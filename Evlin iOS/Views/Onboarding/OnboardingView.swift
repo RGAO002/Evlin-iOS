@@ -114,7 +114,8 @@ struct OnboardingView: View {
                 stepRow("1", "Open the Settings app")
                 stepRow("2", "Tap Screen Time")
                 stepRow("3", "Turn on Screen Time if it's off")
-                stepRow("4", "Come back here and tap Continue")
+                stepRow("4", "Tap Lock Screen Time Settings and set a passcode your child doesn't know")
+                stepRow("5", "Come back here and tap Continue")
             }
             .padding(Spacing.xl)
             .background(
@@ -127,6 +128,30 @@ struct OnboardingView: View {
             Spacer()
 
             VStack(spacing: Spacing.lg) {
+                Button {
+                    Task { await screenTimeManager.openScreenTimeSettings() }
+                } label: {
+                    HStack(spacing: Spacing.md) {
+                        Image(systemName: "gearshape")
+                            .font(.system(size: 14))
+                        Text("Open Screen Time")
+                            .font(.evLabelLarge)
+                    }
+                    .foregroundStyle(Color.evOnPrimary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, Spacing.xl)
+                    .background(
+                        RoundedRectangle(cornerRadius: CornerRadius.md)
+                            .fill(Color.evPrimary)
+                    )
+                }
+
+                Text("If iOS blocks a direct jump, you'll land in the Evlin settings page instead.")
+                    .font(.evBodySmall)
+                    .foregroundStyle(Color.evOutline)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, Spacing.xl)
+
                 Text("After enabling Screen Time, tap Continue")
                     .font(.evBodySmall)
                     .foregroundStyle(Color.evOutline)

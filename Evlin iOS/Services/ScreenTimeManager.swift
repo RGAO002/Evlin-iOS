@@ -3,6 +3,7 @@ import FamilyControls
 import ManagedSettings
 import DeviceActivity
 import Combine
+import UIKit
 
 /// Central manager for FamilyControls authorization, app shielding, and polling.
 class ScreenTimeManager: ObservableObject {
@@ -46,6 +47,35 @@ class ScreenTimeManager: ObservableObject {
             await MainActor.run {
                 self.errorMessage = "Authorization failed: \(error.localizedDescription)"
             }
+        }
+    }
+
+    /// Best-effort jump into iOS Screen Time settings.
+    /// Uses private Settings URL schemes first, then falls back to this app's settings page.
+    @MainActor
+    func openScreenTimeSettings() async {
+        let candidates = [
+            "App-prefs:root=SCREEN_TIME",
+            "App-prefs:SCREEN_TIME",
+            "prefs:root=SCREEN_TIME",
+            "prefs:root=SCREEN_TIME&path=SCREEN_TIME_SUMMARY"
+        ]
+
+        for candidate in candidates {
+            guard let url = URL(string: candidate) else { continue }
+            if await open(url) {
+                errorMessage = nil
+                return
+            }
+        }
+
+        if let fallback = URL(string: UIApplication.openSettingsURLString) {
+            let didOpenFallback = await open(fallback)
+            if !didOpenFallback {
+                errorMessage = "Unable to open Settings on this device."
+            }
+        } else {
+            errorMessage = "Unable to build Settings URL."
         }
     }
 
@@ -122,6 +152,15 @@ class ScreenTimeManager: ObservableObject {
             try activityCenter.startMonitoring(activityName, during: schedule)
         } catch {
             print("[ScreenTime] Failed to schedule relock: \(error)")
+        }
+    }
+
+    @MainActor
+    private func open(_ url: URL) async -> Bool {
+        await withCheckedContinuation { continuation in
+            UIApplication.shared.open(url, options: [:]) { success in
+                continuation.resume(returning: success)
+            }
         }
     }
 }

@@ -84,9 +84,7 @@ struct ChildModeView: View {
                         }
 
                         Button {
-                            if let url = URL(string: UIApplication.openSettingsURLString) {
-                                UIApplication.shared.open(url)
-                            }
+                            Task { await screenTimeManager.openScreenTimeSettings() }
                         } label: {
                             Text("Open Screen Time Settings")
                                 .font(.evBodySmall)
