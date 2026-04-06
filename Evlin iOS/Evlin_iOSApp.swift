@@ -19,12 +19,6 @@ struct Evlin_iOSApp: App {
                         )
                     }
                 )
-                .task {
-                    // Auto-request authorization on first launch
-                    if !screenTimeManager.isAuthorized {
-                        await screenTimeManager.requestAuthorization()
-                    }
-                }
         }
     }
 }

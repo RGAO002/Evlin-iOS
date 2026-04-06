@@ -4,9 +4,14 @@ import Combine
 class APIClient: ObservableObject {
     @Published var baseURL: String
 
+    static let defaultURL = "https://adaptive-engine-production.up.railway.app/api/v1"
+
     init(baseURL: String = "") {
+        let saved = UserDefaults.standard.string(forKey: "serverURL") ?? ""
+        // Ignore old localhost/LAN URLs
+        let useSaved = !saved.isEmpty && !saved.contains("192.168") && !saved.contains("localhost")
         self.baseURL = baseURL.isEmpty
-            ? UserDefaults.standard.string(forKey: "serverURL") ?? "http://192.168.1.175:8000/api/v1"
+            ? (useSaved ? saved : Self.defaultURL)
             : baseURL
     }
 

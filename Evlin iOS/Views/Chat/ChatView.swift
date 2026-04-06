@@ -27,9 +27,10 @@ struct ChatView: View {
                                 // Chat bubble
                                 ChatBubble(content: message.content, role: message.role, timestamp: message.timestamp)
 
-                                // Safety status card
+                                // Safety status card + follow-up
                                 if message.isSafetyCard == true {
                                     SafetyStatusCard(childName: viewModel.childName)
+                                    SafetyActionButtons()
                                 }
 
                                 // Video recommendation card
@@ -54,6 +55,13 @@ struct ChatView: View {
                     .padding(.horizontal, Spacing.xl)
                     .padding(.top, Spacing.md)
                     .padding(.bottom, 160)
+                }
+                .onAppear {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                        if let last = viewModel.messages.last {
+                            proxy.scrollTo(last.id, anchor: .bottom)
+                        }
+                    }
                 }
                 .onChange(of: viewModel.messages.count) { _, _ in
                     if let last = viewModel.messages.last {

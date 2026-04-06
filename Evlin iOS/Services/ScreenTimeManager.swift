@@ -69,9 +69,16 @@ class ScreenTimeManager: ObservableObject {
 
     /// Shield ALL apps (full device lock).
     func shieldAllApps() {
+        print("[ScreenTime] shieldAllApps called, isAuthorized=\(isAuthorized)")
         store.shield.applicationCategories = .all()
         store.shield.webDomainCategories = .all()
+        // Also shield individually selected apps if any
+        let appTokens = selectedApps.applicationTokens
+        if !appTokens.isEmpty {
+            store.shield.applications = appTokens
+        }
         isUnlocked = false
+        print("[ScreenTime] shield applied: categories=.all(), apps=\(appTokens.count)")
     }
 
     /// Unshield (unlock) apps for the given duration.

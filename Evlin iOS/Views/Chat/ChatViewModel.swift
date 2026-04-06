@@ -139,26 +139,47 @@ class ChatViewModel: ObservableObject {
 
     private func executeAction(_ action: ChatAction) {
         switch action {
-        case .lockDevice(let minutes, _):
-            if screenTimeManager.selectedApps.applicationTokens.isEmpty {
-                screenTimeManager.shieldAllApps()
-            } else {
-                screenTimeManager.shieldApps()
-            }
-            if minutes > 0 {
-                Task {
-                    try? await Task.sleep(nanoseconds: UInt64(minutes) * 60 * 1_000_000_000)
-                    await MainActor.run {
-                        screenTimeManager.clearAllShields()
-                    }
-                }
-            }
-        case .unlockDevice:
-            screenTimeManager.clearAllShields()
+        case .lockDevice(let minutes, let childName):
+            // Send to backend for child device to pick up
+            sendToChildDevice(actionType: "lock", params: ["minutes": minutes, "child_name": childName])
+        case .unlockDevice(let childName):
+            sendToChildDevice(actionType: "unlock", params: ["child_name": childName])
         case .adjustRules:
             break
         case .none:
             break
+        }
+    }
+
+    private func sendToChildDevice(actionType: String, params: [String: Any]) {
+        let childId = UserDefaults.standard.string(forKey: "targetChildId") ?? ""
+        print("[Parent] Sending \(actionType) to child: '\(childId)'")
+
+        guard !childId.isEmpty else {
+            print("[Parent] No targetChildId set — skipping")
+            return
+        }
+
+        Task {
+            guard let url = URL(string: "\(apiClient.baseURL)/parent/device-action") else { return }
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+            let body: [String: Any] = [
+                "child_id": childId,
+                "action_type": actionType,
+                "params": params,
+            ]
+            request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+
+            do {
+                let (data, response) = try await URLSession.shared.data(for: request)
+                let http = response as? HTTPURLResponse
+                print("[Parent] device-action response: \(http?.statusCode ?? 0) — \(String(data: data, encoding: .utf8) ?? "")")
+            } catch {
+                print("[Parent] device-action failed: \(error)")
+            }
         }
     }
 

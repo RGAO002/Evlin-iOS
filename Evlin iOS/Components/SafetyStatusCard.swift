@@ -1,19 +1,17 @@
 import SwiftUI
 
 /// Safety status card embedded in chat after safety queries
-/// Source: safety_assurance_briefing — the "Physical Safety Confirmed" card
+/// Source: safety_assurance_briefing
 struct SafetyStatusCard: View {
     let childName: String
 
     var body: some View {
         VStack(spacing: Spacing.xxxl) {
-            // Header
             HStack {
                 HStack(spacing: Spacing.lg) {
                     Circle()
                         .fill(Color.evSecondary)
                         .frame(width: 8, height: 8)
-
                     Text("Physical Safety Confirmed")
                         .font(.evHeadlineSmall)
                         .foregroundStyle(Color.evPrimary)
@@ -24,7 +22,6 @@ struct SafetyStatusCard: View {
                     .foregroundStyle(Color.evSecondary)
             }
 
-            // Location
             ZStack {
                 RoundedRectangle(cornerRadius: CornerRadius.lg)
                     .fill(Color.evSurfaceContainer)
@@ -34,7 +31,6 @@ struct SafetyStatusCard: View {
                     Image(systemName: "location.fill")
                         .font(.system(size: 20))
                         .foregroundStyle(Color.evPrimary)
-
                     Text("AT HOME (LIVING ROOM)")
                         .font(.evLabelMedium)
                         .foregroundStyle(Color.evPrimary)
@@ -49,7 +45,6 @@ struct SafetyStatusCard: View {
                 )
             }
 
-            // Status grid
             HStack(spacing: Spacing.lg) {
                 statusIndicator(icon: "sensor.fill", label: "Device State", value: "Stationary & Logged")
                 statusIndicator(icon: "ear.fill", label: "Acoustics", value: "Safe & Present")
@@ -88,5 +83,57 @@ struct SafetyStatusCard: View {
             }
         )
         .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md))
+    }
+}
+
+/// Follow-up action buttons shown after safety card
+struct SafetyActionButtons: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: Spacing.xl) {
+            Text("Would you like me to initiate a safety check-in call or would you prefer a live audio snippet?")
+                .font(.evBodyMedium)
+                .foregroundStyle(Color.evOnSurface)
+                .lineSpacing(4)
+                .padding(Spacing.xxl)
+                .background(
+                    RoundedRectangle(cornerRadius: CornerRadius.xl)
+                        .fill(Color.evSurfaceContainerLowest)
+                        .evGhostBorder()
+                )
+
+            HStack(spacing: Spacing.lg) {
+                Button {} label: {
+                    HStack(spacing: Spacing.md) {
+                        Image(systemName: "waveform")
+                            .font(.system(size: 14))
+                        Text("Request Live Audio")
+                            .font(.system(size: 14, weight: .bold))
+                    }
+                    .foregroundStyle(Color.evOnPrimary)
+                    .padding(.horizontal, Spacing.xxl)
+                    .padding(.vertical, Spacing.lg + 2)
+                    .background(
+                        RoundedRectangle(cornerRadius: CornerRadius.md)
+                            .fill(Color.evPrimary)
+                    )
+                }
+
+                Button {} label: {
+                    HStack(spacing: Spacing.md) {
+                        Image(systemName: "phone.fill")
+                            .font(.system(size: 14))
+                        Text("Call Device")
+                            .font(.system(size: 14, weight: .bold))
+                    }
+                    .foregroundStyle(Color.evPrimary)
+                    .padding(.horizontal, Spacing.xxl)
+                    .padding(.vertical, Spacing.lg + 2)
+                    .background(
+                        RoundedRectangle(cornerRadius: CornerRadius.md)
+                            .fill(Color.evSurfaceContainerHighest)
+                    )
+                }
+            }
+        }
     }
 }
