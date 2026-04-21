@@ -6,7 +6,6 @@ struct ChatView: View {
     var isPreview = false
     var activeChild: ChildProfile? = nil
 
-    @State private var showDemoBriefing = true
 
     var body: some View {
         VStack(spacing: 0) {
@@ -14,20 +13,6 @@ struct ChatView: View {
                 ScrollView {
                     LazyVStack(spacing: Spacing.xxxl) {
                         editorialHeader
-
-                        if showDemoBriefing {
-                            InterventionBriefingCard(
-                                model: demoBriefingModel,
-                                onPrimary: {
-                                    viewModel.inputText = "Lock \(demoBriefingModel.childName)'s phone for 30 minutes"
-                                    viewModel.sendMessage()
-                                    withAnimation { showDemoBriefing = false }
-                                },
-                                onSecondary: { withAnimation { showDemoBriefing = false } },
-                                onDismiss:   { withAnimation { showDemoBriefing = false } }
-                            )
-                            .transition(.move(edge: .top).combined(with: .opacity))
-                        }
 
                         ForEach(viewModel.messages) { message in
                             VStack(alignment: message.role == .parent ? .trailing : .leading, spacing: Spacing.xl) {
@@ -41,8 +26,22 @@ struct ChatView: View {
                                     LockConfirmationCard(minutes: mins, childName: name)
                                 }
 
-                                // Chat bubble
-                                ChatBubble(content: message.content, role: message.role, timestamp: message.timestamp)
+                                // Strategy artifact card (Task 20)
+                                if message.isStrategyArtifact, message.role == .agent {
+                                    StrategyCard(data: StrategyCardData(
+                                        title: message.strategyTitle ?? "",
+                                        status: message.strategyStatus ?? "",
+                                        category: message.strategyCategory ?? "",
+                                        videoLabel: message.strategyVideoLabel ?? "",
+                                        videoDuration: message.strategyVideoDuration ?? "",
+                                        tip: message.strategyTip ?? ""
+                                    ))
+                                }
+
+                                // Chat bubble (skip for strategy-only messages with empty content)
+                                if !message.content.isEmpty {
+                                    ChatBubble(content: message.content, role: message.role, timestamp: message.timestamp)
+                                }
 
                                 // Safety status card + follow-up
                                 if message.isSafetyCard == true {
@@ -118,43 +117,25 @@ struct ChatView: View {
         }
     }
 
-    // MARK: - Demo briefing (mock data for Chat preview)
-
-    private var demoBriefingModel: InterventionBriefingModel {
-        let child = activeChild ?? ChildProfile.liam
-        return InterventionBriefingModel(
-            childName: child.name,
-            childEmoji: child.avatarEmoji,
-            signal: "Continuous YouTube use",
-            detail: "\(child.name) has been on YouTube for 45 minutes straight, past the weekday screen budget. Consider stepping in before it rolls into homework time.",
-            detectedAt: Date(),
-            primaryActionTitle: "Lock for 30 min",
-            secondaryActionTitle: "Not now"
-        )
-    }
-
     // MARK: - Editorial Header
 
     private var editorialHeader: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Text("Deep Analysis")
-                .font(.system(size: 40, weight: .heavy, design: .default))
-                .foregroundStyle(Color.evPrimary)
-                .tracking(-0.5)
-
-            Text("Strategic Advisory")
-                .font(.system(size: 40, weight: .heavy, design: .default))
-                .foregroundStyle(Color.evOnPrimaryContainer)
-                .tracking(-0.5)
-
-            Text("Evlin is currently monitoring behavioral patterns from the last 72 hours. Ask about strategy adjustments.")
-                .font(.system(size: 16, weight: .medium))
+        VStack(alignment: .leading, spacing: 4) {
+            Text("EVLIN AI")
+                .font(.custom("Inter", size: 10).weight(.heavy))
+                .tracking(1.6)
                 .foregroundStyle(Color.evOnSurfaceVariant)
-                .lineSpacing(3)
-                .padding(.top, Spacing.xl)
+            Text("Strategic Advisory")
+                .font(.custom("Manrope", size: 26).weight(.heavy))
+                .tracking(-0.3)
+                .foregroundStyle(Color.evPrimary)
+            Text("Evlin is monitoring behavioral patterns across all profiles.")
+                .font(.custom("Inter", size: 13))
+                .foregroundStyle(Color.evOnSurfaceVariant)
+                .padding(.top, 6)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, Spacing.section)
+        .padding(.vertical, 20)
     }
 
     // MARK: - Thinking Indicator

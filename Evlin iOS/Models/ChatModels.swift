@@ -20,6 +20,16 @@ struct ChatMessage: Identifiable, Codable {
     var videoThumbnail: String?
     var videoId: String?
 
+    // Strategy artifact (Task 20)
+    var strategyTitle: String? = nil
+    var strategyStatus: String? = nil
+    var strategyCategory: String? = nil
+    var strategyVideoLabel: String? = nil
+    var strategyVideoDuration: String? = nil
+    var strategyTip: String? = nil
+
+    var isStrategyArtifact: Bool { strategyTitle != nil }
+
     init(role: ChatRole, content: String, timestamp: Date = Date(), reasoning: String? = nil, action: ChatAction? = nil) {
         self.id = UUID()
         self.role = role

@@ -22,6 +22,9 @@ class ChatViewModel: ObservableObject {
 
     init() {
         loadMessages()
+        if messages.isEmpty {
+            seedInitialMessages()
+        }
         clearObserver = NotificationCenter.default.addObserver(
             forName: .evlinClearChat, object: nil, queue: .main
         ) { [weak self] _ in
@@ -186,6 +189,35 @@ class ChatViewModel: ObservableObject {
     func sendQuickPrompt(_ prompt: QuickPrompt) {
         inputText = prompt.text
         sendMessage()
+    }
+
+    // MARK: - Seed initial messages
+
+    private func seedInitialMessages() {
+        let now = Date()
+        let m1 = ChatMessage(
+            role: .agent,
+            content: "I've confirmed the manual lock on Liam's device. Given his recent focus patterns, he may experience a frustration spike.",
+            timestamp: now
+        )
+        var m2 = ChatMessage(
+            role: .agent,
+            content: "",
+            timestamp: now
+        )
+        m2.strategyTitle = "Real-time De-escalation Strategy"
+        m2.strategyStatus = "Locked"
+        m2.strategyCategory = "Active Monitoring › Immediate Action"
+        m2.strategyVideoLabel = "Managing Transition Frustration"
+        m2.strategyVideoDuration = "3:00"
+        m2.strategyTip = "If a tantrum occurs, use \"Planned Ignoring\". I've prepared a 30-second refresher for you."
+
+        let m3 = ChatMessage(
+            role: .agent,
+            content: "Would you like to review the suggested de-escalation steps or watch the briefing video now?",
+            timestamp: now
+        )
+        messages = [m1, m2, m3]
     }
 
     // MARK: - Fetch video recommendation
