@@ -135,7 +135,7 @@ struct ProfileView: View {
 
                     // Devices
                     VStack(spacing: 0) {
-                        SectionHead(title: "Device Permissions")
+                        SectionHead("Device Permissions")
                         VStack(spacing: 0) {
                             ForEach(Array(devices.enumerated()), id: \.element.id) { idx, d in
                                 DeviceRow(
