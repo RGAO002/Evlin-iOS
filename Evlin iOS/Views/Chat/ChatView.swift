@@ -9,6 +9,13 @@ struct ChatView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            GlassmorphicHeader(title: "Evlin") {
+                HStack(spacing: 4) {
+                    HeaderIconButton(systemName: "checkmark.seal") {}
+                    HeaderIconButton(systemName: "ellipsis") {}
+                }
+            }
+
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: Spacing.xxxl) {
