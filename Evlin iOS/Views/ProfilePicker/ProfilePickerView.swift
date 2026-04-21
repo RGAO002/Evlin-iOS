@@ -1,5 +1,11 @@
 import SwiftUI
 
+// MARK: - DEPRECATED / RETAINED FOR REFERENCE
+// Replaced by HomeView's dashboard (see Views/Home/HomeView.swift), which
+// handles child profile selection as part of the main parent flow.
+// Not wired into ContentView routing. Kept on disk per spec §2 preservation
+// rule. Do not delete. Do not wire back in without updating spec.
+
 // MARK: - Netflix-style Profile Picker
 // App entry point — parent selects which child they're managing.
 // Mock data for now (Liam / Emma / Sophia + Add child).
@@ -169,7 +175,7 @@ private struct ProfileTile: View {
                         )
                         .shadow(color: profile.accentColor.opacity(0.35), radius: 14, x: 0, y: 8)
 
-                    Text(profile.avatarEmoji)
+                    Text(profile.initial)
                         .font(.system(size: 44))
                 }
                 .frame(height: 96)
