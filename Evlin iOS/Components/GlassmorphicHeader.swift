@@ -1,7 +1,10 @@
 import SwiftUI
 
 struct GlassmorphicHeader: View {
-    var onSettingsTapped: (() -> Void)? = nil
+    /// Active child profile name — if set, shown as a pill that switches profiles on tap.
+    var childName: String? = nil
+    var onSwitchProfile: (() -> Void)? = nil
+    var onSettings: (() -> Void)? = nil
 
     var body: some View {
         HStack(spacing: Spacing.lg) {
@@ -23,9 +26,34 @@ struct GlassmorphicHeader: View {
 
             Spacer()
 
+            // Active child pill (tap to switch)
+            if let name = childName {
+                Button {
+                    onSwitchProfile?()
+                } label: {
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(Color.evSecondary)
+                            .frame(width: 7, height: 7)
+                        Text(name)
+                            .font(.evLabelLarge)
+                            .foregroundStyle(Color.evPrimary)
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(Color.evOnSurfaceVariant)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(
+                        Capsule().fill(Color.evSurfaceContainer)
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+
             // Settings
             Button {
-                onSettingsTapped?()
+                onSettings?()
             } label: {
                 Image(systemName: "gearshape")
                     .font(.system(size: 18))

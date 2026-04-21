@@ -4,6 +4,9 @@ struct ChatView: View {
     @EnvironmentObject var apiClient: APIClient
     @StateObject private var viewModel = ChatViewModel()
     var isPreview = false
+    var activeChild: ChildProfile? = nil
+
+    @State private var showDemoBriefing = true
 
     var body: some View {
         VStack(spacing: 0) {
@@ -11,6 +14,20 @@ struct ChatView: View {
                 ScrollView {
                     LazyVStack(spacing: Spacing.xxxl) {
                         editorialHeader
+
+                        if showDemoBriefing {
+                            InterventionBriefingCard(
+                                model: demoBriefingModel,
+                                onPrimary: {
+                                    viewModel.inputText = "Lock \(demoBriefingModel.childName)'s phone for 30 minutes"
+                                    viewModel.sendMessage()
+                                    withAnimation { showDemoBriefing = false }
+                                },
+                                onSecondary: { withAnimation { showDemoBriefing = false } },
+                                onDismiss:   { withAnimation { showDemoBriefing = false } }
+                            )
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                        }
 
                         ForEach(viewModel.messages) { message in
                             VStack(alignment: message.role == .parent ? .trailing : .leading, spacing: Spacing.xl) {
@@ -95,7 +112,25 @@ struct ChatView: View {
             if !isPreview {
                 viewModel.apiClient = apiClient
             }
+            if let active = activeChild {
+                viewModel.childName = active.name
+            }
         }
+    }
+
+    // MARK: - Demo briefing (mock data for Chat preview)
+
+    private var demoBriefingModel: InterventionBriefingModel {
+        let child = activeChild ?? ChildProfile.liam
+        return InterventionBriefingModel(
+            childName: child.name,
+            childEmoji: child.avatarEmoji,
+            signal: "Continuous YouTube use",
+            detail: "\(child.name) has been on YouTube for 45 minutes straight, past the weekday screen budget. Consider stepping in before it rolls into homework time.",
+            detectedAt: Date(),
+            primaryActionTitle: "Lock for 30 min",
+            secondaryActionTitle: "Not now"
+        )
     }
 
     // MARK: - Editorial Header

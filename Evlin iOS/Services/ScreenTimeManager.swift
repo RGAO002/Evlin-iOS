@@ -50,15 +50,21 @@ class ScreenTimeManager: ObservableObject {
         }
     }
 
-    /// Best-effort jump into iOS Screen Time settings.
-    /// Uses private Settings URL schemes first, then falls back to this app's settings page.
+    /// Best-effort jump into iOS Settings. Prefers Screen Time deep-links, but
+    /// iOS 17+ silently rejects most private sub-paths, so we also try a bare
+    /// Settings-root URL, and finally fall back to this app's settings page.
+    /// The onboarding UI assumes users may land anywhere in Settings and
+    /// provides clear navigation instructions.
     @MainActor
     func openScreenTimeSettings() async {
         let candidates = [
+            // Specific Screen Time deep-links (work on older iOS, often ignored on 17+)
             "App-prefs:root=SCREEN_TIME",
             "App-prefs:SCREEN_TIME",
             "prefs:root=SCREEN_TIME",
-            "prefs:root=SCREEN_TIME&path=SCREEN_TIME_SUMMARY"
+            // Bare Settings root (more reliable than app-specific pane)
+            "App-Prefs:",
+            "prefs:root="
         ]
 
         for candidate in candidates {
@@ -69,6 +75,7 @@ class ScreenTimeManager: ObservableObject {
             }
         }
 
+        // Last resort — this lands on Evlin's own Settings pane, not the root.
         if let fallback = URL(string: UIApplication.openSettingsURLString) {
             let didOpenFallback = await open(fallback)
             if !didOpenFallback {
