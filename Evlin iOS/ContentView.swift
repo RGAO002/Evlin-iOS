@@ -46,17 +46,9 @@ struct ContentView: View {
 
     private var parentView: some View {
         VStack(spacing: 0) {
-            GlassmorphicHeader(
-                childName: activeChild?.name,
-                onSwitchProfile: {
-                    withAnimation(.easeInOut(duration: 0.3)) {
-                        activeChild = nil
-                    }
-                },
-                onSettings: {
-                    showSettings = true
-                }
-            )
+            GlassmorphicHeader(title: "Evlin") {
+                HeaderIconButton(systemName: "gearshape") { showSettings = true }
+            }
 
             ZStack {
                 switch selectedTab {

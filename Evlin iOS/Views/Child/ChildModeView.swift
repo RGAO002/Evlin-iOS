@@ -17,8 +17,8 @@ struct ChildModeView: View {
     var body: some View {
         VStack(spacing: 0) {
             // Header
-            GlassmorphicHeader {
-                showSettings = true
+            GlassmorphicHeader(title: "Evlin Child") {
+                HeaderIconButton(systemName: "gearshape") { showSettings = true }
             }
 
             VStack(spacing: Spacing.section) {
