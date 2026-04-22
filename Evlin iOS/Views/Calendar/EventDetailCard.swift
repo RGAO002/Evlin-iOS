@@ -11,34 +11,34 @@ struct EventDetailCard: View {
 
     var body: some View {
         ZStack {
-            Color.black.opacity(0.4)
-                .background(.ultraThinMaterial)
+            Rectangle()
+                .fill(.ultraThinMaterial)
                 .ignoresSafeArea()
                 .onTapGesture { onClose() }
 
             VStack(alignment: .leading, spacing: 0) {
                 header
-                Divider().padding(.vertical, 4)
+                Divider().padding(.vertical, 2)
                 personRow
-                Divider().padding(.vertical, 4)
+                Divider().padding(.vertical, 2)
                 categoryRow
-                Divider().padding(.vertical, 4)
+                Divider().padding(.vertical, 2)
                 noteRow
-                Divider().padding(.vertical, 4)
+                Divider().padding(.vertical, 2)
                 locationRow
-                Divider().padding(.vertical, 4)
+                Divider().padding(.vertical, 2)
                 reminderRow
                 Spacer(minLength: 8)
                 footer
             }
-            .padding(22)
+            .padding(20)
             .background(
                 RoundedRectangle(cornerRadius: 24, style: .continuous)
                     .fill(Color.white)
             )
-            .shadow(color: .black.opacity(0.28), radius: 30, x: 0, y: 10)
-            .padding(.horizontal, 16)
-            .frame(maxWidth: 440)
+            .shadow(color: .black.opacity(0.25), radius: 40, x: 0, y: 12)
+            .padding(.horizontal, 24)
+            .frame(maxWidth: 360)
         }
         .preferredColorScheme(.light)
     }

@@ -2,6 +2,7 @@ import SwiftUI
 
 struct InsightsView: View {
     @State private var selection: String = "liam"
+    @State private var heroDismissed: Bool = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -17,7 +18,9 @@ struct InsightsView: View {
                     ChildFilterPills(selection: $selection)
                         .padding(.horizontal, -4)
 
-                    heroCard
+                    if !heroDismissed {
+                        heroCard
+                    }
 
                     recommendations
 
@@ -71,16 +74,21 @@ struct InsightsView: View {
 
                 HStack(spacing: 10) {
                     EvlinButton(title: "Review strategy", icon: "checkmark.seal", variant: .success, size: .sm) {}
-                    Text("DISMISS")
-                        .font(.custom("Manrope", size: 11).weight(.heavy))
-                        .tracking(0.9)
-                        .foregroundStyle(.white.opacity(0.9))
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 8)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                .stroke(.white.opacity(0.2), lineWidth: 1)
-                        )
+                    Button {
+                        withAnimation(.easeOut(duration: 0.25)) { heroDismissed = true }
+                    } label: {
+                        Text("DISMISS")
+                            .font(.custom("Manrope", size: 11).weight(.heavy))
+                            .tracking(0.9)
+                            .foregroundStyle(.white.opacity(0.9))
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    .stroke(.white.opacity(0.2), lineWidth: 1)
+                            )
+                    }
+                    .buttonStyle(.plain)
                 }
                 .padding(.top, 6)
             }

@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 struct CalendarView: View {
     @State private var selectedDate: Date = Date()
@@ -81,16 +82,21 @@ struct CalendarView: View {
 
     private var cardTopBar: some View {
         HStack {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Today's Events")
-                    .font(.custom("Manrope", size: 17).weight(.heavy))
-                    .foregroundStyle(Color.evPrimary)
-                Text(CalendarMockData.shortDateLabel(selectedDate))
-                    .font(.custom("Inter", size: 11).weight(.bold))
-                    .tracking(0.6)
-                    .textCase(.uppercase)
-                    .foregroundStyle(Color.evOnSurfaceVariant)
+            Button {
+                showMonthPicker = true
+            } label: {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(CalendarMockData.shortDateLabel(selectedDate))
+                        .font(.custom("Manrope", size: 19).weight(.heavy))
+                        .tracking(-0.2)
+                        .foregroundStyle(Color.evPrimary)
+                    Text("TAP TO CHANGE DATE")
+                        .font(.custom("Inter", size: 10).weight(.heavy))
+                        .tracking(1.4)
+                        .foregroundStyle(Color.evOnSurfaceVariant)
+                }
             }
+            .buttonStyle(.plain)
 
             Spacer()
 

@@ -8,52 +8,87 @@ struct NotificationPanel: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            GlassmorphicHeader(
-                title: "Notifications",
-                kicker: unread > 0 ? "\(unread) unread" : nil,
-                onBack: onClose
-            ) {
-                if unread > 0 {
-                    Button {
-                        withAnimation { notifs = notifs.map { var n = $0; n.unread = false; return n } }
-                    } label: {
-                        Text("Mark all read")
-                            .font(.custom("Inter", size: 12).weight(.bold))
-                            .foregroundStyle(Color.evPrimary)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-
-            if notifs.isEmpty {
-                VStack(spacing: 12) {
-                    Image(systemName: "bell.slash")
-                        .font(.system(size: 40))
-                    Text("All caught up")
-                        .font(.custom("Inter", size: 14))
-                }
-                .foregroundStyle(Color.evOnSurfaceVariant)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                ScrollView {
-                    LazyVStack(spacing: 0) {
-                        ForEach(notifs) { n in
-                            row(for: n)
-                                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                                    Button(role: .destructive) {
-                                        withAnimation { notifs.removeAll { $0.id == n.id } }
-                                    } label: {
-                                        Label("Dismiss", systemImage: "trash")
-                                    }
-                                }
-                        }
-                    }
-                    .padding(.vertical, 8)
-                }
-            }
+            customHeader
+            content
         }
         .background(Color.evSurfaceContainerLow)
-        .navigationBarBackButtonHidden(true)
+        .toolbar(.hidden, for: .navigationBar)
+        .enableSwipeBack()
+    }
+
+    // MARK: - Custom header (per screenshot)
+
+    private var customHeader: some View {
+        HStack(alignment: .top, spacing: 14) {
+            Button(action: onClose) {
+                Image(systemName: "arrow.left")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(Color.evPrimary)
+                    .frame(width: 44, height: 44)
+                    .background(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .fill(Color.evSurfaceContainerHigh)
+                    )
+            }
+            .buttonStyle(.plain)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Notifications")
+                    .font(.custom("Manrope", size: 22).weight(.heavy))
+                    .tracking(-0.2)
+                    .foregroundStyle(Color.evPrimary)
+                if unread > 0 {
+                    Text("\(unread) unread")
+                        .font(.custom("Inter", size: 12))
+                        .foregroundStyle(Color.evOnSurfaceVariant)
+                }
+            }
+            .padding(.top, 4)
+
+            Spacer()
+
+            if unread > 0 {
+                Button {
+                    withAnimation { notifs = notifs.map { var n = $0; n.unread = false; return n } }
+                } label: {
+                    Text("Mark all read")
+                        .font(.custom("Inter", size: 13).weight(.heavy))
+                        .foregroundStyle(Color.evPrimary)
+                }
+                .buttonStyle(.plain)
+                .padding(.top, 12)
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.top, 12)
+        .padding(.bottom, 16)
+        .background(
+            Color.evSurfaceContainerLow
+                .ignoresSafeArea(edges: .top)
+        )
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if notifs.isEmpty {
+            VStack(spacing: 12) {
+                Image(systemName: "bell.slash")
+                    .font(.system(size: 40))
+                Text("All caught up")
+                    .font(.custom("Inter", size: 14))
+            }
+            .foregroundStyle(Color.evOnSurfaceVariant)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(notifs) { n in
+                        row(for: n)
+                    }
+                }
+                .padding(.vertical, 8)
+            }
+        }
     }
 
     @ViewBuilder
@@ -68,9 +103,9 @@ struct NotificationPanel: View {
         } label: {
             HStack(alignment: .top, spacing: 12) {
                 if n.unread {
-                    Circle().fill(color).frame(width: 6, height: 6).offset(y: 8)
+                    Circle().fill(color).frame(width: 6, height: 6).offset(y: 10)
                 } else {
-                    Color.clear.frame(width: 6, height: 6).offset(y: 8)
+                    Color.clear.frame(width: 6, height: 6).offset(y: 10)
                 }
 
                 ZStack {
@@ -93,27 +128,40 @@ struct NotificationPanel: View {
                             .foregroundStyle(color)
                     }
                 }
-                .frame(width: 42, height: 42)
+                .frame(width: 46, height: 46)
                 .overlay(
                     RoundedRectangle(cornerRadius: 13, style: .continuous)
                         .stroke(color.opacity(0.25), lineWidth: 1.5)
                 )
 
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack {
-                        Text(n.title)
-                            .font(.custom("Manrope", size: 13).weight(.heavy))
-                            .foregroundStyle(Color.evPrimary)
-                        Spacer()
-                        Text(n.time)
-                            .font(.custom("Inter", size: 10))
-                            .foregroundStyle(Color.evOutline)
-                    }
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(n.title)
+                        .font(.custom("Manrope", size: 14).weight(.heavy))
+                        .foregroundStyle(Color.evPrimary)
                     Text(n.body)
                         .font(.custom("Inter", size: 12))
                         .foregroundStyle(Color.evOnSurfaceVariant)
-                        .lineSpacing(1)
+                        .lineSpacing(2)
                         .multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Spacer(minLength: 8)
+
+                VStack(alignment: .trailing, spacing: 10) {
+                    Text(n.time)
+                        .font(.custom("Inter", size: 11))
+                        .foregroundStyle(Color.evOutline)
+                    Button {
+                        withAnimation { notifs.removeAll { $0.id == n.id } }
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(Color.evOnSurfaceVariant)
+                            .frame(width: 22, height: 22)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
                 }
             }
             .padding(.vertical, 14)
@@ -126,5 +174,24 @@ struct NotificationPanel: View {
             Rectangle().fill(Color.evOutlineVariant.opacity(0.4)).frame(height: 1),
             alignment: .bottom
         )
+    }
+}
+
+// MARK: - Re-enable edge-swipe back in NavigationStack even when toolbar is hidden
+
+private struct SwipeBackEnabler: UIViewControllerRepresentable {
+    func makeUIViewController(context: Context) -> UIViewController { UIViewController() }
+    func updateUIViewController(_ uiViewController: UIViewController, context: Context) {
+        DispatchQueue.main.async {
+            guard let nav = uiViewController.navigationController else { return }
+            nav.interactivePopGestureRecognizer?.delegate = nil
+            nav.interactivePopGestureRecognizer?.isEnabled = true
+        }
+    }
+}
+
+extension View {
+    func enableSwipeBack() -> some View {
+        self.background(SwipeBackEnabler().frame(width: 0, height: 0))
     }
 }
