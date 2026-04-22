@@ -9,13 +9,6 @@ struct ChatView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            GlassmorphicHeader(title: "Evlin") {
-                HStack(spacing: 4) {
-                    HeaderIconButton(systemName: "checkmark.seal") {}
-                    HeaderIconButton(systemName: "ellipsis") {}
-                }
-            }
-
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: Spacing.xxxl) {
@@ -23,11 +16,6 @@ struct ChatView: View {
 
                         ForEach(viewModel.messages) { message in
                             VStack(alignment: message.role == .parent ? .trailing : .leading, spacing: Spacing.xl) {
-                                // Reasoning card
-                                if let reasoning = message.reasoning, message.role == .agent {
-                                    AgentReasoningCard(label: "Strategic Context", content: reasoning)
-                                }
-
                                 // Lock confirmation card
                                 if let mins = message.lockMinutes, let name = message.lockChildName {
                                     LockConfirmationCard(minutes: mins, childName: name)
