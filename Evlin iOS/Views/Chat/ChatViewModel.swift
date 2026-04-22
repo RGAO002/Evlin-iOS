@@ -22,7 +22,12 @@ class ChatViewModel: ObservableObject {
 
     init() {
         loadMessages()
-        if messages.isEmpty {
+        // Re-seed if empty OR if the persisted strategy artifact is from an older
+        // format (no videoId wired in). Bumps legacy chat history to the latest seed.
+        let staleStrategy = messages.contains { $0.isStrategyArtifact && $0.videoId == nil }
+        if messages.isEmpty || staleStrategy {
+            UserDefaults.standard.removeObject(forKey: Self.storageKey)
+            messages = []
             seedInitialMessages()
         }
         clearObserver = NotificationCenter.default.addObserver(

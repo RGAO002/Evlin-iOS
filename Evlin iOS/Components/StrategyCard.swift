@@ -76,67 +76,27 @@ struct StrategyCard: View {
         if let videoId = data.videoId {
             let thumbnailURL = data.videoThumbnail ?? "https://img.youtube.com/vi/\(videoId)/hqdefault.jpg"
 
-            Group {
-                if isPlaying {
-                    // Playing: inline YouTube WebView
-                    InlineYouTubeWebView(videoId: videoId)
-                        .background(Color.black)
-                } else {
-                    // Not playing: thumbnail + play button, wrapped in a single Button
-                    Button {
-                        isPlaying = true
-                    } label: {
-                        ZStack(alignment: .bottomLeading) {
-                            AsyncImage(url: URL(string: thumbnailURL)) { phase in
-                                switch phase {
-                                case .success(let image):
-                                    image.resizable().aspectRatio(contentMode: .fill)
-                                default:
-                                    Rectangle().fill(Color.evPrimaryContainer)
-                                }
-                            }
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                            .clipped()
+            VStack(alignment: .leading, spacing: 10) {
+                // Use the exact pattern from the working VideoRecommendationCard
+                YouTubePlayerView(
+                    videoId: videoId,
+                    thumbnail: thumbnailURL,
+                    isPlaying: $isPlaying
+                )
+                .aspectRatio(16/9, contentMode: .fit)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
 
-                            // Bottom gradient + title — purely decorative
-                            LinearGradient(
-                                colors: [.black.opacity(0.0), .black.opacity(0.65)],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            )
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(data.videoLabel)
-                                    .font(.custom("Manrope", size: 16).weight(.heavy))
-                                    .foregroundStyle(.white)
-                                    .lineLimit(2)
-                                    .multilineTextAlignment(.leading)
-                                Text("\(data.videoDuration) duration")
-                                    .font(.custom("Inter", size: 11))
-                                    .foregroundStyle(.white.opacity(0.8))
-                            }
-                            .padding(16)
-
-                            // Centered red play button
-                            Circle()
-                                .fill(Color.red)
-                                .frame(width: 56, height: 56)
-                                .overlay(
-                                    Image(systemName: "play.fill")
-                                        .font(.system(size: 22, weight: .bold))
-                                        .foregroundStyle(.white)
-                                        .offset(x: 2)
-                                )
-                                .shadow(color: .black.opacity(0.35), radius: 10, y: 4)
-                                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        }
-                    }
-                    .buttonStyle(.plain)
+                // Title + duration shown BELOW the tile (not as overlay) — avoids hit-test conflicts
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(data.videoLabel)
+                        .font(.custom("Manrope", size: 15).weight(.heavy))
+                        .foregroundStyle(Color.evPrimary)
+                        .lineLimit(2)
+                    Text("\(data.videoDuration) duration")
+                        .font(.custom("Inter", size: 11))
+                        .foregroundStyle(Color.evOnSurfaceVariant)
                 }
             }
-            .frame(height: 200)
-            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         } else {
             // Fallback: static gradient tile (no video wired)
             ZStack(alignment: .bottomLeading) {
