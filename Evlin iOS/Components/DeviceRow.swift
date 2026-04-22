@@ -27,9 +27,11 @@ struct DeviceRow: View {
                     .foregroundStyle(Color.evOnSurfaceVariant)
             }
             Spacer()
-            Image(systemName: locked ? "lock.fill" : "lock.open")
-                .font(.system(size: 14, weight: .bold))
-                .foregroundStyle(locked ? Color.evOnTertiaryContainer : Color.evSecondary)
+            EvlinPill(
+                text: locked ? "Locked" : "Active",
+                tone: locked ? .danger : .success,
+                size: .xs
+            )
         }
         .padding(.vertical, 12)
         .padding(.horizontal, 14)
