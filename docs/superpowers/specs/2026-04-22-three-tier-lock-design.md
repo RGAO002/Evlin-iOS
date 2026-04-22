@@ -1,7 +1,7 @@
 # Three-Tier App Locking + Saved Lists + Onboarding Redesign
 
-**Date**: 2026-04-22 (revised after Codex review)
-**Status**: Design approved, ready for plan
+**Date**: 2026-04-22 (revised after Codex review + Phase 0 spike)
+**Status**: Design approved, ready for plan. Dual-path: **Max is the default/recommended onboarding**; Std is the fallback for users who don't want to configure a Child Apple ID. Future monetization may differentiate the two as premium/free tiers.
 **Scope**: Core parental control — locking child apps from parent's Chat, onboarding flow for both modes, Saved Lists, receipt/confirmation system, active-lock union semantics
 
 ---
@@ -32,11 +32,13 @@ Every lock command from Chat resolves to exactly one of three tiers:
 
 **Used when**: The target matches an entry in the backend's curated **App Catalog** (approx. 60 common apps shipped in v1).
 
-**Characteristics**:
+**Characteristics** (verified in Phase 0 spike):
 - No picker required, no prior setup.
 - Works for well-known apps worldwide.
-- Lock shows iOS's system-level "not available" dialog on launch (not Evlin's custom shield screen).
-- Cannot verify whether the app is actually installed on the child's phone (iOS does not report this). Block rule still applies — if the app is ever launched it will be blocked.
+- **Primary UX: icon hiding.** Blocked apps disappear from the home screen and App Library entirely. Confirmed in spike Test 1.
+- Secondary UX: if launched via deep link or alternate path, iOS shows a system "not available" dialog.
+- App is not uninstalled — only visually hidden. Icon reappears instantly when the block is cleared.
+- Cannot verify whether the app is actually installed on the child's phone (iOS does not report this). The block rule applies regardless; if the app is ever installed + launched it will be blocked.
 
 ### Tier B: Saved List (Picker Token) Lock
 
@@ -52,20 +54,27 @@ Every lock command from Chat resolves to exactly one of three tiers:
 
 **Design note on scale**: Saved Lists are resolved in Chat via fuzzy-match against user intent. Empirically, list counts beyond ~30 per family start to degrade match accuracy. We do not enforce a hard cap; if a family accumulates many lists, the UI should surface a soft warning and encourage list consolidation. A hard cap may be added later based on observed usage.
 
-**Where the tokens live and how they travel**:
+**Where the tokens live and how they travel** (dual path):
 
-- **Std mode (Family Controls passcode only)** — the default and simplest path:
+- **Max mode (Child Apple ID + `.child` auth) — default / recommended**:
+  - Picker runs on parent device (Family Sharing exposes child's installed apps to parent picker).
+  - Unique capability: parent can build and edit Saved Lists from their own phone, without physical access to the child's device.
+  - Parent device encodes the resulting `FamilyActivitySelection` as `Data` (PropertyListEncoder). When a lock command references this list, parent device attaches the blob ephemerally via `POST /parent/commands/attach-blob { command_id, selection_blob_b64 }`. Backend stores in `PendingBlob` with short TTL (10 min). Child device fetches once via `GET /child/pending-blob?command_id=...`; backend deletes row on fetch or TTL expiry.
+  - **Blobs are never persisted in `SavedListMeta`**; only metadata (name, description, createdAt) is synced.
+  - **Open technical risk**: Apple does not officially document that parent-device picker tokens are interchangeable on a child device's `ManagedSettingsStore`. Phase 0 spike Test 3 is BLOCKED pending Child Apple ID access. If tokens are not transferable when tested, Max mode degrades to "parent device sends a remote trigger; child device prompts user to open picker" (same storage model as Std, but still with a remote-initiation UX benefit). The spec is written assuming transferability; the plan notes the degrade path.
+
+- **Std mode (Family Controls passcode only) — fallback for parents not using Child Apple ID**:
   - Picker only runs on child device. Parent cannot remotely build Saved Lists.
   - Child device stores the `FamilyActivitySelection` in App Group UserDefaults keyed by list name.
   - Commands reference the list by name only; child device looks up selection locally.
-  - Only list metadata (name, description, createdAt) syncs to backend so the parent UI can show available list names. **Tokens never leave the child device.**
+  - Only list metadata syncs to backend. **Tokens never leave the child device.**
 
-- **Max mode (Child Apple ID + `.child` auth)** — advanced path with conservative token handling:
-  - Picker runs on parent device (Family Sharing exposes child's apps to parent picker).
-  - **Phase 0 spike result determines the path**:
-    - **If tokens are transferable (spike passes)**: parent device encodes the selection and attaches it **ephemerally** to each Command via `POST /parent/commands { ..., selection_blob: base64 }`. Backend stores the blob in a `pending_blob` row with a short TTL (e.g. 10 minutes). Child device fetches, decodes, applies, posts ack. Backend **deletes the blob immediately upon ack** (or at TTL expiry, whichever first). **Blobs are never persisted in `SavedListMeta`.**
-    - **If tokens are not transferable (spike fails)**: Max mode degrades to "parent device sends a remote trigger; child device prompts user to open picker and make a selection." Same storage model as Std mode thereafter.
-  - The spec below is written for the **Std-mode-primary, Max-mode-relay** configuration. Max-mode-degrade is called out where it diverges.
+**Both modes share (verified in Phase 0 spike Test 2)**:
+- `blockedApplications` with `Application(bundleIdentifier:)` works identically.
+- `denyAppRemoval` works identically — Std mode gets deletion protection without requiring Child Apple ID.
+- Same `ActiveLockStore` union/recompute semantics.
+
+**Monetization note** (informational, not a technical decision): the two modes create a natural product tiering. Max mode's "remote picker on parent device" is worth a premium tier; Std mode's "install on both phones, manage in person" can remain free. This influences neither the technical design nor the onboarding order — both are fully implemented in v1.
 
 ### Tier C: Category Fallback Lock
 
@@ -271,7 +280,7 @@ See §9 for the full v1 catalog.
 
 ---
 
-## 5. Onboarding Flow (complete)
+## 5. Onboarding Flow (MVP — Std-mode-only)
 
 ### 5.1 Shared Entry
 
@@ -291,7 +300,7 @@ See §9 for the full v1 catalog.
 
 ### 5.2 Parent Mode Flow
 
-**Key change from v1: Protection Level is chosen BEFORE the pairing code is generated, so the code carries the protection_mode atomically.**
+**Protection Level is chosen BEFORE the pairing code is generated, so the code carries the protection_mode atomically. Max is presented as the default / recommended option.**
 
 ```
 [1] Welcome
@@ -301,20 +310,21 @@ See §9 for the full v1 catalog.
      Age:  [_]           ← optional
      [Continue]
 
-[4P] Protection Level Select (moved from step 5 → step 4)
-     ◉ Maximum (recommended)
-       · Picker on YOUR phone controls Liam's apps (via Family Sharing)
-       · Evlin cannot be uninstalled
+[4P] Protection Level Select
+     ◉ Maximum (recommended — default selection)
+       · You can build & edit Saved Lists from THIS phone (see child's apps)
+       · Evlin cannot be uninstalled from Liam's phone
        · Requires Child Apple ID (5 min one-time setup)
+       [Choose Maximum]
      ○ Standard
-       · Picker on Liam's phone only
-       · Family Controls passcode protects app deletion
-       · No extra account needed
-     [Choose Maximum] / [Choose Standard]
+       · You build Saved Lists on Liam's phone (need physical access occasionally)
+       · Evlin still cannot be uninstalled (programmatic protection)
+       · No extra account needed — simpler setup
+       [Choose Standard]
 
 [5P] Pairing Code Display
      ┌────────────────────┐
-     │   4 8 2 9 1 7       │   ← POST /family/create returns code + mode is baked in
+     │   4 8 2 9 1 7       │   ← POST /family/create returns code with protection_mode baked in
      │   [QR code]          │
      └────────────────────┘
      Status: ⚪ Waiting for Liam's device...
@@ -327,13 +337,15 @@ See §9 for the full v1 catalog.
 
      ┌─ Maximum mode ──────────────────────────────────┐
      │  [6P-Max-A] Why Child Apple ID                  │
-     │     · 4 benefit bullets                         │
-     │     [Continue]                                  │
+     │     · Lets you build Saved Lists from here      │
+     │     · Enables remote list edits                 │
+     │     · Required for Ask-to-Buy + content filters │
+     │     · Fully compliant with Apple Family Sharing │
+     │     [Got it, let's set it up]                   │
      │                                                 │
      │  [6P-Max-B] Create Child Apple ID                │
-     │     "On THIS phone:                             │
-     │      Settings → Family → Add Member →           │
-     │      Create a Child Account"                    │
+     │     "On THIS phone: Settings → Family →         │
+     │      Add Member → Create a Child Account"       │
      │     [Open Family Settings]                      │
      │     [I've created the account]                  │
      │                                                 │
@@ -344,8 +356,8 @@ See §9 for the full v1 catalog.
      │                                                 │
      │  [6P-Max-D] Waiting for Authorization           │
      │     "Pick up Liam's phone. Evlin there will     │
-     │      prompt for parent authorization. Approve   │
-     │      when iOS asks."                            │
+     │      request parent authorization; approve when │
+     │      iOS prompts you."                          │
      │     Status: ⚪ Waiting for child device...       │
      │     (polls backend for auth_status=granted)     │
      │     ↓                                            │
@@ -354,31 +366,23 @@ See §9 for the full v1 catalog.
      └─────────────────────────────────────────────────┘
 
      ┌─ Standard mode ─────────────────────────────────┐
-     │  [6P-Std-A] Set Family Controls Passcode        │
+     │  [6P-Std-A] Set Screen Time Passcode            │
      │     "On Liam's phone: Settings → Screen Time →  │
      │      Lock Screen Time Settings → Set Passcode"  │
+     │     (Protects Screen Time itself from being     │
+     │      modified by Liam. Evlin's own deletion     │
+     │      protection is automatic, no passcode dance.)│
+     │     [Open Screen Time Settings]                 │
      │     [I've set the passcode]                     │
-     │                                                 │
-     │  [6P-Std-B] Disable App Deletion                │
-     │     "Still on Liam's phone, in Screen Time:     │
-     │      Content & Privacy → iTunes & App Store →   │
-     │      Deleting Apps → Don't Allow"               │
-     │     [I've disabled deletion]                    │
-     │                                                 │
-     │  [6P-Std-C] Verification Note                   │
-     │     "⚠ Evlin cannot verify these settings.      │
-     │      If you skipped them, Liam can uninstall."  │
-     │     [Continue anyway]                           │
      └─────────────────────────────────────────────────┘
 
-[7P] First Saved List (optional, Max mode only)
-     Max mode: "Make your first Saved List from YOUR phone."
-       [Open App Picker]  ← FamilyActivityPicker on parent device
-       → select apps/categories/websites
-       → name the list
-       → selection cached locally; POST meta (no blob) to backend
+[7P] First Saved List (Max mode only — optional)
+     "Make your first Saved List from YOUR phone."
+       [Open App Picker]  ← FamilyActivityPicker on parent device (Max mode: shows child apps)
+       → select apps/categories/websites → name it "list 1"
+       → selection cached locally on parent device; POST meta to backend
        [Skip for now]
-     Std mode: skipped — lists are built on child device (Child Step 6C)
+     (Std mode: skipped here — lists are built on child device at Child Step 7C.)
 
 [8P] Done
      "Liam is protected. Open Chat to send your first command."
@@ -387,7 +391,7 @@ See §9 for the full v1 catalog.
 
 ### 5.3 Child Mode Flow
 
-**Key change: `.child` authorization and `denyAppRemoval` are invoked on the child device. Parent is expected to be physically present during these steps.**
+**Key change: `.child` authorization (Max mode) and `denyAppRemoval` (both modes) are invoked on the child device. Parent is expected to be physically present for the auth/protection steps.**
 
 ```
 [1] Welcome
@@ -408,37 +412,41 @@ See §9 for the full v1 catalog.
      │    1. AuthorizationCenter.requestAuthorization(for: .child)
      │       (iOS surfaces approval prompt on parent's device via Family Sharing;
      │        parent approves there, this call resolves)
-     │    2. On success: POST /child/auth-status {status: granted}  (parent device polls this)
-     │    3. If failure ("not a child account"): show remediation — child Apple ID not
-     │       signed in on this device. [Retry] / [Switch to Standard mode]
+     │    2. On success: POST /family/auth-status/grant
+     │    3. If failure ("not a child account"): show remediation —
+     │       Child Apple ID not signed in on this device.
+     │       [Retry] / [Switch to Standard mode]
      │
      └─ protection_mode=std →
           AuthorizationCenter.requestAuthorization(for: .individual)
           (no parent approval needed)
      [Continue]
 
-[5C] Enable Deletion Protection (Max mode only)
-     ManagedSettingsStore.application.denyAppRemoval = true
-     Verify: re-read store, confirm flag is set.
-     "✓ Evlin is now protected from deletion on this phone."
+[5C] Enable Deletion Protection — BOTH modes
+     "Evlin will now block itself from being deleted on this phone."
+     [Enable Protection]
+     → ManagedSettingsStore.application.denyAppRemoval = true
+     → Verify: re-read store, confirm flag is set.
+     "✓ Evlin is now protected from deletion. Liam cannot uninstall Evlin
+      even if they learn the device passcode."
      [Continue]
-     (Std mode skips this step — passcode was already set in Parent Step [6P-Std-B])
+     (Verified in Phase 0 spike Test 2: denyAppRemoval works under both
+      `.individual` and `.child` authorization — same mechanism for both paths.)
 
 [6C] Category Defaults — REQUIRED
      "Pick which categories your parent should be able to control."
      [Open Category Picker]
      → FamilyActivityPicker (user picks: Social, Games, Entertainment, etc.)
-     → for each picked category, prompt: "Call this: [Social]" (default prefilled)
-     → save tokens to local categoryTokens[name]
+     → save tokens to local categoryTokens
      [Continue]
 
-[7C] Create First Saved List (Std mode only; Max mode: skipped because parent built it in [7P])
+[7C] Create First Saved List (Std mode only; Max mode skips because parent built it in [7P])
      "Make your first Saved List. Your parent can say 'lock list 1 for 30 min' in Chat."
      [Open App Picker]
      → FamilyActivityPicker (apps + categories + websites)
      → Name: [list 1]
-     → save to local savedListTokens[name]
-     → POST /child/saved-lists {name, description} (metadata only)
+     → save to local savedListTokens
+     → POST /family/saved-lists {name, description} (metadata only)
      [Skip for now]
 
 [8C] Child Ready Screen
@@ -464,20 +472,23 @@ NEW:  Views/Onboarding/OnboardingCoordinator.swift      (replaces OnboardingView
       Views/Onboarding/Parent/Max/SignInOnChildStep.swift
       Views/Onboarding/Parent/Max/WaitForAuthorizationStep.swift
       Views/Onboarding/Parent/Std/SetPasscodeStep.swift
-      Views/Onboarding/Parent/Std/DisableDeletionStep.swift
-      Views/Onboarding/Parent/Std/StdVerificationStep.swift
-      Views/Onboarding/Parent/FirstSavedListStep.swift
+      Views/Onboarding/Parent/FirstSavedListStep.swift     (Max only)
       Views/Onboarding/Parent/DoneStep.swift
       Views/Onboarding/Child/EnterPairingCodeStep.swift
       Views/Onboarding/Child/GrantPermissionStep.swift
-      Views/Onboarding/Child/DeletionProtectionStep.swift
+      Views/Onboarding/Child/DeletionProtectionStep.swift  (BOTH modes — moved from Max-only)
       Views/Onboarding/Child/CategoryDefaultsStep.swift
-      Views/Onboarding/Child/FirstSavedListStep.swift
+      Views/Onboarding/Child/FirstSavedListStep.swift       (Std only)
       Views/Onboarding/Child/ChildReadyStep.swift
 
 DELETE: Views/Onboarding/OnboardingView.swift
         Views/Onboarding/SetupView.swift
 ```
+
+**Key differences from pre-spike spec**:
+- Std mode lost the "DisableDeletion" and "StdVerification" steps (`denyAppRemoval` handles it programmatically now).
+- Child `DeletionProtectionStep` is now **always** reached, not Max-only.
+- Max is presented as the default/recommended choice in `[4P]` instead of equal weighting.
 
 ---
 
