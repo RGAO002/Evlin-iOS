@@ -5,59 +5,43 @@ struct ChatInputBar: View {
     var onSend: () -> Void
 
     var body: some View {
-        HStack(spacing: Spacing.lg) {
-            // Add button
-            Button {
-                // TODO: attachment menu
-            } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: 16, weight: .medium))
-                    .foregroundStyle(Color.evOutline)
-                    .frame(width: 36, height: 36)
+        HStack(spacing: 10) {
+            Image(systemName: "bolt")
+                .font(.system(size: 16, weight: .regular))
+                .foregroundStyle(Color.evSecondary)
+
+            TextField("Ask about the strategy...", text: $text, axis: .vertical)
+                .font(.custom("Inter", size: 14))
+                .foregroundStyle(Color.evOnSurface)
+                .lineLimit(1...4)
+                .submitLabel(.send)
+                .onSubmit(onSend)
+
+            Button(action: onSend) {
+                Image(systemName: "arrow.up")
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 40, height: 40)
                     .background(
-                        Circle()
-                            .fill(Color.evSurfaceContainerHigh)
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(Color.evPrimary)
                     )
             }
-
-            // Text field
-            TextField("Consult Evlin on child development...", text: $text)
-                .font(.evBodyMedium)
-                .foregroundStyle(Color.evOnSurface)
-                .tint(Color.evPrimary)
-
-            // Send button
-            Button(action: onSend) {
-                HStack(spacing: 6) {
-                    Text("SEND")
-                        .font(.system(size: 11, weight: .bold))
-                        .tracking(1.5)
-
-                    Image(systemName: "arrowtriangle.right.fill")
-                        .font(.system(size: 10))
-                }
-                .foregroundStyle(Color.evOnPrimary)
-                .padding(.horizontal, Spacing.xl)
-                .padding(.vertical, Spacing.lg)
-                .background(
-                    RoundedRectangle(cornerRadius: CornerRadius.lg)
-                        .fill(text.isEmpty ? Color.evPrimary.opacity(0.4) : Color.evPrimary)
-                )
-            }
-            .disabled(text.isEmpty)
+            .buttonStyle(.plain)
+            .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .opacity(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.4 : 1.0)
         }
-        .padding(.horizontal, Spacing.xl)
-        .padding(.vertical, Spacing.lg)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
         .background(
-            RoundedRectangle(cornerRadius: CornerRadius.xxl)
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
                 .fill(Color.evSurfaceContainerLowest)
-                .overlay(
-                    RoundedRectangle(cornerRadius: CornerRadius.xxl)
-                        .stroke(Color.evOutlineVariant.opacity(0.2), lineWidth: 1)
-                )
-                .evChatInputShadow()
         )
-        .padding(.horizontal, Spacing.xl)
-        .padding(.bottom, Spacing.md)
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(Color.evOutlineVariant, lineWidth: 1)
+        )
+        .padding(.horizontal, 16)
+        .padding(.bottom, 8)
     }
 }
