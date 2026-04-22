@@ -1,6 +1,13 @@
 import SwiftUI
 import FamilyControls
 
+// MARK: - DEPRECATED / RETAINED FOR REFERENCE
+// Replaced by HomeSettingsSheet (Views/Home/HomeSettingsSheet.swift),
+// which consolidates all legacy sections (Connection / Screen Time /
+// Device Status / Chat / Mode / About) with a new Children section on top
+// and is forced into light color scheme.
+// Kept on disk per spec preservation rule. Do not delete. Do not wire back in.
+
 struct SettingsView: View {
     @EnvironmentObject var apiClient: APIClient
     @EnvironmentObject var screenTimeManager: ScreenTimeManager
