@@ -16,32 +16,38 @@ struct EventDetailCard: View {
                 .ignoresSafeArea()
                 .onTapGesture { onClose() }
 
+            // Card — content-hugged height (no Spacer), natural width
             VStack(alignment: .leading, spacing: 0) {
                 header
-                Divider().padding(.vertical, 2)
+                    .padding(.bottom, 12)
+
+                Divider()
                 personRow
-                Divider().padding(.vertical, 2)
+                Divider()
                 categoryRow
-                Divider().padding(.vertical, 2)
+                Divider()
                 noteRow
-                Divider().padding(.vertical, 2)
+                Divider()
                 locationRow
-                Divider().padding(.vertical, 2)
+                Divider()
                 reminderRow
-                Spacer(minLength: 8)
+
                 footer
+                    .padding(.top, 14)
             }
-            .padding(18)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 18)
             .background(
                 RoundedRectangle(cornerRadius: 24, style: .continuous)
                     .fill(Color.white)
             )
-            .shadow(color: .black.opacity(0.25), radius: 40, x: 0, y: 12)
-            .padding(.horizontal, 24)
-            .frame(maxWidth: 360)
+            .shadow(color: .black.opacity(0.18), radius: 40, x: 0, y: 12)
+            .padding(.horizontal, 20)
         }
         .preferredColorScheme(.light)
     }
+
+    // MARK: - Header
 
     private var header: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -53,17 +59,21 @@ struct EventDetailCard: View {
                     .foregroundStyle(.white)
             }
 
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(event.title)
                     .font(.custom("Manrope", size: 22).weight(.heavy))
                     .tracking(-0.2)
                     .foregroundStyle(Color.evPrimary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
                 Text(dayLabel)
                     .font(.custom("Inter", size: 12))
                     .foregroundStyle(Color.evOnSurfaceVariant)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
             }
 
-            Spacer()
+            Spacer(minLength: 8)
 
             Button(action: onClose) {
                 Image(systemName: "xmark")
@@ -75,6 +85,8 @@ struct EventDetailCard: View {
             .buttonStyle(.plain)
         }
     }
+
+    // MARK: - Rows (consistent vertical rhythm)
 
     private var personRow: some View {
         HStack(spacing: 12) {
@@ -88,7 +100,7 @@ struct EventDetailCard: View {
                 .foregroundStyle(Color.evPrimary)
             Spacer()
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, 12)
     }
 
     private var categoryRow: some View {
@@ -100,7 +112,7 @@ struct EventDetailCard: View {
             EvlinPill(text: event.category, tone: .neutral, size: .sm)
             Spacer()
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, 12)
     }
 
     private var noteRow: some View {
@@ -109,14 +121,15 @@ struct EventDetailCard: View {
                 .font(.system(size: 16))
                 .foregroundStyle(Color.evOnSurfaceVariant)
                 .frame(width: 24)
-                .padding(.top, 1)
+                .padding(.top, 2)
             Text(event.note)
                 .font(.custom("Inter", size: 14))
                 .foregroundStyle(Color.evOnSurface)
                 .lineSpacing(3)
                 .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, 12)
     }
 
     private var locationRow: some View {
@@ -130,7 +143,7 @@ struct EventDetailCard: View {
                 .foregroundStyle(Color.evOnSurface)
             Spacer()
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, 12)
     }
 
     private var reminderRow: some View {
@@ -147,8 +160,10 @@ struct EventDetailCard: View {
                 .labelsHidden()
                 .tint(Color.evSecondary)
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, 10)
     }
+
+    // MARK: - Footer
 
     private var footer: some View {
         HStack {
@@ -166,16 +181,15 @@ struct EventDetailCard: View {
                         .font(.custom("Manrope", size: 14).weight(.heavy))
                 }
                 .foregroundStyle(.white)
-                .padding(.horizontal, 18)
-                .padding(.vertical, 11)
+                .padding(.horizontal, 22)
+                .padding(.vertical, 12)
                 .background(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
                         .fill(Color.evPrimary)
                 )
             }
             .buttonStyle(.plain)
         }
-        .padding(.top, 4)
     }
 
     private func avatarURLFor(_ id: String) -> String? {
