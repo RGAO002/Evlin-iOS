@@ -334,7 +334,8 @@ struct CalendarView: View {
                 Spacer(minLength: 0)
             }
             .padding(8)
-            .frame(maxWidth: .infinity, minHeight: h, alignment: .topLeading)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+            .frame(height: h)
             .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(p.bg))
             .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(p.color.opacity(0.3), lineWidth: 1))
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
