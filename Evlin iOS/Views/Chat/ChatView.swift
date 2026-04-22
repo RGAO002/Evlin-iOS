@@ -113,7 +113,7 @@ struct ChatView: View {
             .padding(.top, Spacing.md)
             .background(Color.evSurface)
         }
-        .background(Color.evSurface)
+        .background(Color.evSurfaceContainerLow)
         .onAppear {
             if !isPreview {
                 viewModel.apiClient = apiClient

@@ -78,7 +78,7 @@ struct NotificationPanel: View {
                 }
             }
         }
-        .background(Color.evSurface.ignoresSafeArea())
+        .background(Color.evSurfaceContainerLow.ignoresSafeArea())
     }
 
     @ViewBuilder

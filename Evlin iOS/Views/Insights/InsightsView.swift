@@ -29,7 +29,7 @@ struct InsightsView: View {
                 .padding(.bottom, 40)
             }
         }
-        .background(Color.evSurface)
+        .background(Color.evSurfaceContainerLow)
     }
 
     private var heroCard: some View {

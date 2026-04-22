@@ -85,7 +85,7 @@ struct HomeView: View {
                 .padding(.bottom, 40)
             }
         }
-        .background(Color.evSurface)
+        .background(Color.evSurfaceContainerLow)
         .fullScreenCover(isPresented: $showNotifications) {
             NotificationPanel(onClose: { showNotifications = false })
         }

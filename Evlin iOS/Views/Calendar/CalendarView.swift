@@ -48,7 +48,7 @@ struct CalendarView: View {
                 }
             }
         }
-        .background(Color(hex: 0xF0F4F8))
+        .background(Color.evSurfaceContainerLow)
         .sheet(isPresented: $showMonthPicker) {
             MonthPickerSheet(selectedDay: $selectedDay, onClose: { showMonthPicker = false })
         }

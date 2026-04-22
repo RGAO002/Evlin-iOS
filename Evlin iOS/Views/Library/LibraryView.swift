@@ -67,7 +67,7 @@ struct LibraryView: View {
                 .padding(.bottom, 40)
             }
         }
-        .background(Color.evSurface)
+        .background(Color.evSurfaceContainerLow)
         .fullScreenCover(item: $selectedCategory) { cat in
             CategoryDetailView(category: cat, onBack: { selectedCategory = nil })
         }

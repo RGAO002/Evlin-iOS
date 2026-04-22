@@ -160,7 +160,7 @@ struct ProfileView: View {
                 .padding(.bottom, 40)
             }
         }
-        .background(Color.evSurface)
+        .background(Color.evSurfaceContainerLow)
         .navigationBarBackButtonHidden(true)
         .onAppear {
             rules = ProfileMockData.rules(for: child.id)
