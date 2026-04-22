@@ -2408,7 +2408,7 @@ enum OnboardingStep: Equatable {
     enum ParentStep: Equatable {
         case addChild, protectionLevel, pairingCode
         case maxWhyChildAppleID, maxCreateChildAppleID, maxSignInOnChild, maxWaitForAuth
-        case stdSetPasscode, stdDisableDeletion, stdVerification
+        case stdSetPasscode   // Std-only. DisableDeletion/StdVerification removed post-spike.
         case firstSavedList
     }
     enum ChildStep: Equatable {
@@ -2894,24 +2894,22 @@ git add adaptive-engine/backend/app/api/routes/family.py adaptive-engine/backend
 git commit -m "feat(api): /auth-status endpoints for Max-mode handshake"
 ```
 
-### Task 4.6: Parent Std-path steps
+### Task 4.6: Parent Std-path step (simplified after Phase 0 spike)
+
+**Post-spike change**: Phase 0 Test 2 confirmed `denyAppRemoval` works under `.individual` authorization. The Std path no longer needs `DisableDeletionStep` or `StdVerificationStep` — child device will programmatically enable deletion protection in Task 4.7 Step 3. Std parent path is now a **single step**: set the Screen Time passcode (which prevents the child from modifying Screen Time settings — a separate concern from deletion).
 
 **Files:**
 - Create: `Evlin iOS/Evlin iOS/Views/Onboarding/Parent/Std/SetPasscodeStep.swift`
-- Create: `Evlin iOS/Evlin iOS/Views/Onboarding/Parent/Std/DisableDeletionStep.swift`
-- Create: `Evlin iOS/Evlin iOS/Views/Onboarding/Parent/Std/StdVerificationStep.swift`
 
-- [ ] **Step 1: Each is an instructional screen following the same pattern as CreateChildAppleIDStep**
-
-Template (e.g. `SetPasscodeStep`):
+- [ ] **Step 1: Write SetPasscodeStep**
 
 ```swift
 struct SetPasscodeStep: View {
     let onContinue: () -> Void
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Set Family Controls Passcode").font(.evHeadlineLarge).padding(.top)
-            Text("On Liam's phone:\n1. Open Settings → Screen Time\n2. Lock Screen Time Settings\n3. Set a 4-digit passcode Liam doesn't know")
+            Text("Set Screen Time Passcode").font(.evHeadlineLarge).padding(.top)
+            Text("On Liam's phone:\n1. Open Settings → Screen Time\n2. Lock Screen Time Settings\n3. Set a 4-digit passcode Liam doesn't know\n\n(This prevents Liam from changing Screen Time settings. Evlin's own deletion protection is automatic — no extra step needed.)")
             Button("Open Screen Time Settings") {
                 Task { await ScreenTimeManager.shared.openScreenTimeSettings() }
             }
@@ -2922,48 +2920,11 @@ struct SetPasscodeStep: View {
 }
 ```
 
-```swift
-struct DisableDeletionStep: View {
-    let onContinue: () -> Void
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Disable App Deletion").font(.evHeadlineLarge).padding(.top)
-            Text("Still on Liam's phone, in Screen Time:\n\nContent & Privacy Restrictions\n→ iTunes & App Store Purchases\n→ Deleting Apps → Don't Allow")
-            Button("Open Screen Time Settings") {
-                Task { await ScreenTimeManager.shared.openScreenTimeSettings() }
-            }
-            Spacer()
-            Button("I've disabled deletion", action: onContinue)
-                .buttonStyle(.borderedProminent).frame(maxWidth: .infinity)
-        }.padding()
-    }
-}
-
-struct StdVerificationStep: View {
-    let onContinue: () -> Void
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Verification note").font(.evHeadlineLarge).padding(.top)
-            HStack(alignment: .top, spacing: 12) {
-                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange).font(.title)
-                Text("Evlin cannot verify these settings programmatically. If you skipped them, Liam can uninstall Evlin and bypass controls.")
-            }
-            .padding()
-            .background(Color.orange.opacity(0.1))
-            .cornerRadius(12)
-            Spacer()
-            Button("Continue anyway", action: onContinue)
-                .buttonStyle(.borderedProminent).frame(maxWidth: .infinity)
-        }.padding()
-    }
-}
-```
-
 - [ ] **Step 2: Commit**
 
 ```bash
 git add "Evlin iOS/Evlin iOS/Views/Onboarding/Parent/Std/"
-git commit -m "feat(onboarding): Std-path parent steps"
+git commit -m "feat(onboarding): Std parent SetPasscode step"
 ```
 
 ### Task 4.7: Child steps — EnterPairingCode, GrantPermission, DeletionProtection
@@ -3071,7 +3032,9 @@ struct GrantPermissionStep: View {
 }
 ```
 
-- [ ] **Step 3: DeletionProtectionStep — Max mode only**
+- [ ] **Step 3: DeletionProtectionStep — BOTH modes (verified in spike Test 2)**
+
+Phase 0 spike confirmed `denyAppRemoval` works identically under `.individual` and `.child` auth, so this step is reached in both Max and Std child-onboarding paths.
 
 ```swift
 struct DeletionProtectionStep: View {
@@ -3080,8 +3043,8 @@ struct DeletionProtectionStep: View {
 
     var body: some View {
         VStack(spacing: 16) {
-            Text("Deletion Protection").font(.evHeadlineLarge).padding(.top)
-            Text("Evlin will now block itself from being deleted on this phone.")
+            Text("Protect Evlin from deletion").font(.evHeadlineLarge).padding(.top)
+            Text("Evlin will now block itself from being deleted. Even if Liam knows the device passcode, they won't be able to uninstall Evlin until you disable this.")
             Spacer()
             if applied {
                 Text("✓ Evlin is now protected from deletion.").foregroundStyle(.green)
@@ -3333,11 +3296,10 @@ git commit -m "feat(onboarding): Parent FirstSavedList (Max) + Done"
     case .maxWaitForAuth:
         WaitForAuthStep(familyID: familyID ?? UUID()) { step = .parent(.firstSavedList) }
     case .stdSetPasscode:
-        SetPasscodeStep { step = .parent(.stdDisableDeletion) }
-    case .stdDisableDeletion:
-        DisableDeletionStep { step = .parent(.stdVerification) }
-    case .stdVerification:
-        StdVerificationStep { step = .done }     // Std skips FirstSavedList (built on child side)
+        SetPasscodeStep { step = .done }          // Std path: passcode → done.
+                                                   // DisableDeletion + Verification steps REMOVED
+                                                   // (denyAppRemoval handles it on child side).
+                                                   // Std also skips FirstSavedList (built on child).
     case .firstSavedList:
         ParentFirstSavedListStep(familyID: familyID!, parentDeviceID: parentDeviceID!) { step = .done }
     }
@@ -3351,7 +3313,7 @@ git commit -m "feat(onboarding): Parent FirstSavedList (Max) + Done"
         ) { step = .child(.grantPermission) }
     case .grantPermission:
         GrantPermissionStep(childDeviceID: childDeviceID ?? UUID(), protectionMode: protectionMode) {
-            step = .child(protectionMode == "max" ? .deletionProtection : .categoryDefaults)
+            step = .child(.deletionProtection)    // BOTH paths now go through DeletionProtection
         }
     case .deletionProtection:
         DeletionProtectionStep { step = .child(.categoryDefaults) }
