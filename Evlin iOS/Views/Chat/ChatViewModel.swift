@@ -211,6 +211,9 @@ class ChatViewModel: ObservableObject {
         m2.strategyVideoLabel = "Managing Transition Frustration"
         m2.strategyVideoDuration = "3:00"
         m2.strategyTip = "If a tantrum occurs, use \"Planned Ignoring\". I've prepared a 30-second refresher for you."
+        // Real YouTube video: "The Easy Way to Dramatically Reduce Toddler Tantrums"
+        m2.videoId = "vaGT_FtWEQU"
+        m2.videoThumbnail = "https://img.youtube.com/vi/vaGT_FtWEQU/maxresdefault.jpg"
 
         let m3 = ChatMessage(
             role: .agent,

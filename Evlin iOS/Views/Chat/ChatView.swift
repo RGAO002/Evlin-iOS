@@ -29,7 +29,9 @@ struct ChatView: View {
                                         category: message.strategyCategory ?? "",
                                         videoLabel: message.strategyVideoLabel ?? "",
                                         videoDuration: message.strategyVideoDuration ?? "",
-                                        tip: message.strategyTip ?? ""
+                                        tip: message.strategyTip ?? "",
+                                        videoId: message.videoId,
+                                        videoThumbnail: message.videoThumbnail
                                     ))
                                 }
 

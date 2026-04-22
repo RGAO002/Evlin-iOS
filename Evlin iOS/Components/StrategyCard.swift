@@ -7,12 +7,17 @@ struct StrategyCardData: Hashable {
     let videoLabel: String
     let videoDuration: String
     let tip: String
+    // Optional YouTube video wiring
+    var videoId: String? = nil
+    var videoThumbnail: String? = nil
 }
 
 struct StrategyCard: View {
     let data: StrategyCardData
     var onWatchVideo: () -> Void = {}
     var onReviewStrategy: () -> Void = {}
+
+    @State private var isPlaying: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -66,33 +71,70 @@ struct StrategyCard: View {
             .foregroundStyle(Color.evOnSurfaceVariant)
     }
 
+    @ViewBuilder
     private var videoTile: some View {
-        ZStack(alignment: .bottomLeading) {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(Color.evPrimaryGradient)
-
-            Circle()
-                .fill(.white.opacity(0.18))
-                .frame(width: 60, height: 60)
-                .overlay(
-                    Image(systemName: "play.fill")
-                        .font(.system(size: 22, weight: .bold))
-                        .foregroundStyle(.white)
+        if let videoId = data.videoId {
+            // Real YouTube video — custom thumbnail with title overlay; tap to play inline.
+            ZStack(alignment: .bottomLeading) {
+                YouTubePlayerView(
+                    videoId: videoId,
+                    thumbnail: data.videoThumbnail ?? "https://img.youtube.com/vi/\(videoId)/maxresdefault.jpg",
+                    isPlaying: $isPlaying
                 )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text(data.videoLabel)
-                    .font(.custom("Manrope", size: 16).weight(.heavy))
-                    .foregroundStyle(.white)
-                    .lineLimit(2)
-                Text("\(data.videoDuration) duration")
-                    .font(.custom("Inter", size: 11))
-                    .foregroundStyle(.white.opacity(0.7))
+                if !isPlaying {
+                    // Title overlay sits on the thumbnail before playback starts
+                    LinearGradient(
+                        colors: [.black.opacity(0.0), .black.opacity(0.55)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                    .allowsHitTesting(false)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(data.videoLabel)
+                            .font(.custom("Manrope", size: 16).weight(.heavy))
+                            .foregroundStyle(.white)
+                            .lineLimit(2)
+                        Text("\(data.videoDuration) duration")
+                            .font(.custom("Inter", size: 11))
+                            .foregroundStyle(.white.opacity(0.75))
+                    }
+                    .padding(16)
+                    .allowsHitTesting(false)
+                }
             }
-            .padding(16)
+            .frame(height: 200)
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        } else {
+            // Fallback: static gradient tile (no video wired)
+            ZStack(alignment: .bottomLeading) {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(Color.evPrimaryGradient)
+
+                Circle()
+                    .fill(.white.opacity(0.18))
+                    .frame(width: 60, height: 60)
+                    .overlay(
+                        Image(systemName: "play.fill")
+                            .font(.system(size: 22, weight: .bold))
+                            .foregroundStyle(.white)
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(data.videoLabel)
+                        .font(.custom("Manrope", size: 16).weight(.heavy))
+                        .foregroundStyle(.white)
+                        .lineLimit(2)
+                    Text("\(data.videoDuration) duration")
+                        .font(.custom("Inter", size: 11))
+                        .foregroundStyle(.white.opacity(0.7))
+                }
+                .padding(16)
+            }
+            .frame(height: 160)
         }
-        .frame(height: 160)
     }
 
     private var proactiveTip: some View {
@@ -127,7 +169,12 @@ struct StrategyCard: View {
 
     private var actionButtons: some View {
         HStack(spacing: 10) {
-            Button(action: onWatchVideo) {
+            Button {
+                if data.videoId != nil {
+                    isPlaying = true
+                }
+                onWatchVideo()
+            } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "play.rectangle.fill")
                         .font(.system(size: 14, weight: .bold))
