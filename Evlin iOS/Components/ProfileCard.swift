@@ -8,46 +8,47 @@ struct ProfileCard: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(alignment: .center, spacing: 16) {
+            HStack(alignment: .top, spacing: 16) {
                 EvlinAvatarView(url: child.avatarURL, name: child.name, size: 56, status: child.status)
 
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack(spacing: 8) {
+                VStack(alignment: .leading, spacing: 8) {
+                    // Line 1: Name · age X
+                    HStack(spacing: 6) {
                         Text(child.name)
                             .font(.custom("Manrope", size: 17).weight(.heavy))
                             .tracking(-0.2)
                             .foregroundStyle(Color.evPrimary)
+                        Text("· age \(child.age)")
+                            .font(.custom("Inter", size: 13))
+                            .foregroundStyle(Color.evOnSurfaceVariant)
+                    }
+
+                    // Line 2: status
+                    HStack(spacing: 6) {
                         if child.status == .unlocked {
-                            HStack(spacing: 5) {
-                                ZStack {
-                                    Circle()
-                                        .fill(Color.evSecondary.opacity(0.6))
-                                        .frame(width: 8, height: 8)
-                                        .scaleEffect(ping ? 1.8 : 1.0)
-                                        .opacity(ping ? 0 : 0.6)
-                                    Circle()
-                                        .fill(Color.evSecondary)
-                                        .frame(width: 8, height: 8)
-                                }
-                                Text("UNLOCKED")
-                                    .font(.custom("Inter", size: 9).weight(.heavy))
-                                    .tracking(1.5)
-                                    .foregroundStyle(Color.evSecondary)
+                            ZStack {
+                                Circle()
+                                    .fill(Color.evSecondary.opacity(0.6))
+                                    .frame(width: 8, height: 8)
+                                    .scaleEffect(ping ? 1.8 : 1.0)
+                                    .opacity(ping ? 0 : 0.6)
+                                Circle()
+                                    .fill(Color.evSecondary)
+                                    .frame(width: 8, height: 8)
                             }
+                            Text("UNLOCKED · \(child.timeLeft) left")
+                                .font(.custom("Inter", size: 10).weight(.heavy))
+                                .tracking(1.4)
+                                .foregroundStyle(Color.evSecondary)
                         } else {
                             Text("QUIET TIME")
-                                .font(.custom("Inter", size: 9).weight(.heavy))
-                                .tracking(1.5)
+                                .font(.custom("Inter", size: 10).weight(.heavy))
+                                .tracking(1.4)
                                 .foregroundStyle(Color.evOnSurfaceVariant)
                         }
                     }
 
-                    Text(child.subtitle)
-                        .font(.custom("Inter", size: 12))
-                        .foregroundStyle(Color.evOnSurfaceVariant)
-                        .lineLimit(1)
-
-                    // progress bar
+                    // Line 3: progress bar
                     GeometryReader { geo in
                         ZStack(alignment: .leading) {
                             Capsule().fill(Color.evSecondaryContainer).frame(height: 5)
@@ -57,14 +58,17 @@ struct ProfileCard: View {
                     }
                     .frame(height: 5)
 
-                    Text("\(child.timeLeft) left today")
-                        .font(.custom("Inter", size: 11).weight(.bold))
-                        .foregroundStyle(Color.evSecondary)
+                    // Line 4: subtitle
+                    Text(child.subtitle)
+                        .font(.custom("Inter", size: 12))
+                        .foregroundStyle(Color.evOnSurfaceVariant)
+                        .lineLimit(1)
                 }
 
                 Image(systemName: "chevron.right")
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(Color.evOutline)
+                    .padding(.top, 4)
             }
             .padding(18)
             .background(
