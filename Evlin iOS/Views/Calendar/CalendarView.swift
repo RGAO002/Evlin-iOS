@@ -1,113 +1,185 @@
 import SwiftUI
 
 struct CalendarView: View {
-    @State private var selectedDay: Int = 12
+    @State private var selectedDate: Date = Date()
     @State private var showMonthPicker = false
     @State private var focusPerson: String? = nil
     @State private var activeEvent: CalendarEvent? = nil
+    @State private var now: Date = Date()
 
+    private let calendar = Calendar.current
+    private let nowTimer = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
     private let totalHeight: CGFloat = CGFloat(CalendarMockData.END_H) * CalendarMockData.HOUR_H
 
-    private var events: [CalendarEvent] {
-        CalendarMockData.events[selectedDay] ?? []
-    }
+    private var events: [CalendarEvent] { CalendarMockData.events(for: selectedDate) }
     private var visibleEvents: [CalendarEvent] {
         guard let focusPerson else { return events }
         return events.filter { $0.col == focusPerson }
     }
-    private var allDayItems: [AllDayItem] {
-        CalendarMockData.allDay[selectedDay] ?? []
-    }
-    private var dayLabel: String {
-        let name = CalendarMockData.dayNames[selectedDay] ?? "—"
-        return "\(name), Sep \(selectedDay)"
-    }
+    private var allDayItems: [AllDayItem] { CalendarMockData.allDay(for: selectedDate) }
+    private var isViewingToday: Bool { calendar.isDateInToday(selectedDate) }
 
     var body: some View {
-        VStack(spacing: 0) {
-            GlassmorphicHeader(title: "Schedule", kicker: "September") {
-                HStack(spacing: 4) {
-                    HeaderIconButton(systemName: focusPerson == nil ? "person.2" : "person.fill") {
-                        cycleFocus()
-                    }
-                }
-            }
+        ZStack(alignment: .bottomTrailing) {
+            scrollContainer
 
-            dayNav
-
-            ScrollViewReader { proxy in
-                ScrollView {
-                    timelineBody
-                        .id("timeline")
-                }
-                .onAppear {
-                    scrollToFirstEvent(proxy)
-                }
-                .onChange(of: selectedDay) { _, _ in
-                    scrollToFirstEvent(proxy)
-                }
-            }
+            floatingAddButton
+                .padding(.trailing, 20)
+                .padding(.bottom, 24)
         }
         .background(Color.evSurfaceContainerLow)
         .sheet(isPresented: $showMonthPicker) {
-            MonthPickerSheet(selectedDay: $selectedDay, onClose: { showMonthPicker = false })
+            MonthPickerSheet(selectedDate: $selectedDate, onClose: { showMonthPicker = false })
         }
-        .sheet(item: $activeEvent) { event in
-            EventDetailSheet(
-                event: event,
-                person: CalendarMockData.person(event.col),
-                dayLabel: dayLabel,
-                onClose: { activeEvent = nil }
-            )
+        .overlay {
+            if let event = activeEvent {
+                EventDetailCard(
+                    event: event,
+                    person: CalendarMockData.person(event.col),
+                    dayLabel: "\(isViewingToday ? "Today" : CalendarMockData.shortDateLabel(selectedDate)), \(event.start) – \(event.end)",
+                    onClose: { activeEvent = nil },
+                    onEdit: { activeEvent = nil }
+                )
+                .transition(.opacity)
+                .zIndex(100)
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: activeEvent)
+        .onReceive(nowTimer) { t in now = t }
+    }
+
+    private var scrollContainer: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                cardContent
+                    .id("timeline")
+            }
+            .onAppear { scrollToFirstEvent(proxy) }
+            .onChange(of: selectedDate) { _, _ in scrollToFirstEvent(proxy) }
+            .onChange(of: focusPerson) { _, _ in scrollToFirstEvent(proxy) }
         }
     }
 
-    private var dayNav: some View {
+    private var cardContent: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            cardTopBar
+            avatarRow
+            Rectangle().fill(Color.evOutlineVariant.opacity(0.4)).frame(height: 1)
+            timelineBody
+        }
+        .padding(.bottom, 20)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .fill(Color.evSurfaceContainerLowest)
+        )
+        .evShadow(.ambient)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 12)
+        .padding(.bottom, 80)
+    }
+
+    private var cardTopBar: some View {
         HStack {
-            navButton(systemName: "chevron.left") {
-                selectedDay = max(1, selectedDay - 1)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Today's Events")
+                    .font(.custom("Manrope", size: 17).weight(.heavy))
+                    .foregroundStyle(Color.evPrimary)
+                Text(CalendarMockData.shortDateLabel(selectedDate))
+                    .font(.custom("Inter", size: 11).weight(.bold))
+                    .tracking(0.6)
+                    .textCase(.uppercase)
+                    .foregroundStyle(Color.evOnSurfaceVariant)
             }
+
             Spacer()
-            Button {
-                showMonthPicker = true
-            } label: {
-                VStack(spacing: 1) {
-                    Text(dayLabel)
-                        .font(.custom("Manrope", size: 17).weight(.heavy))
-                        .foregroundStyle(Color.evPrimary)
-                    Text("TAP TO CHANGE DATE")
-                        .font(.custom("Inter", size: 10).weight(.heavy))
-                        .tracking(1.2)
-                        .foregroundStyle(Color.evOnSurfaceVariant)
+
+            HStack(spacing: 2) {
+                topBarButton(systemName: "chevron.left") {
+                    if let d = calendar.date(byAdding: .day, value: -1, to: selectedDate) {
+                        selectedDate = d
+                    }
+                }
+                topBarButton(systemName: "calendar") { showMonthPicker = true }
+                topBarButton(systemName: "chevron.right") {
+                    if let d = calendar.date(byAdding: .day, value: 1, to: selectedDate) {
+                        selectedDate = d
+                    }
                 }
             }
-            .buttonStyle(.plain)
-            Spacer()
-            navButton(systemName: "chevron.right") {
-                selectedDay = min(30, selectedDay + 1)
-            }
         }
-        .padding(.horizontal, 20)
-        .frame(height: 64)
-        .background(Color(hex: 0xF0F4F8).opacity(0.97))
-        .overlay(
-            Rectangle().fill(Color.evOutlineVariant).frame(height: 0.5),
-            alignment: .bottom
-        )
+        .padding(.horizontal, 16)
+        .padding(.top, 16)
+        .padding(.bottom, 12)
     }
 
-    private func navButton(systemName: String, action: @escaping () -> Void) -> some View {
+    private func topBarButton(systemName: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: systemName)
                 .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(Color.evPrimary)
-                .frame(width: 34, height: 34)
-                .background(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.white)
-                )
-                .evShadow(.premium)
+                .foregroundStyle(Color.evOnSurfaceVariant)
+                .frame(width: 32, height: 32)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+
+    private var avatarRow: some View {
+        HStack(spacing: 0) {
+            Color.clear.frame(width: CalendarMockData.TIME_W)
+            ForEach(CalendarMockData.people) { p in
+                avatarButton(for: p)
+                    .frame(maxWidth: .infinity)
+            }
+        }
+        .padding(.horizontal, 6)
+        .padding(.bottom, 10)
+    }
+
+    @ViewBuilder
+    private func avatarButton(for p: CalendarPerson) -> some View {
+        let focused = focusPerson == p.id
+        Button {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                focusPerson = (focusPerson == p.id) ? nil : p.id
+            }
+        } label: {
+            VStack(spacing: 4) {
+                ZStack {
+                    if p.id == "family" {
+                        Circle().fill(p.color)
+                            .frame(width: focused ? 44 : 36, height: focused ? 44 : 36)
+                        Image(systemName: "house.fill")
+                            .font(.system(size: focused ? 18 : 14, weight: .bold))
+                            .foregroundStyle(.white)
+                    } else {
+                        EvlinAvatarView(
+                            url: urlFor(p.id),
+                            name: p.name,
+                            size: focused ? 44 : 36,
+                            ring: true,
+                            ringColor: p.color
+                        )
+                    }
+                }
+                .frame(width: 46, height: 46)
+
+                Text(p.id == "family" ? "Family" : p.name)
+                    .font(.custom("Inter", size: 10).weight(focused ? .heavy : .semibold))
+                    .foregroundStyle(focused ? p.color : Color.evOnSurface)
+                    .lineLimit(1)
+            }
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func urlFor(_ personId: String) -> String? {
+        switch personId {
+        case "liam": return ChildProfile.liam.avatarURL
+        case "maya": return ChildProfile.maya.avatarURL
+        case "emma": return ChildProfile.emma.avatarURL
+        default: return nil
+        }
     }
 
     private var timelineBody: some View {
@@ -129,7 +201,7 @@ struct CalendarView: View {
                     }
                 }
                 .padding(.horizontal, 16)
-                .padding(.top, 12)
+                .padding(.top, 8)
             }
 
             HStack(alignment: .top, spacing: 0) {
@@ -145,15 +217,17 @@ struct CalendarView: View {
                     ForEach(visibleEvents) { ev in
                         eventPill(ev)
                             .offset(y: CalendarMockData.yFor(ev.start))
-                            .id("ev_\(ev.id)")
+                    }
+
+                    if isViewingToday {
+                        currentTimeIndicator
                     }
                 }
                 .frame(height: totalHeight, alignment: .top)
             }
-            .padding(.horizontal, 12)
+            .padding(.horizontal, 6)
             .padding(.top, 6)
         }
-        .padding(.bottom, 120)
     }
 
     private var timeGutter: some View {
@@ -183,9 +257,7 @@ struct CalendarView: View {
     private func eventPill(_ ev: CalendarEvent) -> some View {
         let p = CalendarMockData.person(ev.col)
         let h = CalendarMockData.heightFor(start: ev.start, end: ev.end)
-        return Button {
-            activeEvent = ev
-        } label: {
+        return Button { activeEvent = ev } label: {
             HStack(alignment: .top, spacing: 10) {
                 Rectangle().fill(p.color).frame(width: 4).cornerRadius(2)
                 VStack(alignment: .leading, spacing: 2) {
@@ -205,12 +277,37 @@ struct CalendarView: View {
             .padding(10)
             .frame(maxWidth: .infinity, alignment: .leading)
             .frame(height: h, alignment: .top)
-            .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous).fill(p.bg)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(p.color.opacity(0.3), lineWidth: 1)
-            )
+            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(p.bg))
+            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(p.color.opacity(0.3), lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var currentTimeIndicator: some View {
+        let _ = now
+        let y = CalendarMockData.yForNow()
+        return ZStack(alignment: .leading) {
+            Circle()
+                .fill(Color.red)
+                .frame(width: 10, height: 10)
+                .offset(x: -5)
+            Rectangle()
+                .fill(Color.red)
+                .frame(height: 1.5)
+                .padding(.leading, 4)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .offset(y: y - 5)
+    }
+
+    private var floatingAddButton: some View {
+        Button {} label: {
+            Image(systemName: "plus")
+                .font(.system(size: 22, weight: .bold))
+                .foregroundStyle(.white)
+                .frame(width: 56, height: 56)
+                .background(Circle().fill(Color.evPrimary))
+                .shadow(color: .black.opacity(0.18), radius: 16, y: 8)
         }
         .buttonStyle(.plain)
     }
@@ -220,11 +317,5 @@ struct CalendarView: View {
         withAnimation(.easeInOut(duration: 0.25)) {
             proxy.scrollTo("timeline", anchor: UnitPoint(x: 0, y: max(0, first - 80) / totalHeight))
         }
-    }
-
-    private func cycleFocus() {
-        let order: [String?] = [nil, "liam", "maya", "emma", "family"]
-        let idx = (order.firstIndex(of: focusPerson) ?? 0)
-        focusPerson = order[(idx + 1) % order.count]
     }
 }
