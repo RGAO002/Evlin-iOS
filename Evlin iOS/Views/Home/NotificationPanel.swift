@@ -8,30 +8,11 @@ struct NotificationPanel: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Custom header for this modal
-            HStack(spacing: 10) {
-                Button(action: onClose) {
-                    Image(systemName: "arrow.backward")
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundStyle(Color.evPrimary)
-                        .frame(width: 36, height: 36)
-                        .background(
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .fill(Color.evSurfaceContainerHigh)
-                        )
-                }
-                .buttonStyle(.plain)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Notifications")
-                        .font(.custom("Manrope", size: 18).weight(.heavy))
-                        .foregroundStyle(Color.evPrimary)
-                    if unread > 0 {
-                        Text("\(unread) unread")
-                            .font(.custom("Inter", size: 11))
-                            .foregroundStyle(Color.evOnSurfaceVariant)
-                    }
-                }
-                Spacer()
+            GlassmorphicHeader(
+                title: "Notifications",
+                kicker: unread > 0 ? "\(unread) unread" : nil,
+                onBack: onClose
+            ) {
                 if unread > 0 {
                     Button {
                         withAnimation { notifs = notifs.map { var n = $0; n.unread = false; return n } }
@@ -43,13 +24,6 @@ struct NotificationPanel: View {
                     .buttonStyle(.plain)
                 }
             }
-            .padding(.horizontal, 20)
-            .padding(.top, 16)
-            .padding(.bottom, 12)
-            .overlay(
-                Rectangle().fill(Color.evOutlineVariant).frame(height: 0.5),
-                alignment: .bottom
-            )
 
             if notifs.isEmpty {
                 VStack(spacing: 12) {
@@ -78,7 +52,8 @@ struct NotificationPanel: View {
                 }
             }
         }
-        .background(Color.evSurfaceContainerLow.ignoresSafeArea())
+        .background(Color.evSurfaceContainerLow)
+        .navigationBarBackButtonHidden(true)
     }
 
     @ViewBuilder
