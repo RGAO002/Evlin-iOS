@@ -71,8 +71,18 @@ struct ParentRootView: View {
     }
 }
 
-#Preview {
+// MARK: - Previews
+
+// Full app shell (all 5 tabs + tab bar). Skips onboarding by bypassing ContentView.
+#Preview("Parent Shell (all tabs)") {
+    ParentRootView()
+        .environmentObject(APIClient(baseURL: "http://preview.local"))
+        .environmentObject(ScreenTimeManager.shared)
+}
+
+// ContentView honoring @AppStorage — starts at onboarding if you haven't completed it.
+#Preview("ContentView (real flow)") {
     ContentView()
-        .environmentObject(APIClient(baseURL: "http://preview"))
+        .environmentObject(APIClient(baseURL: "http://preview.local"))
         .environmentObject(ScreenTimeManager.shared)
 }
