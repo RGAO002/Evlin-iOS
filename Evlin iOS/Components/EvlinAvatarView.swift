@@ -13,12 +13,6 @@ struct EvlinAvatarView: View {
 
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
-            if ring {
-                Circle()
-                    .stroke(ringColor, lineWidth: 2.5)
-                    .frame(width: size + 6, height: size + 6)
-            }
-
             Group {
                 if let url, let u = URL(string: url) {
                     AsyncImage(url: u) { phase in
@@ -33,7 +27,9 @@ struct EvlinAvatarView: View {
             }
             .frame(width: size, height: size)
             .clipShape(Circle())
-            .overlay(Circle().stroke(Color.white, lineWidth: 2))
+            .overlay(
+                Circle().stroke(ring ? ringColor : Color.white, lineWidth: ring ? 3 : 2)
+            )
             .shadow(color: .black.opacity(0.08), radius: 3, x: 0, y: 1)
 
             if let status {
