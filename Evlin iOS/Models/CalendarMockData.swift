@@ -9,11 +9,11 @@ struct CalendarPerson: Identifiable, Hashable {
 
 struct CalendarEvent: Identifiable, Hashable {
     let id = UUID()
-    let col: String          // "family" / "liam" / "maya" / "emma"
+    let col: String
     let title: String
     let emoji: String
-    let start: String        // "08:00 AM"
-    let end: String          // "08:30 AM"
+    let start: String
+    let end: String
     let category: String
     let location: String
     let note: String
@@ -32,7 +32,7 @@ enum CalendarMockData {
     static let TIME_W: CGFloat = 48
 
     static let people: [CalendarPerson] = [
-        .init(id: "family", name: "Family",
+        .init(id: "family", name: "Family events",
               color: Color(hex: 0x7C6FF7), bg: Color(hex: 0xEDE9FE)),
         .init(id: "liam", name: "Liam",
               color: .evChildLiam, bg: Color(hex: 0xDBEAFE)),
@@ -42,22 +42,15 @@ enum CalendarMockData {
               color: Color(hex: 0xF97316), bg: Color(hex: 0xFFEDD5)),
     ]
 
-    static let dayNames: [Int: String] = [
-        1: "Sun", 2: "Mon", 3: "Tue", 4: "Wed", 5: "Thu", 6: "Fri", 7: "Sat",
-        8: "Mon", 9: "Tue", 10: "Wed", 11: "Thu", 12: "Thu", 13: "Fri", 14: "Sat",
-        15: "Sun", 16: "Mon", 17: "Tue", 18: "Wed", 19: "Thu", 20: "Fri", 21: "Sat",
-        22: "Sun", 23: "Mon", 24: "Tue", 25: "Wed", 26: "Thu", 27: "Fri", 28: "Sat",
-        29: "Sun", 30: "Mon",
-    ]
-
-    static let events: [Int: [CalendarEvent]] = [
-        12: [
+    // Events keyed by days-offset from today
+    static let eventsByOffset: [Int: [CalendarEvent]] = [
+        0: [
             CalendarEvent(col: "liam",   title: "Clean Table",     emoji: "🧹",
                           start: "08:00 AM", end: "08:30 AM", category: "Chore",
                           location: "Kitchen", note: "Wipe down the kitchen table and chairs after lunch."),
             CalendarEvent(col: "maya",   title: "Piano Practice",  emoji: "🎹",
                           start: "10:00 AM", end: "11:30 AM", category: "Lesson",
-                          location: "Living Room", note: "Work on the new piece from last week."),
+                          location: "Living Room", note: "Work on the new piece from last week. Focus on the right-hand part."),
             CalendarEvent(col: "family", title: "Family Lunch",    emoji: "🍽️",
                           start: "12:00 PM", end: "01:00 PM", category: "Family",
                           location: "Dining Room", note: "Everyone together. No devices at the table."),
@@ -80,7 +73,7 @@ enum CalendarMockData {
                           start: "07:30 PM", end: "08:30 PM", category: "Routine",
                           location: "Bedroom", note: "Two stories max, then lights out."),
         ],
-        19: [
+        7: [
             CalendarEvent(col: "liam", title: "Science Lab", emoji: "🔬",
                           start: "10:00 AM", end: "11:30 AM", category: "Study",
                           location: "Study Room", note: "Volcanos experiment."),
@@ -102,11 +95,38 @@ enum CalendarMockData {
         ],
     ]
 
-    static let allDay: [Int: [AllDayItem]] = [
-        12: [AllDayItem(col: "liam", title: "Wellness Day 🧘")],
+    static let allDayByOffset: [Int: [AllDayItem]] = [
+        0: [AllDayItem(col: "liam", title: "Wellness Day 🧘")],
     ]
 
-    // Parse "08:00 AM" into total minutes from midnight
+    // MARK: - Date helpers
+
+    static func daysFromToday(to date: Date, calendar: Calendar = .current) -> Int {
+        let start = calendar.startOfDay(for: Date())
+        let target = calendar.startOfDay(for: date)
+        return calendar.dateComponents([.day], from: start, to: target).day ?? 0
+    }
+
+    static func events(for date: Date) -> [CalendarEvent] {
+        eventsByOffset[daysFromToday(to: date)] ?? []
+    }
+
+    static func allDay(for date: Date) -> [AllDayItem] {
+        allDayByOffset[daysFromToday(to: date)] ?? []
+    }
+
+    static func shortDateLabel(_ date: Date) -> String {
+        let f = DateFormatter()
+        f.dateFormat = "EEE, MMM d"
+        return f.string(from: date)
+    }
+
+    static func monthName(_ date: Date) -> String {
+        let f = DateFormatter()
+        f.dateFormat = "LLLL"
+        return f.string(from: date)
+    }
+
     static func parseTimeToMinutes(_ s: String) -> Int {
         let parts = s.split(separator: " ")
         guard parts.count == 2 else { return 0 }
@@ -128,6 +148,13 @@ enum CalendarMockData {
     static func heightFor(start: String, end: String) -> CGFloat {
         let h = yFor(end) - yFor(start)
         return max(h, 36)
+    }
+
+    static func yForNow() -> CGFloat {
+        let cal = Calendar.current
+        let h = cal.component(.hour, from: Date())
+        let m = cal.component(.minute, from: Date())
+        return (CGFloat(h) + CGFloat(m) / 60) * HOUR_H
     }
 
     static func person(_ id: String) -> CalendarPerson {
