@@ -200,3 +200,21 @@ struct ProfileView: View {
         .evShadow(.premium)
     }
 }
+
+#Preview("Liam") {
+    NavigationStack {
+        ProfileView(child: .liam)
+    }
+}
+
+#Preview("Maya") {
+    NavigationStack {
+        ProfileView(child: .maya)
+    }
+}
+
+#Preview("Emma (locked)") {
+    NavigationStack {
+        ProfileView(child: .emma)
+    }
+}

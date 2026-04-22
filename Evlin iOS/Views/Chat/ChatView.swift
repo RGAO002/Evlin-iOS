@@ -160,3 +160,9 @@ struct ChatView: View {
         .padding(.vertical, Spacing.md)
     }
 }
+
+#Preview {
+    ChatView(isPreview: true)
+        .environmentObject(APIClient(baseURL: "http://preview.local"))
+        .environmentObject(ScreenTimeManager.shared)
+}

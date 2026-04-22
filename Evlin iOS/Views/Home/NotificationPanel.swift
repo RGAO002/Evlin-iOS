@@ -177,3 +177,8 @@ struct NotificationPanel: View {
     }
 }
 
+#Preview {
+    NavigationStack {
+        NotificationPanel(onClose: {})
+    }
+}

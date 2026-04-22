@@ -86,3 +86,7 @@ struct LibraryView: View {
         }
     }
 }
+
+#Preview {
+    LibraryView()
+}

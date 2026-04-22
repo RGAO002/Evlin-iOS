@@ -85,3 +85,8 @@ struct MonthPickerSheet: View {
         .buttonStyle(.plain)
     }
 }
+
+#Preview {
+    @Previewable @State var date = Date()
+    return MonthPickerSheet(selectedDate: $date, onClose: {})
+}

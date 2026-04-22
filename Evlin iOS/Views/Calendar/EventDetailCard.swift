@@ -187,3 +187,17 @@ struct EventDetailCard: View {
         }
     }
 }
+
+#Preview {
+    let sample = CalendarMockData.eventsByOffset[0]?.first ?? CalendarEvent(
+        col: "liam", title: "Preview", emoji: "📌",
+        start: "10:00 AM", end: "11:00 AM",
+        category: "Study", location: "Study Room",
+        note: "Preview note text."
+    )
+    return EventDetailCard(
+        event: sample,
+        person: CalendarMockData.person(sample.col),
+        dayLabel: "Today, \(sample.start) – \(sample.end)"
+    )
+}

@@ -91,3 +91,12 @@ struct HomeView: View {
         }
     }
 }
+
+#Preview {
+    @Previewable @State var tab: EvlinTab = .home
+    return HomeView(
+        selectedTab: $tab,
+        onOpenProfile: { _ in },
+        onOpenNotifications: {}
+    )
+}

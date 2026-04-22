@@ -170,3 +170,9 @@ struct CategoryDetailView: View {
         }
     }
 }
+
+#Preview {
+    NavigationStack {
+        CategoryDetailView(category: LibraryMockData.categories[0])
+    }
+}

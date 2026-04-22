@@ -358,3 +358,9 @@ private struct ChildEditSheet: View {
         .preferredColorScheme(.light)
     }
 }
+
+#Preview {
+    HomeSettingsSheet(onClose: {})
+        .environmentObject(APIClient(baseURL: "http://preview.local"))
+        .environmentObject(ScreenTimeManager.shared)
+}
