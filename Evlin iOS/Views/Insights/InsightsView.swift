@@ -173,19 +173,21 @@ struct InsightsView: View {
                 }
                 .frame(height: 6)
 
-                HStack(spacing: 18) {
-                    ForEach(InsightsMockData.categories) { c in
-                        HStack(spacing: 6) {
-                            Circle().fill(c.color).frame(width: 8, height: 8)
-                            Text(c.label)
-                                .font(.custom("Inter", size: 11).weight(.semibold))
-                                .foregroundStyle(Color.evOnSurface)
-                            Text(c.time)
-                                .font(.custom("Inter", size: 11))
-                                .foregroundStyle(Color.evOnSurfaceVariant)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 18) {
+                        ForEach(InsightsMockData.categories) { c in
+                            HStack(spacing: 6) {
+                                Circle().fill(c.color).frame(width: 8, height: 8)
+                                Text(c.label)
+                                    .font(.custom("Inter", size: 11).weight(.semibold))
+                                    .foregroundStyle(Color.evOnSurface)
+                                Text(c.time)
+                                    .font(.custom("Inter", size: 11))
+                                    .foregroundStyle(Color.evOnSurfaceVariant)
+                            }
+                            .fixedSize(horizontal: true, vertical: false)
                         }
                     }
-                    Spacer()
                 }
             }
             .padding(20)
