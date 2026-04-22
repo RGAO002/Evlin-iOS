@@ -49,18 +49,17 @@ struct ProfileView: View {
 
                     // Tasks
                     VStack(spacing: 0) {
-                        SectionHead(title: "Tasks") {
+                        SectionHead(title: "Current Tasks") {
                             Text("\(tasks.filter { $0.state == .done }.count)/\(tasks.count) done")
                                 .font(.custom("Inter", size: 11).weight(.bold))
                                 .tracking(1.2)
                                 .textCase(.uppercase)
                                 .foregroundStyle(Color.evOnSurfaceVariant)
                         }
-                        VStack(spacing: 0) {
-                            ForEach(Array(tasks.enumerated()), id: \.element.id) { idx, t in
+                        VStack(spacing: 10) {
+                            ForEach(tasks) { t in
                                 TaskRow(
                                     task: t,
-                                    isLast: idx == tasks.count - 1,
                                     onApprove: {
                                         if let i = tasks.firstIndex(where: { $0.id == t.id }) {
                                             tasks[i].state = .done
@@ -74,14 +73,6 @@ struct ProfileView: View {
                                 )
                             }
                         }
-                        .background(
-                            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                                .fill(Color.evSurfaceContainerLowest)
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                                .stroke(Color.evOutlineVariant.opacity(0.4), lineWidth: 1)
-                        )
                     }
 
                     // Today's Schedule
@@ -135,7 +126,7 @@ struct ProfileView: View {
 
                     // Devices
                     VStack(spacing: 0) {
-                        SectionHead("Device Permissions")
+                        SectionHead("Enrolled Devices")
                         VStack(spacing: 0) {
                             ForEach(Array(devices.enumerated()), id: \.element.id) { idx, d in
                                 DeviceRow(
