@@ -1,5 +1,10 @@
 import SwiftUI
 
+enum HomeRoute: Hashable {
+    case profile(ChildProfile)
+    case notifications
+}
+
 struct ContentView: View {
     @AppStorage("onboardingComplete") private var onboardingComplete = false
     @AppStorage("appMode") private var appMode: String = ""
@@ -31,14 +36,22 @@ struct ParentRootView: View {
                     NavigationStack(path: $profilePath) {
                         HomeView(
                             selectedTab: $selectedTab,
-                            onOpenProfile: { child in profilePath.append(child) }
+                            onOpenProfile: { child in profilePath.append(HomeRoute.profile(child)) },
+                            onOpenNotifications: { profilePath.append(HomeRoute.notifications) }
                         )
-                        .navigationDestination(for: ChildProfile.self) { child in
-                            ProfileView(
-                                child: child,
-                                onBack: { profilePath.removeLast() },
-                                onOpenCalendar: { selectedTab = .calendar }
-                            )
+                        .navigationDestination(for: HomeRoute.self) { route in
+                            switch route {
+                            case .profile(let child):
+                                ProfileView(
+                                    child: child,
+                                    onBack: { if !profilePath.isEmpty { profilePath.removeLast() } },
+                                    onOpenCalendar: { selectedTab = .calendar }
+                                )
+                            case .notifications:
+                                NotificationPanel(onClose: {
+                                    if !profilePath.isEmpty { profilePath.removeLast() }
+                                })
+                            }
                         }
                     }
                 case .calendar:

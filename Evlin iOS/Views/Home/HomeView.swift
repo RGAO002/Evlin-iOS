@@ -2,10 +2,10 @@ import SwiftUI
 
 struct HomeView: View {
     @AppStorage("parentName") private var parentName: String = "Morgan"
-    @State private var showNotifications = false
     @State private var showSettings = false
     @Binding var selectedTab: EvlinTab
     var onOpenProfile: (ChildProfile) -> Void
+    var onOpenNotifications: () -> Void
 
     private var greeting: String {
         let h = Calendar.current.component(.hour, from: Date())
@@ -23,7 +23,7 @@ struct HomeView: View {
             GlassmorphicHeader(title: "", kicker: "\(greeting), \(parentName)") {
                 HStack(spacing: 4) {
                     HeaderIconButton(systemName: "bell", badge: unreadCount > 0) {
-                        showNotifications = true
+                        onOpenNotifications()
                     }
                     HeaderIconButton(systemName: "gearshape") {
                         showSettings = true
@@ -86,9 +86,6 @@ struct HomeView: View {
             }
         }
         .background(Color.evSurfaceContainerLow)
-        .fullScreenCover(isPresented: $showNotifications) {
-            NotificationPanel(onClose: { showNotifications = false })
-        }
         .fullScreenCover(isPresented: $showSettings) {
             HomeSettingsSheet(onClose: { showSettings = false })
         }
