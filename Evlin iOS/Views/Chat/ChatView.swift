@@ -101,7 +101,7 @@ struct ChatView: View {
                 }
             }
             .padding(.top, Spacing.md)
-            .background(Color.evSurface)
+            .background(Color.evSurfaceContainer)
         }
         .background(Color.evSurfaceContainerLow)
         .onAppear {

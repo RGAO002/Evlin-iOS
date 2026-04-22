@@ -132,9 +132,15 @@ class ChatViewModel: ObservableObject {
                 }
             } catch {
                 errorMessage = error.localizedDescription
+                let detail: String
+                if let api = error as? APIError, case .serverError(let code) = api, code == 500 || code == 503 {
+                    detail = "The AI model is briefly overloaded. Please tap again in a few seconds."
+                } else {
+                    detail = "I'm unable to connect right now. Please check your network connection and try again."
+                }
                 messages.append(ChatMessage(
                     role: .agent,
-                    content: "I'm unable to connect right now. Please check your network connection and try again.",
+                    content: detail,
                     timestamp: Date()
                 ))
             }

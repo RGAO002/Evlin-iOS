@@ -30,22 +30,46 @@ class APIClient: ObservableObject {
     }
 
     func sendChatMessage(message: String, childName: String, history: [[String: String]]) async throws -> ChatResponse {
-        let url = URL(string: "\(baseURL)/parent/chat")!
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = 30
+        // Retry up to 3 times — the Gemini backend occasionally returns 500/503
+        // ("This model is currently experiencing high demand"). A short backoff
+        // almost always resolves it on the second try.
+        var lastStatus = 0
+        for attempt in 0..<3 {
+            let url = URL(string: "\(baseURL)/parent/chat")!
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.timeoutInterval = 30
 
-        let body = ChatRequest(message: message, child_name: childName, history: history)
-        request.httpBody = try JSONEncoder().encode(body)
+            let body = ChatRequest(message: message, child_name: childName, history: history)
+            request.httpBody = try JSONEncoder().encode(body)
 
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            let http = response as? HTTPURLResponse
-            throw APIError.serverError(http?.statusCode ?? 0)
+            do {
+                let (data, response) = try await URLSession.shared.data(for: request)
+                let http = response as? HTTPURLResponse
+                lastStatus = http?.statusCode ?? 0
+
+                if lastStatus == 200 {
+                    return try JSONDecoder().decode(ChatResponse.self, from: data)
+                }
+                // Retry on upstream Gemini overload (500/503)
+                if lastStatus == 500 || lastStatus == 503, attempt < 2 {
+                    try? await Task.sleep(nanoseconds: UInt64(800_000_000 * (attempt + 1)))
+                    continue
+                }
+                throw APIError.serverError(lastStatus)
+            } catch let err as APIError {
+                throw err
+            } catch {
+                // Transient network error — retry once
+                if attempt < 2 {
+                    try? await Task.sleep(nanoseconds: 600_000_000)
+                    continue
+                }
+                throw error
+            }
         }
-
-        return try JSONDecoder().decode(ChatResponse.self, from: data)
+        throw APIError.serverError(lastStatus)
     }
 
     func saveServerURL(_ url: String) {
