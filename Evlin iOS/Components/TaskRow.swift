@@ -12,16 +12,8 @@ struct TaskItem: Identifiable, Hashable {
             switch self {
             case .pending: return "Pending"
             case .done: return "Done"
-            case .review: return "Review"
+            case .review: return "Reviewing"
             case .overdue: return "Overdue"
-            }
-        }
-        var tone: EvlinPillTone {
-            switch self {
-            case .pending: return .neutral
-            case .done: return .success
-            case .review: return .warn
-            case .overdue: return .danger
             }
         }
     }
@@ -29,62 +21,153 @@ struct TaskItem: Identifiable, Hashable {
 
 struct TaskRow: View {
     let task: TaskItem
-    var isLast: Bool = false
     var onApprove: () -> Void = {}
     var onRedo: () -> Void = {}
 
     var body: some View {
-        HStack(spacing: 14) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 11, style: .continuous)
-                    .fill(Color.evSurfaceContainerLow)
-                Image(systemName: task.iconSystemName ?? defaultIcon)
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(Color.evPrimary)
-            }
-            .frame(width: 40, height: 40)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(task.title)
-                    .font(.custom("Manrope", size: 14).weight(.bold))
-                    .foregroundStyle(Color.evPrimary)
-                EvlinPill(text: task.state.label, tone: task.state.tone, size: .xs)
-            }
-            Spacer()
+        VStack(spacing: 14) {
+            mainRow
             if task.state == .review {
-                Button(action: onApprove) {
-                    Image(systemName: "checkmark")
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundStyle(Color.white)
-                        .frame(width: 32, height: 32)
-                        .background(Circle().fill(Color.evSecondary))
-                }
-                .buttonStyle(.plain)
-                Button(action: onRedo) {
-                    Image(systemName: "arrow.counterclockwise")
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundStyle(Color.evPrimary)
-                        .frame(width: 32, height: 32)
-                        .background(Circle().fill(Color.evSurfaceContainerHigh))
-                }
-                .buttonStyle(.plain)
+                reviewActions
             }
         }
-        .padding(.vertical, 12)
-        .padding(.horizontal, 14)
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(cardBackground)
+        )
         .overlay(
-            Rectangle().fill(Color.evOutlineVariant.opacity(isLast ? 0 : 0.4))
-                .frame(height: 1),
-            alignment: .bottom
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(Color.evOutlineVariant.opacity(0.25), lineWidth: 1)
         )
     }
 
-    private var defaultIcon: String {
+    private var cardBackground: Color {
         switch task.state {
-        case .done: return "checkmark.circle.fill"
-        case .review: return "eye"
-        case .pending: return "clock"
-        case .overdue: return "exclamationmark.circle"
+        case .review:  return Color(hex: 0xFFF9ED)
+        case .overdue: return Color(hex: 0xFFF5F3)
+        default:       return .evSurfaceContainerLowest
+        }
+    }
+
+    private var mainRow: some View {
+        HStack(spacing: 14) {
+            stateIcon
+            titleText
+            Spacer(minLength: 4)
+            trailingLabel
+            Image(systemName: "chevron.right")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Color.evOutline)
+        }
+    }
+
+    @ViewBuilder
+    private var stateIcon: some View {
+        switch task.state {
+        case .done:
+            ZStack {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color.evSecondary)
+                Image(systemName: "checkmark")
+                    .font(.system(size: 15, weight: .heavy))
+                    .foregroundStyle(.white)
+            }
+            .frame(width: 36, height: 36)
+
+        case .review:
+            ZStack {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color(hex: 0xEF6C00))
+                Image(systemName: task.iconSystemName ?? "camera.fill")
+                    .font(.system(size: 15, weight: .heavy))
+                    .foregroundStyle(.white)
+            }
+            .frame(width: 36, height: 36)
+
+        case .pending:
+            Circle()
+                .stroke(Color.evOutline, lineWidth: 1.5)
+                .frame(width: 28, height: 28)
+                .padding(4)
+
+        case .overdue:
+            ZStack {
+                Circle().stroke(Color.evError, lineWidth: 1.5)
+                Image(systemName: "exclamationmark")
+                    .font(.system(size: 13, weight: .heavy))
+                    .foregroundStyle(Color.evError)
+            }
+            .frame(width: 28, height: 28)
+            .padding(4)
+        }
+    }
+
+    private var titleText: some View {
+        Group {
+            if task.state == .done {
+                Text(task.title)
+                    .strikethrough(true, color: Color.evOnSurfaceVariant)
+                    .foregroundStyle(Color.evOnSurfaceVariant)
+            } else {
+                Text(task.title)
+                    .foregroundStyle(Color.evPrimary)
+            }
+        }
+        .font(.custom("Manrope", size: 16).weight(.heavy))
+    }
+
+    @ViewBuilder
+    private var trailingLabel: some View {
+        switch task.state {
+        case .done:
+            EvlinPill(text: "Done", tone: .success, size: .xs)
+        case .review:
+            EvlinPill(text: "Reviewing", tone: .warn, size: .xs)
+        case .pending:
+            EvlinPill(text: "Pending", tone: .neutral, size: .xs)
+        case .overdue:
+            Text("OVERDUE")
+                .font(.custom("Inter", size: 11).weight(.heavy))
+                .tracking(1.4)
+                .foregroundStyle(Color.evError)
+        }
+    }
+
+    private var reviewActions: some View {
+        HStack(spacing: 10) {
+            Button(action: onApprove) {
+                Text("APPROVE")
+                    .font(.custom("Manrope", size: 12).weight(.heavy))
+                    .tracking(0.8)
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+                    .background(
+                        RoundedRectangle(cornerRadius: 22, style: .continuous)
+                            .fill(Color.evSecondary)
+                    )
+                    .shadow(color: Color.evSecondary.opacity(0.3), radius: 8, y: 3)
+            }
+            .buttonStyle(.plain)
+
+            Button(action: onRedo) {
+                Text("REQUEST REDO")
+                    .font(.custom("Manrope", size: 12).weight(.heavy))
+                    .tracking(0.8)
+                    .foregroundStyle(Color.evOnTertiaryContainer)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+                    .background(
+                        RoundedRectangle(cornerRadius: 22, style: .continuous)
+                            .fill(Color.white)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 22, style: .continuous)
+                            .stroke(Color(hex: 0xEF6C00), lineWidth: 1.5)
+                    )
+            }
+            .buttonStyle(.plain)
         }
     }
 }
