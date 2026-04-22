@@ -47,6 +47,7 @@ struct GlassmorphicHeader<Trailing: View>: View {
         .background(
             Color.evSurface.opacity(0.99)
                 .background(.ultraThinMaterial)
+                .ignoresSafeArea(edges: .top)
         )
         .overlay(
             Rectangle()

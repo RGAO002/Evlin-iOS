@@ -27,10 +27,21 @@ struct DeviceRow: View {
                     .foregroundStyle(Color.evOnSurfaceVariant)
             }
             Spacer()
-            EvlinPill(
-                text: locked ? "Locked" : "Active",
-                tone: locked ? .danger : .success,
-                size: .xs
+
+            // Status pill with leading dot
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(locked ? Color.evError : Color.evSecondary)
+                    .frame(width: 6, height: 6)
+                Text(locked ? "LOCKED" : "ACTIVE")
+                    .font(.custom("Inter", size: 9).weight(.heavy))
+                    .tracking(1.3)
+                    .foregroundStyle(locked ? Color.evError : Color.evSecondary)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(
+                Capsule().fill(locked ? Color.evErrorContainer : Color.evSecondaryContainer)
             )
         }
         .padding(.vertical, 12)

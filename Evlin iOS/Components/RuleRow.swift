@@ -43,17 +43,17 @@ struct RuleRow: View {
                     .foregroundStyle(Color.evOnSurfaceVariant)
             }
             Spacer()
+            Toggle("", isOn: $isOn)
+                .labelsHidden()
+                .tint(Color.evSecondary)
             Button {} label: {
-                Image(systemName: "square.and.pencil")
-                    .font(.system(size: 15, weight: .regular))
+                Image(systemName: "pencil")
+                    .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(Color.evOnSurfaceVariant)
                     .frame(width: 32, height: 32)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            Toggle("", isOn: $isOn)
-                .labelsHidden()
-                .tint(Color.evSecondary)
         }
         .padding(.vertical, 10)
     }

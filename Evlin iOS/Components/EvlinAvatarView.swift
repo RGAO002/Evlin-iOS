@@ -16,7 +16,7 @@ struct EvlinAvatarView: View {
             if ring {
                 Circle()
                     .stroke(ringColor, lineWidth: 2)
-                    .frame(width: size + 8, height: size + 8)
+                    .frame(width: size, height: size)
             }
 
             Group {
@@ -33,7 +33,7 @@ struct EvlinAvatarView: View {
             }
             .frame(width: size, height: size)
             .clipShape(Circle())
-            .overlay(Circle().stroke(Color.white, lineWidth: 2))
+            .overlay(Circle().stroke(ring ? Color.clear : Color.white, lineWidth: 2))
             .shadow(color: .black.opacity(0.08), radius: 3, x: 0, y: 1)
 
             if let status {

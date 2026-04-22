@@ -5,6 +5,7 @@ struct ProfileCard: View {
     var action: () -> Void = {}
 
     @State private var ping: Bool = false
+    @State private var pressed: Bool = false
 
     var body: some View {
         Button(action: action) {
@@ -23,7 +24,7 @@ struct ProfileCard: View {
                             .foregroundStyle(Color.evOnSurfaceVariant)
                     }
 
-                    // Line 2: status
+                    // Line 2: status pill (UNLOCKED dot + label, OR QUIET TIME)
                     HStack(spacing: 6) {
                         if child.status == .unlocked {
                             ZStack {
@@ -36,7 +37,7 @@ struct ProfileCard: View {
                                     .fill(Color.evSecondary)
                                     .frame(width: 8, height: 8)
                             }
-                            Text("UNLOCKED · \(child.timeLeft) left")
+                            Text("UNLOCKED")
                                 .font(.custom("Inter", size: 10).weight(.heavy))
                                 .tracking(1.4)
                                 .foregroundStyle(Color.evSecondary)
@@ -48,17 +49,24 @@ struct ProfileCard: View {
                         }
                     }
 
-                    // Line 3: progress bar
-                    GeometryReader { geo in
-                        ZStack(alignment: .leading) {
-                            Capsule().fill(Color.evSecondaryContainer).frame(height: 5)
-                            Capsule().fill(Color.evSecondary)
-                                .frame(width: max(6, geo.size.width * child.timePct), height: 5)
+                    // Line 3: progress bar — ONLY when unlocked
+                    if child.status == .unlocked {
+                        GeometryReader { geo in
+                            ZStack(alignment: .leading) {
+                                Capsule().fill(Color.evSecondaryContainer).frame(height: 5)
+                                Capsule().fill(Color.evSecondary)
+                                    .frame(width: max(6, geo.size.width * child.timePct), height: 5)
+                            }
                         }
-                    }
-                    .frame(height: 5)
+                        .frame(height: 5)
 
-                    // Line 4: subtitle
+                        // Line 4: "X left today" — only when unlocked
+                        Text("\(child.timeLeft) left today")
+                            .font(.custom("Inter", size: 11).weight(.bold))
+                            .foregroundStyle(Color.evSecondary)
+                    }
+
+                    // Line 5 (or line 3 for locked): subtitle
                     Text(child.subtitle)
                         .font(.custom("Inter", size: 12))
                         .foregroundStyle(Color.evOnSurfaceVariant)
@@ -79,9 +87,21 @@ struct ProfileCard: View {
                 RoundedRectangle(cornerRadius: 20, style: .continuous)
                     .stroke(Color.evOutlineVariant.opacity(0.4), lineWidth: 1)
             )
-            .evShadow(.premium)
+            .shadow(
+                color: .black.opacity(pressed ? 0.08 : 0.04),
+                radius: pressed ? 40 : 30,
+                x: 0,
+                y: pressed ? 20 : 10
+            )
+            .scaleEffect(pressed ? 1.01 : 1.0)
+            .animation(.easeOut(duration: 0.18), value: pressed)
         }
         .buttonStyle(.plain)
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in pressed = true }
+                .onEnded { _ in pressed = false }
+        )
         .onAppear {
             if child.status == .unlocked {
                 withAnimation(.easeOut(duration: 1.6).repeatForever(autoreverses: false)) {
