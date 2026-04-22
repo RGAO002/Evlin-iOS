@@ -25,3 +25,7 @@ struct DashboardView: View {
         .background(Color.evSurface)
     }
 }
+
+#Preview {
+    DashboardView()
+}
