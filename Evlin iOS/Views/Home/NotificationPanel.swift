@@ -177,21 +177,3 @@ struct NotificationPanel: View {
     }
 }
 
-// MARK: - Re-enable edge-swipe back in NavigationStack even when toolbar is hidden
-
-private struct SwipeBackEnabler: UIViewControllerRepresentable {
-    func makeUIViewController(context: Context) -> UIViewController { UIViewController() }
-    func updateUIViewController(_ uiViewController: UIViewController, context: Context) {
-        DispatchQueue.main.async {
-            guard let nav = uiViewController.navigationController else { return }
-            nav.interactivePopGestureRecognizer?.delegate = nil
-            nav.interactivePopGestureRecognizer?.isEnabled = true
-        }
-    }
-}
-
-extension View {
-    func enableSwipeBack() -> some View {
-        self.background(SwipeBackEnabler().frame(width: 0, height: 0))
-    }
-}

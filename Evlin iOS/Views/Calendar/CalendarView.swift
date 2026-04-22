@@ -21,12 +21,14 @@ struct CalendarView: View {
     private var isViewingToday: Bool { calendar.isDateInToday(selectedDate) }
 
     var body: some View {
-        ZStack(alignment: .bottomTrailing) {
-            scrollContainer
-
-            floatingAddButton
-                .padding(.trailing, 20)
-                .padding(.bottom, 24)
+        VStack(spacing: 0) {
+            outerDayNav
+            ZStack(alignment: .bottomTrailing) {
+                scrollContainer
+                floatingAddButton
+                    .padding(.trailing, 20)
+                    .padding(.bottom, 24)
+            }
         }
         .background(Color.evSurfaceContainerLow)
         .sheet(isPresented: $showMonthPicker) {
@@ -47,6 +49,64 @@ struct CalendarView: View {
         }
         .animation(.easeInOut(duration: 0.2), value: activeEvent)
         .onReceive(nowTimer) { t in now = t }
+    }
+
+    private var outerDayNav: some View {
+        HStack {
+            navSquareButton(systemName: "chevron.left") {
+                if let d = calendar.date(byAdding: .day, value: -1, to: selectedDate) {
+                    selectedDate = d
+                }
+            }
+
+            Spacer()
+
+            Button {
+                showMonthPicker = true
+            } label: {
+                VStack(spacing: 2) {
+                    Text(CalendarMockData.shortDateLabel(selectedDate))
+                        .font(.custom("Manrope", size: 22).weight(.heavy))
+                        .tracking(-0.25)
+                        .foregroundStyle(Color.evPrimary)
+                    Text("TAP TO CHANGE DATE")
+                        .font(.custom("Inter", size: 10).weight(.heavy))
+                        .tracking(1.4)
+                        .foregroundStyle(Color.evOnSurfaceVariant)
+                }
+            }
+            .buttonStyle(.plain)
+
+            Spacer()
+
+            navSquareButton(systemName: "chevron.right") {
+                if let d = calendar.date(byAdding: .day, value: 1, to: selectedDate) {
+                    selectedDate = d
+                }
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.top, 12)
+        .padding(.bottom, 16)
+        .background(
+            Color.evSurfaceContainerLow
+                .ignoresSafeArea(edges: .top)
+        )
+    }
+
+    private func navSquareButton(systemName: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 18, weight: .bold))
+                .foregroundStyle(Color.evPrimary)
+                .frame(width: 44, height: 44)
+                .background(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(Color.evSurfaceContainerLowest)
+                )
+                .shadow(color: .black.opacity(0.06), radius: 8, y: 2)
+        }
+        .buttonStyle(.plain)
     }
 
     private var scrollContainer: some View {
@@ -82,21 +142,9 @@ struct CalendarView: View {
 
     private var cardTopBar: some View {
         HStack {
-            Button {
-                showMonthPicker = true
-            } label: {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(CalendarMockData.shortDateLabel(selectedDate))
-                        .font(.custom("Manrope", size: 19).weight(.heavy))
-                        .tracking(-0.2)
-                        .foregroundStyle(Color.evPrimary)
-                    Text("TAP TO CHANGE DATE")
-                        .font(.custom("Inter", size: 10).weight(.heavy))
-                        .tracking(1.4)
-                        .foregroundStyle(Color.evOnSurfaceVariant)
-                }
-            }
-            .buttonStyle(.plain)
+            Text("Today's Events")
+                .font(.custom("Manrope", size: 17).weight(.heavy))
+                .foregroundStyle(Color.evPrimary)
 
             Spacer()
 

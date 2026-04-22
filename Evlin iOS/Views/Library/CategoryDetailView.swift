@@ -26,6 +26,7 @@ struct CategoryDetailView: View {
         }
         .background(Color.evSurfaceContainerLow)
         .navigationBarBackButtonHidden(true)
+        .enableSwipeBack()
     }
 
     private var featuredSection: some View {

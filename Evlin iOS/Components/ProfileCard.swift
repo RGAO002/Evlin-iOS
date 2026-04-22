@@ -24,7 +24,7 @@ struct ProfileCard: View {
                             .foregroundStyle(Color.evOnSurfaceVariant)
                     }
 
-                    // Line 2: status pill (UNLOCKED dot + label, OR QUIET TIME)
+                    // Line 2: status + time (single line)
                     HStack(spacing: 6) {
                         if child.status == .unlocked {
                             ZStack {
@@ -37,10 +37,11 @@ struct ProfileCard: View {
                                     .fill(Color.evSecondary)
                                     .frame(width: 8, height: 8)
                             }
-                            Text("UNLOCKED")
+                            Text("UNLOCKED · \(child.timeLeft) left")
                                 .font(.custom("Inter", size: 10).weight(.heavy))
                                 .tracking(1.4)
                                 .foregroundStyle(Color.evSecondary)
+                                .fixedSize(horizontal: true, vertical: false)
                         } else {
                             Text("QUIET TIME")
                                 .font(.custom("Inter", size: 10).weight(.heavy))
@@ -49,24 +50,24 @@ struct ProfileCard: View {
                         }
                     }
 
-                    // Line 3: progress bar — ONLY when unlocked
-                    if child.status == .unlocked {
-                        GeometryReader { geo in
-                            ZStack(alignment: .leading) {
-                                Capsule().fill(Color.evSecondaryContainer).frame(height: 5)
-                                Capsule().fill(Color.evSecondary)
+                    // Line 3: progress bar — gray (flat) for locked, green (filled) for unlocked
+                    GeometryReader { geo in
+                        ZStack(alignment: .leading) {
+                            Capsule()
+                                .fill(child.status == .unlocked
+                                      ? Color.evSecondaryContainer
+                                      : Color.evSurfaceContainerHigh)
+                                .frame(height: 5)
+                            if child.status == .unlocked {
+                                Capsule()
+                                    .fill(Color.evSecondary)
                                     .frame(width: max(6, geo.size.width * child.timePct), height: 5)
                             }
                         }
-                        .frame(height: 5)
-
-                        // Line 4: "X left today" — only when unlocked
-                        Text("\(child.timeLeft) left today")
-                            .font(.custom("Inter", size: 11).weight(.bold))
-                            .foregroundStyle(Color.evSecondary)
                     }
+                    .frame(height: 5)
 
-                    // Line 5 (or line 3 for locked): subtitle
+                    // Line 4: subtitle
                     Text(child.subtitle)
                         .font(.custom("Inter", size: 12))
                         .foregroundStyle(Color.evOnSurfaceVariant)
@@ -110,14 +111,4 @@ struct ProfileCard: View {
             }
         }
     }
-}
-
-#Preview {
-    VStack(spacing: 14) {
-        ProfileCard(child: .liam)
-        ProfileCard(child: .maya)
-        ProfileCard(child: .emma)
-    }
-    .padding()
-    .background(Color.evSurface)
 }

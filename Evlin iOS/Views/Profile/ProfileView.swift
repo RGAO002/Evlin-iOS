@@ -153,6 +153,7 @@ struct ProfileView: View {
         }
         .background(Color.evSurfaceContainerLow)
         .navigationBarBackButtonHidden(true)
+        .enableSwipeBack()
         .onAppear {
             rules = ProfileMockData.rules(for: child.id)
             tasks = ProfileMockData.tasks(for: child.id)

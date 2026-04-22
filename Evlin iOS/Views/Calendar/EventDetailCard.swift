@@ -31,7 +31,7 @@ struct EventDetailCard: View {
                 Spacer(minLength: 8)
                 footer
             }
-            .padding(20)
+            .padding(18)
             .background(
                 RoundedRectangle(cornerRadius: 24, style: .continuous)
                     .fill(Color.white)
@@ -88,7 +88,7 @@ struct EventDetailCard: View {
                 .foregroundStyle(Color.evPrimary)
             Spacer()
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 2)
     }
 
     private var categoryRow: some View {
@@ -100,7 +100,7 @@ struct EventDetailCard: View {
             EvlinPill(text: event.category, tone: .neutral, size: .sm)
             Spacer()
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 2)
     }
 
     private var noteRow: some View {
@@ -116,7 +116,7 @@ struct EventDetailCard: View {
                 .lineSpacing(3)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(.vertical, 6)
+        .padding(.vertical, 2)
     }
 
     private var locationRow: some View {
@@ -130,7 +130,7 @@ struct EventDetailCard: View {
                 .foregroundStyle(Color.evOnSurface)
             Spacer()
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 2)
     }
 
     private var reminderRow: some View {
@@ -147,7 +147,7 @@ struct EventDetailCard: View {
                 .labelsHidden()
                 .tint(Color.evSecondary)
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 2)
     }
 
     private var footer: some View {
@@ -175,7 +175,7 @@ struct EventDetailCard: View {
             }
             .buttonStyle(.plain)
         }
-        .padding(.top, 8)
+        .padding(.top, 4)
     }
 
     private func avatarURLFor(_ id: String) -> String? {
