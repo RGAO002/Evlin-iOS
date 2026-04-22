@@ -312,27 +312,32 @@ struct CalendarView: View {
         let p = CalendarMockData.person(ev.col)
         let h = CalendarMockData.heightFor(start: ev.start, end: ev.end)
         return Button { activeEvent = ev } label: {
-            HStack(alignment: .top, spacing: 10) {
-                Rectangle().fill(p.color).frame(width: 4).cornerRadius(2)
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 6) {
-                        Text(ev.emoji).font(.system(size: 14))
+            HStack(alignment: .top, spacing: 8) {
+                RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                    .fill(p.color)
+                    .frame(width: 3)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 5) {
+                        Text(ev.emoji).font(.system(size: 12))
                         Text(ev.title)
-                            .font(.custom("Manrope", size: 13).weight(.heavy))
+                            .font(.custom("Manrope", size: 12).weight(.heavy))
                             .foregroundStyle(Color.evPrimary)
                             .lineLimit(1)
                     }
-                    Text(ev.start)
-                        .font(.custom("Inter", size: 10).weight(.bold))
+                    Text("\(ev.start) – \(ev.end)")
+                        .font(.custom("Inter", size: 9).weight(.bold))
                         .foregroundStyle(Color.evOnSurfaceVariant)
+                        .lineLimit(1)
                 }
+
                 Spacer(minLength: 0)
             }
-            .padding(10)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .frame(height: h, alignment: .top)
+            .padding(8)
+            .frame(maxWidth: .infinity, minHeight: h, alignment: .topLeading)
             .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(p.bg))
             .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(p.color.opacity(0.3), lineWidth: 1))
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
         .buttonStyle(.plain)
     }

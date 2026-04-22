@@ -147,7 +147,8 @@ enum CalendarMockData {
 
     static func heightFor(start: String, end: String) -> CGFloat {
         let h = yFor(end) - yFor(start)
-        return max(h, 36)
+        // 52pt minimum fits emoji + title + time + padding at natural content height
+        return max(h, 52)
     }
 
     static func yForNow() -> CGFloat {
