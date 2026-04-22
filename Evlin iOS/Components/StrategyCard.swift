@@ -74,34 +74,65 @@ struct StrategyCard: View {
     @ViewBuilder
     private var videoTile: some View {
         if let videoId = data.videoId {
-            // Real YouTube video — custom thumbnail with title overlay; tap to play inline.
-            ZStack(alignment: .bottomLeading) {
-                YouTubePlayerView(
-                    videoId: videoId,
-                    thumbnail: data.videoThumbnail ?? "https://img.youtube.com/vi/\(videoId)/maxresdefault.jpg",
-                    isPlaying: $isPlaying
-                )
+            let thumbnailURL = data.videoThumbnail ?? "https://img.youtube.com/vi/\(videoId)/hqdefault.jpg"
 
-                if !isPlaying {
-                    // Title overlay sits on the thumbnail before playback starts
-                    LinearGradient(
-                        colors: [.black.opacity(0.0), .black.opacity(0.55)],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                    .allowsHitTesting(false)
+            Group {
+                if isPlaying {
+                    // Playing: inline YouTube WebView
+                    InlineYouTubeWebView(videoId: videoId)
+                        .background(Color.black)
+                } else {
+                    // Not playing: thumbnail + play button, wrapped in a single Button
+                    Button {
+                        isPlaying = true
+                    } label: {
+                        ZStack(alignment: .bottomLeading) {
+                            AsyncImage(url: URL(string: thumbnailURL)) { phase in
+                                switch phase {
+                                case .success(let image):
+                                    image.resizable().aspectRatio(contentMode: .fill)
+                                default:
+                                    Rectangle().fill(Color.evPrimaryContainer)
+                                }
+                            }
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .clipped()
 
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(data.videoLabel)
-                            .font(.custom("Manrope", size: 16).weight(.heavy))
-                            .foregroundStyle(.white)
-                            .lineLimit(2)
-                        Text("\(data.videoDuration) duration")
-                            .font(.custom("Inter", size: 11))
-                            .foregroundStyle(.white.opacity(0.75))
+                            // Bottom gradient + title — purely decorative
+                            LinearGradient(
+                                colors: [.black.opacity(0.0), .black.opacity(0.65)],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(data.videoLabel)
+                                    .font(.custom("Manrope", size: 16).weight(.heavy))
+                                    .foregroundStyle(.white)
+                                    .lineLimit(2)
+                                    .multilineTextAlignment(.leading)
+                                Text("\(data.videoDuration) duration")
+                                    .font(.custom("Inter", size: 11))
+                                    .foregroundStyle(.white.opacity(0.8))
+                            }
+                            .padding(16)
+
+                            // Centered red play button
+                            Circle()
+                                .fill(Color.red)
+                                .frame(width: 56, height: 56)
+                                .overlay(
+                                    Image(systemName: "play.fill")
+                                        .font(.system(size: 22, weight: .bold))
+                                        .foregroundStyle(.white)
+                                        .offset(x: 2)
+                                )
+                                .shadow(color: .black.opacity(0.35), radius: 10, y: 4)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        }
                     }
-                    .padding(16)
-                    .allowsHitTesting(false)
+                    .buttonStyle(.plain)
                 }
             }
             .frame(height: 200)
