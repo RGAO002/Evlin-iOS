@@ -166,29 +166,27 @@ struct EventDetailCard: View {
     // MARK: - Footer
 
     private var footer: some View {
-        HStack(alignment: .center) {
+        HStack(alignment: .center, spacing: 12) {
             Button { onClose() } label: {
                 Text("Close")
-                    .font(.custom("Manrope", size: 17).weight(.heavy))
+                    .font(.custom("Manrope", size: 18).weight(.heavy))
                     .foregroundStyle(Color.evPrimary)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 14)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 16)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-
-            Spacer()
 
             Button(action: onEdit) {
                 HStack(spacing: 8) {
                     Image(systemName: "pencil")
                         .font(.system(size: 15, weight: .bold))
                     Text("Edit")
-                        .font(.custom("Manrope", size: 17).weight(.heavy))
+                        .font(.custom("Manrope", size: 18).weight(.heavy))
                 }
                 .foregroundStyle(.white)
-                .padding(.horizontal, 28)
-                .padding(.vertical, 14)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 16)
                 .background(
                     RoundedRectangle(cornerRadius: 18, style: .continuous)
                         .fill(Color.evPrimary)
