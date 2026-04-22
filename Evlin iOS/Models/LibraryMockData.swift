@@ -21,18 +21,22 @@ enum LibraryMockData {
     ]
 
     static let lessons: [LessonItem] = [
-        LessonItem(title: "Setting boundaries without conflict",
-                   subtitle: "3-part video series", durationMin: 18,
-                   gradient: LinearGradient(colors: [.evChildLiam, Color(hex: 0x1E3A8A)],
-                                            startPoint: .topLeading, endPoint: .bottomTrailing)),
-        LessonItem(title: "The dopamine reset weekend",
-                   subtitle: "Dr. Mira Shah", durationMin: 24,
-                   gradient: LinearGradient(colors: [Color(hex: 0x2E7D32), Color(hex: 0x1B4A1C)],
-                                            startPoint: .topLeading, endPoint: .bottomTrailing)),
-        LessonItem(title: "Tech tantrums: a field guide",
-                   subtitle: "Elena Rodriguez", durationMin: 12,
-                   gradient: LinearGradient(colors: [Color(hex: 0xEF6C00), Color(hex: 0x6E3900)],
-                                            startPoint: .topLeading, endPoint: .bottomTrailing)),
+        LessonItem(
+            author: "Dr. Julian Vance",
+            role: "Pediatric Neuropsychologist",
+            title: "The \"Three-Second\" Pause Method",
+            excerpt: "A neuro-scientific approach to de-escalating toddler tantrums before they peak.",
+            hearts: "2.4k",
+            comments: 184
+        ),
+        LessonItem(
+            author: "Elena Rodriguez",
+            role: "Digital Wellness Strategist",
+            title: "Digital Sovereignty Protocols",
+            excerpt: "Building a child's internal moral compass for digital spaces. Frameworks for the AI era.",
+            hearts: "1.1k",
+            comments: 56
+        ),
     ]
 
     static let categories: [CategoryTileInfo] = [
