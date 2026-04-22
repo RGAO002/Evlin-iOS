@@ -65,7 +65,7 @@ struct EvlinTabBar: View {
             VStack(spacing: 6) {
                 TabBarIndicator()
                     .fill(isActive ? Color.evPrimary : Color.clear)
-                    .frame(width: 34, height: 5)
+                    .frame(width: 30, height: 3.5)
 
                 Image(systemName: isActive ? tab.sfSymbolFilled : tab.sfSymbol)
                     .font(.system(size: 22, weight: isActive ? .semibold : .regular))
@@ -91,31 +91,31 @@ struct EvlinTabBar: View {
 
 private struct TabBarIndicator: Shape {
     func path(in rect: CGRect) -> Path {
-        // Top edge flush with tab bar top; sides taper inward to a narrower rounded bottom.
-        let inset: CGFloat = rect.height * 0.9
-        let r: CGFloat = min(1.5, rect.height * 0.4)
+        // A mostly-horizontal bar with a gentle inward taper at the bottom
+        // and small rounding on all four corners.
+        let w = rect.width
+        let h = rect.height
+        let inset: CGFloat = 2.5   // bottom taper from each side
+        let r: CGFloat = 1         // corner rounding
 
         var p = Path()
-        // Top-left
-        p.move(to: CGPoint(x: 0, y: 0))
-        // Top-right (flat top edge)
-        p.addLine(to: CGPoint(x: rect.width, y: 0))
-        // Taper down to bottom-right
-        p.addLine(to: CGPoint(x: rect.width - inset + r, y: rect.height - r))
-        // Small rounded corner at bottom-right
-        p.addQuadCurve(
-            to: CGPoint(x: rect.width - inset, y: rect.height),
-            control: CGPoint(x: rect.width - inset, y: rect.height - r)
-        )
+        // Top edge (starts after top-left corner)
+        p.move(to: CGPoint(x: r, y: 0))
+        p.addLine(to: CGPoint(x: w - r, y: 0))
+        // Top-right corner
+        p.addQuadCurve(to: CGPoint(x: w, y: r), control: CGPoint(x: w, y: 0))
+        // Right side tapering inward
+        p.addLine(to: CGPoint(x: w - inset + r, y: h - r))
+        // Bottom-right corner
+        p.addQuadCurve(to: CGPoint(x: w - inset, y: h), control: CGPoint(x: w - inset, y: h - r))
         // Bottom edge
-        p.addLine(to: CGPoint(x: inset, y: rect.height))
-        // Small rounded corner at bottom-left
-        p.addQuadCurve(
-            to: CGPoint(x: inset - r, y: rect.height - r),
-            control: CGPoint(x: inset, y: rect.height - r)
-        )
-        // Taper back up to top-left
-        p.addLine(to: CGPoint(x: 0, y: 0))
+        p.addLine(to: CGPoint(x: inset, y: h))
+        // Bottom-left corner
+        p.addQuadCurve(to: CGPoint(x: inset - r, y: h - r), control: CGPoint(x: inset, y: h - r))
+        // Left side tapering back out
+        p.addLine(to: CGPoint(x: 0, y: r))
+        // Top-left corner
+        p.addQuadCurve(to: CGPoint(x: r, y: 0), control: CGPoint(x: 0, y: 0))
         p.closeSubpath()
         return p
     }
