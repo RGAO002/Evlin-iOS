@@ -1,8 +1,8 @@
 # Three-Tier App Locking + Saved Lists + Onboarding Redesign
 
-**Date**: 2026-04-22
+**Date**: 2026-04-22 (revised after Codex review)
 **Status**: Design approved, ready for plan
-**Scope**: Core parental control — locking child apps from parent's Chat, onboarding flow for both modes, Saved Lists, receipt/confirmation system
+**Scope**: Core parental control — locking child apps from parent's Chat, onboarding flow for both modes, Saved Lists, receipt/confirmation system, active-lock union semantics
 
 ---
 
@@ -19,6 +19,7 @@ The design must:
 - Allow a parent to save a curated set of apps ("list 1", "bedtime apps") once and lock them by name from Chat repeatedly.
 - Gracefully degrade for unknown apps ("abcd") to category-level locking.
 - Always return a clear receipt showing what actually got locked, with collateral disclosure when applicable.
+- Correctly handle **overlapping and expiring locks** — a lock expiring must not release apps held by other active locks.
 - Support both single-device testing (parent/child mode toggle on one phone) and multi-device production (pairing code links two phones to one family).
 
 ## 2. Three-Tier Lock Strategy
@@ -27,9 +28,9 @@ Every lock command from Chat resolves to exactly one of three tiers:
 
 ### Tier A: Bundle ID Direct Lock
 
-**Mechanism**: `ManagedSettingsStore.application.blockedApplications = [Application(bundleIdentifier: "com.burbn.instagram")]`
+**Mechanism**: `ManagedSettingsStore.application.blockedApplications ⊇ [Application(bundleIdentifier: "com.burbn.instagram")]`
 
-**Used when**: The target matches an entry in the backend's curated **App Catalog** (approx. 60 common apps shipped in the first release).
+**Used when**: The target matches an entry in the backend's curated **App Catalog** (approx. 60 common apps shipped in v1).
 
 **Characteristics**:
 - No picker required, no prior setup.
@@ -39,35 +40,36 @@ Every lock command from Chat resolves to exactly one of three tiers:
 
 ### Tier B: Saved List (Picker Token) Lock
 
-**Mechanism**: `ManagedSettingsStore.shield.applications = savedList.applicationTokens; .applicationCategories = .specific(savedList.categoryTokens)`
+**Mechanism**: `ManagedSettingsStore.shield.applications ⊇ savedList.applicationTokens; .applicationCategories ⊇ .specific(savedList.categoryTokens)`
 
-**Used when**: The parent has previously created a Saved List (e.g. "list 1", "bedtime apps", "games") by opening `FamilyActivityPicker` once and selecting apps/categories/websites.
+**Used when**: The parent has previously created a Saved List (e.g. "list 1", "bedtime apps", "games") by opening `FamilyActivityPicker` and selecting apps/categories/websites.
 
 **Characteristics**:
 - 100% precise — only the specific apps the parent chose are locked.
 - Shows Evlin's custom shield screen (via `ShieldConfigurationDataSource` extension, planned).
 - Lists persist across app launches.
-- No upper limit on list count.
+- No hard upper limit on list count (see **Design note**).
+
+**Design note on scale**: Saved Lists are resolved in Chat via fuzzy-match against user intent. Empirically, list counts beyond ~30 per family start to degrade match accuracy. We do not enforce a hard cap; if a family accumulates many lists, the UI should surface a soft warning and encourage list consolidation. A hard cap may be added later based on observed usage.
 
 **Where the tokens live and how they travel**:
 
-- **Max mode (Child Apple ID + `.child` auth)**:
-  - Picker runs on parent device (Family Sharing exposes child's apps to parent picker).
-  - Parent device encodes the `FamilyActivitySelection` as `Data` (PropertyListEncoder) and uploads it to backend: `POST /parent/saved-lists { name, selection_blob: base64 }`.
-  - When a lock command references this list, backend attaches `selection_blob` to the Command sent to the child device.
-  - Child device decodes and applies `shield.applications = selection.applicationTokens` locally.
-  - Rationale: Family Sharing tokens are already synced by Apple within the family; routing them as opaque blobs through our backend does not leak app identity to us (we cannot decode them) and is equivalent in effect to Apple's own sync path.
-  - **Open technical risk**: Apple does not officially document that tokens produced by a parent-device picker are valid on a child device's `ManagedSettingsStore`. Phase 2 of the implementation plan includes a spike to verify this. If it fails, Max mode degrades to "parent device triggers picker launch remotely on child device" — same storage model as Std mode, but still better UX than manual setup.
-
-- **Std mode (Family Controls passcode only)**:
+- **Std mode (Family Controls passcode only)** — the default and simplest path:
   - Picker only runs on child device. Parent cannot remotely build Saved Lists.
   - Child device stores the `FamilyActivitySelection` in App Group UserDefaults keyed by list name.
   - Commands reference the list by name only; child device looks up selection locally.
-  - Only list metadata (name, description, createdAt) syncs to backend so the parent UI can show available list names; the selection blob never leaves the child device.
+  - Only list metadata (name, description, createdAt) syncs to backend so the parent UI can show available list names. **Tokens never leave the child device.**
+
+- **Max mode (Child Apple ID + `.child` auth)** — advanced path with conservative token handling:
+  - Picker runs on parent device (Family Sharing exposes child's apps to parent picker).
+  - **Phase 0 spike result determines the path**:
+    - **If tokens are transferable (spike passes)**: parent device encodes the selection and attaches it **ephemerally** to each Command via `POST /parent/commands { ..., selection_blob: base64 }`. Backend stores the blob in a `pending_blob` row with a short TTL (e.g. 10 minutes). Child device fetches, decodes, applies, posts ack. Backend **deletes the blob immediately upon ack** (or at TTL expiry, whichever first). **Blobs are never persisted in `SavedListMeta`.**
+    - **If tokens are not transferable (spike fails)**: Max mode degrades to "parent device sends a remote trigger; child device prompts user to open picker and make a selection." Same storage model as Std mode thereafter.
+  - The spec below is written for the **Std-mode-primary, Max-mode-relay** configuration. Max-mode-degrade is called out where it diverges.
 
 ### Tier C: Category Fallback Lock
 
-**Mechanism**: `ManagedSettingsStore.shield.applicationCategories = .specific([gamesToken, socialToken, ...])`
+**Mechanism**: `ManagedSettingsStore.shield.applicationCategories ⊇ .specific([gamesToken, socialToken, ...])`
 
 **Used when**:
 - Target not in catalog AND not in any Saved List.
@@ -78,13 +80,13 @@ Every lock command from Chat resolves to exactly one of three tiers:
 - Catches the target if it's truly in that category.
 - Automatically covers any new app of that category installed in the future.
 - Has collateral impact — every app in the category is blocked.
-- Requires that the child device picked category tokens once during onboarding (Step 5C in Child Onboarding).
+- Requires that the child device picked category tokens once during onboarding (Child Step 5C).
 
-**Resolution priority** (AI/backend chooses the first match):
+**Resolution priority** (backend chooses the first match):
 1. Saved List name → Tier B
 2. App name in Catalog → Tier A
-3. Category name or inferred category → Tier C
-4. Total miss → send a confirmation card to parent: `{proposedTier, proposedCategory, originalName}`
+3. Category name or AI-inferred category → Tier C
+4. Total miss → `confirmation_required=true` with proposed category
 
 ---
 
@@ -93,10 +95,9 @@ Every lock command from Chat resolves to exactly one of three tiers:
 ### 3.1 Backend (FastAPI + Postgres)
 
 ```python
-# New tables
-
 class Family(Base):
     id = Column(UUID, primary_key=True)
+    protection_mode = Column(Enum("max", "std"))  # chosen at parent onboarding
     created_at = Column(DateTime)
 
 class Device(Base):
@@ -110,6 +111,7 @@ class Device(Base):
 class PairingCode(Base):
     code = Column(String(6), primary_key=True)
     family_id = Column(UUID, FK("family.id"))
+    protection_mode = Column(Enum("max", "std"))  # locked at code generation
     expires_at = Column(DateTime)
     used = Column(Boolean, default=False)
 
@@ -120,9 +122,8 @@ class SavedListMeta(Base):
     description = Column(String, nullable=True)
     mode = Column(Enum("parent_device", "child_device"))
     owning_device_id = Column(UUID, FK("device.id"))
-    # Max mode only: the encoded FamilyActivitySelection uploaded by parent device.
-    # NULL for Std mode (child device keeps selection locally).
-    selection_blob = Column(LargeBinary, nullable=True)
+    # NOTE: selection blobs are NEVER persisted here. Tokens stay on the owning device
+    # (Std) or relay ephemerally through PendingBlob (Max). Only metadata is synced.
     created_at = Column(DateTime)
     updated_at = Column(DateTime)
 
@@ -130,57 +131,82 @@ class Command(Base):
     id = Column(UUID, primary_key=True)
     family_id = Column(UUID, FK("family.id"), index=True)
     target_device_id = Column(UUID, FK("device.id"))
-    payload = Column(JSON)           # see Command payload below
+    payload = Column(JSON)           # see Command payload below — blob NOT stored here
     created_at = Column(DateTime)
     picked_up_at = Column(DateTime, nullable=True)
     acked_at = Column(DateTime, nullable=True)
     ack_status = Column(Enum)        # pending, confirmed_exact, confirmed_fallback, failed, timeout
     ack_detail = Column(JSON, nullable=True)
+
+class PendingBlob(Base):
+    """Ephemeral relay for Max-mode selection blobs. Short-lived.
+    Inserted when parent device POSTs a command with selection_blob.
+    Fetched exactly once by the child device.
+    Deleted on ack or at expires_at (whichever first).
+    """
+    command_id = Column(UUID, FK("command.id"), primary_key=True)
+    blob = Column(LargeBinary)
+    expires_at = Column(DateTime)    # default now() + 10 min
 ```
 
-**Command payload** (JSON shape):
+**Command payload** (JSON — NO blob inline; blob is fetched via separate endpoint):
 ```json
 {
   "command_id": "uuid",
   "action": "lock" | "unlock" | "unlock_all" | "expand_library",
   "tier": "exact_bundle" | "saved_list" | "category",
   "target": {
-    "bundle_id": "com.burbn.instagram",        // tier=exact_bundle
-    "list_name": "list 1",                     // tier=saved_list
-    "category_hint": "games",                  // tier=category
-    "original_request": "abcd"                 // always include, for receipt
+    "bundle_id": "com.burbn.instagram",   // tier=exact_bundle
+    "list_name": "list 1",                // tier=saved_list
+    "has_pending_blob": true,             // tier=saved_list AND Max mode
+    "category_hint": "social",            // tier=category
+    "original_request": "IG"
   },
-  "duration_minutes": 30,                      // null = permanent
+  "duration_minutes": 30,                 // null = permanent
   "issued_at": "2026-04-22T14:20:00Z"
 }
 ```
 
+Child device, on seeing `has_pending_blob: true`, makes a one-shot `GET /child/pending-blob?command_id=...` to fetch the blob. Backend returns blob + deletes the `PendingBlob` row on successful response.
+
 ### 3.2 Child Device Local Storage (App Group UserDefaults `group.com.evlin.ios`)
 
 ```swift
-// Tokens never leave the device they were picked on.
 struct LocalAliasStore: Codable {
     var categoryTokens: [String: ActivityCategoryToken]   // "games" → token
-    var savedListTokens: [String: FamilyActivitySelection] // "list 1" → full selection (apps+cats+websites)
+    var savedListTokens: [String: FamilyActivitySelection] // "list 1" → full selection (Std mode only)
 }
 
-// Persisted state:
-// - "evlin.localAliases" (Data, plist-encoded LocalAliasStore)
-// - "evlin.activeShields" (Data, list of currently-active ShieldHandles for UI display)
+struct ActiveLock: Codable {
+    let commandID: UUID
+    let tier: Tier                                        // .exactBundle / .savedList / .category
+    let blockedBundleIDs: Set<String>                     // tier=exact_bundle
+    let shieldAppTokens: Set<ApplicationToken>            // tier=saved_list
+    let shieldCategoryTokens: Set<ActivityCategoryToken>  // tier=saved_list or category
+    let issuedAt: Date
+    let expiresAt: Date?                                  // nil = permanent
+    let originalRequest: String                           // for UI / receipt
+    let displayName: String                               // "Instagram", "list 1", "Games"
+}
+
+struct ActiveLockStore: Codable {
+    var locks: [UUID: ActiveLock]
+}
 ```
 
-### 3.3 Parent Device Local Storage (Max mode only)
+Persisted under:
+- `evlin.localAliases` (plist-encoded `LocalAliasStore`)
+- `evlin.activeLocks` (plist-encoded `ActiveLockStore`)
 
-Same `LocalAliasStore` structure but only `savedListTokens`. Parent device never needs category tokens.
+### 3.3 Parent Device Local Storage
+
+Stores only non-token metadata:
+- Parent's view of SavedListMeta (name, description) — cached from backend for Chat UI.
+- Current child's name, protection_mode, pairing status.
+
+In Max mode, parent device temporarily holds picked `FamilyActivitySelection` in memory just long enough to POST it with a command. No long-term on-device persistence.
 
 ### 3.4 App Catalog (backend, in-memory seeded from JSON)
-
-```json
-[
-  {"names": ["Instagram", "IG", "insta"], "bundle_id": "com.burbn.instagram", "category_hint": "social"},
-  ...
-]
-```
 
 See §9 for the full v1 catalog.
 
@@ -194,46 +220,54 @@ See §9 for the full v1 catalog.
 │                                        │   │                                  │
 │  Chat.sendMessage("lock IG 30 min")    │◄─►│  POST /parent/chat               │
 │  → APIClient                           │   │  - Gemini parses → action        │
-│  → ReceiptCard(pending)                │   │  - Resolve tier (list/cat/catalog)│
+│  → ReceiptCard(pending)                │   │  - Resolver: pick tier            │
 │                                        │   │  - Create Command row            │
+│                                        │   │  - Trigger APNs silent push      │
 │  Poll /parent/ack-status?cmd=...       │◄─►│  GET  /parent/ack-status         │
 │  → ReceiptCard → confirmed/failed      │   │                                  │
 │                                        │   │  GET  /child/commands?device=... │
-│  (Max mode only)                       │   │  POST /child/ack                 │
-│  ManageLists → FamilyActivityPicker    │   │                                  │
-│  → POST /parent/saved-lists            │◄─►│  POST /parent/saved-lists (meta) │
+│  (Max mode only)                       │   │  GET  /child/pending-blob        │
+│  ManageLists → FamilyActivityPicker    │   │  POST /child/ack                 │
+│  → POST /parent/saved-lists (meta)     │◄─►│  POST /parent/saved-lists (meta) │
+│  (blob travels per-command, not here)  │   │  APNs push → child device        │
 └───────────────────────────────────────┘   └──────────────────────────────────┘
                                                            ▲
-                                                           │
+                                                           │ APNs silent push
                                              ┌─────────────┴────────────────┐
                                              │  Child Device                │
                                              │                              │
-                                             │  Poll /child/commands every  │
-                                             │  30s (BGAppRefreshTask +     │
-                                             │  foreground poll)            │
+                                             │  Command delivery (3 tiers): │
+                                             │  1) APNs silent push (1°)    │
+                                             │  2) foreground poll (2°)     │
+                                             │  3) BGAppRefreshTask (3°)    │
                                              │                              │
                                              │  ActionExecutor.apply():     │
-                                             │    tier=exact_bundle →       │
-                                             │      blockedApplications=[…] │
-                                             │    tier=saved_list →         │
-                                             │      shield.applications=    │
-                                             │      store[listName].tokens  │
-                                             │    tier=category →           │
-                                             │      shield.categories=      │
-                                             │      store[hint]             │
+                                             │    → ActiveLockStore.add()   │
+                                             │    → recompute union         │
+                                             │    → write ManagedSettings   │
                                              │                              │
                                              │  POST /child/ack             │
                                              │                              │
                                              │  DeviceActivityMonitor ext:  │
-                                             │    schedules auto-unlock     │
+                                             │    on intervalEnd →          │
+                                             │    ActiveLockStore.remove()  │
+                                             │    + recompute union         │
                                              │                              │
                                              │  ManageLists (Std mode only) │
                                              │  → FamilyActivityPicker      │
-                                             │  → local store + POST meta   │
+                                             │  → local aliasStore          │
+                                             │  → POST meta                 │
                                              └──────────────────────────────┘
 ```
 
-**Single-device test mode**: Settings toggle flips `UserDefaults["activeMode"]` between `parent` and `child`. Each mode POSTs to backend with its own `device_id` (two devices registered under one family). The HTTP round-trip still happens — it's the real flow, not a shortcut.
+**Command delivery layers** (ordered by reliability):
+1. **APNs silent push** — backend pushes `aps: {content-available: 1}` to child device when a command is queued. Child wakes briefly, fetches queue. **Primary path.** Not 100% guaranteed (iOS throttles), but best-effort real-time.
+2. **Foreground polling** — when child app is foreground, `NSTimer` polls `/child/commands` every 5 seconds. Covers the "child using their phone" case with low latency.
+3. **BGAppRefreshTask** — opportunistic catch-up, scheduled for every ~1h. Not relied on for correctness; acts as a sweep for missed pushes.
+
+**MVP constraint**: APNs requires backend integration (APNs key, push certificate). To avoid blocking early progress, Phase 2 uses foreground polling only; APNs is added in Phase 5. During that window, commands only apply when the child app is running in foreground — acceptable for single-device testing and early demos, not for production.
+
+**Single-device test mode**: Settings toggle flips `UserDefaults["activeMode"]` between `parent` and `child`. Each mode POSTs to backend with its own `device_id` (two devices registered under one family). HTTP round-trips happen identically to real two-device flows.
 
 ---
 
@@ -242,197 +276,174 @@ See §9 for the full v1 catalog.
 ### 5.1 Shared Entry
 
 ```
-┌────────────────────────┐
-│  [1] Welcome            │
-│      - Shield icon       │
-│      - "The Informed    │
-│         Sentinel"        │
-│      - [Continue]        │
-└─────────────┬──────────┘
-              ▼
-┌────────────────────────┐
-│  [2] Mode Select        │
-│   ┌─────┐   ┌─────┐    │
-│   │ Par-│   │Child│    │
-│   │ ent │   │     │    │
-│   └─────┘   └─────┘    │
-└──┬─────────────┬───────┘
-   │ Parent       │ Child
-   ▼              ▼
-  Parent Flow    Child Flow
+[1] Welcome
+    - Shield icon
+    - "The Informed Sentinel" tagline
+    - [Continue]
+
+[2] Mode Select
+    ┌────────────────┐   ┌────────────────┐
+    │  I'm the parent │   │  I'm the child  │
+    └───────┬────────┘   └────────┬───────┘
+            ▼                      ▼
+       Parent Flow            Child Flow
 ```
 
 ### 5.2 Parent Mode Flow
 
+**Key change from v1: Protection Level is chosen BEFORE the pairing code is generated, so the code carries the protection_mode atomically.**
+
 ```
 [1] Welcome
 [2] Mode Select → Parent
-    │
-    ▼
 [3P] Add Child
-     Name: [____]        ← required, used in Chat ("Lock Liam's phone")
+     Name: [____]        ← required
      Age:  [_]           ← optional
      [Continue]
-    │
-    ▼
-[4P] Pairing Code Display
-     ┌────────────────────┐
-     │   4 8 2 9 1 7       │   ← generated by POST /family/create
-     │                      │
-     │   [QR code]          │
-     └────────────────────┘
-     Status: ⚪ Waiting for Liam's device...
-     │
-     │ (polling /family/pairing-status?code=…)
-     │
-     ↓ arrived
-     Status: ✓ Liam's phone connected
-     [Continue]
-    │
-    ▼
-[5P] Protection Level Select
+
+[4P] Protection Level Select (moved from step 5 → step 4)
      ◉ Maximum (recommended)
-       · Picker on THIS phone controls Liam's apps
-       · Evlin cannot be deleted
+       · Picker on YOUR phone controls Liam's apps (via Family Sharing)
+       · Evlin cannot be uninstalled
        · Requires Child Apple ID (5 min one-time setup)
-       [Choose Maximum]
      ○ Standard
        · Picker on Liam's phone only
        · Family Controls passcode protects app deletion
        · No extra account needed
-       [Choose Standard]
-    │
-    ├── Maximum ──▶ [6P-Max]
-    └── Standard ─▶ [6P-Std]
+     [Choose Maximum] / [Choose Standard]
 
-[6P-Max-A] Why Child Apple ID
-     · 4 bullet benefits with icons:
-       - Remote app selection from YOUR phone
-       - Blocks Evlin uninstall automatically
-       - Can set time limits, bedtime without child's involvement
-       - Compliant with Apple Family Sharing
-     [Got it — let's set it up]
-
-[6P-Max-B] Create Child Apple ID
-     "On THIS phone:
-      1. Open Settings → Family
-      2. Tap Add Member → Create a Child Account
-      3. Follow Apple's prompts (~3 min)"
-     [Open Family Settings]  ← tries App-Prefs URLs; falls back to Settings root
-     [I've created the account]
-
-[6P-Max-C] Sign In on Child Device
-     "On Liam's phone:
-      1. Sign out of the existing Apple ID (if any)
-      2. Sign in with the Child Apple ID you just made
-      3. Return to Evlin (already running there in child mode)"
-     [I've signed in on Liam's phone]
-
-[6P-Max-D] Authorize Evlin as Parent
-     "Hand Liam's phone here, then tap below."
-     [Grant Parent Authorization]  ← calls AuthorizationCenter.requestAuthorization(for: .child)
-     │
-     ├─ Success ─▶ [6P-Max-E]
-     └─ Failure (not a child account) ─▶ Retry / back to [6P-Max-B]
-
-[6P-Max-E] Enable Deletion Protection
-     ManagedSettingsStore.application.denyAppRemoval = true
-     "✓ Evlin is now protected from deletion."
+[5P] Pairing Code Display
+     ┌────────────────────┐
+     │   4 8 2 9 1 7       │   ← POST /family/create returns code + mode is baked in
+     │   [QR code]          │
+     └────────────────────┘
+     Status: ⚪ Waiting for Liam's device...
+     │  (poll /family/pairing-status?code=…)
+     ↓ Liam joined
+     Status: ✓ Liam's phone connected
      [Continue]
-    │
-    ▼
-[7P-Max] First Saved List (optional)
-     "Let's make your first Saved List."
-     [Open App Picker]  ← FamilyActivityPicker on parent device (Max mode: shows child apps)
-     → select apps/websites/categories
-     → prompt: Name this list: [_________] e.g. "list 1"
-     → save locally + POST meta
-     [Skip for now]  ← allowed, can create later
-    │
-    ▼
+
+[6P] Protection Instructions (different content by mode)
+
+     ┌─ Maximum mode ──────────────────────────────────┐
+     │  [6P-Max-A] Why Child Apple ID                  │
+     │     · 4 benefit bullets                         │
+     │     [Continue]                                  │
+     │                                                 │
+     │  [6P-Max-B] Create Child Apple ID                │
+     │     "On THIS phone:                             │
+     │      Settings → Family → Add Member →           │
+     │      Create a Child Account"                    │
+     │     [Open Family Settings]                      │
+     │     [I've created the account]                  │
+     │                                                 │
+     │  [6P-Max-C] Sign In on Child Device              │
+     │     "On Liam's phone, sign in with the Child    │
+     │      Apple ID you just created."                │
+     │     [I've signed in on Liam's phone]            │
+     │                                                 │
+     │  [6P-Max-D] Waiting for Authorization           │
+     │     "Pick up Liam's phone. Evlin there will     │
+     │      prompt for parent authorization. Approve   │
+     │      when iOS asks."                            │
+     │     Status: ⚪ Waiting for child device...       │
+     │     (polls backend for auth_status=granted)     │
+     │     ↓                                            │
+     │     Status: ✓ Parent authorization granted      │
+     │     [Continue]                                  │
+     └─────────────────────────────────────────────────┘
+
+     ┌─ Standard mode ─────────────────────────────────┐
+     │  [6P-Std-A] Set Family Controls Passcode        │
+     │     "On Liam's phone: Settings → Screen Time →  │
+     │      Lock Screen Time Settings → Set Passcode"  │
+     │     [I've set the passcode]                     │
+     │                                                 │
+     │  [6P-Std-B] Disable App Deletion                │
+     │     "Still on Liam's phone, in Screen Time:     │
+     │      Content & Privacy → iTunes & App Store →   │
+     │      Deleting Apps → Don't Allow"               │
+     │     [I've disabled deletion]                    │
+     │                                                 │
+     │  [6P-Std-C] Verification Note                   │
+     │     "⚠ Evlin cannot verify these settings.      │
+     │      If you skipped them, Liam can uninstall."  │
+     │     [Continue anyway]                           │
+     └─────────────────────────────────────────────────┘
+
+[7P] First Saved List (optional, Max mode only)
+     Max mode: "Make your first Saved List from YOUR phone."
+       [Open App Picker]  ← FamilyActivityPicker on parent device
+       → select apps/categories/websites
+       → name the list
+       → selection cached locally; POST meta (no blob) to backend
+       [Skip for now]
+     Std mode: skipped — lists are built on child device (Child Step 6C)
+
 [8P] Done
      "Liam is protected. Open Chat to send your first command."
      [Enter Evlin]
-
-─────────────────────────────────────────
-
-[6P-Std-A] Set Family Controls Passcode
-     "On Liam's phone:
-      1. Open Settings → Screen Time
-      2. Lock Screen Time Settings
-      3. Set a 4-digit passcode Liam doesn't know"
-     [Open Screen Time Settings]
-     [I've done this]
-
-[6P-Std-B] Disable App Deletion
-     "On Liam's phone, in Screen Time:
-      Content & Privacy Restrictions
-      → iTunes & App Store Purchases
-      → Deleting Apps → Don't Allow"
-     [I've done this]
-
-[6P-Std-C] Verification Note
-     "⚠ Evlin cannot verify these settings programmatically.
-      If you skipped them, Liam can uninstall Evlin."
-     [Continue anyway]
-    │
-    ▼
-[7P-Std] → [8P]
-   (Saved Lists cannot be created from parent device in Std mode;
-    they must be built on child device — step [6C] in child flow.)
 ```
 
 ### 5.3 Child Mode Flow
 
+**Key change: `.child` authorization and `denyAppRemoval` are invoked on the child device. Parent is expected to be physically present during these steps.**
+
 ```
 [1] Welcome
 [2] Mode Select → Child
-    │
-    ▼
 [3C] Enter Pairing Code
      ┌───────────┐
      │ _ _ _ _ _ _│
      └───────────┘
-     │
-     │ POST /family/pair {code, device_label}
-     │ → returns {family_id, protection_mode, parent_device_id}
-     │
-     ↓ success
-     "Connected to Mom's Evlin ✓"
+     POST /family/pair {code, device_label}
+     → returns {family_id, protection_mode, parent_device_id}
+     → "Connected to Mom's Evlin ✓"
      [Continue]
-    │
-    ▼
+
 [4C] Grant Screen Time Permission
-     "Evlin needs permission to manage Screen Time on this phone."
+     "Evlin needs Screen Time permission on this phone."
      [Grant Permission]
+     ├─ protection_mode=max →
+     │    1. AuthorizationCenter.requestAuthorization(for: .child)
+     │       (iOS surfaces approval prompt on parent's device via Family Sharing;
+     │        parent approves there, this call resolves)
+     │    2. On success: POST /child/auth-status {status: granted}  (parent device polls this)
+     │    3. If failure ("not a child account"): show remediation — child Apple ID not
+     │       signed in on this device. [Retry] / [Switch to Standard mode]
      │
-     ├─ protection_mode=max ─▶ AuthorizationCenter.requestAuthorization(for: .child)
-     │                         (requires Child Apple ID present on this device)
-     └─ protection_mode=std ─▶ AuthorizationCenter.requestAuthorization(for: .individual)
-    │
-    ▼
-[5C] Category Defaults — REQUIRED
+     └─ protection_mode=std →
+          AuthorizationCenter.requestAuthorization(for: .individual)
+          (no parent approval needed)
+     [Continue]
+
+[5C] Enable Deletion Protection (Max mode only)
+     ManagedSettingsStore.application.denyAppRemoval = true
+     Verify: re-read store, confirm flag is set.
+     "✓ Evlin is now protected from deletion on this phone."
+     [Continue]
+     (Std mode skips this step — passcode was already set in Parent Step [6P-Std-B])
+
+[6C] Category Defaults — REQUIRED
      "Pick which categories your parent should be able to control."
      [Open Category Picker]
-     → FamilyActivityPicker (selection filter: categoriesOnly where possible)
-     → user picks: Social, Games, Entertainment, etc.
-     → save each category token to local categoryTokens[name]
+     → FamilyActivityPicker (user picks: Social, Games, Entertainment, etc.)
+     → for each picked category, prompt: "Call this: [Social]" (default prefilled)
+     → save tokens to local categoryTokens[name]
      [Continue]
-    │
-    ▼
-[6C] Create First Saved List (Std mode only)
-     "Let's make your first Saved List. Your parent can later say
-      'lock list 1 for 30 min' in Chat."
+
+[7C] Create First Saved List (Std mode only; Max mode: skipped because parent built it in [7P])
+     "Make your first Saved List. Your parent can say 'lock list 1 for 30 min' in Chat."
      [Open App Picker]
      → FamilyActivityPicker (apps + categories + websites)
      → Name: [list 1]
-     → save selection + POST meta
+     → save to local savedListTokens[name]
+     → POST /child/saved-lists {name, description} (metadata only)
      [Skip for now]
-    │
-    ▼
-[7C] Child Ready Screen
+
+[8C] Child Ready Screen
      "Waiting for commands from Mom's Evlin."
-     · Shows current lock status
+     · Shows active lock status (from ActiveLockStore)
      · Shows last 5 commands received
      · (minimal UI, no tabs)
 ```
@@ -446,13 +457,12 @@ NEW:  Views/Onboarding/OnboardingCoordinator.swift      (replaces OnboardingView
       Views/Onboarding/Shared/WelcomeStep.swift
       Views/Onboarding/Shared/ModeSelectStep.swift
       Views/Onboarding/Parent/AddChildStep.swift
-      Views/Onboarding/Parent/PairingCodeStep.swift
       Views/Onboarding/Parent/ProtectionLevelStep.swift
+      Views/Onboarding/Parent/PairingCodeStep.swift
       Views/Onboarding/Parent/Max/WhyChildAppleIDStep.swift
       Views/Onboarding/Parent/Max/CreateChildAppleIDStep.swift
       Views/Onboarding/Parent/Max/SignInOnChildStep.swift
-      Views/Onboarding/Parent/Max/AuthorizeAsParentStep.swift
-      Views/Onboarding/Parent/Max/DeletionProtectionStep.swift
+      Views/Onboarding/Parent/Max/WaitForAuthorizationStep.swift
       Views/Onboarding/Parent/Std/SetPasscodeStep.swift
       Views/Onboarding/Parent/Std/DisableDeletionStep.swift
       Views/Onboarding/Parent/Std/StdVerificationStep.swift
@@ -460,6 +470,7 @@ NEW:  Views/Onboarding/OnboardingCoordinator.swift      (replaces OnboardingView
       Views/Onboarding/Parent/DoneStep.swift
       Views/Onboarding/Child/EnterPairingCodeStep.swift
       Views/Onboarding/Child/GrantPermissionStep.swift
+      Views/Onboarding/Child/DeletionProtectionStep.swift
       Views/Onboarding/Child/CategoryDefaultsStep.swift
       Views/Onboarding/Child/FirstSavedListStep.swift
       Views/Onboarding/Child/ChildReadyStep.swift
@@ -478,171 +489,293 @@ DELETE: Views/Onboarding/OnboardingView.swift
 Parent: "lock IG for 30 min"
         │
         ▼
-ChatView calls POST /parent/chat (existing endpoint)
+ChatView → POST /parent/chat
         │
         ▼
-Backend: Gemini system prompt (updated) returns:
-{
-  "message": "Locking Instagram on Liam's phone for 30 minutes.",
-  "reasoning": "Parent requested a specific app lock with duration.",
-  "action": {
-    "type": "lock",
-    "target_request": "IG",
-    "duration_minutes": 30
-  }
-}
-        │
-        ▼
-Backend resolution pipeline (new, before returning to client):
-  1. Check if target_request matches any SavedListMeta.name for this family (fuzzy)
-     → if yes: tier = "saved_list", list_name = meta.name
-           If meta.mode == "parent_device" (Max mode): also attach the stored selection_blob
-           If meta.mode == "child_device" (Std mode): no blob; child looks up locally
-  2. Check App Catalog for alias match
-     → if yes: tier = "exact_bundle", bundle_id = catalog.bundle_id
-  3. Ask Gemini to classify "IG" into a category
-     → if confident: tier = "category", category_hint = "social"
-  4. Else: return action with tier="needs_confirmation"
-        │
-        ▼
-Backend creates Command row, POST to target_device_id's queue:
-{
-  "command_id": "uuid",
-  "action": "lock",
-  "tier": "exact_bundle",
-  "target": {
-    "bundle_id": "com.burbn.instagram",   // tier=exact_bundle
-    "list_name": "list 1",                // tier=saved_list
-    "selection_blob": "base64..." | null, // tier=saved_list AND mode=parent_device
-    "category_hint": "social",            // tier=category
-    "original_request": "IG"
-  },
-  "duration_minutes": 30
-}
-        │
-        ▼
-Backend returns to parent client:
-{
-  "message": "Locking Instagram...",
-  "reasoning": "...",
-  "action": {
-    "type": "lock",
-    "command_id": "uuid",
-    "tier": "exact_bundle",
-    "target_display": "Instagram",
-    "duration_minutes": 30
-  }
-}
+Backend:
+  1. Gemini parses: {target_request:"IG", target_kind_hint:"app", duration_minutes:30}
+  2. Resolver pipeline:
+     a. Fuzzy-match Saved Lists → miss
+     b. Catalog lookup "IG" → hit: com.burbn.instagram, social
+     c. Tier = exact_bundle
+  3. Create Command row with payload
+  4. (Max saved-list commands only) If parent device attached selection_blob,
+     INSERT PendingBlob row with TTL=10min
+  5. Schedule APNs silent push to target child device (future Phase 5)
+  6. Return to parent client:
+     {
+       "message": "Locking Instagram for 30 min.",
+       "reasoning": "...",
+       "action": {
+         "type": "lock",
+         "command_id": "uuid",
+         "tier": "exact_bundle",
+         "target_display": "Instagram",
+         "duration_minutes": 30
+       }
+     }
         │
         ▼
 Parent ChatView inserts ReceiptCard(pending, commandID=uuid)
-        │
-        ▼
-ReceiptCard polls GET /parent/ack-status?command_id=uuid every 1s (up to 10s)
+ReceiptCard polls GET /parent/ack-status?command_id=uuid every 1s (up to 10s timeout)
 ```
 
 ### 6.2 Child Device Executes
 
 ```
-Child ActionPoller (BGAppRefreshTask + foreground NSTimer):
-   loops: GET /child/commands?device_id=X
-          → if commands, loop through:
-              ActionExecutor.execute(command)
-              → POST /child/ack
+Child (on APNs silent push OR foreground poll OR BG refresh):
+  GET /child/commands?device_id=X&since=<timestamp>
+  → returns unacked commands
+  For each:
+    if payload.target.has_pending_blob:
+      blob ← GET /child/pending-blob?command_id=...
+      (backend serves + deletes row)
+    result ← ActionExecutor.execute(cmd, blob)
+    POST /child/ack {command_id, status, detail}
 ```
 
-**ActionExecutor.execute(command)**:
+### 6.3 ActiveLockStore — Union & Recompute Semantics (CRITICAL)
+
+Multiple concurrent locks must compose correctly. A lock expiring must release *only its own contributions*. Achieved by holding all active locks in a single store and **recomputing the full union on every change.**
 
 ```swift
-func execute(_ cmd: Command) async -> AckResult {
-    guard ScreenTimeManager.shared.isAuthorized else {
-        return .failed(.notAuthorized)
+actor ActiveLockStore {
+    private var locks: [UUID: ActiveLock] = [:]
+    private let store = ManagedSettingsStore()
+    private let storageKey = "evlin.activeLocks"
+
+    // MARK: - API
+
+    func add(_ lock: ActiveLock) {
+        locks[lock.commandID] = lock
+        persist()
+        recomputeAndApply()
     }
-    do {
+
+    func remove(commandID: UUID) {
+        locks.removeValue(forKey: commandID)
+        persist()
+        recomputeAndApply()
+    }
+
+    func sweepExpired(now: Date = Date()) -> [UUID] {
+        let expired = locks.values
+            .filter { ($0.expiresAt ?? .distantFuture) <= now }
+            .map(\.commandID)
+        for id in expired { locks.removeValue(forKey: id) }
+        if !expired.isEmpty {
+            persist()
+            recomputeAndApply()
+        }
+        return expired
+    }
+
+    func current() -> [ActiveLock] { Array(locks.values) }
+
+    // MARK: - Core
+
+    /// Recomputes union of ALL active locks and writes to ManagedSettingsStore.
+    /// This is the single source of truth — no incremental diffs, no partial updates.
+    private func recomputeAndApply() {
+        if locks.isEmpty {
+            store.application.blockedApplications = nil
+            store.shield.applications = nil
+            store.shield.applicationCategories = nil
+            return
+        }
+
+        // Union Tier A contributions
+        let allBundleIDs = locks.values.flatMap(\.blockedBundleIDs)
+        let bundleApps = Set(allBundleIDs.map { Application(bundleIdentifier: $0) })
+        store.application.blockedApplications = bundleApps.isEmpty ? nil : bundleApps
+
+        // Union Tier B app tokens
+        let allAppTokens = Set(locks.values.flatMap(\.shieldAppTokens))
+        store.shield.applications = allAppTokens.isEmpty ? nil : allAppTokens
+
+        // Union Tier B + C category tokens
+        let allCategoryTokens = Set(locks.values.flatMap(\.shieldCategoryTokens))
+        store.shield.applicationCategories = allCategoryTokens.isEmpty
+            ? nil
+            : .specific(allCategoryTokens)
+    }
+
+    private func persist() {
+        let dict = ActiveLockStore.StoredPayload(locks: locks)
+        if let data = try? PropertyListEncoder().encode(dict) {
+            UserDefaults(suiteName: "group.com.evlin.ios")?.set(data, forKey: storageKey)
+        }
+    }
+    // restore() on init — symmetric
+
+    private struct StoredPayload: Codable { let locks: [UUID: ActiveLock] }
+}
+```
+
+**Expiry orchestration**:
+- When `add(_:)` is called with `expiresAt != nil`, schedule a `DeviceActivitySchedule` keyed by `commandID`.
+- When `DeviceActivityMonitor.intervalDidEnd(DeviceActivityName)` fires (the extension), decode `commandID` from the name, call `ActiveLockStore.shared.remove(commandID: id)`.
+- `sweepExpired()` runs as a safety net on app foreground and on every APNs wake — catches drift if extension missed a fire.
+
+**Unlock commands**:
+- `action=unlock, target=IG` → find lock(s) in store whose `displayName == "Instagram"` OR `blockedBundleIDs` contains `com.burbn.instagram` → remove those.
+- `action=unlock_all` → clear entire store.
+
+### 6.4 ActionExecutor
+
+```swift
+final class ActionExecutor {
+    static let shared = ActionExecutor()
+
+    func execute(_ cmd: Command, blob: Data? = nil) async -> AckResult {
+        guard ScreenTimeManager.shared.isAuthorized else {
+            return .failed(.notAuthorized)
+        }
+
+        // Handle non-lock commands
+        switch cmd.action {
+        case .unlockAll:
+            await ActiveLockStore.shared.removeAll()
+            return .confirmedExact(displayName: "All locks cleared")
+
+        case .unlock:
+            // Remove any matching locks
+            let matched = await ActiveLockStore.shared.removeMatching(cmd.target)
+            return matched.isEmpty
+                ? .failed(.nothingToUnlock)
+                : .confirmedExact(displayName: cmd.target.originalRequest)
+
+        case .expandLibrary:
+            return await runExpandLibraryFlow(cmd)  // see §6.6
+
+        case .lock:
+            break
+        }
+
+        // Build ActiveLock from command + blob
+        do {
+            let lock = try buildLock(from: cmd, blob: blob)
+            await ActiveLockStore.shared.add(lock)
+
+            // Schedule auto-unlock via DeviceActivity if duration set
+            if let mins = cmd.durationMinutes {
+                try scheduleRelock(commandID: lock.commandID, minutes: mins)
+            }
+
+            switch cmd.tier {
+            case .exactBundle, .savedList:
+                return .confirmedExact(displayName: lock.displayName)
+            case .category:
+                return .confirmedFallback(
+                    displayName: lock.displayName,
+                    category: cmd.target.categoryHint ?? "unknown",
+                    origRequest: cmd.target.originalRequest
+                )
+            }
+        } catch let err as ExecuteError {
+            return .failed(err.ackReason)
+        } catch {
+            return .failed(.execution(error.localizedDescription))
+        }
+    }
+
+    private func buildLock(from cmd: Command, blob: Data?) throws -> ActiveLock {
         switch cmd.tier {
         case .exactBundle:
-            let app = Application(bundleIdentifier: cmd.target.bundleID!)
-            var current = store.application.blockedApplications ?? []
-            current.insert(app)
-            store.application.blockedApplications = current
+            guard let bid = cmd.target.bundleID else { throw ExecuteError.malformed }
+            return ActiveLock(
+                commandID: cmd.id, tier: .exactBundle,
+                blockedBundleIDs: [bid],
+                shieldAppTokens: [], shieldCategoryTokens: [],
+                issuedAt: cmd.issuedAt,
+                expiresAt: cmd.expiresAt,
+                originalRequest: cmd.target.originalRequest,
+                displayName: cmd.target.targetDisplay ?? bid
+            )
 
         case .savedList:
-            let selection: FamilyActivitySelection
-            if let blobB64 = cmd.target.selectionBlob,     // Max mode: backend provided blob
-               let data = Data(base64Encoded: blobB64),
-               let decoded = try? PropertyListDecoder().decode(FamilyActivitySelection.self, from: data) {
-                selection = decoded
-            } else if let local = localStore.savedListTokens[cmd.target.listName!] {
-                selection = local                           // Std mode: local lookup
-            } else {
-                return .failed(.listNotFound(cmd.target.listName!))
-            }
-            mergeIntoShield(selection)
+            let selection: FamilyActivitySelection = try decodeSelection(cmd: cmd, blob: blob)
+            return ActiveLock(
+                commandID: cmd.id, tier: .savedList,
+                blockedBundleIDs: [],
+                shieldAppTokens: selection.applicationTokens,
+                shieldCategoryTokens: selection.categoryTokens,
+                issuedAt: cmd.issuedAt,
+                expiresAt: cmd.expiresAt,
+                originalRequest: cmd.target.originalRequest,
+                displayName: cmd.target.listName ?? "saved list"
+            )
 
         case .category:
-            guard let catToken = localStore.categoryTokens[cmd.target.categoryHint!] else {
-                return .failed(.categoryNotConfigured(cmd.target.categoryHint!))
-            }
-            var current = store.shield.applicationCategories
-            store.shield.applicationCategories = addCategory(catToken, to: current)
+            guard let hint = cmd.target.categoryHint,
+                  let tok = LocalAliasStore.shared.categoryToken(forName: hint)
+            else { throw ExecuteError.categoryNotConfigured(cmd.target.categoryHint ?? "unknown") }
+            return ActiveLock(
+                commandID: cmd.id, tier: .category,
+                blockedBundleIDs: [],
+                shieldAppTokens: [],
+                shieldCategoryTokens: [tok],
+                issuedAt: cmd.issuedAt,
+                expiresAt: cmd.expiresAt,
+                originalRequest: cmd.target.originalRequest,
+                displayName: hint.capitalized
+            )
         }
+    }
 
-        // Schedule auto-unlock if duration set
-        if let mins = cmd.durationMinutes {
-            scheduleRelock(commandID: cmd.id, minutes: mins)
+    private func decodeSelection(cmd: Command, blob: Data?) throws -> FamilyActivitySelection {
+        if let blob = blob,
+           let decoded = try? PropertyListDecoder().decode(FamilyActivitySelection.self, from: blob) {
+            return decoded  // Max mode: provided blob
         }
-
-        // Save current shield handles for UI
-        persistActiveShield(cmd)
-
-        return .confirmedExact  // or .confirmedFallback for category
-    } catch {
-        return .failed(.execution(error.localizedDescription))
+        if let listName = cmd.target.listName,
+           let local = LocalAliasStore.shared.savedList(named: listName) {
+            return local   // Std mode: local lookup
+        }
+        throw ExecuteError.listNotFound(cmd.target.listName ?? "(unnamed)")
     }
 }
 ```
 
-### 6.3 Receipt Card States
+### 6.5 Receipt Card States
 
 ```swift
 enum ReceiptState {
-    case pending                                    // 🟡 animated spinner
-    case confirmedExact(displayName: String)        // 🟢 "Instagram locked · Unlocks at 14:53"
-    case confirmedFallback(displayName: String,
-                          category: String,
-                          origRequest: String)      // 🟡 "Games locked (includes 'abcd')"
-    case failedPermission                           // 🔴 "Screen Time permission missing on Liam's phone"
-    case failedListNotFound(listName: String)       // 🔴 "List '\(listName)' not found"
-    case failedTimeout                              // 🔴 "Liam's phone didn't respond in 10s"
-    case failedOther(reason: String)                // 🔴 reason
+    case pending
+    case confirmedExact(displayName: String, unlocksAt: Date?)
+    case confirmedFallback(displayName: String, category: String, origRequest: String)
+    case failedPermission
+    case failedListNotFound(listName: String)
+    case failedCategoryNotConfigured(category: String)
+    case failedTimeout
+    case failedOther(reason: String)
 }
 ```
 
-Receipt card is a new `ChatMessage` type (not just text). Rendered by a new `ReceiptCard` view inside ChatView's message list. Shows:
-- Status icon + color
-- Primary line (what was locked)
-- Secondary line (time, duration, collateral info)
+Receipt card is a new `ChatMessage` subtype rendered by `ReceiptCard` view. Displays:
+- Status icon + color (🟡🟢🔴⚪)
+- Primary line: "Instagram locked"
+- Secondary line: time + duration + collateral count
 - Footer actions:
-  - `.confirmedFallback` → `[Make it precise]` button → triggers Library Expand flow (Step C in §6.4)
-  - `.confirmedExact` → `[Unlock now]` button
+  - `.confirmedFallback` → `[Make it precise]` → Library Expand flow (§6.6)
+  - `.confirmedExact` → `[Unlock now]` → sends `action=unlock` command
 
-### 6.4 Library Expand (Tier A/C → B Promotion)
-
-Parent taps `[Make it precise]` on a fallback receipt:
+### 6.6 Library Expand (Tier A/C → B Promotion)
 
 ```
-Parent Chat:
-  → POST /parent/command with action="expand_library", target="abcd"
+Parent taps [Make it precise] on fallback receipt:
+  → POST /parent/command {action: expand_library, target: "abcd"}
   → ReceiptCard("Waiting for Liam to add abcd...")
 
 Backend: creates Command with action=expand_library for child device
 
 Child Device:
-  → Receives command → shows system notification: "Mom wants to add 'abcd' to Evlin"
-  → Opens Evlin → picker screen pre-opened with context
+  → Receives command (APNs / foreground poll / BG)
+  → Shows system notification: "Mom wants to add 'abcd' to Evlin"
+  → Tap → opens Evlin with picker pre-launched
   → User picks app → names it "abcd"
-  → saved to localStore.savedListTokens as single-item list
-  → POST /child/ack with status=expanded, list_name="abcd"
+  → Saved to LocalAliasStore.savedListTokens["abcd"]
+  → POST /child/ack {status: expanded, list_name: "abcd"}
 
 Parent:
   → ReceiptCard updates: "✓ 'abcd' added. Locking now..."
@@ -653,57 +786,56 @@ Parent:
 
 ## 7. Chat Command Grammar
 
-Gemini system prompt updated to emit:
-
+Gemini system prompt emits:
 ```json
 {
   "message": "...",
   "reasoning": "...",
   "action": {
     "type": "lock" | "unlock" | "unlock_all",
-    "target_request": "<original user words>",     // "IG", "list 1", "bedtime apps"
+    "target_request": "<original user words>",
     "target_kind_hint": "app" | "list" | "category" | null,
-    "duration_minutes": 30 | null,                  // null = permanent lock
-    "confirmation_required": false                  // true if ambiguous
+    "duration_minutes": 30 | null,
+    "confirmation_required": false
   }
 }
 ```
 
-**Backend resolver** (new module, `parent_chat_resolver.py`):
-1. **Fuzzy match Saved Lists** (levenshtein ≤ 2, case-insensitive) → tier=saved_list
-2. **Fuzzy match Catalog aliases** → tier=exact_bundle
-3. **If `target_kind_hint == "category"` OR AI-infer category** → tier=category
-4. **Else** → return `confirmation_required=true, suggestions=[...]`
+**Backend resolver** (new module `parent_chat_resolver.py`):
+1. Fuzzy-match Saved List names (Levenshtein ≤ 2, case-insensitive) → tier=saved_list
+2. Fuzzy-match Catalog aliases → tier=exact_bundle
+3. If `target_kind_hint == "category"` OR AI-inferred category → tier=category
+4. Else → `confirmation_required=true` with suggestions
 
-**Target examples**:
+**Examples**:
+
 | Parent says | Resolved tier | Target |
 |---|---|---|
 | "lock IG for 30 min" | exact_bundle | Instagram/30m |
-| "lock ig and tiktok" | Parse as 2 commands | 2× exact_bundle |
+| "lock ig and tiktok" | 2 commands | 2× exact_bundle |
 | "ban list 1 for 2 hours" | saved_list | "list 1"/120m |
-| "lock bedtime apps" | saved_list | "bedtime apps"/null(permanent) |
+| "lock bedtime apps" | saved_list | "bedtime apps"/null (permanent) |
 | "lock all games" | category | "games"/null |
 | "lock games for 1 hour" | category | "games"/60m |
-| "lock abcd" | category (AI guesses) OR confirmation | games/null OR ask |
+| "lock abcd" | category (AI guess) OR confirmation | games/null OR ask |
 | "unlock everything" | unlock_all | — |
-| "unlock IG" | unlock specific | Instagram (reverse the blockedApplications) |
+| "unlock IG" | unlock specific | Instagram |
 
 ---
 
-## 8. Tamper Detection (deferred, but stubbed in this design)
+## 8. Tamper Detection (deferred — Phase 5)
 
-Out of scope for this spec but noted for future extension:
-- Heartbeat: child device POSTs `/child/heartbeat` every N minutes via BGAppRefreshTask.
-- Backend: if no heartbeat for X minutes → APNs push to parent: "⚠ Evlin on Liam's phone hasn't checked in."
-- Anti-bypass: compare `shield.applications` against last applied; if reset, re-apply + notify parent.
-
-The `Device.last_heartbeat` column and the `/child/heartbeat` endpoint are defined in the data model above so future work doesn't require a migration.
+Data model stubbed now so migrations aren't needed later:
+- `Device.last_heartbeat` column exists.
+- Child device POSTs `/child/heartbeat` every N minutes via BGAppRefreshTask (Phase 5).
+- Backend detects stale heartbeats → APNs push to parent.
+- Child can compare `ManagedSettingsStore.shield.applications` against `ActiveLockStore` state — if reset externally (passcode breach), re-apply + alert.
 
 ---
 
 ## 9. App Catalog (v1)
 
-Initial `app_catalog.json` shipped with backend. Format:
+See `backend/app/data/app_catalog.json` (to be created). Initial 60 entries:
 
 ```json
 [
@@ -717,7 +849,6 @@ Initial `app_catalog.json` shipped with backend. Format:
   {"names": ["WhatsApp"], "bundle_id": "net.whatsapp.WhatsApp", "category_hint": "social"},
   {"names": ["Telegram"], "bundle_id": "ph.telegra.Telegraph", "category_hint": "social"},
   {"names": ["Messenger"], "bundle_id": "com.facebook.Messenger", "category_hint": "social"},
-
   {"names": ["微信", "WeChat"], "bundle_id": "com.tencent.xin", "category_hint": "social"},
   {"names": ["QQ"], "bundle_id": "com.tencent.mqq", "category_hint": "social"},
   {"names": ["微博", "Weibo"], "bundle_id": "com.sina.weibo", "category_hint": "social"},
@@ -755,7 +886,6 @@ Initial `app_catalog.json` shipped with backend. Format:
   {"names": ["Chrome"], "bundle_id": "com.google.chrome.ios", "category_hint": "productivity"},
   {"names": ["Firefox"], "bundle_id": "org.mozilla.ios.Firefox", "category_hint": "productivity"},
   {"names": ["Edge"], "bundle_id": "com.microsoft.msedge", "category_hint": "productivity"},
-
   {"names": ["Gmail"], "bundle_id": "com.google.Gmail", "category_hint": "productivity"},
   {"names": ["Outlook"], "bundle_id": "com.microsoft.Office.Outlook", "category_hint": "productivity"},
   {"names": ["Slack"], "bundle_id": "com.tinyspeck.chatlyio", "category_hint": "productivity"},
@@ -778,96 +908,112 @@ Initial `app_catalog.json` shipped with backend. Format:
 ]
 ```
 
-Total: 60 apps. Bundle IDs should be re-verified before shipping — some in this list are approximate.
+Total: 60 apps. Bundle IDs approximate; verify against live App Store entries before release.
 
 ---
 
-## 10. Settings Changes (existing code)
+## 10. Settings Changes
 
 `SettingsView.swift` and `HomeSettingsSheet.swift` gain:
-- **Active Mode Toggle** (existing, keep) — flips `UserDefaults["activeMode"]`
-- **Saved Lists** section — list all `SavedListMeta`, tap to edit, trash to delete
-- **Manage Library** section:
-  - (Max mode, parent only) "Pick apps from Liam's device" → opens picker
-  - (Std mode or child mode) "Add common apps" → opens picker
-- **Pairing** section — show current family code, "unpair device" button
-- **Protection Level** — show current (Max/Std), button to reconfigure
+- **Active Mode Toggle** (existing) — flips `UserDefaults["activeMode"]`
+- **Saved Lists** section — list all SavedListMeta, tap to edit (if mode == current device), delete with confirmation
+- **Manage Library** — (Child/Std only) "Add Saved List" → picker
+- **Pairing** — show current family code (if still valid), "unpair" button
+- **Protection Level** — show current (Max/Std), "reconfigure" button (re-runs that branch of onboarding)
+- **Active Locks** (Child only) — shows current entries in `ActiveLockStore` with remaining time + manual override
 
 ---
 
 ## 11. Test Plan
 
-**Scope for manual testing (single device, parent/child toggle)**:
+Manual (single device, parent/child toggle):
 
 1. **Onboarding — Parent → Standard path**
-   - Fresh install → complete Parent onboarding in Std mode
-   - Verify pairing code displays and polling works
-   - Skip child setup
-   - Toggle to Child mode → enter pairing code → complete Child onboarding → create a Saved List "list 1" with 2-3 apps
+   - Fresh install → pick Standard → pairing code shown → toggle to child mode → enter code → complete child onboarding including Saved List "list 1" with 2–3 apps.
 2. **Onboarding — Parent → Maximum path**
-   - Requires a real Child Apple ID (deferred; test Std path only in v1)
-3. **Chat → Tier A (bundle ID)**
-   - Parent mode, say "lock IG for 1 min"
-   - Verify ReceiptCard shows pending → confirmed
-   - Verify Instagram is blocked on device (open Instagram → system dialog)
-   - Wait 1 min → verify auto-unlock
-4. **Chat → Tier B (saved list)**
-   - Parent mode, say "ban list 1 for 30 min"
-   - Verify shield applied to the apps in list 1
-5. **Chat → Tier C (category fallback)**
-   - Parent mode, say "lock abcd" (unknown app)
-   - AI infers games category, receipt shows fallback
-   - Tap "Make it precise" → verify library expand flow
-6. **Unlock**
-   - "unlock everything" → all shields cleared
-   - "unlock IG" → only Instagram block removed
+   - Requires real Child Apple ID (deferred; test Std only for MVP).
+3. **Tier A (bundle ID)**
+   - Parent: "lock IG for 1 min"
+   - ReceiptCard: pending → confirmed
+   - On device, open Instagram → system block dialog
+   - After 1 min → verify auto-unlock
+4. **Tier B (saved list)**
+   - Parent: "ban list 1 for 30 min"
+   - Verify shields applied to the list's apps
+5. **Tier C (category fallback)**
+   - Parent: "lock abcd"
+   - Verify AI infers games → Games category shielded
+   - Tap "Make it precise" → library expand flow → verify precise lock
+6. **Concurrent locks + expiry**
+   - "lock IG for 1 min"
+   - Immediately after: "lock TikTok for 5 min"
+   - Verify both shielded simultaneously
+   - Wait 1 min → IG unlocks, TikTok remains ← **critical ActiveLockStore test**
+   - Wait 4 more min → TikTok unlocks
+7. **Unlock**
+   - "unlock everything" → all cleared
+   - "unlock IG" → only Instagram removed (others intact)
 
-**Automated tests (future)**:
-- Backend resolver unit tests (Catalog match, Saved List fuzzy match, category inference)
-- ActionExecutor unit tests (mock ManagedSettingsStore)
+Automated (future):
+- Resolver unit tests (catalog, fuzzy list match, category inference)
+- ActiveLockStore unit tests (add/remove/sweep/union correctness)
+- ActionExecutor integration tests (mock ManagedSettingsStore)
 
 ---
 
-## 12. Build Order / Dependencies
+## 12. Build Order / Phases (revised per Codex review)
 
-Rough phase layout (detailed in implementation plan):
+**Phase 0 — Spike (real device validation)**
+- Verify `Application(bundleIdentifier:)` actually blocks app launch as expected
+- Verify `denyAppRemoval` can be set
+- Verify Max-mode token transferability: picker on parent device → tokens work when applied on child device's `ManagedSettingsStore`
+- Verify `.child` authorization flow with a real Child Apple ID
+- **Outcome**: a 1-page spike report in `docs/superpowers/specs/2026-04-22-spike-notes.md` documenting which paths work and what Max mode degrades to if tokens aren't transferable.
 
-**Phase 1 — Backend foundation**
-- New tables, migrations
-- /family/create, /family/pair, /family/pairing-status
-- /parent/saved-lists, /child/saved-lists
-- App Catalog seed + resolver module
-- Updated /parent/chat with resolver + Command creation
+**Phase 1 — iOS foundation: ActiveLockStore + ActionExecutor**
+- `ActiveLockStore` actor with union/recompute logic
+- `ActionExecutor` with all three tiers (bundle_id works immediately; saved_list/category stubs initially)
+- `LocalAliasStore` skeleton
+- `DeviceActivityMonitor` extension integrated with ActiveLockStore removal
+- Unit-testable; no networking yet (commands are constructed in-code for test purposes)
 
-**Phase 2 — Child device execution**
-- ActionExecutor with three tiers
-- ActionPoller (BGAppRefreshTask + foreground)
-- /child/commands + /child/ack
-- LocalAliasStore + category seeding on onboarding
+**Phase 2 — Backend minimal: commands + ack**
+- Migrations for Family/Device/PairingCode/Command/PendingBlob/SavedListMeta
+- Endpoints: `/family/create`, `/family/pair`, `/family/pairing-status`, `/parent/chat` (resolver + Command row creation), `/child/commands`, `/child/ack`, `/parent/ack-status`
+- `parent_chat_resolver.py` with Catalog lookup + fuzzy Saved List match + category inference
+- App Catalog JSON seed (60 entries)
+- Parent client: foreground polling for ack-status
+- Child client: foreground polling for commands (5s interval while app foreground)
+- **No APNs yet** — commands only apply when child app is foreground. Acceptable for single-device test.
 
-**Phase 3 — Parent device UX**
-- ReceiptCard component + state machine
-- Chat action handling updated
-- Saved Lists management UI
-- Library Expand flow on fallback receipts
+**Phase 3 — Std mode Saved Lists end-to-end**
+- Child device FamilyActivityPicker UI for building lists
+- POST `/child/saved-lists` meta sync
+- Resolver picks up new lists
+- Parent Chat can say "ban list 1 for 30 min" → reaches child → shields apply
+- Tested single-device (mode toggle) and dual-device (two phones on same family)
 
-**Phase 4 — Onboarding rebuild**
-- OnboardingCoordinator replaces existing
-- Shared, Parent, Child sub-flows
-- Pairing UX (code display + polling)
-- Both protection levels (Max path stubbed; Std path full)
+**Phase 4 — Onboarding rebuild + Max mode path**
+- `OnboardingCoordinator` replacing `OnboardingView`/`SetupView`
+- Shared + Parent + Child sub-flows per §5.2/§5.3
+- Protection level selection + pairing carrying protection_mode
+- Max mode: Child Apple ID guide, `.child` auth on child device, `denyAppRemoval` on child device
+- Max mode Saved Lists: parent-device picker + ephemeral blob relay via PendingBlob
+- Std mode fully supported (Max path may have placeholder verification if real Child Apple ID unavailable)
 
-**Phase 5 — Polish**
-- Settings page updates
-- Error surface hardening
-- Test plan execution
+**Phase 5 — Production robustness**
+- APNs silent push integration (backend + iOS client)
+- BGAppRefreshTask as opportunistic sweep
+- Heartbeat endpoint + tamper detection
+- Receipt card failure modes + retry UX
+- Settings page updates (§10)
 
 ---
 
 ## 13. Open Questions / Future Work
 
-- **Max mode full validation** — requires a real Child Apple ID test device. For v1, we build the Max UI path but may not be able to fully verify `.child` authorization flow end-to-end.
-- **`ShieldConfigurationDataSource` extension** — to make Tier B/C shields show Evlin's custom UI ("Mom locked this · Unlocks at 16:00"). Separate extension target, added in a later phase.
-- **Tamper detection** (heartbeat + alerts) — data model stubbed, endpoints deferred.
-- **Recurring time windows** ("lock social every day 9pm–7am") — uses `DeviceActivitySchedule` with `repeats: true`. Deferred to a later spec.
-- **Bundle ID verification** — the v1 catalog in §9 is approximate; confirm each bundle ID against the App Store before release.
+- **Max mode validation** — dependent on Phase 0 spike result. If tokens aren't transferable across devices, Max Saved Lists fall back to child-device picker (same as Std mode).
+- **`ShieldConfigurationDataSource` extension** — to make Tier B/C shields show Evlin's custom UI ("Mom locked this · Unlocks at 16:00"). Separate extension target, later phase.
+- **Recurring time windows** — "lock social every day 9pm–7am" uses `DeviceActivitySchedule` with `repeats: true`. Deferred to a later spec.
+- **Bundle ID verification** — v1 catalog in §9 is approximate; verify each entry against the App Store before shipping.
+- **Saved List hard cap** — not enforced in v1. If usage data shows fuzzy-match accuracy suffers past a threshold, introduce a soft warning or hard cap.
