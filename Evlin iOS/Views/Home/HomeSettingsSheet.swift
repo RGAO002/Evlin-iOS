@@ -241,6 +241,12 @@ struct HomeSettingsSheet: View {
                 Section("About") {
                     LabeledContent("Version", value: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—")
                 }
+
+                #if DEBUG
+                Section("Debug") {
+                    NavigationLink("Spike tests") { SpikeView() }
+                }
+                #endif
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
