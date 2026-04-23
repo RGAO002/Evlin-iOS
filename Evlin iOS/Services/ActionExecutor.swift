@@ -109,11 +109,24 @@ final class ActionExecutor: @unchecked Sendable {
 
     // MARK: - DeviceActivity scheduling
 
+    /// iOS DeviceActivity hard minimum — schedules shorter than this are rejected
+    /// with "activity's schedule is too short". Enforced by Apple, can't be lowered.
+    static let minScheduleMinutes: Int = 15
+
     private func scheduleRelock(commandID: UUID, expiresAt: Date) throws {
-        let calendar = Calendar.current
+        // Clamp expiry to at least the hard minimum. Caller should display the
+        // effective expiry back to the user; the lock will release at `clampedEnd`,
+        // possibly later than what was requested.
         let now = Date()
+        let requestedInterval = expiresAt.timeIntervalSince(now)
+        let minInterval = TimeInterval(Self.minScheduleMinutes * 60)
+        let clampedEnd = requestedInterval < minInterval
+            ? now.addingTimeInterval(minInterval)
+            : expiresAt
+
+        let calendar = Calendar.current
         let startComp = calendar.dateComponents([.hour, .minute, .second], from: now)
-        let endComp = calendar.dateComponents([.hour, .minute, .second], from: expiresAt)
+        let endComp = calendar.dateComponents([.hour, .minute, .second], from: clampedEnd)
         let schedule = DeviceActivitySchedule(intervalStart: startComp, intervalEnd: endComp, repeats: false)
         let name = DeviceActivityName("evlin.lock.\(commandID.uuidString)")
         try activityCenter.startMonitoring(name, during: schedule)

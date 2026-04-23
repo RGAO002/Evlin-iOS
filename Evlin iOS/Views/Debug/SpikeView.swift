@@ -36,7 +36,7 @@ struct SpikeView: View {
                     Button("Disable") { setDenyRemoval(false) }
                 }
                 Section("ActionExecutor") {
-                    Button("Lock IG for 1 min") {
+                    Button("Lock IG for 15 min (min allowed)") {
                         Task {
                             let cmd = LockCommand(
                                 id: UUID(),
@@ -47,7 +47,7 @@ struct SpikeView: View {
                                     originalRequest: "IG",
                                     targetDisplay: "Instagram"
                                 ),
-                                durationMinutes: 1,
+                                durationMinutes: 15,
                                 issuedAt: Date()
                             )
                             let result = await ActionExecutor.shared.execute(cmd)

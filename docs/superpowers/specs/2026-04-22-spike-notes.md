@@ -52,6 +52,23 @@ Downstream consequences:
 
 ---
 
+## Test 2b (Phase 1 validation): ActionExecutor + DeviceActivitySchedule
+
+**Steps**:
+1. Check auth status → `Approved` ✓ (under `.individual`)
+2. Build `LockCommand` for Instagram with `durationMinutes: 1`
+3. Call `ActionExecutor.shared.execute(cmd)`
+
+**Result**: **FAILED** with `execution("The activity's schedule is too short")`
+
+**Root cause**: Apple's `DeviceActivitySchedule` rejects intervals shorter than **15 minutes**. This is an undocumented runtime limit enforced by `DeviceActivityCenter.startMonitoring`.
+
+**Fix applied**: `ActionExecutor.scheduleRelock` now clamps requested expiry to `minScheduleMinutes = 15`. Lock will actually release at 15 min even if command requested less. For sub-15-min lock UX, a different mechanism (foreground `sweepExpired` on timer, or instruct parent on minimum) is needed. Deferred to later polish.
+
+**Plan implication**: Parent Chat in Phase 2 should advise family "minimum lock duration is 15 minutes" in the system prompt. Sub-15-min requests either get clamped silently or returned with a notice.
+
+---
+
 ## Test 3: Max-mode token transferability
 
 **Result**: **BLOCKED — no Child Apple ID available for testing.**
