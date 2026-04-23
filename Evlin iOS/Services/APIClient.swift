@@ -27,6 +27,7 @@ class APIClient: ObservableObject {
         let message: String
         let child_name: String
         let history: [[String: String]]
+        let family_id: String?  // UUID string — required for command queueing
     }
 
     struct ChatResponse: Codable {
@@ -36,9 +37,10 @@ class APIClient: ObservableObject {
     }
 
     func sendChatMessage(message: String, childName: String, history: [[String: String]]) async throws -> ChatResponse {
-        // Retry up to 3 times — the Gemini backend occasionally returns 500/503
-        // ("This model is currently experiencing high demand"). A short backoff
-        // almost always resolves it on the second try.
+        // Read paired family_id from UserDefaults so commands get queued to the child device.
+        let familyID = UserDefaults.standard.string(forKey: "evlin.familyID")
+
+        // Retry up to 3 times — Gemini sometimes returns 500/503.
         var lastStatus = 0
         for attempt in 0..<3 {
             let url = URL(string: "\(baseURL)/parent/chat")!
@@ -47,7 +49,12 @@ class APIClient: ObservableObject {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.timeoutInterval = 30
 
-            let body = ChatRequest(message: message, child_name: childName, history: history)
+            let body = ChatRequest(
+                message: message,
+                child_name: childName,
+                history: history,
+                family_id: familyID
+            )
             request.httpBody = try JSONEncoder().encode(body)
 
             do {
