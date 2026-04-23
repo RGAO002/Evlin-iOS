@@ -10,9 +10,15 @@ class APIClient: ObservableObject {
         let saved = UserDefaults.standard.string(forKey: "serverURL") ?? ""
         // Ignore old localhost/LAN URLs
         let useSaved = !saved.isEmpty && !saved.contains("192.168") && !saved.contains("localhost")
-        self.baseURL = baseURL.isEmpty
+        let raw = baseURL.isEmpty
             ? (useSaved ? saved : Self.defaultURL)
             : baseURL
+        // Guard against missing scheme (user typed raw host in Settings)
+        if raw.hasPrefix("http://") || raw.hasPrefix("https://") {
+            self.baseURL = raw
+        } else {
+            self.baseURL = "https://" + raw
+        }
     }
 
     // MARK: - Parent Chat
