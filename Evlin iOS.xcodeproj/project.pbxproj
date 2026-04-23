@@ -12,6 +12,13 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
+		B6F164562F999B35008E858C /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = B6FA97182F81BB9400DA619E /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = B6FA971F2F81BB9400DA619E;
+			remoteInfo = "Evlin iOS";
+		};
 		B6FA973B2F81C6A000DA619E /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = B6FA97182F81BB9400DA619E /* Project object */;
@@ -36,6 +43,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		B6F164522F999B35008E858C /* Evlin iOSTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "Evlin iOSTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		B6FA97202F81BB9400DA619E /* Evlin iOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Evlin iOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		B6FA97322F81C6A000DA619E /* EvlinDeviceActivityMonitor.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = EvlinDeviceActivityMonitor.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		B6FA97342F81C6A000DA619E /* DeviceActivity.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = DeviceActivity.framework; path = System/Library/Frameworks/DeviceActivity.framework; sourceTree = SDKROOT; };
@@ -50,6 +58,15 @@
 			);
 			target = B6FA971F2F81BB9400DA619E /* Evlin iOS */;
 		};
+		B6F1645E2F999D8A008E858C /* Exceptions for "Evlin iOS" folder in "EvlinDeviceActivityMonitor" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Models/ActiveLock.swift,
+				Models/CommandModels.swift,
+				Models/LockTier.swift,
+			);
+			target = B6FA97312F81C6A000DA619E /* EvlinDeviceActivityMonitor */;
+		};
 		B6FA973E2F81C6A000DA619E /* Exceptions for "EvlinDeviceActivityMonitor" folder in "EvlinDeviceActivityMonitor" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
@@ -60,10 +77,16 @@
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
+		B6F164532F999B35008E858C /* Evlin iOSTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = "Evlin iOSTests";
+			sourceTree = "<group>";
+		};
 		B6FA97222F81BB9400DA619E /* Evlin iOS */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
 				B63459912F8305CB002D7E5D /* Exceptions for "Evlin iOS" folder in "Evlin iOS" target */,
+				B6F1645E2F999D8A008E858C /* Exceptions for "Evlin iOS" folder in "EvlinDeviceActivityMonitor" target */,
 			);
 			path = "Evlin iOS";
 			sourceTree = "<group>";
@@ -79,6 +102,13 @@
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		B6F1644F2F999B35008E858C /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		B6FA971D2F81BB9400DA619E /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -102,6 +132,7 @@
 			children = (
 				B6FA97222F81BB9400DA619E /* Evlin iOS */,
 				B6FA97362F81C6A000DA619E /* EvlinDeviceActivityMonitor */,
+				B6F164532F999B35008E858C /* Evlin iOSTests */,
 				B6FA97332F81C6A000DA619E /* Frameworks */,
 				B6FA97212F81BB9400DA619E /* Products */,
 			);
@@ -112,6 +143,7 @@
 			children = (
 				B6FA97202F81BB9400DA619E /* Evlin iOS.app */,
 				B6FA97322F81C6A000DA619E /* EvlinDeviceActivityMonitor.appex */,
+				B6F164522F999B35008E858C /* Evlin iOSTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -127,6 +159,29 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		B6F164512F999B35008E858C /* Evlin iOSTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = B6F164582F999B35008E858C /* Build configuration list for PBXNativeTarget "Evlin iOSTests" */;
+			buildPhases = (
+				B6F1644E2F999B35008E858C /* Sources */,
+				B6F1644F2F999B35008E858C /* Frameworks */,
+				B6F164502F999B35008E858C /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				B6F164572F999B35008E858C /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				B6F164532F999B35008E858C /* Evlin iOSTests */,
+			);
+			name = "Evlin iOSTests";
+			packageProductDependencies = (
+			);
+			productName = "Evlin iOSTests";
+			productReference = B6F164522F999B35008E858C /* Evlin iOSTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 		B6FA971F2F81BB9400DA619E /* Evlin iOS */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = B6FA972B2F81BB9500DA619E /* Build configuration list for PBXNativeTarget "Evlin iOS" */;
@@ -183,6 +238,10 @@
 				LastSwiftUpdateCheck = 2630;
 				LastUpgradeCheck = 2630;
 				TargetAttributes = {
+					B6F164512F999B35008E858C = {
+						CreatedOnToolsVersion = 26.3;
+						TestTargetID = B6FA971F2F81BB9400DA619E;
+					};
 					B6FA971F2F81BB9400DA619E = {
 						CreatedOnToolsVersion = 26.3;
 					};
@@ -207,11 +266,19 @@
 			targets = (
 				B6FA971F2F81BB9400DA619E /* Evlin iOS */,
 				B6FA97312F81C6A000DA619E /* EvlinDeviceActivityMonitor */,
+				B6F164512F999B35008E858C /* Evlin iOSTests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		B6F164502F999B35008E858C /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		B6FA971E2F81BB9400DA619E /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -229,6 +296,13 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		B6F1644E2F999B35008E858C /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		B6FA971C2F81BB9400DA619E /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -246,6 +320,11 @@
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
+		B6F164572F999B35008E858C /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = B6FA971F2F81BB9400DA619E /* Evlin iOS */;
+			targetProxy = B6F164562F999B35008E858C /* PBXContainerItemProxy */;
+		};
 		B6FA973C2F81C6A000DA619E /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = B6FA97312F81C6A000DA619E /* EvlinDeviceActivityMonitor */;
@@ -254,6 +333,50 @@
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
+		B6F164592F999B35008E858C /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 2YH938GFHS;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.evlin.Evlin-iOSTests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Evlin iOS.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Evlin iOS";
+			};
+			name = Debug;
+		};
+		B6F1645A2F999B35008E858C /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 2YH938GFHS;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.evlin.Evlin-iOSTests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Evlin iOS.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Evlin iOS";
+			};
+			name = Release;
+		};
 		B6FA97292F81BB9500DA619E /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -510,6 +633,15 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		B6F164582F999B35008E858C /* Build configuration list for PBXNativeTarget "Evlin iOSTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				B6F164592F999B35008E858C /* Debug */,
+				B6F1645A2F999B35008E858C /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 		B6FA971B2F81BB9400DA619E /* Build configuration list for PBXProject "Evlin iOS" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
