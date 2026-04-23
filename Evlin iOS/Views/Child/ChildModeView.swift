@@ -12,6 +12,9 @@ struct ChildModeView: View {
     @State private var lastAction = ""
     @State private var pollTimer: Timer?
     @State private var isLocked = false
+    @State private var activeLockCount = 0
+    @State private var activeLockNames: [String] = []
+    @State private var lockStatusTimer: Timer?
     @State private var showSettings = false
 
     var body: some View {
@@ -24,14 +27,14 @@ struct ChildModeView: View {
             VStack(spacing: Spacing.section) {
                 Spacer()
 
-                // Lock status icon
+                // Lock status icon — reflects ActiveLockStore state
                 Circle()
-                    .fill(isLocked ? Color.evError.opacity(0.1) : Color.evSecondary.opacity(0.1))
+                    .fill((activeLockCount > 0 || isLocked) ? Color.evError.opacity(0.1) : Color.evSecondary.opacity(0.1))
                     .frame(width: 120, height: 120)
                     .overlay(
-                        Image(systemName: isLocked ? "lock.fill" : "lock.open.fill")
+                        Image(systemName: (activeLockCount > 0 || isLocked) ? "lock.fill" : "lock.open.fill")
                             .font(.system(size: 48))
-                            .foregroundStyle(isLocked ? Color.evError : Color.evSecondary)
+                            .foregroundStyle((activeLockCount > 0 || isLocked) ? Color.evError : Color.evSecondary)
                     )
 
                 VStack(spacing: Spacing.md) {
@@ -39,9 +42,19 @@ struct ChildModeView: View {
                         .font(.evHeadlineMedium)
                         .foregroundStyle(Color.evPrimary)
 
-                    Text(isLocked ? "Device Restricted" : "Device Unlocked")
+                    Text(activeLockCount > 0
+                         ? "\(activeLockCount) app\(activeLockCount == 1 ? "" : "s") locked"
+                         : (isLocked ? "Device Restricted" : "No active locks"))
                         .font(.evHeadlineSmall)
-                        .foregroundStyle(isLocked ? Color.evError : Color.evSecondary)
+                        .foregroundStyle((activeLockCount > 0 || isLocked) ? Color.evError : Color.evSecondary)
+
+                    if !activeLockNames.isEmpty {
+                        Text(activeLockNames.joined(separator: ", "))
+                            .font(.evBodySmall)
+                            .foregroundStyle(Color.evOnSurfaceVariant)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, Spacing.section)
+                    }
                 }
 
                 Text(statusText)
@@ -127,8 +140,14 @@ struct ChildModeView: View {
         .onDisappear {
             pollTimer?.invalidate()
         }
-        .onAppear { startNewPoller() }
-        .onDisappear { CommandPoller.shared.stop() }
+        .onAppear {
+            startNewPoller()
+            startLockStatusTimer()
+        }
+        .onDisappear {
+            CommandPoller.shared.stop()
+            lockStatusTimer?.invalidate()
+        }
     }
 
     /// Starts the three-tier CommandPoller if we have a paired child device ID.
@@ -142,6 +161,29 @@ struct ChildModeView: View {
         }
         CommandPoller.shared.start(deviceID: deviceID, apiClient: apiClient)
         print("[ChildModeView] CommandPoller started for device \(deviceID)")
+    }
+
+    /// Refresh lock status from ActiveLockStore every 3s so UI stays in sync
+    /// with the real ManagedSettings state that CommandPoller mutated.
+    private func startLockStatusTimer() {
+        refreshLockStatus()
+        lockStatusTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { _ in
+            Task { @MainActor in refreshLockStatus() }
+        }
+    }
+
+    private func refreshLockStatus() {
+        Task {
+            let locks = await ActiveLockStore.shared.current()
+            // sweepExpired drops anything past its TTL — keeps UI honest
+            _ = await ActiveLockStore.shared.sweepExpired()
+            let refreshed = await ActiveLockStore.shared.current()
+            await MainActor.run {
+                activeLockCount = refreshed.count
+                activeLockNames = refreshed.map(\.displayName)
+            }
+            _ = locks
+        }
     }
 
     // MARK: - Polling
