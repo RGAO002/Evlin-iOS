@@ -1,6 +1,9 @@
 import SwiftUI
 import UIKit
 
+/// Child side: generates a family on backend, displays the 6-digit code.
+/// Polls for parent join in background; user can proceed to next step
+/// without waiting (parent has a 10-min window to pair).
 struct EnterPairingCodeStep: View {
     @EnvironmentObject var apiClient: APIClient
     @Binding var familyID: UUID?
@@ -8,17 +11,20 @@ struct EnterPairingCodeStep: View {
     @Binding var protectionMode: String
     let onContinue: () -> Void
 
-    @State private var code: String = ""
-    @State private var error: String?
-    @State private var pairing = false
+    @State private var pairingCode: String = ""
+    @State private var status: String = "Generating code…"
+    @State private var parentJoined = false
+    @State private var errorText: String?
+    @State private var creating = false
 
     var body: some View {
         VStack(spacing: Spacing.section) {
             VStack(spacing: Spacing.lg) {
-                Text("Enter Pairing Code")
+                Text("Pair with your parent")
                     .font(.evHeadlineLarge)
                     .foregroundStyle(Color.evPrimary)
-                Text("Enter the 6-digit code from your parent's Evlin.")
+                    .multilineTextAlignment(.center)
+                Text("Show this code to your parent. Have them open Evlin on their phone, choose Parent mode, and enter it.")
                     .font(.evBodyMedium)
                     .multilineTextAlignment(.center)
                     .foregroundStyle(Color.evOnSurfaceVariant)
@@ -26,83 +32,155 @@ struct EnterPairingCodeStep: View {
             }
             .padding(.top, Spacing.section)
 
-            VStack(alignment: .leading, spacing: Spacing.sm) {
-                Text("PAIRING CODE")
-                    .font(.evLabelMedium)
-                    .foregroundStyle(Color.evOutline)
-                    .evLabelStyle()
-                TextField("123456", text: $code)
-                    .keyboardType(.numberPad)
-                    .font(.system(size: 48, weight: .bold, design: .monospaced))
-                    .foregroundStyle(Color.evPrimary)
-                    .tracking(8)
-                    .multilineTextAlignment(.center)
-                    .padding(Spacing.lg)
-                    .background(Color.evSurfaceContainerHigh)
-                    .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md))
-                    .onChange(of: code) { _, newValue in
-                        let digitsOnly = newValue.filter(\.isNumber)
-                        if digitsOnly != newValue { code = digitsOnly }
-                        if digitsOnly.count == 6 && !pairing {
-                            Task { await pair() }
-                        }
-                    }
-            }
+            Spacer()
 
-            if let err = error {
-                Text(err)
+            Text(pairingCode.isEmpty ? "------" : insertSpaces(pairingCode))
+                .font(.system(size: 48, weight: .bold, design: .monospaced))
+                .foregroundStyle(Color.evPrimary)
+                .tracking(8)
+                .padding(.vertical, Spacing.section)
+                .frame(maxWidth: .infinity)
+                .background(
+                    RoundedRectangle(cornerRadius: CornerRadius.xl)
+                        .fill(Color.evSurfaceContainerLowest)
+                        .evGhostBorder()
+                )
+
+            HStack(spacing: Spacing.md) {
+                if parentJoined {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(Color.evSecondary)
+                } else if errorText == nil && !pairingCode.isEmpty {
+                    ProgressView().controlSize(.small)
+                }
+                Text(status)
                     .font(.evBodySmall)
-                    .foregroundStyle(Color.evError)
-                    .multilineTextAlignment(.center)
+                    .foregroundStyle(parentJoined ? Color.evSecondary : Color.evOnSurfaceVariant)
             }
 
-            if pairing {
-                ProgressView()
+            if let e = errorText {
+                VStack(spacing: Spacing.md) {
+                    Text(e)
+                        .font(.evBodySmall)
+                        .foregroundStyle(Color.evError)
+                        .multilineTextAlignment(.center)
+
+                    HStack(spacing: Spacing.md) {
+                        Button("Use default server") {
+                            apiClient.saveServerURL(APIClient.defaultURL)
+                            errorText = nil
+                            Task { await createFamily() }
+                        }
+                        .font(.evBodySmall)
+                        .foregroundStyle(Color.evPrimary)
+
+                        Button("Retry") {
+                            errorText = nil
+                            Task { await createFamily() }
+                        }
+                        .font(.evBodySmall)
+                        .foregroundStyle(Color.evPrimary)
+                    }
+                }
+                .padding(.horizontal, Spacing.xl)
             }
 
             Spacer()
+
+            Button(action: onContinue) {
+                Text(parentJoined ? "Continue" : "Continue (parent can pair later)")
+                    .font(.evLabelLarge)
+                    .frame(maxWidth: .infinity)
+            }
+            .foregroundStyle(Color.evOnPrimary)
+            .padding(.vertical, Spacing.lg)
+            .background(
+                RoundedRectangle(cornerRadius: CornerRadius.md)
+                    .fill(pairingCode.isEmpty ? Color.evOutline : Color.evPrimary)
+            )
+            .disabled(pairingCode.isEmpty)
         }
         .padding(Spacing.xl)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.evSurface)
+        .task { await createFamily() }
     }
 
-    private func pair() async {
-        pairing = true
-        defer { pairing = false }
-        error = nil
+    private func insertSpaces(_ s: String) -> String {
+        s.map(String.init).joined(separator: " ")
+    }
+
+    private func createFamily() async {
+        guard !creating else { return }
+        creating = true
+        defer { creating = false }
+        status = "Generating code…"
+
+        guard let url = URL(string: "\(apiClient.baseURL)/family/create"),
+              url.scheme != nil else {
+            errorText = "Server URL is invalid. Tap 'Use default server' below."
+            status = "Error"
+            return
+        }
+
         do {
-            let url = URL(string: "\(apiClient.baseURL)/family/pair")!
             var req = URLRequest(url: url)
             req.httpMethod = "POST"
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            let body: [String: Any] = [
-                "code": code,
-                "device_label": UIDevice.current.name,
-            ]
-            req.httpBody = try JSONSerialization.data(withJSONObject: body)
-            let (data, resp) = try await URLSession.shared.data(for: req)
-            guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
-                error = "Invalid or expired code."
+            req.timeoutInterval = 15
+            req.httpBody = try JSONSerialization.data(withJSONObject: [
+                "child_device_label": UIDevice.current.name,
+                "protection_mode": "std",  // placeholder — parent overrides in /pair
+            ])
+            let (data, response) = try await URLSession.shared.data(for: req)
+            if let http = response as? HTTPURLResponse, http.statusCode != 200 {
+                let body = String(data: data, encoding: .utf8) ?? "?"
+                errorText = "Server returned \(http.statusCode). \(body.prefix(200))"
+                status = "Error"
                 return
             }
             struct R: Codable {
                 let family_id: UUID
                 let child_device_id: UUID
-                let parent_device_id: UUID
-                let protection_mode: String
+                let pairing_code: String
+                let code_expires_at: Date
             }
-            let r = try JSONDecoder().decode(R.self, from: data)
+            let dec = JSONDecoder()
+            dec.dateDecodingStrategy = .iso8601
+            let r = try dec.decode(R.self, from: data)
             familyID = r.family_id
             childDeviceID = r.child_device_id
-            protectionMode = r.protection_mode
-            // Persist for later CommandPoller start
+            pairingCode = r.pairing_code
+
             UserDefaults.standard.set(r.family_id.uuidString, forKey: "evlin.familyID")
             UserDefaults.standard.set(r.child_device_id.uuidString, forKey: "evlin.childDeviceID")
-            UserDefaults.standard.set(r.protection_mode, forKey: "evlin.protectionMode")
-            onContinue()
+
+            status = "Waiting for parent to pair…"
+            startPolling()
         } catch {
-            self.error = "Could not pair: \(error.localizedDescription)"
+            errorText = error.localizedDescription
+            status = "Error"
+        }
+    }
+
+    private func startPolling() {
+        Task {
+            while !parentJoined && !Task.isCancelled && !pairingCode.isEmpty {
+                do {
+                    var comps = URLComponents(string: "\(apiClient.baseURL)/family/pairing-status")!
+                    comps.queryItems = [URLQueryItem(name: "code", value: pairingCode)]
+                    let (data, _) = try await URLSession.shared.data(from: comps.url!)
+                    struct R: Codable { let used: Bool }
+                    if let r = try? JSONDecoder().decode(R.self, from: data), r.used {
+                        await MainActor.run {
+                            parentJoined = true
+                            status = "Parent paired ✓"
+                        }
+                        break
+                    }
+                } catch {}
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+            }
         }
     }
 }
