@@ -8,7 +8,7 @@ import ManagedSettings
 /// MVP delivery tier: foreground-only. APNs silent-push integration is Phase 5.
 /// BGAppRefreshTask catchup is Phase 5.
 @MainActor
-final class CommandPoller: ObservableObject {
+final class CommandPoller {
     static let shared = CommandPoller()
 
     private var timer: Timer?
