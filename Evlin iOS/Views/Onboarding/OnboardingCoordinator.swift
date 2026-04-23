@@ -40,6 +40,42 @@ struct OnboardingCoordinator: View {
     @State private var childDeviceID: UUID? = nil
 
     var body: some View {
+        ZStack(alignment: .topTrailing) {
+            stepBody
+
+            #if DEBUG
+            // Debug escape hatch — always available during onboarding
+            Menu {
+                Button("Skip to Parent mode (test)") {
+                    appMode = "parent"
+                    onboardingComplete = true
+                }
+                Button("Skip to Child mode (test)") {
+                    appMode = "child"
+                    onboardingComplete = true
+                }
+                Button("Reset everything (hard)", role: .destructive) {
+                    UserDefaults.standard.removeObject(forKey: "onboardingComplete")
+                    UserDefaults.standard.removeObject(forKey: "appMode")
+                    step = .welcome
+                    childName = ""
+                    familyID = nil
+                }
+            } label: {
+                Image(systemName: "ladybug.fill")
+                    .font(.system(size: 14))
+                    .foregroundStyle(.orange)
+                    .padding(12)
+                    .background(Circle().fill(Color.black.opacity(0.08)))
+            }
+            .padding(.top, 60)
+            .padding(.trailing, 12)
+            #endif
+        }
+    }
+
+    @ViewBuilder
+    private var stepBody: some View {
         Group {
             switch step {
             case .welcome:
