@@ -10,6 +10,33 @@ struct SpikeView: View {
     var body: some View {
         NavigationStack {
             List {
+                Section("Reset (for testing)") {
+                    Button("Reset onboarding + appMode") {
+                        UserDefaults.standard.removeObject(forKey: "onboardingComplete")
+                        UserDefaults.standard.removeObject(forKey: "appMode")
+                        UserDefaults.standard.removeObject(forKey: "evlin.familyID")
+                        UserDefaults.standard.removeObject(forKey: "evlin.childDeviceID")
+                        UserDefaults.standard.removeObject(forKey: "evlin.protectionMode")
+                        record("onboarding reset — close + reopen app to re-enter onboarding")
+                    }
+                    .foregroundStyle(.red)
+
+                    Button("Clear all Evlin UserDefaults (hard reset)") {
+                        let keys = UserDefaults.standard.dictionaryRepresentation().keys
+                        for k in keys where k.hasPrefix("evlin") || k == "onboardingComplete" || k == "appMode" || k == "childId" || k == "childName" || k == "serverURL" || k == "targetChildId" {
+                            UserDefaults.standard.removeObject(forKey: k)
+                        }
+                        // Also clear the shared App Group UserDefaults (ActiveLockStore, LocalAliasStore)
+                        if let shared = UserDefaults(suiteName: "group.com.evlin.ios") {
+                            for k in shared.dictionaryRepresentation().keys {
+                                shared.removeObject(forKey: k)
+                            }
+                        }
+                        record("HARD reset complete — close + reopen app")
+                    }
+                    .foregroundStyle(.red)
+                }
+
                 Section("Authorization") {
                     Button("Check auth status") {
                         let status = AuthorizationCenter.shared.authorizationStatus
