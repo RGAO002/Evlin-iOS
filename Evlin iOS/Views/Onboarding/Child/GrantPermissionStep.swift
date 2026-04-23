@@ -56,7 +56,7 @@ struct GrantPermissionStep: View {
         requesting = true
         defer { requesting = false }
         errorText = nil
-        let memberType: FamilyControlsMemberType = (protectionMode == "max") ? .child : .individual
+        let memberType: FamilyControlsMember = (protectionMode == "max") ? .child : .individual
         do {
             try await AuthorizationCenter.shared.requestAuthorization(for: memberType)
             granted = true
