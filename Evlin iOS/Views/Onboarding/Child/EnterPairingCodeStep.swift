@@ -143,11 +143,11 @@ struct EnterPairingCodeStep: View {
                 let family_id: UUID
                 let child_device_id: UUID
                 let pairing_code: String
-                let code_expires_at: Date
+                // code_expires_at intentionally omitted — Swift's strict ISO8601
+                // decoder doesn't handle the fractional seconds in the server's
+                // timestamp format. We don't use it on the client.
             }
-            let dec = JSONDecoder()
-            dec.dateDecodingStrategy = .iso8601
-            let r = try dec.decode(R.self, from: data)
+            let r = try JSONDecoder().decode(R.self, from: data)
             familyID = r.family_id
             childDeviceID = r.child_device_id
             pairingCode = r.pairing_code
