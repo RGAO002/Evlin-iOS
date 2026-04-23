@@ -10,6 +10,22 @@ struct SpikeView: View {
     var body: some View {
         NavigationStack {
             List {
+                Section("Authorization") {
+                    Button("Check auth status") {
+                        let status = AuthorizationCenter.shared.authorizationStatus
+                        record("auth status = \(status)")
+                    }
+                    Button("Request authorization (.individual)") {
+                        Task {
+                            do {
+                                try await AuthorizationCenter.shared.requestAuthorization(for: .individual)
+                                await MainActor.run { record("auth granted ✓") }
+                            } catch {
+                                await MainActor.run { record("auth failed: \(error)") }
+                            }
+                        }
+                    }
+                }
                 Section("Bundle ID block") {
                     Button("Block Instagram") { blockInstagram() }
                     Button("Block Roblox") { blockRoblox() }

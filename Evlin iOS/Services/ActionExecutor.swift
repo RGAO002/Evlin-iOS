@@ -9,7 +9,9 @@ final class ActionExecutor: @unchecked Sendable {
     private let activityCenter = DeviceActivityCenter()
 
     func execute(_ cmd: LockCommand, blob: Data? = nil) async -> AckResult {
-        guard ScreenTimeManager.shared.isAuthorized else {
+        // Read live auth status (not cached) — ScreenTimeManager.shared.isAuthorized
+        // is set only at init time and won't reflect authorization granted later.
+        guard AuthorizationCenter.shared.authorizationStatus == .approved else {
             return .failed(.notAuthorized)
         }
 
