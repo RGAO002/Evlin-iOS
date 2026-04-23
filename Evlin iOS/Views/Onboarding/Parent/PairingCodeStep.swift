@@ -13,6 +13,7 @@ struct PairingCodeStep: View {
     @State private var status: String = "Generating code…"
     @State private var childJoined = false
     @State private var errorText: String?
+    @State private var creating = false
 
     var body: some View {
         VStack(spacing: Spacing.section) {
@@ -20,7 +21,7 @@ struct PairingCodeStep: View {
                 Text("Pairing Code")
                     .font(.evHeadlineLarge)
                     .foregroundStyle(Color.evPrimary)
-                Text("Open Evlin on \(childName.isEmpty ? "your child" : childName)'s phone and enter this code.")
+                Text("Open Evlin on your child's phone and enter this code.")
                     .font(.evBodyMedium)
                     .multilineTextAlignment(.center)
                     .foregroundStyle(Color.evOnSurfaceVariant)
@@ -46,20 +47,50 @@ struct PairingCodeStep: View {
                 if childJoined {
                     Image(systemName: "checkmark.circle.fill")
                         .foregroundStyle(Color.evSecondary)
-                } else {
+                } else if errorText == nil {
                     ProgressView()
                         .controlSize(.small)
                 }
                 Text(status)
                     .font(.evBodySmall)
-                    .foregroundStyle(Color.evOnSurfaceVariant)
+                    .foregroundStyle(childJoined ? Color.evSecondary : Color.evOnSurfaceVariant)
             }
 
             if let e = errorText {
-                Text(e)
-                    .font(.evBodySmall)
-                    .foregroundStyle(Color.evError)
-                    .multilineTextAlignment(.center)
+                VStack(spacing: Spacing.md) {
+                    Text(e)
+                        .font(.evBodySmall)
+                        .foregroundStyle(Color.evError)
+                        .multilineTextAlignment(.center)
+
+                    Text("Server:")
+                        .font(.caption2)
+                        .foregroundStyle(Color.evOnSurfaceVariant)
+                    Text(apiClient.baseURL)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(Color.evOnSurfaceVariant)
+                        .multilineTextAlignment(.center)
+
+                    HStack(spacing: Spacing.md) {
+                        Button("Use default server") {
+                            apiClient.saveServerURL(APIClient.defaultURL)
+                            errorText = nil
+                            status = "Retrying…"
+                            Task { await createFamily() }
+                        }
+                        .font(.evBodySmall)
+                        .foregroundStyle(Color.evPrimary)
+
+                        Button("Retry") {
+                            errorText = nil
+                            status = "Retrying…"
+                            Task { await createFamily() }
+                        }
+                        .font(.evBodySmall)
+                        .foregroundStyle(Color.evPrimary)
+                    }
+                }
+                .padding(.horizontal, Spacing.xl)
             }
 
             Spacer()
@@ -88,17 +119,39 @@ struct PairingCodeStep: View {
     }
 
     private func createFamily() async {
+        guard !creating else { return }
+        creating = true
+        defer { creating = false }
+        status = "Generating code…"
+        errorText = nil
+
+        // Guard against malformed baseURL (e.g. missing scheme from user input)
+        guard let url = URL(string: "\(apiClient.baseURL)/family/create"),
+              url.scheme != nil else {
+            errorText = "Server URL is invalid. Tap 'Use default server' below."
+            status = "Error"
+            return
+        }
+
         do {
-            let url = URL(string: "\(apiClient.baseURL)/family/create")!
             var req = URLRequest(url: url)
             req.httpMethod = "POST"
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            let body: [String: Any] = [
-                "child_name": childName,
+            req.timeoutInterval = 15
+            let effectiveChildName = childName.trimmingCharacters(in: .whitespaces).isEmpty
+                ? "Child"
+                : childName
+            req.httpBody = try JSONSerialization.data(withJSONObject: [
+                "child_name": effectiveChildName,
                 "protection_mode": protectionMode,
-            ]
-            req.httpBody = try JSONSerialization.data(withJSONObject: body)
-            let (data, _) = try await URLSession.shared.data(for: req)
+            ])
+            let (data, response) = try await URLSession.shared.data(for: req)
+            if let http = response as? HTTPURLResponse, http.statusCode != 200 {
+                let body = String(data: data, encoding: .utf8) ?? "?"
+                errorText = "Server returned \(http.statusCode). \(body.prefix(200))"
+                status = "Error"
+                return
+            }
             struct R: Codable {
                 let family_id: UUID
                 let parent_device_id: UUID
@@ -112,11 +165,11 @@ struct PairingCodeStep: View {
             parentDeviceID = r.parent_device_id
             pairingCode = r.pairing_code
             codeExpiresAt = r.code_expires_at
-            status = "Waiting for \(childName.isEmpty ? "child" : childName)'s device…"
+            status = "Waiting for child device…"
             startPolling()
         } catch {
-            status = "Error"
             errorText = error.localizedDescription
+            status = "Error"
         }
     }
 
@@ -131,7 +184,7 @@ struct PairingCodeStep: View {
                     if let r = try? JSONDecoder().decode(R.self, from: data), r.used {
                         await MainActor.run {
                             childJoined = true
-                            status = "\(childName.isEmpty ? "Child" : childName)'s phone connected"
+                            status = "Child's phone connected"
                         }
                         break
                     }

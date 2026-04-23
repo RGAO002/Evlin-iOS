@@ -86,7 +86,7 @@ struct OnboardingCoordinator: View {
                     switch mode {
                     case .parent:
                         appMode = "parent"
-                        step = .parentAddChild
+                        step = .parentProtectionLevel   // AddChildStep removed — name inferred from child device label
                     case .child:
                         appMode = "child"
                         step = .childEnterPairingCode
@@ -96,7 +96,8 @@ struct OnboardingCoordinator: View {
             // MARK: - Parent flow
 
             case .parentAddChild:
-                AddChildStep(name: $childName) { step = .parentProtectionLevel }
+                // Legacy case kept for enum compatibility; route straight through
+                Color.clear.onAppear { step = .parentProtectionLevel }
 
             case .parentProtectionLevel:
                 ProtectionLevelStep(mode: $protectionMode) { step = .parentPairingCode }
