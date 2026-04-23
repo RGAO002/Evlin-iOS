@@ -91,22 +91,22 @@ struct GrantPermissionStep: View {
         requesting = true
         defer { requesting = false }
         errorText = nil
-        // MVP: always request .individual.
-        // Rationale (per Phase 0 spike): .individual grants access to everything
-        // we need — blockedApplications, denyAppRemoval, shield.applications,
-        // DeviceActivity. The only capability unique to .child auth is
-        // "parent device picker shows child apps" (remote list management),
-        // which isn't wired in MVP. Using .individual avoids the Child Apple ID
-        // setup friction entirely. When we later ship remote list management,
-        // we'll add a separate upgrade flow that requests .child on top.
+        // Max mode requires Child Apple ID (.child auth); Standard uses .individual.
+        let memberType: FamilyControlsMember = (protectionMode == "max") ? .child : .individual
         do {
-            try await AuthorizationCenter.shared.requestAuthorization(for: .individual)
+            try await AuthorizationCenter.shared.requestAuthorization(for: memberType)
             granted = true
             status = "Authorization granted"
-            // Notify backend — parent's WaitForAuth (if Max onboarding used) stops polling.
-            await grantOnBackend()
+            if protectionMode == "max" {
+                // Notify backend so parent's WaitForAuth step can proceed
+                await grantOnBackend()
+            }
         } catch {
-            errorText = "Authorization failed: \(error.localizedDescription)"
+            if protectionMode == "max" {
+                errorText = "Authorization failed — confirm this phone is signed in with the Child Apple ID, then try again."
+            } else {
+                errorText = "Authorization failed: \(error.localizedDescription)"
+            }
         }
     }
 

@@ -33,7 +33,7 @@ struct OnboardingCoordinator: View {
 
     // Shared state threaded between steps
     @State private var childName: String = ""
-    @State private var protectionMode: String = "max"   // default per product direction
+    @State private var protectionMode: String = "std"   // MVP default — Max is Beta (requires Child Apple ID)
     @State private var pairingCode: String = ""
     @State private var familyID: UUID? = nil
     @State private var parentDeviceID: UUID? = nil

@@ -18,27 +18,27 @@ struct ProtectionLevelStep: View {
 
             VStack(spacing: Spacing.lg) {
                 card(
-                    title: "Maximum",
+                    title: "Standard",
                     showRecommended: true,
                     bullets: [
-                        "Pick your child's apps from THIS phone (via Family Sharing)",
-                        "Evlin cannot be uninstalled",
-                        "Requires Child Apple ID (5 min one-time setup)",
-                    ],
-                    selected: mode == "max",
-                    onTap: { mode = "max" }
-                )
-
-                card(
-                    title: "Standard",
-                    showRecommended: false,
-                    bullets: [
-                        "Pick apps on the child's phone directly",
-                        "Evlin still cannot be uninstalled (programmatic protection)",
-                        "No extra account — simpler setup",
+                        "All locking features — block apps by name, lock categories, schedules",
+                        "Evlin protected from deletion (programmatic)",
+                        "Works with any Apple ID — no extra setup",
                     ],
                     selected: mode == "std",
                     onTap: { mode = "std" }
+                )
+
+                card(
+                    title: "Maximum (Beta)",
+                    showRecommended: false,
+                    bullets: [
+                        "Everything in Standard, PLUS:",
+                        "Build app lists from YOUR phone (Family Sharing)",
+                        "Requires Child Apple ID set up on child's device",
+                    ],
+                    selected: mode == "max",
+                    onTap: { mode = "max" }
                 )
             }
 
