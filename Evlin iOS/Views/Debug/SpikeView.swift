@@ -19,6 +19,46 @@ struct SpikeView: View {
                     Button("Enable") { setDenyRemoval(true) }
                     Button("Disable") { setDenyRemoval(false) }
                 }
+                Section("ActionExecutor") {
+                    Button("Lock IG for 1 min") {
+                        Task {
+                            let cmd = LockCommand(
+                                id: UUID(),
+                                action: .lock,
+                                tier: .exactBundle,
+                                target: CommandTarget(
+                                    bundleID: "com.burbn.instagram",
+                                    originalRequest: "IG",
+                                    targetDisplay: "Instagram"
+                                ),
+                                durationMinutes: 1,
+                                issuedAt: Date()
+                            )
+                            let result = await ActionExecutor.shared.execute(cmd)
+                            await MainActor.run { record("execute lock: \(result)") }
+                        }
+                    }
+                    Button("Unlock everything") {
+                        Task {
+                            let cmd = LockCommand(
+                                id: UUID(),
+                                action: .unlockAll,
+                                tier: nil,
+                                target: CommandTarget(originalRequest: "all"),
+                                durationMinutes: nil,
+                                issuedAt: Date()
+                            )
+                            let result = await ActionExecutor.shared.execute(cmd)
+                            await MainActor.run { record("execute unlockAll: \(result)") }
+                        }
+                    }
+                    Button("Show active locks") {
+                        Task {
+                            let locks = await ActiveLockStore.shared.current()
+                            await MainActor.run { record("active locks: \(locks.count) — \(locks.map(\.displayName))") }
+                        }
+                    }
+                }
                 Section("Log") {
                     ForEach(log, id: \.self) { Text($0).font(.caption.monospaced()) }
                 }
