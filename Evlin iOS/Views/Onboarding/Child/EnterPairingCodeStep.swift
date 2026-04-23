@@ -34,11 +34,14 @@ struct EnterPairingCodeStep: View {
 
             Spacer()
 
-            Text(pairingCode.isEmpty ? "------" : insertSpaces(pairingCode))
-                .font(.system(size: 48, weight: .bold, design: .monospaced))
+            Text(pairingCode.isEmpty ? "------" : pairingCode)
+                .font(.system(size: 44, weight: .bold, design: .monospaced))
                 .foregroundStyle(Color.evPrimary)
-                .tracking(8)
+                .tracking(6)
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
                 .padding(.vertical, Spacing.section)
+                .padding(.horizontal, Spacing.lg)
                 .frame(maxWidth: .infinity)
                 .background(
                     RoundedRectangle(cornerRadius: CornerRadius.xl)
