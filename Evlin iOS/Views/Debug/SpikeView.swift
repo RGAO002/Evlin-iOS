@@ -92,6 +92,15 @@ struct SpikeView: View {
                     }
                 }
 
+                Section("Diagnostics") {
+                    Button("Poll child commands NOW") {
+                        Task { await pollChildCommandsNow() }
+                    }
+                    Button("Show last command in queue") {
+                        Task { await showLastQueuedCommand() }
+                    }
+                }
+
                 Section("Authorization") {
                     Button("Check auth status") {
                         let status = AuthorizationCenter.shared.authorizationStatus
@@ -268,6 +277,43 @@ struct SpikeView: View {
             }
         } catch {
             await MainActor.run { record("setup ERROR: \(error.localizedDescription)") }
+        }
+    }
+
+    private func pollChildCommandsNow() async {
+        guard let idStr = UserDefaults.standard.string(forKey: "evlin.childDeviceID"),
+              let deviceID = UUID(uuidString: idStr) else {
+            await MainActor.run { record("no evlin.childDeviceID in UserDefaults") }
+            return
+        }
+        do {
+            let cmds = try await apiClient.pollCommands(deviceID: deviceID)
+            await MainActor.run {
+                record("pollCommands → \(cmds.count) pending")
+                for c in cmds.prefix(3) {
+                    record("  \(c.action) \(c.tier ?? "?") target=\(c.target.target_display ?? c.target.original_request)")
+                }
+            }
+        } catch {
+            await MainActor.run { record("poll error: \(error.localizedDescription)") }
+        }
+    }
+
+    private func showLastQueuedCommand() async {
+        guard let idStr = UserDefaults.standard.string(forKey: "evlin.childDeviceID"),
+              let deviceID = UUID(uuidString: idStr) else {
+            await MainActor.run { record("no evlin.childDeviceID in UserDefaults") }
+            return
+        }
+        do {
+            var comps = URLComponents(string: "\(apiClient.baseURL)/child/commands")!
+            comps.queryItems = [URLQueryItem(name: "device_id", value: deviceID.uuidString)]
+            let (data, resp) = try await URLSession.shared.data(from: comps.url!)
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            let body = String(data: data, encoding: .utf8) ?? ""
+            await MainActor.run { record("GET /child/commands HTTP \(code): \(body.prefix(300))") }
+        } catch {
+            await MainActor.run { record("error: \(error.localizedDescription)") }
         }
     }
 
