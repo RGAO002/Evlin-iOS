@@ -12,9 +12,9 @@ struct ContentView: View {
     var body: some View {
         Group {
             if !onboardingComplete {
-                OnboardingView()
+                OnboardingCoordinator()
             } else if appMode != "parent" && appMode != "child" {
-                SetupView()
+                OnboardingCoordinator()   // fallback
             } else if appMode == "parent" {
                 ParentRootView()
             } else {
