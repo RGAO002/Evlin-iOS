@@ -61,10 +61,12 @@ final class ActiveLockStoreTests: XCTestCase {
         await store.add(Self.makeBundleLock(id: UUID(), bundles: ["a"]))
         await store.add(Self.makeBundleLock(id: UUID(), bundles: ["b"]))
         await store.add(Self.makeBundleLock(id: UUID(), bundles: ["c"]))
-        XCTAssertEqual(await store.current().count, 3)
+        let beforeCount = await store.current().count
+        XCTAssertEqual(beforeCount, 3)
 
         await store.removeAll()
-        XCTAssertEqual(await store.current().count, 0)
+        let afterCount = await store.current().count
+        XCTAssertEqual(afterCount, 0)
     }
 
     func test_concurrentExpiryDoesNotReleaseOtherLocks() async {
