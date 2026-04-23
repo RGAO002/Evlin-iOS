@@ -90,6 +90,101 @@ enum APIError: LocalizedError {
     }
 }
 
+// MARK: - Three-tier lock command APIs
+
+struct PollTargetDTO: Codable {
+    let bundle_id: String?
+    let list_name: String?
+    let has_pending_blob: Bool?
+    let category_hint: String?
+    let original_request: String
+    let target_display: String?
+}
+
+struct PollCommandDTO: Codable {
+    let command_id: UUID
+    let action: String
+    let tier: String?
+    let target: PollTargetDTO
+    let duration_minutes: Int?
+    let issued_at: String
+}
+
+extension APIClient {
+    /// Child polls for queued commands.
+    func pollCommands(deviceID: UUID) async throws -> [PollCommandDTO] {
+        var comps = URLComponents(string: "\(baseURL)/child/commands")!
+        comps.queryItems = [URLQueryItem(name: "device_id", value: deviceID.uuidString)]
+        let (data, response) = try await URLSession.shared.data(from: comps.url!)
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else { return [] }
+        return try JSONDecoder().decode([PollCommandDTO].self, from: data)
+    }
+
+    /// Child posts an ack for a command.
+    func ack(commandID: UUID, status: String, detail: [String: Any]? = nil) async throws {
+        let url = URL(string: "\(baseURL)/child/ack")!
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        var body: [String: Any] = [
+            "command_id": commandID.uuidString,
+            "status": status,
+        ]
+        if let detail = detail { body["detail"] = detail }
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+        _ = try await URLSession.shared.data(for: req)
+    }
+
+    /// Child fetches an ephemeral Max-mode selection blob (one-shot).
+    func fetchPendingBlob(commandID: UUID) async throws -> Data? {
+        var comps = URLComponents(string: "\(baseURL)/child/pending-blob")!
+        comps.queryItems = [URLQueryItem(name: "command_id", value: commandID.uuidString)]
+        let (data, resp) = try await URLSession.shared.data(from: comps.url!)
+        guard (resp as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+        struct Envelope: Codable { let blob_base64: String }
+        let env = try JSONDecoder().decode(Envelope.self, from: data)
+        return Data(base64Encoded: env.blob_base64)
+    }
+
+    /// Parent polls for a command's ack status.
+    func fetchAckStatus(commandID: UUID) async throws -> (status: String, detail: [String: Any]?) {
+        var comps = URLComponents(string: "\(baseURL)/parent/ack-status")!
+        comps.queryItems = [URLQueryItem(name: "command_id", value: commandID.uuidString)]
+        let (data, _) = try await URLSession.shared.data(from: comps.url!)
+        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
+        return (json["status"] as? String ?? "pending", json["detail"] as? [String: Any])
+    }
+
+    // MARK: - Saved list metadata
+
+    struct CreateListParams {
+        let familyID: UUID
+        let owningDeviceID: UUID
+        let name: String
+        let description: String?
+        let mode: String  // "child_device" | "parent_device"
+    }
+
+    @discardableResult
+    func upsertSavedListMeta(_ p: CreateListParams) async throws -> UUID {
+        let url = URL(string: "\(baseURL)/family/saved-lists")!
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        var body: [String: Any] = [
+            "family_id": p.familyID.uuidString,
+            "owning_device_id": p.owningDeviceID.uuidString,
+            "name": p.name,
+            "mode": p.mode,
+        ]
+        if let d = p.description { body["description"] = d }
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (data, _) = try await URLSession.shared.data(for: req)
+        struct R: Codable { let id: UUID }
+        return try JSONDecoder().decode(R.self, from: data).id
+    }
+}
+
 // MARK: - AnyCodable (for flexible action dict)
 
 struct AnyCodable: Codable {

@@ -1,3 +1,4 @@
+
 import Foundation
 
 enum CommandAction: String, Codable, Sendable {
