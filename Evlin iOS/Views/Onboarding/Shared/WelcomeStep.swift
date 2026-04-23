@@ -2,18 +2,21 @@ import SwiftUI
 
 struct WelcomeStep: View {
     let onContinue: () -> Void
+
     var body: some View {
-        VStack(spacing: 24) {
+        VStack(spacing: Spacing.section) {
             Spacer()
+
             Circle()
                 .fill(Color.evPrimary)
-                .frame(width: 80, height: 80)
+                .frame(width: 64, height: 64)
                 .overlay(
                     Image(systemName: "shield.checkered")
-                        .font(.system(size: 36, weight: .bold))
+                        .font(.system(size: 28, weight: .bold))
                         .foregroundStyle(Color.evOnPrimary)
                 )
-            VStack(spacing: 12) {
+
+            VStack(spacing: Spacing.lg) {
                 Text("Welcome to Evlin")
                     .font(.evHeadlineLarge)
                     .foregroundStyle(Color.evPrimary)
@@ -21,18 +24,29 @@ struct WelcomeStep: View {
                     .font(.evHeadlineSmall)
                     .foregroundStyle(Color.evOnPrimaryContainer)
                 Text("AI-powered parental control. Setup takes about 2 minutes.")
+                    .font(.evBodyMedium)
                     .multilineTextAlignment(.center)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal)
+                    .foregroundStyle(Color.evOnSurfaceVariant)
+                    .padding(.horizontal, Spacing.xl)
             }
+
             Spacer()
+
             Button(action: onContinue) {
-                Text("Continue").frame(maxWidth: .infinity)
+                Text("Get Started")
+                    .font(.evLabelLarge)
+                    .frame(maxWidth: .infinity)
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .padding(.horizontal)
+            .foregroundStyle(Color.evOnPrimary)
+            .padding(.vertical, Spacing.lg)
+            .background(
+                RoundedRectangle(cornerRadius: CornerRadius.md)
+                    .fill(Color.evPrimary)
+            )
+            .padding(.horizontal, Spacing.xl)
         }
-        .padding()
+        .padding(Spacing.xl)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.evSurface)
     }
 }

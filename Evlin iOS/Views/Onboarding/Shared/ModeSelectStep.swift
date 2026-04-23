@@ -4,35 +4,83 @@ struct ModeSelectStep: View {
     let onSelect: (OnboardingMode) -> Void
 
     var body: some View {
-        VStack(spacing: 20) {
-            Text("Which phone is this?")
-                .font(.evHeadlineMedium)
-                .padding(.top, 40)
-            Text("Evlin runs on both the parent's phone and the child's phone.")
-                .multilineTextAlignment(.center)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal)
+        VStack(spacing: Spacing.section) {
             Spacer()
-            HStack(spacing: 16) {
-                modeCard(title: "I'm the parent", systemImage: "person.fill.checkmark") { onSelect(.parent) }
-                modeCard(title: "I'm the child", systemImage: "person.fill") { onSelect(.child) }
+
+            Circle()
+                .fill(Color.evPrimary)
+                .frame(width: 64, height: 64)
+                .overlay(
+                    Image(systemName: "shield.checkered")
+                        .font(.system(size: 28, weight: .bold))
+                        .foregroundStyle(Color.evOnPrimary)
+                )
+
+            VStack(spacing: Spacing.lg) {
+                Text("Evlin")
+                    .font(.evHeadlineLarge)
+                    .foregroundStyle(Color.evPrimary)
+                Text("Choose how this device will be used")
+                    .font(.evBodyMedium)
+                    .foregroundStyle(Color.evOnSurfaceVariant)
+                    .multilineTextAlignment(.center)
             }
-            .padding(.horizontal)
+
+            VStack(spacing: Spacing.lg) {
+                modeCard(
+                    title: "Parent Device",
+                    description: "Set up Evlin on your phone to manage your child's device.",
+                    icon: "person.fill.checkmark"
+                ) { onSelect(.parent) }
+
+                modeCard(
+                    title: "Child Device",
+                    description: "This is my child's phone. Pair it with the parent's Evlin.",
+                    icon: "person.fill"
+                ) { onSelect(.child) }
+            }
+            .padding(.horizontal, Spacing.xl)
+
             Spacer()
         }
+        .padding(Spacing.xl)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.evSurface)
     }
 
     @ViewBuilder
-    private func modeCard(title: String, systemImage: String, action: @escaping () -> Void) -> some View {
+    private func modeCard(title: String, description: String, icon: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            VStack(spacing: 12) {
-                Image(systemName: systemImage).font(.system(size: 42)).foregroundStyle(Color.evPrimary)
-                Text(title).font(.headline).foregroundStyle(Color.evPrimary)
+            HStack(spacing: Spacing.xl) {
+                Image(systemName: icon)
+                    .font(.system(size: 24))
+                    .foregroundStyle(Color.evPrimary)
+                    .frame(width: 48, height: 48)
+                    .background(Color.evSurfaceContainerLow)
+                    .clipShape(RoundedRectangle(cornerRadius: CornerRadius.lg))
+
+                VStack(alignment: .leading, spacing: Spacing.sm) {
+                    Text(title)
+                        .font(.evLabelLarge)
+                        .foregroundStyle(Color.evPrimary)
+                    Text(description)
+                        .font(.evBodySmall)
+                        .foregroundStyle(Color.evOnSurfaceVariant)
+                        .multilineTextAlignment(.leading)
+                }
+
+                Spacer()
+
+                Image(systemName: "chevron.right")
+                    .font(.evBodySmall)
+                    .foregroundStyle(Color.evOutline)
             }
-            .frame(maxWidth: .infinity, minHeight: 180)
-            .padding()
-            .background(Color.evSurfaceContainer)
-            .cornerRadius(16)
+            .padding(Spacing.xl)
+            .background(
+                RoundedRectangle(cornerRadius: CornerRadius.xl)
+                    .fill(Color.evSurfaceContainerLowest)
+                    .evGhostBorder()
+            )
         }
         .buttonStyle(.plain)
     }

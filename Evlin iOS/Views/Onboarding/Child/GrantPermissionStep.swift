@@ -13,43 +13,78 @@ struct GrantPermissionStep: View {
     @State private var errorText: String?
 
     var body: some View {
-        VStack(spacing: 20) {
-            Text("Grant Screen Time Permission")
-                .font(.evHeadlineLarge)
-                .padding(.top, 40)
-            Text("Evlin needs permission to manage Screen Time on this phone.")
-                .multilineTextAlignment(.center)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal)
-            HStack(spacing: 8) {
-                if granted {
-                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
-                }
-                Text(status).foregroundStyle(granted ? .green : .secondary)
-            }
-            if let err = errorText {
-                Text(err).font(.caption).foregroundStyle(.red)
-            }
+        VStack(spacing: Spacing.section) {
             Spacer()
-            if granted {
-                Button(action: onContinue) {
-                    Text("Continue").frame(maxWidth: .infinity)
+
+            Circle()
+                .fill(Color.evPrimary)
+                .frame(width: 64, height: 64)
+                .overlay(
+                    Image(systemName: "hourglass")
+                        .font(.system(size: 28, weight: .bold))
+                        .foregroundStyle(Color.evOnPrimary)
+                )
+
+            VStack(spacing: Spacing.lg) {
+                Text("Grant Screen Time Permission")
+                    .font(.evHeadlineLarge)
+                    .foregroundStyle(Color.evPrimary)
+                    .multilineTextAlignment(.center)
+                Text("Evlin needs permission to manage Screen Time on this phone.")
+                    .font(.evBodyMedium)
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(Color.evOnSurfaceVariant)
+                    .padding(.horizontal, Spacing.xl)
+            }
+
+            HStack(spacing: Spacing.md) {
+                if granted {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(Color.evSecondary)
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
+                Text(status)
+                    .font(.evBodySmall)
+                    .foregroundStyle(granted ? Color.evSecondary : Color.evOnSurfaceVariant)
+            }
+
+            if let err = errorText {
+                Text(err)
+                    .font(.evBodySmall)
+                    .foregroundStyle(Color.evError)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, Spacing.xl)
+            }
+
+            Spacer()
+
+            if granted {
+                primaryButton(title: "Continue", action: onContinue)
             } else if requesting {
                 ProgressView()
             } else {
-                Button {
+                primaryButton(title: "Grant Permission") {
                     Task { await request() }
-                } label: {
-                    Text("Grant Permission").frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
             }
         }
-        .padding()
+        .padding(Spacing.xl)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.evSurface)
+    }
+
+    @ViewBuilder
+    private func primaryButton(title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.evLabelLarge)
+                .frame(maxWidth: .infinity)
+        }
+        .foregroundStyle(Color.evOnPrimary)
+        .padding(.vertical, Spacing.lg)
+        .background(
+            RoundedRectangle(cornerRadius: CornerRadius.md)
+                .fill(Color.evPrimary)
+        )
     }
 
     private func request() async {

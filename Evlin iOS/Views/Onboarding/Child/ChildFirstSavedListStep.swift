@@ -9,23 +9,39 @@ struct ChildFirstSavedListStep: View {
     @State private var created: String?
 
     var body: some View {
-        VStack(spacing: 16) {
-            Text("Your First Saved List")
-                .font(.evHeadlineLarge)
-                .padding(.top, 20)
-            Text("Build a list your parent can reference by name in Chat, e.g. 'lock list 1 for 30 min'.")
-                .multilineTextAlignment(.center)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal)
+        VStack(spacing: Spacing.xl) {
+            VStack(spacing: Spacing.lg) {
+                Text("Your First Saved List")
+                    .font(.evHeadlineLarge)
+                    .foregroundStyle(Color.evPrimary)
+                Text("Build a list your parent can reference by name in Chat, e.g. 'lock list 1 for 30 min'.")
+                    .font(.evBodyMedium)
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(Color.evOnSurfaceVariant)
+                    .padding(.horizontal, Spacing.xl)
+            }
+            .padding(.top, Spacing.section)
+
             if let name = created {
-                Label("'\(name)' saved", systemImage: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-                Button(action: onContinue) {
-                    Text("Continue").frame(maxWidth: .infinity)
+                HStack(spacing: Spacing.md) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(Color.evSecondary)
+                    Text("'\(name)' saved")
+                        .font(.evLabelLarge)
+                        .foregroundStyle(Color.evSecondary)
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .padding(.horizontal)
+                Button(action: onContinue) {
+                    Text("Continue")
+                        .font(.evLabelLarge)
+                        .frame(maxWidth: .infinity)
+                }
+                .foregroundStyle(Color.evOnPrimary)
+                .padding(.vertical, Spacing.lg)
+                .background(
+                    RoundedRectangle(cornerRadius: CornerRadius.md)
+                        .fill(Color.evPrimary)
+                )
+                .padding(.horizontal, Spacing.xl)
             } else {
                 SavedListPickerView(
                     familyID: familyID,
@@ -34,8 +50,18 @@ struct ChildFirstSavedListStep: View {
                 ) { name in
                     created = name
                 }
-                Button("Skip for now", action: onContinue).padding(.top)
+                Button(action: onContinue) {
+                    Text("Skip for now")
+                        .font(.evLabelLarge)
+                        .foregroundStyle(Color.evOnSurfaceVariant)
+                }
+                .padding(.top, Spacing.md)
             }
+
+            Spacer()
         }
+        .padding(Spacing.xl)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.evSurface)
     }
 }

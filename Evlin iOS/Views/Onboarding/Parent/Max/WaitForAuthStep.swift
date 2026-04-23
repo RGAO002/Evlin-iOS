@@ -9,31 +9,58 @@ struct WaitForAuthStep: View {
     @State private var granted = false
 
     var body: some View {
-        VStack(spacing: 20) {
-            Text("Waiting for Authorization")
-                .font(.evHeadlineLarge)
-                .padding(.top, 40)
-            Text("Pick up Liam's phone. Evlin there will prompt for parent authorization. Approve when iOS asks you.")
-                .multilineTextAlignment(.center)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal)
-            HStack(spacing: 8) {
+        VStack(spacing: Spacing.section) {
+            VStack(spacing: Spacing.lg) {
+                Text("Waiting for Authorization")
+                    .font(.evHeadlineLarge)
+                    .foregroundStyle(Color.evPrimary)
+                Text("Pick up your child's phone. Evlin there will prompt for parent authorization. Approve when iOS asks you.")
+                    .font(.evBodyMedium)
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(Color.evOnSurfaceVariant)
+                    .padding(.horizontal, Spacing.xl)
+            }
+            .padding(.top, Spacing.section)
+
+            Spacer()
+
+            VStack(spacing: Spacing.lg) {
                 if granted {
-                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                    Circle()
+                        .fill(Color.evSecondaryContainer)
+                        .frame(width: 64, height: 64)
+                        .overlay(
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 28, weight: .bold))
+                                .foregroundStyle(Color.evSecondary)
+                        )
                 } else {
                     ProgressView()
+                        .controlSize(.large)
                 }
-                Text(status).foregroundStyle(.secondary)
+                Text(status)
+                    .font(.evBodyMedium)
+                    .foregroundStyle(granted ? Color.evSecondary : Color.evOnSurfaceVariant)
             }
+
             Spacer()
+
             Button(action: onContinue) {
-                Text("Continue").frame(maxWidth: .infinity)
+                Text("Continue")
+                    .font(.evLabelLarge)
+                    .frame(maxWidth: .infinity)
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
+            .foregroundStyle(Color.evOnPrimary)
+            .padding(.vertical, Spacing.lg)
+            .background(
+                RoundedRectangle(cornerRadius: CornerRadius.md)
+                    .fill(granted ? Color.evPrimary : Color.evOutline)
+            )
             .disabled(!granted)
         }
-        .padding()
+        .padding(Spacing.xl)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.evSurface)
         .task { await poll() }
     }
 

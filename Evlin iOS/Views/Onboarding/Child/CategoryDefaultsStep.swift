@@ -13,22 +13,40 @@ struct CategoryDefaultsStep: View {
     @State private var saved = false
 
     var body: some View {
-        VStack(spacing: 16) {
-            Text("Category Defaults")
-                .font(.evHeadlineLarge)
-                .padding(.top, 40)
-            Text("Pick which categories your parent should be able to control via Chat (e.g. 'lock all games').")
-                .multilineTextAlignment(.center)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal)
+        VStack(spacing: Spacing.section) {
+            VStack(spacing: Spacing.lg) {
+                Text("Category Defaults")
+                    .font(.evHeadlineLarge)
+                    .foregroundStyle(Color.evPrimary)
+                Text("Pick which categories your parent should be able to control via Chat (e.g. 'lock all games').")
+                    .font(.evBodyMedium)
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(Color.evOnSurfaceVariant)
+                    .padding(.horizontal, Spacing.xl)
+            }
+            .padding(.top, Spacing.section)
 
-            Button("Open Category Picker") { showPicker = true }
-                .buttonStyle(.borderedProminent)
-                .familyActivityPicker(isPresented: $showPicker, selection: $selection)
+            Button {
+                showPicker = true
+            } label: {
+                Text("Open Category Picker")
+                    .font(.evLabelLarge)
+                    .foregroundStyle(Color.evPrimary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, Spacing.lg)
+                    .background(
+                        RoundedRectangle(cornerRadius: CornerRadius.md)
+                            .fill(Color.evSurfaceContainerLow)
+                            .evGhostBorder()
+                    )
+            }
+            .buttonStyle(.plain)
+            .familyActivityPicker(isPresented: $showPicker, selection: $selection)
 
             Text("\(selection.categoryTokens.count) categories selected")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                .font(.evLabelMedium)
+                .foregroundStyle(Color.evOnSurfaceVariant)
+                .evLabelStyle()
 
             Spacer()
 
@@ -36,13 +54,21 @@ struct CategoryDefaultsStep: View {
                 saveCategories()
                 onContinue()
             } label: {
-                Text("Continue").frame(maxWidth: .infinity)
+                Text("Continue")
+                    .font(.evLabelLarge)
+                    .frame(maxWidth: .infinity)
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
+            .foregroundStyle(Color.evOnPrimary)
+            .padding(.vertical, Spacing.lg)
+            .background(
+                RoundedRectangle(cornerRadius: CornerRadius.md)
+                    .fill(selection.categoryTokens.isEmpty ? Color.evOutline : Color.evPrimary)
+            )
             .disabled(selection.categoryTokens.isEmpty)
         }
-        .padding()
+        .padding(Spacing.xl)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.evSurface)
     }
 
     private func saveCategories() {

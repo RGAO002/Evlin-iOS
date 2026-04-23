@@ -5,27 +5,49 @@ struct ChildReadyStep: View {
     let onEnter: () -> Void
 
     var body: some View {
-        VStack(spacing: 20) {
+        VStack(spacing: Spacing.section) {
             Spacer()
-            Image(systemName: "checkmark.seal.fill")
-                .font(.system(size: 80))
-                .foregroundStyle(.green)
-            Text("All set!")
-                .font(.evHeadlineLarge)
-            Text("Waiting for commands from your parent's Evlin.")
-                .multilineTextAlignment(.center)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal)
+
+            Circle()
+                .fill(Color.evSecondaryContainer)
+                .frame(width: 64, height: 64)
+                .overlay(
+                    Image(systemName: "checkmark.seal.fill")
+                        .font(.system(size: 28, weight: .bold))
+                        .foregroundStyle(Color.evSecondary)
+                )
+
+            VStack(spacing: Spacing.lg) {
+                Text("All set!")
+                    .font(.evHeadlineLarge)
+                    .foregroundStyle(Color.evPrimary)
+                Text("Waiting for commands from your parent's Evlin.")
+                    .font(.evBodyMedium)
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(Color.evOnSurfaceVariant)
+                    .padding(.horizontal, Spacing.xl)
+            }
+
             Spacer()
+
             Button {
                 onboardingComplete = true
                 onEnter()
             } label: {
-                Text("Enter Evlin").frame(maxWidth: .infinity)
+                Text("Enter Evlin")
+                    .font(.evLabelLarge)
+                    .frame(maxWidth: .infinity)
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .padding()
+            .foregroundStyle(Color.evOnPrimary)
+            .padding(.vertical, Spacing.lg)
+            .background(
+                RoundedRectangle(cornerRadius: CornerRadius.md)
+                    .fill(Color.evPrimary)
+            )
+            .padding(.horizontal, Spacing.xl)
         }
+        .padding(Spacing.xl)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.evSurface)
     }
 }

@@ -15,41 +15,71 @@ struct PairingCodeStep: View {
     @State private var errorText: String?
 
     var body: some View {
-        VStack(spacing: 24) {
-            Text("Pairing Code")
-                .font(.evHeadlineLarge)
-                .padding(.top, 40)
+        VStack(spacing: Spacing.section) {
+            VStack(spacing: Spacing.lg) {
+                Text("Pairing Code")
+                    .font(.evHeadlineLarge)
+                    .foregroundStyle(Color.evPrimary)
+                Text("Open Evlin on \(childName.isEmpty ? "your child" : childName)'s phone and enter this code.")
+                    .font(.evBodyMedium)
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(Color.evOnSurfaceVariant)
+                    .padding(.horizontal, Spacing.xl)
+            }
+            .padding(.top, Spacing.section)
 
-            Text("Open Evlin on Liam's phone and enter this code.")
-                .multilineTextAlignment(.center)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal)
+            Spacer()
 
-            Text(pairingCode.isEmpty ? "- - - - - -" : insertSpaces(pairingCode))
-                .font(.system(size: 42, weight: .bold, design: .monospaced))
+            Text(pairingCode.isEmpty ? "------" : insertSpaces(pairingCode))
+                .font(.system(size: 48, weight: .bold, design: .monospaced))
                 .foregroundStyle(Color.evPrimary)
+                .tracking(8)
+                .padding(.vertical, Spacing.section)
+                .frame(maxWidth: .infinity)
+                .background(
+                    RoundedRectangle(cornerRadius: CornerRadius.xl)
+                        .fill(Color.evSurfaceContainerLowest)
+                        .evGhostBorder()
+                )
 
-            HStack(spacing: 8) {
+            HStack(spacing: Spacing.md) {
                 if childJoined {
-                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(Color.evSecondary)
+                } else {
+                    ProgressView()
+                        .controlSize(.small)
                 }
-                Text(status).foregroundStyle(.secondary)
+                Text(status)
+                    .font(.evBodySmall)
+                    .foregroundStyle(Color.evOnSurfaceVariant)
             }
 
             if let e = errorText {
-                Text(e).font(.caption).foregroundStyle(.red)
+                Text(e)
+                    .font(.evBodySmall)
+                    .foregroundStyle(Color.evError)
+                    .multilineTextAlignment(.center)
             }
 
             Spacer()
 
             Button(action: onContinue) {
-                Text("Continue").frame(maxWidth: .infinity)
+                Text("Continue")
+                    .font(.evLabelLarge)
+                    .frame(maxWidth: .infinity)
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
+            .foregroundStyle(Color.evOnPrimary)
+            .padding(.vertical, Spacing.lg)
+            .background(
+                RoundedRectangle(cornerRadius: CornerRadius.md)
+                    .fill(childJoined ? Color.evPrimary : Color.evOutline)
+            )
             .disabled(!childJoined)
         }
-        .padding()
+        .padding(Spacing.xl)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.evSurface)
         .task { await createFamily() }
     }
 
@@ -82,7 +112,7 @@ struct PairingCodeStep: View {
             parentDeviceID = r.parent_device_id
             pairingCode = r.pairing_code
             codeExpiresAt = r.code_expires_at
-            status = "Waiting for Liam's device…"
+            status = "Waiting for \(childName.isEmpty ? "child" : childName)'s device…"
             startPolling()
         } catch {
             status = "Error"
@@ -101,7 +131,7 @@ struct PairingCodeStep: View {
                     if let r = try? JSONDecoder().decode(R.self, from: data), r.used {
                         await MainActor.run {
                             childJoined = true
-                            status = "Liam's phone connected"
+                            status = "\(childName.isEmpty ? "Child" : childName)'s phone connected"
                         }
                         break
                     }

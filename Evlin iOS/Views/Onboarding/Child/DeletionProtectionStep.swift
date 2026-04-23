@@ -7,34 +7,59 @@ struct DeletionProtectionStep: View {
     @State private var applied = false
 
     var body: some View {
-        VStack(spacing: 20) {
-            Text("Protect Evlin from deletion")
-                .font(.evHeadlineLarge)
-                .padding(.top, 40)
-            Text("Evlin will now block itself from being deleted. Even if Liam knows the device passcode, they won't be able to uninstall Evlin unless you turn this off.")
-                .multilineTextAlignment(.center)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal)
+        VStack(spacing: Spacing.section) {
             Spacer()
-            if applied {
-                Label("Evlin is now protected from deletion.", systemImage: "checkmark.shield.fill")
-                    .foregroundStyle(.green)
-                Button(action: onContinue) {
-                    Text("Continue").frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-            } else {
-                Button {
-                    enable()
-                } label: {
-                    Text("Enable Protection").frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
+
+            Circle()
+                .fill(applied ? Color.evSecondaryContainer : Color.evPrimary)
+                .frame(width: 64, height: 64)
+                .overlay(
+                    Image(systemName: applied ? "checkmark.shield.fill" : "lock.shield.fill")
+                        .font(.system(size: 28, weight: .bold))
+                        .foregroundStyle(applied ? Color.evSecondary : Color.evOnPrimary)
+                )
+
+            VStack(spacing: Spacing.lg) {
+                Text("Protect Evlin from deletion")
+                    .font(.evHeadlineLarge)
+                    .foregroundStyle(Color.evPrimary)
+                    .multilineTextAlignment(.center)
+                Text("Evlin will now block itself from being deleted. Even if the child knows the device passcode, they won't be able to uninstall Evlin unless you turn this off.")
+                    .font(.evBodyMedium)
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(Color.evOnSurfaceVariant)
+                    .padding(.horizontal, Spacing.xl)
             }
+
+            if applied {
+                HStack(spacing: Spacing.md) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(Color.evSecondary)
+                    Text("Evlin is now protected from deletion.")
+                        .font(.evBodyMedium)
+                        .foregroundStyle(Color.evSecondary)
+                }
+            }
+
+            Spacer()
+
+            Button {
+                if applied { onContinue() } else { enable() }
+            } label: {
+                Text(applied ? "Continue" : "Enable Protection")
+                    .font(.evLabelLarge)
+                    .frame(maxWidth: .infinity)
+            }
+            .foregroundStyle(Color.evOnPrimary)
+            .padding(.vertical, Spacing.lg)
+            .background(
+                RoundedRectangle(cornerRadius: CornerRadius.md)
+                    .fill(Color.evPrimary)
+            )
         }
-        .padding()
+        .padding(Spacing.xl)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.evSurface)
     }
 
     private func enable() {

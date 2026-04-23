@@ -13,37 +13,58 @@ struct EnterPairingCodeStep: View {
     @State private var pairing = false
 
     var body: some View {
-        VStack(spacing: 16) {
-            Text("Enter Pairing Code")
-                .font(.evHeadlineLarge)
-                .padding(.top, 40)
-            Text("Enter the 6-digit code from your parent's Evlin.")
-                .multilineTextAlignment(.center)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal)
-            TextField("123456", text: $code)
-                .keyboardType(.numberPad)
-                .font(.system(size: 32, weight: .bold, design: .monospaced))
-                .multilineTextAlignment(.center)
-                .textFieldStyle(.roundedBorder)
-                .padding(.horizontal, 40)
-                .onChange(of: code) { _, newValue in
-                    // Trim to 6 digits, auto-submit on 6
-                    let digitsOnly = newValue.filter(\.isNumber)
-                    if digitsOnly != newValue { code = digitsOnly }
-                    if digitsOnly.count == 6 && !pairing {
-                        Task { await pair() }
-                    }
-                }
-            if let err = error {
-                Text(err).font(.caption).foregroundStyle(.red)
+        VStack(spacing: Spacing.section) {
+            VStack(spacing: Spacing.lg) {
+                Text("Enter Pairing Code")
+                    .font(.evHeadlineLarge)
+                    .foregroundStyle(Color.evPrimary)
+                Text("Enter the 6-digit code from your parent's Evlin.")
+                    .font(.evBodyMedium)
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(Color.evOnSurfaceVariant)
+                    .padding(.horizontal, Spacing.xl)
             }
+            .padding(.top, Spacing.section)
+
+            VStack(alignment: .leading, spacing: Spacing.sm) {
+                Text("PAIRING CODE")
+                    .font(.evLabelMedium)
+                    .foregroundStyle(Color.evOutline)
+                    .evLabelStyle()
+                TextField("123456", text: $code)
+                    .keyboardType(.numberPad)
+                    .font(.system(size: 48, weight: .bold, design: .monospaced))
+                    .foregroundStyle(Color.evPrimary)
+                    .tracking(8)
+                    .multilineTextAlignment(.center)
+                    .padding(Spacing.lg)
+                    .background(Color.evSurfaceContainerHigh)
+                    .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md))
+                    .onChange(of: code) { _, newValue in
+                        let digitsOnly = newValue.filter(\.isNumber)
+                        if digitsOnly != newValue { code = digitsOnly }
+                        if digitsOnly.count == 6 && !pairing {
+                            Task { await pair() }
+                        }
+                    }
+            }
+
+            if let err = error {
+                Text(err)
+                    .font(.evBodySmall)
+                    .foregroundStyle(Color.evError)
+                    .multilineTextAlignment(.center)
+            }
+
             if pairing {
                 ProgressView()
             }
+
             Spacer()
         }
-        .padding()
+        .padding(Spacing.xl)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.evSurface)
     }
 
     private func pair() async {
