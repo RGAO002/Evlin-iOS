@@ -127,6 +127,21 @@ struct ChildModeView: View {
         .onDisappear {
             pollTimer?.invalidate()
         }
+        .onAppear { startNewPoller() }
+        .onDisappear { CommandPoller.shared.stop() }
+    }
+
+    /// Starts the three-tier CommandPoller if we have a paired child device ID.
+    /// The ID was persisted by EnterPairingCodeStep under "evlin.childDeviceID".
+    private func startNewPoller() {
+        guard let idStr = UserDefaults.standard.string(forKey: "evlin.childDeviceID"),
+              let deviceID = UUID(uuidString: idStr)
+        else {
+            print("[ChildModeView] no evlin.childDeviceID — CommandPoller not started")
+            return
+        }
+        CommandPoller.shared.start(deviceID: deviceID, apiClient: apiClient)
+        print("[ChildModeView] CommandPoller started for device \(deviceID)")
     }
 
     // MARK: - Polling
