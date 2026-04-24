@@ -75,7 +75,9 @@ Models/CommandModels.swift     MODIFY — new CommandAction cases
 ```
 api/routes/parent_chat.py      MODIFY — new SYSTEM_PROMPT, new action enum
 services/chat_resolver.py      REWRITE — verb-first routing
-db/models/command.py           MODIFY — AckStatus stays; extend payload schema doc
+db/models/command.py           MODIFY — AckStatus stays; add ack_card_id + ack_context columns (B1 round-trip)
+api/routes/devices.py          MODIFY — ack endpoint persists pending_confirmation card_id + context;
+                                         status polling surfaces them back to parent
 ```
 
 ### Test files (new)
@@ -292,13 +294,19 @@ At the bottom of the existing `CommandTarget` struct definition, add an optional
 struct CommandTarget: Codable, Sendable {
     var bundleID: String?
     var listName: String?
-    var listID: UUID?                 // NEW — stable identifier for a Saved List
+    var listID: UUID?                 // stable identifier for a Saved List
     var categoryHint: String?
-    var targetAll: Bool = false       // NEW — true when kind=all
+    var targetAll: Bool = false       // true when kind=all
     var originalRequest: String
     var targetDisplay: String?
-    var targetChildID: UUID?          // NEW — for multi-child
+    var targetChildID: UUID?          // for multi-child
     var hasPendingBlob: Bool = false
+
+    // Parent's confirmed-downgrade re-submission: when the parent taps "Change to X min"
+    // on a B1 card, the /parent/chat follow-up sets `force_downgrade=true`. Child's
+    // ActiveLockStore.addShield then skips the merge rule for this (tier, targetKey).
+    // See spec §5.2 B1 flow and plan Phase 6/9 changes.
+    var forceDowngrade: Bool = false
 }
 ```
 
@@ -400,6 +408,18 @@ struct RemovedShield: Sendable {
     let stillCovered: [ShieldRecord]
     let blockedAfter: Bool
     var possibleSavedListCoverage: Bool = false  // indeterminate — see EffectiveState
+}
+
+/// Extended AckResult — add `pendingConfirmation` case for B1-style flows
+/// where the child device needs the parent to decide, and the parent sends
+/// back a force-confirmed command. Replaces the prior 3-case AckResult from
+/// three-tier-lock-plan's Task 1.4. Backwards-incompatible — migration step
+/// included in Phase 11.
+enum AckResult: Codable, Sendable, Equatable {
+    case confirmedExact(displayName: String)
+    case confirmedFallback(displayName: String, category: String, origRequest: String)
+    case pendingConfirmation(cardID: String, context: [String: String])
+    case failed(AckFailure)
 }
 
 /// Returned by removeBlock.
@@ -735,25 +755,25 @@ actor ActiveLockStore {
 
     // MARK: - Shield API
 
-    func addShield(_ new: ShieldRecord) -> AddShieldResult {
-        if let existing = shieldRecords[new.recordKey] {
+    /// Add a shield. If `force == true`, the merge rule is skipped — use this
+    /// ONLY when the parent has confirmed a downgrade via the B1 card. The caller
+    /// (ActionExecutor) reads the `force_downgrade` flag from the Command payload;
+    /// the parent UI sends that flag by re-submitting the Chat message with
+    /// `force_confirmations: ["B1"]` in the request.
+    func addShield(_ new: ShieldRecord, force: Bool = false) -> AddShieldResult {
+        if let existing = shieldRecords[new.recordKey], !force {
             return mergeShield(existing: existing, new: new)
         }
+        // force=true OR no existing record → overwrite
         shieldRecords[new.recordKey] = new
         persist()
         recomputeAndApply()
         return .added
     }
 
-    /// Force-apply after user confirmed a downgrade (permanent → timed). No rule check.
-    func applyConfirmedDowngrade(recordKey: String, newExpiry: Date, lastCommandID: UUID) {
-        guard var record = shieldRecords[recordKey] else { return }
-        record.expiresAt = newExpiry
-        record.lastCommandID = lastCommandID
-        shieldRecords[recordKey] = record
-        persist()
-        recomputeAndApply()
-    }
+    // applyConfirmedDowngrade removed: parent UI never mutates the child's store
+    // directly. Downgrade goes through Command pipeline → child's ActionExecutor →
+    // addShield(..., force: true).
 
     @discardableResult
     func removeShield(recordKey: String) -> RemovedShield? {
@@ -1078,7 +1098,9 @@ final class ActionExecutor: @unchecked Sendable {
     private func executeShield(cmd: LockCommand, blob: Data?) async -> AckResult {
         do {
             let record = try buildShieldRecord(from: cmd, blob: blob)
-            let result = await ActiveLockStore.shared.addShield(record)
+            // Parent's confirmed-downgrade re-submission sets target.forceDowngrade = true.
+            let force = cmd.target.forceDowngrade
+            let result = await ActiveLockStore.shared.addShield(record, force: force)
             switch result {
             case .added, .upgradedToPermanent, .extendedTimed:
                 if let expiresAt = record.expiresAt {
@@ -1088,7 +1110,21 @@ final class ActionExecutor: @unchecked Sendable {
             case .noOpShorterThanExisting, .noOpAlreadyPermanent:
                 return .confirmedExact(displayName: "\(record.displayName) already covered")
             case .needsConfirmation(let reason):
-                return .failed(.execution("needs_confirmation: \(reason)"))
+                // Return a structured pending so backend ack can surface card_id to parent.
+                let context: [String: String]
+                switch reason {
+                case .downgradePermanentToTimed(let existingKey, let newExpiry):
+                    context = [
+                        "card_id": "B1",
+                        "target_display": record.displayName,
+                        "target_request": cmd.target.originalRequest,
+                        "existing_record_key": existingKey,
+                        "requested_expiry_iso": ISO8601DateFormatter().string(from: newExpiry),
+                        "requested_duration_minutes": String(cmd.durationMinutes ?? 0),
+                        "existing_mode": "permanent",
+                    ]
+                }
+                return .pendingConfirmation(cardID: "B1", context: context)
             }
         } catch let err as ExecuteError {
             return .failed(err.ackFailure)
@@ -1982,6 +2018,9 @@ class ResolvedAction:
     target_all: bool = False
     target_display: str | None = None
     duration_minutes: int | None = None
+    # Set true when the parent's B1 card confirmation re-submitted the Chat message.
+    # Child reads target.force_downgrade and skips addShield's merge rule.
+    force_downgrade: bool = False
 
 
 @dataclass
@@ -2008,6 +2047,7 @@ def dispatch(
     child_count: int,
     saved_list_names: list[str],
     gemini_action: dict,
+    force_confirmations: list[str] | None = None,  # e.g. ["B1"] — parent confirmed a card
 ) -> DispatchResult:
     """Route a Gemini-parsed action to a concrete dispatch outcome."""
     action_type = gemini_action.get("type")
@@ -2033,7 +2073,7 @@ def dispatch(
     if action_type == "unblock_all":
         return _route_unblock_all(protection_mode)
     if action_type == "shield":
-        return _route_shield(protection_mode, saved_list_names, gemini_action)
+        return _route_shield(protection_mode, saved_list_names, gemini_action, force_confirmations)
     if action_type == "unshield":
         return _route_unshield(protection_mode, gemini_action)
     if action_type == "unshield_all":
@@ -2101,7 +2141,9 @@ def _route_shield(
     mode: str,
     saved_list_names: list[str],
     action: dict,
+    force_confirmations: list[str] | None = None,
 ) -> DispatchResult:
+    force_downgrade = bool(force_confirmations and "B1" in force_confirmations)
     kind = action.get("target_kind_hint")
     target = action.get("target_request", "")
     duration = action.get("duration_minutes")
@@ -2137,6 +2179,7 @@ def _route_shield(
                 target_all=True,
                 target_display="All Apps",
                 duration_minutes=duration if isinstance(duration, int) else None,
+                force_downgrade=force_downgrade,
             )
         )
 
@@ -2149,6 +2192,7 @@ def _route_shield(
                 category_hint=action.get("category_hint_from_ai", target.lower()),
                 target_display=target,
                 duration_minutes=duration if isinstance(duration, int) else None,
+                force_downgrade=force_downgrade,
             )
         )
 
@@ -2163,6 +2207,7 @@ def _route_shield(
                     list_name=matched,
                     target_display=matched,
                     duration_minutes=duration if isinstance(duration, int) else None,
+                    force_downgrade=force_downgrade,
                 )
             )
         suggestions = _fuzzy_list_matches(target, saved_list_names, max_distance=2)
@@ -2324,6 +2369,7 @@ result: DispatchResult = dispatch(
     child_count=len(child_devices),
     saved_list_names=saved_list_names,
     gemini_action=gemini_action,
+    force_confirmations=req.force_confirmations or [],  # e.g. ["B1"] on parent-confirmed downgrade
 )
 
 # Translate DispatchResult -> ChatResponse
@@ -2375,6 +2421,9 @@ if result.resolved:
             "target_display": result.resolved.target_display,
             "original_request": gemini_action.get("target_request", ""),
             "has_pending_blob": False,
+            # Carries parent's B1 "yes downgrade" through to the child executor;
+            # set by dispatch() whenever "B1" is in force_confirmations.
+            "force_downgrade": result.resolved.force_downgrade,
         },
         "duration_minutes": result.resolved.duration_minutes,
         "issued_at": datetime.utcnow().isoformat(),
@@ -2421,6 +2470,24 @@ class ChatAction(BaseModel):
     category_guess: str | None = None
 ```
 
+- [ ] **Step 2b: Extend ChatRequest to accept force_confirmations**
+
+The parent client re-sends /parent/chat after the user confirms a B1 card. The
+re-submission carries `force_confirmations=["B1"]` so the dispatcher knows to
+set `force_downgrade=true` on the ResolvedAction (Phase 6 Task 6.2).
+
+```python
+class ChatRequest(BaseModel):
+    message: str
+    family_id: UUID
+    child_name: str | None = None
+    history: list[ChatHistoryEntry] = Field(default_factory=list)
+
+    # New — card IDs the parent has already confirmed. Currently only "B1"
+    # (permanent→timed downgrade) uses this; reserved for future confirm flows.
+    force_confirmations: list[str] = Field(default_factory=list)
+```
+
 - [ ] **Step 3: Run a smoke test**
 
 ```bash
@@ -2441,6 +2508,60 @@ Expected: Response has `action.card_id` populated (likely D2) or `confirmation_r
 cd /Users/fred/Desktop/Evlin/adaptive-engine
 git add backend/app/api/routes/parent_chat.py
 git commit -m "feat(chat): wire verb-first dispatcher into /parent/chat (Phase 6)"
+```
+
+### Task 6.4: Persist pending_confirmation acks + surface via status endpoint
+
+**Files:**
+- Modify: `adaptive-engine/backend/app/db/models/command.py`
+- Modify: `adaptive-engine/backend/app/api/routes/devices.py` (ack + status endpoints)
+- Migration: new Alembic revision adding columns
+
+Context: the child executor may return `AckResult.pendingConfirmation(cardID, context)`
+(see Phase 3). Backend needs to persist card_id + context on the Command row and
+echo them through the status-polling endpoint, so the parent UI can render the
+confirmation card. Today the Command model has `ack_status` + `ack_detail` only.
+
+- [ ] **Step 1: Add columns to Command**
+
+```python
+# db/models/command.py, inside class Command
+ack_card_id: Mapped[str | None] = mapped_column(String(8), nullable=True)
+ack_context: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+```
+
+- [ ] **Step 2: Alembic migration**
+
+```bash
+cd /Users/fred/Desktop/Evlin/adaptive-engine
+poetry run alembic revision --autogenerate -m "add ack_card_id + ack_context to commands"
+poetry run alembic upgrade head
+```
+
+- [ ] **Step 3: Extend ack endpoint**
+
+In `POST /devices/{device_id}/commands/{command_id}/ack`, accept new optional
+fields `card_id: str | None` and `context: dict | None` in the request body.
+When `status == "pending_confirmation"`, store them. Otherwise leave null.
+
+- [ ] **Step 4: Extend status endpoint**
+
+`GET /devices/{device_id}/commands/{command_id}/status` returns:
+
+```json
+{
+  "status": "pending_confirmation",
+  "detail": null,
+  "displayName": null,
+  "pendingConfirmation": { "card_id": "B1", "context": { "existing_record_key": "...", "requested_expiry_iso": "...", "requested_duration_minutes": "30", "existing_mode": "permanent", "target_display": "Instagram", "target_request": "lock IG for 30 min" } }
+}
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add backend/app/db/models/command.py backend/app/api/routes/devices.py backend/alembic/versions/*.py
+git commit -m "feat(commands): persist + surface pending_confirmation acks (B1 round-trip, Phase 6)"
 ```
 
 ---
@@ -3017,6 +3138,11 @@ struct CardContext {
     let existingLists: [String]         // For E4
     let blockItems: [String]            // For A3
     let childDevices: [(id: UUID, label: String)]  // For D4
+    let mode: String                    // "std" or "max" — drives copy variants (E1)
+    // For B1 round-trip (see plan Phase 6/9):
+    let existingRecordKey: String?      // Opaque key of the permanent record being downgraded
+    let requestedExpiryISO: String?     // Clock-aligned expiry the parent is proposing
+    let existingMode: String?           // "permanent" | "timed" — informs B1 copy
     // Extend as needed
 }
 
@@ -3233,19 +3359,33 @@ enum CardPayloadBuilder {
     // MARK: - Group E (rejection + alternative)
 
     private static func e1(_ ctx: CardContext, _ h: CardHandlers) -> CardPayload {
+        // E1 fires whenever the dispatcher can't shield a single app directly.
+        // In Std: FamilyControls doesn't expose a parent-side app picker, so we offer
+        //   category/Saved List fallbacks or an upgrade to Max.
+        // In Max: remote single-app shield needs the Phase-5 remote picker, which
+        //   isn't built yet — so the copy and CTAs are different (no "upgrade" line).
         let cat = ctx.categoryGuess?.capitalized ?? "its category"
-        return CardPayload(
-            id: .E1,
-            icon: "exclamationmark.triangle",
-            title: "Standard mode can't shield \(ctx.targetDisplay) directly",
-            body: "Standard mode locks by Saved List or category.",
-            buttons: [
-                CardButton(label: "Shield \(cat) category instead", style: .primary, action: h.onPrimary ?? {}),
-                CardButton(label: "Add \(ctx.targetDisplay) to a Saved List", style: .secondary, action: h.onSecondary ?? {}),
-                CardButton(label: "Upgrade to Max", style: .tertiary, action: h.onTertiary ?? {}),
-                CardButton(label: "Cancel", style: .cancel, action: h.onCancel ?? {}),
-            ]
-        )
+        let isMax = ctx.mode == "max"
+
+        let title: String
+        let body: String
+        var buttons: [CardButton] = []
+
+        if isMax {
+            title = "Can't shield \"\(ctx.targetDisplay)\" directly yet"
+            body = "Remote single-app shield is coming soon. For now, shield the category \(ctx.targetDisplay) belongs to, or add it to a Saved List on \(ctx.childName)'s phone."
+            buttons.append(CardButton(label: "Shield \(cat) category instead", style: .primary, action: h.onPrimary ?? {}))
+            buttons.append(CardButton(label: "Add \(ctx.targetDisplay) to a Saved List", style: .secondary, action: h.onSecondary ?? {}))
+        } else {
+            title = "Standard mode can't shield \(ctx.targetDisplay) directly"
+            body = "Standard mode locks by Saved List or category."
+            buttons.append(CardButton(label: "Shield \(cat) category instead", style: .primary, action: h.onPrimary ?? {}))
+            buttons.append(CardButton(label: "Add \(ctx.targetDisplay) to a Saved List", style: .secondary, action: h.onSecondary ?? {}))
+            buttons.append(CardButton(label: "Upgrade to Max", style: .tertiary, action: h.onTertiary ?? {}))
+        }
+        buttons.append(CardButton(label: "Cancel", style: .cancel, action: h.onCancel ?? {}))
+
+        return CardPayload(id: .E1, icon: "exclamationmark.triangle", title: title, body: body, buttons: buttons)
     }
 
     private static func e2(_ ctx: CardContext, _ h: CardHandlers) -> CardPayload {
@@ -3518,6 +3658,56 @@ struct ChatResponse: Codable, Sendable {
 }
 ```
 
+Also extend `sendChatMessage` to accept `forceConfirmations`:
+
+```swift
+func sendChatMessage(
+    message: String,
+    familyID: UUID,
+    childName: String?,
+    history: [ChatHistoryEntry],
+    forceConfirmations: [String] = []
+) async throws -> ChatResponse {
+    struct Body: Encodable {
+        let message: String
+        let family_id: UUID
+        let child_name: String?
+        let history: [ChatHistoryEntry]
+        let force_confirmations: [String]
+    }
+    let body = Body(
+        message: message, family_id: familyID,
+        child_name: childName, history: history,
+        force_confirmations: forceConfirmations
+    )
+    // ... existing POST /parent/chat logic, JSONEncoder().encode(body) ...
+}
+```
+
+And extend the ack-status polling decoder: when `status == "pending_confirmation"`,
+the ack detail carries a `card_id` (e.g. "B1") plus a string-keyed `context` dict
+(see ActionExecutor's `.pendingConfirmation` case). ChatViewModel maps that
+into `currentCard = (.B1, CardContext(... existingRecordKey, requestedExpiryISO,
+requestedDurationMinutes, existingMode ...), handlers)`:
+
+```swift
+struct AckPendingConfirmation: Decodable {
+    let card_id: String
+    let context: [String: String]
+}
+
+struct AckStatusResponse: Decodable {
+    let status: String  // "queued" | "in_flight" | "confirmed" | "failed" | "pending_confirmation"
+    let detail: String?
+    let displayName: String?
+    let pendingConfirmation: AckPendingConfirmation?
+}
+```
+
+Backend ack-status endpoint needs a matching extension: when the child posts
+an ack with the `.pendingConfirmation` AckResult case, persist card_id+context
+on the Command row and surface them here. (Add the column in a 6.x subtask.)
+
 - [ ] **Step 2: Commit**
 
 ```bash
@@ -3547,10 +3737,10 @@ enum ChatOutput {
 When the response contains a `card_id`, set `currentCard` with the appropriate context. The handlers follow-up by re-calling `/parent/chat` with modified phrasing (e.g. user picked a duration → resend with duration filled in).
 
 **Phase 9 MVP fully-wired cards (required for Phase 12 validation to pass)**:
-- **A1** — Block confirmation → confirm executes block
-- **B1** — Permanent→timed downgrade → confirm applies `applyConfirmedDowngrade(recordKey:newExpiry:lastCommandID:)` on ActiveLockStore
+- **A1** — Block confirmation → confirm re-sends /parent/chat with phrasing that skips the A1 guardrail
+- **B1** — Permanent→timed downgrade → confirm re-sends /parent/chat with the ORIGINAL user message and `force_confirmations=["B1"]`. Backend dispatcher sets `force_downgrade=true` on ResolvedAction → Command payload carries it → child executor calls `addShield(force: true)`. Parent does NOT mutate ActiveLockStore directly (the store lives on the child device).
 - **D1** — Missing duration quick-pick → picks duration, re-sends /parent/chat with duration filled
-- **E1** — Std-can't-shield-single → primary action re-sends /parent/chat as category shield
+- **E1** — Std-can't-shield-single → primary action re-sends /parent/chat as category shield (copy varies by mode — see CardPayloadBuilder.e1)
 
 Stub (renders correctly, primary action logs to console): A3, B2, C1, C2, D2, D3, D4, E2, E3, E4, F1, G1. Follow-up per card as time permits.
 
@@ -3560,6 +3750,7 @@ This is a larger integration task — implement incrementally. Minimum MVP:
 
 ```swift
 // In sendMessage, after getting ChatResponse:
+// Path 1 — backend dispatcher returned a card_id synchronously (A1/D1/E1/etc.)
 if let action = response.action, let cardIDStr = action.card_id, let cardID = CardID(rawValue: cardIDStr) {
     let context = CardContext(
         targetDisplay: action.target_display ?? "",
@@ -3569,7 +3760,11 @@ if let action = response.action, let cardIDStr = action.card_id, let cardID = Ca
         listSuggestions: action.list_suggestions ?? [],
         existingLists: [],        // TODO: fetch separately
         blockItems: [],           // TODO: for A3, fetch current blocks
-        childDevices: []          // TODO: for D4, list child devices
+        childDevices: [],         // TODO: for D4, list child devices
+        mode: self.protectionMode,  // "std" | "max" — drives E1 copy
+        existingRecordKey: nil,
+        requestedExpiryISO: nil,
+        existingMode: nil
     )
     let handlers = CardHandlers(
         onPrimary: { [weak self] in self?.handleCardPrimary(cardID: cardID, action: action) },
@@ -3579,10 +3774,47 @@ if let action = response.action, let cardIDStr = action.card_id, let cardID = Ca
     return
 }
 
-// Else: normal flow (queue command_id, poll ack-status, show receipt)
+// Path 2 — normal flow: queue command_id, poll ack-status, show receipt.
+// If status==pending_confirmation, poll returns pendingConfirmation payload
+// (card_id + context dict, see APIClient AckStatusResponse). Build B1 context:
+//
+// if let pc = statusResp.pendingConfirmation, let cardID = CardID(rawValue: pc.card_id) {
+//     let ctx = CardContext(
+//         targetDisplay: pc.context["target_display"] ?? "",
+//         childName: self.childName,
+//         durationMinutes: Int(pc.context["requested_duration_minutes"] ?? ""),
+//         categoryGuess: nil, listSuggestions: [], existingLists: [],
+//         blockItems: [], childDevices: [],
+//         mode: self.protectionMode,
+//         existingRecordKey: pc.context["existing_record_key"],
+//         requestedExpiryISO: pc.context["requested_expiry_iso"],
+//         existingMode: pc.context["existing_mode"]  // "permanent"
+//     )
+//     self.currentCard = (cardID, ctx, handlersForB1(ctx: ctx))
+// }
 ```
 
-Implement `handleCardPrimary` fully for **A1, B1, D1, E1** — these are REQUIRED for Phase 12 validation. Each re-sends a new /parent/chat with clarified phrasing, or in B1's case calls `ActiveLockStore.applyConfirmedDowngrade(...)` directly. Other cards (A3, B2, C1, C2, D2, D3, D4, E2, E3, E4, F1, G1) start as logged-only stubs — they render correctly but don't execute the primary action.
+Implement `handleCardPrimary` fully for **A1, B1, D1, E1** — these are REQUIRED for Phase 12 validation. Each re-sends a new /parent/chat with clarified phrasing. For **B1** specifically: re-send the ORIGINAL user message verbatim plus `force_confirmations: ["B1"]` — the backend dispatcher sees the force flag and bakes `force_downgrade=true` into the ResolvedAction, which travels in the Command payload to the child, where `ActiveLockStore.addShield(force: true)` bypasses the merge rule. Parent NEVER writes to ActiveLockStore — the authoritative copy lives on the child device. Other cards (A3, B2, C1, C2, D2, D3, D4, E2, E3, E4, F1, G1) start as logged-only stubs — they render correctly but don't execute the primary action.
+
+Example B1 handler:
+
+```swift
+private func handleB1Confirm(ctx: CardContext) async {
+    // Original message is still in the last user-bubble; re-send it verbatim
+    // with force_confirmations=["B1"]. Backend dispatcher sets force_downgrade=true.
+    guard let lastUserMsg = messages.reversed().first(where: { $0.isUser })?.text
+    else { return }
+    currentCard = nil
+    await apiClient.sendChatMessage(
+        message: lastUserMsg,
+        familyID: familyID,
+        childName: childName,
+        history: historyForAPI,
+        forceConfirmations: ["B1"]
+    )
+    // Normal ack-polling flow resumes; child executes with force.
+}
+```
 
 - [ ] **Step 2: Commit**
 
