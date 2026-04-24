@@ -13,7 +13,13 @@ struct CardDispatcher: View {
         case .A1, .D3: DangerConfirmCard(payload: payload)
         case .A3: BulkActionCard(payload: payload)
         case .B1, .B2, .C1, .C2: ReplaceModeCard(payload: payload)
-        case .D1, .D4: MissingInfoCard(payload: payload)
+        case .D1:
+            MissingInfoCard(payload: payload)
+        case .D4:
+            // D4 wires checkbox selections back via onCheckboxesConfirmed.
+            MissingInfoCard(payload: payload, onCheckboxesConfirmed: { selected in
+                handlers.onChildrenLabelsPicked?(selected)
+            })
         case .D2: AmbiguityCard(payload: payload)
         case .E1, .E2, .G1: UnsupportedInModeCard(payload: payload)
         case .E3: CatalogMissCard(payload: payload)
@@ -50,6 +56,10 @@ struct CardHandlers {
     var onTertiary: (() -> Void)?
     var onCancel: (() -> Void)?
     var onDurationPicked: ((Int?) -> Void)?   // nil = permanent (D1)
-    var onChildrenPicked: (([UUID]) -> Void)?  // D4
+    var onChildrenPicked: (([UUID]) -> Void)?  // D4 (by id — deferred)
+    /// D4 primary confirm — passes the selected child labels (e.g. ["Liam"])
+    /// so ChatViewModel can rewrite the parent message to include the child's
+    /// name. Preferred over `onChildrenPicked` until we plumb UUID mapping.
+    var onChildrenLabelsPicked: (([String]) -> Void)?
     var onListPicked: ((String) -> Void)?      // F1
 }

@@ -225,6 +225,7 @@ class ChatViewModel: ObservableObject {
             onCancel: { [weak self] in self?.currentCard = nil },
             onDurationPicked: { [weak self] mins in self?.handleDurationPicked(mins, action: act) },
             onChildrenPicked: { [weak self] ids in self?.handleChildrenPicked(ids, action: act) },
+            onChildrenLabelsPicked: { [weak self] labels in self?.handleChildrenLabelsPicked(labels, action: act) },
             onListPicked: { [weak self] name in self?.handleListPicked(name, action: act) }
         )
         self.currentCard = (cardID, context, handlers)
@@ -235,16 +236,74 @@ class ChatViewModel: ObservableObject {
     private func handleCardPrimary(cardID: CardID, action: APIClient.ChatActionResponse) {
         switch cardID {
         case .A1: resendWithForce(["A1"])
+        case .A3: resendWithForce(["A3"])   // "Unblock all N" — dispatcher bypasses A3 guard
         case .B1: resendWithForce(["B1"])
-        case .E1:
-            // "Shield <category> instead" — rewrite to category-shaped phrase.
+        case .D3: resendWithForce(["D3"])   // "Confirm long duration" — dispatcher bypasses D3 guard
+
+        case .D2:
+            // "Lock ALL apps on <child>'s phone" — rewrite to kind=all shield.
+            let durSuffix = action.duration_minutes.map { " for \($0) minutes" } ?? " for 30 minutes"
+            resendWithPhrase("shield everything\(durSuffix)")
+
+        case .E1, .E3:
+            // Both: "Shield <category> instead" — rewrite to category-shaped phrase.
             let cat = action.category_guess ?? "social"
             let durSuffix = action.duration_minutes.map { " for \($0) minutes" } ?? ""
             resendWithPhrase("shield \(cat) apps\(durSuffix)")
-        case .A3, .B2, .C1, .C2, .D2, .D3, .D4, .E2, .E3, .E4, .F1, .G1, .D1:
-            print("[ChatViewModel] Card primary for \(cardID.rawValue) — stub")
+
+        case .D4:
+            // Checkbox confirm — the card's primary tap reads selected IDs out of
+            // the card view itself. MissingInfoCard doesn't plumb the state back
+            // yet; until that's wired, the primary button falls through to a
+            // user-visible hint.
+            showComingSoon(cardID, note: "Multi-child selection UI isn't fully wired yet — include the child's name in your message, e.g. \"lock Liam's phone for 30 min\".")
+
+        case .D1:
+            // D1 primary should never fire — D1 only has duration buttons (onDurationPicked).
             currentCard = nil
+
+        case .B2:
+            // "Switch from block to shield" — requires child-state awareness in
+            // addBlock to return pending_confirmation. Not built yet.
+            showComingSoon(cardID, note: "Block→shield switching isn't fully wired yet. Manually unblock, then shield.")
+
+        case .C1:
+            // "Replace shield with permanent block" — same: needs child-state logic.
+            showComingSoon(cardID, note: "Shield→block replacement isn't fully wired yet. Manually unshield, then block.")
+
+        case .C2:
+            // "Block app in shielded list" — same: needs child-state logic.
+            showComingSoon(cardID, note: "Blocking an app inside a shielded list isn't fully wired yet.")
+
+        case .E2:
+            // "Upgrade to Max" primary — goes to upgrade flow (not built).
+            showComingSoon(cardID, note: "Upgrade flow is coming soon.")
+
+        case .E4:
+            // "Create list on child phone" — needs deep link to child's list picker.
+            showComingSoon(cardID, note: "Creating Saved Lists from Chat isn't wired yet. Open the child phone's Settings → Evlin → Saved Lists.")
+
+        case .F1:
+            // F1's real action is list-pick (via onListPicked, already wired).
+            // Primary fires only in degenerate zero-suggestion case.
+            currentCard = nil
+
+        case .G1:
+            // "Set up Child Apple ID" — opens iOS Settings at best. Not wired.
+            showComingSoon(cardID, note: "Child Apple ID setup happens in iOS Settings → Family Sharing.")
         }
+    }
+
+    /// Clear the card and post a visible agent message explaining why the tap
+    /// didn't execute. Better than silent failure.
+    @MainActor
+    private func showComingSoon(_ cardID: CardID, note: String) {
+        currentCard = nil
+        messages.append(ChatMessage(
+            role: .agent,
+            content: note,
+            timestamp: Date()
+        ))
     }
 
     private func handleCardSecondary(cardID: CardID, action: APIClient.ChatActionResponse) {
@@ -325,17 +384,45 @@ class ChatViewModel: ObservableObject {
         resendWithPhrase("shield \(name)\(durSuffix)")
     }
 
-    /// D4 multi-child pick — resend with the child's name prepended.
-    /// MVP uses first picked; when D4 adds multi-select, loop.
+    /// D4 multi-child pick by UUID — placeholder; we currently use label-based
+    /// routing (see handleChildrenLabelsPicked).
     private func handleChildrenPicked(_ ids: [UUID], action: APIClient.ChatActionResponse) {
         currentCard = nil
-        // TODO: map UUID → child label (need childDevices context). For now, log.
-        print("[ChatViewModel] Children picked \(ids) — label mapping not wired yet")
-        messages.append(ChatMessage(
-            role: .agent,
-            content: "Re-issue the command and include the child's name, e.g. \"lock Liam's phone\".",
-            timestamp: Date()
-        ))
+    }
+
+    /// D4 primary confirm: user picked one or more child labels from the
+    /// checkbox UI. Rewrite the last user message to include the first
+    /// selected child's name so the backend dispatcher's hint matcher can
+    /// route the command to that device. Multi-select is not yet supported
+    /// (would require queueing one Command per child).
+    private func handleChildrenLabelsPicked(_ labels: [String], action: APIClient.ChatActionResponse) {
+        currentCard = nil
+        guard !labels.isEmpty else {
+            messages.append(ChatMessage(
+                role: .agent,
+                content: "Pick at least one child first.",
+                timestamp: Date()
+            ))
+            return
+        }
+        guard let originalMsg = messages.reversed().first(where: { $0.role == .parent })?.content
+        else { return }
+
+        // Prepend the child's name if it's not already in the message.
+        let primary = labels[0]
+        let lowered = originalMsg.lowercased()
+        let rewritten = lowered.contains(primary.lowercased())
+            ? originalMsg
+            : "\(primary)'s phone: \(originalMsg)"
+
+        if labels.count > 1 {
+            messages.append(ChatMessage(
+                role: .agent,
+                content: "Multi-child selection isn't supported yet — applying to \(primary) only.",
+                timestamp: Date()
+            ))
+        }
+        resendWithPhrase(rewritten)
     }
 
     private func resendWithForce(_ forceIDs: [String]) {
