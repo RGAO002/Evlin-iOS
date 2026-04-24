@@ -410,14 +410,47 @@ struct RemovedShield: Sendable {
     var possibleSavedListCoverage: Bool = false  // indeterminate — see EffectiveState
 }
 
-/// Extended AckResult — add `pendingConfirmation` case for B1-style flows
-/// where the child device needs the parent to decide, and the parent sends
-/// back a force-confirmed command. Replaces the prior 3-case AckResult from
-/// three-tier-lock-plan's Task 1.4. Backwards-incompatible — migration step
-/// included in Phase 11.
+/// Which verb was executed — drives receipt copy so success of
+/// `block Instagram` doesn't render as "Shielded Instagram".
+enum AckVerb: String, Codable, Sendable, Equatable {
+    case shield
+    case block
+    case unshield
+    case unblock
+    case unshieldAll = "unshield_all"
+    case unblockAll = "unblock_all"
+}
+
+/// Child-computed snapshot of effective coverage after the mutation, so the
+/// parent's ReceiptCard can render the "Still shielded by / May still be in
+/// a Saved List" honest-disclosure line. Serialized inside AckResult.
+///
+/// Shape mirrors `EffectiveState` from ActiveLockStore (Phase 2) but uses
+/// JSON-friendly primitives. Parent iOS side decodes and passes directly to
+/// ReceiptCard; nothing else consumes it server-side.
+struct AckEffectiveState: Codable, Sendable, Equatable {
+    struct ShieldCover: Codable, Sendable, Equatable {
+        let displayName: String
+        let expiresAtISO: String?      // nil = permanent
+        let tier: String               // "exactApp" | "savedList" | "category" | "allApps"
+    }
+    let isBlocked: Bool
+    let shieldsCovering: [ShieldCover]
+    let possibleSavedListCoverage: Bool  // indeterminate — honest "May still be…" line
+}
+
+/// Extended AckResult.
+/// * `confirmedExact` / `confirmedFallback` now carry `verb` so ReceiptCard
+///   can render verb-appropriate copy (Shielded / Hidden / Unshielded / Restored / Unblocked).
+/// * Both success cases carry an optional `effectiveState` computed on the child
+///   after the mutation, so the parent receipt can show coverage disclosure.
+/// * `pendingConfirmation` case added for B1-style flows where the child device
+///   needs parent confirmation (B1 downgrade).
+/// Replaces the prior 3-case AckResult from three-tier-lock-plan's Task 1.4.
+/// Backwards-incompatible — migration step included in Phase 11.
 enum AckResult: Codable, Sendable, Equatable {
-    case confirmedExact(displayName: String)
-    case confirmedFallback(displayName: String, category: String, origRequest: String)
+    case confirmedExact(verb: AckVerb, displayName: String, effectiveState: AckEffectiveState?)
+    case confirmedFallback(verb: AckVerb, displayName: String, category: String, origRequest: String, effectiveState: AckEffectiveState?)
     case pendingConfirmation(cardID: String, context: [String: String])
     case failed(AckFailure)
 }
@@ -1084,10 +1117,11 @@ final class ActionExecutor: @unchecked Sendable {
         case .unshieldAll:
             let cleared = await ActiveLockStore.shared.unshieldAll()
             cancelAllScheduled()
-            return .confirmedExact(displayName: "\(cleared.count) shield(s) cleared")
+            // effectiveState after unshieldAll is empty by construction — no query needed.
+            return .confirmedExact(verb: .unshieldAll, displayName: "\(cleared.count) shield(s) cleared", effectiveState: nil)
         case .unblockAll:
             let cleared = await ActiveLockStore.shared.unblockAll()
-            return .confirmedExact(displayName: "\(cleared.count) block(s) cleared")
+            return .confirmedExact(verb: .unblockAll, displayName: "\(cleared.count) block(s) cleared", effectiveState: nil)
         case .expandLibrary:
             return .failed(.execution("expand_library handled in UI"))
         }
@@ -1106,9 +1140,11 @@ final class ActionExecutor: @unchecked Sendable {
                 if let expiresAt = record.expiresAt {
                     try? scheduleRelock(recordKey: record.recordKey, expiresAt: expiresAt)
                 }
-                return buildConfirmReceipt(cmd: cmd, record: record)
+                let eff = await currentEffectiveState(forShieldRecord: record, cmd: cmd)
+                return buildConfirmReceipt(verb: .shield, cmd: cmd, record: record, effectiveState: eff)
             case .noOpShorterThanExisting, .noOpAlreadyPermanent:
-                return .confirmedExact(displayName: "\(record.displayName) already covered")
+                let eff = await currentEffectiveState(forShieldRecord: record, cmd: cmd)
+                return .confirmedExact(verb: .shield, displayName: "\(record.displayName) already covered", effectiveState: eff)
             case .needsConfirmation(let reason):
                 // Return a structured pending so backend ack can surface card_id to parent.
                 let context: [String: String]
@@ -1133,17 +1169,65 @@ final class ActionExecutor: @unchecked Sendable {
         }
     }
 
-    private func buildConfirmReceipt(cmd: LockCommand, record: ShieldRecord) -> AckResult {
+    private func buildConfirmReceipt(
+        verb: AckVerb,
+        cmd: LockCommand,
+        record: ShieldRecord,
+        effectiveState: AckEffectiveState?
+    ) -> AckResult {
         switch cmd.tier {
         case .category:
             return .confirmedFallback(
+                verb: verb,
                 displayName: record.displayName,
                 category: cmd.target.categoryHint ?? "unknown",
-                origRequest: cmd.target.originalRequest
+                origRequest: cmd.target.originalRequest,
+                effectiveState: effectiveState
             )
         default:
-            return .confirmedExact(displayName: record.displayName)
+            return .confirmedExact(verb: verb, displayName: record.displayName, effectiveState: effectiveState)
         }
+    }
+
+    /// Build an AckEffectiveState for the app/list/category the command targeted.
+    /// Used after every mutation so the parent's receipt can render the honest
+    /// "Still shielded by / May still be in a Saved List" disclosure.
+    private func currentEffectiveState(forShieldRecord record: ShieldRecord, cmd: LockCommand) async -> AckEffectiveState? {
+        // Query coverage for the narrowest meaningful target (bundleID if known,
+        // else broader: category or saved list). Multi-tier shields matter here.
+        let query: AppQuery
+        if let bid = cmd.target.bundleID {
+            query = AppQuery(bundleID: bid, categoryHint: cmd.target.categoryHint?.lowercased())
+        } else {
+            // For list/category/all commands, caller-facing effective-state is
+            // mostly for the honest "still covered" line — run with nil bundle
+            // (store returns only broader shields; EffectiveState still correct).
+            query = AppQuery(bundleID: nil, categoryHint: cmd.target.categoryHint?.lowercased())
+        }
+        let state = await ActiveLockStore.shared.effectiveState(for: query)
+        return AckEffectiveState(
+            isBlocked: state.blockedAfter,
+            shieldsCovering: state.stillCovered.map {
+                .init(displayName: $0.displayName,
+                      expiresAtISO: $0.expiresAt.map { ISO8601DateFormatter().string(from: $0) },
+                      tier: $0.tier.rawValue)
+            },
+            possibleSavedListCoverage: state.possibleSavedListCoverage
+        )
+    }
+
+    /// Effective-state for unblock/unshield: the caller has already removed the
+    /// record, so `stillShieldedBy`/`stillCovered` already reflects post-removal.
+    private func effectiveStateFrom(_ stillCovered: [ShieldRecord], isBlocked: Bool, possibleSavedList: Bool) -> AckEffectiveState {
+        AckEffectiveState(
+            isBlocked: isBlocked,
+            shieldsCovering: stillCovered.map {
+                .init(displayName: $0.displayName,
+                      expiresAtISO: $0.expiresAt.map { ISO8601DateFormatter().string(from: $0) },
+                      tier: $0.tier.rawValue)
+            },
+            possibleSavedListCoverage: possibleSavedList
+        )
     }
 
     private func buildShieldRecord(from cmd: LockCommand, blob: Data?) throws -> ShieldRecord {
@@ -1248,11 +1332,16 @@ final class ActionExecutor: @unchecked Sendable {
             targetChildID: cmd.target.targetChildID ?? UUID()
         )
         let result = await ActiveLockStore.shared.addBlock(record)
+        // Coverage snapshot after block — mostly just isBlocked=true,
+        // but include any timed shields still covering (honest disclosure).
+        let query = AppQuery(bundleID: bundleID, categoryHint: nil)
+        let state = await ActiveLockStore.shared.effectiveState(for: query)
+        let eff = effectiveStateFrom(state.stillCovered, isBlocked: true, possibleSavedList: state.possibleSavedListCoverage)
         switch result {
         case .added:
-            return .confirmedExact(displayName: record.displayName)
+            return .confirmedExact(verb: .block, displayName: record.displayName, effectiveState: eff)
         case .alreadyBlocked:
-            return .confirmedExact(displayName: "\(record.displayName) already blocked")
+            return .confirmedExact(verb: .block, displayName: "\(record.displayName) already blocked", effectiveState: eff)
         }
     }
 
@@ -1290,7 +1379,12 @@ final class ActionExecutor: @unchecked Sendable {
             return .failed(.nothingToUnlock)
         }
         cancelScheduled(recordKey: recordKey)
-        return .confirmedExact(displayName: removed.record.displayName)
+        // After removing a list/category/all shield, any other shields still in
+        // place that overlap the same app are reported via effectiveState.
+        let query = AppQuery(bundleID: nil, categoryHint: nil)  // broad
+        let state = await ActiveLockStore.shared.effectiveState(for: query)
+        let eff = effectiveStateFrom(state.stillCovered, isBlocked: state.blockedAfter, possibleSavedList: state.possibleSavedListCoverage)
+        return .confirmedExact(verb: .unshield, displayName: removed.record.displayName, effectiveState: eff)
     }
 
     /// Spec §4.4: default to removing exactApp shield if one exists. Otherwise reject
@@ -1313,7 +1407,10 @@ final class ActionExecutor: @unchecked Sendable {
                 return .failed(.nothingToUnlock)
             }
             cancelScheduled(recordKey: exactAppShield.recordKey)
-            return .confirmedExact(displayName: removed.record.displayName)
+            // Re-query after removal — broader shields may still cover the app.
+            let post = await ActiveLockStore.shared.effectiveState(for: query)
+            let eff = effectiveStateFrom(post.stillCovered, isBlocked: post.blockedAfter, possibleSavedList: post.possibleSavedListCoverage)
+            return .confirmedExact(verb: .unshield, displayName: removed.record.displayName, effectiveState: eff)
         }
 
         let broader = state.shieldsCovering.filter { $0.tier != .exactApp }
@@ -1356,7 +1453,12 @@ final class ActionExecutor: @unchecked Sendable {
         //  - stillShieldedBy non-empty  → "Unblocked X. Still shielded by Y..."
         //  - else if possibleSavedListCoverage → "Unblocked X. May still be in a Saved List."
         //  - else → "Unblocked X. Now fully unrestricted."
-        return .confirmedExact(displayName: removed.record.displayName)
+        let eff = effectiveStateFrom(
+            removed.stillShieldedBy,
+            isBlocked: false,
+            possibleSavedList: removed.possibleSavedListCoverage
+        )
+        return .confirmedExact(verb: .unblock, displayName: removed.record.displayName, effectiveState: eff)
     }
 
     // MARK: - DeviceActivity scheduling
@@ -1959,6 +2061,46 @@ def test_no_list_match_no_close_routes_to_e4():
         gemini_action=_gemini_action("shield", "totally unknown list", kind="list", duration=30),
     )
     assert result.requires_card == "E4"
+
+
+def test_a1_force_confirmation_bypasses_a1_card_and_resolves_block():
+    # First turn: parent says "block IG" → A1 card (Max mode, catalog hits).
+    initial = dispatch(
+        family_id=uuid4(),
+        protection_mode="max",
+        child_count=1,
+        saved_list_names=[],
+        gemini_action=_gemini_action("block", "Instagram", kind="app"),
+    )
+    assert initial.requires_card == "A1"
+    assert initial.resolved is not None  # still carried so card can display target
+
+    # Second turn: parent tapped "Block Instagram" on A1 → re-send with force.
+    confirmed = dispatch(
+        family_id=uuid4(),
+        protection_mode="max",
+        child_count=1,
+        saved_list_names=[],
+        gemini_action=_gemini_action("block", "Instagram", kind="app"),
+        force_confirmations=["A1"],
+    )
+    assert confirmed.requires_card is None
+    assert confirmed.resolved is not None
+    assert confirmed.resolved.action == "block"
+
+
+def test_child_name_hint_threaded_onto_resolved_action():
+    result = dispatch(
+        family_id=uuid4(),
+        protection_mode="std",
+        child_count=1,
+        saved_list_names=["list 1"],
+        gemini_action=_gemini_action(
+            "shield", "list 1", kind="list", duration=30, child_name_hint="Liam"
+        ),
+    )
+    assert result.resolved is not None
+    assert result.resolved.child_name_hint == "Liam"
 ```
 
 - [ ] **Step 2: Run the tests, verify they fail**
@@ -2021,6 +2163,14 @@ class ResolvedAction:
     # Set true when the parent's B1 card confirmation re-submitted the Chat message.
     # Child reads target.force_downgrade and skips addShield's merge rule.
     force_downgrade: bool = False
+    # Which child the command targets. Forwarded from gemini_action.child_name_hint
+    # (Gemini parses "Liam's phone" → child_name_hint="Liam"). Handler matches this
+    # against Device.label (case-insensitive, substring-OK); falls back to D4 if
+    # ambiguous or no match. Matching must be forgiving because labels can be
+    # "Liam's iPhone" but the hint is just "Liam".
+    # IMPORTANT: must NOT be None in multi-child families; D4 intercept handles that
+    # upstream (child_count >= 2 and no hint → requires_card=D4).
+    child_name_hint: str | None = None
 
 
 @dataclass
@@ -2067,26 +2217,37 @@ def dispatch(
 
     # Route by verb
     if action_type == "block":
-        return _route_block(protection_mode, gemini_action)
-    if action_type == "unblock":
-        return _route_unblock(protection_mode, gemini_action)
-    if action_type == "unblock_all":
-        return _route_unblock_all(protection_mode)
-    if action_type == "shield":
-        return _route_shield(protection_mode, saved_list_names, gemini_action, force_confirmations)
-    if action_type == "unshield":
-        return _route_unshield(protection_mode, gemini_action)
-    if action_type == "unshield_all":
-        return DispatchResult(
+        result = _route_block(protection_mode, gemini_action, force_confirmations)
+    elif action_type == "unblock":
+        result = _route_unblock(protection_mode, gemini_action)
+    elif action_type == "unblock_all":
+        result = _route_unblock_all(protection_mode)
+    elif action_type == "shield":
+        result = _route_shield(protection_mode, saved_list_names, gemini_action, force_confirmations)
+    elif action_type == "unshield":
+        result = _route_unshield(protection_mode, gemini_action)
+    elif action_type == "unshield_all":
+        result = DispatchResult(
             resolved=ResolvedAction(action="unshield_all", tier=None)
         )
+    else:
+        return DispatchResult(receipt_only_text=f"Unknown action: {action_type}")
 
-    return DispatchResult(receipt_only_text=f"Unknown action: {action_type}")
+    # Thread child_name_hint from Gemini into any queued ResolvedAction so the
+    # /parent/chat handler can pick the right Device. Single-child families
+    # still match without a hint (handler falls back to the only child).
+    if result.resolved is not None:
+        result.resolved.child_name_hint = gemini_action.get("child_name_hint")
+    return result
 
 
 # ---------- Verb handlers ----------
 
-def _route_block(mode: str, action: dict) -> DispatchResult:
+def _route_block(
+    mode: str,
+    action: dict,
+    force_confirmations: list[str] | None = None,
+) -> DispatchResult:
     # Std can't create new blocks → E2
     if mode == "std":
         return DispatchResult(requires_card="E2")
@@ -2099,16 +2260,23 @@ def _route_block(mode: str, action: dict) -> DispatchResult:
             requires_card="E3",
             category_guess=action.get("category_hint_from_ai"),
         )
-    # First-time block → always A1 confirm (spec §5.2 A1)
-    return DispatchResult(
-        requires_card="A1",
-        resolved=ResolvedAction(
-            action="block",
-            tier=None,
-            bundle_id=entry.bundle_id,
-            target_display=entry.names[0],
-        ),
+
+    resolved = ResolvedAction(
+        action="block",
+        tier=None,
+        bundle_id=entry.bundle_id,
+        target_display=entry.names[0],
     )
+
+    # Parent already confirmed A1 in the previous turn → dispatch the block directly.
+    # Without this bypass, the parent's A1 confirm re-sends the same phrasing and
+    # hits A1 again, never queueing the real command.
+    if force_confirmations and "A1" in force_confirmations:
+        return DispatchResult(resolved=resolved)
+
+    # First-time (or unconfirmed) block → A1 confirm card (spec §5.2 A1).
+    # The card's primary button re-sends /parent/chat with force_confirmations=["A1"].
+    return DispatchResult(requires_card="A1", resolved=resolved)
 
 
 def _route_unblock(mode: str, action: dict) -> DispatchResult:
@@ -2403,10 +2571,53 @@ if result.receipt_only_text:
 
 # Resolved — queue a Command
 if result.resolved:
-    # Pick first child device (D4 already caught multi-child-no-name case)
     if not child_devices:
         raise HTTPException(400, "no child device paired")
-    target_child = child_devices[0]
+
+    # Pick the child device that matches child_name_hint.
+    # D4 intercept already handles multi-child-no-hint upstream, but we still need
+    # to honor the hint when it's present — otherwise "lock Liam's phone" would
+    # silently target child_devices[0] even when Liam is [1]. Fall back to D4 if
+    # the hinted name doesn't match any device (could be Gemini hallucination or
+    # a child was just removed from the family).
+    hint = result.resolved.child_name_hint
+    target_child = None
+    if hint:
+        needle = hint.strip().lower()
+        # Forgiving match: Device.label is often "Liam's iPhone" while the hint
+        # is just "Liam". Accept equality or hint-as-substring. If multiple
+        # devices match (e.g. "Liam's iPhone" + "Liam's iPad"), fall back to D4.
+        matches = [
+            dev for dev in child_devices
+            if needle == (dev.label or "").strip().lower()
+            or needle in (dev.label or "").strip().lower()
+        ]
+        if len(matches) == 1:
+            target_child = matches[0]
+        # len == 0 or > 1 → fall through to D4
+        if target_child is None:
+            # Hint didn't resolve — re-prompt with D4 so the parent disambiguates
+            # using real device labels rather than silently mis-targeting.
+            return ChatResponse(
+                message=message,
+                reasoning=reasoning,
+                action=ChatAction(
+                    type=action_type,
+                    confirmation_required=True,
+                    card_id="D4",
+                    target_display=result.resolved.target_display,
+                ),
+            )
+    else:
+        # No hint — either single-child family (safe) or D4 already caught it upstream.
+        if len(child_devices) > 1:
+            # Shouldn't happen (D4 guard above) but defend anyway.
+            return ChatResponse(
+                message=message, reasoning=reasoning,
+                action=ChatAction(type=action_type, confirmation_required=True, card_id="D4",
+                                   target_display=result.resolved.target_display),
+            )
+        target_child = child_devices[0]
 
     payload = {
         "action": result.resolved.action,
@@ -2483,8 +2694,12 @@ class ChatRequest(BaseModel):
     child_name: str | None = None
     history: list[ChatHistoryEntry] = Field(default_factory=list)
 
-    # New — card IDs the parent has already confirmed. Currently only "B1"
-    # (permanent→timed downgrade) uses this; reserved for future confirm flows.
+    # Card IDs the parent has already confirmed in-session. Dispatcher uses these
+    # to bypass the specific guard and dispatch the underlying action:
+    #   "A1" — Max first-time block → bypass A1, queue block Command
+    #   "B1" — permanent→timed shield downgrade → set force_downgrade=true on
+    #          ResolvedAction so child's addShield(force: true) overrides merge
+    # Reserved for future confirm flows (A3 unblock_all, D3 long-duration shield, …).
     force_confirmations: list[str] = Field(default_factory=list)
 ```
 
@@ -2510,22 +2725,38 @@ git add backend/app/api/routes/parent_chat.py
 git commit -m "feat(chat): wire verb-first dispatcher into /parent/chat (Phase 6)"
 ```
 
-### Task 6.4: Persist pending_confirmation acks + surface via status endpoint
+### Task 6.4: Persist full ack payload (verb, effective_state, pending_confirmation) + surface via status endpoint
 
 **Files:**
 - Modify: `adaptive-engine/backend/app/db/models/command.py`
 - Modify: `adaptive-engine/backend/app/api/routes/devices.py` (ack + status endpoints)
 - Migration: new Alembic revision adding columns
 
-Context: the child executor may return `AckResult.pendingConfirmation(cardID, context)`
-(see Phase 3). Backend needs to persist card_id + context on the Command row and
-echo them through the status-polling endpoint, so the parent UI can render the
-confirmation card. Today the Command model has `ack_status` + `ack_detail` only.
+Context: the child's AckResult now carries 4 independent things the parent UI
+needs to render a correct receipt:
+  1. `verb` — which action succeeded (shield/block/unshield/unblock/unshield_all/unblock_all)
+  2. `displayName` — already persisted in ack_detail
+  3. `effective_state` — coverage snapshot after the mutation, for the honest
+     "Still shielded by …" / "May still be in a Saved List" disclosure line
+  4. `pending_confirmation` — card_id + context when the mutation deferred to
+     parent (currently only B1)
+
+Without persisting these, the parent polls /status and can't distinguish
+"unblock IG succeeded" from "shield IG succeeded", and it can never show the
+effective-state disclosure line — which is the whole point of spec §8.
 
 - [ ] **Step 1: Add columns to Command**
 
 ```python
 # db/models/command.py, inside class Command
+# Verb that succeeded — drives receipt copy on parent.
+ack_verb: Mapped[str | None] = mapped_column(String(16), nullable=True)
+
+# Coverage snapshot, JSON-serialized AckEffectiveState (see iOS Phase 1).
+# Shape: {"isBlocked": bool, "shieldsCovering": [{...}], "possibleSavedListCoverage": bool}
+ack_effective_state: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+# pending_confirmation payload (B1 round-trip).
 ack_card_id: Mapped[str | None] = mapped_column(String(8), nullable=True)
 ack_context: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 ```
@@ -2534,34 +2765,116 @@ ack_context: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 ```bash
 cd /Users/fred/Desktop/Evlin/adaptive-engine
-poetry run alembic revision --autogenerate -m "add ack_card_id + ack_context to commands"
+poetry run alembic revision --autogenerate -m "add ack_verb + ack_effective_state + ack_card_id + ack_context to commands"
 poetry run alembic upgrade head
 ```
 
-- [ ] **Step 3: Extend ack endpoint**
+- [ ] **Step 3: Extend ack endpoint payload schema**
 
-In `POST /devices/{device_id}/commands/{command_id}/ack`, accept new optional
-fields `card_id: str | None` and `context: dict | None` in the request body.
-When `status == "pending_confirmation"`, store them. Otherwise leave null.
+In `POST /devices/{device_id}/commands/{command_id}/ack`, widen the Pydantic
+request model:
 
-- [ ] **Step 4: Extend status endpoint**
+```python
+class AckEffectiveStateCover(BaseModel):
+    displayName: str
+    expiresAtISO: str | None = None
+    tier: str  # "exactApp" | "savedList" | "category" | "allApps"
 
-`GET /devices/{device_id}/commands/{command_id}/status` returns:
+class AckEffectiveStatePayload(BaseModel):
+    isBlocked: bool = False
+    shieldsCovering: list[AckEffectiveStateCover] = Field(default_factory=list)
+    possibleSavedListCoverage: bool = False
+
+class AckRequest(BaseModel):
+    status: str                          # "confirmed" | "failed" | "pending_confirmation"
+    verb: str | None = None              # required when status=confirmed
+    detail: str | None = None            # displayName on success, error on failure
+    display_name: str | None = None      # alias for detail on success
+    category: str | None = None          # for confirmedFallback
+    orig_request: str | None = None      # for confirmedFallback
+    effective_state: AckEffectiveStatePayload | None = None
+    card_id: str | None = None           # pending_confirmation only
+    context: dict | None = None          # pending_confirmation only
+```
+
+Handler persists the relevant subset of columns based on `status`. iOS
+ActionExecutor's `AckResult.Codable` JSON naturally maps to this schema — the
+child just `JSONEncoder().encode(ackResult)` and POSTs it as the body.
+
+- [ ] **Step 4: Extend status endpoint response**
+
+`GET /devices/{device_id}/commands/{command_id}/status` returns (fields absent
+when null):
+
+```json
+{
+  "status": "confirmed",
+  "verb": "unblock",
+  "detail": "Instagram",
+  "displayName": "Instagram",
+  "category": null,
+  "origRequest": null,
+  "effectiveState": {
+    "isBlocked": false,
+    "shieldsCovering": [
+      {"displayName": "Social", "expiresAtISO": "2026-04-24T22:15:00Z", "tier": "category"}
+    ],
+    "possibleSavedListCoverage": false
+  },
+  "pendingConfirmation": null
+}
+```
+
+For pending_confirmation:
 
 ```json
 {
   "status": "pending_confirmation",
+  "verb": null,
   "detail": null,
   "displayName": null,
-  "pendingConfirmation": { "card_id": "B1", "context": { "existing_record_key": "...", "requested_expiry_iso": "...", "requested_duration_minutes": "30", "existing_mode": "permanent", "target_display": "Instagram", "target_request": "lock IG for 30 min" } }
+  "effectiveState": null,
+  "pendingConfirmation": {
+    "card_id": "B1",
+    "context": { "existing_record_key": "...", "requested_expiry_iso": "...",
+                 "requested_duration_minutes": "30", "existing_mode": "permanent",
+                 "target_display": "Instagram", "target_request": "lock IG for 30 min" }
+  }
 }
 ```
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: iOS AckStatusResponse decoder (update Task 9.1 stub)**
+
+Ensure the iOS `AckStatusResponse` (in APIClient, Phase 9 Task 9.1) now decodes:
+
+```swift
+struct AckStatusResponse: Decodable {
+    let status: String  // "queued" | "in_flight" | "confirmed" | "failed" | "pending_confirmation"
+    let verb: String?   // "shield" | "block" | "unshield" | "unblock" | "unshield_all" | "unblock_all"
+    let detail: String?
+    let displayName: String?
+    let category: String?
+    let origRequest: String?
+    let effectiveState: AckEffectiveState?   // from Phase 1
+    let pendingConfirmation: AckPendingConfirmation?
+}
+```
+
+ChatViewModel, when `status == "confirmed"`, builds `ReceiptState` as:
+
+```swift
+let verb = AckVerb(rawValue: resp.verb ?? "") ?? .shield
+let state: ReceiptState = (resp.category != nil)
+    ? .confirmedFallback(verb: verb, displayName: resp.displayName ?? "", category: resp.category!, origRequest: resp.origRequest ?? "")
+    : .confirmedExact(verb: verb, displayName: resp.displayName ?? "", unlocksAt: /* from Command.expiresAt */)
+receipt = (state, resp.effectiveState)
+```
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add backend/app/db/models/command.py backend/app/api/routes/devices.py backend/alembic/versions/*.py
-git commit -m "feat(commands): persist + surface pending_confirmation acks (B1 round-trip, Phase 6)"
+git commit -m "feat(commands): persist verb + effective_state + pending_confirmation acks (Phase 6)"
 ```
 
 ---
@@ -3506,8 +3819,10 @@ import SwiftUI
 
 enum ReceiptState: Sendable, Equatable {
     case pending
-    case confirmedExact(displayName: String, unlocksAt: Date?)
-    case confirmedFallback(displayName: String, category: String, origRequest: String)
+    /// Mirrors AckResult.confirmedExact. `verb` drives copy branching so
+    /// `unblock Instagram` renders as "Unblocked Instagram", not "Shielded Instagram".
+    case confirmedExact(verb: AckVerb, displayName: String, unlocksAt: Date?)
+    case confirmedFallback(verb: AckVerb, displayName: String, category: String, origRequest: String)
     case failedPermission
     case failedListNotFound(listName: String)
     case failedCategoryNotConfigured(category: String)
@@ -3517,9 +3832,16 @@ enum ReceiptState: Sendable, Equatable {
 
 /// Two-line receipt: primary mutation + optional effective-state disclosure.
 /// See spec §8.
+///
+/// IMPORTANT: ReceiptCard runs on the PARENT device. The child computes
+/// AckEffectiveState (see AckResult) and ships it up through the ack →
+/// /devices/.../commands/.../status endpoint. Parent never queries its own
+/// ActiveLockStore here — that store exists on the child. The old design
+/// typed this as `EffectiveState?` (child-side actor type); we switched to
+/// AckEffectiveState so it can actually be Codable-deserialized server-side.
 struct ReceiptCard: View {
     let state: ReceiptState
-    let effectiveState: EffectiveState?    // from ActiveLockStore; nil if not queried
+    let effectiveState: AckEffectiveState?    // decoded from ack; nil if none reported
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -3542,24 +3864,29 @@ struct ReceiptCard: View {
                 ProgressView().controlSize(.small)
                 Text("Sending…").font(.subheadline)
             }
-        case .confirmedExact(let name, let unlocksAt):
+        case .confirmedExact(let verb, let name, let unlocksAt):
             HStack(spacing: 8) {
-                Image(systemName: "checkmark.shield")
+                Image(systemName: iconForVerb(verb))
                 VStack(alignment: .leading) {
-                    Text("Shielded \(name)").font(.subheadline).fontWeight(.medium)
-                    if let at = unlocksAt {
-                        Text("Unlocks at \(timeString(at))").font(.caption).foregroundStyle(.secondary)
-                    } else {
-                        Text("Until you unlock").font(.caption).foregroundStyle(.secondary)
+                    Text(titleForVerb(verb, displayName: name))
+                        .font(.subheadline).fontWeight(.medium)
+                    // Timing sub-line only meaningful for additive verbs (shield).
+                    if verb == .shield {
+                        if let at = unlocksAt {
+                            Text("Unlocks at \(timeString(at))").font(.caption).foregroundStyle(.secondary)
+                        } else {
+                            Text("Until you unlock").font(.caption).foregroundStyle(.secondary)
+                        }
                     }
                 }
             }
-        case .confirmedFallback(let name, let category, let orig):
+        case .confirmedFallback(let verb, let name, let category, let orig):
             HStack(spacing: 8) {
                 Image(systemName: "arrow.triangle.branch")
                 VStack(alignment: .leading) {
-                    Text("\(category.capitalized) shielded (fallback)").font(.subheadline).fontWeight(.medium)
-                    Text("No exact match for \(orig); shielded \(category) instead.")
+                    Text(fallbackTitleForVerb(verb, category: category))
+                        .font(.subheadline).fontWeight(.medium)
+                    Text("No exact match for \(orig); applied to \(category) instead.")
                         .font(.caption).foregroundStyle(.secondary)
                     _ = name  // unused outside title
                 }
@@ -3586,18 +3913,23 @@ struct ReceiptCard: View {
         guard let effectiveState = effectiveState else { return nil }
         if effectiveState.isBlocked { return "Still blocked." }
 
-        // Certain coverage wins
+        // Certain coverage wins. AckEffectiveState carries `expiresAtISO` (String?)
+        // so we parse it before comparing. Permanent (nil) sorts strongest.
         if !effectiveState.shieldsCovering.isEmpty {
-            let sorted = effectiveState.shieldsCovering.sorted { a, b in
-                if a.expiresAt == nil && b.expiresAt != nil { return true }
-                if a.expiresAt != nil && b.expiresAt == nil { return false }
-                return (a.expiresAt ?? .distantPast) > (b.expiresAt ?? .distantPast)
+            let iso = ISO8601DateFormatter()
+            let parsed: [(AckEffectiveState.ShieldCover, Date?)] = effectiveState.shieldsCovering.map {
+                ($0, $0.expiresAtISO.flatMap { iso.date(from: $0) })
             }
-            let strongest = sorted[0]
-            if strongest.expiresAt == nil {
-                return "Still shielded by \(strongest.displayName) permanently."
+            let sorted = parsed.sorted { a, b in
+                if a.1 == nil && b.1 != nil { return true }
+                if a.1 != nil && b.1 == nil { return false }
+                return (a.1 ?? .distantPast) > (b.1 ?? .distantPast)
             }
-            return "Still shielded by \(strongest.displayName) until \(timeString(strongest.expiresAt!))."
+            let (strongest, strongestExpires) = sorted[0]
+            if let exp = strongestExpires {
+                return "Still shielded by \(strongest.displayName) until \(timeString(exp))."
+            }
+            return "Still shielded by \(strongest.displayName) permanently."
         }
 
         // Indeterminate — Saved List shields exist but we couldn't verify coverage.
@@ -3613,6 +3945,44 @@ struct ReceiptCard: View {
         let f = DateFormatter()
         f.timeStyle = .short
         return f.string(from: date)
+    }
+
+    // MARK: - Verb-driven copy helpers
+    //
+    // IMPORTANT: without these, every success verb (block/unshield/unblock/…) was
+    // rendered as "Shielded <name>" — which contradicts what the child actually did.
+    // Keep this logic here (not in AckResult) so localization stays near the view.
+
+    private func iconForVerb(_ verb: AckVerb) -> String {
+        switch verb {
+        case .shield:      return "checkmark.shield"
+        case .block:       return "eye.slash"
+        case .unshield:    return "lock.open"
+        case .unblock:     return "eye"
+        case .unshieldAll: return "lock.open.rotation"
+        case .unblockAll:  return "eye.circle"
+        }
+    }
+
+    private func titleForVerb(_ verb: AckVerb, displayName: String) -> String {
+        switch verb {
+        case .shield:      return "Shielded \(displayName)"
+        case .block:       return "Hidden \(displayName) from home screen"
+        case .unshield:    return "Unshielded \(displayName)"
+        case .unblock:     return "Restored \(displayName) to home screen"
+        case .unshieldAll: return "All shields cleared (\(displayName))"
+        case .unblockAll:  return "All blocks cleared (\(displayName))"
+        }
+    }
+
+    private func fallbackTitleForVerb(_ verb: AckVerb, category: String) -> String {
+        switch verb {
+        case .shield:      return "\(category.capitalized) shielded (fallback)"
+        case .unshield:    return "\(category.capitalized) unshielded (fallback)"
+        // Block/unblock never take the category fallback — dispatcher routes
+        // unknown-target block to E3, not a fallback ack. Defensive default:
+        default:           return "\(category.capitalized) updated (fallback)"
+        }
     }
 }
 ```
@@ -3698,15 +4068,21 @@ struct AckPendingConfirmation: Decodable {
 
 struct AckStatusResponse: Decodable {
     let status: String  // "queued" | "in_flight" | "confirmed" | "failed" | "pending_confirmation"
+    let verb: String?   // present when status=="confirmed"; maps to AckVerb
     let detail: String?
     let displayName: String?
+    let category: String?       // confirmedFallback only
+    let origRequest: String?    // confirmedFallback only
+    let effectiveState: AckEffectiveState?
     let pendingConfirmation: AckPendingConfirmation?
 }
 ```
 
-Backend ack-status endpoint needs a matching extension: when the child posts
-an ack with the `.pendingConfirmation` AckResult case, persist card_id+context
-on the Command row and surface them here. (Add the column in a 6.x subtask.)
+Backend ack + status endpoints carry the full AckResult payload. See Task 6.4
+for the Command model columns (`ack_verb`, `ack_effective_state`, `ack_card_id`,
+`ack_context`) and the ack endpoint schema. ChatViewModel translates
+`AckStatusResponse` → `ReceiptState` + `AckEffectiveState?` and passes both to
+`ReceiptCard` (spec §8).
 
 - [ ] **Step 2: Commit**
 
@@ -3737,7 +4113,7 @@ enum ChatOutput {
 When the response contains a `card_id`, set `currentCard` with the appropriate context. The handlers follow-up by re-calling `/parent/chat` with modified phrasing (e.g. user picked a duration → resend with duration filled in).
 
 **Phase 9 MVP fully-wired cards (required for Phase 12 validation to pass)**:
-- **A1** — Block confirmation → confirm re-sends /parent/chat with phrasing that skips the A1 guardrail
+- **A1** — Block confirmation → confirm re-sends /parent/chat with the ORIGINAL user message and `force_confirmations=["A1"]`. Dispatcher's `_route_block` sees the force flag and returns `resolved` (bypassing the A1 guard), which queues a real block Command. Without the force flag, A1 would loop forever.
 - **B1** — Permanent→timed downgrade → confirm re-sends /parent/chat with the ORIGINAL user message and `force_confirmations=["B1"]`. Backend dispatcher sets `force_downgrade=true` on ResolvedAction → Command payload carries it → child executor calls `addShield(force: true)`. Parent does NOT mutate ActiveLockStore directly (the store lives on the child device).
 - **D1** — Missing duration quick-pick → picks duration, re-sends /parent/chat with duration filled
 - **E1** — Std-can't-shield-single → primary action re-sends /parent/chat as category shield (copy varies by mode — see CardPayloadBuilder.e1)
