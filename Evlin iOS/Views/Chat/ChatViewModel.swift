@@ -174,7 +174,12 @@ class ChatViewModel: ObservableObject {
             return
         }
 
-        // 2. Queued command — append bubble + start ack poll
+        // 2. Queued command — append bubble + start ack poll.
+        // Note: no longer sets msg.lockMinutes/lockChildName — the legacy
+        // LockConfirmationCard was mock UI ("Liam's device has been restricted")
+        // that lied about execution state. ReceiptCard is now the single honest
+        // source of truth; if the child fails (not authorized, category not
+        // configured, etc.), the receipt shows the real error.
         if let act = resp.action, let cmdID = act.command_id {
             var msg = ChatMessage(
                 role: .agent, content: resp.message, timestamp: Date(),
@@ -182,11 +187,6 @@ class ChatViewModel: ObservableObject {
             )
             msg.commandID = cmdID
             msg.receiptState = .pending
-            // Back-compat: legacy lock-confirmation card UI for shield/shield_all responses.
-            if act.type == "shield" || act.type == "shield_all", let mins = act.duration_minutes {
-                msg.lockMinutes = mins
-                msg.lockChildName = childName
-            }
             messages.append(msg)
             startAckPoll(
                 commandID: cmdID,
@@ -492,8 +492,35 @@ class ChatViewModel: ObservableObject {
                         }
                         return true
                     case "failed":
-                        let reason = (resp.detail?["reason"]?.value as? String) ?? "Failed"
-                        self.applyReceipt(.failedOther(reason: reason), effective: nil, messageID: messageID)
+                        // Map structured failure detail (from CommandPoller) to
+                        // the specific ReceiptState case. ReceiptCard then renders
+                        // a human copy instead of the raw Swift enum description.
+                        let detail = resp.detail ?? [:]
+                        let kind = (detail["reason"]?.value as? String) ?? "other"
+                        let state: ReceiptState
+                        switch kind {
+                        case "not_authorized":
+                            state = .failedPermission
+                        case "list_not_found":
+                            state = .failedListNotFound(
+                                listName: (detail["list_name"]?.value as? String) ?? "(unknown)"
+                            )
+                        case "category_not_configured":
+                            state = .failedCategoryNotConfigured(
+                                category: (detail["category"]?.value as? String) ?? "(unknown)"
+                            )
+                        case "nothing_to_unlock":
+                            state = .failedOther(reason: "Nothing matched to unlock.")
+                        case "malformed":
+                            state = .failedOther(reason: "The command wasn't well-formed.")
+                        case "execution":
+                            state = .failedOther(
+                                reason: (detail["message"]?.value as? String) ?? "Execution failed."
+                            )
+                        default:
+                            state = .failedOther(reason: kind)
+                        }
+                        self.applyReceipt(state, effective: nil, messageID: messageID)
                         return true
                     case "timeout":
                         self.applyReceipt(.failedTimeout, effective: nil, messageID: messageID)

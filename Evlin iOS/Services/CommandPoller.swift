@@ -113,7 +113,29 @@ final class CommandPoller {
             case .pendingConfirmation(let cardID, let ctx):
                 return ("pending_confirmation", ["card_id": cardID, "context": ctx])
             case .failed(let fail):
-                return ("failed", ["reason": String(describing: fail)])
+                // Structured failure detail so the parent receipt can render a
+                // specific ReceiptState (failedPermission, failedListNotFound,
+                // failedCategoryNotConfigured, …) instead of dumping Swift's
+                // default enum description like `categoryNotConfigured("social")`.
+                var d: [String: Any] = [:]
+                switch fail {
+                case .notAuthorized:
+                    d["reason"] = "not_authorized"
+                case .listNotFound(let n):
+                    d["reason"] = "list_not_found"
+                    d["list_name"] = n
+                case .categoryNotConfigured(let c):
+                    d["reason"] = "category_not_configured"
+                    d["category"] = c
+                case .nothingToUnlock:
+                    d["reason"] = "nothing_to_unlock"
+                case .malformed:
+                    d["reason"] = "malformed"
+                case .execution(let s):
+                    d["reason"] = "execution"
+                    d["message"] = s
+                }
+                return ("failed", d)
             }
         }()
 
