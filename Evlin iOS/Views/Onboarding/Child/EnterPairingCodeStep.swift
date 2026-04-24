@@ -102,6 +102,26 @@ struct EnterPairingCodeStep: View {
                     .fill(parentJoined ? Color.evPrimary : Color.evOutline)
             )
             .disabled(!parentJoined)
+
+            #if DEBUG
+            // Dev-only escape hatch for single-device testing. Skips waiting for
+            // a parent to enter the 6-digit code and forces the flow forward
+            // with protectionMode=std. Backend stays unpaired — that's fine for
+            // exercising the remaining child-onboarding steps (DeletionProtection,
+            // CategoryDefaults, FirstSavedList, ChildReady).
+            // Gated by #if DEBUG so release builds can't see it.
+            Button {
+                protectionMode = "std"
+                parentJoined = true
+                status = "⚠️ Skipped (DEBUG) — proceeding as Std mode"
+                onContinue()
+            } label: {
+                Text("⚠️ DEBUG: Skip pairing (single-device)")
+                    .font(.evBodySmall)
+                    .foregroundStyle(Color.evError)
+                    .padding(.top, Spacing.md)
+            }
+            #endif
         }
         .padding(Spacing.xl)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
