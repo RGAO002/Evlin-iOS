@@ -228,29 +228,44 @@ class ChatViewModel: ObservableObject {
 
     // MARK: - Card handlers (Phase 9)
 
-    /// Re-send the original user message with force_confirmations, so the dispatcher
-    /// bypasses the guard that caused the card (A1 block, B1 downgrade, …).
+    /// Handle the primary button on a confirmation card. Most cards re-send
+    /// /parent/chat with either force_confirmations or a clarified phrasing.
     private func handleCardPrimary(cardID: CardID, action: APIClient.ChatActionResponse) {
-        let forceIDs: [String]
         switch cardID {
-        case .A1: forceIDs = ["A1"]
-        case .B1: forceIDs = ["B1"]
+        case .A1:
+            resendWithForce(["A1"])
+        case .B1:
+            resendWithForce(["B1"])
         case .E1:
-            // E1 primary = "shield category instead". Let the user re-issue as a
-            // category-shaped phrase. Minimal stub: log + clear.
-            // TODO: fire a fresh /parent/chat with `shield <category> apps`.
-            print("[ChatViewModel] E1 primary (category fallback) — not wired yet")
-            currentCard = nil
-            return
+            // E1 primary = "Shield <category> instead". Rewrite the parent's
+            // original request into a category-shaped phrase and re-send. Use
+            // categoryGuess from the backend's DispatchResult.
+            let cat = action.category_guess ?? "social"
+            let durSuffix = action.duration_minutes.map { " for \($0) minutes" } ?? ""
+            resendWithPhrase("shield \(cat) apps\(durSuffix)")
         default:
             print("[ChatViewModel] Card primary for \(cardID.rawValue) — stub")
             currentCard = nil
-            return
         }
+    }
 
+    /// Re-send the original user message verbatim + force_confirmations.
+    private func resendWithForce(_ forceIDs: [String]) {
         guard let originalMsg = messages.reversed().first(where: { $0.role == .parent })?.content
         else { currentCard = nil; return }
+        resend(message: originalMsg, forceConfirmations: forceIDs)
+    }
+
+    /// Re-send with a brand-new phrase (for rewrites like E1 → category shield).
+    private func resendWithPhrase(_ phrase: String) {
+        resend(message: phrase, forceConfirmations: [])
+    }
+
+    private func resend(message: String, forceConfirmations: [String]) {
         currentCard = nil
+        // Echo the rewritten intent as a parent message so the user sees what we sent.
+        messages.append(ChatMessage(role: .parent, content: message, timestamp: Date()))
+        isThinking = true
 
         Task {
             let history: [[String: String]] = messages.suffix(10).map { msg in
@@ -258,19 +273,57 @@ class ChatViewModel: ObservableObject {
             }
             do {
                 let resp = try await apiClient.sendChatMessage(
-                    message: originalMsg,
+                    message: message,
                     childName: childName,
                     history: history,
-                    forceConfirmations: forceIDs
+                    forceConfirmations: forceConfirmations
                 )
                 await MainActor.run {
-                    self.messages.append(ChatMessage(
-                        role: .agent, content: resp.message, timestamp: Date(),
-                        reasoning: resp.reasoning, action: nil
-                    ))
+                    // Re-enter the normal response handler by re-using the same
+                    // card-rendering / action-translation code path. Easiest:
+                    // append the agent text + if backend returned a new card_id,
+                    // render it; else log and move on.
+                    if let act = resp.action,
+                       let cardIDStr = act.card_id,
+                       let cardID = CardID(rawValue: cardIDStr) {
+                        let context = CardContext(
+                            targetDisplay: act.target_display ?? "",
+                            childName: self.childName,
+                            durationMinutes: act.duration_minutes,
+                            categoryGuess: act.category_guess,
+                            listSuggestions: act.list_suggestions ?? [],
+                            existingLists: [], blockItems: [], childDevices: [],
+                            mode: self.protectionMode,
+                            existingRecordKey: nil, requestedExpiryISO: nil, existingMode: nil
+                        )
+                        let handlers = CardHandlers(
+                            onPrimary: { [weak self] in self?.handleCardPrimary(cardID: cardID, action: act) },
+                            onCancel: { [weak self] in self?.currentCard = nil },
+                            onDurationPicked: { [weak self] mins in self?.handleDurationPicked(mins, action: act) }
+                        )
+                        self.messages.append(ChatMessage(
+                            role: .agent, content: resp.message, timestamp: Date(),
+                            reasoning: resp.reasoning, action: nil
+                        ))
+                        self.currentCard = (cardID, context, handlers)
+                    } else {
+                        self.messages.append(ChatMessage(
+                            role: .agent, content: resp.message, timestamp: Date(),
+                            reasoning: resp.reasoning, action: nil
+                        ))
+                    }
+                    self.isThinking = false
                 }
             } catch {
-                print("[ChatViewModel] force-confirm resend failed: \(error)")
+                await MainActor.run {
+                    self.messages.append(ChatMessage(
+                        role: .agent,
+                        content: "Sorry, I couldn't reach the server. Try again?",
+                        timestamp: Date()
+                    ))
+                    self.isThinking = false
+                }
+                print("[ChatViewModel] resend failed: \(error)")
             }
         }
     }
