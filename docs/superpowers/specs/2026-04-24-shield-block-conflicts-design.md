@@ -29,7 +29,7 @@ This spec replaces the data-model and confirmation parts of the older three-tier
 | D2 | `ActiveLockStore` holds **ShieldRecord** (indexed by stable `recordKey = tier:targetKey`) and **BlockRecord** (indexed by `bundleID`) separately. Multiple ShieldRecords can cover the same app — they coexist. |
 | D3 | Effective state for any app is computed at runtime via `effectiveState(for: AppQuery)`. No persisted coverage cache. |
 | D4 | Shield merges on same `(tier, targetKey)`: same→max-expiry, timed→permanent auto-upgrades, permanent→timed requires user confirmation. |
-| D5 | Block is Max-only. Std can shield but not block. `denyAppRemoval` is available to both via a default-on onboarding toggle with clear side-effect copy. |
+| D5 | **Creating** a block is Max-only. Std cannot create blocks. **Removing** blocks (`unblock` / `unblockAll`) works in BOTH modes — otherwise a device downgraded from Max to Std would have orphaned, unreachable blocks. `denyAppRemoval` is available to both via a default-on onboarding toggle with clear side-effect copy. |
 | D6 | Receipts always report effective state after mutation. `"Unlocked IG. Still shielded by Social until 17:30."` |
 | D7 | 17 confirmation scenarios collapse to **8 reusable card templates** driven by payload. |
 | D8 | Dispatcher routes by **user-verb-first**, not by resolver-first. `block` in Std hits Max-feature card, not Std-can't-shield card. |
@@ -303,12 +303,27 @@ Canonical rules, derived from the Q4 decisions.
 
 ### 4.4 Partial unlock semantics
 
+**Deterministic rule for `unshield X` (an app target, not a list/category/all)**:
+
+Let N = number of shield records covering X (computed via `effectiveState`).
+
+| Case | Rule |
+|---|---|
+| **Has an `exactApp` shield on X** (regardless of other covers) | Remove ONLY the `exactApp` record. Effective-state line in receipt discloses any remaining list/category/all coverage. |
+| **No `exactApp` shield, exactly 1 higher-tier cover** (one of: list / category / all) | Reject with suggestion: `X is shielded by <list 1>. Unlock the source directly: "unlock list 1".` Receipt only; no card. |
+| **No `exactApp` shield, multiple higher-tier covers** | Reject with disambiguation receipt: `X is shielded by 3 sources: list 1 (until 17:30), Social (until 18:00), shield all (until 20:00). Unlock one explicitly.` Receipt only; no card. |
+| **Not covered by any shield at all** | Reject with R-variant: `X isn't shielded.` (If blocked, append R2 guidance.) |
+
+This rule **never silently removes a broader shield** via an app target. Broader shields require their own verb (`unlock list 1`, `unlock Social`, `unlock all`).
+
+**For other commands**:
+
 | Scenario | Action |
 |---|---|
-| `unshield X` when X has exactApp shield only | Remove it; if still covered by list/category/all, receipt shows remaining coverage |
-| `unshield X` when X only blocked | Reject with R2 (`"IG isn't shielded — it's blocked. Use 'unblock IG'"`). No card, receipt only. |
-| `unblock X` when X only shielded | Reject with R3. Receipt only. |
-| `unshieldAll` | Remove all shields. Blocks preserved. Receipt says count of each. |
+| `unshield <listName>` / `unshield <categoryName>` / `unshield all` | Remove that specific record by `recordKey`. |
+| `unshield X` when X only blocked | Reject with R2 (`"X isn't shielded — it's blocked. Use 'unblock X'"`). |
+| `unblock X` when X only shielded | Reject with R3. |
+| `unshieldAll` | Remove all shields. Blocks preserved. Receipt says count. |
 | `unblockAll` | **Card A3** always (destructive). After confirm, remove all blocks. Shields preserved. |
 
 ### 4.5 Coexistence (no conflicts)
@@ -377,7 +392,7 @@ Every card has: **Trigger**, **Template**, **Content**, **Outcomes**, **Receipt 
 - **Template**: DangerConfirmCard.
 - **Content**:
   - title: `Unblock \(displayName)?`
-  - body: `\(childName) will see \(displayName) back on the home screen and can open it.`
+  - body: `\(childName) will see \(displayName) back on the home screen. It may still be restricted by other shields if any are active.`
   - buttons: `[Unblock]` (destructive), `[Cancel]`.
 - **Outcomes**: confirm → `removeBlock(bundleID)` → recompute → receipt.
 - **Receipt**: `🔓 Unblocked \(displayName).` + effective-state line ("Still shielded by X until Y") if applicable.
@@ -539,6 +554,7 @@ Every card has: **Trigger**, **Template**, **Content**, **Outcomes**, **Receipt 
   - title: `Can't set up Maximum on this phone`
   - body: `\(childName)'s phone isn't signed in with a Child Apple ID. Maximum requires Family Sharing with a Child account.`
   - buttons: `[Set up Child Apple ID (help guide)]`, `[Continue with Standard instead]`, `[Back]`.
+- **Downgrade semantics**: "Continue with Standard" sets `family.protection_mode = std`. Existing `BlockRecord`s on the child device are **NOT auto-cleared** — per D5, Std can still `unblock`/`unblockAll` manually. Any existing `ShieldRecord` with `tier = .exactApp` that was created via Max-mode picker tokens is also preserved; Std dispatcher lets them continue to live (they can be unshielded by `unshield <recordKey>` via Settings UI or by `unshieldAll`), but Std cannot **create new** exactApp shields.
 
 ### 5.3 Pure-receipt (no card) scenarios
 
@@ -568,10 +584,12 @@ The Chat-command dispatcher routes parent input through these steps **in order**
           miss: → E3, abort.
           hit: check existing block/shield state → A1/C1/C2 as applicable; or execute directly.
    3b. action == unblock:
-        if family.mode == std: → E2 (different copy), abort.
+        # Unblock works in BOTH modes — Std devices may have leftover blocks from
+        # a previous Max session; they must be able to clear them.
         if bundle not blocked: → R3 receipt, abort.
         → A2 card.
    3c. action == unblockAll:
+        # Also allowed in both modes. Always destructive — always A3 card.
         → A3 card always.
    3d. action == shield:
         if target is a saved list:
@@ -582,12 +600,35 @@ The Chat-command dispatcher routes parent input through these steps **in order**
         if target is "all" (explicit) or kind=all: proceed; no duration → D1; >24h → D3.
         if target is ambiguous ("everything he wastes..."): → D2.
         if target is a specific app:
-          family.mode == std AND app not in any saved list: → E1.
-          family.mode == max: resolve to exactApp token or catalog fallback; proceed.
+          # Shield.applications requires ApplicationToken — bundle IDs can't shield.
+          # Tokens come only from FamilyActivityPicker (child-device alias library,
+          # OR parent-device picker in Phase 5 Max mode).
+          family.mode == std:
+            → E1 always (Std has no exactApp tier).
+          family.mode == max:
+            a) token available locally (alias library on the device that will execute):
+               → exactApp shield record, proceed.
+            b) no token BUT category_hint_from_ai resolves to a configured category:
+               → E1-style confirmation card offering "Shield <category> instead" / "Add to a list first".
+               (Catalog bundle IDs do NOT create exactApp shields — they only power block.)
+            c) no token and no category fallback:
+               → hard reject: "<X> can't be shielded by name yet. Add it to a Saved List first."
+                 (Offer "Add to library" action that pushes expand_library to child device.)
         check merge rule against existing record → B1 if downgrade, else execute.
    3e. action == unshield:
-        if target only blocked: → R2 receipt, abort.
-        else remove matching shield; effective-state receipt.
+        if target is a specific app X:
+          state = effectiveState(AppQuery with token/bundleID for X)
+          if state.isBlocked and no shields: → R2 receipt.
+          if state.shieldsCovering contains an .exactApp record for X:
+            → removeShield(exactAppRecordKey); effective-state receipt.
+          elif state.shieldsCovering.count == 1:
+            → reject with suggestion to unlock the source directly (list/category/all).
+          elif state.shieldsCovering.count > 1:
+            → reject with disambiguation listing all covering sources.
+          else:  # no coverage
+            → R: "X isn't shielded."
+        else if target is a list/category/all identifier:
+          → removeShield(recordKey for that tier/target); effective-state receipt.
    3f. action == unshieldAll:
         unlock all shields, preserve blocks, receipt with counts.
 4. Record mutation result.
@@ -748,9 +789,9 @@ For removals where the target is now fully unrestricted, the receipt ends with `
 | Shield saved list | ✅ | ✅ |
 | Shield category | ✅ | ✅ |
 | Shield all | ✅ | ✅ |
-| Block single app | ❌ (E2) | ✅ |
-| Unblock | ❌ (E2) | ✅ |
-| UnblockAll | ❌ | ✅ |
+| Block single app (create) | ❌ (E2) | ✅ |
+| Unblock (remove existing block) | ✅ (lets downgraded users clear leftover blocks) | ✅ |
+| UnblockAll | ✅ (same rationale) | ✅ |
 | denyAppRemoval device protection | ✅ (default-on toggle) | ✅ (same) |
 | Screen Time authorization | `.individual` | `.child` (needs Child Apple ID) |
 | Parent-side FamilyActivityPicker (Phase 5) | ❌ | 🔶 future |
