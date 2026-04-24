@@ -28,15 +28,34 @@ class APIClient: ObservableObject {
         let child_name: String
         let history: [[String: String]]
         let family_id: String?  // UUID string — required for command queueing
+        let force_confirmations: [String]
     }
 
-    struct ChatResponse: Codable {
+    struct ChatActionResponse: Codable, Sendable {
+        let type: String
+        let command_id: UUID?
+        let tier: String?
+        let target_display: String?
+        let duration_minutes: Int?
+        let confirmation_required: Bool?
+        let card_id: String?
+        let confirmation_reason: String?
+        let list_suggestions: [String]?
+        let category_guess: String?
+    }
+
+    struct ChatResponse: Codable, Sendable {
         let message: String
         let reasoning: String?
-        let action: [String: AnyCodable]?
+        let action: ChatActionResponse?
     }
 
-    func sendChatMessage(message: String, childName: String, history: [[String: String]]) async throws -> ChatResponse {
+    func sendChatMessage(
+        message: String,
+        childName: String,
+        history: [[String: String]],
+        forceConfirmations: [String] = []
+    ) async throws -> ChatResponse {
         // Read paired family_id from UserDefaults so commands get queued to the child device.
         let familyID = UserDefaults.standard.string(forKey: "evlin.familyID")
 
@@ -53,7 +72,8 @@ class APIClient: ObservableObject {
                 message: message,
                 child_name: childName,
                 history: history,
-                family_id: familyID
+                family_id: familyID,
+                force_confirmations: forceConfirmations
             )
             request.httpBody = try JSONEncoder().encode(body)
 
@@ -127,6 +147,24 @@ struct PollCommandDTO: Codable {
     let issued_at: String
 }
 
+// MARK: - v2 ack-status decode
+
+struct AckPendingConfirmation: Decodable, Sendable {
+    let card_id: String
+    let context: [String: String]
+}
+
+struct AckStatusResponse: Decodable, Sendable {
+    let status: String  // "pending" | "confirmed" | "failed" | "timeout" | "pending_confirmation"
+    let verb: String?
+    let detail: [String: AnyCodable]?
+    let displayName: String?
+    let category: String?
+    let origRequest: String?
+    let effectiveState: AckEffectiveState?
+    let pendingConfirmation: AckPendingConfirmation?
+}
+
 extension APIClient {
     /// Child polls for queued commands.
     func pollCommands(deviceID: UUID) async throws -> [PollCommandDTO] {
@@ -170,6 +208,14 @@ extension APIClient {
         let (data, _) = try await URLSession.shared.data(from: comps.url!)
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
         return (json["status"] as? String ?? "pending", json["detail"] as? [String: Any])
+    }
+
+    /// Richer v2 ack-status decoder. See plan Phase 6 Task 6.4.
+    func fetchRichAckStatus(commandID: UUID) async throws -> AckStatusResponse {
+        var comps = URLComponents(string: "\(baseURL)/parent/ack-status")!
+        comps.queryItems = [URLQueryItem(name: "command_id", value: commandID.uuidString)]
+        let (data, _) = try await URLSession.shared.data(from: comps.url!)
+        return try JSONDecoder().decode(AckStatusResponse.self, from: data)
     }
 
     // MARK: - Saved list metadata

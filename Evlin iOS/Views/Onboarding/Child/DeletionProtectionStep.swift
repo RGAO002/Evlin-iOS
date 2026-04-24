@@ -1,21 +1,25 @@
 import SwiftUI
+import FamilyControls
+import ManagedSettings
 
+/// Child onboarding step — explicit toggle (default ON) for denyAppRemoval.
+/// Shows side-effect copy when enabled; hides it when user turns off.
+/// Per spec §2 D5 + user feedback.
 struct DeletionProtectionStep: View {
+    @State private var isEnabled: Bool = true
     let onContinue: () -> Void
-
-    @State private var applied = false
 
     var body: some View {
         VStack(spacing: Spacing.section) {
             Spacer()
 
             Circle()
-                .fill(applied ? Color.evSecondaryContainer : Color.evPrimary)
+                .fill(Color.evPrimary)
                 .frame(width: 64, height: 64)
                 .overlay(
-                    Image(systemName: applied ? "checkmark.shield.fill" : "lock.shield.fill")
+                    Image(systemName: "lock.shield.fill")
                         .font(.system(size: 28, weight: .bold))
-                        .foregroundStyle(applied ? Color.evSecondary : Color.evOnPrimary)
+                        .foregroundStyle(Color.evOnPrimary)
                 )
 
             VStack(spacing: Spacing.lg) {
@@ -23,29 +27,34 @@ struct DeletionProtectionStep: View {
                     .font(.evHeadlineLarge)
                     .foregroundStyle(Color.evPrimary)
                     .multilineTextAlignment(.center)
-                Text("Evlin will now block itself from being deleted. Even if the child knows the device passcode, they won't be able to uninstall Evlin unless you turn this off.")
+                Text("If enabled, the child won't be able to delete Evlin from this phone, even if they know your passcode.")
                     .font(.evBodyMedium)
                     .multilineTextAlignment(.center)
                     .foregroundStyle(Color.evOnSurfaceVariant)
                     .padding(.horizontal, Spacing.xl)
             }
 
-            if applied {
-                HStack(spacing: Spacing.md) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(Color.evSecondary)
-                    Text("Evlin is now protected from deletion.")
-                        .font(.evBodyMedium)
-                        .foregroundStyle(Color.evSecondary)
+            Toggle("Prevent Evlin from being deleted", isOn: $isEnabled)
+                .padding(.horizontal, Spacing.xl)
+                .onChange(of: isEnabled) { _, newValue in
+                    applyDenyAppRemoval(newValue)
                 }
+
+            if isEnabled {
+                Text("Note: iOS applies this setting phone-wide — it also prevents the child from deleting **other apps**. There is no per-app deletion protection on iOS.")
+                    .font(.evBodySmall)
+                    .foregroundStyle(Color.evOnSurfaceVariant)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, Spacing.xl)
+                    .transition(.opacity)
             }
 
             Spacer()
 
             Button {
-                if applied { onContinue() } else { enable() }
+                onContinue()
             } label: {
-                Text(applied ? "Continue" : "Enable Protection")
+                Text("Continue")
                     .font(.evLabelLarge)
                     .frame(maxWidth: .infinity)
             }
@@ -59,10 +68,14 @@ struct DeletionProtectionStep: View {
         .padding(Spacing.xl)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.evSurface)
+        .onAppear {
+            // Initialize ManagedSettings to match the default (ON).
+            applyDenyAppRemoval(true)
+        }
     }
 
-    private func enable() {
-        ScreenTimeManager.shared.enableDeletionProtection()
-        applied = true
+    private func applyDenyAppRemoval(_ flag: Bool) {
+        let store = ManagedSettingsStore()
+        store.application.denyAppRemoval = flag
     }
 }

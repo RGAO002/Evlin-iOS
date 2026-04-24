@@ -10,9 +10,17 @@ class ChatViewModel: ObservableObject {
     @Published var isThinking = false
     @Published var errorMessage: String?
 
+    /// Currently-rendered confirmation card, if any. See plan Phase 9.
+    /// Set when backend returns `action.card_id`, cleared when user answers.
+    @Published var currentCard: (CardID, CardContext, CardHandlers)?
+
     let quickPrompts = QuickPrompt.defaults
     var apiClient: APIClient = APIClient()
     var childName: String = "Liam"
+    /// "std" | "max" — drives E1 copy branching. Read from UserDefaults at sendMessage time.
+    private var protectionMode: String {
+        UserDefaults.standard.string(forKey: "evlin.protectionMode") ?? "std"
+    }
 
     private static let storageKey = "evlin_chat_history"
 
@@ -85,20 +93,51 @@ class ChatViewModel: ObservableObject {
                 )
 
                 var action: ChatAction? = nil
-                if let actionDict = response.action,
-                   let type = actionDict["type"]?.value as? String {
-                    let duration = (actionDict["duration_minutes"]?.value as? Int)
-                        ?? (actionDict["minutes"]?.value as? Int)
-                    switch type {
-                    case "lock":
-                        let minutes = duration ?? 30
-                        action = .lockDevice(minutes: minutes, childName: childName)
-                    case "lock_all":
-                        let minutes = duration ?? 30
-                        action = .lockDevice(minutes: minutes, childName: childName)
-                    case "unlock":
-                        action = .unlockDevice(childName: childName)
-                    case "unlock_all":
+
+                // New v2 shape: response.action is a structured ChatActionResponse.
+                // Phase 9 — if dispatcher returned a card_id, render the card instead.
+                if let act = response.action, let cardIDStr = act.card_id, let cardID = CardID(rawValue: cardIDStr) {
+                    let context = CardContext(
+                        targetDisplay: act.target_display ?? "",
+                        childName: self.childName,
+                        durationMinutes: act.duration_minutes,
+                        categoryGuess: act.category_guess,
+                        listSuggestions: act.list_suggestions ?? [],
+                        existingLists: [],
+                        blockItems: [],
+                        childDevices: [],
+                        mode: self.protectionMode,
+                        existingRecordKey: nil,
+                        requestedExpiryISO: nil,
+                        existingMode: nil
+                    )
+                    let handlers = CardHandlers(
+                        onPrimary: { [weak self] in
+                            self?.handleCardPrimary(cardID: cardID, action: act)
+                        },
+                        onCancel: { [weak self] in self?.currentCard = nil },
+                        onDurationPicked: { [weak self] mins in
+                            self?.handleDurationPicked(mins, action: act)
+                        }
+                    )
+                    messages.append(ChatMessage(
+                        role: .agent, content: response.message,
+                        timestamp: Date(), reasoning: response.reasoning, action: nil
+                    ))
+                    self.currentCard = (cardID, context, handlers)
+                    self.isThinking = false
+                    return
+                }
+
+                // Legacy shape fallback (v1 `action.type` direct) — the new backend
+                // emits ChatActionResponse but the ChatAction enum here still drives
+                // the legacy lock-card UI.
+                if let act = response.action {
+                    let duration = act.duration_minutes ?? 30
+                    switch act.type {
+                    case "shield", "lock":
+                        action = .lockDevice(minutes: duration, childName: childName)
+                    case "unshield", "unshield_all", "unblock", "unblock_all", "unlock", "unlock_all":
                         action = .unlockDevice(childName: childName)
                     default:
                         action = ChatAction.none
@@ -185,6 +224,82 @@ class ChatViewModel: ObservableObject {
             timestamp: now
         )
         messages = [m1, m2, m3]
+    }
+
+    // MARK: - Card handlers (Phase 9)
+
+    /// Re-send the original user message with force_confirmations, so the dispatcher
+    /// bypasses the guard that caused the card (A1 block, B1 downgrade, …).
+    private func handleCardPrimary(cardID: CardID, action: APIClient.ChatActionResponse) {
+        let forceIDs: [String]
+        switch cardID {
+        case .A1: forceIDs = ["A1"]
+        case .B1: forceIDs = ["B1"]
+        case .E1:
+            // E1 primary = "shield category instead". Let the user re-issue as a
+            // category-shaped phrase. Minimal stub: log + clear.
+            // TODO: fire a fresh /parent/chat with `shield <category> apps`.
+            print("[ChatViewModel] E1 primary (category fallback) — not wired yet")
+            currentCard = nil
+            return
+        default:
+            print("[ChatViewModel] Card primary for \(cardID.rawValue) — stub")
+            currentCard = nil
+            return
+        }
+
+        guard let originalMsg = messages.reversed().first(where: { $0.role == .parent })?.content
+        else { currentCard = nil; return }
+        currentCard = nil
+
+        Task {
+            let history: [[String: String]] = messages.suffix(10).map { msg in
+                ["role": msg.role == .parent ? "parent" : "agent", "content": msg.content]
+            }
+            do {
+                let resp = try await apiClient.sendChatMessage(
+                    message: originalMsg,
+                    childName: childName,
+                    history: history,
+                    forceConfirmations: forceIDs
+                )
+                await MainActor.run {
+                    self.messages.append(ChatMessage(
+                        role: .agent, content: resp.message, timestamp: Date(),
+                        reasoning: resp.reasoning, action: nil
+                    ))
+                }
+            } catch {
+                print("[ChatViewModel] force-confirm resend failed: \(error)")
+            }
+        }
+    }
+
+    /// D1 quick-pick — resend with duration filled in.
+    private func handleDurationPicked(_ mins: Int?, action: APIClient.ChatActionResponse) {
+        guard let originalMsg = messages.reversed().first(where: { $0.role == .parent })?.content
+        else { currentCard = nil; return }
+        currentCard = nil
+        let durStr = mins.map { "for \($0) minutes" } ?? "permanently"
+        let refined = "\(originalMsg) \(durStr)"
+        Task {
+            let history: [[String: String]] = messages.suffix(10).map { msg in
+                ["role": msg.role == .parent ? "parent" : "agent", "content": msg.content]
+            }
+            do {
+                let resp = try await apiClient.sendChatMessage(
+                    message: refined, childName: childName, history: history
+                )
+                await MainActor.run {
+                    self.messages.append(ChatMessage(
+                        role: .agent, content: resp.message, timestamp: Date(),
+                        reasoning: resp.reasoning, action: nil
+                    ))
+                }
+            } catch {
+                print("[ChatViewModel] duration-pick resend failed: \(error)")
+            }
+        }
     }
 
     // MARK: - Fetch video recommendation

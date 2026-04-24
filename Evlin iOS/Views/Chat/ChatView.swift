@@ -64,6 +64,13 @@ struct ChatView: View {
                         if viewModel.isThinking {
                             thinkingIndicator
                         }
+
+                        // Confirmation card (Phase 9) — rendered below the message list.
+                        if let (cardID, context, handlers) = viewModel.currentCard {
+                            CardDispatcher(cardID: cardID, context: context, handlers: handlers)
+                                .padding(.top, Spacing.md)
+                                .transition(.opacity.combined(with: .scale))
+                        }
                     }
                     .padding(.horizontal, Spacing.xl)
                     .padding(.top, Spacing.md)
