@@ -2538,7 +2538,8 @@ git commit -m "feat(models): CardID + CardPayload types (Phase 7)"
 ```swift
 import SwiftUI
 
-/// Used for A1 (Block first-time), A2 (Unblock), D3 (long duration).
+/// Used for A1 (Block first-time) and D3 (long duration).
+/// (A2 was removed — single unblock is a direct action with no card.)
 /// Optional secondary "alternative" action + destructive primary + cancel.
 struct DangerConfirmCard: View {
     let payload: CardPayload
@@ -3581,7 +3582,7 @@ if let action = response.action, let cardIDStr = action.card_id, let cardID = Ca
 // Else: normal flow (queue command_id, poll ack-status, show receipt)
 ```
 
-Implement `handleCardPrimary` for A1 and D1 first — it should re-send a new /parent/chat with clarified phrasing. Other cards can be stubs initially.
+Implement `handleCardPrimary` fully for **A1, B1, D1, E1** — these are REQUIRED for Phase 12 validation. Each re-sends a new /parent/chat with clarified phrasing, or in B1's case calls `ActiveLockStore.applyConfirmedDowngrade(...)` directly. Other cards (A3, B2, C1, C2, D2, D3, D4, E2, E3, E4, F1, G1) start as logged-only stubs — they render correctly but don't execute the primary action.
 
 - [ ] **Step 2: Commit**
 
@@ -3773,8 +3774,8 @@ Delete and reinstall Evlin on the test iPhone. Enter Spike tests → "Reset all 
 1. Max mode (if configured): `block Instagram`.
 2. Expect A1 card. Confirm block.
 3. On home screen: Instagram icon is hidden.
-4. Chat: `unblock Instagram`. Expect A2 card. Confirm.
-5. Icon returns. If another shield also covered IG, receipt should say so.
+4. Chat: `unblock Instagram`. Direct action — no confirmation card; receipt appears immediately.
+5. Icon returns. Receipt should say `🔓 Unblocked Instagram.` plus effective-state line if any shield still covers IG (e.g. `Still shielded by Social until 17:30.`).
 
 - [ ] **Step 4: Walk through conflict path (savedList tier — exactApp gated in MVP)**
 
@@ -3873,8 +3874,9 @@ From spec §12 — leave for a future plan:
   onboarding (when `.child` auth fails, before any blocks exist). Per spec §5.2 G1, blocks
   are not auto-cleared; Std dispatcher already accepts `unblock` / `unblockAll` directly, so
   any blocks that DO exist remain removable. Settings-triggered downgrade isn't in this plan.
-- **Card handler coverage** — ChatViewModel wires A1, D1, E1 handlers fully. Others
-  (A3, B1, B2, C1, C2, D2, D3, D4, E2, E3, E4, F1, G1) render correctly but primary action
+- **Card handler coverage** — ChatViewModel wires **A1, B1, D1, E1** handlers fully
+  (these are REQUIRED for Phase 12 validation to pass). Others
+  (A3, B2, C1, C2, D2, D3, D4, E2, E3, E4, F1, G1) render correctly but primary action
   is logged-only stub. Follow-ups per card as time permits. (A2 has been removed entirely;
   single `unblock` is a direct action.)
 - **Multi-child context** — D4 card renders but child-device list is placeholder empty until
