@@ -135,7 +135,9 @@ class ScreenTimeManager: ObservableObject {
         isUnlocked = true
         enableDeletionProtection()
         Task {
-            await ActiveLockStore.shared.removeAll()
+            // Clear both shield + block records (spec §3 — two independent stores).
+            _ = await ActiveLockStore.shared.unshieldAll()
+            _ = await ActiveLockStore.shared.unblockAll()
             await MainActor.run {
                 NotificationCenter.default.post(name: .evlinLockStateChanged, object: false)
             }

@@ -1,6 +1,7 @@
 import Foundation
 import DeviceActivity
 import ManagedSettings
+import FamilyControls
 import CryptoKit
 
 /// Fires when a scheduled shield interval ends. Removes the ShieldRecord from
