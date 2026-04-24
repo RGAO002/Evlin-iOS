@@ -57,6 +57,13 @@ struct ChatView: View {
                                         )
                                     )
                                 }
+
+                                // Receipt card — shows pending spinner then flips
+                                // to success/failure + honest effective-state line
+                                // when the child acks. See plan Phase 8.
+                                if message.role == .agent, let receipt = message.receiptState {
+                                    ReceiptCard(state: receipt, effectiveState: message.receiptEffectiveState)
+                                }
                             }
                             .id(message.id)
                         }

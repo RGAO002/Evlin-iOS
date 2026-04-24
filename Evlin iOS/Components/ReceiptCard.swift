@@ -1,6 +1,6 @@
 import SwiftUI
 
-enum ReceiptState: Sendable, Equatable {
+enum ReceiptState: Sendable, Equatable, Codable {
     case pending
     /// Mirrors AckResult.confirmedExact. `verb` drives copy branching so
     /// `unblock Instagram` renders as "Unblocked Instagram", not "Shielded Instagram".

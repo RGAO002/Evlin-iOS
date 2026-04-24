@@ -260,9 +260,62 @@ final class ActionExecutor: @unchecked Sendable {
             return .failed(.nothingToUnlock)
         }
         cancelScheduled(recordKey: recordKey)
-        let query = AppQuery(bundleID: nil, categoryHint: nil)
-        let state = await ActiveLockStore.shared.effectiveState(for: query)
-        let eff = effectiveStateFrom(state.stillCovered, isBlocked: state.blockedAfter, possibleSavedList: state.possibleSavedListCoverage)
+
+        // P2 fix: narrow the post-query so the "Still shielded by …" disclosure
+        // only mentions shields that actually overlap what we just removed.
+        // The broken version used AppQuery(nil, nil) which matched `all`-tier
+        // shields + flagged every saved-list shield as "possibly covering" — so
+        // `unshield list 1` would falsely claim list 2 might still cover it.
+        let eff: AckEffectiveState
+        switch tier {
+        case .all:
+            // After removing the broadest possible shield, there is nothing
+            // specific to "still cover" — effective state is trivially empty.
+            eff = AckEffectiveState(isBlocked: false, shieldsCovering: [], possibleSavedListCoverage: false)
+        case .category:
+            // Re-ask with the same category hint. Remaining shields on that
+            // category (or `all`-tier) are correctly reported; unrelated
+            // saved-list shields on OTHER apps won't be flagged.
+            let post = await ActiveLockStore.shared.effectiveState(
+                for: AppQuery(categoryHint: targetKey)
+            )
+            eff = effectiveStateFrom(
+                post.stillCovered,
+                isBlocked: post.blockedAfter,
+                possibleSavedList: post.possibleSavedListCoverage
+            )
+        case .savedList:
+            // Ask per-token: did any remaining shield cover an app that was in
+            // the list we just removed? Union the results, dedup by recordKey.
+            var union: [String: ShieldRecord] = [:]
+            var blockedAny = false
+            var possibleList = false
+            for token in removed.record.appTokens {
+                let s = await ActiveLockStore.shared.effectiveState(
+                    for: AppQuery(token: token)
+                )
+                for r in s.stillCovered { union[r.recordKey] = r }
+                if s.blockedAfter { blockedAny = true }
+                if s.possibleSavedListCoverage { possibleList = true }
+            }
+            // Category tokens in the removed list: no bundle-level reverse lookup,
+            // but we can still check if any `all`-tier or same-category shield remains.
+            for _ in removed.record.categoryTokens {
+                let s = await ActiveLockStore.shared.effectiveState(for: AppQuery())
+                // `all`-tier always matches AppQuery(). This catches the edge case.
+                for r in s.stillCovered where r.tier == .all { union[r.recordKey] = r }
+            }
+            eff = effectiveStateFrom(
+                Array(union.values),
+                isBlocked: blockedAny,
+                possibleSavedList: possibleList
+            )
+        case .exactApp:
+            // removeExplicit is called for list/category/all; exactApp goes through
+            // unshieldAppByBundle. Defensive default.
+            eff = AckEffectiveState(isBlocked: false, shieldsCovering: [], possibleSavedListCoverage: false)
+        }
+
         return .confirmedExact(verb: .unshield, displayName: removed.record.displayName, effectiveState: eff)
     }
 

@@ -29,6 +29,14 @@ struct ChatMessage: Identifiable, Codable {
     var strategyVideoDuration: String? = nil
     var strategyTip: String? = nil
 
+    // Receipt state (Phase 9 P1-1 fix).
+    // When an agent message originates from a queued Command, we track the
+    // child's ack here. ChatView renders ReceiptCard(state, effectiveState)
+    // beneath the bubble. Nil until the ack poll resolves.
+    var commandID: UUID? = nil
+    var receiptState: ReceiptState? = nil
+    var receiptEffectiveState: AckEffectiveState? = nil
+
     var isStrategyArtifact: Bool { strategyTitle != nil }
 
     init(role: ChatRole, content: String, timestamp: Date = Date(), reasoning: String? = nil, action: ChatAction? = nil) {

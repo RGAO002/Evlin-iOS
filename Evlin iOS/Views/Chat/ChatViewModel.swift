@@ -14,6 +14,10 @@ class ChatViewModel: ObservableObject {
     /// Set when backend returns `action.card_id`, cleared when user answers.
     @Published var currentCard: (CardID, CardContext, CardHandlers)?
 
+    /// In-flight ack-status polls, keyed by command_id. Cancelled on clearHistory
+    /// or when a terminal status is received.
+    private var activePolls: [UUID: Task<Void, Never>] = [:]
+
     let quickPrompts = QuickPrompt.defaults
     var apiClient: APIClient = APIClient()
     var childName: String = "Liam"
@@ -71,122 +75,12 @@ class ChatViewModel: ObservableObject {
         let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
 
-        messages.append(ChatMessage(
-            role: .parent,
-            content: text,
-            timestamp: Date()
-        ))
+        messages.append(ChatMessage(role: .parent, content: text, timestamp: Date()))
         inputText = ""
         isThinking = true
         errorMessage = nil
 
-        let history: [[String: String]] = messages.suffix(10).map { msg in
-            ["role": msg.role == .parent ? "parent" : "agent", "content": msg.content]
-        }
-
-        Task {
-            do {
-                let response = try await apiClient.sendChatMessage(
-                    message: text,
-                    childName: childName,
-                    history: history
-                )
-
-                var action: ChatAction? = nil
-
-                // New v2 shape: response.action is a structured ChatActionResponse.
-                // Phase 9 — if dispatcher returned a card_id, render the card instead.
-                if let act = response.action, let cardIDStr = act.card_id, let cardID = CardID(rawValue: cardIDStr) {
-                    let context = CardContext(
-                        targetDisplay: act.target_display ?? "",
-                        childName: self.childName,
-                        durationMinutes: act.duration_minutes,
-                        categoryGuess: act.category_guess,
-                        listSuggestions: act.list_suggestions ?? [],
-                        existingLists: [],
-                        blockItems: [],
-                        childDevices: [],
-                        mode: self.protectionMode,
-                        existingRecordKey: nil,
-                        requestedExpiryISO: nil,
-                        existingMode: nil
-                    )
-                    let handlers = CardHandlers(
-                        onPrimary: { [weak self] in
-                            self?.handleCardPrimary(cardID: cardID, action: act)
-                        },
-                        onCancel: { [weak self] in self?.currentCard = nil },
-                        onDurationPicked: { [weak self] mins in
-                            self?.handleDurationPicked(mins, action: act)
-                        }
-                    )
-                    messages.append(ChatMessage(
-                        role: .agent, content: response.message,
-                        timestamp: Date(), reasoning: response.reasoning, action: nil
-                    ))
-                    self.currentCard = (cardID, context, handlers)
-                    self.isThinking = false
-                    return
-                }
-
-                // Legacy shape fallback (v1 `action.type` direct) — the new backend
-                // emits ChatActionResponse but the ChatAction enum here still drives
-                // the legacy lock-card UI.
-                if let act = response.action {
-                    let duration = act.duration_minutes ?? 30
-                    switch act.type {
-                    case "shield", "lock":
-                        action = .lockDevice(minutes: duration, childName: childName)
-                    case "unshield", "unshield_all", "unblock", "unblock_all", "unlock", "unlock_all":
-                        action = .unlockDevice(childName: childName)
-                    default:
-                        action = ChatAction.none
-                    }
-                }
-
-                var msg = ChatMessage(
-                    role: .agent,
-                    content: response.message,
-                    timestamp: Date(),
-                    reasoning: response.reasoning,
-                    action: action
-                )
-
-                // Attach lock confirmation card
-                if case .lockDevice(let mins, let name) = action {
-                    msg.lockMinutes = mins
-                    msg.lockChildName = name
-                }
-
-                // Attach safety card
-                let lowered = text.lowercased()
-                if lowered.contains("safe") || lowered.contains("where") || lowered.contains("location") {
-                    msg.isSafetyCard = true
-                }
-
-                messages.append(msg)
-
-                // Fetch video recommendation for lock actions
-                if msg.lockMinutes != nil {
-                    await fetchVideoRecommendation(for: msg.id)
-                }
-            } catch {
-                errorMessage = error.localizedDescription
-                let detail: String
-                if let api = error as? APIError, case .serverError(let code) = api, code == 500 || code == 503 {
-                    detail = "The AI model is briefly overloaded. Please tap again in a few seconds."
-                } else {
-                    detail = "I'm unable to connect right now. Please check your network connection and try again."
-                }
-                messages.append(ChatMessage(
-                    role: .agent,
-                    content: detail,
-                    timestamp: Date()
-                ))
-            }
-
-            isThinking = false
-        }
+        dispatchChat(userMessage: text, forceConfirmations: [])
     }
 
     func sendQuickPrompt(_ prompt: QuickPrompt) {
@@ -226,133 +120,346 @@ class ChatViewModel: ObservableObject {
         messages = [m1, m2, m3]
     }
 
-    // MARK: - Card handlers (Phase 9)
+    // MARK: - Chat pipeline (Phase 9 — unified)
 
-    /// Handle the primary button on a confirmation card. Most cards re-send
-    /// /parent/chat with either force_confirmations or a clarified phrasing.
+    /// Single entry point for every outbound /parent/chat call.
+    /// Handles three response shapes:
+    ///   1. `card_id` set → render a confirmation card, wire its handlers.
+    ///   2. `command_id` set → append agent bubble, start ack-status poll that
+    ///      mutates the bubble's receiptState when the child acks.
+    ///   3. plain text → append agent bubble, done.
+    /// `userMessage` is the parent-visible text that produced this call.
+    /// When the dispatcher rewrites the message (card → resend), the new parent
+    /// bubble is appended BEFORE calling this so history ordering is correct.
+    private func dispatchChat(userMessage: String, forceConfirmations: [String]) {
+        let history: [[String: String]] = messages.suffix(10).map { msg in
+            ["role": msg.role == .parent ? "parent" : "agent", "content": msg.content]
+        }
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let resp = try await self.apiClient.sendChatMessage(
+                    message: userMessage,
+                    childName: self.childName,
+                    history: history,
+                    forceConfirmations: forceConfirmations
+                )
+                await MainActor.run { self.processResponse(resp, userMessage: userMessage) }
+            } catch {
+                await MainActor.run {
+                    let detail: String
+                    if let api = error as? APIError, case .serverError(let code) = api, code == 500 || code == 503 {
+                        detail = "The AI model is briefly overloaded. Please tap again in a few seconds."
+                    } else {
+                        detail = "I'm unable to connect right now. Please check your network connection and try again."
+                    }
+                    self.messages.append(ChatMessage(role: .agent, content: detail, timestamp: Date()))
+                    self.errorMessage = error.localizedDescription
+                    self.isThinking = false
+                }
+            }
+        }
+    }
+
+    @MainActor
+    private func processResponse(_ resp: APIClient.ChatResponse, userMessage: String) {
+        // 1. Card rendering
+        if let act = resp.action, let cardIDStr = act.card_id, let cardID = CardID(rawValue: cardIDStr) {
+            messages.append(ChatMessage(
+                role: .agent, content: resp.message, timestamp: Date(),
+                reasoning: resp.reasoning, action: nil
+            ))
+            renderCard(cardID: cardID, action: act)
+            isThinking = false
+            return
+        }
+
+        // 2. Queued command — append bubble + start ack poll
+        if let act = resp.action, let cmdID = act.command_id {
+            var msg = ChatMessage(
+                role: .agent, content: resp.message, timestamp: Date(),
+                reasoning: resp.reasoning, action: nil
+            )
+            msg.commandID = cmdID
+            msg.receiptState = .pending
+            // Back-compat: legacy lock-confirmation card UI for shield/shield_all responses.
+            if act.type == "shield" || act.type == "shield_all", let mins = act.duration_minutes {
+                msg.lockMinutes = mins
+                msg.lockChildName = childName
+            }
+            messages.append(msg)
+            startAckPoll(
+                commandID: cmdID,
+                messageID: msg.id,
+                targetDisplay: act.target_display,
+                expiresAt: act.duration_minutes.map { Date().addingTimeInterval(TimeInterval($0 * 60)) }
+            )
+            isThinking = false
+            return
+        }
+
+        // 3. Plain text (conversational reply, or confirmation_required without card_id)
+        messages.append(ChatMessage(
+            role: .agent, content: resp.message, timestamp: Date(),
+            reasoning: resp.reasoning, action: nil
+        ))
+        isThinking = false
+    }
+
+    @MainActor
+    private func renderCard(cardID: CardID, action act: APIClient.ChatActionResponse) {
+        let context = CardContext(
+            targetDisplay: act.target_display ?? "",
+            childName: self.childName,
+            durationMinutes: act.duration_minutes,
+            categoryGuess: act.category_guess,
+            listSuggestions: act.list_suggestions ?? [],
+            existingLists: [], blockItems: [], childDevices: [],
+            mode: self.protectionMode,
+            existingRecordKey: nil, requestedExpiryISO: nil, existingMode: nil
+        )
+        let handlers = CardHandlers(
+            onPrimary: { [weak self] in self?.handleCardPrimary(cardID: cardID, action: act) },
+            onSecondary: { [weak self] in self?.handleCardSecondary(cardID: cardID, action: act) },
+            onTertiary: { [weak self] in self?.handleCardTertiary(cardID: cardID, action: act) },
+            onCancel: { [weak self] in self?.currentCard = nil },
+            onDurationPicked: { [weak self] mins in self?.handleDurationPicked(mins, action: act) },
+            onChildrenPicked: { [weak self] ids in self?.handleChildrenPicked(ids, action: act) },
+            onListPicked: { [weak self] name in self?.handleListPicked(name, action: act) }
+        )
+        self.currentCard = (cardID, context, handlers)
+    }
+
+    // MARK: - Card button handlers (P1-2 fix — no more dead slots)
+
     private func handleCardPrimary(cardID: CardID, action: APIClient.ChatActionResponse) {
         switch cardID {
-        case .A1:
-            resendWithForce(["A1"])
-        case .B1:
-            resendWithForce(["B1"])
+        case .A1: resendWithForce(["A1"])
+        case .B1: resendWithForce(["B1"])
         case .E1:
-            // E1 primary = "Shield <category> instead". Rewrite the parent's
-            // original request into a category-shaped phrase and re-send. Use
-            // categoryGuess from the backend's DispatchResult.
+            // "Shield <category> instead" — rewrite to category-shaped phrase.
             let cat = action.category_guess ?? "social"
             let durSuffix = action.duration_minutes.map { " for \($0) minutes" } ?? ""
             resendWithPhrase("shield \(cat) apps\(durSuffix)")
-        default:
+        case .A3, .B2, .C1, .C2, .D2, .D3, .D4, .E2, .E3, .E4, .F1, .G1, .D1:
             print("[ChatViewModel] Card primary for \(cardID.rawValue) — stub")
             currentCard = nil
         }
     }
 
-    /// Re-send the original user message verbatim + force_confirmations.
-    private func resendWithForce(_ forceIDs: [String]) {
-        guard let originalMsg = messages.reversed().first(where: { $0.role == .parent })?.content
-        else { currentCard = nil; return }
-        resend(message: originalMsg, forceConfirmations: forceIDs)
-    }
-
-    /// Re-send with a brand-new phrase (for rewrites like E1 → category shield).
-    private func resendWithPhrase(_ phrase: String) {
-        resend(message: phrase, forceConfirmations: [])
-    }
-
-    private func resend(message: String, forceConfirmations: [String]) {
-        currentCard = nil
-        // Echo the rewritten intent as a parent message so the user sees what we sent.
-        messages.append(ChatMessage(role: .parent, content: message, timestamp: Date()))
-        isThinking = true
-
-        Task {
-            let history: [[String: String]] = messages.suffix(10).map { msg in
-                ["role": msg.role == .parent ? "parent" : "agent", "content": msg.content]
-            }
-            do {
-                let resp = try await apiClient.sendChatMessage(
-                    message: message,
-                    childName: childName,
-                    history: history,
-                    forceConfirmations: forceConfirmations
-                )
-                await MainActor.run {
-                    // Re-enter the normal response handler by re-using the same
-                    // card-rendering / action-translation code path. Easiest:
-                    // append the agent text + if backend returned a new card_id,
-                    // render it; else log and move on.
-                    if let act = resp.action,
-                       let cardIDStr = act.card_id,
-                       let cardID = CardID(rawValue: cardIDStr) {
-                        let context = CardContext(
-                            targetDisplay: act.target_display ?? "",
-                            childName: self.childName,
-                            durationMinutes: act.duration_minutes,
-                            categoryGuess: act.category_guess,
-                            listSuggestions: act.list_suggestions ?? [],
-                            existingLists: [], blockItems: [], childDevices: [],
-                            mode: self.protectionMode,
-                            existingRecordKey: nil, requestedExpiryISO: nil, existingMode: nil
-                        )
-                        let handlers = CardHandlers(
-                            onPrimary: { [weak self] in self?.handleCardPrimary(cardID: cardID, action: act) },
-                            onCancel: { [weak self] in self?.currentCard = nil },
-                            onDurationPicked: { [weak self] mins in self?.handleDurationPicked(mins, action: act) }
-                        )
-                        self.messages.append(ChatMessage(
-                            role: .agent, content: resp.message, timestamp: Date(),
-                            reasoning: resp.reasoning, action: nil
-                        ))
-                        self.currentCard = (cardID, context, handlers)
-                    } else {
-                        self.messages.append(ChatMessage(
-                            role: .agent, content: resp.message, timestamp: Date(),
-                            reasoning: resp.reasoning, action: nil
-                        ))
-                    }
-                    self.isThinking = false
-                }
-            } catch {
-                await MainActor.run {
-                    self.messages.append(ChatMessage(
-                        role: .agent,
-                        content: "Sorry, I couldn't reach the server. Try again?",
-                        timestamp: Date()
-                    ))
-                    self.isThinking = false
-                }
-                print("[ChatViewModel] resend failed: \(error)")
-            }
+    private func handleCardSecondary(cardID: CardID, action: APIClient.ChatActionResponse) {
+        switch cardID {
+        case .A1:
+            // "Shield for a while instead" — switch block → shield with default 30 min.
+            let t = action.target_display ?? "that app"
+            resendWithPhrase("shield \(t) for 30 minutes")
+        case .D2:
+            // "Just distracting categories" — common interpretation of "everything".
+            let durSuffix = action.duration_minutes.map { " for \($0) minutes" } ?? " for 30 minutes"
+            resendWithPhrase("shield distracting categories\(durSuffix)")
+        case .D3:
+            // "Change duration" — drop back to D1-style quick-pick.
+            // Cheapest path: clear the D3 card and let user retype.
+            currentCard = nil
+            messages.append(ChatMessage(
+                role: .agent,
+                content: "Okay — how long should it be instead? Try e.g. \"for 30 minutes\" or \"for 2 hours\".",
+                timestamp: Date()
+            ))
+        case .E1:
+            // "Add to a Saved List" — MVP: direct the user to create it.
+            currentCard = nil
+            messages.append(ChatMessage(
+                role: .agent,
+                content: "You can create or edit Saved Lists from the child device's Settings. Once added, say \"shield <list name>\" here.",
+                timestamp: Date()
+            ))
+        case .E2:
+            // "Shield X instead" — switch block intent to shield.
+            let t = action.target_display ?? "that app"
+            resendWithPhrase("shield \(t) for 30 minutes")
+        case .F1:
+            // "Show all lists" — MVP stub.
+            currentCard = nil
+            messages.append(ChatMessage(
+                role: .agent,
+                content: "Here are your lists:\n" + (action.list_suggestions?.joined(separator: ", ") ?? "(none)"),
+                timestamp: Date()
+            ))
+        default:
+            print("[ChatViewModel] Card secondary for \(cardID.rawValue) — stub")
+            currentCard = nil
         }
     }
 
-    /// D1 quick-pick — resend with duration filled in.
+    private func handleCardTertiary(cardID: CardID, action: APIClient.ChatActionResponse) {
+        switch cardID {
+        case .E1:
+            // "Upgrade to Max" — MVP stub; real wiring goes to upgrade flow.
+            currentCard = nil
+            messages.append(ChatMessage(
+                role: .agent,
+                content: "Maximum mode unlocks remote single-app shields. Upgrade flow isn't built yet — coming soon.",
+                timestamp: Date()
+            ))
+        default:
+            print("[ChatViewModel] Card tertiary for \(cardID.rawValue) — stub")
+            currentCard = nil
+        }
+    }
+
+    /// D1 quick-pick — resend with duration filled in. Goes through the full
+    /// response pipeline so the follow-up can itself produce a card/receipt.
     private func handleDurationPicked(_ mins: Int?, action: APIClient.ChatActionResponse) {
         guard let originalMsg = messages.reversed().first(where: { $0.role == .parent })?.content
         else { currentCard = nil; return }
         currentCard = nil
         let durStr = mins.map { "for \($0) minutes" } ?? "permanently"
-        let refined = "\(originalMsg) \(durStr)"
-        Task {
-            let history: [[String: String]] = messages.suffix(10).map { msg in
-                ["role": msg.role == .parent ? "parent" : "agent", "content": msg.content]
-            }
-            do {
-                let resp = try await apiClient.sendChatMessage(
-                    message: refined, childName: childName, history: history
-                )
-                await MainActor.run {
-                    self.messages.append(ChatMessage(
-                        role: .agent, content: resp.message, timestamp: Date(),
-                        reasoning: resp.reasoning, action: nil
-                    ))
+        resendWithPhrase("\(originalMsg) \(durStr)")
+    }
+
+    /// F1 fuzzy-match list pick — resend as a direct shield on the chosen list.
+    private func handleListPicked(_ name: String, action: APIClient.ChatActionResponse) {
+        currentCard = nil
+        let durSuffix = action.duration_minutes.map { " for \($0) minutes" } ?? " for 30 minutes"
+        resendWithPhrase("shield \(name)\(durSuffix)")
+    }
+
+    /// D4 multi-child pick — resend with the child's name prepended.
+    /// MVP uses first picked; when D4 adds multi-select, loop.
+    private func handleChildrenPicked(_ ids: [UUID], action: APIClient.ChatActionResponse) {
+        currentCard = nil
+        // TODO: map UUID → child label (need childDevices context). For now, log.
+        print("[ChatViewModel] Children picked \(ids) — label mapping not wired yet")
+        messages.append(ChatMessage(
+            role: .agent,
+            content: "Re-issue the command and include the child's name, e.g. \"lock Liam's phone\".",
+            timestamp: Date()
+        ))
+    }
+
+    private func resendWithForce(_ forceIDs: [String]) {
+        guard let originalMsg = messages.reversed().first(where: { $0.role == .parent })?.content
+        else { currentCard = nil; return }
+        currentCard = nil
+        isThinking = true
+        dispatchChat(userMessage: originalMsg, forceConfirmations: forceIDs)
+    }
+
+    private func resendWithPhrase(_ phrase: String) {
+        currentCard = nil
+        messages.append(ChatMessage(role: .parent, content: phrase, timestamp: Date()))
+        isThinking = true
+        dispatchChat(userMessage: phrase, forceConfirmations: [])
+    }
+
+    // MARK: - Ack-status polling (P1-1 fix)
+
+    /// Polls /parent/ack-status for a queued command and mutates the agent
+    /// message's receiptState when the child acks. Times out at 30 s.
+    private func startAckPoll(commandID: UUID, messageID: UUID, targetDisplay: String?, expiresAt: Date?) {
+        let task = Task { [weak self] in
+            let deadline = Date().addingTimeInterval(30)
+            while Date() < deadline, !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                guard let self else { return }
+                let resp: AckStatusResponse
+                do {
+                    resp = try await self.apiClient.fetchRichAckStatus(commandID: commandID)
+                } catch {
+                    continue  // transient; retry next tick
                 }
-            } catch {
-                print("[ChatViewModel] duration-pick resend failed: \(error)")
+
+                let done = await MainActor.run { () -> Bool in
+                    switch resp.status {
+                    case "pending", "queued", "in_flight":
+                        return false
+                    case "confirmed", "confirmed_exact":
+                        let verb = AckVerb(rawValue: resp.verb ?? "shield") ?? .shield
+                        let name = resp.displayName ?? targetDisplay ?? ""
+                        self.applyReceipt(
+                            .confirmedExact(verb: verb, displayName: name, unlocksAt: expiresAt),
+                            effective: resp.effectiveState,
+                            messageID: messageID
+                        )
+                        return true
+                    case "confirmed_fallback":
+                        let verb = AckVerb(rawValue: resp.verb ?? "shield") ?? .shield
+                        let name = resp.displayName ?? targetDisplay ?? ""
+                        let cat = resp.category ?? "unknown"
+                        let orig = resp.origRequest ?? targetDisplay ?? ""
+                        self.applyReceipt(
+                            .confirmedFallback(verb: verb, displayName: name, category: cat, origRequest: orig),
+                            effective: resp.effectiveState,
+                            messageID: messageID
+                        )
+                        return true
+                    case "pending_confirmation":
+                        // Child is asking for parent confirmation (B1-style).
+                        if let pc = resp.pendingConfirmation, let cid = CardID(rawValue: pc.card_id) {
+                            self.renderPendingConfirmationCard(cardID: cid, context: pc.context)
+                        }
+                        // Clear receipt placeholder — card takes over.
+                        if let idx = self.messages.firstIndex(where: { $0.id == messageID }) {
+                            self.messages[idx].receiptState = nil
+                        }
+                        return true
+                    case "failed":
+                        let reason = (resp.detail?["reason"]?.value as? String) ?? "Failed"
+                        self.applyReceipt(.failedOther(reason: reason), effective: nil, messageID: messageID)
+                        return true
+                    case "timeout":
+                        self.applyReceipt(.failedTimeout, effective: nil, messageID: messageID)
+                        return true
+                    default:
+                        return false
+                    }
+                }
+                if done { return }
+            }
+            // Deadline hit without a terminal status
+            await MainActor.run {
+                self?.applyReceipt(.failedTimeout, effective: nil, messageID: messageID)
             }
         }
+        activePolls[commandID] = task
+    }
+
+    @MainActor
+    private func applyReceipt(_ state: ReceiptState, effective: AckEffectiveState?, messageID: UUID) {
+        guard let idx = messages.firstIndex(where: { $0.id == messageID }) else { return }
+        messages[idx].receiptState = state
+        messages[idx].receiptEffectiveState = effective
+    }
+
+    @MainActor
+    private func renderPendingConfirmationCard(cardID: CardID, context ctx: [String: String]) {
+        let cardCtx = CardContext(
+            targetDisplay: ctx["target_display"] ?? "",
+            childName: self.childName,
+            durationMinutes: Int(ctx["requested_duration_minutes"] ?? ""),
+            categoryGuess: nil,
+            listSuggestions: [],
+            existingLists: [], blockItems: [], childDevices: [],
+            mode: self.protectionMode,
+            existingRecordKey: ctx["existing_record_key"],
+            requestedExpiryISO: ctx["requested_expiry_iso"],
+            existingMode: ctx["existing_mode"]
+        )
+        let fakeAction = APIClient.ChatActionResponse(
+            type: "shield", command_id: nil, tier: nil,
+            target_display: ctx["target_display"],
+            duration_minutes: Int(ctx["requested_duration_minutes"] ?? ""),
+            confirmation_required: true,
+            card_id: cardID.rawValue,
+            confirmation_reason: nil, list_suggestions: nil, category_guess: nil
+        )
+        let handlers = CardHandlers(
+            onPrimary: { [weak self] in self?.handleCardPrimary(cardID: cardID, action: fakeAction) },
+            onSecondary: { [weak self] in self?.handleCardSecondary(cardID: cardID, action: fakeAction) },
+            onCancel: { [weak self] in self?.currentCard = nil }
+        )
+        self.currentCard = (cardID, cardCtx, handlers)
     }
 
     // MARK: - Fetch video recommendation
