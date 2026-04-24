@@ -178,16 +178,19 @@ struct ChildModeView: View {
         Task {
             // sweepExpired drops anything past its TTL — keeps UI honest
             _ = await ActiveLockStore.shared.sweepExpired()
-            let refreshed = await ActiveLockStore.shared.current()
+            let current = await ActiveLockStore.shared.allCurrent()
+            // Display combined shield + block count; see spec §3.
+            let names = current.shields.map(\.displayName) + current.blocks.map(\.displayName)
+            let total = current.shields.count + current.blocks.count
             await MainActor.run {
-                activeLockCount = refreshed.count
-                activeLockNames = refreshed.map(\.displayName)
-                isLocked = !refreshed.isEmpty
+                activeLockCount = total
+                activeLockNames = names
+                isLocked = total > 0
                 if !screenTimeManager.isAuthorized {
                     statusText = "Authorize Screen Time to receive parent commands."
                 } else if childDeviceID.isEmpty {
                     statusText = "Finish pairing to receive parent commands."
-                } else if refreshed.isEmpty {
+                } else if total == 0 {
                     statusText = "Waiting for parent commands..."
                 } else {
                     statusText = "Apps are restricted by parent"

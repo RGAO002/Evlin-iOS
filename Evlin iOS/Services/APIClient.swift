@@ -108,10 +108,14 @@ enum APIError: LocalizedError {
 struct PollTargetDTO: Codable {
     let bundle_id: String?
     let list_name: String?
+    let list_id: String?                 // new: saved list UUID (spec §3.2)
     let has_pending_blob: Bool?
     let category_hint: String?
+    let target_all: Bool?                // new: "shield everything"
     let original_request: String
     let target_display: String?
+    let target_child_id: String?         // new: which child device (multi-child)
+    let force_downgrade: Bool?           // new: parent-confirmed B1 downgrade
 }
 
 struct PollCommandDTO: Codable {

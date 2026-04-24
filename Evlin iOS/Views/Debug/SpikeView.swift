@@ -135,42 +135,45 @@ struct SpikeView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
-                    Button("Hard-block IG for 15 min (min allowed)") {
+                    Button("Block IG (permanent — Max only)") {
                         Task {
                             let cmd = LockCommand(
                                 id: UUID(),
-                                action: .lock,
-                                tier: .exactBundle,
+                                action: .block,
+                                tier: nil,
                                 target: CommandTarget(
                                     bundleID: "com.burbn.instagram",
                                     originalRequest: "IG",
                                     targetDisplay: "Instagram"
                                 ),
-                                durationMinutes: 15,
+                                durationMinutes: nil,
                                 issuedAt: Date()
                             )
                             let result = await ActionExecutor.shared.execute(cmd)
-                            await MainActor.run { record("execute lock: \(result)") }
+                            await MainActor.run { record("execute block: \(result)") }
                         }
                     }
-                    Button("Unlock everything") {
+                    Button("Unshield everything") {
                         Task {
                             let cmd = LockCommand(
                                 id: UUID(),
-                                action: .unlockAll,
+                                action: .unshieldAll,
                                 tier: nil,
                                 target: CommandTarget(originalRequest: "all"),
                                 durationMinutes: nil,
                                 issuedAt: Date()
                             )
                             let result = await ActionExecutor.shared.execute(cmd)
-                            await MainActor.run { record("execute unlockAll: \(result)") }
+                            await MainActor.run { record("execute unshieldAll: \(result)") }
                         }
                     }
-                    Button("Show active locks") {
+                    Button("Show active shields + blocks") {
                         Task {
-                            let locks = await ActiveLockStore.shared.current()
-                            await MainActor.run { record("active locks: \(locks.count) — \(locks.map(\.displayName))") }
+                            let cur = await ActiveLockStore.shared.allCurrent()
+                            await MainActor.run {
+                                record("shields: \(cur.shields.count) — \(cur.shields.map(\.displayName))")
+                                record("blocks: \(cur.blocks.count) — \(cur.blocks.map(\.displayName))")
+                            }
                         }
                     }
                 }

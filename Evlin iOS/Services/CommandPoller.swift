@@ -54,25 +54,21 @@ final class CommandPoller {
     }
 
     private func execute(poll: PollCommandDTO, api: APIClient) async {
-        let tier = poll.tier.flatMap(LockTier.init(rawValue:))
+        // tier maps to new ShieldTier set; backend emits "exactApp"|"savedList"|"category"|"all"
+        let tier = poll.tier.flatMap(ShieldTier.init(rawValue:))
         let target = CommandTarget(
             bundleID: poll.target.bundle_id,
             listName: poll.target.list_name,
-            hasPendingBlob: poll.target.has_pending_blob ?? false,
+            listID: poll.target.list_id.flatMap(UUID.init(uuidString:)),
             categoryHint: poll.target.category_hint,
+            targetAll: poll.target.target_all ?? false,
             originalRequest: poll.target.original_request,
-            targetDisplay: poll.target.target_display
+            targetDisplay: poll.target.target_display,
+            targetChildID: poll.target.target_child_id.flatMap(UUID.init(uuidString:)),
+            hasPendingBlob: poll.target.has_pending_blob ?? false,
+            forceDowngrade: poll.target.force_downgrade ?? false
         )
-        let action: CommandAction = {
-            switch poll.action {
-            case "lock": return .lock
-            case "unlock": return .unlock
-            case "lock_all": return .lockAll
-            case "unlock_all": return .unlockAll
-            case "expand_library": return .expandLibrary
-            default: return .lock
-            }
-        }()
+        let action: CommandAction = CommandAction(rawValue: poll.action) ?? .shield
 
         let issued = ISO8601DateFormatter().date(from: poll.issued_at) ?? Date()
         let cmd = LockCommand(
@@ -84,7 +80,6 @@ final class CommandPoller {
             issuedAt: issued
         )
 
-        // Fetch blob if Max mode
         var blob: Data? = nil
         if target.hasPendingBlob {
             blob = try? await api.fetchPendingBlob(commandID: cmd.id)
@@ -92,15 +87,31 @@ final class CommandPoller {
 
         let result = await ActionExecutor.shared.execute(cmd, blob: blob)
 
-        // Map AckResult → backend ack status string + detail
+        // Map AckResult → ack status + rich detail (verb + effective_state + pending payload).
+        // See plan Phase 6 Task 6.4 for the backend schema.
         let (status, detail): (String, [String: Any]?) = {
             switch result {
-            case .confirmedExact(let name):
-                return ("confirmed_exact", ["display_name": name])
-            case .confirmedFallback(let name, let cat, let orig):
-                return ("confirmed_fallback", [
-                    "display_name": name, "category": cat, "orig": orig,
-                ])
+            case .confirmedExact(let verb, let name, let eff):
+                var d: [String: Any] = ["verb": verb.rawValue, "display_name": name]
+                if let eff = eff, let data = try? JSONEncoder().encode(eff),
+                   let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    d["effective_state"] = dict
+                }
+                return ("confirmed", d)
+            case .confirmedFallback(let verb, let name, let cat, let orig, let eff):
+                var d: [String: Any] = [
+                    "verb": verb.rawValue,
+                    "display_name": name,
+                    "category": cat,
+                    "orig_request": orig,
+                ]
+                if let eff = eff, let data = try? JSONEncoder().encode(eff),
+                   let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    d["effective_state"] = dict
+                }
+                return ("confirmed", d)
+            case .pendingConfirmation(let cardID, let ctx):
+                return ("pending_confirmation", ["card_id": cardID, "context": ctx])
             case .failed(let fail):
                 return ("failed", ["reason": String(describing: fail)])
             }
