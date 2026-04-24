@@ -586,6 +586,30 @@ final class ActiveLockStoreTests: XCTestCase {
 
     // MARK: - Sweep expired
 
+    // MARK: - Effective-state query (spec §3.5)
+
+    func test_effectiveState_returns_covering_shields() async {
+        let store = ActiveLockStore()
+        let cat = Self.makeTimedShield(displayName: "Social", minutes: 60,
+                                        tier: .category, targetKey: "social")
+        _ = await store.addShield(cat)
+
+        let state = await store.effectiveState(for: AppQuery(categoryHint: "social"))
+        XCTAssertEqual(state.shieldsCovering.count, 1)
+        XCTAssertFalse(state.isBlocked)
+    }
+
+    func test_effectiveState_flags_blocked() async {
+        let store = ActiveLockStore()
+        let b = BlockRecord(bundleID: "com.x", displayName: "X",
+                             blockedAt: Date(), lastCommandID: UUID(),
+                             originalRequest: "block", targetChildID: UUID())
+        _ = await store.addBlock(b)
+
+        let state = await store.effectiveState(for: AppQuery(bundleID: "com.x"))
+        XCTAssertTrue(state.isBlocked)
+    }
+
     func test_sweepExpired_removes_past_shields() async {
         let store = ActiveLockStore()
         let live = Self.makeTimedShield(displayName: "IG", minutes: 60, targetKey: "live_key")
@@ -1073,16 +1097,18 @@ final class ActionExecutor: @unchecked Sendable {
 
         switch tier {
         case .exactApp:
-            // Requires a token from alias library or Phase 5 parent-device picker.
-            // Look up by catalog bundleID if provided.
-            guard let bundleID = cmd.target.bundleID,
-                  let local = LocalAliasStore.shared.tokenForApp(bundleID: bundleID)
-            else {
-                throw ExecuteError.noTokenForApp(cmd.target.bundleID ?? "unknown")
-            }
-            appTokens = [local]
-            targetKey = base64Key(for: local)
-            displayName = cmd.target.targetDisplay ?? bundleID
+            // GAP: No token source is wired in MVP.
+            // - Std mode: dispatcher routes kind=app to E1 fallback card (not this path).
+            // - Max mode: parent-device picker (Phase 5) doesn't exist yet; there's no
+            //   alias library on the child device keyed by bundle ID either.
+            // So this branch is UNREACHABLE from the normal dispatcher flow.
+            // If we ever get here (e.g. a buggy backend, or a future Phase 5 wiring arrives
+            // without this being updated), fail loudly rather than silently with a misleading
+            // error. DO NOT silently coerce into a category shield — that would cause broader
+            // collateral blocking than the user asked for.
+            throw ExecuteError.notImplemented(
+                "exactApp shield requires Phase 5 token mapping — this path should be unreachable"
+            )
         case .savedList:
             let sel: FamilyActivitySelection
             if let blob = blob,
@@ -1170,38 +1196,78 @@ final class ActionExecutor: @unchecked Sendable {
         }
     }
 
-    // MARK: - Unshield
+    // MARK: - Unshield — spec §4.4 deterministic rule
 
     private func executeUnshield(cmd: LockCommand) async -> AckResult {
-        // Dispatcher should already have routed by target type. Here we just remove by recordKey.
-        // recordKey is expected in cmd.target.listID (for savedList), .categoryHint (for category),
-        // "all" (for all), or we construct from bundleID for exactApp.
-        // Simplest approach: use explicit recordKey-style field in CommandTarget.
-        // For MVP, look up by tier + identifiers present.
+        // Dispatcher routes by target kind. Direct-named targets
+        // (list/category/all) go straight to recordKey removal. App targets
+        // run the multi-cover disambiguation per spec §4.4.
         guard let tier = cmd.tier else { return .failed(.malformed) }
-        let targetKey: String
+
         switch tier {
-        case .exactApp:
-            guard let bid = cmd.target.bundleID,
-                  let tok = LocalAliasStore.shared.tokenForApp(bundleID: bid)
-            else { return .failed(.nothingToUnlock) }
-            targetKey = base64Key(for: tok)
         case .savedList:
             guard let id = cmd.target.listID else { return .failed(.nothingToUnlock) }
-            targetKey = id.uuidString
+            return await removeExplicit(tier: .savedList, targetKey: id.uuidString)
         case .category:
             guard let hint = cmd.target.categoryHint else { return .failed(.nothingToUnlock) }
-            targetKey = hint.lowercased()
+            return await removeExplicit(tier: .category, targetKey: hint.lowercased())
         case .all:
-            targetKey = "all"
+            return await removeExplicit(tier: .all, targetKey: "all")
+        case .exactApp:
+            // App target: follow spec §4.4 disambiguation.
+            guard let bid = cmd.target.bundleID else { return .failed(.malformed) }
+            return await unshieldAppByBundle(bundleID: bid, displayName: cmd.target.targetDisplay ?? bid)
         }
+    }
 
+    private func removeExplicit(tier: ShieldTier, targetKey: String) async -> AckResult {
         let recordKey = ShieldRecord.makeRecordKey(tier: tier, targetKey: targetKey)
         guard let removed = await ActiveLockStore.shared.removeShield(recordKey: recordKey) else {
             return .failed(.nothingToUnlock)
         }
         cancelScheduled(recordKey: recordKey)
         return .confirmedExact(displayName: removed.record.displayName)
+    }
+
+    /// Spec §4.4: default to removing exactApp shield if one exists. Otherwise reject
+    /// with a suggestion (1 cover) or disambiguation (N covers). Never silently remove
+    /// a broader shield via an app-name target.
+    private func unshieldAppByBundle(bundleID: String, displayName: String) async -> AckResult {
+        let query = AppQuery(bundleID: bundleID)
+        let state = await ActiveLockStore.shared.effectiveState(for: query)
+
+        // In MVP, exactApp shields are never created (see `notImplemented` above), so
+        // state.shieldsCovering will not contain exactApp records. Logic is written
+        // forward-compatibly in case Phase 5 changes that.
+        if let exactAppShield = state.shieldsCovering.first(where: { $0.tier == .exactApp }) {
+            guard let removed = await ActiveLockStore.shared.removeShield(recordKey: exactAppShield.recordKey) else {
+                return .failed(.nothingToUnlock)
+            }
+            cancelScheduled(recordKey: exactAppShield.recordKey)
+            return .confirmedExact(displayName: removed.record.displayName)
+        }
+
+        let broader = state.shieldsCovering.filter { $0.tier != .exactApp }
+        switch broader.count {
+        case 0:
+            return .failed(.nothingToUnlock)
+        case 1:
+            let s = broader[0]
+            return .failed(.execution(
+                "\(displayName) is shielded by \(s.displayName). To release it, use \"unlock \(s.displayName)\"."
+            ))
+        default:
+            let sources = broader.map { s -> String in
+                if let exp = s.expiresAt {
+                    let f = DateFormatter(); f.timeStyle = .short
+                    return "\(s.displayName) (until \(f.string(from: exp)))"
+                }
+                return "\(s.displayName) (permanent)"
+            }.joined(separator: ", ")
+            return .failed(.execution(
+                "\(displayName) is shielded by \(broader.count) sources: \(sources). Unlock one explicitly."
+            ))
+        }
     }
 
     // MARK: - Unblock
@@ -1260,37 +1326,24 @@ enum ExecuteError: Error {
     case malformed
     case listNotFound(String)
     case categoryNotConfigured(String)
-    case noTokenForApp(String)
+    case notImplemented(String)      // for spec-defined deferrals like exactApp shield
 
     var ackFailure: AckFailure {
         switch self {
         case .malformed: return .malformed
         case .listNotFound(let n): return .listNotFound(n)
         case .categoryNotConfigured(let n): return .categoryNotConfigured(n)
-        case .noTokenForApp(let n): return .execution("No token for \(n)")
+        case .notImplemented(let reason): return .execution("Not implemented in MVP: \(reason)")
         }
     }
 }
 ```
 
-- [ ] **Step 2: Extend LocalAliasStore with tokenForApp(bundleID:) helper**
+- [ ] **Step 2: No LocalAliasStore changes needed**
 
-Modify `Evlin iOS/Evlin iOS/Services/LocalAliasStore.swift` — add this method:
-
-```swift
-extension LocalAliasStore {
-    /// Look up an ApplicationToken by bundle ID via the alias library.
-    /// Requires prior onboarding/picker setup. Returns nil if not found.
-    /// Used by ActionExecutor for exactApp-tier shield creation (Max mode).
-    func tokenForApp(bundleID: String) -> ApplicationToken? {
-        // For MVP: this is a stub — Phase 5 will implement the real mapping
-        // when alias libraries are wired to onboarding.
-        // Currently returns nil, which means exactApp shield always fails in MVP.
-        // Std mode doesn't use this path; Max mode's remote picker is Phase 5+.
-        return nil
-    }
-}
-```
+The previous draft added a `tokenForApp(bundleID:)` stub. That's removed because the exactApp
+shield path now throws `.notImplemented` directly — there's no caller for the helper. Phase 5
+will add the real token lookup when parent-device picker is wired.
 
 - [ ] **Step 3: Ensure CommandModels has listID on CommandTarget**
 
@@ -1766,8 +1819,9 @@ def test_ambiguous_verb_routes_to_clarification():
     assert result.confirmation_reason == "ambiguous_verb"
 
 
-def test_unblock_works_in_std():
-    """Std can unblock (for leftover blocks from Max downgrades) — spec D5."""
+def test_unblock_works_in_std_as_direct_action():
+    """Std can unblock (for leftover blocks from Max downgrades) — spec D5.
+    Single-item unblock is a DIRECT action — no card (spec §5.2 A2 removed)."""
     result = dispatch(
         family_id=uuid4(),
         protection_mode="std",
@@ -1775,7 +1829,10 @@ def test_unblock_works_in_std():
         saved_list_names=[],
         gemini_action=_gemini_action("unblock", "IG", kind="app"),
     )
-    assert result.requires_card == "A2"   # not E2
+    assert result.requires_card is None
+    assert result.resolved is not None
+    assert result.resolved.action == "unblock"
+    assert result.resolved.bundle_id == "com.burbn.instagram"
 
 
 def test_shield_single_app_in_std_routes_to_e1():
@@ -1969,7 +2026,17 @@ def _route_block(mode: str, action: dict) -> DispatchResult:
 
 def _route_unblock(mode: str, action: dict) -> DispatchResult:
     # Spec D5: unblock works in BOTH modes (for leftover blocks after downgrade).
-    return DispatchResult(requires_card="A2")
+    # DIRECT ACTION — no confirmation card (spec §5.2 A2 removed).
+    # Receipt discloses any remaining shield coverage per §8 effective-state line.
+    entry = catalog_lookup(action.get("target_request", ""))
+    return DispatchResult(
+        resolved=ResolvedAction(
+            action="unblock",
+            tier=None,
+            bundle_id=entry.bundle_id if entry else None,
+            target_display=(entry.names[0] if entry else action.get("target_request")),
+        )
+    )
 
 
 def _route_unblock_all(mode: str) -> DispatchResult:
@@ -2335,7 +2402,8 @@ import Foundation
 /// All confirmation card IDs. See spec §5.
 enum CardID: String, Codable, Sendable {
     // Group A — destructive confirmations
-    case A1, A2, A3
+    // A2 removed (single unblock is direct action, no card) — see spec §5.2.
+    case A1, A3
     // Group B — downgrade confirmations
     case B1, B2
     // Group C — upgrade confirmations
@@ -2862,7 +2930,7 @@ struct CardDispatcher: View {
     var body: some View {
         let payload = buildPayload()
         switch cardID {
-        case .A1, .A2, .D3: DangerConfirmCard(payload: payload)
+        case .A1, .D3: DangerConfirmCard(payload: payload)
         case .A3: BulkActionCard(payload: payload)
         case .B1, .B2, .C1, .C2: ReplaceModeCard(payload: payload)
         case .D1, .D4: MissingInfoCard(payload: payload)
@@ -2930,7 +2998,7 @@ enum CardPayloadBuilder {
     static func build(cardID: CardID, context: CardContext, handlers: CardHandlers) -> CardPayload {
         switch cardID {
         case .A1: return a1(context, handlers)
-        case .A2: return a2(context, handlers)
+        // A2 removed — single unblock is direct action (spec §5.2).
         case .A3: return a3(context, handlers)
         case .B1: return b1(context, handlers)
         case .B2: return b2(context, handlers)
@@ -2965,18 +3033,7 @@ enum CardPayloadBuilder {
         )
     }
 
-    private static func a2(_ ctx: CardContext, _ h: CardHandlers) -> CardPayload {
-        CardPayload(
-            id: .A2,
-            icon: "lock.open",
-            title: "Unblock \(ctx.targetDisplay)?",
-            body: "\(ctx.childName) will see \(ctx.targetDisplay) back on the home screen. It may still be restricted by other shields if any are active.",
-            buttons: [
-                CardButton(label: "Unblock", style: .destructive, action: h.onPrimary ?? {}),
-                CardButton(label: "Cancel", style: .cancel, action: h.onCancel ?? {}),
-            ]
-        )
-    }
+    // A2 removed — single unblock is a direct action; no payload/function needed.
 
     private static func a3(_ ctx: CardContext, _ h: CardHandlers) -> CardPayload {
         CardPayload(
@@ -3418,7 +3475,7 @@ enum ChatOutput {
 @Published var currentCard: (CardID, CardContext, CardHandlers)?
 ```
 
-When the response contains a `card_id`, set `currentCard` with the appropriate context. The handlers follow-up by re-calling `/parent/chat` with modified phrasing (e.g. user picked a duration → resend with duration filled in). For MVP, implement the wiring for A1, A2, D1, E1, and leave others as `TODO-friendly stubs` (emit a console log so tester knows the card's primary action isn't fully wired).
+When the response contains a `card_id`, set `currentCard` with the appropriate context. The handlers follow-up by re-calling `/parent/chat` with modified phrasing (e.g. user picked a duration → resend with duration filled in). For MVP, implement the wiring for A1, D1, E1, and leave others as `TODO-friendly stubs` (emit a console log so tester knows the card's primary action isn't fully wired). Note: A2 was removed — `unblock X` doesn't render a card; it produces a direct receipt.
 
 This is a larger integration task — implement incrementally. Minimum MVP:
 
@@ -3702,18 +3759,22 @@ From spec §12 — leave for a future plan:
 
 ## Known MVP limitations (implemented partially, follow-ups noted)
 
-- **Unshield multi-cover disambiguation (spec §4.4)** — the iOS `executeUnshield` currently only
-  tries the exactApp record. The full spec rule (remove exactApp if exists; else if 1 higher
-  cover, reject+suggest; else reject+disambiguate) is not implemented. Follow-up task: extend
-  `ActionExecutor.executeUnshield` to query `ActiveLockStore.effectiveState(for:)` and branch
-  per §4.4. The current behavior is safe (never silently removes broader shield) but the UX
-  when no exactApp exists will be a raw `.nothingToUnlock` failure instead of a helpful
-  disambiguation receipt.
-- **Max exactApp shield** — `LocalAliasStore.tokenForApp(bundleID:)` is a stub returning nil.
-  Max exactApp shield always fails in MVP. Fine because Phase 5 parent-device remote picker
-  isn't implemented; dispatcher routes Max/kind=app to E1 fallback card anyway.
-- **Card handler coverage** — ChatViewModel wires up A1, A2, D1, E1 handlers fully. Others
+- **Max exactApp shield — NOT implemented; path is fail-fast.** No token source is wired for
+  `exactApp` tier in MVP. The dispatcher routes Max/`kind=app` to the E1 fallback card, so
+  production flows never enter this path. If they ever do (bug or future Phase 5 wiring arrives
+  without updating this), `ActionExecutor.executeShield` throws `.notImplemented` with a clear
+  reason — catching the bug loudly instead of silently shielding the wrong thing.
+- **Post-onboarding Max→Std downgrade — out of scope.** The only downgrade path is G1 during
+  onboarding (when `.child` auth fails, before any blocks exist). Per spec §5.2 G1, blocks
+  are not auto-cleared; Std dispatcher already accepts `unblock` / `unblockAll` directly, so
+  any blocks that DO exist remain removable. Settings-triggered downgrade isn't in this plan.
+- **Card handler coverage** — ChatViewModel wires A1, D1, E1 handlers fully. Others
   (A3, B1, B2, C1, C2, D2, D3, D4, E2, E3, E4, F1, G1) render correctly but primary action
-  is logged-only stub. Follow-ups per card as time permits.
+  is logged-only stub. Follow-ups per card as time permits. (A2 has been removed entirely;
+  single `unblock` is a direct action.)
 - **Multi-child context** — D4 card renders but child-device list is placeholder empty until
   `ChatViewModel.currentCard.childDevices` is wired via `/family/children` API call.
+- **Unshield disambiguation** — FULLY implemented per spec §4.4 (see `unshieldAppByBundle`
+  in Task 3.1). Tested path: when no exactApp shield exists and a single higher-tier cover
+  is present, the receipt suggests unlocking the source directly ("unlock list 1"). When
+  multiple cover, the receipt lists them all.

@@ -360,7 +360,7 @@ struct CardButton {
 
 | Template | Cards covered | Variants |
 |---|---|---|
-| `DangerConfirmCard` | A1, A2, D3 | optional secondary "alternative action" |
+| `DangerConfirmCard` | A1, D3 | optional secondary "alternative action" |
 | `ReplaceModeCard` | B1, B2, C1, C2 | transition-with-context text |
 | `MissingInfoCard` | D1, D4 | quick-pick (D1) vs checkbox multi-select (D4) |
 | `AmbiguityCard` | D2 | A-vs-B radio |
@@ -387,15 +387,16 @@ Every card has: **Trigger**, **Template**, **Content**, **Outcomes**, **Receipt 
   - Cancel → no-op.
 - **Receipt**: `🚫 Blocked \(displayName) on \(childName)'s phone · until you unblock.` + effective-state line if applicable.
 
-#### A2 — Unblock confirmation
-- **Trigger**: `unblock X`.
-- **Template**: DangerConfirmCard.
-- **Content**:
-  - title: `Unblock \(displayName)?`
-  - body: `\(childName) will see \(displayName) back on the home screen. It may still be restricted by other shields if any are active.`
-  - buttons: `[Unblock]` (destructive), `[Cancel]`.
-- **Outcomes**: confirm → `removeBlock(bundleID)` → recompute → receipt.
-- **Receipt**: `🔓 Unblocked \(displayName).` + effective-state line ("Still shielded by X until Y") if applicable.
+#### A2 — (REMOVED — direct action, no card)
+
+`unblock X` is a direct action. Rationale: scoped to one app, reversible, and the receipt already discloses any remaining coverage via effective-state line. Card added friction without safety benefit.
+
+Confirmation is still required for the bulk action `unblockAll` (card A3) because it operates on many apps at once.
+
+**Flow**:
+- `unblock X` → `removeBlock(bundleID)` → receipt: `🔓 Unblocked \(displayName).` + effective-state line if applicable.
+
+Added to **§5.3 pure-receipt scenarios** as R7 (see end of this section).
 
 #### A3 — UnblockAll
 - **Trigger**: `unblock everything` / `unblock all`.
@@ -566,6 +567,7 @@ Every card has: **Trigger**, **Template**, **Content**, **Outcomes**, **Receipt 
 | R4 | duration < 15 min | `Locked for 15 min (iOS minimum). Unlocks at \(time).` (Receipt reported after auto-clamp.) |
 | R5 | permanent-shield duplicate (same target, both permanent) | `\(displayName) is already permanently shielded. No change.` |
 | R6 | same target, new timed shorter than existing timed | `Keeping existing \(oldRemaining) shield (longer than requested \(newRequested)).` |
+| R7 | `unblock X` when X is currently blocked (direct action, no card) | `🔓 Unblocked \(displayName).` + effective-state line if shields remain. |
 
 ---
 
@@ -586,8 +588,9 @@ The Chat-command dispatcher routes parent input through these steps **in order**
    3b. action == unblock:
         # Unblock works in BOTH modes — Std devices may have leftover blocks from
         # a previous Max session; they must be able to clear them.
+        # DIRECT ACTION — no confirmation card. Receipt discloses remaining coverage.
         if bundle not blocked: → R3 receipt, abort.
-        → A2 card.
+        → execute removeBlock directly → R7 receipt.
    3c. action == unblockAll:
         # Also allowed in both modes. Always destructive — always A3 card.
         → A3 card always.
@@ -872,7 +875,7 @@ The Phase 1 MVP is pre-launch (no real users). Migration is trivial:
 | Card | Template | Variant notes |
 |---|---|---|
 | A1 | DangerConfirmCard | +secondary "shield instead" |
-| A2 | DangerConfirmCard | no secondary |
+| A2 | **(removed — direct action, no card)** | — |
 | A3 | BulkActionCard | itemized list |
 | B1 | ReplaceModeCard | permanent → timed |
 | B2 | ReplaceModeCard | block → shield |
