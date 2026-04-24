@@ -1,27 +1,39 @@
-
 import Foundation
 
+/// Chat-level action verbs. See spec §7.
+/// Legacy lock/unlock/lockAll/unlockAll are aliased during migration (Phase 11).
 enum CommandAction: String, Codable, Sendable {
-    case lock
-    case unlock
-    case lockAll = "lock_all"
-    case unlockAll = "unlock_all"
+    case shield
+    case block
+    case unshield
+    case unblock
+    case unshieldAll = "unshield_all"
+    case unblockAll = "unblock_all"
     case expandLibrary = "expand_library"
 }
 
 struct CommandTarget: Codable, Sendable {
     var bundleID: String?
     var listName: String?
-    var hasPendingBlob: Bool = false
+    var listID: UUID?                 // stable identifier for a Saved List
     var categoryHint: String?
+    var targetAll: Bool = false       // true when kind=all
     var originalRequest: String
     var targetDisplay: String?
+    var targetChildID: UUID?          // for multi-child
+    var hasPendingBlob: Bool = false
+
+    // Parent's confirmed-downgrade re-submission: when the parent taps "Change to X min"
+    // on a B1 card, the /parent/chat follow-up sets `force_downgrade=true`. Child's
+    // ActiveLockStore.addShield then skips the merge rule for this (tier, targetKey).
+    // See spec §5.2 B1 flow and plan Phase 6/9 changes.
+    var forceDowngrade: Bool = false
 }
 
 struct LockCommand: Codable, Sendable, Identifiable {
     let id: UUID                   // command_id
     let action: CommandAction
-    let tier: LockTier?            // nil for unlock_all etc.
+    let tier: ShieldTier?          // nil for unshield_all, unblock_all, expand_library
     let target: CommandTarget
     let durationMinutes: Int?      // nil = permanent
     let issuedAt: Date
@@ -31,9 +43,45 @@ struct LockCommand: Codable, Sendable, Identifiable {
     }
 }
 
+/// Which verb was executed — drives receipt copy so success of
+/// `block Instagram` doesn't render as "Shielded Instagram".
+enum AckVerb: String, Codable, Sendable, Equatable {
+    case shield
+    case block
+    case unshield
+    case unblock
+    case unshieldAll = "unshield_all"
+    case unblockAll = "unblock_all"
+}
+
+/// Child-computed snapshot of effective coverage after the mutation, so the
+/// parent's ReceiptCard can render the "Still shielded by / May still be in
+/// a Saved List" honest-disclosure line. Serialized inside AckResult.
+///
+/// Shape mirrors `EffectiveState` from ActiveLockStore (Phase 2) but uses
+/// JSON-friendly primitives.
+struct AckEffectiveState: Codable, Sendable, Equatable {
+    struct ShieldCover: Codable, Sendable, Equatable {
+        let displayName: String
+        let expiresAtISO: String?      // nil = permanent
+        let tier: String               // ShieldTier rawValue
+    }
+    let isBlocked: Bool
+    let shieldsCovering: [ShieldCover]
+    let possibleSavedListCoverage: Bool  // indeterminate — honest "May still be…" line
+}
+
+/// Extended AckResult.
+/// * `confirmedExact` / `confirmedFallback` carry `verb` so ReceiptCard can render
+///   verb-appropriate copy (Shielded / Hidden / Unshielded / Restored / Unblocked).
+/// * Both success cases carry an optional `effectiveState` computed on the child
+///   after the mutation, so the parent receipt can show coverage disclosure.
+/// * `pendingConfirmation` case added for B1-style flows where the child device
+///   needs parent confirmation (B1 downgrade).
 enum AckResult: Codable, Sendable, Equatable {
-    case confirmedExact(displayName: String)
-    case confirmedFallback(displayName: String, category: String, origRequest: String)
+    case confirmedExact(verb: AckVerb, displayName: String, effectiveState: AckEffectiveState?)
+    case confirmedFallback(verb: AckVerb, displayName: String, category: String, origRequest: String, effectiveState: AckEffectiveState?)
+    case pendingConfirmation(cardID: String, context: [String: String])
     case failed(AckFailure)
 }
 
