@@ -382,10 +382,16 @@ struct AppQuery: Sendable {
 }
 
 /// Snapshot of what's covering an app. See spec §3.5.
+/// IMPORTANT: coverage for `savedList` tier can only be determined via token match.
+/// If the query has no token (e.g. unblock by bundleID, where we never had a token),
+/// savedList coverage is UNKNOWN. `possibleSavedListCoverage` flags this —
+/// receipts must treat the target as "may still be covered" rather than asserting
+/// "fully unrestricted".
 struct EffectiveState: Sendable {
     var isBlocked: Bool
-    var shieldsCovering: [ShieldRecord]
-    var earliestFullyUnrestricted: Date?   // nil if permanent or blocked
+    var shieldsCovering: [ShieldRecord]           // shields we're sure cover
+    var possibleSavedListCoverage: Bool           // true if savedList shields exist but query can't verify coverage
+    var earliestFullyUnrestricted: Date?          // nil if permanent, blocked, or possibleSavedListCoverage=true
 }
 
 /// Returned by removeShield — tells caller what's still covering the target (for receipt).
@@ -393,12 +399,14 @@ struct RemovedShield: Sendable {
     let record: ShieldRecord
     let stillCovered: [ShieldRecord]
     let blockedAfter: Bool
+    var possibleSavedListCoverage: Bool = false  // indeterminate — see EffectiveState
 }
 
 /// Returned by removeBlock.
 struct RemovedBlock: Sendable {
     let record: BlockRecord
     let stillShieldedBy: [ShieldRecord]
+    var possibleSavedListCoverage: Bool = false  // indeterminate — see EffectiveState
 }
 
 import FamilyControls
@@ -782,14 +790,20 @@ actor ActiveLockStore {
     }
 
     @discardableResult
-    func removeBlock(bundleID: String) -> RemovedBlock? {
+    func removeBlock(bundleID: String, categoryHint: String? = nil) -> RemovedBlock? {
         guard let record = blockRecords.removeValue(forKey: bundleID) else { return nil }
         persist()
         recomputeAndApply()
-        // Return remaining shields that cover this bundle (best-effort via categoryHint lookup)
-        let query = AppQuery(bundleID: bundleID)
+        // Pass categoryHint so shields on the matching category ARE detected.
+        // savedList shields still can't be confirmed — effectiveState sets
+        // possibleSavedListCoverage so the caller can generate an honest receipt.
+        let query = AppQuery(bundleID: bundleID, categoryHint: categoryHint?.lowercased())
         let state = effectiveState(for: query)
-        return RemovedBlock(record: record, stillShieldedBy: state.shieldsCovering)
+        return RemovedBlock(
+            record: record,
+            stillShieldedBy: state.shieldsCovering,
+            possibleSavedListCoverage: state.possibleSavedListCoverage
+        )
     }
 
     func unblockAll() -> [BlockRecord] {
@@ -807,7 +821,12 @@ actor ActiveLockStore {
     }
 
     func effectiveState(for query: AppQuery) -> EffectiveState {
-        var state = EffectiveState(isBlocked: false, shieldsCovering: [], earliestFullyUnrestricted: nil)
+        var state = EffectiveState(
+            isBlocked: false,
+            shieldsCovering: [],
+            possibleSavedListCoverage: false,
+            earliestFullyUnrestricted: nil
+        )
 
         if let bid = query.bundleID, blockRecords[bid] != nil {
             state.isBlocked = true
@@ -816,11 +835,16 @@ actor ActiveLockStore {
         for record in shieldRecords.values {
             if shieldCovers(record, query: query) {
                 state.shieldsCovering.append(record)
+            } else if record.tier == .savedList, query.token == nil {
+                // We have a saved-list shield but no token to check membership —
+                // coverage indeterminate. Flag for honest receipt.
+                state.possibleSavedListCoverage = true
             }
         }
 
-        // earliestFullyUnrestricted: nil if blocked or any permanent shield; else max(expiresAt)
-        if state.isBlocked || state.shieldsCovering.contains(where: { $0.expiresAt == nil }) {
+        // earliestFullyUnrestricted: nil if blocked, any permanent shield, or indeterminate list coverage
+        let hasPermanent = state.shieldsCovering.contains(where: { $0.expiresAt == nil })
+        if state.isBlocked || hasPermanent || state.possibleSavedListCoverage {
             state.earliestFullyUnrestricted = nil
         } else {
             state.earliestFullyUnrestricted = state.shieldsCovering.compactMap(\.expiresAt).max()
@@ -1216,7 +1240,11 @@ final class ActionExecutor: @unchecked Sendable {
         case .exactApp:
             // App target: follow spec §4.4 disambiguation.
             guard let bid = cmd.target.bundleID else { return .failed(.malformed) }
-            return await unshieldAppByBundle(bundleID: bid, displayName: cmd.target.targetDisplay ?? bid)
+            return await unshieldAppByBundle(
+                bundleID: bid,
+                displayName: cmd.target.targetDisplay ?? bid,
+                categoryHint: cmd.target.categoryHint
+            )
         }
     }
 
@@ -1232,8 +1260,13 @@ final class ActionExecutor: @unchecked Sendable {
     /// Spec §4.4: default to removing exactApp shield if one exists. Otherwise reject
     /// with a suggestion (1 cover) or disambiguation (N covers). Never silently remove
     /// a broader shield via an app-name target.
-    private func unshieldAppByBundle(bundleID: String, displayName: String) async -> AckResult {
-        let query = AppQuery(bundleID: bundleID)
+    ///
+    /// `categoryHint` (from Command.target.categoryHint, threaded by backend
+    /// `_route_unshield`) is required for detecting category shields covering X.
+    /// Without it, `effectiveState` would miss category coverage and the receipt
+    /// would falsely claim nothing-to-unlock.
+    private func unshieldAppByBundle(bundleID: String, displayName: String, categoryHint: String?) async -> AckResult {
+        let query = AppQuery(bundleID: bundleID, categoryHint: categoryHint?.lowercased())
         let state = await ActiveLockStore.shared.effectiveState(for: query)
 
         // In MVP, exactApp shields are never created (see `notImplemented` above), so
@@ -1274,9 +1307,19 @@ final class ActionExecutor: @unchecked Sendable {
 
     private func executeUnblock(cmd: LockCommand) async -> AckResult {
         guard let bid = cmd.target.bundleID else { return .failed(.malformed) }
-        guard let removed = await ActiveLockStore.shared.removeBlock(bundleID: bid) else {
+        // Pass category_hint so removeBlock's coverage query detects category
+        // shields (e.g. "Social" covering IG) after unblock — otherwise receipt
+        // would falsely claim IG is now fully unrestricted.
+        guard let removed = await ActiveLockStore.shared.removeBlock(
+            bundleID: bid,
+            categoryHint: cmd.target.categoryHint
+        ) else {
             return .failed(.nothingToUnlock)
         }
+        // Receipt grammar (see ReceiptCard and spec §8):
+        //  - stillShieldedBy non-empty  → "Unblocked X. Still shielded by Y..."
+        //  - else if possibleSavedListCoverage → "Unblocked X. May still be in a Saved List."
+        //  - else → "Unblocked X. Now fully unrestricted."
         return .confirmedExact(displayName: removed.record.displayName)
     }
 
@@ -1925,7 +1968,11 @@ from backend.app.services.app_catalog import lookup as catalog_lookup
 
 @dataclass
 class ResolvedAction:
-    """The concrete action to queue when no card is needed."""
+    """The concrete action to queue when no card is needed.
+    `category_hint` is required (when available) for unshield/unblock paths —
+    iOS uses it to detect category coverage of the target app, so receipts
+    report accurate effective state after mutation.
+    """
     action: str            # "shield" | "block" | "unshield" | "unblock" | "unshield_all" | "unblock_all"
     tier: str | None       # "exactApp" | "savedList" | "category" | "all"
     bundle_id: str | None = None
@@ -2029,12 +2076,18 @@ def _route_unblock(mode: str, action: dict) -> DispatchResult:
     # DIRECT ACTION — no confirmation card (spec §5.2 A2 removed).
     # Receipt discloses any remaining shield coverage per §8 effective-state line.
     entry = catalog_lookup(action.get("target_request", ""))
+    # Thread category_hint through so iOS can check category coverage at receipt time.
+    # Prefer catalog entry's category_hint; fall back to Gemini's category_hint_from_ai.
+    category_hint = (
+        entry.category_hint if entry else None
+    ) or action.get("category_hint_from_ai")
     return DispatchResult(
         resolved=ResolvedAction(
             action="unblock",
             tier=None,
             bundle_id=entry.bundle_id if entry else None,
             target_display=(entry.names[0] if entry else action.get("target_request")),
+            category_hint=category_hint,
         )
     )
 
@@ -2164,12 +2217,18 @@ def _route_unshield(mode: str, action: dict) -> DispatchResult:
         )
     # Default: app-level unshield
     entry = catalog_lookup(action.get("target_request", ""))
+    # Same category_hint threading as _route_unblock so iOS can disambiguate
+    # multi-cover unshield (spec §4.4) without losing category coverage info.
+    category_hint = (
+        entry.category_hint if entry else None
+    ) or action.get("category_hint_from_ai")
     return DispatchResult(
         resolved=ResolvedAction(
             action="unshield",
             tier="exactApp",
             bundle_id=entry.bundle_id if entry else None,
             target_display=(entry.names[0] if entry else action.get("target_request")),
+            category_hint=category_hint,
         )
     )
 
@@ -3381,23 +3440,32 @@ struct ReceiptCard: View {
         }
     }
 
-    /// Effective-state line per spec §8.3.
+    /// Effective-state line per spec §8.3 — honest about indeterminate coverage.
     private var effectiveStateLine: String? {
         guard let effectiveState = effectiveState else { return nil }
         if effectiveState.isBlocked { return "Still blocked." }
-        if effectiveState.shieldsCovering.isEmpty { return nil }
 
-        // Pick strongest: permanent first, then latest expiry
-        let sorted = effectiveState.shieldsCovering.sorted { a, b in
-            if a.expiresAt == nil && b.expiresAt != nil { return true }
-            if a.expiresAt != nil && b.expiresAt == nil { return false }
-            return (a.expiresAt ?? .distantPast) > (b.expiresAt ?? .distantPast)
+        // Certain coverage wins
+        if !effectiveState.shieldsCovering.isEmpty {
+            let sorted = effectiveState.shieldsCovering.sorted { a, b in
+                if a.expiresAt == nil && b.expiresAt != nil { return true }
+                if a.expiresAt != nil && b.expiresAt == nil { return false }
+                return (a.expiresAt ?? .distantPast) > (b.expiresAt ?? .distantPast)
+            }
+            let strongest = sorted[0]
+            if strongest.expiresAt == nil {
+                return "Still shielded by \(strongest.displayName) permanently."
+            }
+            return "Still shielded by \(strongest.displayName) until \(timeString(strongest.expiresAt!))."
         }
-        let strongest = sorted[0]
-        if strongest.expiresAt == nil {
-            return "Still shielded by \(strongest.displayName) permanently."
+
+        // Indeterminate — Saved List shields exist but we couldn't verify coverage.
+        // Better to warn than claim unrestricted.
+        if effectiveState.possibleSavedListCoverage {
+            return "May still be covered by a Saved List — check Settings."
         }
-        return "Still shielded by \(strongest.displayName) until \(timeString(strongest.expiresAt!))."
+
+        return nil   // truly unrestricted
     }
 
     private func timeString(_ date: Date) -> String {
@@ -3475,7 +3543,17 @@ enum ChatOutput {
 @Published var currentCard: (CardID, CardContext, CardHandlers)?
 ```
 
-When the response contains a `card_id`, set `currentCard` with the appropriate context. The handlers follow-up by re-calling `/parent/chat` with modified phrasing (e.g. user picked a duration → resend with duration filled in). For MVP, implement the wiring for A1, D1, E1, and leave others as `TODO-friendly stubs` (emit a console log so tester knows the card's primary action isn't fully wired). Note: A2 was removed — `unblock X` doesn't render a card; it produces a direct receipt.
+When the response contains a `card_id`, set `currentCard` with the appropriate context. The handlers follow-up by re-calling `/parent/chat` with modified phrasing (e.g. user picked a duration → resend with duration filled in).
+
+**Phase 9 MVP fully-wired cards (required for Phase 12 validation to pass)**:
+- **A1** — Block confirmation → confirm executes block
+- **B1** — Permanent→timed downgrade → confirm applies `applyConfirmedDowngrade(recordKey:newExpiry:lastCommandID:)` on ActiveLockStore
+- **D1** — Missing duration quick-pick → picks duration, re-sends /parent/chat with duration filled
+- **E1** — Std-can't-shield-single → primary action re-sends /parent/chat as category shield
+
+Stub (renders correctly, primary action logs to console): A3, B2, C1, C2, D2, D3, D4, E2, E3, E4, F1, G1. Follow-up per card as time permits.
+
+A2 was removed — `unblock X` doesn't render a card; direct receipt.
 
 This is a larger integration task — implement incrementally. Minimum MVP:
 
@@ -3698,12 +3776,18 @@ Delete and reinstall Evlin on the test iPhone. Enter Spike tests → "Reset all 
 4. Chat: `unblock Instagram`. Expect A2 card. Confirm.
 5. Icon returns. If another shield also covered IG, receipt should say so.
 
-- [ ] **Step 4: Walk through conflict path**
+- [ ] **Step 4: Walk through conflict path (savedList tier — exactApp gated in MVP)**
 
-1. `shield Instagram permanently` (Max mode).
-2. `shield Instagram for 30 min`.
-3. Expect B1 card ("Change permanent lock to 30 min?"). Confirm.
-4. Verify ActiveLockStore shows single record, timed.
+Uses `list 1` instead of a single app because MVP's exactApp shield is fail-fast
+(see "Known limitations"). The conflict semantics are identical; only the tier
+differs.
+
+1. `shield list 1 permanently`.
+2. `shield list 1 for 30 min`.
+3. Expect B1 card: `Change permanent lock to 30 min? "list 1" is currently shielded permanently...`
+4. Tap **Change to 30 min**.
+5. Verify ActiveLockStore shows a single ShieldRecord with tier=.savedList, expiresAt ≈ now+30min.
+6. Confirm receipt: `Shortened list 1 lock to 30 min. Unlocks at 17:30.`
 
 - [ ] **Step 5: Walk through missing-duration path**
 
@@ -3711,16 +3795,37 @@ Delete and reinstall Evlin on the test iPhone. Enter Spike tests → "Reset all 
 2. Expect D1 card with duration options.
 3. Pick 15 min. Verify receipt and that the shield applies.
 
-- [ ] **Step 6: Record any broken path**
+- [ ] **Step 5.5: Walk through effective-state receipt**
 
-Create a "validation notes" file in `docs/superpowers/specs/` with:
+Verifies the P1 fix (receipts honest after unblock/unshield).
+
+1. From Step 3 end state (Instagram blocked).
+2. `shield Social category for 60 min`.
+3. `unblock Instagram`.
+4. **Expected receipt**: `🔓 Unblocked Instagram. Still shielded by Social until 18:30.`
+   (Backend threads category_hint=social via catalog; iOS effectiveState detects Social coverage.)
+5. Bonus — `shield list 1 for 60 min` (list 1 happens to contain IG).
+6. `unblock TikTok` (TikTok was never blocked — just to see behavior — or pick another
+   blocked app after first blocking it).
+7. If a saved list exists in the family, receipt should include the `possibleSavedListCoverage`
+   disclosure: `"may still be in a Saved List — check Settings."` (because we can't confirm
+   via bundleID alone).
+
+- [ ] **Step 6: Record validation notes**
+
+Create `docs/superpowers/specs/2026-04-24-validation-notes.md` with:
 ```markdown
 # Phase 12 Validation — 2026-04-24
-- Shield single list: ✅
-- Block single app: ✅/❌ (notes)
-- Conflict downgrade: ✅/❌
-- Missing duration D1: ✅/❌
-- ...
+## Paths that MUST work (Phase 9 fully wired)
+- [ ] Shield savedList/category (any tier except exactApp)
+- [ ] Block → A1 card → confirm → icon hides
+- [ ] Unblock → direct action → icon returns
+- [ ] Conflict B1 (permanent→timed downgrade on savedList)
+- [ ] Missing duration D1 → quick-pick → shield applies
+- [ ] Effective-state receipt honesty (Unblock + Still shielded by...)
+## Paths that are EXPECTED to be stubs (Phase 9 not wired)
+- [ ] A3, C1, C2, D2, D3, D4, E2, E3, E4, F1, G1 render correctly but primary action logs only
+- [ ] exactApp shield fails fast with .notImplemented (expected — out of MVP scope)
 ```
 
 - [ ] **Step 7: Commit validation notes**

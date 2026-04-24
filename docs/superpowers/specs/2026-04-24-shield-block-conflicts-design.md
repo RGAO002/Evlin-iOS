@@ -504,7 +504,7 @@ Added to **§5.3 pure-receipt scenarios** as R7 (see end of this section).
   - Upgrade → external upgrade flow.
 
 #### E2 — Max-only command in Std mode
-- **Trigger**: Std mode, verb is `block` or `unblock`. (Priority over E1.)
+- **Trigger**: Std mode, verb is `block` (creating new block). **Does NOT fire for `unblock` / `unblockAll`** — per D5, Std allows removing existing blocks. Priority over E1 for `block`.
 - **Template**: UnsupportedInModeCard (upgrade variant).
 - **Content**:
   - icon: 🔒
@@ -756,7 +756,12 @@ def effectiveLine(target, state, mutation):
       if strongest.expiresAt is None:
         return "Still shielded by \(strongest.displayName) permanently."
       return "Still shielded by \(strongest.displayName) until \(formatTime(strongest.expiresAt))."
-    return None  # fully unrestricted — no line needed (we might say "Now fully available.")
+    # INDETERMINATE: saved-list shields exist but we couldn't verify coverage
+    # (query was bundleID-only and savedList tokens can't be checked from bundleID).
+    # Better to flag uncertainty than claim unrestricted.
+    if state.possibleSavedListCoverage:
+      return "May still be covered by a Saved List — check Settings."
+    return None  # truly unrestricted — no line needed (or say "Now fully available.")
 
   # For additions (shield or block)
   otherCoverage = state.shieldsCovering.filter(s => s.recordKey != mutation.recordKey)
@@ -765,6 +770,15 @@ def effectiveLine(target, state, mutation):
     return "Also covered by \(otherCoverage[0].displayName) until \(…)."
   return None
 ```
+
+**Savedlist coverage indeterminacy** (spec-level rule):
+
+`EffectiveState.possibleSavedListCoverage = true` when the query has no `token` (typical for
+unblock/unshield by bundleID) AND any `savedList` shield exists in the store. In this case
+the receipt writer MUST prefer the indeterminate line over silence. Callers are encouraged
+to pass `categoryHint` (via the backend resolver's catalog lookup) when possible — that
+resolves category coverage deterministically, narrowing the indeterminacy to just list
+coverage.
 
 For removals where the target is now fully unrestricted, the receipt ends with `. Now fully available.` to make the finality explicit (avoids "did it really unlock?" confusion).
 
