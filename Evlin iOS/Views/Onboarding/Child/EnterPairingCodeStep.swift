@@ -2,8 +2,8 @@ import SwiftUI
 import UIKit
 
 /// Child side: generates a family on backend, displays the 6-digit code.
-/// Polls for parent join in background; user can proceed to next step
-/// without waiting (parent has a 10-min window to pair).
+/// Polls for parent join in background. The child waits here until the parent
+/// has paired so the next step can use the parent's selected protection mode.
 struct EnterPairingCodeStep: View {
     @EnvironmentObject var apiClient: APIClient
     @Binding var familyID: UUID?
@@ -24,7 +24,7 @@ struct EnterPairingCodeStep: View {
                     .font(.evHeadlineLarge)
                     .foregroundStyle(Color.evPrimary)
                     .multilineTextAlignment(.center)
-                Text("Show this code to your parent. Have them open Evlin on their phone, choose Parent mode, and enter it.")
+                Text("Show this code to your parent. Have them open Evlin on their phone, choose Parent mode, and enter it. Stay here until the parent pairs.")
                     .font(.evBodyMedium)
                     .multilineTextAlignment(.center)
                     .foregroundStyle(Color.evOnSurfaceVariant)
@@ -91,7 +91,7 @@ struct EnterPairingCodeStep: View {
             Spacer()
 
             Button(action: onContinue) {
-                Text(parentJoined ? "Continue" : "Continue (parent can pair later)")
+                Text(parentJoined ? "Continue" : "Waiting for parent")
                     .font(.evLabelLarge)
                     .frame(maxWidth: .infinity)
             }
@@ -99,9 +99,9 @@ struct EnterPairingCodeStep: View {
             .padding(.vertical, Spacing.lg)
             .background(
                 RoundedRectangle(cornerRadius: CornerRadius.md)
-                    .fill(pairingCode.isEmpty ? Color.evOutline : Color.evPrimary)
+                    .fill(parentJoined ? Color.evPrimary : Color.evOutline)
             )
-            .disabled(pairingCode.isEmpty)
+            .disabled(!parentJoined)
         }
         .padding(Spacing.xl)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -173,11 +173,15 @@ struct EnterPairingCodeStep: View {
                     var comps = URLComponents(string: "\(apiClient.baseURL)/family/pairing-status")!
                     comps.queryItems = [URLQueryItem(name: "code", value: pairingCode)]
                     let (data, _) = try await URLSession.shared.data(from: comps.url!)
-                    struct R: Codable { let used: Bool }
+                    struct R: Codable {
+                        let used: Bool
+                        let protection_mode: String
+                    }
                     if let r = try? JSONDecoder().decode(R.self, from: data), r.used {
                         await MainActor.run {
+                            protectionMode = r.protection_mode
                             parentJoined = true
-                            status = "Parent paired ✓"
+                            status = "Parent paired ✓ \(r.protection_mode == "max" ? "Maximum" : "Standard") mode"
                         }
                         break
                     }

@@ -16,6 +16,29 @@ final class ActionExecutor: @unchecked Sendable {
         }
 
         switch cmd.action {
+        case .lockAll:
+            let lock = ActiveLock(
+                id: cmd.id,
+                tier: .category,
+                blockedBundleIDs: [],
+                shieldAppTokens: [],
+                shieldCategoryTokens: [],
+                shieldsAllApplications: true,
+                issuedAt: cmd.issuedAt,
+                expiresAt: cmd.expiresAt,
+                originalRequest: cmd.target.originalRequest,
+                displayName: "All Apps"
+            )
+            await ActiveLockStore.shared.add(lock)
+            if cmd.durationMinutes != nil, let expires = lock.expiresAt {
+                do {
+                    try scheduleRelock(commandID: lock.id, expiresAt: expires)
+                } catch {
+                    return .failed(.execution(error.localizedDescription))
+                }
+            }
+            return .confirmedExact(displayName: "All Apps")
+
         case .unlockAll:
             await ActiveLockStore.shared.removeAll()
             cancelAllScheduled()
@@ -67,6 +90,7 @@ final class ActionExecutor: @unchecked Sendable {
                 id: cmd.id, tier: .exactBundle,
                 blockedBundleIDs: [bid],
                 shieldAppTokens: [], shieldCategoryTokens: [],
+                shieldsAllApplications: false,
                 issuedAt: cmd.issuedAt, expiresAt: cmd.expiresAt,
                 originalRequest: cmd.target.originalRequest,
                 displayName: cmd.target.targetDisplay ?? bid
@@ -87,6 +111,7 @@ final class ActionExecutor: @unchecked Sendable {
                 blockedBundleIDs: [],
                 shieldAppTokens: sel.applicationTokens,
                 shieldCategoryTokens: sel.categoryTokens,
+                shieldsAllApplications: false,
                 issuedAt: cmd.issuedAt, expiresAt: cmd.expiresAt,
                 originalRequest: cmd.target.originalRequest,
                 displayName: cmd.target.listName ?? "saved list"
@@ -100,6 +125,7 @@ final class ActionExecutor: @unchecked Sendable {
                 blockedBundleIDs: [],
                 shieldAppTokens: [],
                 shieldCategoryTokens: [tok],
+                shieldsAllApplications: false,
                 issuedAt: cmd.issuedAt, expiresAt: cmd.expiresAt,
                 originalRequest: cmd.target.originalRequest,
                 displayName: hint.capitalized

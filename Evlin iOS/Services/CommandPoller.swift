@@ -67,6 +67,7 @@ final class CommandPoller {
             switch poll.action {
             case "lock": return .lock
             case "unlock": return .unlock
+            case "lock_all": return .lockAll
             case "unlock_all": return .unlockAll
             case "expand_library": return .expandLibrary
             default: return .lock

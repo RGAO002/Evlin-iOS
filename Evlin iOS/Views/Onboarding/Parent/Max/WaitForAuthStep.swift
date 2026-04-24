@@ -11,10 +11,10 @@ struct WaitForAuthStep: View {
     var body: some View {
         VStack(spacing: Spacing.section) {
             VStack(spacing: Spacing.lg) {
-                Text("Waiting for Authorization")
+                Text("Approve Evlin on the child phone")
                     .font(.evHeadlineLarge)
                     .foregroundStyle(Color.evPrimary)
-                Text("Pick up your child's phone. Evlin there will prompt for parent authorization. Approve when iOS asks you.")
+                Text("On the child phone, continue Evlin onboarding and tap Grant Permission. iOS should ask the parent or guardian to approve Screen Time access.")
                     .font(.evBodyMedium)
                     .multilineTextAlignment(.center)
                     .foregroundStyle(Color.evOnSurfaceVariant)
@@ -41,9 +41,27 @@ struct WaitForAuthStep: View {
                 Text(status)
                     .font(.evBodyMedium)
                     .foregroundStyle(granted ? Color.evSecondary : Color.evOnSurfaceVariant)
+                    .multilineTextAlignment(.center)
             }
 
             Spacer()
+
+            if !granted {
+                VStack(alignment: .leading, spacing: Spacing.sm) {
+                    Text("If it fails:")
+                        .font(.evLabelMedium)
+                        .foregroundStyle(Color.evPrimary)
+                    Text("Check that the child phone is signed in with the Child Apple Account and is in the same Family Sharing group.")
+                        .font(.evBodySmall)
+                        .foregroundStyle(Color.evOnSurfaceVariant)
+                        .multilineTextAlignment(.leading)
+                }
+                .padding(Spacing.lg)
+                .background(
+                    RoundedRectangle(cornerRadius: CornerRadius.lg)
+                        .fill(Color.evSurfaceContainerLowest)
+                )
+            }
 
             Button(action: onContinue) {
                 Text("Continue")

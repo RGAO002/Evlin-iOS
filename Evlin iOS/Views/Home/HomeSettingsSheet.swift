@@ -8,8 +8,10 @@ struct HomeSettingsSheet: View {
 
     @AppStorage("parentName") private var parentName: String = "Morgan"
     @AppStorage("childName") private var childName: String = "Liam"
-    @AppStorage("targetChildId") private var targetChildId: String = ""
     @AppStorage("appMode") private var appMode: String = ""
+    @AppStorage("evlin.familyID") private var familyID: String = ""
+    @AppStorage("evlin.parentDeviceID") private var parentDeviceID: String = ""
+    @AppStorage("evlin.childDeviceID") private var childDeviceID: String = ""
 
     @State private var children: [ChildProfile] = ChildProfile.all
     @State private var editing: ChildProfile? = nil
@@ -17,8 +19,6 @@ struct HomeSettingsSheet: View {
 
     @State private var serverURL: String = ""
     @State private var isPickerPresented = false
-    @State private var pairingInput: String = ""
-    @State private var pairingMessage: String?
 
     var body: some View {
         NavigationStack {
@@ -79,38 +79,16 @@ struct HomeSettingsSheet: View {
                         TextField("Liam", text: $childName)
                     }
 
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Child Device ID")
-                            .font(.custom("Inter", size: 11).weight(.bold))
-                            .tracking(1.2)
-                            .textCase(.uppercase)
-                            .foregroundStyle(Color.evOutline)
-                        TextField("Paste child's device ID here", text: $targetChildId)
-                            .font(.system(size: 12, design: .monospaced))
-                            .autocorrectionDisabled()
-                            .textInputAutocapitalization(.never)
+                    if !familyID.isEmpty {
+                        idRow(title: "Family ID", value: familyID)
                     }
 
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Pair with Code")
-                            .font(.custom("Inter", size: 11).weight(.bold))
-                            .tracking(1.2)
-                            .textCase(.uppercase)
-                            .foregroundStyle(Color.evOutline)
-                        HStack(spacing: 10) {
-                            TextField("6-digit code", text: $pairingInput)
-                                .font(.system(size: 18, weight: .bold, design: .monospaced))
-                                .keyboardType(.numberPad)
-                            Button("Pair") { pairWithCode() }
-                                .disabled(pairingInput.count != 6)
-                                .buttonStyle(.borderedProminent)
-                                .tint(Color.evPrimary)
-                        }
-                        if let msg = pairingMessage {
-                            Text(msg)
-                                .font(.caption)
-                                .foregroundStyle(msg.contains("Paired") ? Color.evSecondary : Color.evError)
-                        }
+                    if !parentDeviceID.isEmpty {
+                        idRow(title: "Parent Device ID", value: parentDeviceID)
+                    }
+
+                    if !childDeviceID.isEmpty {
+                        idRow(title: "Child Device ID", value: childDeviceID)
                     }
                 }
 
@@ -228,6 +206,9 @@ struct HomeSettingsSheet: View {
                         UserDefaults.standard.removeObject(forKey: "childId")
                         UserDefaults.standard.removeObject(forKey: "childName")
                         UserDefaults.standard.removeObject(forKey: "targetChildId")
+                        UserDefaults.standard.removeObject(forKey: "evlin.familyID")
+                        UserDefaults.standard.removeObject(forKey: "evlin.parentDeviceID")
+                        UserDefaults.standard.removeObject(forKey: "evlin.childDeviceID")
                         UserDefaults.standard.removeObject(forKey: "evlin_chat_history")
                         UserDefaults.standard.removeObject(forKey: "serverURL")
                         NotificationCenter.default.post(name: .evlinClearChat, object: nil)
@@ -243,10 +224,19 @@ struct HomeSettingsSheet: View {
                 }
 
                 #if DEBUG
-                Section("Debug") {
-                    NavigationLink("Spike tests") { SpikeView() }
+                Section("Developer Tools") {
+                    NavigationLink {
+                        SpikeView()
+                    } label: {
+                        Label("Diagnostics & Spike Tests", systemImage: "wrench.and.screwdriver")
+                    }
+
+                    Text("One-device setup, backend checks, auth checks, and explicit hard-block experiments. Hidden in release builds.")
+                        .font(.caption)
+                        .foregroundStyle(Color.evOnSurfaceVariant)
                 }
                 #endif
+
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
@@ -288,33 +278,18 @@ struct HomeSettingsSheet: View {
         .preferredColorScheme(.light)
     }
 
-    private func pairWithCode() {
-        Task {
-            guard let url = URL(string: "\(apiClient.baseURL)/parent/pair") else { return }
-            var request = URLRequest(url: url)
-            request.httpMethod = "POST"
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.httpBody = try? JSONEncoder().encode(["code": pairingInput])
-
-            do {
-                let (data, response) = try await URLSession.shared.data(for: request)
-                guard let http = response as? HTTPURLResponse, http.statusCode == 200,
-                      let result = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      let pairedId = result["child_id"] as? String,
-                      let pairedName = result["child_name"] as? String
-                else {
-                    await MainActor.run { pairingMessage = "Invalid code" }
-                    return
-                }
-                await MainActor.run {
-                    targetChildId = pairedId
-                    childName = pairedName
-                    pairingMessage = "Paired with \(pairedName)!"
-                    pairingInput = ""
-                }
-            } catch {
-                await MainActor.run { pairingMessage = "Connection error" }
-            }
+    @ViewBuilder
+    private func idRow(title: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.custom("Inter", size: 11).weight(.bold))
+                .tracking(1.2)
+                .textCase(.uppercase)
+                .foregroundStyle(Color.evOutline)
+            Text(value)
+                .font(.system(size: 12, design: .monospaced))
+                .foregroundStyle(Color.evOnSurfaceVariant)
+                .textSelection(.enabled)
         }
     }
 }

@@ -42,6 +42,7 @@ class ScreenTimeManager: ObservableObject {
             await MainActor.run {
                 self.isAuthorized = true
                 self.errorMessage = nil
+                self.enableDeletionProtection()
             }
         } catch {
             await MainActor.run {
@@ -102,6 +103,7 @@ class ScreenTimeManager: ObservableObject {
 
         isUnlocked = false
         saveSelection()
+        NotificationCenter.default.post(name: .evlinLockStateChanged, object: true)
     }
 
     /// Shield ALL apps (full device lock).
@@ -115,20 +117,45 @@ class ScreenTimeManager: ObservableObject {
             store.shield.applications = appTokens
         }
         isUnlocked = false
+        NotificationCenter.default.post(name: .evlinLockStateChanged, object: true)
         print("[ScreenTime] shield applied: categories=.all(), apps=\(appTokens.count)")
     }
 
     /// Unshield (unlock) apps for the given duration.
     func unshieldApps(forMinutes minutes: Int) {
-        store.clearAllSettings()
+        clearLockRestrictions()
         isUnlocked = true
+        NotificationCenter.default.post(name: .evlinLockStateChanged, object: false)
         scheduleRelock(afterMinutes: minutes)
     }
 
     /// Remove all shields.
     func clearAllShields() {
-        store.clearAllSettings()
+        clearLockRestrictions()
         isUnlocked = true
+        enableDeletionProtection()
+        Task {
+            await ActiveLockStore.shared.removeAll()
+            await MainActor.run {
+                NotificationCenter.default.post(name: .evlinLockStateChanged, object: false)
+            }
+        }
+    }
+
+    /// Prevent Evlin from being deleted. This is intentionally separate from
+    /// lock/unlock state so unlocking apps doesn't make Evlin removable.
+    func enableDeletionProtection() {
+        store.application.denyAppRemoval = true
+        UserDefaults.standard.set(true, forKey: "evlin.deletionProtectionEnabled")
+    }
+
+    /// Clear only lock-related settings. Do not call `clearAllSettings()` here:
+    /// it also clears `application.denyAppRemoval`, making Evlin deletable.
+    private func clearLockRestrictions() {
+        store.application.blockedApplications = nil
+        store.shield.applications = nil
+        store.shield.applicationCategories = nil
+        store.shield.webDomainCategories = nil
     }
 
     /// Save the selected apps to shared UserDefaults so the Monitor extension can read them.

@@ -1,5 +1,4 @@
 import SwiftUI
-import ManagedSettings
 
 struct DeletionProtectionStep: View {
     let onContinue: () -> Void
@@ -63,8 +62,7 @@ struct DeletionProtectionStep: View {
     }
 
     private func enable() {
-        let store = ManagedSettingsStore()
-        store.application.denyAppRemoval = true
+        ScreenTimeManager.shared.enableDeletionProtection()
         applied = true
     }
 }

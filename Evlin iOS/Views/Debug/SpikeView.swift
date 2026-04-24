@@ -16,7 +16,7 @@ struct SpikeView: View {
     var body: some View {
         NavigationStack {
             List {
-                Section("Test Mode Quickstart") {
+                Section("One-Device Test Setup") {
                     Text("One-tap setup that skips onboarding and makes this single device switch between Parent and Child mode. Creates a family on the backend, pairs it, grants auth, and seeds a test Saved List.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -117,7 +117,11 @@ struct SpikeView: View {
                         }
                     }
                 }
-                Section("Bundle ID block") {
+                Section("Hard Block Tests (Hides App Icon)") {
+                    Text("These use ManagedSettings blockedApplications. They are intentionally different from shield mode and can make the app disappear from the home screen.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
                     Button("Block Instagram") { blockInstagram() }
                     Button("Block Roblox") { blockRoblox() }
                     Button("Clear all blocks") { clearBlocks() }
@@ -127,7 +131,11 @@ struct SpikeView: View {
                     Button("Disable") { setDenyRemoval(false) }
                 }
                 Section("ActionExecutor") {
-                    Button("Lock IG for 15 min (min allowed)") {
+                    Text("The IG test below uses exact_bundle, so it hard-blocks and may hide the app icon. Saved lists and categories use shield.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Button("Hard-block IG for 15 min (min allowed)") {
                         Task {
                             let cmd = LockCommand(
                                 id: UUID(),
@@ -170,7 +178,7 @@ struct SpikeView: View {
                     ForEach(log, id: \.self) { Text($0).font(.caption.monospaced()) }
                 }
             }
-            .navigationTitle("Spike tests")
+            .navigationTitle("Diagnostics")
         }
     }
 
@@ -210,13 +218,13 @@ struct SpikeView: View {
     private func setupTestMode() async {
         record("setup: creating family…")
         do {
-            // 1. Create family (as parent)
+            // 1. Create family as the child side, then pair this same device as parent.
             let createURL = URL(string: "\(apiClient.baseURL)/family/create")!
             var req = URLRequest(url: createURL)
             req.httpMethod = "POST"
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
             req.httpBody = try JSONSerialization.data(withJSONObject: [
-                "child_name": "TestKid",
+                "child_device_label": UIDevice.current.name + " (child-mode)",
                 "protection_mode": "std",
             ])
             let (data1, resp1) = try await URLSession.shared.data(for: req)
@@ -227,20 +235,21 @@ struct SpikeView: View {
             }
             struct CreateR: Codable {
                 let family_id: UUID
-                let parent_device_id: UUID
+                let child_device_id: UUID
                 let pairing_code: String
             }
             let c = try JSONDecoder().decode(CreateR.self, from: data1)
             record("setup: got code \(c.pairing_code), pairing…")
 
-            // 2. Pair (as child, same device)
+            // 2. Pair as the parent side on the same device.
             let pairURL = URL(string: "\(apiClient.baseURL)/family/pair")!
             var req2 = URLRequest(url: pairURL)
             req2.httpMethod = "POST"
             req2.setValue("application/json", forHTTPHeaderField: "Content-Type")
             req2.httpBody = try JSONSerialization.data(withJSONObject: [
                 "code": c.pairing_code,
-                "device_label": UIDevice.current.name + " (child-mode)",
+                "parent_device_label": UIDevice.current.name + " (parent-mode)",
+                "protection_mode": "std",
             ])
             let (data2, resp2) = try await URLSession.shared.data(for: req2)
             guard (resp2 as? HTTPURLResponse)?.statusCode == 200 else {
@@ -324,7 +333,7 @@ struct SpikeView: View {
             req.httpMethod = "POST"
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
             req.httpBody = try JSONSerialization.data(withJSONObject: [
-                "child_name": "ping",
+                "child_device_label": "ping",
                 "protection_mode": "std",
             ])
             let (data, resp) = try await URLSession.shared.data(for: req)

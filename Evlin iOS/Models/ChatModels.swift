@@ -2,6 +2,7 @@ import Foundation
 
 extension Notification.Name {
     static let evlinClearChat = Notification.Name("evlinClearChat")
+    static let evlinLockStateChanged = Notification.Name("evlinLockStateChanged")
 }
 
 struct ChatMessage: Identifiable, Codable {

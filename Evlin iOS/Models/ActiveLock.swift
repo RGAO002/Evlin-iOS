@@ -8,6 +8,7 @@ struct ActiveLock: Codable, Sendable, Identifiable {
     let blockedBundleIDs: Set<String>
     let shieldAppTokens: Set<ApplicationToken>
     let shieldCategoryTokens: Set<ActivityCategoryToken>
+    let shieldsAllApplications: Bool?
     let issuedAt: Date
     let expiresAt: Date?
     let originalRequest: String

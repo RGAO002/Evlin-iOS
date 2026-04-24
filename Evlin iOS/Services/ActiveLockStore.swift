@@ -78,6 +78,7 @@ actor ActiveLockStore {
             store.application.blockedApplications = nil
             store.shield.applications = nil
             store.shield.applicationCategories = nil
+            store.shield.webDomainCategories = nil
             return
         }
 
@@ -88,10 +89,17 @@ actor ActiveLockStore {
         let allAppTokens = Set(locks.values.flatMap(\.shieldAppTokens))
         store.shield.applications = allAppTokens.isEmpty ? nil : allAppTokens
 
+        if locks.values.contains(where: { $0.shieldsAllApplications == true }) {
+            store.shield.applicationCategories = .all()
+            store.shield.webDomainCategories = .all()
+            return
+        }
+
         let allCategoryTokens = Set(locks.values.flatMap(\.shieldCategoryTokens))
         store.shield.applicationCategories = allCategoryTokens.isEmpty
             ? nil
             : .specific(allCategoryTokens)
+        store.shield.webDomainCategories = nil
     }
 
     private func persist() {

@@ -1,24 +1,45 @@
 import SwiftUI
 import FamilyControls
 
-/// Child picks the ActivityCategoryTokens that the parent should be allowed to
-/// control via Chat (e.g. "lock all games"). Category names are auto-assigned
-/// as "category_1", "category_2" etc. since SwiftUI Label(token) doesn't expose
-/// the human-readable name back to us. Parent/child can rename later in Settings.
+/// Maps semantic Chat categories ("games", "social", "entertainment") to the
+/// opaque ActivityCategoryTokens produced by FamilyActivityPicker.
 struct CategoryDefaultsStep: View {
     let onContinue: () -> Void
 
-    @State private var selection = FamilyActivitySelection()
+    @State private var selections: [String: FamilyActivitySelection] = [:]
+    @State private var pickerSelection = FamilyActivitySelection()
+    @State private var activeCategory: SemanticCategory?
     @State private var showPicker = false
-    @State private var saved = false
+
+    private let categories: [SemanticCategory] = [
+        .init(key: "games", title: "Games", example: "Roblox, Minecraft, Fortnite", required: true),
+        .init(key: "social", title: "Social", example: "Instagram, TikTok, Snapchat", required: true),
+        .init(key: "entertainment", title: "Entertainment", example: "YouTube, Netflix, Twitch", required: true),
+        .init(key: "education", title: "Education", example: "Learning and study apps", required: false),
+        .init(key: "productivity", title: "Productivity", example: "Tools, finance, work apps", required: false),
+    ]
+
+    private var configuredKeys: Set<String> {
+        Set(selections.compactMap { key, selection in
+            selection.categoryTokens.isEmpty ? nil : key
+        })
+    }
+
+    private var requiredKeys: Set<String> {
+        Set(categories.filter(\.required).map(\.key))
+    }
+
+    private var canContinue: Bool {
+        requiredKeys.isSubset(of: configuredKeys)
+    }
 
     var body: some View {
         VStack(spacing: Spacing.section) {
             VStack(spacing: Spacing.lg) {
-                Text("Category Defaults")
+                Text("Category Shield Setup")
                     .font(.evHeadlineLarge)
                     .foregroundStyle(Color.evPrimary)
-                Text("Pick which categories your parent should be able to control via Chat (e.g. 'lock all games').")
+                Text("Pick one Screen Time category for each label below. This lets Chat say \"lock Instagram\" and use the Social shield instead of hiding the app icon.")
                     .font(.evBodyMedium)
                     .multilineTextAlignment(.center)
                     .foregroundStyle(Color.evOnSurfaceVariant)
@@ -26,27 +47,25 @@ struct CategoryDefaultsStep: View {
             }
             .padding(.top, Spacing.section)
 
-            Button {
-                showPicker = true
-            } label: {
-                Text("Open Category Picker")
-                    .font(.evLabelLarge)
-                    .foregroundStyle(Color.evPrimary)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, Spacing.lg)
-                    .background(
-                        RoundedRectangle(cornerRadius: CornerRadius.md)
-                            .fill(Color.evSurfaceContainerLow)
-                            .evGhostBorder()
-                    )
+            VStack(spacing: Spacing.md) {
+                ForEach(categories) { category in
+                    categoryRow(category)
+                }
             }
-            .buttonStyle(.plain)
-            .familyActivityPicker(isPresented: $showPicker, selection: $selection)
+            .familyActivityPicker(isPresented: $showPicker, selection: $pickerSelection)
+            .onChange(of: showPicker) { _, isPresented in
+                if !isPresented {
+                    commitPickerSelection()
+                }
+            }
 
-            Text("\(selection.categoryTokens.count) categories selected")
-                .font(.evLabelMedium)
-                .foregroundStyle(Color.evOnSurfaceVariant)
-                .evLabelStyle()
+            if !canContinue {
+                Text("Set up Games, Social, and Entertainment to make default shield mode reliable.")
+                    .font(.evBodySmall)
+                    .foregroundStyle(Color.evOnSurfaceVariant)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, Spacing.xl)
+            }
 
             Spacer()
 
@@ -62,25 +81,92 @@ struct CategoryDefaultsStep: View {
             .padding(.vertical, Spacing.lg)
             .background(
                 RoundedRectangle(cornerRadius: CornerRadius.md)
-                    .fill(selection.categoryTokens.isEmpty ? Color.evOutline : Color.evPrimary)
+                    .fill(canContinue ? Color.evPrimary : Color.evOutline)
             )
-            .disabled(selection.categoryTokens.isEmpty)
+            .disabled(!canContinue)
         }
         .padding(Spacing.xl)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.evSurface)
     }
 
-    private func saveCategories() {
-        // Note: we can't read the human category name from the token, so we assign
-        // positional names. Parent Chat's AI classifies targets into semantic
-        // categories (games/social/...) — the child device then needs to know
-        // which of its picked tokens corresponds to which name. For MVP, we
-        // save each under the default "category_N" key; a future Settings page
-        // lets user rename per token.
-        for (i, tok) in selection.categoryTokens.enumerated() {
-            LocalAliasStore.shared.saveCategoryToken(tok, forName: "category_\(i + 1)")
+    private func categoryRow(_ category: SemanticCategory) -> some View {
+        let configured = configuredKeys.contains(category.key)
+
+        return Button {
+            activeCategory = category
+            pickerSelection = selections[category.key] ?? FamilyActivitySelection()
+            showPicker = true
+        } label: {
+            HStack(spacing: Spacing.lg) {
+                Image(systemName: configured ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 22))
+                    .foregroundStyle(configured ? Color.evPrimary : Color.evOutline)
+
+                VStack(alignment: .leading, spacing: Spacing.xs) {
+                    HStack(spacing: Spacing.sm) {
+                        Text(category.title)
+                            .font(.evLabelLarge)
+                            .foregroundStyle(Color.evPrimary)
+                        if category.required {
+                            Text("REQUIRED")
+                                .font(.evLabelMedium)
+                                .evLabelStyle()
+                                .foregroundStyle(Color.evOnPrimary)
+                                .padding(.horizontal, Spacing.sm)
+                                .padding(.vertical, 2)
+                                .background(Capsule().fill(Color.evPrimary))
+                        }
+                    }
+
+                    Text(category.example)
+                        .font(.evBodySmall)
+                        .foregroundStyle(Color.evOnSurfaceVariant)
+                }
+
+                Spacer()
+
+                Text(configured ? "Change" : "Pick")
+                    .font(.evLabelMedium)
+                    .foregroundStyle(Color.evPrimary)
+            }
+            .padding(Spacing.lg)
+            .background(
+                RoundedRectangle(cornerRadius: CornerRadius.lg)
+                    .fill(Color.evSurfaceContainerLowest)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: CornerRadius.lg)
+                    .stroke(configured ? Color.evPrimary : Color.evOutlineVariant, lineWidth: configured ? 2 : 1)
+            )
         }
-        saved = true
+        .buttonStyle(.plain)
     }
+
+    private func commitPickerSelection() {
+        guard let category = activeCategory else { return }
+        defer {
+            activeCategory = nil
+            pickerSelection = FamilyActivitySelection()
+        }
+
+        guard !pickerSelection.categoryTokens.isEmpty else { return }
+        selections[category.key] = pickerSelection
+    }
+
+    private func saveCategories() {
+        for category in categories {
+            guard let token = selections[category.key]?.categoryTokens.first else { continue }
+            LocalAliasStore.shared.saveCategoryToken(token, forName: category.key)
+        }
+    }
+}
+
+private struct SemanticCategory: Identifiable, Equatable {
+    let key: String
+    let title: String
+    let example: String
+    let required: Bool
+
+    var id: String { key }
 }

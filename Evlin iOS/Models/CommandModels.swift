@@ -4,6 +4,7 @@ import Foundation
 enum CommandAction: String, Codable, Sendable {
     case lock
     case unlock
+    case lockAll = "lock_all"
     case unlockAll = "unlock_all"
     case expandLibrary = "expand_library"
 }

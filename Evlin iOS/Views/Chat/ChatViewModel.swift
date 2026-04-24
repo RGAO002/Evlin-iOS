@@ -1,6 +1,5 @@
 import SwiftUI
 import Combine
-import FamilyControls
 
 @MainActor
 class ChatViewModel: ObservableObject {
@@ -14,7 +13,6 @@ class ChatViewModel: ObservableObject {
     let quickPrompts = QuickPrompt.defaults
     var apiClient: APIClient = APIClient()
     var childName: String = "Liam"
-    private let screenTimeManager = ScreenTimeManager.shared
 
     private static let storageKey = "evlin_chat_history"
 
@@ -89,19 +87,22 @@ class ChatViewModel: ObservableObject {
                 var action: ChatAction? = nil
                 if let actionDict = response.action,
                    let type = actionDict["type"]?.value as? String {
+                    let duration = (actionDict["duration_minutes"]?.value as? Int)
+                        ?? (actionDict["minutes"]?.value as? Int)
                     switch type {
                     case "lock":
-                        let minutes = (actionDict["minutes"]?.value as? Int) ?? 30
+                        let minutes = duration ?? 30
+                        action = .lockDevice(minutes: minutes, childName: childName)
+                    case "lock_all":
+                        let minutes = duration ?? 30
                         action = .lockDevice(minutes: minutes, childName: childName)
                     case "unlock":
                         action = .unlockDevice(childName: childName)
+                    case "unlock_all":
+                        action = .unlockDevice(childName: childName)
                     default:
-                        action = .none
+                        action = ChatAction.none
                     }
-                }
-
-                if let action = action {
-                    executeAction(action)
                 }
 
                 var msg = ChatMessage(
@@ -146,54 +147,6 @@ class ChatViewModel: ObservableObject {
             }
 
             isThinking = false
-        }
-    }
-
-    // MARK: - Execute Screen Time actions
-
-    private func executeAction(_ action: ChatAction) {
-        switch action {
-        case .lockDevice(let minutes, let childName):
-            // Send to backend for child device to pick up
-            sendToChildDevice(actionType: "lock", params: ["minutes": minutes, "child_name": childName])
-        case .unlockDevice(let childName):
-            sendToChildDevice(actionType: "unlock", params: ["child_name": childName])
-        case .adjustRules:
-            break
-        case .none:
-            break
-        }
-    }
-
-    private func sendToChildDevice(actionType: String, params: [String: Any]) {
-        let childId = UserDefaults.standard.string(forKey: "targetChildId") ?? ""
-        print("[Parent] Sending \(actionType) to child: '\(childId)'")
-
-        guard !childId.isEmpty else {
-            print("[Parent] No targetChildId set — skipping")
-            return
-        }
-
-        Task {
-            guard let url = URL(string: "\(apiClient.baseURL)/parent/device-action") else { return }
-            var request = URLRequest(url: url)
-            request.httpMethod = "POST"
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-
-            let body: [String: Any] = [
-                "child_id": childId,
-                "action_type": actionType,
-                "params": params,
-            ]
-            request.httpBody = try? JSONSerialization.data(withJSONObject: body)
-
-            do {
-                let (data, response) = try await URLSession.shared.data(for: request)
-                let http = response as? HTTPURLResponse
-                print("[Parent] device-action response: \(http?.statusCode ?? 0) — \(String(data: data, encoding: .utf8) ?? "")")
-            } catch {
-                print("[Parent] device-action failed: \(error)")
-            }
         }
     }
 
