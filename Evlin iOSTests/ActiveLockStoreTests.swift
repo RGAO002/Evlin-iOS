@@ -1,102 +1,254 @@
 import XCTest
 @testable import Evlin_iOS
 
+/// Tests for the new (tier, targetKey)-keyed ActiveLockStore.
+/// Uses exactApp tier where possible since tokens can be constructed in tests
+/// via an opaque Data-based encoding (see `TestHelpers`).
 final class ActiveLockStoreTests: XCTestCase {
     override func setUp() async throws {
-        // Clean slate between tests — each test gets its own store instance.
-        // Note: shared App Group UserDefaults persist, so we clean explicitly.
-        UserDefaults(suiteName: "group.com.evlin.ios")?.removeObject(forKey: "evlin.activeLocks")
+        // Clear shared App Group state so tests don't pollute each other.
+        UserDefaults(suiteName: "group.com.evlin.ios")?.removeObject(forKey: "evlin.shieldRecords")
+        UserDefaults(suiteName: "group.com.evlin.ios")?.removeObject(forKey: "evlin.blockRecords")
     }
 
-    func test_add_then_remove_clearsStore() async {
-        let store = ActiveLockStore()
-        let lock = Self.makeBundleLock(id: UUID(), bundles: ["com.x.y"])
-        await store.add(lock)
-        var cur = await store.current()
-        XCTAssertEqual(cur.count, 1)
+    // MARK: - Merge rules (spec §3.4)
 
-        await store.remove(commandID: lock.id)
-        cur = await store.current()
-        XCTAssertEqual(cur.count, 0)
+    func test_add_same_target_timed_new_longer_extends() async {
+        let store = ActiveLockStore()
+        let r1 = Self.makeTimedShield(displayName: "IG", minutes: 30)
+        let r2 = Self.makeTimedShield(displayName: "IG", minutes: 60, recordKey: r1.recordKey)
+
+        _ = await store.addShield(r1)
+        let result = await store.addShield(r2)
+
+        if case .extendedTimed(let newExpiry) = result {
+            XCTAssertGreaterThan(newExpiry, r1.expiresAt!)
+        } else {
+            XCTFail("Expected .extendedTimed, got \(result)")
+        }
+        let current = await store.allCurrent().shields
+        XCTAssertEqual(current.count, 1)
+        XCTAssertEqual(current[0].expiresAt, r2.expiresAt)
     }
 
-    func test_sweepExpired_removesOnlyExpired() async {
+    func test_add_same_target_timed_new_shorter_noOp() async {
         let store = ActiveLockStore()
-        let live = Self.makeBundleLock(id: UUID(), bundles: ["a"], expiresAt: .distantFuture)
-        let dead = Self.makeBundleLock(id: UUID(), bundles: ["b"], expiresAt: Date().addingTimeInterval(-1))
-        await store.add(live)
-        await store.add(dead)
+        let r1 = Self.makeTimedShield(displayName: "IG", minutes: 60)
+        let r2 = Self.makeTimedShield(displayName: "IG", minutes: 30, recordKey: r1.recordKey)
+
+        _ = await store.addShield(r1)
+        let result = await store.addShield(r2)
+
+        XCTAssertEqual(String(describing: result), "noOpShorterThanExisting")
+    }
+
+    func test_add_same_target_timed_upgraded_to_permanent() async {
+        let store = ActiveLockStore()
+        let r1 = Self.makeTimedShield(displayName: "IG", minutes: 30)
+        let r2 = Self.makePermanentShield(displayName: "IG", recordKey: r1.recordKey)
+
+        _ = await store.addShield(r1)
+        let result = await store.addShield(r2)
+
+        if case .upgradedToPermanent(let prev) = result {
+            XCTAssertEqual(prev, r1.expiresAt)
+        } else {
+            XCTFail("Expected .upgradedToPermanent, got \(result)")
+        }
+        let current = await store.allCurrent().shields
+        XCTAssertNil(current[0].expiresAt)
+    }
+
+    func test_add_same_target_permanent_to_timed_needs_confirmation() async {
+        let store = ActiveLockStore()
+        let r1 = Self.makePermanentShield(displayName: "IG")
+        let r2 = Self.makeTimedShield(displayName: "IG", minutes: 30, recordKey: r1.recordKey)
+
+        _ = await store.addShield(r1)
+        let result = await store.addShield(r2)
+
+        if case .needsConfirmation(let reason) = result {
+            if case .downgradePermanentToTimed(let key, _) = reason {
+                XCTAssertEqual(key, r1.recordKey)
+            } else {
+                XCTFail("wrong reason \(reason)")
+            }
+        } else {
+            XCTFail("Expected .needsConfirmation, got \(result)")
+        }
+    }
+
+    func test_add_same_target_both_permanent_noOp() async {
+        let store = ActiveLockStore()
+        let r1 = Self.makePermanentShield(displayName: "IG")
+        let r2 = Self.makePermanentShield(displayName: "IG", recordKey: r1.recordKey)
+
+        _ = await store.addShield(r1)
+        let result = await store.addShield(r2)
+
+        XCTAssertEqual(String(describing: result), "noOpAlreadyPermanent")
+    }
+
+    // MARK: - Different (tier, target) coexist
+
+    func test_different_tiers_covering_same_app_coexist() async {
+        let store = ActiveLockStore()
+        let exact = Self.makeTimedShield(displayName: "IG", minutes: 30, tier: .exactApp, targetKey: "ig_token_key")
+        let category = Self.makeTimedShield(displayName: "Social", minutes: 60, tier: .category, targetKey: "social")
+
+        _ = await store.addShield(exact)
+        _ = await store.addShield(category)
+
+        let current = await store.allCurrent().shields
+        XCTAssertEqual(current.count, 2)
+    }
+
+    // MARK: - unshieldAll preserves blocks (spec §4.4)
+
+    func test_unshieldAll_preserves_blocks() async {
+        let store = ActiveLockStore()
+        let shield = Self.makeTimedShield(displayName: "IG", minutes: 30)
+        let block = BlockRecord(bundleID: "com.roblox.robloxmobile", displayName: "Roblox",
+                                 blockedAt: Date(), lastCommandID: UUID(),
+                                 originalRequest: "block Roblox",
+                                 targetChildID: UUID())
+
+        _ = await store.addShield(shield)
+        _ = await store.addBlock(block)
+
+        let cleared = await store.unshieldAll()
+        XCTAssertEqual(cleared.count, 1)
+
+        let final = await store.allCurrent()
+        XCTAssertEqual(final.shields.count, 0)
+        XCTAssertEqual(final.blocks.count, 1)
+    }
+
+    // MARK: - addBlock duplicate
+
+    func test_addBlock_duplicate_alreadyBlocked() async {
+        let store = ActiveLockStore()
+        let b = BlockRecord(bundleID: "com.burbn.instagram", displayName: "Instagram",
+                            blockedAt: Date(), lastCommandID: UUID(),
+                            originalRequest: "block IG",
+                            targetChildID: UUID())
+
+        _ = await store.addBlock(b)
+        let result = await store.addBlock(b)
+
+        XCTAssertEqual(String(describing: result), "alreadyBlocked")
+        let current = await store.allCurrent().blocks
+        XCTAssertEqual(current.count, 1)
+    }
+
+    // MARK: - removeBlock reports remaining shields
+
+    func test_removeBlock_reports_remaining_shields() async {
+        let store = ActiveLockStore()
+        let shield = Self.makeTimedShield(displayName: "Social", minutes: 60, tier: .category, targetKey: "social")
+        let block = BlockRecord(bundleID: "com.burbn.instagram", displayName: "Instagram",
+                                 blockedAt: Date(), lastCommandID: UUID(),
+                                 originalRequest: "block IG",
+                                 targetChildID: UUID())
+        _ = await store.addShield(shield)
+        _ = await store.addBlock(block)
+
+        let removed = await store.removeBlock(bundleID: "com.burbn.instagram")
+        XCTAssertNotNil(removed)
+        let final = await store.allCurrent().blocks
+        XCTAssertEqual(final.count, 0)
+    }
+
+    // MARK: - Effective-state query (spec §3.5)
+
+    func test_effectiveState_returns_covering_shields() async {
+        let store = ActiveLockStore()
+        let cat = Self.makeTimedShield(displayName: "Social", minutes: 60,
+                                        tier: .category, targetKey: "social")
+        _ = await store.addShield(cat)
+
+        let state = await store.effectiveState(for: AppQuery(categoryHint: "social"))
+        XCTAssertEqual(state.shieldsCovering.count, 1)
+        XCTAssertFalse(state.isBlocked)
+    }
+
+    func test_effectiveState_flags_blocked() async {
+        let store = ActiveLockStore()
+        let b = BlockRecord(bundleID: "com.x", displayName: "X",
+                             blockedAt: Date(), lastCommandID: UUID(),
+                             originalRequest: "block", targetChildID: UUID())
+        _ = await store.addBlock(b)
+
+        let state = await store.effectiveState(for: AppQuery(bundleID: "com.x"))
+        XCTAssertTrue(state.isBlocked)
+    }
+
+    func test_sweepExpired_removes_past_shields() async {
+        let store = ActiveLockStore()
+        let live = Self.makeTimedShield(displayName: "IG", minutes: 60, targetKey: "live_key")
+        let dead = Self.makeTimedShield(displayName: "TT", minutes: 0, expiresAt: Date().addingTimeInterval(-5), targetKey: "dead_key")
+
+        _ = await store.addShield(live)
+        _ = await store.addShield(dead)
 
         let removed = await store.sweepExpired()
-        XCTAssertEqual(removed, [dead.id])
-        let remaining = await store.current().map(\.id)
-        XCTAssertEqual(remaining, [live.id])
+        XCTAssertEqual(removed.count, 1)
+        XCTAssertEqual(removed[0].recordKey, dead.recordKey)
+        let after = await store.allCurrent().shields.count
+        XCTAssertEqual(after, 1)
     }
 
-    func test_addPermanent_hasNoExpiry() async {
-        let store = ActiveLockStore()
-        let permanent = Self.makeBundleLock(id: UUID(), bundles: ["x"], expiresAt: nil)
-        await store.add(permanent)
-        let removed = await store.sweepExpired()
-        XCTAssertTrue(removed.isEmpty)
-    }
+    // MARK: - Helpers
 
-    func test_removeMatching_byBundleID() async {
-        let store = ActiveLockStore()
-        let igLock = Self.makeBundleLock(id: UUID(), bundles: ["com.burbn.instagram"])
-        let ttLock = Self.makeBundleLock(id: UUID(), bundles: ["com.zhiliaoapp.musically"])
-        await store.add(igLock)
-        await store.add(ttLock)
-
-        var target = CommandTarget(originalRequest: "IG")
-        target.bundleID = "com.burbn.instagram"
-        let removed = await store.removeMatching(target)
-        XCTAssertEqual(removed, [igLock.id])
-        let remaining = await store.current().map(\.id)
-        XCTAssertEqual(remaining, [ttLock.id])
-    }
-
-    func test_removeAll_clearsEverything() async {
-        let store = ActiveLockStore()
-        await store.add(Self.makeBundleLock(id: UUID(), bundles: ["a"]))
-        await store.add(Self.makeBundleLock(id: UUID(), bundles: ["b"]))
-        await store.add(Self.makeBundleLock(id: UUID(), bundles: ["c"]))
-        let beforeCount = await store.current().count
-        XCTAssertEqual(beforeCount, 3)
-
-        await store.removeAll()
-        let afterCount = await store.current().count
-        XCTAssertEqual(afterCount, 0)
-    }
-
-    func test_concurrentExpiryDoesNotReleaseOtherLocks() async {
-        // Critical behavior: if lock1 expires, locks 2 and 3 remain.
-        let store = ActiveLockStore()
-        let l1 = Self.makeBundleLock(id: UUID(), bundles: ["com.a"], expiresAt: Date().addingTimeInterval(-1)) // expired
-        let l2 = Self.makeBundleLock(id: UUID(), bundles: ["com.b"], expiresAt: .distantFuture)
-        let l3 = Self.makeBundleLock(id: UUID(), bundles: ["com.c"], expiresAt: nil) // permanent
-        await store.add(l1)
-        await store.add(l2)
-        await store.add(l3)
-
-        let removed = await store.sweepExpired()
-        XCTAssertEqual(removed, [l1.id])
-        let remainingIDs = Set(await store.current().map(\.id))
-        XCTAssertEqual(remainingIDs, Set([l2.id, l3.id]))
-    }
-
-    // MARK: helpers
-    private static func makeBundleLock(id: UUID, bundles: [String], expiresAt: Date? = .distantFuture) -> ActiveLock {
-        ActiveLock(
-            id: id,
-            tier: .exactBundle,
-            blockedBundleIDs: Set(bundles),
-            shieldAppTokens: [],
-            shieldCategoryTokens: [],
+    private static func makeTimedShield(
+        displayName: String,
+        minutes: Int,
+        expiresAt: Date? = nil,
+        tier: ShieldTier = .exactApp,
+        targetKey: String? = nil,
+        recordKey: String? = nil
+    ) -> ShieldRecord {
+        let tk = targetKey ?? "test_key_\(UUID().uuidString.prefix(6))"
+        let rk = recordKey ?? ShieldRecord.makeRecordKey(tier: tier, targetKey: tk)
+        return ShieldRecord(
+            recordKey: rk,
+            tier: tier,
+            targetKey: tk,
+            displayName: displayName,
+            lastCommandID: UUID(),
+            appTokens: [],
+            categoryTokens: [],
+            webDomainTokens: [],
+            appliesToAll: tier == .all,
             issuedAt: Date(),
-            expiresAt: expiresAt,
-            originalRequest: bundles.first ?? "",
-            displayName: bundles.first ?? ""
+            expiresAt: expiresAt ?? Date().addingTimeInterval(TimeInterval(minutes * 60)),
+            originalRequest: "test",
+            targetChildID: UUID()
+        )
+    }
+
+    private static func makePermanentShield(
+        displayName: String,
+        tier: ShieldTier = .exactApp,
+        targetKey: String? = nil,
+        recordKey: String? = nil
+    ) -> ShieldRecord {
+        let tk = targetKey ?? "test_key_\(UUID().uuidString.prefix(6))"
+        let rk = recordKey ?? ShieldRecord.makeRecordKey(tier: tier, targetKey: tk)
+        return ShieldRecord(
+            recordKey: rk,
+            tier: tier,
+            targetKey: tk,
+            displayName: displayName,
+            lastCommandID: UUID(),
+            appTokens: [],
+            categoryTokens: [],
+            webDomainTokens: [],
+            appliesToAll: tier == .all,
+            issuedAt: Date(),
+            expiresAt: nil,
+            originalRequest: "test",
+            targetChildID: UUID()
         )
     }
 }

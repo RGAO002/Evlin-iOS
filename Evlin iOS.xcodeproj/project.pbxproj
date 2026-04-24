@@ -61,9 +61,7 @@
 		B6F1645E2F999D8A008E858C /* Exceptions for "Evlin iOS" folder in "EvlinDeviceActivityMonitor" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
-				Models/ActiveLock.swift,
 				Models/CommandModels.swift,
-				Models/LockTier.swift,
 			);
 			target = B6FA97312F81C6A000DA619E /* EvlinDeviceActivityMonitor */;
 		};
