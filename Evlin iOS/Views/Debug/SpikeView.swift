@@ -13,6 +13,12 @@ struct SpikeView: View {
     @State private var testParentDeviceID: String = UserDefaults.standard.string(forKey: "evlin.parentDeviceID") ?? ""
     private let store = ManagedSettingsStore()
 
+    // Spike: verify that one FamilyActivityPicker session can yield multiple
+    // identifiable categories via `selection.categories[*].localizedDisplayName`.
+    // See chat discussion 2026-04-24.
+    @State private var spikeSelection = FamilyActivitySelection(includeEntireCategory: true)
+    @State private var spikePickerOpen = false
+
     var body: some View {
         NavigationStack {
             List {
@@ -177,6 +183,24 @@ struct SpikeView: View {
                         }
                     }
                 }
+
+                Section("Category Token Spike") {
+                    Text("Open Apple picker once. Select multiple categories (tap the category ROW header, not individual apps). The log prints what we got back — we're verifying `.categories[*].localizedDisplayName` gives us a stable, identifiable name per token.")
+                        .font(.caption).foregroundStyle(.secondary)
+
+                    Button("🧪 One picker → inspect categories") {
+                        // Reset selection each time so we don't accumulate across runs.
+                        spikeSelection = FamilyActivitySelection(includeEntireCategory: true)
+                        spikePickerOpen = true
+                    }
+                    .familyActivityPicker(isPresented: $spikePickerOpen, selection: $spikeSelection)
+                    .onChange(of: spikePickerOpen) { _, isOpen in
+                        if !isOpen {
+                            logSpikeResult(spikeSelection)
+                        }
+                    }
+                }
+
                 Section("Log") {
                     ForEach(log, id: \.self) { Text($0).font(.caption.monospaced()) }
                 }
@@ -188,6 +212,31 @@ struct SpikeView: View {
     private func record(_ line: String) {
         log.insert("\(Date().formatted(date: .omitted, time: .standard)) \(line)", at: 0)
         print("[Spike] \(line)")
+    }
+
+    /// Dump everything interesting from a FamilyActivitySelection so we can
+    /// decide whether to collapse category-token setup to one picker.
+    private func logSpikeResult(_ sel: FamilyActivitySelection) {
+        record("═══ spike result ═══")
+        record("includeEntireCategory=\(sel.includeEntireCategory)")
+        record("categoryTokens.count=\(sel.categoryTokens.count)")
+        record("categories.count=\(sel.categories.count)")
+        for (i, c) in sel.categories.enumerated() {
+            let name = c.localizedDisplayName ?? "<nil>"
+            let hasToken = c.token != nil
+            record("  [\(i)] name=\"\(name)\"  token=\(hasToken ? "✓" : "✗")")
+        }
+        record("applicationTokens.count=\(sel.applicationTokens.count)")
+        record("applications.count=\(sel.applications.count)")
+        for (i, a) in sel.applications.prefix(5).enumerated() {
+            let name = a.localizedDisplayName ?? "<nil>"
+            let bid = a.bundleIdentifier ?? "<nil>"
+            record("  app[\(i)] name=\"\(name)\" bundle=\(bid)")
+        }
+        if sel.applications.count > 5 {
+            record("  ... (\(sel.applications.count - 5) more apps omitted)")
+        }
+        record("webDomainTokens.count=\(sel.webDomainTokens.count)")
     }
 
     private func blockInstagram() {
