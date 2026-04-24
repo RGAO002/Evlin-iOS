@@ -137,11 +137,16 @@ struct ChildModeView: View {
             screenTimeManager.enableDeletionProtection()
         }
         .onAppear {
-            startNewPoller()
+            // CommandPoller is started at the app level (Evlin_iOSApp) so it
+            // keeps running regardless of which mode/tab the user is in. This
+            // view only refreshes its own lock-status display.
             startLockStatusTimer()
+
+            if UUID(uuidString: childDeviceID) == nil {
+                statusText = "Finish pairing to receive parent commands."
+            }
         }
         .onDisappear {
-            CommandPoller.shared.stop()
             lockStatusTimer?.invalidate()
         }
         .onReceive(NotificationCenter.default.publisher(for: .evlinLockStateChanged)) { note in
