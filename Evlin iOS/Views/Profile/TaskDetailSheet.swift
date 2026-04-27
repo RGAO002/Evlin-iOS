@@ -308,7 +308,102 @@ struct TaskDetailSheet: View {
 
     @ViewBuilder
     private var actionButtons: some View {
-        EmptyView()  // Filled in Task 2.4
+        switch task.state {
+        case .review:
+            VStack(spacing: 10) {
+                primaryButton("Approve submission", color: Color.evSecondary, action: onApprove)
+                outlinedButton("Request redo", action: onRedo)
+            }
+        case .bypass:
+            VStack(spacing: 10) {
+                primaryButton("Allow bypass", color: EvlinAddPalette.bypass, action: onApprove)
+                outlinedButton("Deny — keep as task", action: onRedo)
+            }
+        case .pending, .overdue:
+            primaryButton("Mark as complete", color: Color.evSecondary, action: onApprove)
+        case .done:
+            doneStatusCard
+        case .bypassed:
+            bypassedStatusCard
+        }
+    }
+
+    private func primaryButton(_ title: String, color: Color, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.custom("Manrope", size: 14).weight(.heavy))
+                .tracking(0.3)
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 14)
+                .background(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(color)
+                )
+                .shadow(color: color.opacity(0.32), radius: 14, y: 4)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func outlinedButton(_ title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title.uppercased())
+                .font(.custom("Manrope", size: 12).weight(.heavy))
+                .tracking(1.0)
+                .foregroundStyle(Color.evOnTertiaryContainer)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 13)
+                .background(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(Color.white)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(Color(hex: 0xEF6C00), lineWidth: 1.5)
+                )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var doneStatusCard: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "checkmark.seal.fill")
+                .font(.system(size: 22, weight: .semibold))
+                .foregroundStyle(Color.evSecondary)
+            Text("You approved this task")
+                .font(.custom("Manrope", size: 14).weight(.bold))
+                .foregroundStyle(Color.evSecondary)
+            Spacer()
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color.evSecondaryContainer)
+        )
+    }
+
+    private var bypassedStatusCard: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "nosign")
+                .font(.system(size: 20, weight: .semibold))
+                .foregroundStyle(Color.evOnSurfaceVariant)
+            Text(task.title)
+                .font(.custom("Manrope", size: 14).weight(.bold))
+                .strikethrough(true, color: Color.evOnSurfaceVariant)
+                .foregroundStyle(Color.evOnSurfaceVariant)
+            Spacer()
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color.evSurfaceContainerLow)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Color.evOutlineVariant, lineWidth: 1)
+        )
     }
 }
 
