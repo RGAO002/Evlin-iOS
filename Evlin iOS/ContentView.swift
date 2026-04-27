@@ -27,6 +27,7 @@ struct ContentView: View {
 struct ParentRootView: View {
     @State private var selectedTab: EvlinTab = .home
     @State private var profilePath = NavigationPath()
+    @State private var banner: (title: String, body: String, avatarURL: String?)? = nil
 
     var body: some View {
         VStack(spacing: 0) {
@@ -80,6 +81,20 @@ struct ParentRootView: View {
 
             EvlinTabBar(selectedTab: $selectedTab)
         }
+        .overlay(alignment: .top) {
+            if let b = banner {
+                NotificationBanner(
+                    title: b.title,
+                    message: b.body,
+                    avatarURL: b.avatarURL,
+                    onDismiss: { withAnimation { banner = nil } }
+                )
+                .padding(.top, 8)
+                .transition(.move(edge: .top).combined(with: .opacity))
+                .zIndex(80)
+            }
+        }
+        .animation(.spring(response: 0.36, dampingFraction: 0.78), value: banner?.title)
     }
 }
 
