@@ -33,23 +33,34 @@ struct TaskRow: View {
     let task: TaskItem
     var onApprove: () -> Void = {}
     var onRedo: () -> Void = {}
+    var onOpen: () -> Void = {}
 
     var body: some View {
-        VStack(spacing: 14) {
-            mainRow
-            if task.state == .review {
-                reviewActions
+        Button(action: onOpen) {
+            VStack(spacing: 14) {
+                mainRow
+                if task.state == .review {
+                    reviewActions
+                        .contentShape(Rectangle())
+                        .onTapGesture { /* swallow row tap */ }
+                }
+                if task.state == .bypass {
+                    bypassActions
+                        .contentShape(Rectangle())
+                        .onTapGesture { /* swallow row tap */ }
+                }
             }
+            .padding(14)
+            .background(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(cardBackground)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(Color.evOutlineVariant.opacity(0.25), lineWidth: 1)
+            )
         }
-        .padding(14)
-        .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(cardBackground)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(Color.evOutlineVariant.opacity(0.25), lineWidth: 1)
-        )
+        .buttonStyle(.plain)
     }
 
     private var cardBackground: Color {
@@ -178,6 +189,43 @@ struct TaskRow: View {
 
         case .bypassed:
             EvlinPill(text: "Bypassed", tone: .neutral, size: .xs)
+        }
+    }
+
+    private var bypassActions: some View {
+        HStack(spacing: 10) {
+            Button(action: onApprove) {
+                Text("ALLOW")
+                    .font(.custom("Manrope", size: 12).weight(.heavy))
+                    .tracking(0.8)
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+                    .background(
+                        RoundedRectangle(cornerRadius: 22, style: .continuous)
+                            .fill(EvlinAddPalette.bypass)
+                    )
+                    .shadow(color: EvlinAddPalette.bypass.opacity(0.3), radius: 8, y: 3)
+            }
+            .buttonStyle(.plain)
+
+            Button(action: onRedo) {
+                Text("DENY")
+                    .font(.custom("Manrope", size: 12).weight(.heavy))
+                    .tracking(0.8)
+                    .foregroundStyle(Color.evOnTertiaryContainer)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+                    .background(
+                        RoundedRectangle(cornerRadius: 22, style: .continuous)
+                            .fill(Color.white)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 22, style: .continuous)
+                            .stroke(Color(hex: 0xEF6C00), lineWidth: 1.5)
+                    )
+            }
+            .buttonStyle(.plain)
         }
     }
 
