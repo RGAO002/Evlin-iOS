@@ -6,7 +6,13 @@ struct CalendarView: View {
     @State private var showMonthPicker = false
     @State private var focusPerson: String? = nil
     @State private var activeEvent: CalendarEvent? = nil
+    @State private var newEvent: PendingNewEvent? = nil
     @State private var now: Date = Date()
+
+    private struct PendingNewEvent: Equatable {
+        let event: CalendarEvent
+        let person: CalendarPerson
+    }
 
     private let calendar = Calendar.current
     private let nowTimer = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
@@ -47,13 +53,40 @@ struct CalendarView: View {
                     person: CalendarMockData.person(event.col),
                     dayLabel: "\(isViewingToday ? "Today" : CalendarMockData.shortDateLabel(selectedDate)), \(event.start) – \(event.end)",
                     onClose: { activeEvent = nil },
-                    onSave: { _ in activeEvent = nil }
+                    onSave: { updated in
+                        let offset = CalendarMockData.daysFromToday(to: selectedDate)
+                        var todays = CalendarMockData.runtimeEventsByOffset[offset] ?? []
+                        if let i = todays.firstIndex(where: { $0.id == updated.id }) {
+                            todays[i] = updated
+                            CalendarMockData.runtimeEventsByOffset[offset] = todays
+                        }
+                        activeEvent = nil
+                    }
                 )
                 .transition(.opacity)
                 .zIndex(100)
             }
+            if let pending = newEvent {
+                EventDetailCard(
+                    event: pending.event,
+                    person: pending.person,
+                    dayLabel: CalendarMockData.shortDateLabel(selectedDate),
+                    isNew: true,
+                    onClose: { newEvent = nil },
+                    onSave: { created in
+                        let offset = CalendarMockData.daysFromToday(to: selectedDate)
+                        var todays = CalendarMockData.runtimeEventsByOffset[offset] ?? []
+                        todays.append(created)
+                        CalendarMockData.runtimeEventsByOffset[offset] = todays
+                        newEvent = nil
+                    }
+                )
+                .transition(.opacity)
+                .zIndex(101)
+            }
         }
         .animation(.easeInOut(duration: 0.2), value: activeEvent)
+        .animation(.easeInOut(duration: 0.2), value: newEvent)
         .onReceive(nowTimer) { t in now = t }
     }
 
@@ -393,7 +426,7 @@ struct CalendarView: View {
     }
 
     private var floatingAddButton: some View {
-        Button {} label: {
+        Button { startNewEvent() } label: {
             Image(systemName: "plus")
                 .font(.system(size: 22, weight: .bold))
                 .foregroundStyle(.white)
@@ -402,6 +435,33 @@ struct CalendarView: View {
                 .shadow(color: .black.opacity(0.18), radius: 16, y: 8)
         }
         .buttonStyle(.plain)
+    }
+
+    private func startNewEvent() {
+        // Default person: focused person if any, else "family"
+        let personId = focusPerson ?? "family"
+        let person = CalendarMockData.person(personId)
+        // Default time: next hour from now (rounded), 1 hour duration
+        let formatter = DateFormatter()
+        formatter.dateFormat = "hh:mm a"
+        let startDate = Date()
+        let startStr = formatter.string(from: startDate)
+        let endStr = formatter.string(from: addOneHour(to: startDate))
+        let event = CalendarEvent(
+            col: personId,
+            title: "",
+            emoji: "📌",
+            start: startStr,
+            end: endStr,
+            category: "Activity",
+            location: "",
+            note: ""
+        )
+        newEvent = PendingNewEvent(event: event, person: person)
+    }
+
+    private func addOneHour(to date: Date) -> Date {
+        calendar.date(byAdding: .hour, value: 1, to: date) ?? date
     }
 
     private func scrollToFirstEvent(_ proxy: ScrollViewProxy) {
