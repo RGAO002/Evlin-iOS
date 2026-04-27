@@ -124,11 +124,78 @@ struct AddTaskForm: View {
     let child: ChildProfile
     var onSave: (TaskItem) -> Void
     var onCancel: () -> Void
+
+    @State private var title: String = ""
+    @State private var category: TaskCategory = .chore
+    @State private var taskDescription: String = ""
+    @State private var dueLabel: String = ""
+
+    private let categories: [(value: TaskCategory, label: String)] = [
+        (.chore, "Chore"),
+        (.homework, "Homework"),
+        (.reading, "Reading"),
+        (.routine, "Routine"),
+    ]
+
+    private var canSave: Bool { !title.trimmingCharacters(in: .whitespaces).isEmpty }
+
     var body: some View {
-        FormShell(title: "New Task", canSave: false, onCancel: onCancel, onSave: {}) {
-            Text("AddTaskForm — implemented in Phase 6")
+        FormShell(
+            title: "New Task",
+            canSave: canSave,
+            onCancel: onCancel,
+            onSave: save
+        ) {
+            FormField(label: "Title") {
+                TextField("e.g. Read for 20 minutes", text: $title)
+                    .font(.custom("Inter", size: 14).weight(.semibold))
+                    .evlinFormInput()
+            }
+
+            FormField(label: "Category") {
+                FormPillSelector(items: categories, selected: $category)
+            }
+
+            FormField(label: "What to do") {
+                TextField("Instructions for the student…", text: $taskDescription, axis: .vertical)
+                    .lineLimit(3...6)
+                    .evlinFormInput()
+            }
+
+            FormField(label: "Due (optional)") {
+                TextField("e.g. Today, 6:00 PM — leave blank for no deadline", text: $dueLabel)
+                    .evlinFormInput()
+            }
         }
     }
+
+    private func save() {
+        let trimmed = title.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return }
+        let nextId = (Date().timeIntervalSince1970 * 1000).truncatingRemainder(dividingBy: 1_000_000)
+        let task = TaskItem(
+            id: Int(nextId),
+            title: trimmed,
+            state: .pending,
+            iconSystemName: nil,
+            category: category.rawValue,
+            description: taskDescription.trimmingCharacters(in: .whitespaces),
+            photos: [],
+            note: nil,
+            submittedAt: nil,
+            dueLabel: dueLabel.trimmingCharacters(in: .whitespaces).isEmpty
+                ? nil
+                : dueLabel.trimmingCharacters(in: .whitespaces)
+        )
+        onSave(task)
+    }
+}
+
+enum TaskCategory: String, Hashable, CaseIterable {
+    case chore = "Chore"
+    case homework = "Homework"
+    case reading = "Reading"
+    case routine = "Routine"
 }
 struct EditTaskForm: View {
     let task: TaskItem
