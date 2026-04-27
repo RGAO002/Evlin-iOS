@@ -19,9 +19,11 @@ struct LessonItem: Identifiable, Hashable {
 
 struct LessonCard: View {
     let lesson: LessonItem
+    var onTap: () -> Void = {}
     @State private var pressed: Bool = false
 
     var body: some View {
+        Button(action: onTap) {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 10) {
                 ZStack {
@@ -108,5 +110,7 @@ struct LessonCard: View {
                 .onChanged { _ in pressed = true }
                 .onEnded { _ in pressed = false }
         )
+        }
+        .buttonStyle(.plain)
     }
 }

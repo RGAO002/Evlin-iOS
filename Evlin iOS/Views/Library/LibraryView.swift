@@ -3,6 +3,7 @@ import SwiftUI
 struct LibraryView: View {
     @State private var scrolledReelId: UUID?
     @State private var libraryPath = NavigationPath()
+    @State private var comingSoonTitle: String? = nil
 
     var body: some View {
         NavigationStack(path: $libraryPath) {
@@ -31,6 +32,14 @@ struct LibraryView: View {
                 })
             }
         }
+        .alert("Coming soon", isPresented: Binding(
+            get: { comingSoonTitle != nil },
+            set: { if !$0 { comingSoonTitle = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(comingSoonTitle.map { "Player for \"\($0)\" is coming soon." } ?? "")
+        }
     }
 
     private var trendingReels: some View {
@@ -45,7 +54,7 @@ struct LibraryView: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 15) {
                     ForEach(LibraryMockData.reels) { reel in
-                        ReelCard(reel: reel).id(reel.id)
+                        ReelCard(reel: reel, onTap: { comingSoonTitle = reel.title }).id(reel.id)
                     }
                 }
                 .scrollTargetLayout()
@@ -67,7 +76,7 @@ struct LibraryView: View {
             SectionHead("Trending Lessons")
             VStack(spacing: 12) {
                 ForEach(LibraryMockData.lessons) { lesson in
-                    LessonCard(lesson: lesson)
+                    LessonCard(lesson: lesson, onTap: { comingSoonTitle = lesson.title })
                 }
             }
         }
