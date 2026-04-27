@@ -10,6 +10,7 @@ struct ProfileView: View {
     @State private var tasks: [TaskItem] = []
     @State private var events: [ProfileEvent] = []
     @State private var devices: [DeviceItem] = []
+    @State private var activeDevice: DeviceItem? = nil
     @State private var activeTask: TaskItem? = nil
     @State private var editingTask: TaskItem? = nil
     @State private var editingRule: RuleItem? = nil
@@ -211,7 +212,8 @@ struct ProfileView: View {
                                     DeviceRow(
                                         iconSystemName: d.iconSystemName, name: d.name,
                                         detail: d.detail, locked: d.locked,
-                                        isLast: idx == devices.count - 1
+                                        isLast: idx == devices.count - 1,
+                                        onPress: { activeDevice = d }
                                     )
                                 }
                             }
@@ -351,6 +353,15 @@ struct ProfileView: View {
                     addMode = nil
                 }
             )
+        }
+        .fullScreenCover(item: $activeDevice) { device in
+            NavigationStack {
+                DeviceAppsSheet(
+                    device: device,
+                    childId: child.id,
+                    onClose: { activeDevice = nil }
+                )
+            }
         }
         .onAppear {
             rules = ProfileMockData.rules(for: child.id)
