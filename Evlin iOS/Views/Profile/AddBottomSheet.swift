@@ -286,10 +286,80 @@ struct AddRuleForm: View {
     let child: ChildProfile
     var onSave: (RuleItem) -> Void
     var onCancel: () -> Void
+
+    @State private var title: String = ""
+    @State private var detail: String = ""
+    @State private var icon: String = "shield"
+    @State private var tone: RuleRow.Tone = .primary
+
+    private let icons = ["shield", "display", "moon", "sun.max", "iphone.slash", "nosign", "clock"]
+    private let tones: [(value: RuleRow.Tone, label: String)] = [
+        (.primary, "Primary"),
+        (.tertiary, "Calm"),
+        (.neutral, "Neutral"),
+    ]
+
+    private var canSave: Bool { !title.trimmingCharacters(in: .whitespaces).isEmpty }
+
     var body: some View {
-        FormShell(title: "New Rule", canSave: false, onCancel: onCancel, onSave: {}) {
-            Text("AddRuleForm — implemented in Phase 7")
+        FormShell(
+            title: "New Rule",
+            canSave: canSave,
+            onCancel: onCancel,
+            onSave: save
+        ) {
+            FormField(label: "Title") {
+                TextField("e.g. No phones at dinner", text: $title)
+                    .font(.custom("Inter", size: 14).weight(.semibold))
+                    .evlinFormInput()
+            }
+            FormField(label: "Detail") {
+                TextField("e.g. 6:00 – 7:00 PM", text: $detail)
+                    .evlinFormInput()
+            }
+            FormField(label: "Icon") {
+                FlowLayout(spacing: 8) {
+                    ForEach(icons, id: \.self) { name in
+                        Button {
+                            icon = name
+                        } label: {
+                            Image(systemName: name)
+                                .font(.system(size: 20, weight: .medium))
+                                .foregroundStyle(icon == name ? Color.evPrimary : Color.evOnSurfaceVariant)
+                                .frame(width: 44, height: 44)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                        .fill(icon == name ? Color.evPrimary.opacity(0.06) : Color.white)
+                                )
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                        .stroke(icon == name ? Color.evPrimary : Color.evOutlineVariant,
+                                                lineWidth: 2)
+                                )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            FormField(label: "Tone") {
+                FormPillSelector(items: tones, selected: $tone)
+            }
         }
+    }
+
+    private func save() {
+        let trimmed = title.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return }
+        let id = "rule_\(Int(Date().timeIntervalSince1970 * 1000))"
+        let rule = RuleItem(
+            id: id,
+            iconSystemName: icon,
+            title: trimmed,
+            detail: detail.trimmingCharacters(in: .whitespaces),
+            on: true,
+            tone: tone
+        )
+        onSave(rule)
     }
 }
 struct EditRuleForm: View {
