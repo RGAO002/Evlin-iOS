@@ -465,9 +465,78 @@ struct AddCalendarForm: View {
     let child: ChildProfile
     var onSave: (CalendarEvent) -> Void
     var onCancel: () -> Void
+
+    @State private var title: String = ""
+    @State private var startTime: String = "04:00 PM"
+    @State private var endTime: String = "05:00 PM"
+    @State private var category: String = "Activity"
+    @State private var recurrence: String = "none"
+
+    private let categories: [(value: String, label: String)] = [
+        ("Activity", "Activity"), ("Lesson", "Lesson"), ("Sport", "Sport"),
+        ("Family", "Family"), ("Routine", "Routine"), ("Study", "Study"),
+    ]
+    private let repeats: [(value: String, label: String)] = [
+        ("none", "Once"), ("daily", "Daily"),
+        ("weekdays", "Weekdays"), ("weekly", "Weekly"),
+    ]
+
+    private var canSave: Bool { !title.trimmingCharacters(in: .whitespaces).isEmpty }
+
     var body: some View {
-        FormShell(title: "Add to Calendar", canSave: false, onCancel: onCancel, onSave: {}) {
-            Text("AddCalendarForm — implemented in Phase 8")
+        FormShell(
+            title: "Add to Calendar",
+            canSave: canSave,
+            onCancel: onCancel,
+            onSave: save
+        ) {
+            FormField(label: "Title") {
+                TextField("e.g. Soccer Practice", text: $title)
+                    .font(.custom("Inter", size: 14).weight(.semibold))
+                    .evlinFormInput()
+            }
+            FormField(label: "Time") {
+                HStack(spacing: 8) {
+                    TextField("Start", text: $startTime).evlinFormInput()
+                    Text("–").foregroundStyle(Color.evOnSurfaceVariant)
+                    TextField("End", text: $endTime).evlinFormInput()
+                }
+            }
+            FormField(label: "Category") {
+                FormPillSelector(items: categories, selected: $category)
+            }
+            FormField(label: "Repeat") {
+                FormPillSelector(items: repeats, selected: $recurrence)
+            }
+        }
+    }
+
+    private func save() {
+        let trimmed = title.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return }
+        let event = CalendarEvent(
+            col: child.id,
+            title: trimmed,
+            emoji: emojiFor(category),
+            start: startTime,
+            end: endTime,
+            category: category,
+            location: "",
+            note: "",
+            recurrence: recurrence
+        )
+        onSave(event)
+    }
+
+    private func emojiFor(_ cat: String) -> String {
+        switch cat {
+        case "Activity": return "📅"
+        case "Lesson":   return "📚"
+        case "Sport":    return "⚽"
+        case "Family":   return "🏠"
+        case "Routine":  return "🌙"
+        case "Study":    return "📐"
+        default:         return "🗓️"
         }
     }
 }

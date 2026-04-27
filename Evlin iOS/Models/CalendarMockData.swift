@@ -97,6 +97,11 @@ enum CalendarMockData {
         ],
     ]
 
+    /// Runtime-added events (per session). Phase 8: ProfileView's "Add Calendar"
+    /// pushes here. CalendarView's `events(for:)` merges these in.
+    /// Keyed by days-offset same as eventsByOffset.
+    static var runtimeEventsByOffset: [Int: [CalendarEvent]] = [:]
+
     static let allDayByOffset: [Int: [AllDayItem]] = [
         0: [AllDayItem(col: "liam", title: "Wellness Day 🧘")],
     ]
@@ -110,7 +115,10 @@ enum CalendarMockData {
     }
 
     static func events(for date: Date) -> [CalendarEvent] {
-        eventsByOffset[daysFromToday(to: date)] ?? []
+        let offset = daysFromToday(to: date)
+        let baseline = eventsByOffset[offset] ?? []
+        let runtime = runtimeEventsByOffset[offset] ?? []
+        return baseline + runtime
     }
 
     static func allDay(for date: Date) -> [AllDayItem] {

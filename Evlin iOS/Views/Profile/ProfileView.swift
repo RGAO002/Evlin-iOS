@@ -340,8 +340,11 @@ struct ProfileView: View {
                     rules.append(newRule)
                     addMode = nil
                 },
-                onCreateCalendar: { _ in
-                    addMode = nil  // Phase 8 will handle calendar event creation
+                onCreateCalendar: { event in
+                    var todays = CalendarMockData.runtimeEventsByOffset[0] ?? []
+                    todays.append(event)
+                    CalendarMockData.runtimeEventsByOffset[0] = todays
+                    addMode = nil
                 },
                 onCreateDevice: { newDevice in
                     devices.append(newDevice)
