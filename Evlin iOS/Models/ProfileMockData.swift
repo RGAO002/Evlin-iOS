@@ -40,11 +40,57 @@ enum ProfileMockData {
     }
 
     static func tasks(for childId: String) -> [TaskItem] {
-        [
-            .init(id: 1, title: "Clean Table", state: .done, iconSystemName: "checkmark"),
-            .init(id: 2, title: "Science Project", state: .review, iconSystemName: "camera"),
-            .init(id: 3, title: "Math Practice", state: .pending, iconSystemName: nil),
-            .init(id: 4, title: "Walk Dog", state: .overdue, iconSystemName: nil),
+        // Mirror HTML 874-880 verbatim; non-Liam children get a subset.
+        guard childId == "liam" else {
+            return [
+                .init(id: 1, title: "Read for 15 min", state: .done,
+                      iconSystemName: "checkmark", category: "Reading",
+                      description: "Read any book of your choice for 15 minutes.",
+                      submittedAt: "3:00 PM", dueLabel: "Today, 4:00 PM"),
+                .init(id: 2, title: "Tidy bedroom", state: .pending,
+                      iconSystemName: nil, category: "Chore",
+                      description: "Make the bed and put away clothes.",
+                      dueLabel: "Today, 6:00 PM"),
+            ]
+        }
+        return [
+            .init(id: 1, title: "Clean Table", state: .done,
+                  iconSystemName: "checkmark",
+                  category: "Chore",
+                  description: "Wipe down the kitchen table after lunch and put any plates in the sink.",
+                  photos: ["https://images.unsplash.com/photo-1556909114-f6e7ad7d3136?w=800&q=80"],
+                  note: "All done! Used the new spray.",
+                  submittedAt: "12:42 PM",
+                  dueLabel: "Today, 1:00 PM"),
+            .init(id: 2, title: "Science Project", state: .review,
+                  iconSystemName: "camera",
+                  category: "Homework",
+                  description: "Finish the volcano diagram on page 14 and label the layers. Take a photo of your finished page.",
+                  photos: [
+                    "https://images.unsplash.com/photo-1532619675605-1ede6c2ed2b0?w=800&q=80",
+                    "https://images.unsplash.com/photo-1581094271901-8022df4466f9?w=800&q=80",
+                    "https://images.unsplash.com/photo-1606326608606-aa0b62935f2b?w=800&q=80",
+                  ],
+                  note: "Took longer than I thought!",
+                  submittedAt: "3:18 PM",
+                  dueLabel: "Today, 4:00 PM"),
+            .init(id: 3, title: "Math Practice", state: .pending,
+                  iconSystemName: nil,
+                  category: "Homework",
+                  description: "Complete questions 1 through 8 on page 24 of your maths book. Take a photo of your finished page.",
+                  dueLabel: "Today, 6:00 PM"),
+            .init(id: 5, title: "Read for 20 minutes", state: .bypass,
+                  iconSystemName: nil,
+                  category: "Reading",
+                  description: "Read any book of your choice for at least 20 minutes and tell us about it.",
+                  note: "I had football practice and got home too late. Can I do double tomorrow instead?",
+                  submittedAt: "7:42 PM",
+                  dueLabel: "Today, 8:00 PM"),
+            .init(id: 4, title: "Walk Dog", state: .overdue,
+                  iconSystemName: nil,
+                  category: "Chore",
+                  description: "Take Buddy for his afternoon walk around the block — at least 15 minutes.",
+                  dueLabel: "Yesterday, 5:00 PM"),
         ]
     }
 
