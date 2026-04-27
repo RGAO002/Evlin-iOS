@@ -263,7 +263,47 @@ struct TaskDetailSheet: View {
 
     @ViewBuilder
     private var noteBlock: some View {
-        EmptyView()  // Filled in Task 2.3
+        let isBypass = task.state == .bypass
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(isBypass
+                     ? "WHY \(child.name.uppercased()) CAN'T DO IT"
+                     : "\(child.name.uppercased())'S NOTE")
+                    .font(.custom("Inter", size: 11).weight(.heavy))
+                    .tracking(1.6)
+                    .foregroundStyle(isBypass ? EvlinAddPalette.bypass : Color.evOnSurfaceVariant)
+                Spacer()
+                if isBypass, let at = task.submittedAt {
+                    Text("at \(at)")
+                        .font(.custom("Inter", size: 11))
+                        .foregroundStyle(Color.evOnSurfaceVariant)
+                }
+            }
+
+            if let note = task.note {
+                Text("\u{201C}\(note)\u{201D}")
+                    .font(.custom("Inter", size: 14))
+                    .foregroundStyle(Color.evOnSurface)
+                    .lineSpacing(3)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 14)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .fill(isBypass ? EvlinAddPalette.bypass.opacity(0.06) : Color.evSurfaceContainerLow)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .stroke(isBypass ? EvlinAddPalette.bypass.opacity(0.25) : Color.evOutlineVariant,
+                                    lineWidth: 1)
+                    )
+            } else {
+                Text("No note added.")
+                    .font(.custom("Inter", size: 13))
+                    .italic()
+                    .foregroundStyle(Color.evOutline)
+            }
+        }
     }
 
     @ViewBuilder
