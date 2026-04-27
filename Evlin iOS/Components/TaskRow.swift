@@ -6,14 +6,24 @@ struct TaskItem: Identifiable, Hashable {
     var state: State
     var iconSystemName: String?
 
+    // Rich data (Phase 1 — for TaskDetailSheet, see HTML 730-865)
+    var category: String? = nil           // "Chore" | "Homework" | "Reading" | "Routine"
+    var description: String? = nil        // "What to do" body
+    var photos: [String] = []             // submission photo URLs
+    var note: String? = nil               // child's note OR bypass reason
+    var submittedAt: String? = nil        // "3:18 PM"
+    var dueLabel: String? = nil           // "Today, 4:00 PM"
+
     enum State: String, Hashable {
-        case pending, done, review, overdue
+        case pending, done, review, overdue, bypass, bypassed
         var label: String {
             switch self {
-            case .pending: return "Pending"
-            case .done: return "Done"
-            case .review: return "Reviewing"
-            case .overdue: return "Overdue"
+            case .pending:  return "Pending"
+            case .done:     return "Done"
+            case .review:   return "Reviewing"
+            case .overdue:  return "Overdue"
+            case .bypass:   return "Bypass requested"
+            case .bypassed: return "Bypassed"
             }
         }
     }
@@ -46,6 +56,7 @@ struct TaskRow: View {
         switch task.state {
         case .review:  return Color(hex: 0xFFF9ED)
         case .overdue: return Color(hex: 0xFFF5F3)
+        case .bypass:  return Color(hex: 0xF7F2FF)   // pale purple
         default:       return .evSurfaceContainerLowest
         }
     }
@@ -100,6 +111,30 @@ struct TaskRow: View {
             }
             .frame(width: 28, height: 28)
             .padding(4)
+
+        case .bypass:
+            ZStack {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color(hex: 0x7C3AED))    // BYPASS_PURPLE per HTML 483
+                Image(systemName: "hand.raised.fill")
+                    .font(.system(size: 15, weight: .heavy))
+                    .foregroundStyle(.white)
+            }
+            .frame(width: 36, height: 36)
+
+        case .bypassed:
+            ZStack {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(Color.evOutlineVariant, lineWidth: 2)
+                    .background(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(Color.evSurfaceContainerLowest)
+                    )
+                Image(systemName: "nosign")
+                    .font(.system(size: 14, weight: .heavy))
+                    .foregroundStyle(Color.evOutline)
+            }
+            .frame(width: 36, height: 36)
         }
     }
 
@@ -131,6 +166,18 @@ struct TaskRow: View {
                 .font(.custom("Inter", size: 11).weight(.heavy))
                 .tracking(1.4)
                 .foregroundStyle(Color.evError)
+
+        case .bypass:
+            Text("BYPASS REQUESTED")
+                .font(.custom("Inter", size: 10).weight(.heavy))
+                .tracking(1.4)
+                .foregroundStyle(Color(hex: 0x7C3AED))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(Capsule().fill(Color(hex: 0x7C3AED).opacity(0.12)))
+
+        case .bypassed:
+            EvlinPill(text: "Bypassed", tone: .neutral, size: .xs)
         }
     }
 
