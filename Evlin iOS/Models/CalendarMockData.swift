@@ -17,6 +17,8 @@ struct CalendarEvent: Identifiable, Hashable {
     let category: String
     let location: String
     let note: String
+    /// One of: "none" | "daily" | "weekdays" | "weekly" | "monthly". See HTML 1418.
+    var recurrence: String = "none"
 }
 
 struct AllDayItem: Identifiable, Hashable {
