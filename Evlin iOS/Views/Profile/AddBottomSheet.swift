@@ -367,10 +367,98 @@ struct EditRuleForm: View {
     var onSave: (RuleItem) -> Void
     var onDelete: () -> Void
     var onCancel: () -> Void
+
+    @State private var title: String
+    @State private var detail: String
+    @State private var icon: String
+    @State private var tone: RuleRow.Tone
+
+    init(rule: RuleItem,
+         onSave: @escaping (RuleItem) -> Void,
+         onDelete: @escaping () -> Void,
+         onCancel: @escaping () -> Void) {
+        self.rule = rule
+        self.onSave = onSave
+        self.onDelete = onDelete
+        self.onCancel = onCancel
+        _title = State(initialValue: rule.title)
+        _detail = State(initialValue: rule.detail)
+        _icon = State(initialValue: rule.iconSystemName)
+        _tone = State(initialValue: rule.tone)
+    }
+
+    private let icons = ["shield", "display", "moon", "sun.max", "iphone.slash", "nosign", "clock"]
+    private let tones: [(value: RuleRow.Tone, label: String)] = [
+        (.primary, "Primary"),
+        (.tertiary, "Calm"),
+        (.neutral, "Neutral"),
+    ]
+
+    private var canSave: Bool { !title.trimmingCharacters(in: .whitespaces).isEmpty }
+
     var body: some View {
-        FormShell(title: "Edit Rule", canSave: false, onCancel: onCancel, onSave: {}) {
-            Text("EditRuleForm — implemented in Phase 7")
+        FormShell(
+            title: "Edit Rule",
+            canSave: canSave,
+            onCancel: onCancel,
+            onSave: save
+        ) {
+            FormField(label: "Title") {
+                TextField("e.g. No phones at dinner", text: $title)
+                    .font(.custom("Inter", size: 14).weight(.semibold))
+                    .evlinFormInput()
+            }
+            FormField(label: "Detail") {
+                TextField("e.g. 6:00 – 7:00 PM", text: $detail).evlinFormInput()
+            }
+            FormField(label: "Icon") {
+                FlowLayout(spacing: 8) {
+                    ForEach(icons, id: \.self) { name in
+                        Button { icon = name } label: {
+                            Image(systemName: name)
+                                .font(.system(size: 20, weight: .medium))
+                                .foregroundStyle(icon == name ? Color.evPrimary : Color.evOnSurfaceVariant)
+                                .frame(width: 44, height: 44)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                        .fill(icon == name ? Color.evPrimary.opacity(0.06) : Color.white)
+                                )
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                        .stroke(icon == name ? Color.evPrimary : Color.evOutlineVariant,
+                                                lineWidth: 2)
+                                )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            FormField(label: "Tone") {
+                FormPillSelector(items: tones, selected: $tone)
+            }
+            Button(action: onDelete) {
+                Text("Delete rule")
+                    .font(.custom("Inter", size: 14).weight(.heavy))
+                    .foregroundStyle(Color.evError)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+                    .background(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(Color.evError.opacity(0.4), lineWidth: 1.5)
+                    )
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 8)
         }
+    }
+
+    private func save() {
+        var updated = rule
+        updated.title = title.trimmingCharacters(in: .whitespaces)
+        updated.detail = detail.trimmingCharacters(in: .whitespaces)
+        updated.iconSystemName = icon
+        updated.tone = tone
+        onSave(updated)
     }
 }
 struct AddCalendarForm: View {

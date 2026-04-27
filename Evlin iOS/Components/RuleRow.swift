@@ -8,6 +8,7 @@ struct RuleRow: View {
     let detail: String
     @Binding var isOn: Bool
     var tone: Tone = .primary
+    var onEdit: () -> Void = {}
 
     private var iconBg: Color {
         switch tone {
@@ -46,7 +47,7 @@ struct RuleRow: View {
             Toggle("", isOn: $isOn)
                 .labelsHidden()
                 .tint(Color.evSecondary)
-            Button {} label: {
+            Button(action: onEdit) {
                 Image(systemName: "pencil")
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(Color.evOnSurfaceVariant)

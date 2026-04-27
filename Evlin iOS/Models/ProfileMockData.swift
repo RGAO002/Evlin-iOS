@@ -2,11 +2,11 @@ import SwiftUI
 
 struct RuleItem: Identifiable, Hashable {
     let id: String
-    let iconSystemName: String
-    let title: String
-    let detail: String
+    var iconSystemName: String
+    var title: String
+    var detail: String
     var on: Bool
-    let tone: RuleRow.Tone
+    var tone: RuleRow.Tone
 }
 
 struct ProfileEvent: Identifiable, Hashable {

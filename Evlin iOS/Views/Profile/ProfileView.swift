@@ -12,6 +12,7 @@ struct ProfileView: View {
     @State private var devices: [DeviceItem] = []
     @State private var activeTask: TaskItem? = nil
     @State private var editingTask: TaskItem? = nil
+    @State private var editingRule: RuleItem? = nil
     @State private var showProfileMenu = false
     @State private var showEditProfile = false
     @State private var showDeleteConfirm = false
@@ -78,7 +79,8 @@ struct ProfileView: View {
                                 ForEach($rules) { $rule in
                                     RuleRow(iconSystemName: rule.iconSystemName,
                                             title: rule.title, detail: rule.detail,
-                                            isOn: $rule.on, tone: rule.tone)
+                                            isOn: $rule.on, tone: rule.tone,
+                                            onEdit: { editingRule = rule })
                                         .padding(.horizontal, 14)
                                         .overlay(
                                             Rectangle().fill(Color.evOutlineVariant.opacity(0.4)).frame(height: 1),
@@ -286,6 +288,23 @@ struct ProfileView: View {
                     editingTask = nil
                 },
                 onCancel: { editingTask = nil }
+            )
+            .presentationDetents([.large])
+        }
+        .sheet(item: $editingRule) { rule in
+            EditRuleForm(
+                rule: rule,
+                onSave: { updated in
+                    if let i = rules.firstIndex(where: { $0.id == updated.id }) {
+                        rules[i] = updated
+                    }
+                    editingRule = nil
+                },
+                onDelete: {
+                    rules.removeAll(where: { $0.id == rule.id })
+                    editingRule = nil
+                },
+                onCancel: { editingRule = nil }
             )
             .presentationDetents([.large])
         }
