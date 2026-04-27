@@ -47,7 +47,7 @@ struct CalendarView: View {
                     person: CalendarMockData.person(event.col),
                     dayLabel: "\(isViewingToday ? "Today" : CalendarMockData.shortDateLabel(selectedDate)), \(event.start) – \(event.end)",
                     onClose: { activeEvent = nil },
-                    onEdit: { activeEvent = nil }
+                    onSave: { _ in activeEvent = nil }
                 )
                 .transition(.opacity)
                 .zIndex(100)

@@ -4,10 +4,32 @@ struct EventDetailCard: View {
     let event: CalendarEvent
     let person: CalendarPerson
     let dayLabel: String
+    var isNew: Bool = false
     var onClose: () -> Void = {}
-    var onEdit: () -> Void = {}
+    var onSave: (CalendarEvent) -> Void = { _ in }
+    var onDelete: () -> Void = {}
 
+    @State private var isEditing: Bool
+    @State private var draft: CalendarEvent
     @State private var reminderOn: Bool = true
+
+    init(event: CalendarEvent,
+         person: CalendarPerson,
+         dayLabel: String,
+         isNew: Bool = false,
+         onClose: @escaping () -> Void = {},
+         onSave: @escaping (CalendarEvent) -> Void = { _ in },
+         onDelete: @escaping () -> Void = {}) {
+        self.event = event
+        self.person = person
+        self.dayLabel = dayLabel
+        self.isNew = isNew
+        self.onClose = onClose
+        self.onSave = onSave
+        self.onDelete = onDelete
+        _isEditing = State(initialValue: isNew)
+        _draft = State(initialValue: event)
+    }
 
     var body: some View {
         ZStack {
@@ -22,15 +44,12 @@ struct EventDetailCard: View {
                     .padding(.bottom, 12)
 
                 Divider()
-                personRow
-                Divider()
-                categoryRow
-                Divider()
-                noteRow
-                Divider()
-                locationRow
-                Divider()
-                reminderRow
+
+                if isEditing {
+                    editForm
+                } else {
+                    readView
+                }
 
                 footer
                     .padding(.top, 14)
@@ -60,7 +79,7 @@ struct EventDetailCard: View {
             }
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(event.title)
+                Text(isEditing ? (isNew ? "New event" : "Edit event") : event.title)
                     .font(.custom("Manrope", size: 22).weight(.heavy))
                     .tracking(-0.2)
                     .foregroundStyle(Color.evPrimary)
@@ -83,6 +102,105 @@ struct EventDetailCard: View {
                     .background(Circle().fill(Color.evSurfaceContainerHigh))
             }
             .buttonStyle(.plain)
+        }
+    }
+
+    // MARK: - Read view
+
+    private var readView: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            personRow
+            Divider()
+            categoryRow
+            Divider()
+            recurrenceRow
+            Divider()
+            noteRow
+            Divider()
+            locationRow
+            Divider()
+            reminderRow
+        }
+    }
+
+    private var recurrenceRow: some View {
+        HStack(alignment: .top, spacing: 14) {
+            Image(systemName: "repeat")
+                .foregroundStyle(Color.evOnSurfaceVariant)
+                .frame(width: 20)
+            Text(recurrenceLabel(event.recurrence))
+                .font(.custom("Inter", size: 14))
+                .foregroundStyle(Color.evOnSurface)
+            Spacer()
+        }
+        .padding(.vertical, 12)
+    }
+
+    private func recurrenceLabel(_ value: String) -> String {
+        switch value {
+        case "daily":    return "Every day"
+        case "weekdays": return "Every weekday"
+        case "weekly":   return "Every week"
+        case "monthly":  return "Every month"
+        default:         return "Does not repeat"
+        }
+    }
+
+    // MARK: - Edit form
+
+    private var editForm: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            evField("TITLE") {
+                TextField("Event title", text: $draft.title).evlinFormInput()
+            }
+            evField("TIME") {
+                HStack(spacing: 8) {
+                    TextField("Start", text: $draft.start).evlinFormInput()
+                    Text("–").foregroundStyle(Color.evOnSurfaceVariant)
+                    TextField("End", text: $draft.end).evlinFormInput()
+                }
+            }
+            evField("CATEGORY") {
+                FormPillSelector(
+                    items: [("Activity", "Activity"), ("Lesson", "Lesson"),
+                            ("Sport", "Sport"), ("Family", "Family"),
+                            ("Routine", "Routine"), ("Study", "Study")],
+                    selected: Binding(get: { draft.category }, set: { draft.category = $0 })
+                )
+            }
+            evField("REPEAT") {
+                FormPillSelector(
+                    items: [("none", "Once"), ("daily", "Daily"),
+                            ("weekdays", "Weekdays"), ("weekly", "Weekly")],
+                    selected: Binding(get: { draft.recurrence }, set: { draft.recurrence = $0 })
+                )
+            }
+            evField("NOTE") {
+                TextField("Add a note…", text: Binding(
+                    get: { draft.note },
+                    set: { draft.note = $0 }
+                ), axis: .vertical)
+                .lineLimit(3...5)
+                .evlinFormInput()
+            }
+            evField("LOCATION") {
+                TextField("Add location…", text: Binding(
+                    get: { draft.location },
+                    set: { draft.location = $0 }
+                ))
+                .evlinFormInput()
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func evField<Content: View>(_ label: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(label)
+                .font(.custom("Inter", size: 10).weight(.heavy))
+                .tracking(1.2)
+                .foregroundStyle(Color.evOnSurfaceVariant)
+            content()
         }
     }
 
@@ -165,34 +283,80 @@ struct EventDetailCard: View {
 
     // MARK: - Footer
 
+    private var canSaveDraft: Bool {
+        !draft.title.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
     private var footer: some View {
         HStack(alignment: .center, spacing: 12) {
-            Button { onClose() } label: {
-                Text("Close")
-                    .font(.custom("Manrope", size: 18).weight(.heavy))
-                    .foregroundStyle(Color.evPrimary)
+            if isEditing {
+                Button {
+                    if isNew {
+                        onClose()
+                    } else {
+                        draft = event
+                        isEditing = false
+                    }
+                } label: {
+                    Text(isNew ? "Discard" : "Cancel")
+                        .font(.custom("Manrope", size: 18).weight(.heavy))
+                        .foregroundStyle(Color.evPrimary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 16)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    onSave(draft)
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: isNew ? "plus" : "checkmark")
+                            .font(.system(size: 15, weight: .bold))
+                        Text(isNew ? "Create" : "Save")
+                            .font(.custom("Manrope", size: 18).weight(.heavy))
+                    }
+                    .foregroundStyle(.white)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 16)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-
-            Button(action: onEdit) {
-                HStack(spacing: 8) {
-                    Image(systemName: "pencil")
-                        .font(.system(size: 15, weight: .bold))
-                    Text("Edit")
-                        .font(.custom("Manrope", size: 18).weight(.heavy))
+                    .background(
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .fill(canSaveDraft ? Color.evPrimary : Color.evPrimary.opacity(0.4))
+                    )
                 }
-                .foregroundStyle(.white)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 16)
-                .background(
-                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .fill(Color.evPrimary)
-                )
+                .buttonStyle(.plain)
+                .disabled(!canSaveDraft)
+            } else {
+                Button { onClose() } label: {
+                    Text("Close")
+                        .font(.custom("Manrope", size: 18).weight(.heavy))
+                        .foregroundStyle(Color.evPrimary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 16)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    draft = event
+                    isEditing = true
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "pencil")
+                            .font(.system(size: 15, weight: .bold))
+                        Text("Edit")
+                            .font(.custom("Manrope", size: 18).weight(.heavy))
+                    }
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 16)
+                    .background(
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .fill(Color.evPrimary)
+                    )
+                }
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
         }
     }
 

@@ -9,14 +9,14 @@ struct CalendarPerson: Identifiable, Hashable {
 
 struct CalendarEvent: Identifiable, Hashable {
     let id = UUID()
-    let col: String
-    let title: String
-    let emoji: String
-    let start: String
-    let end: String
-    let category: String
-    let location: String
-    let note: String
+    var col: String
+    var title: String
+    var emoji: String
+    var start: String
+    var end: String
+    var category: String
+    var location: String
+    var note: String
     /// One of: "none" | "daily" | "weekdays" | "weekly" | "monthly". See HTML 1418.
     var recurrence: String = "none"
 }
