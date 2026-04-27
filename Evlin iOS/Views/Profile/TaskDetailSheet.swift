@@ -150,7 +150,115 @@ struct TaskDetailSheet: View {
 
     @ViewBuilder
     private var submissionBlock: some View {
-        EmptyView()  // Filled in Task 2.2
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("\(child.name.uppercased())'S SUBMISSION")
+                    .font(.custom("Inter", size: 11).weight(.heavy))
+                    .tracking(1.6)
+                    .foregroundStyle(Color.evOnSurfaceVariant)
+                Spacer()
+                if let at = task.submittedAt {
+                    Text("at \(at)")
+                        .font(.custom("Inter", size: 11))
+                        .foregroundStyle(Color.evOnSurfaceVariant)
+                }
+            }
+
+            if !task.photos.isEmpty {
+                photoGallery
+            } else {
+                emptySubmissionPlaceholder
+            }
+        }
+    }
+
+    private var photoGallery: some View {
+        VStack(spacing: 10) {
+            ZStack(alignment: .topTrailing) {
+                AsyncImage(url: URL(string: task.photos[min(activePhotoIndex, task.photos.count - 1)])) { phase in
+                    if let img = phase.image {
+                        img.resizable().scaledToFill()
+                    } else {
+                        Rectangle().fill(Color.evSurfaceContainerLow)
+                    }
+                }
+                .aspectRatio(4/3, contentMode: .fit)
+                .frame(maxWidth: .infinity)
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .stroke(Color.evOutlineVariant, lineWidth: 1)
+                )
+
+                if task.photos.count > 1 {
+                    Text("\(activePhotoIndex + 1) / \(task.photos.count)")
+                        .font(.custom("Inter", size: 11).weight(.heavy))
+                        .tracking(0.4)
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(Capsule().fill(Color.black.opacity(0.65)))
+                        .padding(10)
+                }
+            }
+
+            if task.photos.count > 1 {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(Array(task.photos.enumerated()), id: \.offset) { idx, urlStr in
+                            Button {
+                                activePhotoIndex = idx
+                            } label: {
+                                AsyncImage(url: URL(string: urlStr)) { phase in
+                                    if let img = phase.image {
+                                        img.resizable().scaledToFill()
+                                    } else {
+                                        Rectangle().fill(Color.evSurfaceContainerLow)
+                                    }
+                                }
+                                .frame(width: 64, height: 64)
+                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                        .stroke(idx == activePhotoIndex ? Color.evPrimary : Color.evOutlineVariant,
+                                                lineWidth: idx == activePhotoIndex ? 2 : 1)
+                                )
+                                .opacity(idx == activePhotoIndex ? 1.0 : 0.75)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private var emptySubmissionPlaceholder: some View {
+        VStack(spacing: 10) {
+            ZStack {
+                Circle()
+                    .fill(Color.evSurfaceContainerLow)
+                    .frame(width: 56, height: 56)
+                Image(systemName: task.state == .overdue ? "exclamationmark" : "hourglass")
+                    .font(.system(size: 24, weight: .semibold))
+                    .foregroundStyle(Color.evOutline)
+            }
+            Text(task.state == .overdue ? "No photo submitted" : "Waiting for photo")
+                .font(.custom("Manrope", size: 14).weight(.bold))
+                .foregroundStyle(Color.evOnSurface)
+            Text(task.state == .overdue
+                 ? "\(child.name) missed the deadline"
+                 : "\(child.name) hasn't uploaded yet")
+                .font(.custom("Inter", size: 12))
+                .foregroundStyle(Color.evOnSurfaceVariant)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 32)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
+                .foregroundStyle(Color.evOutlineVariant)
+        )
     }
 
     @ViewBuilder
