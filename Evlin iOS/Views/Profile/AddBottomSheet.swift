@@ -1,0 +1,184 @@
+import SwiftUI
+
+/// Bottom sheet host that picks between AddMenu / AddTaskForm / AddRuleForm /
+/// AddCalendarForm / AddDeviceForm. Mode switches as the user navigates.
+/// See HTML 1152-1166.
+struct AddBottomSheet: View {
+    @Binding var mode: AddBottomMode?
+    let child: ChildProfile
+    var onCreateTask: (TaskItem) -> Void = { _ in }
+    var onCreateRule: (RuleItem) -> Void = { _ in }
+    var onCreateCalendar: (CalendarEvent) -> Void = { _ in }
+    var onCreateDevice: (DeviceItem) -> Void = { _ in }
+
+    var body: some View {
+        Group {
+            switch mode {
+            case .menu:     AddMenu(child: child, mode: $mode)
+            case .task:     AddTaskForm(child: child, onSave: onCreateTask, onCancel: { mode = nil })
+            case .rule:     AddRuleForm(child: child, onSave: onCreateRule, onCancel: { mode = nil })
+            case .calendar: AddCalendarForm(child: child, onSave: onCreateCalendar, onCancel: { mode = nil })
+            case .device:   AddDeviceForm(child: child, onSave: onCreateDevice, onCancel: { mode = nil })
+            case nil:       EmptyView()
+            }
+        }
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+    }
+}
+
+enum AddBottomMode: Hashable {
+    case menu, task, rule, calendar, device
+}
+
+extension AddBottomMode: Identifiable {
+    var id: Self { self }
+}
+
+/// 4-option launcher. HTML 1168-1192.
+private struct AddMenu: View {
+    let child: ChildProfile
+    @Binding var mode: AddBottomMode?
+
+    private struct Option {
+        let id: AddBottomMode
+        let icon: String
+        let label: String
+        let sub: String
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Add new")
+                .font(.custom("Manrope", size: 18).weight(.heavy))
+                .tracking(-0.18)
+                .foregroundStyle(Color.evPrimary)
+                .padding(.horizontal, 24)
+                .padding(.top, 18)
+                .padding(.bottom, 14)
+
+            VStack(spacing: 0) {
+                ForEach(Array(options.enumerated()), id: \.element.id) { idx, o in
+                    Button {
+                        mode = o.id
+                    } label: {
+                        HStack(spacing: 16) {
+                            ZStack {
+                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    .fill(Color.evSurfaceContainerLow)
+                                Image(systemName: o.icon)
+                                    .font(.system(size: 20, weight: .medium))
+                                    .foregroundStyle(Color.evPrimary)
+                            }
+                            .frame(width: 48, height: 48)
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(o.label)
+                                    .font(.custom("Manrope", size: 16).weight(.heavy))
+                                    .foregroundStyle(Color.evOnSurface)
+                                Text(o.sub)
+                                    .font(.custom("Inter", size: 12))
+                                    .foregroundStyle(Color.evOnSurfaceVariant)
+                            }
+
+                            Spacer()
+
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundStyle(Color.evOutline)
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 14)
+                    }
+                    .buttonStyle(.plain)
+
+                    if idx < options.count - 1 {
+                        Rectangle()
+                            .fill(Color.evOutlineVariant.opacity(0.4))
+                            .frame(height: 1)
+                            .padding(.leading, 80)
+                    }
+                }
+            }
+
+            Spacer()
+        }
+    }
+
+    private var options: [Option] {
+        [
+            .init(id: .task, icon: "checkmark.circle", label: "Add Task",
+                  sub: "New chore or homework for \(child.name)"),
+            .init(id: .calendar, icon: "calendar", label: "Add to Calendar",
+                  sub: "Schedule something on \(child.name)'s day"),
+            .init(id: .rule, icon: "shield", label: "Add Rule",
+                  sub: "New screen-time or routine rule"),
+            .init(id: .device, icon: "iphone", label: "Add Device",
+                  sub: "Enroll a phone, tablet, or laptop"),
+        ]
+    }
+}
+
+// Stubs for forms — actual implementations come in Phases 6-9.
+struct AddTaskForm: View {
+    let child: ChildProfile
+    var onSave: (TaskItem) -> Void
+    var onCancel: () -> Void
+    var body: some View {
+        FormShell(title: "New Task", canSave: false, onCancel: onCancel, onSave: {}) {
+            Text("AddTaskForm — implemented in Phase 6")
+        }
+    }
+}
+struct EditTaskForm: View {
+    let task: TaskItem
+    var onSave: (TaskItem) -> Void
+    var onDelete: () -> Void
+    var onCancel: () -> Void
+    var body: some View {
+        FormShell(title: "Edit Task", canSave: false, onCancel: onCancel, onSave: {}) {
+            Text("EditTaskForm — implemented in Phase 6")
+        }
+    }
+}
+struct AddRuleForm: View {
+    let child: ChildProfile
+    var onSave: (RuleItem) -> Void
+    var onCancel: () -> Void
+    var body: some View {
+        FormShell(title: "New Rule", canSave: false, onCancel: onCancel, onSave: {}) {
+            Text("AddRuleForm — implemented in Phase 7")
+        }
+    }
+}
+struct EditRuleForm: View {
+    let rule: RuleItem
+    var onSave: (RuleItem) -> Void
+    var onDelete: () -> Void
+    var onCancel: () -> Void
+    var body: some View {
+        FormShell(title: "Edit Rule", canSave: false, onCancel: onCancel, onSave: {}) {
+            Text("EditRuleForm — implemented in Phase 7")
+        }
+    }
+}
+struct AddCalendarForm: View {
+    let child: ChildProfile
+    var onSave: (CalendarEvent) -> Void
+    var onCancel: () -> Void
+    var body: some View {
+        FormShell(title: "Add to Calendar", canSave: false, onCancel: onCancel, onSave: {}) {
+            Text("AddCalendarForm — implemented in Phase 8")
+        }
+    }
+}
+struct AddDeviceForm: View {
+    let child: ChildProfile
+    var onSave: (DeviceItem) -> Void
+    var onCancel: () -> Void
+    var body: some View {
+        FormShell(title: "Enroll Device", canSave: false, onCancel: onCancel, onSave: {}) {
+            Text("AddDeviceForm — implemented in Phase 9")
+        }
+    }
+}
