@@ -11,11 +11,30 @@ struct ProfileView: View {
     @State private var events: [ProfileEvent] = []
     @State private var devices: [DeviceItem] = []
     @State private var activeTask: TaskItem? = nil
+    @State private var showProfileMenu = false
+    @State private var showEditProfile = false
+    @State private var showDeleteConfirm = false
 
     var body: some View {
         VStack(spacing: 0) {
             GlassmorphicHeader(title: "\(child.name)'s Space", onBack: onBack) {
-                HeaderIconButton(systemName: "ellipsis") {}
+                Menu {
+                    Button {
+                        showEditProfile = true
+                    } label: {
+                        Label("Edit Profile", systemImage: "pencil")
+                    }
+                    Button(role: .destructive) {
+                        showDeleteConfirm = true
+                    } label: {
+                        Label("Delete Profile", systemImage: "trash")
+                    }
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(Color.evOnSurface)
+                        .frame(width: 40, height: 40)
+                }
             }
 
             ScrollView {
@@ -177,6 +196,26 @@ struct ProfileView: View {
                     },
                     onEdit: {}    // wired in Phase 6
                 )
+            }
+        }
+        .alert("Delete \(child.name)?", isPresented: $showDeleteConfirm) {
+            Button("Cancel", role: .cancel) {}
+            Button("Delete", role: .destructive) {
+                onBack()
+            }
+        } message: {
+            Text("This will remove the profile and all associated data.")
+        }
+        .sheet(isPresented: $showEditProfile) {
+            // Phase 4 stub: ChildEditSheet (HTML 307) full impl deferred to polish phase.
+            NavigationStack {
+                Text("Edit Profile (coming soon)")
+                    .navigationTitle("Edit \(child.name)")
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Done") { showEditProfile = false }
+                        }
+                    }
             }
         }
         .onAppear {
