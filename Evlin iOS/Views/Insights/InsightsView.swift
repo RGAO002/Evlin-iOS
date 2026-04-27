@@ -3,6 +3,7 @@ import SwiftUI
 struct InsightsView: View {
     @State private var selection: String = "liam"
     @State private var heroDismissed: Bool = false
+    @State private var toastText: String? = nil
 
     var body: some View {
         VStack(spacing: 0) {
@@ -33,6 +34,24 @@ struct InsightsView: View {
             }
         }
         .background(Color.evSurfaceContainerLow)
+        .overlay(alignment: .bottom) {
+            if let text = toastText {
+                Text(text)
+                    .font(.custom("Inter", size: 13).weight(.semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(Capsule().fill(Color.black.opacity(0.78)))
+                    .padding(.bottom, 90)
+                    .transition(.opacity)
+                    .onAppear {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 2.4) {
+                            withAnimation { toastText = nil }
+                        }
+                    }
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: toastText)
     }
 
     private var heroCard: some View {
@@ -73,7 +92,9 @@ struct InsightsView: View {
                     .fixedSize(horizontal: false, vertical: true)
 
                 HStack(spacing: 10) {
-                    EvlinButton(title: "Review strategy", icon: "checkmark.seal", variant: .success, size: .sm) {}
+                    EvlinButton(title: "Review strategy", icon: "checkmark.seal", variant: .success, size: .sm) {
+                        toastText = "Strategy details coming soon."
+                    }
                     Button {
                         withAnimation(.easeOut(duration: 0.25)) { heroDismissed = true }
                     } label: {
@@ -128,7 +149,9 @@ struct InsightsView: View {
                                 .foregroundStyle(Color.evOnSurfaceVariant)
                         }
                         Spacer()
-                        EvlinButton(title: "Apply", size: .sm) {}
+                        EvlinButton(title: "Apply", size: .sm) {
+                            toastText = "Recommendation applied."
+                        }
                     }
                     .padding(.horizontal, 18)
                     .padding(.vertical, 14)
