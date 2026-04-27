@@ -14,6 +14,8 @@ struct ProfileView: View {
     @State private var showProfileMenu = false
     @State private var showEditProfile = false
     @State private var showDeleteConfirm = false
+    @State private var devicesExpanded = true
+    @State private var rulesExpanded = true
 
     var body: some View {
         VStack(spacing: 0) {
@@ -41,32 +43,56 @@ struct ProfileView: View {
                 VStack(spacing: 26) {
                     // Summary card
                     summaryCard
-                    // Active Rules
+                    // Active Rules (collapsible per HTML 1086-1121)
                     VStack(spacing: 0) {
-                        SectionHead(title: "Active Rules") {
-                            EvlinPill(text: "Verified", tone: .success, size: .sm)
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                rulesExpanded.toggle()
+                            }
+                        } label: {
+                            HStack {
+                                Text("Active Rules")
+                                    .font(.custom("Manrope", size: 16).weight(.heavy))
+                                    .tracking(-0.16)
+                                    .foregroundStyle(Color.evOnSurface)
+                                EvlinPill(
+                                    text: "\(rules.filter(\.on).count)/\(rules.count)",
+                                    tone: .success, size: .xs
+                                )
+                                Spacer()
+                                Image(systemName: "chevron.down")
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundStyle(Color.evOutline)
+                                    .rotationEffect(.degrees(rulesExpanded ? 180 : 0))
+                            }
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 14)
                         }
-                        VStack(spacing: 0) {
-                            ForEach($rules) { $rule in
-                                RuleRow(iconSystemName: rule.iconSystemName,
-                                        title: rule.title, detail: rule.detail,
-                                        isOn: $rule.on, tone: rule.tone)
-                                    .padding(.horizontal, 14)
-                                    .overlay(
-                                        Rectangle().fill(Color.evOutlineVariant.opacity(0.4)).frame(height: 1),
-                                        alignment: .bottom
-                                    )
+                        .buttonStyle(.plain)
+
+                        if rulesExpanded {
+                            VStack(spacing: 0) {
+                                ForEach($rules) { $rule in
+                                    RuleRow(iconSystemName: rule.iconSystemName,
+                                            title: rule.title, detail: rule.detail,
+                                            isOn: $rule.on, tone: rule.tone)
+                                        .padding(.horizontal, 14)
+                                        .overlay(
+                                            Rectangle().fill(Color.evOutlineVariant.opacity(0.4)).frame(height: 1),
+                                            alignment: .bottom
+                                        )
+                                }
                             }
                         }
-                        .background(
-                            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                                .fill(Color.evSurfaceContainerLowest)
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                                .stroke(Color.evOutlineVariant.opacity(0.4), lineWidth: 1)
-                        )
                     }
+                    .background(
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .fill(Color.evSurfaceContainerLowest)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .stroke(Color.evOutlineVariant.opacity(0.4), lineWidth: 1)
+                    )
 
                     // Tasks
                     VStack(spacing: 0) {
@@ -146,27 +172,54 @@ struct ProfileView: View {
                         )
                     }
 
-                    // Devices
+                    // Devices (collapsible per HTML 1064-1085)
                     VStack(spacing: 0) {
-                        SectionHead("Enrolled Devices")
-                        VStack(spacing: 0) {
-                            ForEach(Array(devices.enumerated()), id: \.element.id) { idx, d in
-                                DeviceRow(
-                                    iconSystemName: d.iconSystemName, name: d.name,
-                                    detail: d.detail, locked: d.locked,
-                                    isLast: idx == devices.count - 1
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                devicesExpanded.toggle()
+                            }
+                        } label: {
+                            HStack {
+                                Text("Enrolled Devices")
+                                    .font(.custom("Manrope", size: 16).weight(.heavy))
+                                    .tracking(-0.16)
+                                    .foregroundStyle(Color.evOnSurface)
+                                EvlinPill(
+                                    text: "\(devices.count) \(child.status == .unlocked ? "active" : "locked")",
+                                    tone: child.status == .unlocked ? .success : .danger,
+                                    size: .xs
                                 )
+                                Spacer()
+                                Image(systemName: "chevron.down")
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundStyle(Color.evOutline)
+                                    .rotationEffect(.degrees(devicesExpanded ? 180 : 0))
+                            }
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 14)
+                        }
+                        .buttonStyle(.plain)
+
+                        if devicesExpanded {
+                            VStack(spacing: 0) {
+                                ForEach(Array(devices.enumerated()), id: \.element.id) { idx, d in
+                                    DeviceRow(
+                                        iconSystemName: d.iconSystemName, name: d.name,
+                                        detail: d.detail, locked: d.locked,
+                                        isLast: idx == devices.count - 1
+                                    )
+                                }
                             }
                         }
-                        .background(
-                            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                                .fill(Color.evSurfaceContainerLowest)
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                                .stroke(Color.evOutlineVariant.opacity(0.4), lineWidth: 1)
-                        )
                     }
+                    .background(
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .fill(Color.evSurfaceContainerLowest)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .stroke(Color.evOutlineVariant.opacity(0.4), lineWidth: 1)
+                    )
                 }
                 .padding(.horizontal, 20)
                 .padding(.top, 16)
