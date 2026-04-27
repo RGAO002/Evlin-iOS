@@ -16,7 +16,7 @@ struct ProfileView: View {
     @State private var showDeleteConfirm = false
     @State private var devicesExpanded = true
     @State private var rulesExpanded = true
-    @State private var showAddSheet = false
+    @State private var addMode: AddBottomMode? = nil
 
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
@@ -231,7 +231,7 @@ struct ProfileView: View {
 
             // Floating + FAB (HTML 1124-1130)
             Button {
-                showAddSheet = true
+                addMode = .menu
             } label: {
                 Image(systemName: "plus")
                     .font(.system(size: 22, weight: .bold))
@@ -289,10 +289,26 @@ struct ProfileView: View {
                     }
             }
         }
-        .sheet(isPresented: $showAddSheet) {
-            // Phase 5 will replace this with AddBottomSheet
-            Text("Add menu (coming in Phase 5)")
-                .presentationDetents([.medium])
+        .sheet(item: $addMode) { _ in
+            AddBottomSheet(
+                mode: $addMode,
+                child: child,
+                onCreateTask: { newTask in
+                    tasks.append(newTask)
+                    addMode = nil
+                },
+                onCreateRule: { newRule in
+                    rules.append(newRule)
+                    addMode = nil
+                },
+                onCreateCalendar: { _ in
+                    addMode = nil  // Phase 8 will handle calendar event creation
+                },
+                onCreateDevice: { newDevice in
+                    devices.append(newDevice)
+                    addMode = nil
+                }
+            )
         }
         .onAppear {
             rules = ProfileMockData.rules(for: child.id)
