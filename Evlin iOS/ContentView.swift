@@ -1,7 +1,7 @@
 import SwiftUI
 
 enum HomeRoute: Hashable {
-    case profile(ChildProfile)
+    case profile(ChildProfile, taskId: Int? = nil)
     case notifications
 }
 
@@ -41,16 +41,28 @@ struct ParentRootView: View {
                         )
                         .navigationDestination(for: HomeRoute.self) { route in
                             switch route {
-                            case .profile(let child):
+                            case .profile(let child, let taskId):
                                 ProfileView(
                                     child: child,
+                                    initialTaskId: taskId,
                                     onBack: { if !profilePath.isEmpty { profilePath.removeLast() } },
                                     onOpenCalendar: { selectedTab = .calendar }
                                 )
                             case .notifications:
-                                NotificationPanel(onClose: {
-                                    if !profilePath.isEmpty { profilePath.removeLast() }
-                                })
+                                NotificationPanel(
+                                    onClose: {
+                                        if !profilePath.isEmpty { profilePath.removeLast() }
+                                    },
+                                    onOpenProfile: { childId, taskId in
+                                        // Pop notifications, then push profile with taskId.
+                                        if !profilePath.isEmpty { profilePath.removeLast() }
+                                        if let child = ChildProfile.all.first(where: { $0.id == childId }) {
+                                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                                                profilePath.append(HomeRoute.profile(child, taskId: taskId))
+                                            }
+                                        }
+                                    }
+                                )
                             }
                         }
                     }

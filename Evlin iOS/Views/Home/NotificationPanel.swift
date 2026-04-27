@@ -2,6 +2,7 @@ import SwiftUI
 
 struct NotificationPanel: View {
     var onClose: () -> Void
+    var onOpenProfile: (String, Int?) -> Void = { _, _ in }
     @State private var notifs: [HomeNotification] = HomeMockData.notifications
 
     private var unread: Int { notifs.filter(\.unread).count }
@@ -98,6 +99,14 @@ struct NotificationPanel: View {
             withAnimation {
                 if let idx = notifs.firstIndex(where: { $0.id == n.id }) {
                     notifs[idx].unread = false
+                }
+            }
+            // Deep-link: task notifications open the corresponding child's
+            // ProfileView with the task expanded. See HTML 240-246.
+            if n.kind == "task", n.childId != "family" {
+                onClose()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    onOpenProfile(n.childId, n.taskId)
                 }
             }
         } label: {
