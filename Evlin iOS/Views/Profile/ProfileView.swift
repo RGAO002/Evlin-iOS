@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ProfileView: View {
     let child: ChildProfile
+    var initialTaskId: Int? = nil
     var onBack: () -> Void = {}
     var onOpenCalendar: () -> Void = {}
 
@@ -9,6 +10,7 @@ struct ProfileView: View {
     @State private var tasks: [TaskItem] = []
     @State private var events: [ProfileEvent] = []
     @State private var devices: [DeviceItem] = []
+    @State private var activeTask: TaskItem? = nil
 
     var body: some View {
         VStack(spacing: 0) {
@@ -62,14 +64,15 @@ struct ProfileView: View {
                                     task: t,
                                     onApprove: {
                                         if let i = tasks.firstIndex(where: { $0.id == t.id }) {
-                                            tasks[i].state = .done
+                                            tasks[i].state = (t.state == .bypass) ? .bypassed : .done
                                         }
                                     },
                                     onRedo: {
                                         if let i = tasks.firstIndex(where: { $0.id == t.id }) {
                                             tasks[i].state = .pending
                                         }
-                                    }
+                                    },
+                                    onOpen: { activeTask = t }
                                 )
                             }
                         }
@@ -154,11 +157,36 @@ struct ProfileView: View {
         .background(Color.evSurfaceContainerLow)
         .navigationBarBackButtonHidden(true)
         .enableSwipeBack()
+        .fullScreenCover(item: $activeTask) { task in
+            NavigationStack {
+                TaskDetailSheet(
+                    task: task,
+                    child: child,
+                    onClose: { activeTask = nil },
+                    onApprove: {
+                        if let i = tasks.firstIndex(where: { $0.id == task.id }) {
+                            tasks[i].state = (task.state == .bypass) ? .bypassed : .done
+                        }
+                        activeTask = nil
+                    },
+                    onRedo: {
+                        if let i = tasks.firstIndex(where: { $0.id == task.id }) {
+                            tasks[i].state = .pending
+                        }
+                        activeTask = nil
+                    },
+                    onEdit: {}    // wired in Phase 6
+                )
+            }
+        }
         .onAppear {
             rules = ProfileMockData.rules(for: child.id)
             tasks = ProfileMockData.tasks(for: child.id)
             events = ProfileMockData.events(for: child.id)
             devices = ProfileMockData.devices(for: child.id)
+            if let id = initialTaskId, let task = tasks.first(where: { $0.id == id }) {
+                activeTask = task
+            }
         }
     }
 
