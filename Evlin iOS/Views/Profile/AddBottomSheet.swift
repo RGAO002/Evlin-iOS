@@ -202,10 +202,84 @@ struct EditTaskForm: View {
     var onSave: (TaskItem) -> Void
     var onDelete: () -> Void
     var onCancel: () -> Void
+
+    @State private var title: String
+    @State private var category: TaskCategory
+    @State private var taskDescription: String
+    @State private var dueLabel: String
+
+    init(task: TaskItem,
+         onSave: @escaping (TaskItem) -> Void,
+         onDelete: @escaping () -> Void,
+         onCancel: @escaping () -> Void) {
+        self.task = task
+        self.onSave = onSave
+        self.onDelete = onDelete
+        self.onCancel = onCancel
+        _title = State(initialValue: task.title)
+        _category = State(initialValue: TaskCategory(rawValue: task.category ?? "Chore") ?? .chore)
+        _taskDescription = State(initialValue: task.description ?? "")
+        _dueLabel = State(initialValue: task.dueLabel ?? "")
+    }
+
+    private let categories: [(value: TaskCategory, label: String)] = [
+        (.chore, "Chore"),
+        (.homework, "Homework"),
+        (.reading, "Reading"),
+        (.routine, "Routine"),
+    ]
+
+    private var canSave: Bool { !title.trimmingCharacters(in: .whitespaces).isEmpty }
+
     var body: some View {
-        FormShell(title: "Edit Task", canSave: false, onCancel: onCancel, onSave: {}) {
-            Text("EditTaskForm — implemented in Phase 6")
+        FormShell(
+            title: "Edit Task",
+            canSave: canSave,
+            onCancel: onCancel,
+            onSave: save
+        ) {
+            FormField(label: "Title") {
+                TextField("e.g. Read for 20 minutes", text: $title)
+                    .font(.custom("Inter", size: 14).weight(.semibold))
+                    .evlinFormInput()
+            }
+            FormField(label: "Category") {
+                FormPillSelector(items: categories, selected: $category)
+            }
+            FormField(label: "What to do") {
+                TextField("Instructions for the student…", text: $taskDescription, axis: .vertical)
+                    .lineLimit(3...6)
+                    .evlinFormInput()
+            }
+            FormField(label: "Due (optional)") {
+                TextField("e.g. Today, 6:00 PM — leave blank for no deadline", text: $dueLabel)
+                    .evlinFormInput()
+            }
+
+            Button(action: onDelete) {
+                Text("Delete task")
+                    .font(.custom("Inter", size: 14).weight(.heavy))
+                    .foregroundStyle(Color.evError)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+                    .background(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(Color.evError.opacity(0.4), lineWidth: 1.5)
+                    )
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 8)
         }
+    }
+
+    private func save() {
+        var updated = task
+        updated.title = title.trimmingCharacters(in: .whitespaces)
+        updated.category = category.rawValue
+        updated.description = taskDescription.trimmingCharacters(in: .whitespaces)
+        let trimDue = dueLabel.trimmingCharacters(in: .whitespaces)
+        updated.dueLabel = trimDue.isEmpty ? nil : trimDue
+        onSave(updated)
     }
 }
 struct AddRuleForm: View {

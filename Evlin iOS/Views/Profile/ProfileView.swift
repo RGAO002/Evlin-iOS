@@ -11,6 +11,7 @@ struct ProfileView: View {
     @State private var events: [ProfileEvent] = []
     @State private var devices: [DeviceItem] = []
     @State private var activeTask: TaskItem? = nil
+    @State private var editingTask: TaskItem? = nil
     @State private var showProfileMenu = false
     @State private var showEditProfile = false
     @State private var showDeleteConfirm = false
@@ -265,9 +266,28 @@ struct ProfileView: View {
                         }
                         activeTask = nil
                     },
-                    onEdit: {}    // wired in Phase 6
+                    onEdit: { editingTask = task }
                 )
             }
+        }
+        .sheet(item: $editingTask) { task in
+            EditTaskForm(
+                task: task,
+                onSave: { updated in
+                    if let i = tasks.firstIndex(where: { $0.id == updated.id }) {
+                        tasks[i] = updated
+                    }
+                    activeTask = updated
+                    editingTask = nil
+                },
+                onDelete: {
+                    tasks.removeAll(where: { $0.id == task.id })
+                    activeTask = nil
+                    editingTask = nil
+                },
+                onCancel: { editingTask = nil }
+            )
+            .presentationDetents([.large])
         }
         .alert("Delete \(child.name)?", isPresented: $showDeleteConfirm) {
             Button("Cancel", role: .cancel) {}
