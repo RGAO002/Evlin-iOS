@@ -16,8 +16,10 @@ struct ProfileView: View {
     @State private var showDeleteConfirm = false
     @State private var devicesExpanded = true
     @State private var rulesExpanded = true
+    @State private var showAddSheet = false
 
     var body: some View {
+        ZStack(alignment: .bottomTrailing) {
         VStack(spacing: 0) {
             GlassmorphicHeader(title: "\(child.name)'s Space", onBack: onBack) {
                 Menu {
@@ -226,6 +228,22 @@ struct ProfileView: View {
                 .padding(.bottom, 40)
             }
         }
+
+            // Floating + FAB (HTML 1124-1130)
+            Button {
+                showAddSheet = true
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 22, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 56, height: 56)
+                    .background(Circle().fill(Color.evPrimary))
+                    .shadow(color: Color.evPrimary.opacity(0.32), radius: 24, y: 8)
+            }
+            .buttonStyle(.plain)
+            .padding(.trailing, 20)
+            .padding(.bottom, 24)
+        }
         .background(Color.evSurfaceContainerLow)
         .navigationBarBackButtonHidden(true)
         .enableSwipeBack()
@@ -270,6 +288,11 @@ struct ProfileView: View {
                         }
                     }
             }
+        }
+        .sheet(isPresented: $showAddSheet) {
+            // Phase 5 will replace this with AddBottomSheet
+            Text("Add menu (coming in Phase 5)")
+                .presentationDetents([.medium])
         }
         .onAppear {
             rules = ProfileMockData.rules(for: child.id)
