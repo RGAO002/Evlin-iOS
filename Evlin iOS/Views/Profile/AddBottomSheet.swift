@@ -544,9 +544,84 @@ struct AddDeviceForm: View {
     let child: ChildProfile
     var onSave: (DeviceItem) -> Void
     var onCancel: () -> Void
+
+    @State private var name: String = ""
+    @State private var detail: String = ""
+    @State private var iconSystemName: String = "iphone"
+
+    private struct DeviceType: Hashable {
+        let icon: String
+        let label: String
+    }
+    private let types: [DeviceType] = [
+        .init(icon: "iphone",          label: "Phone"),
+        .init(icon: "ipad",            label: "Tablet"),
+        .init(icon: "laptopcomputer",  label: "Laptop"),
+        .init(icon: "desktopcomputer", label: "Desktop"),
+        .init(icon: "applewatch",      label: "Watch"),
+        .init(icon: "tv",              label: "TV"),
+    ]
+
+    private var canSave: Bool { !name.trimmingCharacters(in: .whitespaces).isEmpty }
+
     var body: some View {
-        FormShell(title: "Enroll Device", canSave: false, onCancel: onCancel, onSave: {}) {
-            Text("AddDeviceForm — implemented in Phase 9")
+        FormShell(
+            title: "Enroll Device",
+            canSave: canSave,
+            onCancel: onCancel,
+            onSave: save
+        ) {
+            FormField(label: "Device type") {
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3), spacing: 8) {
+                    ForEach(types, id: \.icon) { t in
+                        Button {
+                            iconSystemName = t.icon
+                        } label: {
+                            VStack(spacing: 6) {
+                                Image(systemName: t.icon)
+                                    .font(.system(size: 24, weight: .medium))
+                                Text(t.label)
+                                    .font(.custom("Inter", size: 11).weight(.heavy))
+                            }
+                            .foregroundStyle(iconSystemName == t.icon ? Color.evPrimary : Color.evOnSurfaceVariant)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 12)
+                            .background(
+                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    .fill(iconSystemName == t.icon ? Color.evPrimary.opacity(0.06) : Color.white)
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    .stroke(iconSystemName == t.icon ? Color.evPrimary : Color.evOutlineVariant,
+                                            lineWidth: 2)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+
+            FormField(label: "Name") {
+                TextField("e.g. iPhone 15", text: $name)
+                    .font(.custom("Inter", size: 14).weight(.semibold))
+                    .evlinFormInput()
+            }
+            FormField(label: "Notes") {
+                TextField("e.g. \(child.name)'s primary phone", text: $detail)
+                    .evlinFormInput()
+            }
         }
+    }
+
+    private func save() {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return }
+        let device = DeviceItem(
+            iconSystemName: iconSystemName,
+            name: trimmed,
+            detail: detail.trimmingCharacters(in: .whitespaces),
+            locked: false
+        )
+        onSave(device)
     }
 }
