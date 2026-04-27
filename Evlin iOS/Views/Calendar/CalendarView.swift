@@ -20,6 +20,12 @@ struct CalendarView: View {
     private var allDayItems: [AllDayItem] { CalendarMockData.allDay(for: selectedDate) }
     private var isViewingToday: Bool { calendar.isDateInToday(selectedDate) }
 
+    /// Visible columns: when no person focus, all 4. When focused, just that one.
+    private var visibleColumns: [CalendarPerson] {
+        guard let focusPerson else { return CalendarMockData.people }
+        return CalendarMockData.people.filter { $0.id == focusPerson }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             outerDayNav
@@ -239,27 +245,13 @@ struct CalendarView: View {
     private var timelineBody: some View {
         VStack(alignment: .leading, spacing: 10) {
             if !allDayItems.isEmpty {
-                HStack(spacing: 8) {
-                    Text("ALL DAY")
-                        .font(.custom("Inter", size: 10).weight(.heavy))
-                        .tracking(1.4)
-                        .foregroundStyle(Color.evOnSurfaceVariant)
-                    ForEach(allDayItems) { item in
-                        let p = CalendarMockData.person(item.col)
-                        Text(item.title)
-                            .font(.custom("Inter", size: 12).weight(.semibold))
-                            .foregroundStyle(p.color)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
-                            .background(Capsule().fill(p.bg))
-                    }
-                }
-                .padding(.horizontal, 16)
-                .padding(.top, 8)
+                allDayBar
             }
 
             HStack(alignment: .top, spacing: 0) {
                 timeGutter
+                    .frame(width: CalendarMockData.TIME_W)
+
                 ZStack(alignment: .topLeading) {
                     ForEach(CalendarMockData.START_H...CalendarMockData.END_H, id: \.self) { h in
                         Rectangle()
@@ -268,10 +260,26 @@ struct CalendarView: View {
                             .offset(y: CGFloat(h) * CalendarMockData.HOUR_H)
                     }
 
-                    ForEach(visibleEvents) { ev in
-                        eventPill(ev)
-                            .offset(y: CalendarMockData.yFor(ev.start))
+                    GeometryReader { geo in
+                        let colWidth = geo.size.width / CGFloat(visibleColumns.count)
+                        ForEach(Array(visibleColumns.enumerated()), id: \.element.id) { colIdx, person in
+                            let colEvents = visibleEvents.filter { $0.col == person.id }
+                            ZStack(alignment: .topLeading) {
+                                Rectangle()
+                                    .fill(Color.clear)
+                                    .contentShape(Rectangle())
+                                    .frame(width: colWidth, height: totalHeight)
+
+                                ForEach(colEvents) { ev in
+                                    columnEventPill(ev, color: person.color, columnWidth: colWidth)
+                                        .offset(y: CalendarMockData.yFor(ev.start))
+                                }
+                            }
+                            .frame(width: colWidth, alignment: .topLeading)
+                            .offset(x: colWidth * CGFloat(colIdx))
+                        }
                     }
+                    .frame(height: totalHeight)
 
                     if isViewingToday {
                         currentTimeIndicator
@@ -282,6 +290,26 @@ struct CalendarView: View {
             .padding(.horizontal, 6)
             .padding(.top, 6)
         }
+    }
+
+    private var allDayBar: some View {
+        HStack(spacing: 8) {
+            Text("ALL DAY")
+                .font(.custom("Inter", size: 10).weight(.heavy))
+                .tracking(1.4)
+                .foregroundStyle(Color.evOnSurfaceVariant)
+            ForEach(allDayItems) { item in
+                let p = CalendarMockData.person(item.col)
+                Text(item.title)
+                    .font(.custom("Inter", size: 12).weight(.semibold))
+                    .foregroundStyle(p.color)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(Capsule().fill(p.bg))
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
     }
 
     private var timeGutter: some View {
@@ -308,39 +336,43 @@ struct CalendarView: View {
         }
     }
 
-    private func eventPill(_ ev: CalendarEvent) -> some View {
-        let p = CalendarMockData.person(ev.col)
+    private func columnEventPill(_ ev: CalendarEvent, color: Color, columnWidth: CGFloat) -> some View {
         let h = CalendarMockData.heightFor(start: ev.start, end: ev.end)
         return Button { activeEvent = ev } label: {
-            HStack(alignment: .top, spacing: 8) {
-                RoundedRectangle(cornerRadius: 1.5, style: .continuous)
-                    .fill(p.color)
-                    .frame(width: 3)
-
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 5) {
-                        Text(ev.emoji).font(.system(size: 12))
-                        Text(ev.title)
-                            .font(.custom("Manrope", size: 12).weight(.heavy))
-                            .foregroundStyle(Color.evPrimary)
-                            .lineLimit(1)
+            VStack(alignment: .leading, spacing: 3) {
+                if h > 38 {
+                    Text(ev.emoji).font(.system(size: 12))
+                }
+                HStack(spacing: 4) {
+                    if ev.recurrence != "none" {
+                        Image(systemName: "repeat")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.white.opacity(0.85))
                     }
-                    Text("\(ev.start) – \(ev.end)")
-                        .font(.custom("Inter", size: 9).weight(.bold))
-                        .foregroundStyle(Color.evOnSurfaceVariant)
+                    Text(ev.title)
+                        .font(.custom("Manrope", size: 11).weight(.heavy))
+                        .foregroundStyle(.white)
                         .lineLimit(1)
                 }
-
-                Spacer(minLength: 0)
+                if h > 54 {
+                    Text("\(ev.start.replacingOccurrences(of: " AM", with: "").replacingOccurrences(of: " PM", with: "")) – \(ev.end.replacingOccurrences(of: " AM", with: "").replacingOccurrences(of: " PM", with: ""))")
+                        .font(.custom("Inter", size: 9).weight(.bold))
+                        .foregroundStyle(.white.opacity(0.75))
+                        .lineLimit(1)
+                }
             }
-            .padding(8)
+            .padding(h > 40 ? 7 : 5)
             .frame(maxWidth: .infinity, alignment: .topLeading)
             .frame(height: h)
-            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(p.bg))
-            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(p.color.opacity(0.3), lineWidth: 1))
-            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(color)
+            )
+            .shadow(color: color.opacity(0.33), radius: 6, y: 1)
+            .padding(.horizontal, 3)
         }
         .buttonStyle(.plain)
+        .frame(width: columnWidth)
     }
 
     private var currentTimeIndicator: some View {
