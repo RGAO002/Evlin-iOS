@@ -191,29 +191,58 @@ struct ProfileView: View {
     }
 
     private var summaryCard: some View {
-        HStack(spacing: 18) {
-            EvlinAvatarView(url: child.avatarURL, name: child.name, size: 64, status: child.status)
-            VStack(alignment: .leading, spacing: 6) {
-                Text(child.name)
-                    .font(.custom("Manrope", size: 22).weight(.heavy))
-                    .tracking(-0.22)
-                    .foregroundStyle(Color.evPrimary)
-                Text(child.status == .unlocked ? "UNLOCKED" : "QUIET TIME")
-                    .font(.custom("Inter", size: 10).weight(.heavy))
-                    .tracking(1.6)
-                    .foregroundStyle(child.status == .unlocked ? Color.evSecondary : Color.evOnSurfaceVariant)
-                GeometryReader { geo in
-                    ZStack(alignment: .leading) {
-                        Capsule().fill(Color.evSecondaryContainer).frame(height: 5)
-                        Capsule().fill(Color.evSecondary)
-                            .frame(width: max(6, geo.size.width * child.timePct), height: 5)
+        VStack(spacing: 16) {
+            HStack(spacing: 18) {
+                EvlinAvatarView(url: child.avatarURL, name: child.name, size: 64, status: child.status)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(child.name)
+                        .font(.custom("Manrope", size: 22).weight(.heavy))
+                        .tracking(-0.22)
+                        .foregroundStyle(Color.evPrimary)
+                    GeometryReader { geo in
+                        ZStack(alignment: .leading) {
+                            Capsule().fill(Color.evSecondaryContainer).frame(height: 5)
+                            Capsule().fill(Color.evSecondary)
+                                .frame(width: max(6, geo.size.width * child.timePct), height: 5)
+                        }
+                    }
+                    .frame(height: 5)
+                    HStack(spacing: 4) {
+                        Text(child.timeLeft)
+                            .font(.custom("Inter", size: 11).weight(.heavy))
+                            .foregroundStyle(Color.evSecondary)
+                        Text("left today")
+                            .font(.custom("Inter", size: 11).weight(.heavy))
+                            .foregroundStyle(Color.evOnSurfaceVariant)
                     }
                 }
-                .frame(height: 5)
-                Text("\(child.timeLeft) left today")
-                    .font(.custom("Inter", size: 11).weight(.bold))
-                    .foregroundStyle(Color.evSecondary)
             }
+
+            // Lock/Unlock big button (HTML 1036-1056)
+            Button {
+                // Phase 4: visual only. Backend hookup is out of scope here.
+                print("[Profile] Lock/Unlock tapped for \(child.id)")
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: child.status == .unlocked ? "lock" : "lock.open")
+                        .font(.system(size: 18, weight: .semibold))
+                    Text(child.status == .unlocked
+                         ? "Lock \(child.name)'s devices"
+                         : "Unlock \(child.name)'s devices")
+                        .font(.custom("Manrope", size: 14).weight(.heavy))
+                        .tracking(0.2)
+                }
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 14)
+                .background(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(child.status == .unlocked ? Color.evSecondary : Color.evError)
+                )
+                .shadow(color: (child.status == .unlocked ? Color.evSecondary : Color.evError).opacity(0.32),
+                        radius: 14, y: 4)
+            }
+            .buttonStyle(.plain)
         }
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
