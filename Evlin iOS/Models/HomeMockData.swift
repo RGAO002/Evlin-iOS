@@ -2,29 +2,49 @@ import SwiftUI
 
 struct HomeNotification: Identifiable, Hashable {
     let id: Int
-    let childId: String      // "liam" / "maya" / "emma" / "family"
+    let childId: String              // "liam" / "maya" / "emma" / "family"
     let iconSystemName: String
     let title: String
     let body: String
     let time: String
     var unread: Bool
+
+    /// "task" → tap opens ProfileView with TaskDetailSheet expanded for taskId.
+    /// nil → tap only marks as read (legacy behavior).
+    /// See HTML 220-228.
+    var kind: String? = nil
+    var taskId: Int? = nil
 }
 
 enum HomeMockData {
+    /// Notifications array. Per HTML 219-228, the first 5 are 'task' kind that
+    /// deep-link into ProfileView; the last 3 are informational.
     static let notifications: [HomeNotification] = [
-        .init(id: 1, childId: "liam", iconSystemName: "checkmark.circle",
-              title: "Homework Complete",
-              body: "Liam finished his Science Project and submitted it for review.",
-              time: "2m ago", unread: true),
-        .init(id: 2, childId: "maya", iconSystemName: "music.note",
-              title: "Piano Practice Done",
-              body: "Maya completed her 45-min piano session.",
-              time: "18m ago", unread: true),
-        .init(id: 3, childId: "liam", iconSystemName: "figure.soccer",
+        .init(id: 1, childId: "liam",   iconSystemName: "checkmark.circle",
+              title: "Science Project — needs review",
+              body: "Liam submitted his Science Project. Tap to review and approve.",
+              time: "2m ago", unread: true, kind: "task", taskId: 2),
+        .init(id: 2, childId: "maya",   iconSystemName: "music.note",
+              title: "Piano Practice — needs review",
+              body: "Maya finished her 45-min piano session and uploaded a clip.",
+              time: "18m ago", unread: true, kind: "task", taskId: 2),
+        .init(id: 6, childId: "liam",   iconSystemName: "exclamationmark.circle",
+              title: "Walk Dog — overdue",
+              body: "Liam hasn't checked off Walk Dog from yesterday.",
+              time: "12h ago", unread: true, kind: "task", taskId: 4),
+        .init(id: 7, childId: "liam",   iconSystemName: "clock",
+              title: "Math Practice — due soon",
+              body: "Math Practice is due at 6:00 PM today.",
+              time: "30m ago", unread: false, kind: "task", taskId: 3),
+        .init(id: 8, childId: "liam",   iconSystemName: "hand.raised",
+              title: "Bypass requested — Read for 20 minutes",
+              body: "\"I had football practice and got home too late. Can I do double tomorrow instead?\"",
+              time: "5m ago", unread: true, kind: "task", taskId: 5),
+        .init(id: 3, childId: "liam",   iconSystemName: "figure.soccer",
               title: "Soccer Practice",
               body: "Liam's session starts in 30 minutes at City Park.",
               time: "1h ago", unread: false),
-        .init(id: 4, childId: "emma", iconSystemName: "book",
+        .init(id: 4, childId: "emma",   iconSystemName: "book",
               title: "Reading Goal Reached",
               body: "Emma read for 60 minutes today — new personal best!",
               time: "2h ago", unread: false),
@@ -39,7 +59,7 @@ enum HomeMockData {
         case "liam": return .evChildLiam
         case "maya": return .evChildMaya
         case "emma": return .evChildEmma
-        default: return .evPrimary
+        default:     return .evPrimary
         }
     }
 
