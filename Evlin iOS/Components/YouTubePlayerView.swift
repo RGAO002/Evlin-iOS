@@ -32,7 +32,15 @@ struct YouTubePlayerView: View {
                             autoPlay: true,
                             showControls: true,
                             showFullscreenButton: true,
-                            restrictRelatedVideosToSameChannel: true
+                            restrictRelatedVideosToSameChannel: true,
+                            // Critical: YouTubePlayerKit's default originURL is
+                            // built from the app's bundle ID (e.g.
+                            // https://com.evlin.evlin-ios) — YouTube's iframe
+                            // player rejects that with Error 153 since Apr 2026.
+                            // Override with a real origin so the &origin= URL
+                            // parameter and the loadHTMLString baseURL both
+                            // satisfy YouTube's referer/origin check.
+                            originURL: URL(string: "https://www.youtube.com")
                         )
                     )
                 )
