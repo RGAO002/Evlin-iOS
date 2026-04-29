@@ -199,10 +199,20 @@ class ChatViewModel: ObservableObject {
         }
 
         // 3. Plain text (conversational reply, or confirmation_required without card_id)
-        messages.append(ChatMessage(
+        var msg = ChatMessage(
             role: .agent, content: resp.message, timestamp: Date(),
             reasoning: resp.reasoning, action: nil
-        ))
+        )
+        // Restore safety-card heuristic that was lost in d86772c refactor.
+        // When the parent asks "is X safe", "where is X", or "X's location",
+        // attach the SafetyStatusCard + SafetyActionButtons (location pin +
+        // call) to the agent's reply. The card is rendered by ChatView when
+        // isSafetyCard == true.
+        let lowered = userMessage.lowercased()
+        if lowered.contains("safe") || lowered.contains("where") || lowered.contains("location") {
+            msg.isSafetyCard = true
+        }
+        messages.append(msg)
         isThinking = false
     }
 

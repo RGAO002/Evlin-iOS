@@ -53,10 +53,11 @@ struct InlineYouTubeWebView: UIViewRepresentable {
         configuration.allowsInlineMediaPlayback = true
         configuration.allowsPictureInPictureMediaPlayback = true
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
-
-        if #available(iOS 10.0, *) {
-            configuration.mediaTypesRequiringUserActionForPlayback = []
-        }
+        // iOS 10+ : empty set means autoplay/play don't need a user
+        // gesture. The thumbnail tap that flipped `isPlaying` already
+        // counts as the user action, so this lets the embed load and
+        // play immediately instead of staying on the YouTube poster.
+        configuration.mediaTypesRequiringUserActionForPlayback = []
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.scrollView.isScrollEnabled = false
@@ -66,17 +67,39 @@ struct InlineYouTubeWebView: UIViewRepresentable {
         webView.scrollView.backgroundColor = .clear
 
         context.coordinator.loadedVideoId = videoId
-        webView.loadHTMLString(Self.embedHTML(for: videoId), baseURL: URL(string: "https://www.youtube-nocookie.com"))
+        // baseURL must use https so the iframe is allowed to load
+        // YouTube's player code.
+        webView.loadHTMLString(
+            Self.embedHTML(for: videoId),
+            baseURL: URL(string: "https://www.youtube.com")
+        )
         return webView
     }
 
     func updateUIView(_ webView: WKWebView, context: Context) {
         guard context.coordinator.loadedVideoId != videoId else { return }
         context.coordinator.loadedVideoId = videoId
-        webView.loadHTMLString(Self.embedHTML(for: videoId), baseURL: URL(string: "https://www.youtube-nocookie.com"))
+        webView.loadHTMLString(
+            Self.embedHTML(for: videoId),
+            baseURL: URL(string: "https://www.youtube.com")
+        )
     }
 
     static func embedHTML(for videoId: String) -> String {
+        // playsinline=1 is required on iOS so the player stays inside the
+        // WKWebView (combined with `allowsInlineMediaPlayback = true`).
+        // With playsinline=0 the player just shows the thumbnail and
+        // never starts because the OS expects a native fullscreen
+        // takeover that our embed never invokes.
+        //
+        // Embed host: switched from youtube-nocookie.com → youtube.com.
+        // The nocookie variant has tighter referrer/embed policies and
+        // some videos that allow regular embedding refuse to load there
+        // ("Video unavailable" inside the iframe). Plain embed.youtube.com
+        // is broadly compatible.
+        //
+        // Removed enablejsapi=1 — we don't post messages to the player and
+        // it adds an extra origin check.
         """
         <!DOCTYPE html>
         <html>
@@ -101,7 +124,7 @@ struct InlineYouTubeWebView: UIViewRepresentable {
         </head>
         <body>
             <iframe
-                src="https://www.youtube-nocookie.com/embed/\(videoId)?playsinline=0&autoplay=1&rel=0&modestbranding=1"
+                src="https://www.youtube.com/embed/\(videoId)?playsinline=1&autoplay=1&rel=0&modestbranding=1"
                 title="YouTube video player"
                 allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
                 allowfullscreen>
