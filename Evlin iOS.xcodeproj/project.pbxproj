@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		B6CD8CCD2FA1981D00FD6C13 /* YouTubePlayerKit in Frameworks */ = {isa = PBXBuildFile; productRef = B6CD8CCC2FA1981D00FD6C13 /* YouTubePlayerKit */; };
 		B6FA97352F81C6A000DA619E /* DeviceActivity.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B6FA97342F81C6A000DA619E /* DeviceActivity.framework */; };
 		B6FA973D2F81C6A000DA619E /* EvlinDeviceActivityMonitor.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = B6FA97322F81C6A000DA619E /* EvlinDeviceActivityMonitor.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
@@ -114,6 +115,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B6CD8CCD2FA1981D00FD6C13 /* YouTubePlayerKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -202,6 +204,7 @@
 			);
 			name = "Evlin iOS";
 			packageProductDependencies = (
+				B6CD8CCC2FA1981D00FD6C13 /* YouTubePlayerKit */,
 			);
 			productName = "Evlin iOS";
 			productReference = B6FA97202F81BB9400DA619E /* Evlin iOS.app */;
@@ -260,6 +263,9 @@
 			);
 			mainGroup = B6FA97172F81BB9400DA619E;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				B6CD8CCB2FA1981D00FD6C13 /* XCRemoteSwiftPackageReference "YouTubePlayerKit" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = B6FA97212F81BB9400DA619E /* Products */;
 			projectDirPath = "";
@@ -671,6 +677,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		B6CD8CCB2FA1981D00FD6C13 /* XCRemoteSwiftPackageReference "YouTubePlayerKit" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/SvenTiigi/YouTubePlayerKit";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.0.5;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		B6CD8CCC2FA1981D00FD6C13 /* YouTubePlayerKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = B6CD8CCB2FA1981D00FD6C13 /* XCRemoteSwiftPackageReference "YouTubePlayerKit" */;
+			productName = YouTubePlayerKit;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = B6FA97182F81BB9400DA619E /* Project object */;
 }
