@@ -1,49 +1,34 @@
 import SwiftUI
-import YouTubePlayerKit
+import WebKit
 
 /// External-facing wrapper used by StrategyCard / VideoRecommendationCard.
 ///
-/// Behavior (matches the pre-YouTube-Error-153 experience):
-/// - Default state: thumbnail + red play button.
-/// - Tap (or external `isPlaying = true` from WATCH VIDEO button) → swaps
-///   in-place to a YouTubePlayerKit inline player that auto-plays.
-/// - When the user taps the player's fullscreen button, iOS WebKit takes
-///   over with the system-native fullscreen chrome (Done button top-leading,
-///   AirPlay, Picture-in-Picture, etc.). YouTube's controls remain inside,
-///   wrapped by iOS — this is the closest iOS-native experience available
-///   for YouTube content.
+/// Behavior (matches the pre-Error-153 user-remembered experience):
+/// - Default: thumbnail + red play button.
+/// - Tap (or external `isPlaying = true`) → swap in-place to an inline
+///   WKWebView that auto-plays.
+/// - User taps the YouTube player's fullscreen icon → iOS WebKit takes over
+///   with system-native fullscreen chrome (Done button top-leading, AirPlay,
+///   Picture-in-Picture, scrubber). This is what the user calls "iOS player
+///   controls" — it's the OS chrome wrapping YouTube's iframe player.
 ///
-/// Why YouTubePlayerKit and not raw WKWebView: YouTube tightened iframe
-/// embed Referer enforcement (Error 153) in late 2025 / Apr 2026. The kit
-/// handles the WKWebView Referer/origin wiring correctly via a real HTTPS
-/// origin, where our previous loadHTMLString + baseURL approach now fails.
+/// Why we don't use loadHTMLString anymore:
+/// YouTube tightened iframe embed Referer enforcement (Error 153) in late
+/// 2025 / Apr 2026. `loadHTMLString(_, baseURL:)` produces an empty/synthetic
+/// referrer that YouTube now rejects, regardless of baseURL.
+/// `webView.load(URLRequest(url:))` to the actual embed URL is a real HTTP
+/// navigation: the document IS the YouTube embed page, the origin IS
+/// youtube.com, and sub-resource fetches get same-origin referrer naturally.
 struct YouTubePlayerView: View {
     let videoId: String
     let thumbnail: String
     @Binding var isPlaying: Bool
 
     var body: some View {
-        Group {
+        ZStack {
             if isPlaying {
-                YouTubePlayerKit.YouTubePlayerView(
-                    YouTubePlayer(
-                        source: .video(id: videoId),
-                        parameters: .init(
-                            autoPlay: true,
-                            showControls: true,
-                            showFullscreenButton: true,
-                            restrictRelatedVideosToSameChannel: true,
-                            // Critical: YouTubePlayerKit's default originURL is
-                            // built from the app's bundle ID (e.g.
-                            // https://com.evlin.evlin-ios) — YouTube's iframe
-                            // player rejects that with Error 153 since Apr 2026.
-                            // Override with a real origin so the &origin= URL
-                            // parameter and the loadHTMLString baseURL both
-                            // satisfy YouTube's referer/origin check.
-                            originURL: URL(string: "https://www.youtube.com")
-                        )
-                    )
-                )
+                InlineYouTubeWebView(videoId: videoId)
+                    .background(Color.black)
             } else {
                 Button {
                     isPlaying = true
@@ -68,8 +53,56 @@ struct YouTubePlayerView: View {
                     }
                 }
                 .buttonStyle(.plain)
+                .contentShape(Rectangle())
                 .accessibilityLabel("Play YouTube video")
             }
         }
     }
+}
+
+/// Loads `https://www.youtube.com/embed/<id>?...` directly as the WKWebView's
+/// document. Inline playback enabled; native iOS fullscreen chrome appears
+/// when the user taps the player's fullscreen button.
+struct InlineYouTubeWebView: UIViewRepresentable {
+    let videoId: String
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeUIView(context: Context) -> WKWebView {
+        let cfg = WKWebViewConfiguration()
+        cfg.allowsInlineMediaPlayback = true
+        cfg.allowsPictureInPictureMediaPlayback = true
+        cfg.defaultWebpagePreferences.allowsContentJavaScript = true
+        // Empty set = autoplay/play don't require a user gesture. The
+        // thumbnail tap that flipped isPlaying counts as the user gesture.
+        cfg.mediaTypesRequiringUserActionForPlayback = []
+
+        let webView = WKWebView(frame: .zero, configuration: cfg)
+        webView.scrollView.isScrollEnabled = false
+        webView.scrollView.bounces = false
+        webView.isOpaque = false
+        webView.backgroundColor = .black
+        webView.scrollView.backgroundColor = .black
+
+        context.coordinator.loadedVideoId = videoId
+        load(into: webView)
+        return webView
+    }
+
+    func updateUIView(_ webView: WKWebView, context: Context) {
+        guard context.coordinator.loadedVideoId != videoId else { return }
+        context.coordinator.loadedVideoId = videoId
+        load(into: webView)
+    }
+
+    private func load(into webView: WKWebView) {
+        // Real HTTP navigation to YouTube's embed page. Avoids the
+        // loadHTMLString Referer trap that triggers YouTube Error 153.
+        guard let url = URL(string:
+            "https://www.youtube.com/embed/\(videoId)?playsinline=1&autoplay=1&rel=0&modestbranding=1"
+        ) else { return }
+        webView.load(URLRequest(url: url))
+    }
+
+    final class Coordinator { var loadedVideoId: String? }
 }
