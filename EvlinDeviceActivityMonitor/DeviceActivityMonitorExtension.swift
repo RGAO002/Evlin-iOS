@@ -24,6 +24,14 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         removeShieldByHashAndRecompute(hashHex: hashHex)
     }
 
+    override func eventDidReachThreshold(_ event: DeviceActivityEvent.Name,
+                                         activity: DeviceActivityName) {
+        super.eventDidReachThreshold(event, activity: activity)
+        if event.rawValue == "evlin.bigkid.chunk" {
+            Task { await BigKidExtensionReporter.shared.reportChunk() }
+        }
+    }
+
     private func removeShieldByHashAndRecompute(hashHex: String) {
         guard let shieldData = defaults?.data(forKey: shieldsKey),
               var shields = try? PropertyListDecoder().decode([String: ShieldRecord].self, from: shieldData)
