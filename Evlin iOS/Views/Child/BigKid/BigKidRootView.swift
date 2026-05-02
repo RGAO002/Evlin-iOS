@@ -83,7 +83,10 @@ struct BigKidRootView: View {
             case .dailyComplete:
                 Text("DailyComplete").bold()
             case .screenTimeFinished:
-                Text("ScreenTimeFinished").bold()
+                BigKidScreenTimeFinishedView(onAck: {
+                    _ = try? await client.ackScreenTimeFinished()
+                    await poller.refreshNow()
+                })
             }
         }
         .environment(state)
