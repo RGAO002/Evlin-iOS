@@ -27,23 +27,26 @@ struct BigKidRootView: View {
         _poller = StateObject(wrappedValue: poller)
     }
 
+    @State private var taskNav: BigKidTask?
+    @State private var bypassNav: BigKidTask?
+
     var body: some View {
         Group {
             switch BigKidRouter.route(state) {
             case .home:
-                BigKidHomeView { task in /* TODO Phase 6 task detail nav */ }
+                BigKidHomeView { task in taskNav = task }
             case .homeReflectionA:
                 BigKidHomeReflectionView(
                     subState: .a,
                     onStartReflection: { /* TODO Phase 7 nav to LockedScreen */ },
-                    onTaskTap: { _ in /* TODO Phase 6 */ },
+                    onTaskTap: { task in taskNav = task },
                     onNudgeParent: { /* not used in State A */ }
                 )
             case .homeReflectionB:
                 BigKidHomeReflectionView(
                     subState: .b,
                     onStartReflection: {},
-                    onTaskTap: { _ in },
+                    onTaskTap: { task in taskNav = task },
                     onNudgeParent: {
                         Task {
                             guard let rid = state.reflectionRequest?.id else { return }
@@ -69,6 +72,31 @@ struct BigKidRootView: View {
             if new == .active {
                 Task { await poller.refreshNow() }
             }
+        }
+        .sheet(item: $taskNav) { t in
+            BigKidTaskDetailView(
+                task: t,
+                onBack: { taskNav = nil },
+                onBypass: {
+                    bypassNav = t
+                    taskNav = nil
+                },
+                onSubmit: { data, note in
+                    _ = try? await client.submitEvidence(taskId: t.id, photoData: data, note: note)
+                    await poller.refreshNow()
+                    taskNav = nil
+                }
+            )
+        }
+        .sheet(item: $bypassNav) { t in
+            BigKidBypassView(
+                task: t,
+                onBack: { bypassNav = nil },
+                onSend: { reason in
+                    _ = try? await client.submitBypass(taskId: t.id, reason: reason)
+                    await poller.refreshNow()
+                }
+            )
         }
     }
 }
