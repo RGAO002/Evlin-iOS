@@ -32,6 +32,14 @@ struct BigKidRootView: View {
         _client = StateObject(wrappedValue: client)
         _state = State(initialValue: initialState)
         _poller = StateObject(wrappedValue: poller)
+
+        // Mirror baseURL + childId into the App Group so the
+        // EvlinDeviceActivityMonitor extension can hit /child/time-consumption
+        // when DeviceActivityEvent thresholds fire (Phase 10).
+        if let groupDefaults = UserDefaults(suiteName: "group.com.evlin.ios") {
+            groupDefaults.set(baseURL.absoluteString, forKey: "evlin.baseURL")
+            groupDefaults.set(childId.uuidString, forKey: "evlin.childId")
+        }
     }
 
     @State private var taskNav: BigKidTask?
