@@ -31,7 +31,7 @@ struct BigKidRootView: View {
         Group {
             switch BigKidRouter.route(state) {
             case .home:
-                BigKidHomePlaceholderView()
+                BigKidHomeView { task in /* TODO Phase 6 task detail nav */ }
             case .homeReflectionA:
                 Text("HomeReflection A").bold()
             case .homeReflectionB:
@@ -57,16 +57,6 @@ struct BigKidRootView: View {
     }
 }
 
-private struct BigKidHomePlaceholderView: View {
-    @Environment(BigKidState.self) private var state
-
-    var body: some View {
-        VStack(spacing: 12) {
-            Text("Hi, \(state.childName)").font(.title)
-            Text("\(state.tasks.count) tasks, \(state.minutesLeft)/\(state.minutesMax) min")
-        }
-    }
-}
 
 #if DEBUG
 #Preview("Local backend") {
