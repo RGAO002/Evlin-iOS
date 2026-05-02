@@ -33,9 +33,25 @@ struct BigKidRootView: View {
             case .home:
                 BigKidHomeView { task in /* TODO Phase 6 task detail nav */ }
             case .homeReflectionA:
-                Text("HomeReflection A").bold()
+                BigKidHomeReflectionView(
+                    subState: .a,
+                    onStartReflection: { /* TODO Phase 7 nav to LockedScreen */ },
+                    onTaskTap: { _ in /* TODO Phase 6 */ },
+                    onNudgeParent: { /* not used in State A */ }
+                )
             case .homeReflectionB:
-                Text("HomeReflection B").bold()
+                BigKidHomeReflectionView(
+                    subState: .b,
+                    onStartReflection: {},
+                    onTaskTap: { _ in },
+                    onNudgeParent: {
+                        Task {
+                            guard let rid = state.reflectionRequest?.id else { return }
+                            _ = try? await client.reflectionNudge(rid: rid)
+                            await poller.refreshNow()
+                        }
+                    }
+                )
             case .complete:
                 Text("CompleteScreen").bold()
             case .dailyComplete:
