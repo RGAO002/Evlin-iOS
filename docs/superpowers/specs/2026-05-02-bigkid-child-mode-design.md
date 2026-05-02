@@ -428,10 +428,10 @@ Tracked for future plans:
 
 ## 13. Open Questions (resolve before implementation)
 
-1. **Home variant: A or B?** Default = A. Confirm before Phase 2 starts.
+1. ~~**Home variant: A or B?**~~ **Resolved**: Home variant = A (clean, engaging layout). HomeScreenB (circular dial) is built in the JSX prototype but will not be ported in v1; tracked in §12.
 2. **Final State B copy.** Draft above is a placeholder; Esen may give exact wording.
 3. **Time consumption granularity.** 5-min threshold is a guess; verify against DeviceActivityEvent's minimum threshold (Apple docs say 1 min minimum). Likely fine.
-4. **Photo storage.** Where do task evidence photos live (S3? Supabase Storage?)? Backend choice; out of scope here.
+4. ~~**Photo storage.**~~ **Resolved**: task evidence photos live in Supabase Storage bucket `evlin-task-evidence`, keyed `{childId}/{taskId}/{timestamp}.jpg`. Public URL persisted on `Task.evidencePhotoURL`. Matches existing project storage convention per `MEMORY.md`.
 5. ~~**What counts as "all tasks done" if a task has bypass approved?**~~ **Resolved**: a task counts as done iff `status == .done` OR `bypass?.status == .approved`. See `BigKidState.allTasksDone` in §4.
 
 ---
