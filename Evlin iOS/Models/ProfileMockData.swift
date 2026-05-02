@@ -25,6 +25,13 @@ struct DeviceItem: Identifiable, Hashable {
 }
 
 enum ProfileMockData {
+    /// Mutable per-child task store. Seeded lazily from `defaultTasks(for:)`
+    /// the first time a child is read, then mutated in place by Profile +
+    /// Task Detail screens. Both screens reach in here so they always see
+    /// the same source of truth (a notification deep-linking into Task
+    /// Detail picks up the same tasks Profile already shows).
+    static var runtimeTasks: [String: [TaskItem]] = [:]
+
     static func rules(for childId: String) -> [RuleItem] {
         [
             .init(id: "screen", iconSystemName: "display",
@@ -39,7 +46,44 @@ enum ProfileMockData {
         ]
     }
 
+    /// Reads from `runtimeTasks`, seeding from `defaultTasks` on first
+    /// access. Callers should treat the returned array as authoritative
+    /// and re-fetch after any mutation via `setTasks(...)` or
+    /// `updateTask(...)`.
     static func tasks(for childId: String) -> [TaskItem] {
+        if let cached = runtimeTasks[childId] { return cached }
+        let seeded = defaultTasks(for: childId)
+        runtimeTasks[childId] = seeded
+        return seeded
+    }
+
+    static func setTasks(_ tasks: [TaskItem], for childId: String) {
+        runtimeTasks[childId] = tasks
+    }
+
+    /// Replace one task in `runtimeTasks` (matched by id). Returns the
+    /// updated full list for the child.
+    @discardableResult
+    static func updateTask(_ task: TaskItem, for childId: String) -> [TaskItem] {
+        var list = tasks(for: childId)
+        if let i = list.firstIndex(where: { $0.id == task.id }) {
+            list[i] = task
+        } else {
+            list.append(task)
+        }
+        runtimeTasks[childId] = list
+        return list
+    }
+
+    @discardableResult
+    static func deleteTask(_ taskId: Int, for childId: String) -> [TaskItem] {
+        var list = tasks(for: childId)
+        list.removeAll(where: { $0.id == taskId })
+        runtimeTasks[childId] = list
+        return list
+    }
+
+    private static func defaultTasks(for childId: String) -> [TaskItem] {
         // Mirror HTML 874-880 verbatim; non-Liam children get a subset.
         guard childId == "liam" else {
             return [

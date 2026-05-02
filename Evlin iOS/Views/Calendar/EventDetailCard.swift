@@ -6,19 +6,40 @@ struct EventDetailCard: View {
     let dayLabel: String
     var isNew: Bool = false
     var onClose: () -> Void = {}
-    var onSave: (CalendarEvent) -> Void = { _ in }
+    /// Save callback. The first arg is the primary event; the second is
+    /// any extra recipient IDs the user multi-selected so the caller can
+    /// fan out a copy of the event under each. For a single-recipient
+    /// save the second array is empty.
+    var onSave: (CalendarEvent, [String]) -> Void = { _, _ in }
     var onDelete: () -> Void = {}
 
     @State private var isEditing: Bool
     @State private var draft: CalendarEvent
     @State private var reminderOn: Bool = true
 
+    // Inline-pill "add new category" — HTML 1494-1502, 1566.
+    @State private var customCategories: [String] = []
+    @State private var addingCategory: Bool = false
+    @State private var newCategoryName: String = ""
+    @FocusState private var newCategoryFocused: Bool
+
+    /// Multi-select recipients for the event. Defaults to {`event.col`}.
+    /// Picking "family" is mutually exclusive with the per-child options
+    /// (consistent with how the app interprets a family event).
+    @State private var recipientSelection: Set<String> = []
+
+    private static let defaultCategories: [String] =
+        ["Activity", "Lesson", "Sport", "Family", "Routine", "Study"]
+    private var allCategories: [String] {
+        Self.defaultCategories + customCategories
+    }
+
     init(event: CalendarEvent,
          person: CalendarPerson,
          dayLabel: String,
          isNew: Bool = false,
          onClose: @escaping () -> Void = {},
-         onSave: @escaping (CalendarEvent) -> Void = { _ in },
+         onSave: @escaping (CalendarEvent, [String]) -> Void = { _, _ in },
          onDelete: @escaping () -> Void = {}) {
         self.event = event
         self.person = person
@@ -29,40 +50,55 @@ struct EventDetailCard: View {
         self.onDelete = onDelete
         _isEditing = State(initialValue: isNew)
         _draft = State(initialValue: event)
+        _recipientSelection = State(initialValue: [event.col])
     }
 
     var body: some View {
-        ZStack {
-            Rectangle()
-                .fill(.ultraThinMaterial)
-                .ignoresSafeArea()
-                .onTapGesture { onClose() }
+        GeometryReader { geo in
+            ZStack {
+                Rectangle()
+                    .fill(.ultraThinMaterial)
+                    .ignoresSafeArea()
+                    .onTapGesture { onClose() }
 
-            // Card — content-hugged height (no Spacer), natural width
-            VStack(alignment: .leading, spacing: 0) {
-                header
-                    .padding(.bottom, 12)
+                // Card — header + scrollable middle + footer.
+                // Caps height at ~85% of the screen so the form never
+                // overflows when many fields are visible (Title / Time /
+                // Assigned to / Category / Repeat / Notes / Location /
+                // Reminder).
+                VStack(alignment: .leading, spacing: 0) {
+                    header
+                        .padding(.horizontal, 20)
+                        .padding(.top, 18)
+                        .padding(.bottom, 12)
 
-                Divider()
+                    Divider()
 
-                if isEditing {
-                    editForm
-                } else {
-                    readView
+                    ScrollView(showsIndicators: false) {
+                        if isEditing {
+                            editForm
+                        } else {
+                            readView
+                        }
+                    }
+                    .padding(.horizontal, 20)
+
+                    Divider()
+
+                    footer
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 14)
                 }
-
-                footer
-                    .padding(.top, 14)
+                .frame(maxHeight: geo.size.height * 0.86)
+                .background(
+                    RoundedRectangle(cornerRadius: 24, style: .continuous)
+                        .fill(Color.white)
+                )
+                .shadow(color: .black.opacity(0.18), radius: 40, x: 0, y: 12)
+                .padding(.horizontal, 20)
             }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 18)
-            .background(
-                RoundedRectangle(cornerRadius: 24, style: .continuous)
-                    .fill(Color.white)
-            )
-            .shadow(color: .black.opacity(0.18), radius: 40, x: 0, y: 12)
-            .padding(.horizontal, 20)
         }
+        .ignoresSafeArea(.keyboard, edges: .bottom)
         .preferredColorScheme(.light)
     }
 
@@ -136,13 +172,15 @@ struct EventDetailCard: View {
         .padding(.vertical, 12)
     }
 
+    /// Short labels for pill-style selector. Read-mode summary in the
+    /// detail card uses these too so the page stays compact.
     private func recurrenceLabel(_ value: String) -> String {
         switch value {
-        case "daily":    return "Every day"
-        case "weekdays": return "Every weekday"
-        case "weekly":   return "Every week"
-        case "monthly":  return "Every month"
-        default:         return "Does not repeat"
+        case "daily":    return "Daily"
+        case "weekdays": return "Weekdays"
+        case "weekly":   return "Weekly"
+        case "monthly":  return "Monthly"
+        default:         return "Never"
         }
     }
 
@@ -160,18 +198,15 @@ struct EventDetailCard: View {
                     TextField("End", text: $draft.end).evlinFormInput()
                 }
             }
-            evField("CATEGORY") {
-                FormPillSelector(
-                    items: [("Activity", "Activity"), ("Lesson", "Lesson"),
-                            ("Sport", "Sport"), ("Family", "Family"),
-                            ("Routine", "Routine"), ("Study", "Study")],
-                    selected: Binding(get: { draft.category }, set: { draft.category = $0 })
-                )
-            }
+            evField("ASSIGNED TO") { recipientPills }
+            evField("CATEGORY") { categoryPills }
             evField("REPEAT") {
                 FormPillSelector(
-                    items: [("none", "Once"), ("daily", "Daily"),
-                            ("weekdays", "Weekdays"), ("weekly", "Weekly")],
+                    items: [("none", "Never"),
+                            ("daily", "Daily"),
+                            ("weekdays", "Weekdays"),
+                            ("weekly", "Weekly"),
+                            ("monthly", "Monthly")],
                     selected: Binding(get: { draft.recurrence }, set: { draft.recurrence = $0 })
                 )
             }
@@ -190,8 +225,253 @@ struct EventDetailCard: View {
                 ))
                 .evlinFormInput()
             }
+            // Editable reminder row — HTML 1579-1584.
+            evField("REMINDER") {
+                HStack {
+                    Text("30 minutes before")
+                        .font(.custom("Inter", size: 14))
+                        .foregroundStyle(Color.evOnSurface)
+                    Spacer()
+                    Toggle("", isOn: $reminderOn)
+                        .labelsHidden()
+                        .tint(Color.evSecondary)
+                        .fixedSize()
+                        // Extra breathing room for the native UISwitch
+                        // knob shadow so it isn't shaved off by either
+                        // the bordered rect's trailing strokeBorder or
+                        // the surrounding ScrollView clip.
+                        .padding(.trailing, 4)
+                }
+                .padding(.leading, 14)
+                .padding(.trailing, 10)
+                .padding(.vertical, 10)
+                .background(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Color.evSurfaceContainerLowest)
+                )
+                .overlay(
+                    // strokeBorder (vs. stroke) keeps the 1pt line fully
+                    // inside the rounded rect so the trailing edge of
+                    // the toggle no longer gets shaved off by the
+                    // ScrollView clip.
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .strokeBorder(Color.evOutlineVariant, lineWidth: 1)
+                )
+            }
         }
         .padding(.vertical, 4)
+        // Tiny horizontal breathing room for shape-stroke pills sitting
+        // flush with the ScrollView's leading edge — without this the
+        // very first pill in any FlowLayout (Family / Activity / Never
+        // / 30-mins-before) would lose its left/right border to the
+        // clip rect.
+        .padding(.horizontal, 1)
+    }
+
+    /// Pills with an inline "+" that swaps to a primary-bordered pill input
+    /// in place — HTML 1564-1567. The "+" and the in-place input both
+    /// reuse the exact same padding profile as a real category pill so
+    /// their heights match and FlowLayout aligns everything on a single
+    /// baseline.
+    private var categoryPills: some View {
+        FlowLayout(spacing: 6) {
+            ForEach(allCategories, id: \.self) { c in
+                let selected = draft.category == c
+                Button {
+                    draft.category = c
+                } label: {
+                    Text(c.uppercased())
+                        .font(.custom("Inter", size: 11).weight(.heavy))
+                        .tracking(0.9)
+                        .foregroundStyle(selected ? Color.evPrimary : Color.evOnSurfaceVariant)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(
+                            Capsule().fill(selected
+                                           ? Color.evPrimary.opacity(0.08)
+                                           : Color.white)
+                        )
+                        .overlay(
+                            Capsule().strokeBorder(selected ? Color.evPrimary : Color.evOutlineVariant,
+                                                   lineWidth: 2)
+                        )
+                }
+                .buttonStyle(.plain)
+            }
+
+            if addingCategory {
+                // Pill-sized inline input. Same v-padding (6) and font
+                // (Inter 11 heavy) as a real category pill so heights
+                // match exactly. minWidth gives enough room to type
+                // without the pill collapsing while the field is empty.
+                TextField("Name…", text: $newCategoryName)
+                    .focused($newCategoryFocused)
+                    .submitLabel(.done)
+                    .font(.custom("Inter", size: 11).weight(.heavy))
+                    .foregroundStyle(Color.evPrimary)
+                    .frame(minWidth: 64, maxWidth: 120)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(Capsule().fill(Color.white))
+                    .overlay(Capsule().strokeBorder(Color.evPrimary, lineWidth: 2))
+                    .onSubmit { commitNewCategory() }
+                    .onChange(of: newCategoryFocused) { _, focused in
+                        if !focused { commitNewCategory() }
+                    }
+            } else {
+                // Original dashed-circle "+" button (per design). The
+                // misalignment was purely a height mismatch — the old
+                // 32×32 frame was taller than the surrounding ~26pt
+                // pills, so FlowLayout's top-alignment dropped it below
+                // the baseline. Sizing the circle to match the pill
+                // height (font 11 + .vertical 6 padding ≈ 26pt) puts it
+                // back on the same row baseline as the rest.
+                Button {
+                    addingCategory = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                        newCategoryFocused = true
+                    }
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 12, weight: .heavy))
+                        .foregroundStyle(Color.evOnSurfaceVariant)
+                        .frame(width: 26, height: 26)
+                        .background(Circle().fill(Color.clear))
+                        .overlay(
+                            Circle().strokeBorder(
+                                Color.evOutlineVariant,
+                                style: StrokeStyle(lineWidth: 2, dash: [4, 3])
+                            )
+                        )
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    private func commitNewCategory() {
+        let trimmed = newCategoryName.trimmingCharacters(in: .whitespaces)
+        if !trimmed.isEmpty && !allCategories.contains(trimmed) {
+            customCategories.append(trimmed)
+            draft.category = trimmed
+        }
+        newCategoryName = ""
+        addingCategory = false
+    }
+
+    // MARK: - Recipients (multi-select)
+
+    /// Single-line pill row for the editForm "Assigned to" field.
+    /// Tapping any pill is always allowed; toggle handles exclusivity
+    /// (picking a child auto-clears Family, picking Family clears all
+    /// children). Conflicting pills are visually faded to telegraph the
+    /// rule but remain tappable so the user can swap with one tap.
+    private var recipientPills: some View {
+        HStack(spacing: 6) {
+            ForEach(CalendarMockData.people) { p in
+                let isSel = recipientSelection.contains(p.id)
+                let conflicting = isRecipientDisabled(p.id)
+                Button {
+                    toggleRecipient(p.id)
+                } label: {
+                    HStack(spacing: 4) {
+                        recipientAvatar(for: p)
+                        Text(p.id == "family" ? "Family" : p.name)
+                            .font(.custom("Inter", size: 11)
+                                  .weight(isSel ? .heavy : .semibold))
+                            .foregroundStyle(isSel ? p.color : Color.evOnSurfaceVariant)
+                            .lineLimit(1)
+                        if isSel {
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 9, weight: .heavy))
+                                .foregroundStyle(p.color)
+                        }
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .background(
+                        Capsule().fill(isSel
+                                       ? p.color.opacity(0.10)
+                                       : Color.white)
+                    )
+                    .overlay(
+                        Capsule().strokeBorder(
+                            isSel ? p.color : Color.evOutlineVariant,
+                            lineWidth: 2
+                        )
+                    )
+                    .opacity(conflicting ? 0.45 : 1)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func recipientAvatar(for p: CalendarPerson) -> some View {
+        if p.id == "family" {
+            ZStack {
+                Circle().fill(p.color)
+                Image(systemName: "house.fill")
+                    .font(.system(size: 7, weight: .bold))
+                    .foregroundStyle(.white)
+            }
+            .frame(width: 16, height: 16)
+        } else {
+            EvlinAvatarView(
+                url: childAvatarURL(for: p.id),
+                name: p.name,
+                size: 16,
+                ring: true,
+                ringColor: p.color
+            )
+        }
+    }
+
+    private func childAvatarURL(for id: String) -> String? {
+        switch id {
+        case "liam": return ChildProfile.liam.avatarURL
+        case "maya": return ChildProfile.maya.avatarURL
+        case "emma": return ChildProfile.emma.avatarURL
+        default:     return nil
+        }
+    }
+
+    private func toggleRecipient(_ id: String) {
+        if id == "family" {
+            recipientSelection = ["family"]
+            return
+        }
+        recipientSelection.remove("family")
+        if recipientSelection.contains(id) {
+            recipientSelection.remove(id)
+            if recipientSelection.isEmpty { recipientSelection.insert("family") }
+        } else {
+            recipientSelection.insert(id)
+        }
+    }
+
+    private func isRecipientDisabled(_ id: String) -> Bool {
+        if id == "family" {
+            return recipientSelection.contains(where: { $0 != "family" })
+        }
+        return recipientSelection.contains("family")
+    }
+
+    /// Builds the primary saved event using the first selected recipient
+    /// as `col`, then forwards any extras to the parent so it can fan
+    /// out a copy under each.
+    private func commitSave() {
+        let order = ["family", "liam", "maya", "emma"]
+        let chosen = order.filter { recipientSelection.contains($0) }
+        guard let primary = chosen.first else {
+            onSave(draft, [])
+            return
+        }
+        var saved = draft
+        saved.col = primary
+        let extras = Array(chosen.dropFirst())
+        onSave(saved, extras)
     }
 
     private func evField<Content: View>(_ label: String, @ViewBuilder content: () -> Content) -> some View {
@@ -277,6 +557,12 @@ struct EventDetailCard: View {
             Toggle("", isOn: $reminderOn)
                 .labelsHidden()
                 .tint(Color.evSecondary)
+                .fixedSize()
+                // The native UISwitch renders a soft knob shadow that
+                // bleeds ~2pt past its frame on the trailing side. Without
+                // this padding the row sits flush with the ScrollView's
+                // clip edge and the rightmost pixels get shaved off.
+                .padding(.trailing, 4)
         }
         .padding(.vertical, 10)
     }
@@ -308,7 +594,7 @@ struct EventDetailCard: View {
                 .buttonStyle(.plain)
 
                 Button {
-                    onSave(draft)
+                    commitSave()
                 } label: {
                     HStack(spacing: 8) {
                         Image(systemName: isNew ? "plus" : "checkmark")

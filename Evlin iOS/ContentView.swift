@@ -1,9 +1,21 @@
 import SwiftUI
 
-enum HomeRoute: Hashable {
+/// Routes shared by every navigation stack in the parent shell (Home,
+/// Insights). Adding a new pushable destination to either tab? Add the
+/// case here and handle it in `appNavigationDestination`.
+enum AppRoute: Hashable {
     case profile(ChildProfile, taskId: Int? = nil)
     case notifications
+    /// Pushable Task Detail. We carry the full child + task by id so we
+    /// can reach the live task model inside the view.
+    case taskDetail(child: ChildProfile, taskId: Int)
+    /// Pushable per-device app-limits screen. Mirrors `taskDetail` —
+    /// pushes onto the same stack so edge-swipe-back works.
+    case deviceDetail(device: DeviceItem, childId: String)
 }
+
+/// Compatibility alias — older code referenced `HomeRoute`.
+typealias HomeRoute = AppRoute
 
 struct ContentView: View {
     @AppStorage("onboardingComplete") private var onboardingComplete = false
@@ -27,6 +39,7 @@ struct ContentView: View {
 struct ParentRootView: View {
     @State private var selectedTab: EvlinTab = .home
     @State private var profilePath = NavigationPath()
+    @State private var insightsPath = NavigationPath()
     @State private var banner: (title: String, body: String, avatarURL: String?)? = nil
 
     var body: some View {
@@ -37,35 +50,13 @@ struct ParentRootView: View {
                     NavigationStack(path: $profilePath) {
                         HomeView(
                             selectedTab: $selectedTab,
-                            onOpenProfile: { child in profilePath.append(HomeRoute.profile(child)) },
-                            onOpenNotifications: { profilePath.append(HomeRoute.notifications) }
+                            onOpenProfile: { child in profilePath.append(AppRoute.profile(child)) },
+                            onOpenNotifications: { profilePath.append(AppRoute.notifications) }
                         )
-                        .navigationDestination(for: HomeRoute.self) { route in
-                            switch route {
-                            case .profile(let child, let taskId):
-                                ProfileView(
-                                    child: child,
-                                    initialTaskId: taskId,
-                                    onBack: { if !profilePath.isEmpty { profilePath.removeLast() } },
-                                    onOpenCalendar: { selectedTab = .calendar }
-                                )
-                            case .notifications:
-                                NotificationPanel(
-                                    onClose: {
-                                        if !profilePath.isEmpty { profilePath.removeLast() }
-                                    },
-                                    onOpenProfile: { childId, taskId in
-                                        // Pop notifications, then push profile with taskId.
-                                        if !profilePath.isEmpty { profilePath.removeLast() }
-                                        if let child = ChildProfile.all.first(where: { $0.id == childId }) {
-                                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-                                                profilePath.append(HomeRoute.profile(child, taskId: taskId))
-                                            }
-                                        }
-                                    }
-                                )
-                            }
-                        }
+                        .appNavigationDestination(
+                            path: $profilePath,
+                            selectedTab: $selectedTab
+                        )
                     }
                 case .calendar:
                     CalendarView()
@@ -74,7 +65,17 @@ struct ParentRootView: View {
                 case .library:
                     LibraryView()
                 case .insights:
-                    InsightsView()
+                    NavigationStack(path: $insightsPath) {
+                        InsightsView(
+                            onOpenNotifications: {
+                                insightsPath.append(AppRoute.notifications)
+                            }
+                        )
+                        .appNavigationDestination(
+                            path: $insightsPath,
+                            selectedTab: $selectedTab
+                        )
+                    }
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -95,6 +96,72 @@ struct ParentRootView: View {
             }
         }
         .animation(.spring(response: 0.36, dampingFraction: 0.78), value: banner?.title)
+    }
+}
+
+// MARK: - Shared navigation destinations
+
+extension View {
+    /// Centralised destination resolver for `AppRoute`. Used by every
+    /// tab-scoped `NavigationStack` so that pushing the same case from
+    /// Home or Insights produces the same screen with the same back
+    /// behaviour.
+    @ViewBuilder
+    func appNavigationDestination(
+        path: Binding<NavigationPath>,
+        selectedTab: Binding<EvlinTab>
+    ) -> some View {
+        self.navigationDestination(for: AppRoute.self) { route in
+            switch route {
+            case .profile(let child, let taskId):
+                ProfileView(
+                    child: child,
+                    initialTaskId: taskId,
+                    onBack: {
+                        if !path.wrappedValue.isEmpty { path.wrappedValue.removeLast() }
+                    },
+                    onOpenCalendar: { selectedTab.wrappedValue = .calendar },
+                    onOpenTaskDetail: { task in
+                        path.wrappedValue.append(
+                            AppRoute.taskDetail(child: child, taskId: task.id)
+                        )
+                    },
+                    onOpenDevice: { device in
+                        path.wrappedValue.append(
+                            AppRoute.deviceDetail(device: device, childId: child.id)
+                        )
+                    }
+                )
+            case .notifications:
+                NotificationPanel(
+                    onClose: {
+                        if !path.wrappedValue.isEmpty { path.wrappedValue.removeLast() }
+                    },
+                    onOpenTask: { childId, taskId in
+                        guard let child = ChildProfile.all.first(where: { $0.id == childId }) else { return }
+                        path.wrappedValue.append(
+                            AppRoute.taskDetail(child: child, taskId: taskId)
+                        )
+                    }
+                )
+            case .taskDetail(let child, let taskId):
+                TaskDetailView(
+                    childId: child.id,
+                    taskId: taskId,
+                    onBack: {
+                        if !path.wrappedValue.isEmpty { path.wrappedValue.removeLast() }
+                    }
+                )
+            case .deviceDetail(let device, let childId):
+                DeviceAppsSheet(
+                    device: device,
+                    childId: childId,
+                    onClose: {
+                        if !path.wrappedValue.isEmpty { path.wrappedValue.removeLast() }
+                    }
+                )
+            }
+        }
     }
 }
 

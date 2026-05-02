@@ -1,16 +1,30 @@
 import SwiftUI
 
 struct InsightsView: View {
+    /// Push `.notifications` onto the parent's NavigationStack. Keeping
+    /// it as a callback means the view itself doesn't have to know
+    /// anything about routing.
+    var onOpenNotifications: () -> Void = {}
+
     @State private var selection: String = "liam"
     @State private var heroDismissed: Bool = false
     @State private var toastText: String? = nil
+    @State private var showSettings: Bool = false
+
+    private var unreadCount: Int {
+        HomeMockData.notifications.filter(\.unread).count
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             GlassmorphicHeader(title: "Child Insights", kicker: "Past 7 days") {
                 HStack(spacing: 4) {
-                    HeaderIconButton(systemName: "bell", badge: true) {}
-                    HeaderIconButton(systemName: "gearshape") {}
+                    HeaderIconButton(systemName: "bell", badge: unreadCount > 0) {
+                        onOpenNotifications()
+                    }
+                    HeaderIconButton(systemName: "gearshape") {
+                        showSettings = true
+                    }
                 }
             }
 
@@ -52,6 +66,27 @@ struct InsightsView: View {
             }
         }
         .animation(.easeInOut(duration: 0.2), value: toastText)
+        .fullScreenCover(isPresented: $showSettings) {
+            HomeSettingsSheet(onClose: { showSettings = false })
+        }
+    }
+
+    /// Builds the hero body with `45% increase` in bold white over the
+    /// faded white base (mirrors `<b style={{ color: '#fff' }}>` in the
+    /// design HTML line 57).
+    private var heroBodyAttributed: Text {
+        let body = InsightsMockData.heroBody
+        let highlight = "45% increase"
+        guard let range = body.range(of: highlight) else {
+            return Text(body).foregroundStyle(.white.opacity(0.7))
+        }
+        let pre  = String(body[..<range.lowerBound])
+        let post = String(body[range.upperBound...])
+        return Text(pre).foregroundStyle(.white.opacity(0.7))
+            + Text(highlight)
+                .foregroundStyle(.white)
+                .fontWeight(.heavy)
+            + Text(post).foregroundStyle(.white.opacity(0.7))
     }
 
     private var heroCard: some View {
@@ -74,7 +109,7 @@ struct InsightsView: View {
                     Text("EVLIN AI ANALYSIS")
                         .font(.custom("Inter", size: 10).weight(.heavy))
                         .tracking(1.6)
-                        .foregroundStyle(Color.evSecondaryFixed)
+                        .foregroundStyle(Color(hex: 0xA3F69C)) // Design line 49
                 }
                 .padding(.bottom, 4)
 
@@ -85,9 +120,8 @@ struct InsightsView: View {
                     .lineSpacing(-2)
                     .fixedSize(horizontal: false, vertical: true)
 
-                Text(InsightsMockData.heroBody)
+                heroBodyAttributed
                     .font(.custom("Inter", size: 13))
-                    .foregroundStyle(.white.opacity(0.7))
                     .lineSpacing(3)
                     .fixedSize(horizontal: false, vertical: true)
 

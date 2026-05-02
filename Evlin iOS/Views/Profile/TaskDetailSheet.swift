@@ -10,8 +10,9 @@ struct TaskDetailSheet: View {
     var onApprove: () -> Void = {}
     var onRedo: () -> Void = {}
     var onEdit: () -> Void = {}
-
-    @State private var activePhotoIndex: Int = 0
+    /// Tap on a submission photo. Receives the tapped index. Used by
+    /// `TaskDetailView` to open the full-screen photo viewer.
+    var onPhotoTap: (Int) -> Void = { _ in }
 
     private var stateMeta: (label: String, tone: Color, bg: Color) {
         switch task.state {
@@ -60,10 +61,7 @@ struct TaskDetailSheet: View {
                     .font(.system(size: 18, weight: .semibold))
                     .foregroundStyle(Color.evPrimary)
                     .frame(width: 40, height: 40)
-                    .background(
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .fill(Color.clear)
-                    )
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
 
@@ -80,11 +78,17 @@ struct TaskDetailSheet: View {
 
             Spacer()
 
+            // The ellipsis glyph itself is only ~18pt wide; without an
+            // explicit `contentShape` the hit area collapses to the icon
+            // bounding box, which is why the first tap often missed and
+            // it felt like double-tapping was needed. Setting the shape
+            // to the full 40×40 frame restores a single-tap response.
             Button(action: onEdit) {
                 Image(systemName: "ellipsis")
                     .font(.system(size: 18, weight: .semibold))
                     .foregroundStyle(Color.evOnSurface)
                     .frame(width: 40, height: 40)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
         }
@@ -173,64 +177,14 @@ struct TaskDetailSheet: View {
     }
 
     private var photoGallery: some View {
-        VStack(spacing: 10) {
-            ZStack(alignment: .topTrailing) {
-                AsyncImage(url: URL(string: task.photos[min(activePhotoIndex, task.photos.count - 1)])) { phase in
-                    if let img = phase.image {
-                        img.resizable().scaledToFill()
-                    } else {
-                        Rectangle().fill(Color.evSurfaceContainerLow)
-                    }
-                }
-                .aspectRatio(4/3, contentMode: .fit)
-                .frame(maxWidth: .infinity)
-                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .stroke(Color.evOutlineVariant, lineWidth: 1)
-                )
-
-                if task.photos.count > 1 {
-                    Text("\(activePhotoIndex + 1) / \(task.photos.count)")
-                        .font(.custom("Inter", size: 11).weight(.heavy))
-                        .tracking(0.4)
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 4)
-                        .background(Capsule().fill(Color.black.opacity(0.65)))
-                        .padding(10)
-                }
-            }
-
-            if task.photos.count > 1 {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        ForEach(Array(task.photos.enumerated()), id: \.offset) { idx, urlStr in
-                            Button {
-                                activePhotoIndex = idx
-                            } label: {
-                                AsyncImage(url: URL(string: urlStr)) { phase in
-                                    if let img = phase.image {
-                                        img.resizable().scaledToFill()
-                                    } else {
-                                        Rectangle().fill(Color.evSurfaceContainerLow)
-                                    }
-                                }
-                                .frame(width: 64, height: 64)
-                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                        .stroke(idx == activePhotoIndex ? Color.evPrimary : Color.evOutlineVariant,
-                                                lineWidth: idx == activePhotoIndex ? 2 : 1)
-                                )
-                                .opacity(idx == activePhotoIndex ? 1.0 : 0.75)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                }
-            }
-        }
+        // Inline carousel: horizontal swipe between photos right inside
+        // the detail screen (no need to open the fullscreen viewer to
+        // page through). Tap any photo to push the fullscreen viewer
+        // for pinch / drag-to-dismiss. See `EvlinPhotoCarousel`.
+        EvlinPhotoCarousel(
+            photos: task.photos,
+            onTapPhoto: { idx in onPhotoTap(idx) }
+        )
     }
 
     private var emptySubmissionPlaceholder: some View {
@@ -311,16 +265,16 @@ struct TaskDetailSheet: View {
         switch task.state {
         case .review:
             VStack(spacing: 10) {
-                primaryButton("Approve submission", color: Color.evSecondary, action: onApprove)
-                outlinedButton("Request redo", action: onRedo)
+                primaryButton("APPROVE SUBMISSION", color: Color.evSecondary, action: onApprove)
+                outlinedButton("REQUEST REDO", action: onRedo)
             }
         case .bypass:
             VStack(spacing: 10) {
-                primaryButton("Allow bypass", color: EvlinAddPalette.bypass, action: onApprove)
-                outlinedButton("Deny — keep as task", action: onRedo)
+                primaryButton("ALLOW BYPASS", color: EvlinAddPalette.bypass, action: onApprove)
+                outlinedButton("DENY — KEEP AS TASK", action: onRedo)
             }
         case .pending, .overdue:
-            primaryButton("Mark as complete", color: Color.evSecondary, action: onApprove)
+            primaryButton("MARK AS COMPLETE", color: Color.evSecondary, action: onApprove)
         case .done:
             doneStatusCard
         case .bypassed:
@@ -329,16 +283,22 @@ struct TaskDetailSheet: View {
     }
 
     private func primaryButton(_ title: String, color: Color, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
+        // Use the secondary gradient when the action is the canonical
+        // green CTA (Approve submission, Mark as complete). Other tones
+        // (e.g. bypass purple) keep their solid fill.
+        let useGradient = (color == Color.evSecondary)
+        return Button(action: action) {
             Text(title)
                 .font(.custom("Manrope", size: 14).weight(.heavy))
-                .tracking(0.3)
+                .tracking(0.8)
                 .foregroundStyle(.white)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 14)
                 .background(
                     RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .fill(color)
+                        .fill(useGradient
+                              ? AnyShapeStyle(Color.evSecondaryGradient)
+                              : AnyShapeStyle(color))
                 )
                 .shadow(color: color.opacity(0.32), radius: 14, y: 4)
         }

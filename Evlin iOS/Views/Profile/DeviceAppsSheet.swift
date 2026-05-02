@@ -39,6 +39,11 @@ struct DeviceAppsSheet: View {
             }
         }
         .background(Color.evSurfaceContainerLow)
+        // Pushed onto the parent NavigationStack — hide the system nav
+        // bar and rely on this view's own header arrow / edge-swipe.
+        .navigationBarBackButtonHidden(true)
+        .toolbar(.hidden, for: .navigationBar)
+        .enableSwipeBack()
         .onAppear { apps = DeviceAppsMockData.apps(for: childId) }
     }
 

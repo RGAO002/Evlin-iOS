@@ -1,7 +1,15 @@
 import SwiftUI
 
-/// Cancel / Title / Save header + scrollable body. See HTML 1196-1217.
+/// Cancel / Title / Save header + natural-height body. See HTML 1196-1217.
 /// Use as the root of every Add*/Edit* form sheet.
+///
+/// Sizing: the body is a plain `VStack` (no ScrollView). FormShell's
+/// natural height is exactly `header + divider + sum(fields)`, which
+/// lets the surrounding `EvlinSheetCard` collapse around its content.
+/// All current forms fit comfortably in ~half-screen, so we don't pay
+/// for ScrollView's "fill all offered space" behaviour. If a future
+/// form ever needs scrolling, wrap its FormShell content in a
+/// `ScrollView` at the call site.
 struct FormShell<Content: View>: View {
     let title: String
     var canSave: Bool = true
@@ -35,14 +43,13 @@ struct FormShell<Content: View>: View {
 
             Divider()
 
-            ScrollView {
-                VStack(spacing: 16) {
-                    content
-                }
-                .padding(.horizontal, 20)
-                .padding(.top, 18)
-                .padding(.bottom, 24)
+            VStack(spacing: 16) {
+                content
             }
+            .padding(.horizontal, 20)
+            .padding(.top, 18)
+            .padding(.bottom, 24)
+            .frame(maxWidth: .infinity, alignment: .top)
         }
     }
 }
@@ -64,7 +71,12 @@ struct FormField<Content: View>: View {
     }
 }
 
-/// TextField input style matching HTML 1194 (FORM_INPUT).
+/// TextField input style matching HTML 1194 (FORM_INPUT). We use
+/// `strokeBorder` rather than `stroke` so the 1.5pt line is fully inside
+/// the rounded rectangle bounds (CSS `box-sizing: border-box` parity);
+/// `stroke` puts half outside the path which makes inputs render ~1pt
+/// taller than the design and creates a faint "shadow halo" along the
+/// edge.
 extension View {
     func evlinFormInput() -> some View {
         self
@@ -78,7 +90,7 @@ extension View {
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .stroke(Color.evOutlineVariant, lineWidth: 1.5)
+                    .strokeBorder(Color.evOutlineVariant, lineWidth: 1)
             )
     }
 }
@@ -105,8 +117,8 @@ struct FormPillSelector<Item: Hashable>: View {
                         )
                         .overlay(
                             Capsule()
-                                .stroke(selected == item.value ? Color.evPrimary : Color.evOutlineVariant,
-                                        lineWidth: 2)
+                                .strokeBorder(selected == item.value ? Color.evPrimary : Color.evOutlineVariant,
+                                              lineWidth: 2)
                         )
                 }
                 .buttonStyle(.plain)
@@ -116,11 +128,19 @@ struct FormPillSelector<Item: Hashable>: View {
 }
 
 /// Simple flow layout for pills (wraps when row is full).
+///
+/// IMPORTANT: when measured with an unconstrained proposal (e.g. the
+/// hidden measurement layer in `EvlinSheetCard`, where `fixedSize`
+/// strips the height proposal), `proposal.width` is nil. We default to
+/// `.infinity` rather than 0 so items lay out in a single row instead
+/// of wrapping after every item — otherwise a 7-icon picker would
+/// report 7 rows of natural height and inflate the surrounding sheet
+/// to ~full screen.
 struct FlowLayout: Layout {
     var spacing: CGFloat = 6
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let result = arrange(in: proposal.width ?? 0, subviews: subviews)
+        let result = arrange(in: proposal.width ?? .infinity, subviews: subviews)
         return result.size
     }
 

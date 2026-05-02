@@ -3,86 +3,99 @@ import WebKit
 
 /// External-facing wrapper used by StrategyCard / VideoRecommendationCard.
 ///
-/// Behavior (matches the pre-Error-153 user-remembered experience):
-/// - Default: thumbnail + red play button.
-/// - Tap (or external `isPlaying = true`) → swap in-place to an inline
-///   WKWebView that auto-plays.
-/// - User taps the YouTube player's fullscreen icon → iOS WebKit takes over
-///   with system-native fullscreen chrome (Done button top-leading, AirPlay,
-///   Picture-in-Picture, scrubber). This is what the user calls "iOS player
-///   controls" — it's the OS chrome wrapping YouTube's iframe player.
+/// This intentionally matches the original working UX:
+/// - thumbnail in the chat card
+/// - tap -> inline WKWebView starts the YouTube embed in-place
+/// - YouTube/WebKit owns the fullscreen button and media chrome
 ///
-/// Why we don't use loadHTMLString anymore:
-/// YouTube tightened iframe embed Referer enforcement (Error 153) in late
-/// 2025 / Apr 2026. `loadHTMLString(_, baseURL:)` produces an empty/synthetic
-/// referrer that YouTube now rejects, regardless of baseURL.
-/// `webView.load(URLRequest(url:))` to the actual embed URL is a real HTTP
-/// navigation: the document IS the YouTube embed page, the origin IS
-/// youtube.com, and sub-resource fetches get same-origin referrer naturally.
+/// Do not wrap this in a SwiftUI fullScreenCover. That creates a second
+/// fullscreen layer on top of WebKit's own media fullscreen, which is the
+/// source of the "close one layer, reveal another layer" behavior.
 struct YouTubePlayerView: View {
     let videoId: String
     let thumbnail: String
     @Binding var isPlaying: Bool
+    @State private var localIsPlaying = false
 
     var body: some View {
         ZStack {
-            if isPlaying {
+            if shouldPlay {
                 InlineYouTubeWebView(videoId: videoId)
                     .background(Color.black)
             } else {
                 Button {
+#if DEBUG
+                    print("[YouTubePlayer] thumbnail tapped videoId=\(videoId)")
+#endif
+                    localIsPlaying = true
                     isPlaying = true
                 } label: {
-                    ZStack {
-                        AsyncImage(url: URL(string: thumbnail)) { image in
-                            image.resizable().aspectRatio(contentMode: .fill)
-                        } placeholder: {
-                            Rectangle().fill(Color.evPrimaryContainer)
-                        }
-
-                        Circle()
-                            .fill(Color.red)
-                            .frame(width: 56, height: 56)
-                            .overlay(
-                                Image(systemName: "play.fill")
-                                    .font(.system(size: 22))
-                                    .foregroundStyle(Color.white)
-                                    .offset(x: 2)
-                            )
-                            .shadow(color: .black.opacity(0.3), radius: 8, y: 4)
-                    }
+                    thumbnailContent
                 }
                 .buttonStyle(.plain)
                 .contentShape(Rectangle())
                 .accessibilityLabel("Play YouTube video")
             }
         }
+        .onChange(of: isPlaying) { _, newValue in
+            if newValue {
+                localIsPlaying = true
+            }
+        }
+    }
+
+    private var shouldPlay: Bool {
+        isPlaying || localIsPlaying
+    }
+
+    private var thumbnailContent: some View {
+        ZStack {
+            AsyncImage(url: URL(string: thumbnail)) { image in
+                image.resizable().aspectRatio(contentMode: .fill)
+            } placeholder: {
+                Rectangle().fill(Color.evPrimaryContainer)
+            }
+
+            Circle()
+                .fill(Color.red)
+                .frame(width: 56, height: 56)
+                .overlay(
+                    Image(systemName: "play.fill")
+                        .font(.system(size: 22))
+                        .foregroundStyle(Color.white)
+                        .offset(x: 2)
+                )
+                .shadow(color: .black.opacity(0.3), radius: 8, y: 4)
+        }
     }
 }
 
-/// Loads `https://www.youtube.com/embed/<id>?...` directly as the WKWebView's
-/// document. Inline playback enabled; native iOS fullscreen chrome appears
-/// when the user taps the player's fullscreen button.
+/// Loads the YouTube embed URL as the WKWebView's top-level document.
+///
+/// YouTube now requires embedded players inside WebViews to identify the API
+/// client. Direct top-level loading preserves the original inline player ->
+/// WebKit fullscreen flow; the explicit Referer header avoids Error 153.
 struct InlineYouTubeWebView: UIViewRepresentable {
     let videoId: String
 
-    func makeCoordinator() -> Coordinator { Coordinator() }
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
 
     func makeUIView(context: Context) -> WKWebView {
-        let cfg = WKWebViewConfiguration()
-        cfg.allowsInlineMediaPlayback = true
-        cfg.allowsPictureInPictureMediaPlayback = true
-        cfg.defaultWebpagePreferences.allowsContentJavaScript = true
-        // Empty set = autoplay/play don't require a user gesture. The
-        // thumbnail tap that flipped isPlaying counts as the user gesture.
-        cfg.mediaTypesRequiringUserActionForPlayback = []
+        let configuration = WKWebViewConfiguration()
+        configuration.allowsInlineMediaPlayback = true
+        configuration.allowsPictureInPictureMediaPlayback = true
+        configuration.defaultWebpagePreferences.allowsContentJavaScript = true
+        configuration.mediaTypesRequiringUserActionForPlayback = []
 
-        let webView = WKWebView(frame: .zero, configuration: cfg)
+        let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.scrollView.isScrollEnabled = false
         webView.scrollView.bounces = false
         webView.isOpaque = false
         webView.backgroundColor = .black
         webView.scrollView.backgroundColor = .black
+        webView.navigationDelegate = context.coordinator
 
         context.coordinator.loadedVideoId = videoId
         load(into: webView)
@@ -96,13 +109,69 @@ struct InlineYouTubeWebView: UIViewRepresentable {
     }
 
     private func load(into webView: WKWebView) {
-        // Real HTTP navigation to YouTube's embed page. Avoids the
-        // loadHTMLString Referer trap that triggers YouTube Error 153.
-        guard let url = URL(string:
-            "https://www.youtube.com/embed/\(videoId)?playsinline=1&autoplay=1&rel=0&modestbranding=1"
-        ) else { return }
-        webView.load(URLRequest(url: url))
+        let identityURL = clientIdentityURL
+        guard let embedURL = embedURL(identityURL: identityURL) else { return }
+        var request = URLRequest(url: embedURL)
+        request.setValue(identityURL.absoluteString, forHTTPHeaderField: "Referer")
+#if DEBUG
+        print("[YouTubePlayer] loading embed videoId=\(videoId) referer=\(identityURL.absoluteString) url=\(embedURL.absoluteString)")
+#endif
+        webView.load(request)
     }
 
-    final class Coordinator { var loadedVideoId: String? }
+    private var clientIdentityURL: URL {
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = Bundle.main.bundleIdentifier?.lowercased() ?? "com.evlin.evlin-ios"
+        return components.url ?? URL(string: "https://com.evlin.evlin-ios")!
+    }
+
+    private func embedURL(identityURL: URL) -> URL? {
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = "www.youtube.com"
+        components.path = "/embed/\(videoId)"
+        components.queryItems = [
+            URLQueryItem(name: "autoplay", value: "1"),
+            URLQueryItem(name: "controls", value: "1"),
+            URLQueryItem(name: "fs", value: "1"),
+            URLQueryItem(name: "playsinline", value: "1"),
+            URLQueryItem(name: "rel", value: "0"),
+            URLQueryItem(name: "modestbranding", value: "1"),
+            URLQueryItem(name: "enablejsapi", value: "1"),
+            URLQueryItem(name: "origin", value: identityURL.absoluteString),
+            URLQueryItem(name: "widget_referrer", value: identityURL.absoluteString)
+        ]
+        return components.url
+    }
+
+    final class Coordinator: NSObject, WKNavigationDelegate {
+        var loadedVideoId: String?
+
+        func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+#if DEBUG
+            print("[YouTubePlayer] didStart url=\(webView.url?.absoluteString ?? "nil")")
+#endif
+        }
+
+        func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+#if DEBUG
+            print("[YouTubePlayer] didCommit url=\(webView.url?.absoluteString ?? "nil")")
+#endif
+        }
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+#if DEBUG
+            print("[YouTubePlayer] didFinish url=\(webView.url?.absoluteString ?? "nil")")
+#endif
+        }
+
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            print("[YouTubePlayer] didFail error=\(error.localizedDescription)")
+        }
+
+        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+            print("[YouTubePlayer] didFailProvisional error=\(error.localizedDescription)")
+        }
+    }
 }

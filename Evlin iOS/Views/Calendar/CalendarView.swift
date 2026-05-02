@@ -53,13 +53,20 @@ struct CalendarView: View {
                     person: CalendarMockData.person(event.col),
                     dayLabel: "\(isViewingToday ? "Today" : CalendarMockData.shortDateLabel(selectedDate)), \(event.start) – \(event.end)",
                     onClose: { activeEvent = nil },
-                    onSave: { updated in
+                    onSave: { updated, extras in
                         let offset = CalendarMockData.daysFromToday(to: selectedDate)
                         var todays = CalendarMockData.runtimeEventsByOffset[offset] ?? []
                         if let i = todays.firstIndex(where: { $0.id == updated.id }) {
                             todays[i] = updated
-                            CalendarMockData.runtimeEventsByOffset[offset] = todays
+                        } else {
+                            todays.append(updated)
                         }
+                        for rid in extras {
+                            var copy = updated
+                            copy.col = rid
+                            todays.append(copy)
+                        }
+                        CalendarMockData.runtimeEventsByOffset[offset] = todays
                         activeEvent = nil
                     }
                 )
@@ -73,10 +80,15 @@ struct CalendarView: View {
                     dayLabel: CalendarMockData.shortDateLabel(selectedDate),
                     isNew: true,
                     onClose: { newEvent = nil },
-                    onSave: { created in
+                    onSave: { created, extras in
                         let offset = CalendarMockData.daysFromToday(to: selectedDate)
                         var todays = CalendarMockData.runtimeEventsByOffset[offset] ?? []
                         todays.append(created)
+                        for rid in extras {
+                            var copy = created
+                            copy.col = rid
+                            todays.append(copy)
+                        }
                         CalendarMockData.runtimeEventsByOffset[offset] = todays
                         newEvent = nil
                     }
@@ -437,11 +449,12 @@ struct CalendarView: View {
         .buttonStyle(.plain)
     }
 
+    /// Opens the new-event sheet defaulted to the focused person (or
+    /// "family" if no filter is active). The user can change/multi-select
+    /// recipients inside the sheet itself.
     private func startNewEvent() {
-        // Default person: focused person if any, else "family"
         let personId = focusPerson ?? "family"
         let person = CalendarMockData.person(personId)
-        // Default time: next hour from now (rounded), 1 hour duration
         let formatter = DateFormatter()
         formatter.dateFormat = "hh:mm a"
         let startDate = Date()

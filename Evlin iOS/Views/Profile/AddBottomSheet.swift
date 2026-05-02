@@ -22,8 +22,8 @@ struct AddBottomSheet: View {
             case nil:       EmptyView()
             }
         }
-        .presentationDetents([.medium, .large])
-        .presentationDragIndicator(.visible)
+        // Hosted inside `EvlinSheetCard`, so no system sheet sizing is
+        // needed — the wrapper handles backdrop, height, and dismiss.
     }
 }
 
@@ -89,6 +89,8 @@ private struct AddMenu: View {
                         }
                         .padding(.horizontal, 16)
                         .padding(.vertical, 14)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
 
@@ -100,8 +102,7 @@ private struct AddMenu: View {
                     }
                 }
             }
-
-            Spacer()
+            .padding(.bottom, 12)
         }
     }
 
@@ -264,7 +265,7 @@ struct EditTaskForm: View {
                     .padding(.vertical, 12)
                     .background(
                         RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .stroke(Color.evError.opacity(0.4), lineWidth: 1.5)
+                            .strokeBorder(Color.evError.opacity(0.4), lineWidth: 1)
                     )
             }
             .buttonStyle(.plain)
@@ -333,8 +334,8 @@ struct AddRuleForm: View {
                                 )
                                 .overlay(
                                     RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                        .stroke(icon == name ? Color.evPrimary : Color.evOutlineVariant,
-                                                lineWidth: 2)
+                                        .strokeBorder(icon == name ? Color.evPrimary : Color.evOutlineVariant,
+                                                      lineWidth: 2)
                                 )
                         }
                         .buttonStyle(.plain)
@@ -425,8 +426,8 @@ struct EditRuleForm: View {
                                 )
                                 .overlay(
                                     RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                        .stroke(icon == name ? Color.evPrimary : Color.evOutlineVariant,
-                                                lineWidth: 2)
+                                        .strokeBorder(icon == name ? Color.evPrimary : Color.evOutlineVariant,
+                                                      lineWidth: 2)
                                 )
                         }
                         .buttonStyle(.plain)
@@ -444,7 +445,7 @@ struct EditRuleForm: View {
                     .padding(.vertical, 12)
                     .background(
                         RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .stroke(Color.evError.opacity(0.4), lineWidth: 1.5)
+                            .strokeBorder(Color.evError.opacity(0.4), lineWidth: 1)
                     )
             }
             .buttonStyle(.plain)
@@ -592,7 +593,7 @@ struct AddDeviceForm: View {
                             )
                             .overlay(
                                 RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                    .stroke(iconSystemName == t.icon ? Color.evPrimary : Color.evOutlineVariant,
+                                    .strokeBorder(iconSystemName == t.icon ? Color.evPrimary : Color.evOutlineVariant,
                                             lineWidth: 2)
                             )
                         }

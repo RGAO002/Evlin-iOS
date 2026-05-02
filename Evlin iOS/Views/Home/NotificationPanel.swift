@@ -2,7 +2,10 @@ import SwiftUI
 
 struct NotificationPanel: View {
     var onClose: () -> Void
-    var onOpenProfile: (String, Int?) -> Void = { _, _ in }
+    /// Open a task directly. Replaces the older two-step
+    /// `onOpenProfile(childId, taskId?)` flow — task notifications now
+    /// push straight to TaskDetail through the parent navigation stack.
+    var onOpenTask: (String, Int) -> Void = { _, _ in }
     @State private var notifs: [HomeNotification] = HomeMockData.notifications
 
     private var unread: Int { notifs.filter(\.unread).count }
@@ -101,13 +104,11 @@ struct NotificationPanel: View {
                     notifs[idx].unread = false
                 }
             }
-            // Deep-link: task notifications open the corresponding child's
-            // ProfileView with the task expanded. See HTML 240-246.
-            if n.kind == "task", n.childId != "family" {
-                onClose()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                    onOpenProfile(n.childId, n.taskId)
-                }
+            // Deep-link: task notifications push TaskDetail on the same
+            // navigation stack we're already inside (Home or Insights).
+            // No more close-then-reopen dance.
+            if n.kind == "task", n.childId != "family", let tid = n.taskId {
+                onOpenTask(n.childId, tid)
             }
         } label: {
             HStack(alignment: .top, spacing: 12) {

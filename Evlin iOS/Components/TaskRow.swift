@@ -72,12 +72,15 @@ struct TaskRow: View {
         }
     }
 
+    /// Title + status pill stacked vertically (HTML 532-542).
     private var mainRow: some View {
         HStack(spacing: 14) {
             stateIcon
-            titleText
+            VStack(alignment: .leading, spacing: 3) {
+                titleText
+                trailingLabel
+            }
             Spacer(minLength: 4)
-            trailingLabel
             Image(systemName: "chevron.right")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(Color.evOutline)
@@ -169,7 +172,7 @@ struct TaskRow: View {
         case .done:
             EvlinPill(text: "Done", tone: .success, size: .xs)
         case .review:
-            EvlinPill(text: "Reviewing", tone: .warn, size: .xs)
+            EvlinPill(text: "Needs review", tone: .warn, size: .xs)
         case .pending:
             EvlinPill(text: "Pending", tone: .neutral, size: .xs)
         case .overdue:
@@ -240,7 +243,7 @@ struct TaskRow: View {
                     .padding(.vertical, 12)
                     .background(
                         RoundedRectangle(cornerRadius: 22, style: .continuous)
-                            .fill(Color.evSecondary)
+                            .fill(Color.evSecondaryGradient)
                     )
                     .shadow(color: Color.evSecondary.opacity(0.3), radius: 8, y: 3)
             }
