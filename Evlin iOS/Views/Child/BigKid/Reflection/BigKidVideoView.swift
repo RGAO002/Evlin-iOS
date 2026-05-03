@@ -149,6 +149,13 @@ private struct VideoEmbedView: UIViewRepresentable {
         web.backgroundColor = .black
         web.scrollView.backgroundColor = .black
         web.navigationDelegate = context.coordinator
+        // Block all gestures inside the player. YouTube's HTML5 player
+        // keeps double-tap-to-skip-10s active even with `controls=0`,
+        // and there's no embed param to disable it. Killing user
+        // interaction on the WKWebView itself is the cleanest stopper —
+        // `autoplay=1` in the URL means the kid doesn't need to tap to
+        // start playback anyway.
+        web.isUserInteractionEnabled = false
 
         context.coordinator.loadedVideoId = videoId
         load(into: web)
