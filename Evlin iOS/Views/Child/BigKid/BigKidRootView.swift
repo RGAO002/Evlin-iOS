@@ -166,7 +166,18 @@ struct BigKidRootView: View {
                         print("[BigKid] submitEvidence failed for task \(t.id): \(error)")
                     }
                     await poller.refreshNow()
-                    taskNav = nil
+                    // Rebind taskNav to the refreshed task so the sheet
+                    // re-renders with phase=.submitted (otherwise it keeps
+                    // showing the .input UI from the originally-captured
+                    // value). SwiftUI's .sheet(item:) only re-evaluates
+                    // its content when the bound Identifiable changes —
+                    // same id with new fields counts.
+                    if let fresh = state.tasks.first(where: { $0.id == t.id }) {
+                        await MainActor.run { taskNav = fresh }
+                    }
+                    // Kid stays on the screen and now sees their own photo
+                    // + "Sent just now" banner. Taps "Back to today"
+                    // themselves to dismiss.
                 }
             )
         }
