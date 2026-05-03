@@ -61,6 +61,28 @@ struct BigKidLockedView: View {
         }
     }
 
+    /// Body copy under the "Hey <name>" headline. When the parent
+    /// supplied a reason it's wrapped in the canonical sentence:
+    ///   "You did <reason>. Work through these three steps and your
+    ///    devices will unlock."
+    /// When everything is done we switch to the celebratory copy.
+    private var messageBody: String {
+        if allDone {
+            return "You did the work. Tap below to finish up and get your devices back."
+        }
+        let raw = (state.reflectionRequest?.reason ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else {
+            return "Your devices are locked for a bit. Work through these three steps and your devices will unlock."
+        }
+        // Strip a trailing period so we can re-attach the canonical sentence cleanly.
+        var trimmed = raw
+        while trimmed.hasSuffix(".") || trimmed.hasSuffix("。") {
+            trimmed.removeLast()
+        }
+        return "You did \(trimmed). Work through these three steps and your devices will unlock."
+    }
+
     private var headlineBlock: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("REFLECTION TIME")
@@ -71,9 +93,7 @@ struct BigKidLockedView: View {
                 .font(.system(size: 38, weight: .heavy))
                 .tracking(-1)
                 .foregroundStyle(EvlinKidColors.ink)
-            Text(allDone
-                 ? "You did the work. Tap below to finish up and get your devices back."
-                 : (state.reflectionRequest?.reason ?? "Your devices are locked for a bit. Work through these three steps and they'll unlock."))
+            Text(messageBody)
                 .font(.system(size: 16))
                 .foregroundStyle(EvlinKidColors.ink2)
                 .lineSpacing(3)
