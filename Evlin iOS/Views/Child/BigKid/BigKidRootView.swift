@@ -150,6 +150,28 @@ struct BigKidRootView: View {
         }
     }
 
+    /// Optimistically mark a reflection sub-step as completed in the local
+    /// `BigKidState`. This makes the LockedScreen progress bar / step rows
+    /// update immediately when the kid finishes a step, regardless of whether
+    /// the backend `step-complete` round-trip has landed yet (or, in DEBUG
+    /// scenario mode, whether the poller is even running). The next live
+    /// `state` snapshot from the poller will overwrite this with the
+    /// authoritative server value.
+    private func applyLocalStepCompletion(_ step: BigKidReflectionStep) {
+        guard let req = state.reflectionRequest else { return }
+        guard !req.stepsCompleted.contains(step) else { return }
+        let merged = ReflectionRequest(
+            id: req.id, reason: req.reason,
+            videoId: req.videoId, videoTitle: req.videoTitle,
+            writingPrompt: req.writingPrompt, quiz: req.quiz,
+            stepsCompleted: req.stepsCompleted + [step],
+            quizScore: req.quizScore, essayText: req.essayText,
+            status: req.status, parentNote: req.parentNote,
+            submittedAt: req.submittedAt, approvedAt: req.approvedAt
+        )
+        state.reflectionRequest = merged
+    }
+
     #if DEBUG
     private func applyDebugScenario(_ scenario: BigKidDebugScenario) {
         if let snapshot = scenario.snapshot() {
@@ -190,6 +212,7 @@ struct BigKidRootView: View {
         case .video:
             if let r = state.reflectionRequest {
                 BigKidVideoView(videoId: r.videoId, videoTitle: r.videoTitle) {
+                    applyLocalStepCompletion(.video)
                     _ = try? await client.reflectionStepComplete(rid: r.id, step: .video)
                     await poller.refreshNow()
                     reflectionPath.removeLast()
@@ -206,6 +229,7 @@ struct BigKidRootView: View {
                         ?? QuizAnswerOutcome(correct: false, allCorrect: false, score: 0)
                     },
                     onComplete: {
+                        applyLocalStepCompletion(.quiz)
                         await poller.refreshNow()
                         reflectionPath.removeLast()
                     },
@@ -215,6 +239,7 @@ struct BigKidRootView: View {
         case .writing:
             if let r = state.reflectionRequest {
                 BigKidWritingView(prompt: r.writingPrompt) { text in
+                    applyLocalStepCompletion(.writing)
                     _ = try? await client.reflectionEssay(rid: r.id, text: text)
                     await poller.refreshNow()
                     reflectionPath = NavigationPath()

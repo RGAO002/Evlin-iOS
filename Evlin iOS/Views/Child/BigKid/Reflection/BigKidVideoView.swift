@@ -1,56 +1,41 @@
-import Combine
 import SwiftUI
 import WebKit
 
 /// Reflection step 1 — kid watches the assigned YouTube video.
 ///
-/// **Why no JS-bridge progress detection:** YouTube's IFrame API
-/// hosted via `loadHTMLString` triggers Player Error 152/153 on
-/// recent embeds (Apr 2026 Referer enforcement tightening). The
-/// chat side worked around this in `Components/YouTubePlayerView.swift`
-/// by loading the embed as a real HTTP request with an explicit
-/// `Referer` header — same approach here. The trade-off is we lose
-/// JS access to player events, so we estimate progress with a
-/// SwiftUI timer driven off a fixed expected duration. Kid still
-/// can't skip (controls hidden), and the timer pauses naturally
-/// when the view is backgrounded — combined with the scenePhase
-/// reset rule (spec §6.2) this is the soft fallback before AAC.
+/// **YouTube embed strategy.** YouTube's IFrame API hosted via
+/// `loadHTMLString` triggers Player Error 152/153 on recent embeds
+/// (Apr 2026 Referer enforcement tightening). The chat side worked
+/// around this in `Components/YouTubePlayerView.swift` by loading the
+/// embed as a real HTTP request with an explicit `Referer` header —
+/// same approach here.
+///
+/// **Real progress.** Inside the loaded YouTube embed page sits a
+/// standard HTML5 `<video>` element. We inject a `WKUserScript` at
+/// document-end that listens to that element's `timeupdate` and
+/// `ended` events and forwards `(currentTime / duration)` plus
+/// playback-state messages to the native `WKScriptMessageHandler`.
+/// The kid still can't skip — `web.isUserInteractionEnabled = false`
+/// kills all gestures, so the player just plays through.
 struct BigKidVideoView: View {
     let videoId: String
     let videoTitle: String
-    /// Expected video length in seconds. The kid must dwell on this
-    /// screen for at least this long before "Continue" enables.
-    let expectedDurationSeconds: Double
     var onComplete: () async -> Void
 
-    @State private var elapsed: Double = 0
+    @State private var playbackPercent: Double = 0
+    @State private var ended: Bool = false
     @State private var completing: Bool = false
-    @Environment(\.scenePhase) private var scenePhase
-
-    private let tickInterval: Double = 0.5
-    private let timer = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
-
-    init(videoId: String,
-         videoTitle: String,
-         expectedDurationSeconds: Double = 120,
-         onComplete: @escaping () async -> Void) {
-        self.videoId = videoId
-        self.videoTitle = videoTitle
-        self.expectedDurationSeconds = expectedDurationSeconds
-        self.onComplete = onComplete
-    }
-
-    private var playbackPercent: Double {
-        min(100, (elapsed / expectedDurationSeconds) * 100)
-    }
-    private var watched: Bool { elapsed >= expectedDurationSeconds }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header.padding(.top, 6).padding(.bottom, 20)
-            VideoEmbedView(videoId: videoId)
-                .clipShape(RoundedRectangle(cornerRadius: 24))
-                .frame(maxHeight: 440)
+            VideoEmbedView(
+                videoId: videoId,
+                onProgress: { playbackPercent = min(100, $0) },
+                onEnded: { ended = true }
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 24))
+            .frame(maxHeight: 440)
             VStack(spacing: 10) {
                 progressBar.padding(.top, 20)
                 lockHint
@@ -61,11 +46,9 @@ struct BigKidVideoView: View {
         .padding(.horizontal, EvlinKidMetrics.Padding.screenH)
         .padding(.bottom, 30)
         .background(EvlinKidColors.surface.ignoresSafeArea())
-        .onReceive(timer) { _ in
-            guard scenePhase == .active else { return }
-            elapsed = min(expectedDurationSeconds, elapsed + tickInterval)
-        }
     }
+
+    private var watched: Bool { ended || playbackPercent >= 99 }
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -105,16 +88,9 @@ struct BigKidVideoView: View {
             }
         } else {
             EvKidBigButton(isDisabled: true, action: {}) {
-                Text("Watching… \(remainingLabel)")
+                Text("Watching…")
             }
         }
-    }
-
-    private var remainingLabel: String {
-        let remaining = max(0, Int((expectedDurationSeconds - elapsed).rounded(.up)))
-        let m = remaining / 60
-        let s = remaining % 60
-        return String(format: "(%d:%02d)", m, s)
     }
 
     private func complete() {
@@ -128,11 +104,18 @@ struct BigKidVideoView: View {
 /// from the bundle id. Mirrors `Components/YouTubePlayerView.swift ::
 /// InlineYouTubeWebView` — required to avoid Error 152/153 on recent
 /// YouTube embed servers.
+///
+/// On document-end we inject a JS user script that watches the embed
+/// page's HTML5 `<video>` element and forwards `timeupdate` + `ended`
+/// events to the host via a `WKScriptMessageHandler` named
+/// `evlinPlayer`. Kid touch is blocked at the WKWebView layer.
 private struct VideoEmbedView: UIViewRepresentable {
     let videoId: String
+    let onProgress: (Double) -> Void
+    let onEnded: () -> Void
 
     func makeCoordinator() -> Coordinator {
-        Coordinator()
+        Coordinator(onProgress: onProgress, onEnded: onEnded)
     }
 
     func makeUIView(context: Context) -> WKWebView {
@@ -141,6 +124,15 @@ private struct VideoEmbedView: UIViewRepresentable {
         cfg.allowsPictureInPictureMediaPlayback = false
         cfg.defaultWebpagePreferences.allowsContentJavaScript = true
         cfg.mediaTypesRequiringUserActionForPlayback = []
+
+        // Inject the progress + end-detection bridge.
+        let userScript = WKUserScript(
+            source: Self.bridgeJS,
+            injectionTime: .atDocumentEnd,
+            forMainFrameOnly: false   // YouTube nests the player in a sub-frame on some pages
+        )
+        cfg.userContentController.addUserScript(userScript)
+        cfg.userContentController.add(context.coordinator, name: "evlinPlayer")
 
         let web = WKWebView(frame: .zero, configuration: cfg)
         web.scrollView.isScrollEnabled = false
@@ -189,9 +181,6 @@ private struct VideoEmbedView: UIViewRepresentable {
         components.host = "www.youtube.com"
         components.path = "/embed/\(videoId)"
         components.queryItems = [
-            // Disable controls + keyboard + fullscreen so the kid can't
-            // skip ahead. Continue is gated on the SwiftUI timer in the
-            // host view.
             URLQueryItem(name: "autoplay", value: "1"),
             URLQueryItem(name: "controls", value: "0"),
             URLQueryItem(name: "disablekb", value: "1"),
@@ -206,8 +195,52 @@ private struct VideoEmbedView: UIViewRepresentable {
         return components.url
     }
 
-    final class Coordinator: NSObject, WKNavigationDelegate {
+    /// JS injected into the YouTube embed page at document-end. Polls
+    /// for the `<video>` element (it appears asynchronously after the
+    /// player JS runs), then attaches `timeupdate` / `ended` listeners
+    /// and forwards events to the `evlinPlayer` script-message handler.
+    private static let bridgeJS = """
+    (function() {
+      if (window.__evlinAttached) return;
+      window.__evlinAttached = true;
+      function attach() {
+        var v = document.querySelector('video');
+        if (!v) { setTimeout(attach, 200); return; }
+        function send(payload) {
+          try { window.webkit.messageHandlers.evlinPlayer.postMessage(payload); } catch (e) {}
+        }
+        v.addEventListener('timeupdate', function() {
+          var d = v.duration || 0;
+          if (d > 0) send({ k: 'p', v: (v.currentTime / d) * 100 });
+        });
+        v.addEventListener('ended', function() { send({ k: 'end' }); });
+      }
+      attach();
+    })();
+    """
+
+    final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
+        let onProgress: (Double) -> Void
+        let onEnded: () -> Void
         var loadedVideoId: String?
+
+        init(onProgress: @escaping (Double) -> Void, onEnded: @escaping () -> Void) {
+            self.onProgress = onProgress
+            self.onEnded = onEnded
+        }
+
+        func userContentController(_ uc: WKUserContentController,
+                                    didReceive m: WKScriptMessage) {
+            guard let dict = m.body as? [String: Any], let k = dict["k"] as? String else { return }
+            switch k {
+            case "p":
+                if let v = dict["v"] as? Double { onProgress(v) }
+            case "end":
+                onEnded()
+            default:
+                break
+            }
+        }
     }
 }
 
@@ -215,7 +248,6 @@ private struct VideoEmbedView: UIViewRepresentable {
 #Preview {
     BigKidVideoView(videoId: "dQw4w9WgXcQ",
                     videoTitle: "Why rest time matters for your brain",
-                    expectedDurationSeconds: 10,
                     onComplete: {})
 }
 #endif
