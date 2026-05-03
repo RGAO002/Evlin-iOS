@@ -70,9 +70,33 @@ struct EvlinPhotoCarousel: View {
 
     private func photoPage(urlString: String, index: Int) -> some View {
         AsyncImage(url: URL(string: urlString)) { phase in
-            if let img = phase.image {
+            switch phase {
+            case .success(let img):
                 img.resizable().scaledToFill()
-            } else {
+            case .failure(let error):
+                #if DEBUG
+                // Make the failure visible during dev — silent gray
+                // rectangles cost us hours of "is the photo even loading?".
+                ZStack(alignment: .topLeading) {
+                    Rectangle().fill(Color.red.opacity(0.12))
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("AsyncImage failed").font(.caption).bold()
+                        Text(urlString).font(.system(size: 9, design: .monospaced))
+                            .lineLimit(3)
+                        Text(error.localizedDescription).font(.system(size: 9))
+                            .foregroundStyle(.red)
+                    }
+                    .padding(8)
+                }
+                #else
+                Rectangle().fill(Color.evSurfaceContainerLow)
+                #endif
+            case .empty:
+                ZStack {
+                    Rectangle().fill(Color.evSurfaceContainerLow)
+                    ProgressView()
+                }
+            @unknown default:
                 Rectangle().fill(Color.evSurfaceContainerLow)
             }
         }
