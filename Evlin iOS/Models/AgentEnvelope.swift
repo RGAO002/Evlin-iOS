@@ -26,9 +26,29 @@ struct ReceiptDTO: Codable, Sendable {
     let args: [String: AnyCodable]
     let summary: String
     let undoToken: String?
+    /// ISO8601 wall-clock deadline after which Undo is rejected. Used by
+    /// ReceiptBubble to compute remaining seconds; without it the
+    /// countdown resets every onAppear and lies about validity.
+    let undoExpiresAt: String?
 
     enum CodingKeys: String, CodingKey {
         case tool, args, summary
         case undoToken = "undo_token"
+        case undoExpiresAt = "undo_expires_at"
+    }
+
+    /// Seconds left until Undo expiry, computed from wall clock.
+    /// Returns 0 if no token, no expiry timestamp, or already past.
+    var undoSecondsRemaining: Int {
+        guard undoToken != nil, let iso = undoExpiresAt else { return 0 }
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let date = f.date(from: iso) ?? {
+            let f2 = ISO8601DateFormatter()
+            f2.formatOptions = [.withInternetDateTime]
+            return f2.date(from: iso)
+        }()
+        guard let date else { return 0 }
+        return max(0, Int(date.timeIntervalSinceNow.rounded()))
     }
 }
