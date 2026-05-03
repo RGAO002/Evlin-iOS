@@ -70,10 +70,19 @@ struct BigKidTaskDetailView: View {
 
     @ViewBuilder
     private var phaseContent: some View {
-        switch task.phase {
-        case .input: inputPhase
-        case .submitted: submittedPhase
-        case .redo: redoPhase
+        // Status takes precedence over phase. Backend has no .done phase
+        // (only input / submitted / redo), so once a parent approves,
+        // status flips to .done while phase stays .submitted. Without
+        // this check the kid would keep seeing "Evidence submitted –
+        // waiting for parent" even after approval.
+        if task.status == .done {
+            approvedPhase
+        } else {
+            switch task.phase {
+            case .input: inputPhase
+            case .submitted: submittedPhase
+            case .redo: redoPhase
+            }
         }
     }
 
@@ -364,6 +373,36 @@ struct BigKidTaskDetailView: View {
         }
         .aspectRatio(4.0/3.0, contentMode: .fit)
         .clipShape(RoundedRectangle(cornerRadius: 18))
+    }
+
+    // MARK: - Approved phase
+    /// Shown when the parent has approved this submission (status == .done).
+    /// Celebratory tone + the kid's photo + their note.
+    private var approvedPhase: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            EvKidCard(tone: .green, padding: 22) {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(spacing: 10) {
+                        ZStack {
+                            Circle().fill(EvlinKidColors.green500)
+                                .frame(width: 36, height: 36)
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 16, weight: .bold))
+                                .foregroundStyle(.white)
+                        }
+                        Text("Approved!")
+                            .font(.system(size: 19, weight: .heavy))
+                            .foregroundStyle(EvlinKidColors.green700)
+                    }
+                    Text("Nice work — a parent reviewed it and gave it a thumbs up.")
+                        .font(.system(size: 14))
+                        .foregroundStyle(EvlinKidColors.green600)
+                        .lineSpacing(2)
+                }
+            }
+            evidencePreview.padding(.top, 4)
+            EvKidBigButton(tone: .ghost, action: onBack) { Text("Back to today") }
+        }
     }
 
     // MARK: - Redo phase
