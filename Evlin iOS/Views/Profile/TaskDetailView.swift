@@ -82,9 +82,28 @@ struct TaskDetailView: View {
                         reloadTask()
                     },
                     onDelete: {
-                        ProfileMockData.deleteTask(activeEdit.id, for: childId)
-                        editingTask = nil
-                        onBack()
+                        // If this task lives in the BigKid backend (Liam +
+                        // paired), hit DELETE /parent/task/{id}. Otherwise
+                        // mutate ProfileMockData. Without this branch the
+                        // Profile UI was lying — local state cleared, but
+                        // backend kept the task and the next 8s poll
+                        // resurrected it on the row list.
+                        if let backendID = activeEdit.backendID,
+                           let client = bigKidParent {
+                            Task {
+                                do { try await client.deleteTask(taskId: backendID) } catch {
+                                    print("[TaskDetail] delete failed: \(error)")
+                                }
+                                await MainActor.run {
+                                    editingTask = nil
+                                    onBack()
+                                }
+                            }
+                        } else {
+                            ProfileMockData.deleteTask(activeEdit.id, for: childId)
+                            editingTask = nil
+                            onBack()
+                        }
                     },
                     onCancel: { editingTask = nil }
                 )
