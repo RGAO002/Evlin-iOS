@@ -51,6 +51,14 @@ class APIClient: ObservableObject {
         let message: String
         let reasoning: String?
         let action: ChatActionResponse?
+        let proposals: [ProposalDTO]?
+        let receipts: [ReceiptDTO]?
+        let cancelledProposals: [String]?
+
+        enum CodingKeys: String, CodingKey {
+            case message, reasoning, action, proposals, receipts
+            case cancelledProposals = "cancelled_proposals"
+        }
     }
 
     func sendChatMessage(
