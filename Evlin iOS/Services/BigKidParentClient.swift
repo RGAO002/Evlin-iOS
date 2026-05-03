@@ -165,9 +165,14 @@ extension TaskItem {
 
         let photos: [String] = (t.evidencePhotoURL?.absoluteString).map { [$0] } ?? []
 
-        // For bypass-state rows we surface the bypass reason as the "note"
-        // because the parent-UI's bypass card reads `task.note` for that copy.
-        let note: String? = t.bypass.map { $0.reason } ?? t.redoReason
+        // Note priority: bypass reason > kid's evidence note > parent's redo
+        // reason. The parent-UI's bypass status card reads `task.note` to
+        // render the kid's bypass copy; the submission card under "review"
+        // reads it to show the kid's "Took longer than I thought!"-style
+        // note next to the photo grid.
+        let note: String? = t.bypass.map { $0.reason }
+            ?? t.evidenceNote
+            ?? t.redoReason
 
         return TaskItem(
             id: sequenceID,

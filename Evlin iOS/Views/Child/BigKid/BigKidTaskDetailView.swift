@@ -316,12 +316,15 @@ struct BigKidTaskDetailView: View {
     BigKidTaskDetailView(task: .fixture(status: .submitted, phase: .submitted),
                          onBack: {}, onBypass: {}, onSubmit: { _, _ in })
 }
+private func _redoPreviewTask() -> BigKidTask {
+    let t = BigKidTask.fixture(status: .todo, phase: .redo)
+    return BigKidTask(id: t.id, title: t.title, description: t.description,
+                      category: t.category, due: t.due, status: t.status, phase: t.phase,
+                      redoReason: "Bed is still messy. Please smooth the covers.",
+                      evidencePhotoURL: nil, evidenceNote: nil, bypass: nil)
+}
 #Preview("Redo") {
-    var t = BigKidTask.fixture(status: .todo, phase: .redo)
-    t = BigKidTask(id: t.id, title: t.title, description: t.description,
-                   category: t.category, due: t.due, status: t.status, phase: t.phase,
-                   redoReason: "Bed is still messy. Please smooth the covers.",
-                   evidencePhotoURL: nil, bypass: nil)
-    return BigKidTaskDetailView(task: t, onBack: {}, onBypass: {}, onSubmit: { _, _ in })
+    BigKidTaskDetailView(task: _redoPreviewTask(),
+                         onBack: {}, onBypass: {}, onSubmit: { _, _ in })
 }
 #endif

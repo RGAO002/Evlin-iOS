@@ -156,7 +156,15 @@ struct BigKidRootView: View {
                     taskNav = nil
                 },
                 onSubmit: { data, note in
-                    _ = try? await client.submitEvidence(taskId: t.id, photoData: data, note: note)
+                    do {
+                        _ = try await client.submitEvidence(taskId: t.id, photoData: data, note: note)
+                    } catch {
+                        // Surface in console so we know when the kid's
+                        // upload silently fails (photo too large / network /
+                        // 5xx). Phase 13 follow-up: render an inline banner
+                        // and keep the sheet open on failure.
+                        print("[BigKid] submitEvidence failed for task \(t.id): \(error)")
+                    }
                     await poller.refreshNow()
                     taskNav = nil
                 }

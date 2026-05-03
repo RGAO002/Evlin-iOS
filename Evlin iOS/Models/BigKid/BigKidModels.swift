@@ -50,6 +50,7 @@ struct BigKidTask: Codable, Equatable, Sendable, Identifiable {
     let phase: BigKidTaskPhase
     let redoReason: String?
     let evidencePhotoURL: URL?
+    let evidenceNote: String?
     let bypass: BypassRequest?
 }
 
@@ -157,7 +158,7 @@ extension BigKidTask {
         BigKidTask(
             id: id, title: title, description: description, category: category,
             due: due, status: status, phase: phase, redoReason: nil,
-            evidencePhotoURL: nil, bypass: bypass
+            evidencePhotoURL: nil, evidenceNote: nil, bypass: bypass
         )
     }
 }
