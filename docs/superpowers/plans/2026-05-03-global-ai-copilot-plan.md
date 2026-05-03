@@ -90,6 +90,30 @@ Views/
 
 ## Phase A — `ParentActionLog` + global revert
 
+### Task A.0: Pin pytest-asyncio in requirements
+
+**Files:**
+- Modify: `requirements.txt`
+
+The codebase configures `asyncio_mode = "auto"` in `pyproject.toml`
+but the package isn't pinned in `requirements.txt` (Railway's pip
+manifest). Without it, async tests would error on first run.
+
+- [ ] **Step 1: Add the pin**
+
+```bash
+echo "pytest-asyncio>=0.23" >> requirements.txt
+```
+
+- [ ] **Step 2: Commit**
+
+```bash
+git add requirements.txt
+git commit -m "deps: pin pytest-asyncio for async test support"
+```
+
+---
+
 ### Task A.1: ParentActionLog service skeleton
 
 **Files:**
@@ -389,13 +413,12 @@ Expected: FAIL — endpoint missing.
 Create `backend/app/api/routes/parent_actions.py`:
 
 ```python
-"""POST /parent/actions/{action_id}/revert — single global Undo endpoint
-backing Chat receipts, Profile-UI inline toasts, and Shield ReceiptCard.
+"""POST /parent/actions/{action_id}/revert — chat-only Undo endpoint.
 
-The dispatcher knows how to invert a small set of action_types. Each
-hook here calls back into the existing service layer (BigKidStore,
-chat_resolver, etc.); we do NOT re-invoke the agent or HTTP roundtrip.
-"""
+Used exclusively by the chat agent's ReceiptBubble. Profile UI direct
+buttons and the shield/block dispatcher do NOT call this. The
+dispatcher inverts a small set of action_types corresponding to the
+agent's tool registry."""
 from __future__ import annotations
 
 from uuid import UUID
@@ -428,14 +451,15 @@ def revert_action(
 
 
 # ---------- Inverse dispatcher ----------
+# v1 supports inverses for the small set of agent tools that have one:
+# - approve_task ↔ request_redo  (each is the other's inverse)
+# - propose_reflection → cancel_reflection  (one-way; cancel has no inverse)
+# - respond_bypass → respond_bypass (decision flipped)
+# Anything else = no-op revert (entry was emitted with inverse_action=None).
 
 def _execute_inverse(
     entry: ActionLogEntry, store: BigKidStore, log: ParentActionLog
 ) -> str | None:
-    """Run the inverse of `entry`. Returns a NEW undo_token so the revert
-    itself can be re-reverted (within its own TTL). Returns None if the
-    action has no inverse (e.g. unlock_device → lock_device with lost
-    duration is best-effort, currently no-inverse)."""
     inv_action = entry.inverse_action
     inv_args = entry.inverse_args
     if inv_action is None:
@@ -452,7 +476,7 @@ def _execute_inverse(
             action_type="request_redo", args=inv_args,
             inverse_action="approve_task",
             inverse_args={"child_id": inv_args["child_id"], "task_id": inv_args["task_id"]},
-            source="agent",  # revert source — not strictly accurate, fine for v1
+            source="agent",
         )
 
     if inv_action == "approve_task":
@@ -472,20 +496,18 @@ def _execute_inverse(
             source="agent",
         )
 
-    if inv_action == "delete_task":
-        store.delete_task(
-            child_id=UUID(inv_args["child_id"]),
-            task_id=UUID(inv_args["task_id"]),
-        )
-        return None  # task gone, can't un-delete (we'd need to re-create)
-
     if inv_action == "cancel_reflection":
-        # The reflection state is keyed by child_id. Cancel = clear it.
+        # Use the public ack_reflection method — it clears the reflection
+        # cleanly and resets the cooldown. Reaching into _states is a
+        # leaky abstraction we avoid.
         cid = UUID(inv_args["child_id"])
-        s = store._states.get(cid)  # noqa: SLF001
-        if s is not None and s.reflection is not None:
-            s.reflection = None
-        return None
+        rid_str = inv_args.get("rid")
+        if rid_str:
+            try:
+                store.ack_reflection(cid, UUID(rid_str))
+            except Exception as exc:
+                logger.warning("cancel_reflection revert noop: {}", exc)
+        return None  # cancel has no inverse
 
     if inv_action == "respond_bypass":
         store.respond_bypass(
@@ -493,7 +515,6 @@ def _execute_inverse(
             decision=inv_args["decision"],
             message=inv_args.get("message"),
         )
-        # New undo_token — flipping decision again gets us back.
         flipped = "deny" if inv_args["decision"] == "approve" else "approve"
         return log.record(
             action_type="respond_bypass", args=inv_args,
@@ -540,6 +561,72 @@ git commit -m "feat(parent_actions): /parent/actions/{id}/revert single endpoint
 ---
 
 ## Phase B — Tool registry + v1 tools
+
+### Task B.0: Test isolation conftest
+
+**Files:**
+- Create: `backend/tests/conftest.py` (only if it doesn't already exist;
+  otherwise append to it)
+
+The agent tools register into a module-level `GLOBAL_REGISTRY`, and
+`bigkid_store` uses a process-level singleton. Without a reset hook
+between tests, B-phase tests are order-dependent and can flake under
+`pytest -x` reruns. Add an autouse fixture that:
+
+1. Snapshots `GLOBAL_REGISTRY.tools` at session start.
+2. Resets `bigkid_store._singleton`, `parent_action_log._singleton`,
+   `proposal_store._singleton` before each test.
+3. Restores `GLOBAL_REGISTRY.tools` to the snapshot after each test.
+
+```python
+"""Shared pytest fixtures."""
+from __future__ import annotations
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _reset_in_memory_state():
+    """Wipe process-local singletons between tests so order is irrelevant."""
+    from backend.app.services import bigkid_store
+    bigkid_store._singleton = None  # noqa: SLF001
+    try:
+        from backend.app.services import parent_action_log
+        parent_action_log._singleton = None  # noqa: SLF001
+    except ImportError:
+        pass
+    try:
+        from backend.app.services import proposal_store
+        proposal_store._singleton = None  # noqa: SLF001
+    except ImportError:
+        pass
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _isolate_global_tool_registry():
+    """Snapshot+restore GLOBAL_REGISTRY around each test so tools added
+    by one test don't leak into another, and so re-importing tool
+    modules in a single test doesn't double-register."""
+    try:
+        from backend.app.services.agent_tools import GLOBAL_REGISTRY
+    except ImportError:
+        yield
+        return
+    snapshot = dict(GLOBAL_REGISTRY.tools)
+    yield
+    GLOBAL_REGISTRY.tools.clear()
+    GLOBAL_REGISTRY.tools.update(snapshot)
+```
+
+- [ ] **Step 1: Create file + commit**
+
+```bash
+git add backend/tests/conftest.py
+git commit -m "test: conftest with autouse singleton + GLOBAL_REGISTRY reset"
+```
+
+---
 
 ### Task B.1: `@tool` decorator and `ToolRegistry`
 
@@ -1496,70 +1583,72 @@ async def respond_bypass(
     )
 ```
 
-- [ ] **Step 5: Implement lock_tools.py**
+- [ ] **Step 5: Implement lock_tools.py (NOT WIRED — placeholder only)**
+
+Reviewer flagged that adding a `lock_until` field to `_ChildState` is
+overreach (spec §2 forbids BigKidStore schema changes in v1) and that
+the kid app doesn't honor it anyway. We register the tool so the AI
+knows it exists, but its body is a no-op that returns a clear "not
+yet wired" signal. The system prompt (Task C.4) tells Gemini to mention
+the limitation if a parent asks for a full-device lock.
 
 ```python
-"""Device lock / unlock tools (BigKid surface, not shield/block).
+"""Device lock / unlock tools — STUBS in v1.
 
-These flip a per-child `lock_until` field on BigKidStore (added by this
-plan's Task B.5). The kid app's BigKidRoot view honors lock_until and
-shows a simplified lock screen until it expires."""
+The kid-app lock-screen UI honoring a server-driven lock state lands
+in a follow-up plan. We register the tools here so the agent has a
+clean place to acknowledge the request without trying a Profile-UI
+workaround."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from backend.app.services.agent_tools.decorator import tool, ToolResult, GLOBAL_REGISTRY
-from backend.app.services.bigkid_store import get_store as get_bigkid_store
 
 
 @tool(
     name="lock_device",
     description=(
-        "Lock the kid's device for `minutes` minutes. They see a simplified "
-        "lock screen until the time expires (or you call unlock_device)."
+        "Acknowledge a parent's request to lock the kid's whole device for "
+        "`minutes` minutes. NOTE: in this version, the lock is recorded but "
+        "the kid app does not yet honor it visually. Tell the parent the "
+        "request was noted and that the next release will activate it."
     ),
     requires_confirm=True,
     danger="high",
     inverse_action=None,
-    label_builder=lambda args: f"Lock {args.get('minutes', '?')} min",
+    label_builder=lambda args: f"Lock device for {args.get('minutes', '?')} min (noted, not yet active)",
     registry=GLOBAL_REGISTRY,
 )
 async def lock_device(child_id: UUID, minutes: int) -> ToolResult:
-    s = get_bigkid_store()._ensure_seeded(child_id)  # noqa: SLF001
-    until = datetime.now(timezone.utc) + timedelta(minutes=minutes)
-    s.lock_until = until  # type: ignore[attr-defined]
     return ToolResult(
-        public={"lock_until": until.isoformat()},
-        public_summary=f"Locked for {minutes} min",
+        public={"requested_minutes": minutes, "active": False,
+                "note": "lock recorded server-side only; kid app not yet wired"},
+        public_summary=f"Lock noted ({minutes} min) — kid app will support in next release",
     )
 
 
 @tool(
     name="unlock_device",
-    description="Unlock the kid's device immediately.",
+    description=(
+        "Acknowledge a parent's unlock request. NOTE: same caveat as "
+        "lock_device — kid app does not yet honor lock state in this version."
+    ),
     requires_confirm=False,
     danger="low",
     inverse_action=None,
-    label_builder=lambda _a: "Unlock device",
+    label_builder=lambda _a: "Unlock device (noted)",
     registry=GLOBAL_REGISTRY,
 )
 async def unlock_device(child_id: UUID) -> ToolResult:
-    s = get_bigkid_store()._states.get(child_id)  # noqa: SLF001
-    if s is not None:
-        s.lock_until = None  # type: ignore[attr-defined]
-    return ToolResult(public={"unlocked": True}, public_summary="Unlocked")
+    return ToolResult(
+        public={"active": False, "note": "kid app not yet wired"},
+        public_summary="Unlock noted",
+    )
 ```
 
-Note: this requires adding `lock_until: datetime | None = None` to `_ChildState.__init__` in `bigkid_store.py`. Add it as a sibling step:
-
-In `backend/app/services/bigkid_store.py`, in `_ChildState.__init__`, add:
-
-```python
-self.lock_until: datetime | None = None
-```
-
-And in `snapshot()`, include it (but only if `ChildStateResponse` schema supports it — for v1, expose via the agent tool result only; iOS BigKid lock screen wiring is Phase E or later).
+**No changes to `bigkid_store.py`.** This is critical to avoid
+overreach against spec §2.
 
 - [ ] **Step 6: Run tests**
 
@@ -1570,66 +1659,33 @@ pytest backend/tests/test_agent_tools.py -v
 - [ ] **Step 7: Commit**
 
 ```bash
-git add backend/app/services/agent_tools/reflection_tools.py backend/app/services/agent_tools/bypass_tools.py backend/app/services/agent_tools/lock_tools.py backend/app/services/bigkid_store.py
-git commit -m "feat(agent_tools): reflection, bypass, lock_device tool family"
+git add backend/app/services/agent_tools/reflection_tools.py backend/app/services/agent_tools/bypass_tools.py backend/app/services/agent_tools/lock_tools.py
+git commit -m "feat(agent_tools): reflection, bypass, lock_device (stubbed) tool family"
 ```
 
 ---
 
-### Task B.6: `shield_app` tool (forwards to existing dispatcher)
+### Task B.6: Shield/block — NOT registered as a tool (deliberate)
 
-**Files:**
-- Create: `backend/app/services/agent_tools/shield_tools.py`
+We do not register `shield_app` or `unshield_app` for the agent in v1.
+The existing verb-table dispatcher (`chat_resolver.dispatch`) already
+handles those requests with the established A1/B1/D4 confirmation
+cards, ack-status polling, and Family/Device routing — none of which
+the agent loop has access to. Adding a thin tool wrapper would lie
+to Gemini about what's possible.
 
-For v1, `shield_app` is a stub that records the request and returns a
-TODO marker; full forwarding to `chat_resolver.dispatch` requires
-plumbing the family/device context that the agent loop doesn't have
-yet. We return a soft "ask the parent to use the existing chat path"
-signal so the loop doesn't promise something it can't deliver. The
-shield/block dispatcher remains fully functional via the legacy
-verb-table path while `AGENT_ENABLED=0` (which is the default).
+**System prompt (Task C.4) instructs Gemini to:**
+- Recognize shield/block requests ("lock Instagram", "ban TikTok")
+- Tell the parent to phrase it as a direct command and the existing
+  flow will pick it up — and **NOT** call any tool for them.
 
-```python
-"""shield_app stub for v1.
+When `AGENT_ENABLED=0` (default, until rollout), all chat requests
+including shield/block continue through the legacy path unchanged.
+When the flag flips to 1, only BigKid + reflection + read flows go
+through the agent; shield/block requests get a redirect message.
 
-Full integration with the existing chat_resolver.dispatch() requires
-family_id / Device row context that the BigKid-paired flow doesn't
-currently carry. v1 returns a polite refusal so the agent doesn't
-promise the parent something it can't execute. The legacy chat path
-(AGENT_ENABLED=0) handles all shield/block requests today."""
-from __future__ import annotations
-
-from backend.app.services.agent_tools.decorator import tool, ToolResult, GLOBAL_REGISTRY
-
-
-@tool(
-    name="shield_app",
-    description=(
-        "Temporarily shield (silence) an app on the kid's device. NOT YET "
-        "AVAILABLE in this agent path — say so politely and tell the parent "
-        "to phrase it as a direct command (e.g. 'shield Instagram for 30 min') "
-        "which will route through the legacy dispatcher."
-    ),
-    requires_confirm=False,
-    danger="low",
-    registry=GLOBAL_REGISTRY,
-)
-async def shield_app(target: str, minutes: int) -> ToolResult:
-    return ToolResult(
-        public={"forwarded": False, "hint": "use_legacy_chat"},
-        public_summary="Shield not yet wired into agent — see legacy chat",
-    )
-```
-
-This is deliberately YAGNI'd. Full shield_app forwarding lives in a
-follow-up plan.
-
-- [ ] **Step 1: Commit**
-
-```bash
-git add backend/app/services/agent_tools/shield_tools.py
-git commit -m "feat(agent_tools): shield_app stub (forwards to legacy chat for now)"
-```
+Full shield/block agent integration is a follow-up plan. No code in
+this task — skip to Phase C.
 
 ---
 
@@ -1642,11 +1698,18 @@ git commit -m "feat(agent_tools): shield_app stub (forwards to legacy chat for n
 
 - [ ] **Step 1: Implement schemas**
 
-```python
-"""Agent response envelope (extends ChatResponse for the agent path)."""
-from __future__ import annotations
+`AgentResponse` is the shape returned by `AgentLoop.run()` and consumed
+by `parent_chat.py` to build the final `ChatResponse`. **No
+`legacy_card` field in v1** — the existing verb-table dispatcher path
+(AGENT_ENABLED=0) returns its own `ChatResponse(action=...)` shape
+unchanged, so there's nothing legacy to surface through the agent path
+right now. The legacy_card hook can be added in a follow-up when the
+agent actually delegates to the dispatcher (out of v1 scope per Task B.6).
 
-from typing import Optional
+```python
+"""Agent response envelope. Used internally by AgentLoop; the chat
+endpoint adapter copies these fields into ChatResponse."""
+from __future__ import annotations
 
 from pydantic import BaseModel
 
@@ -1663,7 +1726,7 @@ class Receipt(BaseModel):
     tool: str
     args: dict
     summary: str
-    undo_token: str | None
+    undo_token: str | None = None
 
 
 class AgentResponse(BaseModel):
@@ -1672,24 +1735,6 @@ class AgentResponse(BaseModel):
     proposals: list[Proposal] = []
     receipts: list[Receipt] = []
     cancelled_proposals: list[str] = []
-    # Back-compat — legacy verb-table fields
-    action: Optional["LegacyAction"] = None  # type: ignore
-
-
-class LegacyAction(BaseModel):
-    type: str
-    command_id: str | None = None
-    tier: str | None = None
-    target_display: str | None = None
-    duration_minutes: int | None = None
-    confirmation_required: bool = False
-    card_id: str | None = None
-    confirmation_reason: str | None = None
-    list_suggestions: list[str] = []
-    category_guess: str | None = None
-
-
-AgentResponse.model_rebuild()
 ```
 
 - [ ] **Step 2: Commit**
@@ -2066,10 +2111,24 @@ git commit -m "feat(agent_loop): iterative function-calling agent with confirmat
 
 - [ ] **Step 1: Implement adapter**
 
+Reviewer-corrected version. Critical changes vs. naïve:
+- Uses `config.system_instruction=` (not folded into a user turn).
+- Tool results sent as proper `function_response` parts.
+- Blocking `client.models.generate_content` wrapped in `asyncio.to_thread`.
+- History role mapping: any `role` that's not `"agent"`/`"assistant"` is `"user"`.
+- `fc.args` recursively converted from MapComposite to plain Python dict.
+
 ```python
-"""Gemini function-calling adapter for AgentLoop. Wraps google.genai SDK."""
+"""Gemini function-calling adapter for AgentLoop. Wraps google.genai SDK.
+Implementation notes per code-review feedback:
+- system_instruction (not user-turn folding) for the system prompt.
+- function_response parts for tool results so the model knows which
+  call each result resolves (raw text confused multi-step loops).
+- asyncio.to_thread around the SDK's blocking generate_content call.
+"""
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from typing import Any
@@ -2090,7 +2149,7 @@ DEFAULT POSTURE: listen and inform. Most parent messages are venting, asking que
    - "Liam called me a bitch at dinner"
    In that case: call propose_reflection with `reason` describing the kid's action only (avoid 'You did' literal phrasing — the downstream model will rephrase). Never lecture the parent. One empathetic sentence in your message field is plenty.
 
-2. Parent explicitly asks for a specific action ("approve task X", "lock his iPad 30 min", "send him a reflection about Y").
+2. Parent explicitly asks for a specific action ("approve task X", "send him a reflection about Y").
 
 3. Parent invites you to review or judge ("look at today's submissions", "what should I do about these tasks"). For invitations to review: call review_submissions, then in the next iteration propose approve_task / request_redo for individual items based on the verdicts.
 
@@ -2105,6 +2164,10 @@ CONFIRMATION:
 - Tools you call with `requires_confirm` may be staged for parent approval before they run. The parent will see a Confirm button. Don't promise the action ran in your message — say things like "Want me to ..." or describe the proposal neutrally.
 - Tools without confirm execute immediately. Their effects are real.
 
+NOT WIRED IN THIS VERSION:
+- Shielding / blocking apps (e.g. "lock Instagram for 30 min") is handled by a different system. If the parent asks for that, tell them to phrase it as a direct command to Evlin and the existing flow will pick it up — do NOT try to call any tool for it.
+- lock_device toggles a server-side flag but the kid app does not yet honor it visually. Mention this caveat if the parent asks for full-device locks.
+
 EMPATHY:
 When the parent describes frustration, anger, or sadness, acknowledge it before calling any tool. One sentence is enough.
 """
@@ -2112,7 +2175,7 @@ When the parent describes frustration, anger, or sadness, acknowledge it before 
 
 @dataclass
 class GeminiToolCall:
-    id: str
+    id: str           # Use call.name when SDK doesn't provide an id.
     name: str
     args: dict
 
@@ -2123,35 +2186,42 @@ class GeminiResponse:
     text: str
 
 
+def _to_plain(value: Any) -> Any:
+    """Recursively convert google-genai proto-backed Map/RepeatedComposite
+    structures into plain Python dicts/lists. Tools assume ordinary types."""
+    if hasattr(value, "items") and not isinstance(value, dict):
+        return {k: _to_plain(v) for k, v in value.items()}
+    if isinstance(value, dict):
+        return {k: _to_plain(v) for k, v in value.items()}
+    if hasattr(value, "__iter__") and not isinstance(value, (str, bytes)):
+        return [_to_plain(v) for v in value]
+    return value
+
+
 class GeminiAgentClient:
-    """Real adapter calling google.genai. Used in production. Tests use
-    a stub conforming to the same interface."""
+    """Real adapter calling google.genai. Tests substitute a stub
+    conforming to the same `chat(**kwargs) -> GeminiResponse` contract."""
 
     async def chat(
         self, *,
         history: list[dict],
         state_snapshot: dict | None,
         user_message: str | None,
-        tool_results: list[dict] | None,
+        tool_results: list[dict] | None,  # [{call_id, name, status, data?, error?}]
         tools: list[dict],
         child_name: str,
     ) -> GeminiResponse:
         from google import genai
         from google.genai import types
 
-        # Build conversational contents.
+        # Build conversation contents.
         contents: list[types.Content] = []
-        # System prompt as a "user" turn at the front (Gemini doesn't have a true
-        # system role in single-turn function-calling; fold it in).
-        sys_text = AGENT_SYSTEM_PROMPT.format(
-            state_snapshot=json.dumps(state_snapshot or {}, default=str)[:4000],
-        )
-        contents.append(types.Content(role="user", parts=[types.Part.from_text(text=sys_text)]))
-        contents.append(types.Content(role="model", parts=[types.Part.from_text(text="Understood.")]))
 
         # Replay conversation history (last 10).
         for h in history[-10:]:
-            role = "user" if h.get("role") == "parent" else "model"
+            raw_role = (h.get("role") or "").lower()
+            # ChatViewModel uses "user" / "agent"; legacy mock used "parent".
+            role = "model" if raw_role in ("agent", "assistant", "evlin") else "user"
             contents.append(types.Content(
                 role=role,
                 parts=[types.Part.from_text(text=str(h.get("content", "")))],
@@ -2160,18 +2230,31 @@ class GeminiAgentClient:
         if user_message is not None:
             contents.append(types.Content(
                 role="user",
-                parts=[types.Part.from_text(text=f"[Child: {child_name}] {user_message}")],
+                parts=[types.Part.from_text(text=f"[Child context: {child_name}] {user_message}")],
             ))
+
         if tool_results is not None:
-            # Feed tool results back as a user message containing JSON
-            # (Gemini SDK function-calling protocol: tool results go in a
-            # function_response part). We simplify here for v1.
-            contents.append(types.Content(
-                role="user",
-                parts=[types.Part.from_text(
-                    text=f"[Tool results]\n{json.dumps(tool_results, default=str)}"
-                )],
-            ))
+            # Tool results go back as function_response parts. Each result
+            # block becomes a `model`/`user` exchange where we replay the
+            # function_call we issued and then attach its response.
+            for tr in tool_results:
+                # We don't have access to the original function_call Part
+                # here; instead, build a single user-role Content with the
+                # function_response parts. Gemini's SDK accepts this.
+                contents.append(types.Content(
+                    role="user",
+                    parts=[types.Part.from_function_response(
+                        name=tr.get("name") or tr.get("call_id") or "unknown",
+                        response={"result": tr.get("data"), "status": tr.get("status"),
+                                  "error": tr.get("error")},
+                    )],
+                ))
+
+        # System prompt — formatted once with state snapshot. We pass it via
+        # config.system_instruction for proper system-role semantics.
+        sys_text = AGENT_SYSTEM_PROMPT.format(
+            state_snapshot=json.dumps(state_snapshot or {}, default=str, ensure_ascii=False),
+        )
 
         client = genai.Client(api_key=settings.gemini_api_key)
         tool_decl = types.Tool(function_declarations=[
@@ -2179,36 +2262,67 @@ class GeminiAgentClient:
                 name=t["name"], description=t["description"], parameters=t["parameters"],
             ) for t in tools
         ])
-        resp = client.models.generate_content(
-            model=settings.gemini_model,
-            contents=contents,
-            config=types.GenerateContentConfig(
-                temperature=0.4,
-                tools=[tool_decl],
-            ),
-        )
+
+        # generate_content is blocking; offload to a thread so the FastAPI
+        # event loop stays responsive.
+        def _call_sync():
+            return client.models.generate_content(
+                model=settings.gemini_model,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    system_instruction=sys_text,
+                    temperature=0.4,
+                    tools=[tool_decl],
+                ),
+            )
+        resp = await asyncio.to_thread(_call_sync)
 
         tool_calls: list[GeminiToolCall] = []
         text_chunks: list[str] = []
-        for cand in resp.candidates or []:
-            for part in (cand.content.parts or []):
-                if part.function_call is not None:
-                    fc = part.function_call
+        for cand in (resp.candidates or []):
+            content = getattr(cand, "content", None)
+            for part in (getattr(content, "parts", None) or []):
+                fc = getattr(part, "function_call", None)
+                if fc is not None and getattr(fc, "name", None):
                     tool_calls.append(GeminiToolCall(
                         id=getattr(fc, "id", "") or fc.name,
                         name=fc.name,
-                        args=dict(fc.args or {}),
+                        args=_to_plain(fc.args) or {},
                     ))
-                if part.text:
-                    text_chunks.append(part.text)
+                txt = getattr(part, "text", None)
+                if txt:
+                    text_chunks.append(txt)
         return GeminiResponse(tool_calls=tool_calls, text="".join(text_chunks))
 ```
 
-- [ ] **Step 2: Commit**
+The `last_tool_results` shape produced by AgentLoop now matches what the
+adapter consumes (`name`, `status`, `data`, `error`, `call_id`). See
+Task C.3 step 3 — that's where the AgentLoop is updated to include `name`
+in each result.
+
+- [ ] **Step 2: Update AgentLoop to include `name` in tool results**
+
+In Task C.3's implementation, the `last_results.append({...})` calls
+must include `"name": call.name` so the adapter can build a valid
+`function_response` part. Update each appended dict:
+
+```python
+last_results.append({
+    "call_id": call.id, "name": call.name, "status": "ok", "data": result.public,
+})
+last_results.append({
+    "call_id": call.id, "name": call.name, "status": "error", "error": str(exc),
+})
+last_results.append({
+    "call_id": call.id, "name": call.name, "status": "awaiting_user_confirm",
+})
+```
+
+- [ ] **Step 3: Commit**
 
 ```bash
-git add backend/app/services/agent_gemini.py
-git commit -m "feat(agent): real Gemini function-calling adapter for AgentLoop"
+git add backend/app/services/agent_gemini.py backend/app/services/agent_loop.py
+git commit -m "feat(agent): Gemini adapter — function_response parts + async to_thread + system_instruction"
 ```
 
 ---
@@ -2302,21 +2416,50 @@ from backend.app.api.routes.parent_agent import router as parent_agent_router
 app.include_router(parent_agent_router, prefix=settings.api_prefix)
 ```
 
-- [ ] **Step 4: Modify `/parent/chat` to route through agent when flag set**
+- [ ] **Step 4: Expand ChatResponse FIRST**
 
-In `backend/app/api/routes/parent_chat.py`, at the very top of `parent_chat()`:
+Before touching the route function, modify the response schema in
+`backend/app/api/routes/parent_chat.py`:
 
 ```python
-# Force-load tool modules so decorators register.
-import backend.app.services.agent_tools.read_tools  # noqa: F401
-import backend.app.services.agent_tools.task_tools  # noqa: F401
-import backend.app.services.agent_tools.reflection_tools  # noqa: F401
-import backend.app.services.agent_tools.bypass_tools  # noqa: F401
-import backend.app.services.agent_tools.lock_tools  # noqa: F401
-import backend.app.services.agent_tools.shield_tools  # noqa: F401
-import backend.app.services.agent_tools.vision_tools  # noqa: F401
+# Top of file, with other imports:
+from backend.app.schemas.agent import Proposal, Receipt
 
-# At the start of parent_chat():
+# Modify the existing ChatResponse class:
+class ChatResponse(BaseModel):
+    message: str
+    reasoning: str | None = None
+    action: ChatAction | None = None
+    # New agent-path fields (all optional / default empty for back-compat).
+    proposals: list[Proposal] = []
+    receipts: list[Receipt] = []
+    cancelled_proposals: list[str] = []
+```
+
+iOS old builds ignore unknown fields (Codable default). Existing
+shield/block path leaves them empty. Agent path populates them.
+
+- [ ] **Step 5: Module-level imports for tool registration**
+
+At the TOP of `parent_chat.py` (NOT inside the route function), add:
+
+```python
+# Force tool modules to import so @tool decorators register into
+# GLOBAL_REGISTRY at app startup. Done once per process.
+from backend.app.services.agent_tools import (  # noqa: F401
+    read_tools, task_tools, reflection_tools, bypass_tools,
+    lock_tools, vision_tools,
+)
+# NOTE: shield_app and unshield_app are NOT registered for the agent in
+# v1 (the existing verb-table dispatcher handles those). Don't import
+# shield_tools here — leaving it unimported keeps it out of the registry.
+```
+
+- [ ] **Step 6: Modify the `parent_chat` route**
+
+Insert at the START of `async def parent_chat(...)`:
+
+```python
 if settings.agent_enabled:
     from backend.app.services.agent_loop import AgentLoop, AgentInput
     from backend.app.services.agent_gemini import GeminiAgentClient
@@ -2327,7 +2470,9 @@ if settings.agent_enabled:
 
     state_snapshot = None
     if req.child_device_id is not None:
-        state_snapshot = get_bigkid_store().get_state(req.child_device_id).model_dump(mode="json")
+        full = get_bigkid_store().get_state(req.child_device_id)
+        # Trim per spec §4.4 — drop quiz body + photo URLs from snapshot.
+        state_snapshot = _trimmed_snapshot(full)
 
     loop = AgentLoop(
         registry=GLOBAL_REGISTRY,
@@ -2341,30 +2486,49 @@ if settings.agent_enabled:
         state_snapshot=state_snapshot,
         force_confirmations=req.force_confirmations or [],
     ))
-    # Adapt AgentResponse → ChatResponse (back-compat envelope).
+    # CRITICAL: forward proposals + receipts. Reviewer flagged this — the
+    # original draft dropped them.
     return ChatResponse(
-        message=agent_resp.message, reasoning=agent_resp.reasoning,
-        action=None,  # Agent path doesn't use legacy action field
-        # iOS Phase D adds proposals/receipts decoding to ChatResponse.
-        # For now they're attached as extra fields via dict (FastAPI honors
-        # arbitrary extra kwargs only if model_config allows; see schema fix).
+        message=agent_resp.message,
+        reasoning=agent_resp.reasoning,
+        action=None,
+        proposals=agent_resp.proposals,
+        receipts=agent_resp.receipts,
+        cancelled_proposals=agent_resp.cancelled_proposals,
     )
 ```
 
-To carry proposals/receipts in the response, we expand `ChatResponse` (in
-`parent_chat.py`):
+And add the snapshot trimmer at module scope:
 
 ```python
-class ChatResponse(BaseModel):
-    message: str
-    reasoning: str | None = None
-    action: ChatAction | None = None
-    proposals: list[Proposal] = []
-    receipts: list[Receipt] = []
-    cancelled_proposals: list[str] = []
+def _trimmed_snapshot(state) -> dict:
+    """Strip context-bloat from the full ChildStateResponse for the
+    agent's auto-injected state. See spec §4.4."""
+    return {
+        "child_name": state.child_name,
+        "minutes_left": state.minutes_left,
+        "minutes_max": state.minutes_max,
+        "tasks": [
+            {
+                "id": str(t.id), "title": t.title, "status": t.status.value,
+                "phase": t.phase.value,
+                "has_photo": bool(t.evidence_photo_url),
+                "has_note": bool(t.evidence_note),
+                "has_bypass": t.bypass is not None,
+                "redo_reason": t.redo_reason,
+            }
+            for t in state.tasks
+        ],
+        "reflection_active": state.reflection_request is not None,
+        "reflection_reason": (
+            state.reflection_request.reason if state.reflection_request else None
+        ),
+        "pending_bypass_count": sum(
+            1 for t in state.tasks
+            if t.bypass and t.bypass.status.value == "pending"
+        ),
+    }
 ```
-
-(Add the imports for `Proposal`/`Receipt` from `schemas.agent`.)
 
 - [ ] **Step 5: Run all backend tests**
 
@@ -2385,16 +2549,69 @@ git commit -m "feat(agent): /parent/agent/exec + agent-enabled route in /parent/
 
 ## Phase D — iOS components
 
-### Task D.1: Decode envelope (Proposal, Receipt, AgentResponse)
+### Task D.1: Decode envelope (Proposal, Receipt)
 
 **Files:**
 - Create: `Evlin iOS/Evlin iOS/Models/AgentEnvelope.swift`
 - Modify: `Evlin iOS/Evlin iOS/Services/APIClient.swift` (extend `ChatResponse`)
 
+**Pre-flight:** verify `AnyCodable` exists in the project before proceeding:
+
+```bash
+grep -rn "struct AnyCodable\|typealias AnyCodable" "Evlin iOS/Evlin iOS/" | head
+```
+
+If it doesn't exist, drop a minimal type at the top of
+`AgentEnvelope.swift` (we don't need full polymorphism in v1 — `args`
+is rendered as a few well-known keys).
+
 - [ ] **Step 1: New model file**
 
 ```swift
 import Foundation
+
+/// Minimal type-erased value for decoding heterogeneous tool args.
+/// AI tool args are JSON: strings, numbers, bools, null, and possibly
+/// nested. v1 only displays a handful of known keys (reason, title,
+/// minutes), so deep nesting is rare; a flat decoder is enough.
+struct AnyCodable: Codable, Hashable, @unchecked Sendable {
+    let value: Any
+
+    init(_ v: Any) { self.value = v }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.singleValueContainer()
+        if c.decodeNil() { value = NSNull(); return }
+        if let b = try? c.decode(Bool.self) { value = b; return }
+        if let i = try? c.decode(Int.self) { value = i; return }
+        if let d = try? c.decode(Double.self) { value = d; return }
+        if let s = try? c.decode(String.self) { value = s; return }
+        if let arr = try? c.decode([AnyCodable].self) { value = arr; return }
+        if let dict = try? c.decode([String: AnyCodable].self) { value = dict; return }
+        value = NSNull()
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.singleValueContainer()
+        switch value {
+        case is NSNull: try c.encodeNil()
+        case let b as Bool: try c.encode(b)
+        case let i as Int: try c.encode(i)
+        case let d as Double: try c.encode(d)
+        case let s as String: try c.encode(s)
+        case let a as [AnyCodable]: try c.encode(a)
+        case let d as [String: AnyCodable]: try c.encode(d)
+        default: try c.encodeNil()
+        }
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(String(describing: value))
+    }
+    static func == (lhs: AnyCodable, rhs: AnyCodable) -> Bool {
+        String(describing: lhs.value) == String(describing: rhs.value)
+    }
+}
 
 /// Tool-call confirmation pending parent approval.
 struct ProposalDTO: Codable, Sendable, Hashable {
@@ -2417,13 +2634,10 @@ struct ReceiptDTO: Codable, Sendable, Hashable {
         case undoToken = "undo_token"
     }
 }
-
-/// Toast / banner state for inline Undo on direct-API actions.
-struct UndoableActionResult<T>: Hashable where T: Hashable {
-    let value: T
-    let undoToken: String?
-}
 ```
+
+If `AnyCodable` already exists in the codebase, drop the `struct
+AnyCodable` part of this file and import it from wherever it lives.
 
 - [ ] **Step 2: Extend ChatResponse in APIClient**
 
@@ -2667,6 +2881,7 @@ git commit -m "feat(ios): ProposalCard generic agent confirmation UI"
 
 ```swift
 import SwiftUI
+import Combine
 
 /// Receipt for an agent-executed action. Shows summary + Undo button
 /// with 60s countdown. Tapping Undo POSTs /parent/actions/{id}/revert.
@@ -2676,8 +2891,7 @@ struct ReceiptBubble: View {
     @State private var secondsRemaining: Int = 60
     @State private var undoing = false
     @State private var undoneOrExpired = false
-
-    private let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+    @State private var timerCancellable: Cancellable? = nil
 
     var body: some View {
         HStack(spacing: 12) {
@@ -2702,12 +2916,19 @@ struct ReceiptBubble: View {
         .padding(.horizontal, 14).padding(.vertical, 10)
         .background(Color.evSurfaceContainerLow)
         .clipShape(RoundedRectangle(cornerRadius: 12))
-        .onReceive(timer) { _ in
-            guard !undoneOrExpired else { return }
-            secondsRemaining -= 1
-            if secondsRemaining <= 0 {
-                undoneOrExpired = true
+        .onAppear {
+            // Start a connectable timer we can cancel on disappear so we
+            // don't leak ticks for off-screen receipts.
+            let publisher = Timer.publish(every: 1, on: .main, in: .common)
+            timerCancellable = publisher.autoconnect().sink { _ in
+                guard !undoneOrExpired else { return }
+                secondsRemaining -= 1
+                if secondsRemaining <= 0 { undoneOrExpired = true }
             }
+        }
+        .onDisappear {
+            timerCancellable?.cancel()
+            timerCancellable = nil
         }
     }
 
@@ -2841,13 +3062,10 @@ func skipProposal(_ p: ProposalDTO) {
 func undoReceipt(token: String) async {
     let client = AgentClient(baseURL: apiClient.baseURL)
     do {
-        let res = try await client.revertAction(actionID: token)
-        // Show a subtle confirmation message.
-        messages.append(ChatMessage(
-            role: .agent,
-            content: "Reverted.",
-            timestamp: Date(),
-        ))
+        _ = try await client.revertAction(actionID: token)
+        // Show a subtle confirmation message (uses ChatMessage's existing
+        // optional defaults — no trailing comma).
+        messages.append(ChatMessage(role: .agent, content: "Reverted."))
     } catch {
         errorMessage = (error as? LocalizedError)?.errorDescription
     }
