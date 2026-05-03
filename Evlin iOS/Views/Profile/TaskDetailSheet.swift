@@ -173,6 +173,26 @@ struct TaskDetailSheet: View {
             } else {
                 emptySubmissionPlaceholder
             }
+            #if DEBUG
+            // Inline diagnostic: show what TaskItem actually decoded so we
+            // can tell at a glance whether it's a backend gap (no URL),
+            // a mapping bug (URL exists but photos array empty), or a
+            // SwiftUI/AsyncImage failure (photos has URL but image won't
+            // load — that case lights up the photoGallery's red overlay).
+            VStack(alignment: .leading, spacing: 4) {
+                Text("DEBUG").font(.caption).bold()
+                Text("backendID: \(task.backendID?.uuidString ?? "nil")")
+                Text("photos.count: \(task.photos.count)")
+                ForEach(task.photos, id: \.self) { url in
+                    Text(url).font(.system(size: 9, design: .monospaced)).lineLimit(2)
+                }
+                Text("note: \(task.note ?? "nil")")
+                Text("state: \(String(describing: task.state))")
+            }
+            .padding(8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.yellow.opacity(0.18), in: RoundedRectangle(cornerRadius: 8))
+            #endif
         }
     }
 
