@@ -291,8 +291,24 @@ struct BigKidTaskDetailView: View {
                     switch phase {
                     case .success(let img):
                         img.resizable().scaledToFill()
-                    case .failure:
+                    case .failure(let error):
+                        #if DEBUG
+                        ZStack(alignment: .topLeading) {
+                            placeholderImage
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("AsyncImage failed").font(.caption).bold()
+                                Text(url.absoluteString).font(.system(size: 9, design: .monospaced))
+                                    .lineLimit(3)
+                                Text(error.localizedDescription).font(.system(size: 9))
+                                    .foregroundStyle(.red)
+                            }
+                            .padding(8)
+                            .background(.white.opacity(0.85), in: RoundedRectangle(cornerRadius: 6))
+                            .padding(8)
+                        }
+                        #else
                         placeholderImage
+                        #endif
                     case .empty:
                         ZStack {
                             placeholderImage
@@ -304,6 +320,9 @@ struct BigKidTaskDetailView: View {
                 }
                 .aspectRatio(4.0/3.0, contentMode: .fill)
                 .clipShape(RoundedRectangle(cornerRadius: 18))
+                .onAppear {
+                    print("[BigKid] evidencePreview loading URL: \(url.absoluteString)")
+                }
             } else {
                 placeholderImage
             }
