@@ -376,31 +376,59 @@ struct BigKidTaskDetailView: View {
     }
 
     // MARK: - Approved phase
-    /// Shown when the parent has approved this submission (status == .done).
-    /// Celebratory tone + the kid's photo + their note.
+    /// Shown when status == .done. Two flavours:
+    ///   - Normal approve (kid submitted evidence, parent approved):
+    ///     celebratory "Approved!" with the photo + note.
+    ///   - Bypass approve (kid asked to skip, parent allowed it):
+    ///     softer "Excused" copy — no "thumbs up" framing because the
+    ///     kid didn't actually do the work, plus the parent's reply if
+    ///     they wrote one.
     private var approvedPhase: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        let isBypassApproved = (task.bypass?.status == .approved)
+        return VStack(alignment: .leading, spacing: 18) {
             EvKidCard(tone: .green, padding: 22) {
                 VStack(alignment: .leading, spacing: 12) {
                     HStack(spacing: 10) {
                         ZStack {
                             Circle().fill(EvlinKidColors.green500)
                                 .frame(width: 36, height: 36)
-                            Image(systemName: "checkmark")
+                            Image(systemName: isBypassApproved ? "hand.raised.fill" : "checkmark")
                                 .font(.system(size: 16, weight: .bold))
                                 .foregroundStyle(.white)
                         }
-                        Text("Approved!")
+                        Text(isBypassApproved ? "Excused" : "Approved!")
                             .font(.system(size: 19, weight: .heavy))
                             .foregroundStyle(EvlinKidColors.green700)
                     }
-                    Text("Nice work — a parent reviewed it and gave it a thumbs up.")
+                    Text(isBypassApproved
+                         ? "A parent agreed to let you skip this one. No worries."
+                         : "Nice work — a parent reviewed it and gave it a thumbs up.")
                         .font(.system(size: 14))
                         .foregroundStyle(EvlinKidColors.green600)
                         .lineSpacing(2)
+                    if isBypassApproved,
+                       let reply = task.bypass?.parentResponse, !reply.isEmpty {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("FROM YOUR PARENT")
+                                .font(.system(size: 12, weight: .bold))
+                                .tracking(0.6)
+                                .foregroundStyle(EvlinKidColors.green600)
+                            Text(reply)
+                                .font(.system(size: 14))
+                                .foregroundStyle(EvlinKidColors.ink)
+                                .lineSpacing(2)
+                        }
+                        .padding(12)
+                        .background(.white)
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                    }
                 }
             }
-            evidencePreview.padding(.top, 4)
+            // Bypass-approved tasks have no submitted photo — kid never
+            // did the work — so skip evidencePreview in that branch.
+            if !isBypassApproved {
+                evidencePreview.padding(.top, 4)
+            }
             EvKidBigButton(tone: .ghost, action: onBack) { Text("Back to today") }
         }
     }
