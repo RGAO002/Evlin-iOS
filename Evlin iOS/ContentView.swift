@@ -43,6 +43,20 @@ struct ContentView: View {
             if onboardingComplete && (appMode == "parent" || appMode == "child") {
                 FloatingModeToggle()
             }
+            // Parent-side BigKid debug — opens the trigger / approve /
+            // review-task sheet that calls /api/v1/parent/* endpoints.
+            // Only surfaces while we're actually in parent mode.
+            if onboardingComplete && appMode == "parent" {
+                VStack {
+                    HStack {
+                        ParentBigKidDebugButton()
+                            .padding(.leading, 12)
+                            .padding(.top, 8)
+                        Spacer()
+                    }
+                    Spacer()
+                }
+            }
             #endif
         }
     }
