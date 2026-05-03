@@ -117,33 +117,71 @@ struct BigKidTaskDetailView: View {
         }
     }
 
+    @ViewBuilder
     private var cameraButton: some View {
+        if let data = photoData, let uiImage = UIImage(data: data) {
+            capturedPreview(uiImage: uiImage)
+        } else {
+            emptyCameraPlaceholder
+        }
+    }
+
+    private var emptyCameraPlaceholder: some View {
         Button { showCamera = true } label: {
             VStack(spacing: 10) {
                 ZStack {
                     Circle().fill(EvlinKidColors.green500)
                         .frame(width: 60, height: 60)
-                    Image(systemName: photoData == nil ? "camera.fill" : "checkmark")
-                        .font(.system(size: photoData == nil ? 24 : 28, weight: .semibold))
+                    Image(systemName: "camera.fill")
+                        .font(.system(size: 24, weight: .semibold))
                         .foregroundStyle(.white)
                 }
-                Text(photoData == nil ? "Take a photo" : "Photo ready")
+                Text("Take a photo")
                     .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(photoData == nil ? EvlinKidColors.ink2 : EvlinKidColors.green500)
-                Text(photoData == nil ? "Show us what you did" : "Tap to retake")
+                    .foregroundStyle(EvlinKidColors.ink2)
+                Text("Show us what you did")
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(EvlinKidColors.ink3)
             }
             .frame(maxWidth: .infinity)
             .frame(height: 180)
-            .background(photoData != nil ? EvlinKidColors.primarySoft : EvlinKidColors.surface2)
+            .background(EvlinKidColors.surface2)
             .clipShape(RoundedRectangle(cornerRadius: EvlinKidMetrics.Radius.cardLarge))
             .overlay(
                 RoundedRectangle(cornerRadius: EvlinKidMetrics.Radius.cardLarge)
-                    .strokeBorder(style: StrokeStyle(lineWidth: 2,
-                                                     dash: photoData == nil ? [6] : []))
-                    .foregroundStyle(photoData != nil ? EvlinKidColors.primary : EvlinKidColors.ink4)
+                    .strokeBorder(style: StrokeStyle(lineWidth: 2, dash: [6]))
+                    .foregroundStyle(EvlinKidColors.ink4)
             )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func capturedPreview(uiImage: UIImage) -> some View {
+        Button { showCamera = true } label: {
+            ZStack(alignment: .bottomTrailing) {
+                Image(uiImage: uiImage)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 240)
+                    .clipShape(RoundedRectangle(cornerRadius: EvlinKidMetrics.Radius.cardLarge))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: EvlinKidMetrics.Radius.cardLarge)
+                            .stroke(EvlinKidColors.primary, lineWidth: 2)
+                    )
+
+                HStack(spacing: 6) {
+                    Image(systemName: "arrow.triangle.2.circlepath.camera.fill")
+                        .font(.system(size: 12, weight: .semibold))
+                    Text("Tap to retake")
+                        .font(.system(size: 13, weight: .semibold))
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .background(.black.opacity(0.55), in: Capsule())
+                .padding(12)
+            }
         }
         .buttonStyle(.plain)
     }

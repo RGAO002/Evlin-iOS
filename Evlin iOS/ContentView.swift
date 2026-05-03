@@ -22,16 +22,28 @@ struct ContentView: View {
     @AppStorage("appMode") private var appMode: String = ""
 
     var body: some View {
-        Group {
-            if !onboardingComplete {
-                OnboardingCoordinator()
-            } else if appMode != "parent" && appMode != "child" {
-                OnboardingCoordinator()   // fallback
-            } else if appMode == "parent" {
-                ParentRootView()
-            } else {
-                ChildModeView()
+        ZStack {
+            Group {
+                if !onboardingComplete {
+                    OnboardingCoordinator()
+                } else if appMode != "parent" && appMode != "child" {
+                    OnboardingCoordinator()   // fallback
+                } else if appMode == "parent" {
+                    ParentRootView()
+                } else {
+                    // Big-kid product UI (`BigKidRootView`) when paired + API base is
+                    // known; otherwise legacy lock / pairing shell (`ChildModeView`).
+                    ChildModeExperienceView()
+                }
             }
+
+            #if DEBUG
+            // Single-device dev affordance: float a small P/K pill that
+            // toggles parent ↔ child mode. Drag to reposition.
+            if onboardingComplete && (appMode == "parent" || appMode == "child") {
+                FloatingModeToggle()
+            }
+            #endif
         }
     }
 }

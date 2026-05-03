@@ -161,8 +161,39 @@ extension ReflectionRequest {
 }
 
 extension ChildStateResponse {
+    /// Default fallback fixture used when the backend is unreachable.
+    /// Mirrors the backend seed in `bigkid_store.py :: seed_default()` so
+    /// debug builds without a live server still show realistic content.
+    static let defaultFixtureTasks: [BigKidTask] = [
+        .fixture(
+            title: "Make bed",
+            description: "Smooth the covers and fluff the pillow.",
+            category: .chores, due: "8:00 AM"
+        ),
+        .fixture(
+            title: "Math homework",
+            description: "Page 42, problems 1–10. Show your work.",
+            category: .homework, due: "6:00 PM"
+        ),
+        .fixture(
+            title: "Brush teeth",
+            description: "Two minutes, top and bottom.",
+            category: .selfCare, due: "9:00 PM"
+        ),
+        .fixture(
+            title: "Walk the dog",
+            description: "Around the block — bring water and a poop bag.",
+            category: .chores, due: "5:00 PM"
+        ),
+        .fixture(
+            title: "Read for 20 min",
+            description: "Pick a book you like. No screens during reading time.",
+            category: .selfCare, due: "8:30 PM"
+        ),
+    ]
+
     static func fixture(
-        tasks: [BigKidTask] = [.fixture()],
+        tasks: [BigKidTask] = ChildStateResponse.defaultFixtureTasks,
         reflection: ReflectionRequest? = nil,
         minutesLeft: Int = 0,
         minutesMax: Int = 120,
