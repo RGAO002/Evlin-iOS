@@ -12,6 +12,16 @@ struct BigKidTaskDetailView: View {
     @State private var submitting = false
     @FocusState private var noteFocused: Bool
 
+    /// Hydrate `photoData` from the on-disk cache when the view appears so
+    /// the kid sees their last submitted photo even after the backend's
+    /// in-memory store gets wiped (which currently happens on every
+    /// Railway redeploy). See `KidEvidenceCache`.
+    private func hydrateFromCache() {
+        if photoData == nil, let cached = KidEvidenceCache.load(taskId: task.id) {
+            photoData = cached
+        }
+    }
+
     /// Stable scroll anchor for the note input. We scroll to this when the
     /// keyboard appears so the field doesn't sit under the keyboard. The
     /// system's automatic keyboard avoidance fails for axis: .vertical
@@ -46,6 +56,7 @@ struct BigKidTaskDetailView: View {
             }
         }
         .background(EvlinKidColors.surface.ignoresSafeArea())
+        .onAppear { hydrateFromCache() }
         .sheet(isPresented: $showCamera) {
             EvKidPhotoPicker { data in
                 showCamera = false
@@ -236,6 +247,11 @@ struct BigKidTaskDetailView: View {
     private func submitAction() {
         guard let data = photoData else { return }
         submitting = true
+        // Cache the bytes locally so this kid always sees their photo on
+        // re-open, regardless of whether the backend kept its copy. Saves
+        // before the network call so a slow upload doesn't lose the cache
+        // if the user backgrounds the app mid-flight.
+        KidEvidenceCache.save(taskId: task.id, photoData: data)
         Task {
             await onSubmit(data, note.isEmpty ? nil : note)
             submitting = false
