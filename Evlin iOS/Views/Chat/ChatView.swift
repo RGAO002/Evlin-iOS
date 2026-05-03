@@ -64,6 +64,33 @@ struct ChatView: View {
                                 if message.role == .agent, let receipt = message.receiptState {
                                     ReceiptCard(state: receipt, effectiveState: message.receiptEffectiveState)
                                 }
+
+                                // Agent envelope (Phase E) — staged proposals
+                                // for parent confirmation, and executed receipts
+                                // with 60s Undo countdown. Empty arrays render
+                                // nothing.
+                                if message.role == .agent,
+                                   let proposals = message.proposals, !proposals.isEmpty {
+                                    VStack(spacing: 10) {
+                                        ForEach(proposals, id: \.token) { p in
+                                            ProposalCard(
+                                                proposal: p,
+                                                onConfirm: { await viewModel.confirmProposal(p) },
+                                                onSkip: { viewModel.skipProposal(p) }
+                                            )
+                                        }
+                                    }
+                                }
+                                if message.role == .agent,
+                                   let receipts = message.receipts, !receipts.isEmpty {
+                                    VStack(spacing: 8) {
+                                        ForEach(receipts, id: \.summary) { r in
+                                            ReceiptBubble(receipt: r, onUndo: { token in
+                                                await viewModel.undoReceipt(token: token)
+                                            })
+                                        }
+                                    }
+                                }
                             }
                             .id(message.id)
                         }

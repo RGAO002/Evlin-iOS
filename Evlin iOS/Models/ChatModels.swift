@@ -37,6 +37,13 @@ struct ChatMessage: Identifiable, Codable {
     var receiptState: ReceiptState? = nil
     var receiptEffectiveState: AckEffectiveState? = nil
 
+    // Agent envelope (Phase D/E — global AI copilot).
+    // When AGENT_ENABLED=1, /parent/chat may return staged proposals
+    // (parent must confirm) and/or executed receipts (with optional undo).
+    // ChatView renders ProposalCard / ReceiptBubble beneath the bubble.
+    var proposals: [ProposalDTO]? = nil
+    var receipts: [ReceiptDTO]? = nil
+
     var isStrategyArtifact: Bool { strategyTitle != nil }
 
     init(role: ChatRole, content: String, timestamp: Date = Date(), reasoning: String? = nil, action: ChatAction? = nil) {

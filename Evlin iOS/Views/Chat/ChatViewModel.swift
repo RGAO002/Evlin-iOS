@@ -198,6 +198,23 @@ class ChatViewModel: ObservableObject {
             return
         }
 
+        // 2.5 Agent envelope (Phase D/E). When AGENT_ENABLED=1 the backend may
+        // return staged proposals and/or executed receipts. Append a single
+        // bubble carrying both; ChatView renders ProposalCard / ReceiptBubble
+        // beneath. Strictly opt-in — only fires when at least one is non-empty,
+        // so existing card_id / command_id / shield-block flows are untouched.
+        if (resp.proposals?.isEmpty == false) || (resp.receipts?.isEmpty == false) {
+            var msg = ChatMessage(
+                role: .agent, content: resp.message, timestamp: Date(),
+                reasoning: resp.reasoning, action: nil
+            )
+            msg.proposals = resp.proposals
+            msg.receipts = resp.receipts
+            messages.append(msg)
+            isThinking = false
+            return
+        }
+
         // 3. Plain text (conversational reply, or confirmation_required without card_id)
         var msg = ChatMessage(
             role: .agent, content: resp.message, timestamp: Date(),
@@ -593,6 +610,50 @@ class ChatViewModel: ObservableObject {
     }
 
     // MARK: - Fetch video recommendation
+
+    // MARK: - Agent envelope handlers (Phase E)
+
+    /// Parent tapped Confirm on a ProposalCard. POST /parent/agent/exec,
+    /// then move the proposal to the receipts list on the same agent message
+    /// so the card flips into a ReceiptBubble in place.
+    @MainActor
+    func confirmProposal(_ p: ProposalDTO) async {
+        let client = AgentClient(baseURL: apiClient.baseURL)
+        do {
+            let receipt = try await client.executeProposal(token: p.token)
+            if let i = messages.lastIndex(where: { $0.role == .agent }) {
+                var msg = messages[i]
+                msg.proposals?.removeAll(where: { $0.token == p.token })
+                msg.receipts = (msg.receipts ?? []) + [receipt]
+                messages[i] = msg
+            }
+        } catch {
+            errorMessage = (error as? LocalizedError)?.errorDescription
+        }
+    }
+
+    /// Parent tapped Skip — drop the proposal from the most recent agent message.
+    @MainActor
+    func skipProposal(_ p: ProposalDTO) {
+        if let i = messages.lastIndex(where: { $0.role == .agent }) {
+            var msg = messages[i]
+            msg.proposals?.removeAll(where: { $0.token == p.token })
+            messages[i] = msg
+        }
+    }
+
+    /// Parent tapped Undo on a ReceiptBubble. POST the revert and append a
+    /// subtle confirmation bubble. Errors flow into errorMessage.
+    @MainActor
+    func undoReceipt(token: String) async {
+        let client = AgentClient(baseURL: apiClient.baseURL)
+        do {
+            _ = try await client.revertAction(actionID: token)
+            messages.append(ChatMessage(role: .agent, content: "Reverted."))
+        } catch {
+            errorMessage = (error as? LocalizedError)?.errorDescription
+        }
+    }
 
     private func fetchVideoRecommendation(for messageId: UUID) async {
         let base = apiClient.baseURL
