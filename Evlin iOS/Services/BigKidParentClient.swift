@@ -163,7 +163,7 @@ extension TaskItem {
             }
         }()
 
-        let photos: [String] = (t.evidencePhotoURL?.absoluteString).map { [$0] } ?? []
+        let photos: [String] = (t.evidencePhotoUrl?.absoluteString).map { [$0] } ?? []
 
         // Note priority: bypass reason > kid's evidence note > parent's redo
         // reason. The parent-UI's bypass status card reads `task.note` to

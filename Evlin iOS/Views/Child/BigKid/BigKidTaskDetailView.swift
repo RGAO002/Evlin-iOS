@@ -302,7 +302,7 @@ struct BigKidTaskDetailView: View {
                     .scaledToFill()
                     .aspectRatio(4.0/3.0, contentMode: .fill)
                     .clipShape(RoundedRectangle(cornerRadius: 18))
-            } else if let url = task.evidencePhotoURL {
+            } else if let url = task.evidencePhotoUrl {
                 AsyncImage(url: url) { phase in
                     switch phase {
                     case .success(let img):
@@ -428,7 +428,7 @@ private func _redoPreviewTask() -> BigKidTask {
     return BigKidTask(id: t.id, title: t.title, description: t.description,
                       category: t.category, due: t.due, status: t.status, phase: t.phase,
                       redoReason: "Bed is still messy. Please smooth the covers.",
-                      evidencePhotoURL: nil, evidenceNote: nil, bypass: nil)
+                      evidencePhotoUrl: nil, evidenceNote: nil, bypass: nil)
 }
 #Preview("Redo") {
     BigKidTaskDetailView(task: _redoPreviewTask(),
