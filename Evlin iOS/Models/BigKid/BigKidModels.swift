@@ -142,18 +142,68 @@ extension BigKidTask {
 }
 
 extension ReflectionRequest {
+    /// Realistic fixture quiz — mirrors `bigkid_reflection_seed.json` so
+    /// DEBUG / scenario mode (no live backend) renders the same content
+    /// the real backend would seed.
+    static let defaultFixtureQuiz: [QuizQuestion] = [
+        QuizQuestion(
+            q: "Why does your body need rest time away from screens?",
+            options: [
+                "So your eyes and brain can recover and focus better",
+                "Because screens run out of battery",
+                "So adults can use the TV",
+                "It doesn't really matter",
+            ]
+        ),
+        QuizQuestion(
+            q: "What is a healthy thing to do when your screen time ends?",
+            options: [
+                "Hide another device under the bed",
+                "Find something fun offline — draw, read, go outside",
+                "Argue until you get more time",
+                "Wait quietly doing nothing",
+            ]
+        ),
+        QuizQuestion(
+            q: "How does not sticking to limits make others feel?",
+            options: [
+                "Proud of you",
+                "Nothing at all",
+                "Worried, because agreements matter",
+                "Happy you broke the rule",
+            ]
+        ),
+        QuizQuestion(
+            q: "What is the best way to earn trust back?",
+            options: [
+                "Pretend it didn't happen",
+                "Keep to the limit and be honest next time",
+                "Complain",
+                "Change the password",
+            ]
+        ),
+        QuizQuestion(
+            q: "If you feel an urge to keep scrolling, a good move is to...",
+            options: [
+                "Just do it anyway",
+                "Pause, take three breaths, and pick an offline thing",
+                "Hide from a parent",
+                "Start a new game",
+            ]
+        ),
+    ]
+
     static func fixture(
         status: BigKidReflectionStatus = .pending,
         stepsCompleted: [BigKidReflectionStep] = []
     ) -> ReflectionRequest {
         ReflectionRequest(
-            id: UUID(), reason: "stayed up too late",
+            id: UUID(),
+            reason: "stayed up past bedtime",
             videoId: "dQw4w9WgXcQ",
-            videoTitle: "Why rest time matters",
-            writingPrompt: "What were you feeling, and what could you do differently tomorrow?",
-            quiz: (0..<5).map { i in
-                QuizQuestion(q: "Q\(i+1)?", options: ["A", "B", "C", "D"])
-            },
+            videoTitle: "Why rest time matters for your brain",
+            writingPrompt: "What were you feeling when time ran out, and what could you do differently tomorrow?",
+            quiz: ReflectionRequest.defaultFixtureQuiz,
             stepsCompleted: stepsCompleted, quizScore: nil, essayText: nil,
             status: status, parentNote: nil, submittedAt: nil, approvedAt: nil
         )
