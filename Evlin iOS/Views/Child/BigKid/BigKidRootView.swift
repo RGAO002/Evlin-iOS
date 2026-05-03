@@ -140,9 +140,27 @@ struct BigKidRootView: View {
         #endif
         #if DEBUG
         .overlay(alignment: .topTrailing) {
-            BigKidDebugScenarioMenu(current: $debugScenario) { selected in
-                applyDebugScenario(selected)
-            }
+            BigKidDebugScenarioMenu(
+                current: $debugScenario,
+                onSelect: { selected in applyDebugScenario(selected) },
+                onReset: {
+                    Task {
+                        do { try await client.debugResetState() } catch {
+                            print("[BigKid] reset failed: \(error)")
+                        }
+                        // Drop any open detail sheet so it doesn't keep
+                        // showing the now-deleted task. Then re-poll.
+                        await MainActor.run {
+                            taskNav = nil
+                            bypassNav = nil
+                            reflectionPath = NavigationPath()
+                            debugScenario = .live
+                        }
+                        poller.start()
+                        await poller.refreshNow()
+                    }
+                }
+            )
             .padding(.top, 8)
             .padding(.trailing, 12)
         }

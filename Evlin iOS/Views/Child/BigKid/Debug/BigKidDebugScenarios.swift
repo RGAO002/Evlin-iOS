@@ -129,6 +129,10 @@ enum BigKidDebugScenario: String, CaseIterable, Identifiable {
 struct BigKidDebugScenarioMenu: View {
     @Binding var current: BigKidDebugScenario
     let onSelect: (BigKidDebugScenario) -> Void
+    /// Optional handler for the "Reset tasks" action button. Hits the
+    /// backend's `/parent/_debug/reset/{child_id}` endpoint and refreshes
+    /// the poller so the kid sees fresh fixture tasks again.
+    var onReset: (() -> Void)? = nil
 
     var body: some View {
         Menu {
@@ -142,6 +146,12 @@ struct BigKidDebugScenarioMenu: View {
                     } else {
                         Text(s.label)
                     }
+                }
+            }
+            if let onReset {
+                Divider()
+                Button(role: .destructive) { onReset() } label: {
+                    Label("Reset tasks (server)", systemImage: "arrow.counterclockwise")
                 }
             }
         } label: {

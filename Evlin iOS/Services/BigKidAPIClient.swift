@@ -75,6 +75,25 @@ final class BigKidAPIClient: ObservableObject {
 
     // MARK: - Time consumption
 
+    // MARK: - DEBUG
+
+    /// Reset this child's task list / reflection / time pool back to the
+    /// initial fixture state. DEBUG-only convenience for re-testing the
+    /// task flow without redeploying. Server endpoint:
+    /// POST /parent/_debug/reset/{child_id}
+    func debugResetState() async throws {
+        // /parent/_debug/... lives outside /child/* so we build the URL
+        // manually rather than going through makeRequest().
+        guard let url = URL(string:
+            baseURL.absoluteString + "/parent/_debug/reset/\(childId.uuidString)"
+        ) else { throw URLError(.badURL) }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 15
+        let (data, resp) = try await session.data(for: req)
+        try Self.validate(resp, data: data)
+    }
+
     func reportTimeUse(minutesUsed: Int) async throws {
         let req = try makeJSONRequest(path: "/child/time-consumption",
                                        method: "POST", body: ["minutes_used": minutesUsed])
