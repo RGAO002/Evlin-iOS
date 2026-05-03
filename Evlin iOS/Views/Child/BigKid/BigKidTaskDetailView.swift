@@ -332,6 +332,12 @@ struct BigKidTaskDetailView: View {
     }
 
     // MARK: - Redo phase
+    /// Shown when a parent has clicked REQUEST REDO. Banner explains why,
+    /// then the same camera + note + submit UI as the input phase so the
+    /// kid can immediately take a new photo and resubmit. The previous
+    /// version had a "Try again" button with an empty action and a stale
+    /// comment claiming phase would flip on its own — it wouldn't, the
+    /// kid was stuck.
     private var redoPhase: some View {
         VStack(alignment: .leading, spacing: 18) {
             EvKidCard(tone: .amber, padding: 22) {
@@ -364,9 +370,11 @@ struct BigKidTaskDetailView: View {
                     }
                 }
             }
-            EvKidBigButton(action: { /* phase will flip on next poll once parent re-reviews */ }) {
-                Text("Try again")
-            }
+            // Reuse the input UI so the kid can immediately retake a
+            // photo + add a new note + resubmit. Same hookup as the
+            // initial submission — submitAction calls onSubmit which
+            // hits POST /child/task/{id}/evidence.
+            inputPhase
         }
     }
 }
