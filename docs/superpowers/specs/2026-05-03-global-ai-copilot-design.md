@@ -21,10 +21,11 @@ new chat capability) with a **tool-calling agent** that can:
   warrants it (specifically: misbehavior narration → reflection card).
 - Compose multi-step plans across multiple tools in one chat turn.
 
-Plus a **global Undo** safety net: every parent-side mutation —
-whether triggered by the chat agent, a Profile UI button, or the
-existing shield/block dispatcher — surfaces an Undo button for 60s
-backed by a single `ParentActionLog` service.
+Plus an **agent-receipt Undo** safety net: every action executed by
+the chat agent surfaces an Undo button on its receipt bubble for 60s,
+backed by a `ParentActionLog` service. **Profile UI direct buttons
+and the shield/block dispatcher are NOT modified** — they keep their
+current behavior with no inline toasts. Undo is a chat-only feature.
 
 ## 2. Non-goals (v1)
 
@@ -317,7 +318,10 @@ async def review_submissions(child_id: UUID) -> ToolResult:
 The agent then sees these verdicts in the next iteration and can
 propose `approve_task` / `request_redo` for each.
 
-## 6. Global ParentActionLog (Undo for everything)
+## 6. ParentActionLog (Undo for chat-agent receipts)
+
+Scope: only the chat agent writes to and reverts from this log. Profile
+UI mutations and the shield/block dispatcher are unaffected.
 
 ### 6.1 Service
 
@@ -346,33 +350,7 @@ class ParentActionLog:
     def gc(): ...   # purge expired entries
 ```
 
-### 6.2 Direct-API endpoints log too
-
-Every existing parent-side mutation endpoint records to the log on
-success and returns the `undo_token` in its response. Touched files:
-
-- `bigkid_parent.review_task` (`/parent/task/{id}/review`)
-- `bigkid_parent.create_task` (`/parent/task`)
-- `bigkid_parent.delete_task` (`/parent/task/{id}` DELETE)
-- `bigkid_parent.respond_bypass` (`/parent/bypass/{id}/respond`)
-- `bigkid_parent.trigger_reflection` (`/parent/reflection/trigger`)
-- `bigkid_parent.approve_reflection` (`/parent/reflection/{id}/approve`)
-- (Shield/block dispatcher writes — see §6.3)
-
-Each endpoint's response gets a new optional field:
-`undo_token: string?`. iOS uses it for inline Undo UI; if null, no
-Undo button is shown.
-
-### 6.3 Shield/block dispatcher integration
-
-The shield dispatcher already writes a `Command` row that the kid
-device polls. We log to `ParentActionLog` at command-creation time
-with inverse `unshield` / `unblock` (and the inverse args). Undoing a
-shield_app produces a NEW Command of the inverse type — kid device
-polls + applies it. The user-facing iOS ReceiptCard adds an Undo
-button identical to the chat one.
-
-### 6.4 Single revert endpoint
+### 6.2 Single revert endpoint
 
 ```
 POST /parent/actions/{action_id}/revert
@@ -387,7 +365,7 @@ Server:
 4. Return a new receipt (with its own `undo_token`, so reverts can be
    re-reverted).
 
-## 7. iOS changes
+## 7. iOS changes (chat only)
 
 ### 7.1 New components
 
@@ -395,35 +373,31 @@ Server:
   body + danger color + Confirm / Skip buttons. Tapping Confirm POSTs
   `/parent/agent/exec` with the proposal token. On success replaces
   the card in-place with a ReceiptBubble.
-- `Components/ConfirmationCards/ReceiptBubble.swift` — green check +
-  one-line summary + Undo button with 60s countdown.
-  Tapping Undo POSTs `/parent/actions/{id}/revert`. Shows toast on
-  expiry.
-- `Components/InlineUndoToast.swift` — non-chat surface for Profile
-  UI + Shield ReceiptCard. Shows briefly above the safe area: "Approved.
-  [Undo]". Same 60s timeout.
+- `Components/ReceiptBubble.swift` — green check + one-line summary +
+  Undo button with 60s countdown. Tapping Undo POSTs
+  `/parent/actions/{id}/revert`. Greys to "Done" on expiry.
 
 ### 7.2 Modified files
 
 | File | Change |
 |------|--------|
-| `Models/ChatModels.swift` | `ChatMessage` gains `proposals: [Proposal]`, `receipts: [Receipt]`, `legacyCard: LegacyCard?` |
-| `Services/APIClient.swift` | New methods `executeProposal(token)`, `revertAction(actionID)` |
+| `Models/ChatModels.swift` | `ChatMessage` gains `proposals: [Proposal]`, `receipts: [Receipt]` |
+| `Services/AgentClient.swift` (new) | `executeProposal(token)`, `revertAction(actionID)` |
+| `Services/APIClient.swift` | `ChatResponse` gains optional `proposals`, `receipts`, `cancelled_proposals` fields |
 | `Views/Chat/ChatViewModel.swift` | Decode new envelope; render proposal cards + receipt bubbles below message bubble |
-| `Views/Chat/ChatView.swift` | Layout for the three response sections |
-| `Views/Profile/ProfileView.swift` | Approve/Redo buttons surface InlineUndoToast on success |
-| `Views/Profile/TaskDetailView.swift` | Same — toast on completion of approve/redo |
-| `Views/Profile/AddBottomSheet.swift` | Toast on task creation |
-| `Components/ReceiptCard.swift` (existing shield) | Add Undo button if `undo_token` present |
-| `Services/BigKidParentClient.swift` | Methods return `(value, undoToken)`; add `revertAction(actionID)` |
+| `Views/Chat/ChatView.swift` | Layout for the three response sections (text → proposals → receipts) |
 
 ### 7.3 Behavior unchanged
 
-- Existing R1 / D1-G1 / shield/block confirmation cards STAY. Agent
-  emits `legacy_card` for those paths via the `shield_app` tool's
-  forward to the dispatcher.
-- Profile UI direct buttons keep their existing optimistic-flip + API
-  call pattern. Only addition is the toast on success.
+- Profile UI direct buttons (Approve / Redo / Create / Allow Bypass)
+  stay exactly as they are. No toast, no Undo. They write to
+  BigKidStore directly via `/parent/task/...` etc. and return their
+  existing response shapes — the Phase 12 wiring is not touched.
+- The shield/block dispatcher and its Receipt cards stay as-is; no
+  Undo button.
+- Existing A1-G1 + R1 confirmation cards STAY. Agent emits
+  `legacy_card` for those paths via the `shield_app` tool's forward
+  to the dispatcher (handled in `parent_chat.py` adaptation layer).
 
 ## 8. Failure / edge cases
 
@@ -471,11 +445,10 @@ Server:
 
 ## 11. Known issues called out
 
-- BigKidStore in-memory. Every new server deploy wipes child task
-  lists, reflection state, and (now) action log. The kid app's local
-  `KidEvidenceCache` partly papers this over for photos; nothing
-  papers it over for the parent. Real fix: SQLite or Postgres
-  migration. Listed in §9 as deferred.
+- BigKidStore + ParentActionLog both in-memory. Every Railway redeploy
+  wipes them. The kid app's local `KidEvidenceCache` partly papers
+  this over for photos; nothing papers it over for the parent. Real
+  fix: SQLite or Postgres migration. Listed in §9 as deferred.
 - 60s Undo window is conservative. Could expand to 5m later. Not
   parameterized in v1 to avoid premature config.
 - `_was_authorized` heuristic is best-effort. False positives mean a
