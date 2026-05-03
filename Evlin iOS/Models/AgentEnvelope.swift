@@ -25,7 +25,10 @@ struct ReceiptDTO: Codable, Sendable {
     let tool: String
     let args: [String: AnyCodable]
     let summary: String
-    let undoToken: String?
+    /// Mutable so ChatViewModel can null it out after a successful undo —
+    /// otherwise the ReceiptBubble would re-render the countdown button on
+    /// every view rebuild (tab switch, scroll-back-into-view, etc).
+    var undoToken: String?
     /// ISO8601 wall-clock deadline after which Undo is rejected. Used by
     /// ReceiptBubble to compute remaining seconds; without it the
     /// countdown resets every onAppear and lies about validity.

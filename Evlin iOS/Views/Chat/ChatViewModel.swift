@@ -644,11 +644,26 @@ class ChatViewModel: ObservableObject {
 
     /// Parent tapped Undo on a ReceiptBubble. POST the revert and append a
     /// subtle confirmation bubble. Errors flow into errorMessage.
+    ///
+    /// On success, also nulls the matching `undoToken` on every receipt
+    /// across all messages so the bubble doesn't re-render its countdown
+    /// button when the chat view rebuilds (tab switch, scroll-into-view).
     @MainActor
     func undoReceipt(token: String) async {
         let client = AgentClient(baseURL: apiClient.baseURL)
         do {
             _ = try await client.revertAction(actionID: token)
+            // Persist the undone state by clearing the token on the original
+            // receipt — survives view rebuilds AND messages-to-UserDefaults.
+            for i in messages.indices {
+                guard var rs = messages[i].receipts else { continue }
+                var changed = false
+                for j in rs.indices where rs[j].undoToken == token {
+                    rs[j].undoToken = nil
+                    changed = true
+                }
+                if changed { messages[i].receipts = rs }
+            }
             messages.append(ChatMessage(role: .agent, content: "Reverted."))
         } catch {
             errorMessage = (error as? LocalizedError)?.errorDescription
