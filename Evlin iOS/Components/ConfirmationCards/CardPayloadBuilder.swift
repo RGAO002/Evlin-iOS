@@ -20,7 +20,29 @@ enum CardPayloadBuilder {
         case .E4: return e4(context, handlers)
         case .F1: return f1(context, handlers)
         case .G1: return g1(context, handlers)
+        case .R1: return r1(context, handlers)
         }
+    }
+
+    // MARK: - Group R (reflection)
+
+    private static func r1(_ ctx: CardContext, _ h: CardHandlers) -> CardPayload {
+        // ctx.targetDisplay carries the parent's plain-English reason as
+        // emitted by Gemini's `reflection_reason` field. The kid will see
+        // a Gemini-rephrased "displayReason" once the trigger fires; here
+        // we surface what the parent actually said so they can confirm
+        // what they're sending.
+        let who = ctx.childName.isEmpty ? "your kid" : ctx.childName
+        return CardPayload(
+            id: .R1,
+            icon: "sparkles",
+            title: "Send \(who) a reflection?",
+            body: "I'll prepare a short video, a 5-question quiz, and a writing prompt about: “\(ctx.targetDisplay)”. Their phone stays locked until they finish all three.",
+            buttons: [
+                CardButton(label: "Send reflection", style: .primary, action: h.onPrimary ?? {}),
+                CardButton(label: "Just venting — skip", style: .cancel, action: h.onCancel ?? {}),
+            ]
+        )
     }
 
     // MARK: - Group A

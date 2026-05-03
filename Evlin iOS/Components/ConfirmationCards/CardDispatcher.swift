@@ -24,6 +24,7 @@ struct CardDispatcher: View {
         case .E1, .E2, .G1: UnsupportedInModeCard(payload: payload)
         case .E3: CatalogMissCard(payload: payload)
         case .E4, .F1: ListSuggestionCard(payload: payload)
+        case .R1: DangerConfirmCard(payload: payload)
         }
     }
 

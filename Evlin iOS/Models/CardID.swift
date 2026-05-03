@@ -17,4 +17,6 @@ enum CardID: String, Codable, Sendable {
     case F1
     // Group G — onboarding fallback
     case G1
+    // Group R — reflection confirmation (big-kid mode)
+    case R1
 }

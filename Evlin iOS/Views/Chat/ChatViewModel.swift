@@ -301,6 +301,12 @@ class ChatViewModel: ObservableObject {
         case .G1:
             // "Set up Child Apple ID" — opens iOS Settings at best. Not wired.
             showComingSoon(cardID, note: "Child Apple ID setup happens in iOS Settings → Family Sharing.")
+
+        case .R1:
+            // Reflection confirmation. Resend the original parent message
+            // with force=["R1"] so the backend's reflect path skips the
+            // confirmation gate and actually fires.
+            resendWithForce(["R1"])
         }
     }
 
