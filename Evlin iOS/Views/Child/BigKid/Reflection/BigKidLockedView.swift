@@ -61,26 +61,29 @@ struct BigKidLockedView: View {
         }
     }
 
-    /// Body copy under the "Hey <name>" headline. When the parent
-    /// supplied a reason it's wrapped in the canonical sentence:
-    ///   "You did <reason>. Work through these three steps and your
-    ///    devices will unlock."
-    /// When everything is done we switch to the celebratory copy.
+    /// Body copy under the "Hey <name>" headline.
+    ///
+    /// Three branches:
+    /// 1. All three reflection steps done → celebratory copy.
+    /// 2. `displayReason` present (Gemini rephrased the parent's reason
+    ///    into a kid-readable sentence) → use it verbatim and append
+    ///    the canonical "Work through these three steps…" suffix.
+    /// 3. Fallback (fixture path / Gemini failed) → generic neutral
+    ///    sentence so the kid never sees raw parent input that might
+    ///    be a fragment or contain rude wording.
     private var messageBody: String {
         if allDone {
             return "You did the work. Tap below to finish up and get your devices back."
         }
-        let raw = (state.reflectionRequest?.reason ?? "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !raw.isEmpty else {
-            return "Your devices are locked for a bit. Work through these three steps and your devices will unlock."
+        let suffix = "Work through these three steps and your devices will unlock."
+        if let display = state.reflectionRequest?.displayReason?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !display.isEmpty {
+            // displayReason is a complete sentence; just append the suffix.
+            let needsPeriod = !display.hasSuffix(".") && !display.hasSuffix("。")
+                && !display.hasSuffix("!") && !display.hasSuffix("?")
+            return needsPeriod ? "\(display). \(suffix)" : "\(display) \(suffix)"
         }
-        // Strip a trailing period so we can re-attach the canonical sentence cleanly.
-        var trimmed = raw
-        while trimmed.hasSuffix(".") || trimmed.hasSuffix("。") {
-            trimmed.removeLast()
-        }
-        return "You did \(trimmed). Work through these three steps and your devices will unlock."
+        return "Your devices are locked for a bit. \(suffix)"
     }
 
     private var headlineBlock: some View {

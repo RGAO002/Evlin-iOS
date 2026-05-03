@@ -74,7 +74,9 @@ struct BigKidQuizView: View {
                             .foregroundStyle(EvlinKidColors.ink)
                             .lineSpacing(2)
                             .multilineTextAlignment(.leading)
-                        Spacer(minLength: 0)
+                            .lineLimit(nil)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .padding(18)
                     .background(selected == idx ? EvlinKidColors.green50 : .white)
@@ -166,7 +168,13 @@ struct BigKidQuizView: View {
             )
             .padding(.top, 28)
             Spacer(minLength: 0)
-            EvKidBigButton(action: passed ? continueAction : retryAction) {
+            EvKidBigButton(action: {
+                if passed {
+                    continueAction()
+                } else {
+                    retryAction()
+                }
+            }) {
                 Text(passed ? "Continue" : "Retry quiz")
             }
             .padding(.top, 24)

@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 
 struct BigKidHomeReflectionView: View {
@@ -8,11 +9,21 @@ struct BigKidHomeReflectionView: View {
     var onStartReflection: () -> Void
     var onTaskTap: (BigKidTask) -> Void
     var onNudgeParent: () -> Void
+    /// Optional refresh hook: pull-to-refresh on the scroll view + an
+    /// auto-tick every 10s while in State B (waiting for parent
+    /// approval) call this. Default no-op so State A doesn't get
+    /// affected if the host doesn't supply one.
+    var onRefresh: () async -> Void = {}
 
     private var doneCount: Int {
         state.tasks.filter { $0.status == .done || $0.bypass?.status == .approved }.count
     }
     private var allDone: Bool { state.allTasksDone }
+
+    /// 10-second poll cadence while waiting for parent approval —
+    /// faster than the global 60s loop so the Complete screen
+    /// surfaces within ~10s of an approve.
+    private let stateBPollTimer = Timer.publish(every: 10, on: .main, in: .common).autoconnect()
 
     var body: some View {
         ScrollView {
@@ -28,6 +39,13 @@ struct BigKidHomeReflectionView: View {
             .padding(.bottom, 40)
         }
         .background(EvlinKidColors.Reflection.bgSurface.ignoresSafeArea())
+        .refreshable {
+            await onRefresh()
+        }
+        .onReceive(stateBPollTimer) { _ in
+            guard subState == .b else { return }
+            Task { await onRefresh() }
+        }
     }
 
     private var greeting: some View {

@@ -153,6 +153,10 @@ struct PairingCodeStep: View {
 
             UserDefaults.standard.set(r.family_id.uuidString, forKey: "evlin.familyID")
             UserDefaults.standard.set(r.parent_device_id.uuidString, forKey: "evlin.parentDeviceID")
+            // Persist child_device_id on the parent side too — BigKid debug
+            // panel, chat reflection trigger, and task review UI all read this
+            // same key. Without it, parent has to manually paste the UUID.
+            UserDefaults.standard.set(r.child_device_id.uuidString, forKey: "evlin.childDeviceID")
 
             status = "Paired ✓"
         } catch {

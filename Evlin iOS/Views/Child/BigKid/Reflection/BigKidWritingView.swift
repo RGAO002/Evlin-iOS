@@ -31,6 +31,7 @@ struct BigKidWritingView: View {
         }
         .padding(.horizontal, EvlinKidMetrics.Padding.screenH)
         .padding(.top, 20).padding(.bottom, 30)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(EvlinKidColors.surface.ignoresSafeArea())
     }
 
@@ -59,11 +60,11 @@ struct BigKidWritingView: View {
     private var editor: some View {
         TextField("Take your time. Write at least 3 sentences...",
                   text: $text, axis: .vertical)
-            .lineLimit(8...20)
+            .lineLimit(8...50)
             .font(.system(size: 16))
             .foregroundStyle(EvlinKidColors.ink)
             .padding(16)
-            .frame(maxWidth: .infinity, minHeight: 160, alignment: .topLeading)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .background(.white)
             .clipShape(RoundedRectangle(cornerRadius: 16))
             .overlay(

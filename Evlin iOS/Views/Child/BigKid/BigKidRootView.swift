@@ -61,7 +61,8 @@ struct BigKidRootView: View {
                         subState: .a,
                         onStartReflection: { reflectionPath.append(ReflectionNav.locked) },
                         onTaskTap: { _ in },
-                        onNudgeParent: {}
+                        onNudgeParent: {},
+                        onRefresh: { await poller.refreshNow() }
                     )
                     .navigationDestination(for: ReflectionNav.self) { dest in
                         destinationView(for: dest)
@@ -76,10 +77,19 @@ struct BigKidRootView: View {
                         onNudgeParent: {
                             Task {
                                 guard let rid = state.reflectionRequest?.id else { return }
-                                _ = try? await client.reflectionNudge(rid: rid)
+                                // Optimistic local cooldown — flip the button
+                                // into "Just sent — try again in m:ss" the
+                                // moment it's pressed. Server's authoritative
+                                // endsAt overwrites if the response lands.
+                                state.notifyParentCooldownEndsAt =
+                                    Date().addingTimeInterval(5 * 60)
+                                if let outcome = try? await client.reflectionNudge(rid: rid) {
+                                    state.notifyParentCooldownEndsAt = outcome.endsAt
+                                }
                                 await poller.refreshNow()
                             }
-                        }
+                        },
+                        onRefresh: { await poller.refreshNow() }
                     )
                     .navigationDestination(for: ReflectionNav.self) { dest in
                         destinationView(for: dest)
@@ -114,6 +124,20 @@ struct BigKidRootView: View {
                 Task { await poller.refreshNow() }
             }
         }
+        #if DEBUG
+        .overlay(alignment: .bottom) {
+            if let err = poller.lastError {
+                Text("⚠︎ poller: \(err)")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(.red.opacity(0.85), in: Capsule())
+                    .padding(.bottom, 60)
+                    .frame(maxWidth: .infinity, alignment: .center)
+            }
+        }
+        #endif
         #if DEBUG
         .overlay(alignment: .topTrailing) {
             BigKidDebugScenarioMenu(current: $debugScenario) { selected in
@@ -161,7 +185,7 @@ struct BigKidRootView: View {
         guard let req = state.reflectionRequest else { return }
         guard !req.stepsCompleted.contains(step) else { return }
         let merged = ReflectionRequest(
-            id: req.id, reason: req.reason,
+            id: req.id, reason: req.reason, displayReason: req.displayReason,
             videoId: req.videoId, videoTitle: req.videoTitle,
             writingPrompt: req.writingPrompt, quiz: req.quiz,
             stepsCompleted: req.stepsCompleted + [step],

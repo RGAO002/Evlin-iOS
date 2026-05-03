@@ -220,8 +220,15 @@ private struct ParentBigKidDebugSheet: View {
             let data = try await postJSON(path: "/parent/reflection/trigger", body: body)
             let dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
             let rid = (dict?["id"] as? String) ?? "?"
+            // Use the trigger response directly to populate Section 2 —
+            // no need to round-trip through /child/state, which would
+            // overwrite this status message with "Refreshed kid state."
+            if let idStr = dict?["id"] as? String, let parsed = UUID(uuidString: idStr) {
+                pendingReflectionID = parsed
+                pendingReflectionStatus = (dict?["status"] as? String) ?? "pending"
+                pendingReflectionEssay = nil
+            }
             setStatus("✓ Reflection triggered (id=\(rid)). Switch to kid mode and watch State A appear within 60s.")
-            await refreshKidState()
         } catch {
             setStatus("✗ Trigger failed: \(error)")
         }

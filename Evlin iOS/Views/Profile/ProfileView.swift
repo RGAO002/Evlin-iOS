@@ -27,6 +27,23 @@ struct ProfileView: View {
     @State private var rulesExpanded = true
     @State private var addMode: AddBottomMode? = nil
 
+    // Backend wiring (Phase 12 — Profile ↔ BigKid task loop).
+    // Active when this is Liam AND we have a paired child UUID stored
+    // (parent received it during 6-digit pairing). Falls back to
+    // ProfileMockData for other children or when not paired.
+    @AppStorage("evlin.childDeviceID") private var pairedChildID: String = ""
+    @EnvironmentObject private var apiClient: APIClient
+    @State private var backendError: String? = nil
+    @State private var pollTask: Task<Void, Never>? = nil
+    private var backendChildID: UUID? {
+        guard child.id == "liam", !pairedChildID.isEmpty else { return nil }
+        return UUID(uuidString: pairedChildID)
+    }
+    private var bigKidParent: BigKidParentClient? {
+        guard backendChildID != nil else { return nil }
+        return BigKidParentClient(baseURLString: apiClient.baseURL)
+    }
+
     // Local mutable status so the Lock/Unlock button can flip the avatar
     // and pills without requiring a global mutation. See HTML 1029-1034.
     @State private var localStatus: ChildProfile.Status = .unlocked
@@ -88,19 +105,18 @@ struct ProfileView: View {
                             ForEach(tasks) { t in
                                 TaskRow(
                                     task: t,
-                                    onApprove: {
-                                        if let i = tasks.firstIndex(where: { $0.id == t.id }) {
-                                            tasks[i].state = (t.state == .bypass) ? .bypassed : .done
-                                        }
-                                    },
-                                    onRedo: {
-                                        if let i = tasks.firstIndex(where: { $0.id == t.id }) {
-                                            tasks[i].state = .pending
-                                        }
-                                    },
+                                    onApprove: { handleApprove(t) },
+                                    onRedo: { handleRedo(t, reason: nil) },
                                     onOpen: { onOpenTaskDetail(t) }
                                 )
                             }
+                        }
+                        if let err = backendError {
+                            Text("⚠︎ Couldn't refresh tasks: \(err)")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(.red)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.top, 4)
                         }
                     }
 
@@ -195,7 +211,7 @@ struct ProfileView: View {
                     mode: $addMode,
                     child: child,
                     onCreateTask: { newTask in
-                        tasks.append(newTask)
+                        handleCreateTask(newTask)
                         addMode = nil
                     },
                     onCreateRule: { newRule in
@@ -217,7 +233,6 @@ struct ProfileView: View {
         }
         .onAppear {
             rules = ProfileMockData.rules(for: child.id)
-            tasks = ProfileMockData.tasks(for: child.id)
             events = ProfileMockData.events(for: child.id)
             devices = ProfileMockData.devices(for: child.id)
             // Initialise local mutables from the source profile.
@@ -226,10 +241,155 @@ struct ProfileView: View {
             if localAge == 0    { localAge = child.age }
             if localSubtitle.isEmpty { localSubtitle = child.subtitle }
             if localAvatarURL == nil { localAvatarURL = child.avatarURL }
+
+            // Tasks: backend if paired (Liam), otherwise mock.
+            if backendChildID != nil {
+                tasks = []   // wait for first refresh; avoids flashing seed copy
+                Task { await refreshFromBackend() }
+                startPollingBackend()
+            } else {
+                tasks = ProfileMockData.tasks(for: child.id)
+            }
+
             // Deep-link from notifications: if a taskId was supplied,
             // jump straight to its detail screen.
             if let id = initialTaskId, let task = tasks.first(where: { $0.id == id }) {
                 DispatchQueue.main.async { onOpenTaskDetail(task) }
+            }
+        }
+        .onDisappear {
+            pollTask?.cancel()
+            pollTask = nil
+        }
+    }
+
+    // MARK: - Backend wiring (Phase 12)
+
+    /// Pull `/parent/state/{childId}` and rebuild `tasks` from real backend
+    /// data. No-op when not paired.
+    @MainActor
+    private func refreshFromBackend() async {
+        guard let cid = backendChildID, let client = bigKidParent else { return }
+        do {
+            let snapshot = try await client.fetchKidState(childId: cid)
+            tasks = snapshot.tasks.enumerated().map { idx, t in
+                TaskItem.from(backend: t, sequenceID: idx + 1)
+            }
+            backendError = nil
+        } catch {
+            backendError = (error as? BigKidAPIError).map(\.detail) ?? error.localizedDescription
+        }
+    }
+
+    /// Refresh every 8s while the screen is visible. Lightweight — JSON
+    /// payload is small and the backend store is in-memory.
+    private func startPollingBackend() {
+        pollTask?.cancel()
+        pollTask = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 8_000_000_000)
+                if Task.isCancelled { return }
+                await refreshFromBackend()
+            }
+        }
+    }
+
+    /// Approve handler. Backend-backed if `task.backendID` exists.
+    /// For bypass-state rows we approve the bypass; for review-state rows
+    /// we approve the task itself.
+    private func handleApprove(_ task: TaskItem) {
+        guard let backendID = task.backendID, let client = bigKidParent else {
+            // Mock-only fallback (non-Liam children).
+            if let i = tasks.firstIndex(where: { $0.id == task.id }) {
+                tasks[i].state = (task.state == .bypass) ? .bypassed : .done
+            }
+            return
+        }
+        // Optimistic update so the row flips immediately.
+        if let i = tasks.firstIndex(where: { $0.id == task.id }) {
+            tasks[i].state = (task.state == .bypass) ? .bypassed : .done
+        }
+        Task {
+            do {
+                if task.state == .bypass, let bid = task.backendBypassID {
+                    _ = try await client.respondBypass(
+                        bypassId: bid, decision: .approve, message: nil
+                    )
+                } else {
+                    _ = try await client.reviewTask(taskId: backendID, decision: .approve)
+                }
+                await refreshFromBackend()
+            } catch {
+                await MainActor.run {
+                    backendError = "approve failed: \(error.localizedDescription)"
+                }
+                await refreshFromBackend()  // pull authoritative state back
+            }
+        }
+    }
+
+    /// Redo handler. Same backend semantics as approve, but for the redo
+    /// branch. `reason` is wired from TaskDetailSheet's redo flow; the
+    /// inline row redo button passes nil.
+    private func handleRedo(_ task: TaskItem, reason: String?) {
+        guard let backendID = task.backendID, let client = bigKidParent else {
+            if let i = tasks.firstIndex(where: { $0.id == task.id }) {
+                tasks[i].state = .pending
+            }
+            return
+        }
+        if let i = tasks.firstIndex(where: { $0.id == task.id }) {
+            tasks[i].state = .pending
+        }
+        Task {
+            do {
+                if task.state == .bypass, let bid = task.backendBypassID {
+                    _ = try await client.respondBypass(
+                        bypassId: bid, decision: .deny, message: reason
+                    )
+                } else {
+                    _ = try await client.reviewTask(
+                        taskId: backendID, decision: .redo, redoReason: reason
+                    )
+                }
+                await refreshFromBackend()
+            } catch {
+                await MainActor.run {
+                    backendError = "redo failed: \(error.localizedDescription)"
+                }
+                await refreshFromBackend()
+            }
+        }
+    }
+
+    /// Create-task handler. Uses backend if paired, mock list otherwise.
+    private func handleCreateTask(_ newTask: TaskItem) {
+        guard let cid = backendChildID, let client = bigKidParent else {
+            tasks.append(newTask)
+            return
+        }
+        // Map the parent-UI category strings back to backend enum.
+        let category: BigKidTaskCategory = {
+            switch (newTask.category ?? "Chore").lowercased() {
+            case "homework": return .homework
+            case "self-care", "routine", "reading": return .selfCare
+            default: return .chores
+            }
+        }()
+        Task {
+            do {
+                _ = try await client.createTask(
+                    childId: cid, title: newTask.title,
+                    description: newTask.description ?? "",
+                    category: category, due: newTask.dueLabel
+                )
+                await refreshFromBackend()
+            } catch {
+                await MainActor.run {
+                    backendError = "create failed: \(error.localizedDescription)"
+                    // Show the new task locally too so the user sees something.
+                    tasks.append(newTask)
+                }
             }
         }
     }
@@ -497,16 +657,19 @@ struct ProfileView: View {
     NavigationStack {
         ProfileView(child: .liam)
     }
+    .environmentObject(APIClient())
 }
 
 #Preview("Maya") {
     NavigationStack {
         ProfileView(child: .maya)
     }
+    .environmentObject(APIClient())
 }
 
 #Preview("Emma (locked)") {
     NavigationStack {
         ProfileView(child: .emma)
     }
+    .environmentObject(APIClient())
 }

@@ -29,6 +29,9 @@ class APIClient: ObservableObject {
         let history: [[String: String]]
         let family_id: String?  // UUID string — required for command queueing
         let force_confirmations: [String]
+        // BigKid child id (UUID string). Used by `reflect` action only.
+        // Same source as the BigKid debug panel: @AppStorage("evlin.childDeviceID").
+        let child_device_id: String?
     }
 
     struct ChatActionResponse: Codable, Sendable {
@@ -58,6 +61,8 @@ class APIClient: ObservableObject {
     ) async throws -> ChatResponse {
         // Read paired family_id from UserDefaults so commands get queued to the child device.
         let familyID = UserDefaults.standard.string(forKey: "evlin.familyID")
+        // BigKid child id (set by the BigKid debug panel) — needed for the `reflect` action.
+        let bigKidChildID = UserDefaults.standard.string(forKey: "evlin.childDeviceID")
 
         // Retry up to 3 times — Gemini sometimes returns 500/503.
         var lastStatus = 0
@@ -73,7 +78,8 @@ class APIClient: ObservableObject {
                 child_name: childName,
                 history: history,
                 family_id: familyID,
-                force_confirmations: forceConfirmations
+                force_confirmations: forceConfirmations,
+                child_device_id: (bigKidChildID?.isEmpty == false) ? bigKidChildID : nil
             )
             request.httpBody = try JSONEncoder().encode(body)
 

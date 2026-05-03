@@ -88,16 +88,23 @@ struct BigKidCompleteView: View {
 }
 
 #if DEBUG
-#Preview {
-    var r = ReflectionRequest.fixture(status: .approved,
-                                      stepsCompleted: [.video, .quiz, .writing])
-    r = ReflectionRequest(
-        id: r.id, reason: r.reason, videoId: r.videoId, videoTitle: r.videoTitle,
-        writingPrompt: r.writingPrompt, quiz: r.quiz, stepsCompleted: r.stepsCompleted,
-        quizScore: 5, essayText: "ok", status: .approved,
+private func _previewRequest() -> ReflectionRequest {
+    let base = ReflectionRequest.fixture(
+        status: .approved,
+        stepsCompleted: [.video, .quiz, .writing]
+    )
+    return ReflectionRequest(
+        id: base.id, reason: base.reason, displayReason: base.displayReason,
+        videoId: base.videoId, videoTitle: base.videoTitle,
+        writingPrompt: base.writingPrompt, quiz: base.quiz,
+        stepsCompleted: base.stepsCompleted, quizScore: 5, essayText: "ok",
+        status: .approved,
         parentNote: "Thanks for being honest. Proud of you.",
         submittedAt: Date(), approvedAt: Date()
     )
-    return BigKidCompleteView(request: r, onContinue: {})
+}
+
+#Preview {
+    BigKidCompleteView(request: _previewRequest(), onContinue: {})
 }
 #endif

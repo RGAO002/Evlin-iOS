@@ -14,6 +14,11 @@ struct TaskItem: Identifiable, Hashable {
     var submittedAt: String? = nil        // "3:18 PM"
     var dueLabel: String? = nil           // "Today, 4:00 PM"
 
+    // Backend identity (BigKid). Nil = mock-only task (e.g. demo children
+    // other than Liam). Non-nil = round-trips with `/parent/task/{id}/...`.
+    var backendID: UUID? = nil
+    var backendBypassID: UUID? = nil      // when state == .bypass
+
     enum State: String, Hashable {
         case pending, done, review, overdue, bypass, bypassed
         var label: String {

@@ -61,6 +61,10 @@ struct QuizQuestion: Codable, Equatable, Sendable {
 struct ReflectionRequest: Codable, Equatable, Sendable, Identifiable {
     let id: UUID
     let reason: String
+    /// Gemini-rephrased, kid-appropriate second-person sentence
+    /// (e.g. "You called me a hurtful name."). Backend leaves this nil
+    /// on the fixture path; iOS falls back to the raw `reason` then.
+    let displayReason: String?
     let videoId: String
     let videoTitle: String
     let writingPrompt: String
@@ -91,7 +95,24 @@ extension JSONDecoder {
     static let bigKid: JSONDecoder = {
         let d = JSONDecoder()
         d.keyDecodingStrategy = .convertFromSnakeCase
-        d.dateDecodingStrategy = .iso8601
+        // Pydantic v2 serializes datetime with microseconds:
+        // `2026-05-02T16:23:45.123456+00:00`. Swift's default `.iso8601`
+        // formatter is strict and rejects fractional seconds. Try the
+        // fractional-seconds variant first, fall back to plain.
+        d.dateDecodingStrategy = .custom { decoder in
+            let container = try decoder.singleValueContainer()
+            let str = try container.decode(String.self)
+            let withFraction = ISO8601DateFormatter()
+            withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            if let date = withFraction.date(from: str) { return date }
+            let plain = ISO8601DateFormatter()
+            plain.formatOptions = [.withInternetDateTime]
+            if let date = plain.date(from: str) { return date }
+            throw DecodingError.dataCorruptedError(
+                in: container,
+                debugDescription: "Expected ISO 8601 date, got \(str)"
+            )
+        }
         return d
     }()
 }
@@ -200,6 +221,7 @@ extension ReflectionRequest {
         ReflectionRequest(
             id: UUID(),
             reason: "stayed up past bedtime",
+            displayReason: "You stayed up past your bedtime on your tablet.",
             videoId: "dQw4w9WgXcQ",
             videoTitle: "Why rest time matters for your brain",
             writingPrompt: "What were you feeling when time ran out, and what could you do differently tomorrow?",
