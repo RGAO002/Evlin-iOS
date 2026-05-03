@@ -10,18 +10,40 @@ struct BigKidTaskDetailView: View {
     @State private var photoData: Data?
     @State private var showCamera = false
     @State private var submitting = false
+    @FocusState private var noteFocused: Bool
+
+    /// Stable scroll anchor for the note input. We scroll to this when the
+    /// keyboard appears so the field doesn't sit under the keyboard. The
+    /// system's automatic keyboard avoidance fails for axis: .vertical
+    /// TextFields nested in a ScrollView — the avoidance shrinks the
+    /// content area but doesn't scroll, so the field stays under the
+    /// keyboard.
+    private enum ScrollAnchor: Hashable { case noteField }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                topBar.padding(.top, 8)
-                titleBlock.padding(.top, 12).padding(.bottom, 24)
-                if let due = task.due { dueRow(due).padding(.bottom, 24) }
-                whatToDoBlock.padding(.bottom, 24)
-                phaseContent
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    topBar.padding(.top, 8)
+                    titleBlock.padding(.top, 12).padding(.bottom, 24)
+                    if let due = task.due { dueRow(due).padding(.bottom, 24) }
+                    whatToDoBlock.padding(.bottom, 24)
+                    phaseContent
+                }
+                .padding(.horizontal, EvlinKidMetrics.Padding.screenH)
+                .padding(.bottom, 40)
             }
-            .padding(.horizontal, EvlinKidMetrics.Padding.screenH)
-            .padding(.bottom, 40)
+            .scrollDismissesKeyboard(.interactively)
+            .onChange(of: noteFocused) { _, focused in
+                guard focused else { return }
+                // Two-step delay: wait for keyboard frame to register so
+                // ScrollView knows the new safe-area inset before scrolling.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                    withAnimation(.easeInOut(duration: 0.25)) {
+                        proxy.scrollTo(ScrollAnchor.noteField, anchor: .bottom)
+                    }
+                }
+            }
         }
         .background(EvlinKidColors.surface.ignoresSafeArea())
         .sheet(isPresented: $showCamera) {
@@ -31,6 +53,8 @@ struct BigKidTaskDetailView: View {
             }
             .ignoresSafeArea()
         }
+        // Tap-to-dismiss keyboard anywhere outside the field.
+        .onTapGesture { noteFocused = false }
     }
 
     @ViewBuilder
@@ -195,14 +219,18 @@ struct BigKidTaskDetailView: View {
                 .lineLimit(3...5)
                 .font(.system(size: 16))
                 .foregroundStyle(EvlinKidColors.ink)
+                .focused($noteFocused)
+                .submitLabel(.done)
                 .padding(14)
                 .background(EvlinKidColors.surface2)
                 .clipShape(RoundedRectangle(cornerRadius: 14))
                 .overlay(
                     RoundedRectangle(cornerRadius: 14)
-                        .stroke(EvlinKidColors.line, lineWidth: 1.5)
+                        .stroke(noteFocused ? EvlinKidColors.green500 : EvlinKidColors.line,
+                                lineWidth: 1.5)
                 )
         }
+        .id(ScrollAnchor.noteField)
     }
 
     private func submitAction() {
@@ -248,8 +276,44 @@ struct BigKidTaskDetailView: View {
                 .font(.system(size: 13, weight: .bold))
                 .tracking(0.8)
                 .foregroundStyle(EvlinKidColors.ink3)
-            // Show actual photo if cached locally; else placeholder
-            placeholderImage
+            // Priority: in-memory captured bytes (instant after submit) →
+            // backend URL via AsyncImage (re-opened later) → placeholder.
+            // Local bytes are cleared on view recreation, so AsyncImage is
+            // the canonical source after a navigation round-trip.
+            if let data = photoData, let img = UIImage(data: data) {
+                Image(uiImage: img)
+                    .resizable()
+                    .scaledToFill()
+                    .aspectRatio(4.0/3.0, contentMode: .fill)
+                    .clipShape(RoundedRectangle(cornerRadius: 18))
+            } else if let url = task.evidencePhotoURL {
+                AsyncImage(url: url) { phase in
+                    switch phase {
+                    case .success(let img):
+                        img.resizable().scaledToFill()
+                    case .failure:
+                        placeholderImage
+                    case .empty:
+                        ZStack {
+                            placeholderImage
+                            ProgressView()
+                        }
+                    @unknown default:
+                        placeholderImage
+                    }
+                }
+                .aspectRatio(4.0/3.0, contentMode: .fill)
+                .clipShape(RoundedRectangle(cornerRadius: 18))
+            } else {
+                placeholderImage
+            }
+            if let note = task.evidenceNote, !note.isEmpty {
+                Text("\u{201C}\(note)\u{201D}")
+                    .font(.system(size: 14))
+                    .italic()
+                    .foregroundStyle(EvlinKidColors.ink2)
+                    .padding(.top, 4)
+            }
         }
     }
 
