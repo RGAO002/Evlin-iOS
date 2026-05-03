@@ -30,12 +30,29 @@ struct BigKidVideoView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header.padding(.top, 6).padding(.bottom, 20)
-            VideoEmbedView(
-                videoId: videoId,
-                bridge: bridge,
-                onProgress: { playbackPercent = min(100, $0) },
-                onEnded: { ended = true }
-            )
+            ZStack {
+                VideoEmbedView(
+                    videoId: videoId,
+                    bridge: bridge,
+                    onProgress: { playbackPercent = min(100, $0) },
+                    onEnded: { ended = true }
+                )
+                if ended {
+                    // Cover YouTube's "more videos" endscreen with a flat
+                    // black tile after playback finishes. CSS injection
+                    // hides most of it, but YouTube periodically changes
+                    // class names — this is the belt-and-suspenders path.
+                    Rectangle().fill(Color.black)
+                    VStack(spacing: 12) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 48, weight: .semibold))
+                            .foregroundStyle(EvlinKidColors.green500)
+                        Text("Video done")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.85))
+                    }
+                }
+            }
             .clipShape(RoundedRectangle(cornerRadius: 24))
             .frame(maxHeight: 440)
             VStack(spacing: 10) {
@@ -245,14 +262,48 @@ private struct VideoEmbedView: UIViewRepresentable {
         return components.url
     }
 
-    /// JS injected into the YouTube embed page at document-end. Polls
-    /// for the `<video>` element (it appears asynchronously after the
-    /// player JS runs), then attaches `timeupdate` / `ended` listeners
-    /// and forwards events to the `evlinPlayer` script-message handler.
+    /// JS injected into the YouTube embed page at document-end. Two jobs:
+    ///
+    /// 1. Inject a `<style>` block hiding YouTube's end-screen "more
+    ///    videos" overlay, suggested cards, and watermark. YouTube's
+    ///    class names drift (`.ytp-endscreen-content`, `.ytp-ce-element`,
+    ///    etc.), so we cover several variants. Combined with the
+    ///    SwiftUI black overlay we paint over the player on `ended`,
+    ///    this is belt-and-suspenders against the endscreen surfacing.
+    ///
+    /// 2. Poll for the `<video>` element (it appears asynchronously
+    ///    after the player JS runs), then attach `timeupdate` / `ended`
+    ///    listeners and forward events to the `evlinPlayer`
+    ///    script-message handler.
     private static let bridgeJS = """
     (function() {
       if (window.__evlinAttached) return;
       window.__evlinAttached = true;
+
+      // (1) Hide endscreen / cards / watermark via CSS.
+      var css = [
+        '.ytp-endscreen-content',
+        '.ytp-ce-element',
+        '.ytp-ce-covering-overlay',
+        '.ytp-ce-element-shadow',
+        '.ytp-ce-covering-image',
+        '.ytp-ce-expanding-image',
+        '.ytp-ce-element-show',
+        '.ytp-pause-overlay',
+        '.ytp-pause-overlay-container',
+        '.ytp-suggested-action',
+        '.ytp-suggested-action-badge',
+        '.ytp-cards-button',
+        '.ytp-cards-teaser',
+        '.iv-branding',
+        '.ytp-watermark',
+        '.ytp-show-cards-title'
+      ].join(',') + ' { display: none !important; opacity: 0 !important; visibility: hidden !important; }';
+      var style = document.createElement('style');
+      style.textContent = css;
+      (document.head || document.documentElement).appendChild(style);
+
+      // (2) Bridge HTML5 <video> events to native.
       function attach() {
         var v = document.querySelector('video');
         if (!v) { setTimeout(attach, 200); return; }
@@ -263,7 +314,12 @@ private struct VideoEmbedView: UIViewRepresentable {
           var d = v.duration || 0;
           if (d > 0) send({ k: 'p', v: (v.currentTime / d) * 100 });
         });
-        v.addEventListener('ended', function() { send({ k: 'end' }); });
+        v.addEventListener('ended', function() {
+          // Pause to keep YouTube from spinning up the endscreen card
+          // animation right under our SwiftUI cover.
+          try { v.pause(); } catch (e) {}
+          send({ k: 'end' });
+        });
       }
       attach();
     })();
