@@ -25,12 +25,14 @@ struct BigKidVideoView: View {
     @State private var playbackPercent: Double = 0
     @State private var ended: Bool = false
     @State private var completing: Bool = false
+    @StateObject private var bridge = VideoBridge()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header.padding(.top, 6).padding(.bottom, 20)
             VideoEmbedView(
                 videoId: videoId,
+                bridge: bridge,
                 onProgress: { playbackPercent = min(100, $0) },
                 onEnded: { ended = true }
             )
@@ -40,6 +42,9 @@ struct BigKidVideoView: View {
                 progressBar.padding(.top, 20)
                 lockHint
             }
+            #if DEBUG
+            debugSkipButton.padding(.top, 12)
+            #endif
             Spacer(minLength: 16)
             primaryButton.padding(.top, 20)
         }
@@ -47,6 +52,27 @@ struct BigKidVideoView: View {
         .padding(.bottom, 30)
         .background(EvlinKidColors.surface.ignoresSafeArea())
     }
+
+    #if DEBUG
+    private var debugSkipButton: some View {
+        Button {
+            bridge.skipToNearEnd(secondsRemaining: 5)
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "forward.end.fill")
+                    .font(.system(size: 11, weight: .semibold))
+                Text("DEBUG: skip to last 5s")
+                    .font(.system(size: 12, weight: .semibold))
+            }
+            .foregroundStyle(.orange)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .overlay(Capsule().stroke(.orange.opacity(0.5), lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .frame(maxWidth: .infinity, alignment: .center)
+    }
+    #endif
 
     private var watched: Bool { ended || playbackPercent >= 99 }
 
@@ -99,6 +125,28 @@ struct BigKidVideoView: View {
     }
 }
 
+/// Holds a weak reference to the embedded WKWebView so the SwiftUI
+/// host can poke at the player from the outside (e.g. a DEBUG "skip
+/// to last 5s" button). Initialized inside `VideoEmbedView.makeUIView`.
+final class VideoBridge: ObservableObject {
+    fileprivate weak var webView: WKWebView?
+
+    /// Seek the underlying HTML5 `<video>` to (duration − secondsRemaining).
+    /// No-op while the duration is still 0 (e.g. video metadata not loaded
+    /// yet). DEBUG-only call sites; safe to leave the API in release since
+    /// nothing in production calls it.
+    func skipToNearEnd(secondsRemaining: Double) {
+        let js = """
+        (function() {
+          var v = document.querySelector('video');
+          if (!v || !isFinite(v.duration) || v.duration <= 0) return;
+          v.currentTime = Math.max(0, v.duration - \(secondsRemaining));
+        })();
+        """
+        webView?.evaluateJavaScript(js, completionHandler: nil)
+    }
+}
+
 /// WKWebView wrapper that loads `youtube.com/embed/<id>` as a real HTTP
 /// request with a `Referer` header set to a synthetic origin derived
 /// from the bundle id. Mirrors `Components/YouTubePlayerView.swift ::
@@ -111,6 +159,7 @@ struct BigKidVideoView: View {
 /// `evlinPlayer`. Kid touch is blocked at the WKWebView layer.
 private struct VideoEmbedView: UIViewRepresentable {
     let videoId: String
+    let bridge: VideoBridge
     let onProgress: (Double) -> Void
     let onEnded: () -> Void
 
@@ -150,6 +199,7 @@ private struct VideoEmbedView: UIViewRepresentable {
         web.isUserInteractionEnabled = false
 
         context.coordinator.loadedVideoId = videoId
+        bridge.webView = web
         load(into: web)
         return web
     }
