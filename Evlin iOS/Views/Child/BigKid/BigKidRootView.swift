@@ -46,6 +46,10 @@ struct BigKidRootView: View {
     @State private var bypassNav: BigKidTask?
     @State private var reflectionPath = NavigationPath()
 
+    #if DEBUG
+    @State private var debugScenario: BigKidDebugScenario = .live
+    #endif
+
     var body: some View {
         Group {
             switch BigKidRouter.route(state) {
@@ -110,6 +114,15 @@ struct BigKidRootView: View {
                 Task { await poller.refreshNow() }
             }
         }
+        #if DEBUG
+        .overlay(alignment: .topTrailing) {
+            BigKidDebugScenarioMenu(current: $debugScenario) { selected in
+                applyDebugScenario(selected)
+            }
+            .padding(.top, 8)
+            .padding(.trailing, 12)
+        }
+        #endif
         .sheet(item: $taskNav) { t in
             BigKidTaskDetailView(
                 task: t,
@@ -136,6 +149,25 @@ struct BigKidRootView: View {
             )
         }
     }
+
+    #if DEBUG
+    private func applyDebugScenario(_ scenario: BigKidDebugScenario) {
+        if let snapshot = scenario.snapshot() {
+            poller.stop()
+            state.apply(snapshot)
+            // Reset any active navigation so the route switch picks up the
+            // new state cleanly (otherwise sheets could remain open over
+            // the wrong root).
+            taskNav = nil
+            bypassNav = nil
+            reflectionPath = NavigationPath()
+        } else {
+            // .live → resume polling.
+            poller.start()
+            Task { await poller.refreshNow() }
+        }
+    }
+    #endif
 
     @ViewBuilder
     private func destinationView(for dest: ReflectionNav) -> some View {
