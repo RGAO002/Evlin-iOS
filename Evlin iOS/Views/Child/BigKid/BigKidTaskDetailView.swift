@@ -18,6 +18,11 @@ struct BigKidTaskDetailView: View {
     @State private var showCamera = false
     @State private var submitting = false
     @FocusState private var noteFocused: Bool
+    /// Drives the fullscreen `PhotoGalleryViewer` that opens when the kid
+    /// taps a submitted-evidence photo. Mirrors the parent-side flow so
+    /// pinch-zoom / pan / drag-to-dismiss feel identical on both sides.
+    @State private var showFullscreenPhoto = false
+    @State private var fullscreenStartIndex = 0
 
     /// Hard cap matches the backend's `max 6 photos` guard so the kid
     /// can't queue an over-limit batch and only learn at submit time.
@@ -80,6 +85,21 @@ struct BigKidTaskDetailView: View {
         }
         // Tap-to-dismiss keyboard anywhere outside the field.
         .onTapGesture { noteFocused = false }
+        .fullScreenCover(isPresented: $showFullscreenPhoto) {
+            // Same fullscreen viewer the parent uses on TaskDetailView, so
+            // pinch / drag-to-dismiss / page-flick behave identically on
+            // both sides. Backend URLs only — local cached bytes don't
+            // round-trip through the URL-based viewer; that fallback uses
+            // the inline preview only.
+            let urls = task.evidencePhotoUrls.map { $0.absoluteString }
+            if !urls.isEmpty {
+                PhotoGalleryViewer(
+                    photos: urls,
+                    startIndex: fullscreenStartIndex,
+                    isPresented: $showFullscreenPhoto
+                )
+            }
+        }
     }
 
     @ViewBuilder
@@ -228,9 +248,17 @@ struct BigKidTaskDetailView: View {
         .buttonStyle(.plain)
     }
 
+    // Shared chrome so the photo thumbnails and the "+ Add" tile match
+    // exactly — same outer frame, same corner radius, same border weight.
+    // The X badge lives inside the tile (not offset out) so it doesn't
+    // expand the thumbnail's effective bounding box and make rows look
+    // misaligned next to the + tile.
+    private static let stripTileSize: CGFloat = 72
+    private static let stripTileRadius: CGFloat = 12
+
     /// Horizontal strip of every photo the kid has taken plus a trailing
     /// "+ Add" tile (hidden once we hit `maxPhotos`). Each thumbnail has
-    /// a small X badge for removal. Indices are stable for the lifetime
+    /// a small X overlay for removal. Indices are stable for the lifetime
     /// of this view instance so the kid's tap target doesn't shift while
     /// they're aiming for the X.
     private var photoStrip: some View {
@@ -243,7 +271,6 @@ struct BigKidTaskDetailView: View {
                     addTile
                 }
             }
-            .padding(.vertical, 2) // give the X badge room to overflow
         }
     }
 
@@ -253,25 +280,29 @@ struct BigKidTaskDetailView: View {
                 Image(uiImage: img)
                     .resizable()
                     .scaledToFill()
-                    .frame(width: 72, height: 72)
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12)
-                            .stroke(index == 0 ? EvlinKidColors.primary : EvlinKidColors.line,
-                                    lineWidth: index == 0 ? 2 : 1)
-                    )
+            } else {
+                Color.gray.opacity(0.2)
             }
+            // X stays inside the tile — keeps thumbnail's bounding box
+            // identical to the + tile so they line up perfectly in the row.
             Button {
                 photos.remove(at: index)
             } label: {
                 Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 20, weight: .bold))
+                    .font(.system(size: 18, weight: .bold))
                     .foregroundStyle(.white, .black.opacity(0.7))
+                    .padding(4)
             }
             .buttonStyle(.plain)
-            .offset(x: 6, y: -6)
             .accessibilityLabel("Remove photo \(index + 1)")
         }
+        .frame(width: Self.stripTileSize, height: Self.stripTileSize)
+        .clipShape(RoundedRectangle(cornerRadius: Self.stripTileRadius, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: Self.stripTileRadius, style: .continuous)
+                .stroke(index == 0 ? EvlinKidColors.primary : EvlinKidColors.line,
+                        lineWidth: 1)
+        )
     }
 
     private var addTile: some View {
@@ -283,13 +314,12 @@ struct BigKidTaskDetailView: View {
                     .font(.system(size: 12, weight: .semibold))
             }
             .foregroundStyle(EvlinKidColors.ink3)
-            .frame(width: 72, height: 72)
+            .frame(width: Self.stripTileSize, height: Self.stripTileSize)
             .background(EvlinKidColors.surface2)
-            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .clipShape(RoundedRectangle(cornerRadius: Self.stripTileRadius, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .strokeBorder(style: StrokeStyle(lineWidth: 1.5, dash: [4]))
-                    .foregroundStyle(EvlinKidColors.ink4)
+                RoundedRectangle(cornerRadius: Self.stripTileRadius, style: .continuous)
+                    .stroke(EvlinKidColors.line, lineWidth: 1)
             )
         }
         .buttonStyle(.plain)
@@ -400,8 +430,8 @@ struct BigKidTaskDetailView: View {
                     .tracking(0.8)
                     .foregroundStyle(EvlinKidColors.ink3)
                 Spacer()
-                if evidenceTotalCount > 1 {
-                    Text("\(evidenceTotalCount) photos")
+                if task.evidencePhotoUrls.count > 1 {
+                    Text("\(task.evidencePhotoUrls.count) photos")
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(EvlinKidColors.ink3)
                 }
@@ -417,104 +447,34 @@ struct BigKidTaskDetailView: View {
         }
     }
 
-    /// Total number of photos to display, prioritising local cached bytes
-    /// (instant) over backend URLs (which arrive after the next state
-    /// poll). The two are mirrors — the cache is written from the same
-    /// list the kid just submitted.
-    private var evidenceTotalCount: Int {
-        if !photos.isEmpty { return photos.count }
-        return task.evidencePhotoUrls.count
-    }
-
-    /// Hero + thumbnail strip for submitted/approved phases. Single
-    /// photo collapses to just the hero (no strip).
+    /// Submitted/Approved evidence preview. Reuses the parent-side
+    /// `EvlinPhotoCarousel` + `PhotoGalleryViewer` so the kid gets the
+    /// exact same paged carousel + thumbnail strip + tap-fullscreen
+    /// affordance the parent has on TaskDetailView. Backend URLs only;
+    /// local-cache fallback (when backend dropped its in-memory state)
+    /// renders the first cached photo inline as a static placeholder.
     @ViewBuilder
     private var evidenceContent: some View {
-        if !photos.isEmpty {
-            evidenceFromLocalCache
-        } else if !task.evidencePhotoUrls.isEmpty {
-            evidenceFromBackend
+        if !task.evidencePhotoUrls.isEmpty {
+            EvlinPhotoCarousel(
+                photos: task.evidencePhotoUrls.map { $0.absoluteString },
+                onTapPhoto: { idx in
+                    fullscreenStartIndex = idx
+                    showFullscreenPhoto = true
+                }
+            )
+        } else if let first = photos.first, let img = UIImage(data: first) {
+            // Fallback for the brief window between submit and the next
+            // state poll (or for backends with in-memory storage that
+            // got wiped). Inline static — no carousel because there are
+            // no URLs to drive PhotoGalleryViewer.
+            Image(uiImage: img)
+                .resizable()
+                .scaledToFill()
+                .aspectRatio(4.0/3.0, contentMode: .fill)
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         } else {
             placeholderImage
-        }
-    }
-
-    @State private var evidenceFocusIndex: Int = 0
-
-    private var evidenceFromLocalCache: some View {
-        VStack(spacing: 10) {
-            let idx = min(evidenceFocusIndex, photos.count - 1)
-            if let img = UIImage(data: photos[idx]) {
-                Image(uiImage: img)
-                    .resizable()
-                    .scaledToFill()
-                    .aspectRatio(4.0/3.0, contentMode: .fill)
-                    .clipShape(RoundedRectangle(cornerRadius: 18))
-            } else {
-                placeholderImage
-            }
-            if photos.count > 1 {
-                evidenceThumbStrip(count: photos.count) { i in
-                    if let img = UIImage(data: photos[i]) {
-                        Image(uiImage: img).resizable().scaledToFill()
-                    }
-                }
-            }
-        }
-    }
-
-    private var evidenceFromBackend: some View {
-        VStack(spacing: 10) {
-            let urls = task.evidencePhotoUrls
-            let idx = min(evidenceFocusIndex, urls.count - 1)
-            AsyncImage(url: urls[idx]) { phase in
-                switch phase {
-                case .success(let img): img.resizable().scaledToFill()
-                case .failure: placeholderImage
-                case .empty:
-                    ZStack { placeholderImage; ProgressView() }
-                @unknown default: placeholderImage
-                }
-            }
-            .aspectRatio(4.0/3.0, contentMode: .fill)
-            .clipShape(RoundedRectangle(cornerRadius: 18))
-            if urls.count > 1 {
-                evidenceThumbStrip(count: urls.count) { i in
-                    AsyncImage(url: urls[i]) { phase in
-                        switch phase {
-                        case .success(let img): img.resizable().scaledToFill()
-                        default: Color.gray.opacity(0.2)
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// Thumb strip used by both local-cache and backend evidence views.
-    /// Tapping a thumb sets `evidenceFocusIndex`, which the hero reads.
-    @ViewBuilder
-    private func evidenceThumbStrip<Thumb: View>(
-        count: Int, @ViewBuilder thumb: @escaping (Int) -> Thumb
-    ) -> some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                ForEach(0..<count, id: \.self) { i in
-                    Button { evidenceFocusIndex = i } label: {
-                        thumb(i)
-                            .frame(width: 56, height: 56)
-                            .clipShape(RoundedRectangle(cornerRadius: 10))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 10)
-                                    .stroke(i == evidenceFocusIndex
-                                            ? EvlinKidColors.primary
-                                            : EvlinKidColors.line,
-                                            lineWidth: i == evidenceFocusIndex ? 2 : 1)
-                            )
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
         }
     }
 
