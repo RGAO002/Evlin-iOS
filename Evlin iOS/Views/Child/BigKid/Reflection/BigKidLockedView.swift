@@ -5,6 +5,13 @@ struct BigKidLockedView: View {
     var onTapStep: (BigKidReflectionStep) -> Void
     var onUnlock: () -> Void
 
+    #if DEBUG
+    @EnvironmentObject private var client: BigKidAPIClient
+    @EnvironmentObject private var poller: BigKidStatePoller
+    @State private var debugRunning: Bool = false
+    @State private var debugStatus: String = ""
+    #endif
+
     private var progress: Int {
         state.reflectionRequest?.stepsCompleted.count ?? 0
     }
@@ -22,6 +29,9 @@ struct BigKidLockedView: View {
             Spacer(minLength: 24)
             primaryButton
             disclaimer.padding(.top, 14)
+            #if DEBUG
+            debugSkipButton.padding(.top, 12)
+            #endif
         }
         .padding(.horizontal, EvlinKidMetrics.Padding.screenH)
         .padding(.top, 20)
@@ -210,6 +220,69 @@ struct BigKidLockedView: View {
             .foregroundStyle(EvlinKidColors.ink3)
             .frame(maxWidth: .infinity)
     }
+
+    #if DEBUG
+    /// Fast-forwards the reflection through video → quiz → essay-submitted
+    /// so the kid screen lands at "awaiting parent approval" without
+    /// actually playing the video, answering the quiz, or typing an essay.
+    /// Stops short of approval — that's the parent's side, exercise it
+    /// from chat ("approve his reflection") or the parent debug menu.
+    private var debugSkipButton: some View {
+        VStack(spacing: 6) {
+            Button(action: runDebugSkip) {
+                HStack(spacing: 6) {
+                    if debugRunning { ProgressView().controlSize(.small) }
+                    Image(systemName: "forward.fill")
+                        .font(.system(size: 11, weight: .bold))
+                    Text(debugRunning ? "Skipping…" : "DEBUG: Skip to essay-submitted")
+                        .font(.system(size: 11, weight: .semibold).monospaced())
+                }
+                .foregroundStyle(.orange)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(.orange.opacity(0.12), in: Capsule())
+                .overlay(Capsule().stroke(.orange.opacity(0.4), lineWidth: 1))
+            }
+            .buttonStyle(.plain)
+            .disabled(debugRunning)
+            if !debugStatus.isEmpty {
+                Text(debugStatus)
+                    .font(.system(size: 10).monospaced())
+                    .foregroundStyle(.orange.opacity(0.75))
+            }
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private func runDebugSkip() {
+        guard let rid = state.reflectionRequest?.id else { return }
+        debugRunning = true
+        debugStatus = ""
+        Task {
+            do {
+                // Video step.
+                _ = try await client.reflectionStepComplete(rid: rid, step: .video)
+                // Quiz step. The store's submit_essay() looks for `quiz` in
+                // stepsCompleted directly; the per-question quiz-answer
+                // endpoint is what the real UI uses but is optional for
+                // moving stepsCompleted forward — step-complete is enough.
+                _ = try await client.reflectionStepComplete(rid: rid, step: .quiz)
+                // Essay submission flips the request to .submitted (all
+                // three steps now satisfied) which is exactly the
+                // "awaiting parent approval" state the user asked for.
+                _ = try await client.reflectionEssay(
+                    rid: rid,
+                    text: "DEBUG: auto-completed via skip button. Real essay would describe what I'd do differently next time."
+                )
+                await MainActor.run { debugStatus = "✅ submitted, awaiting parent approval" }
+                await poller.refreshNow()
+            } catch {
+                await MainActor.run { debugStatus = "⚠️ \(error.localizedDescription)" }
+            }
+            await MainActor.run { debugRunning = false }
+        }
+    }
+    #endif
 }
 
 #if DEBUG

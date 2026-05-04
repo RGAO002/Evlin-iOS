@@ -123,6 +123,37 @@ class APIClient: ObservableObject {
         baseURL = url
         UserDefaults.standard.set(url, forKey: "serverURL")
     }
+
+    // MARK: - Family protection mode (DEBUG runtime toggle)
+
+    struct ProtectionModeResponse: Codable {
+        let family_id: String
+        let mode: String  // "std" | "max"
+    }
+
+    func getProtectionMode(familyID: UUID) async throws -> String {
+        let url = URL(string: "\(baseURL)/family/\(familyID.uuidString)/protection-mode")!
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 15
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
+            throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+        return try JSONDecoder().decode(ProtectionModeResponse.self, from: data).mode
+    }
+
+    func setProtectionMode(familyID: UUID, mode: String) async throws {
+        let url = URL(string: "\(baseURL)/family/\(familyID.uuidString)/protection-mode")!
+        var req = URLRequest(url: url)
+        req.httpMethod = "PUT"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.timeoutInterval = 15
+        req.httpBody = try JSONSerialization.data(withJSONObject: ["mode": mode])
+        let (_, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
+            throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+    }
 }
 
 // MARK: - Error
