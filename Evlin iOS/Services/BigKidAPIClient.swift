@@ -126,7 +126,14 @@ final class BigKidAPIClient: ObservableObject {
     }
 
     private func get<T: Decodable>(_ path: String) async throws -> T {
-        let req = try makeRequest(path: path, method: "GET")
+        var req = try makeRequest(path: path, method: "GET")
+        // Bypass URLCache for kid-state polls. Without this, URLSession's
+        // default cache policy can return a stale '/child/state' body for
+        // up to several seconds even though we explicitly fired a fresh
+        // request — that's why the kid sometimes missed a reflection the
+        // parent had just confirmed in chat. State endpoints are
+        // realtime; never serve them from cache.
+        req.cachePolicy = .reloadIgnoringLocalCacheData
         return try await perform(req)
     }
 
