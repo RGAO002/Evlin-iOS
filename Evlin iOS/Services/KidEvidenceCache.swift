@@ -14,32 +14,54 @@ import Foundation
 /// nice-to-have offline fallback rather than the only way the kid
 /// can see their own work.
 enum KidEvidenceCache {
-    private static var directory: URL {
+    private static var rootDirectory: URL {
         let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
         let dir = base.appendingPathComponent("BigKidEvidence", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
 
-    private static func fileURL(for taskId: UUID) -> URL {
-        directory.appendingPathComponent("\(taskId.uuidString).jpg")
+    /// One subdirectory per task — holds N photos as `0.jpg`, `1.jpg`, …
+    /// in the order the kid added them. Directory layout means we can
+    /// list all photos for a task without tracking a separate index.
+    private static func taskDirectory(for taskId: UUID) -> URL {
+        let dir = rootDirectory.appendingPathComponent(taskId.uuidString, isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
     }
 
-    static func save(taskId: UUID, photoData: Data) {
-        do {
-            try photoData.write(to: fileURL(for: taskId), options: .atomic)
-        } catch {
-            print("[KidEvidenceCache] save failed for \(taskId): \(error)")
+    /// Save a batch as the full evidence set — clears any existing photos
+    /// first so the cache mirrors the backend's "list replaces previous"
+    /// semantics.
+    static func save(taskId: UUID, photos: [Data]) {
+        clear(taskId: taskId)
+        let dir = taskDirectory(for: taskId)
+        for (idx, data) in photos.enumerated() {
+            let url = dir.appendingPathComponent("\(idx).jpg")
+            do {
+                try data.write(to: url, options: .atomic)
+            } catch {
+                print("[KidEvidenceCache] save failed for \(taskId) idx=\(idx): \(error)")
+            }
         }
     }
 
-    static func load(taskId: UUID) -> Data? {
-        let url = fileURL(for: taskId)
-        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
-        return try? Data(contentsOf: url)
+    /// Load all cached photos for a task, in submission order. Empty if
+    /// the task was never submitted on this device or after `clear`.
+    static func load(taskId: UUID) -> [Data] {
+        let dir = taskDirectory(for: taskId)
+        let fm = FileManager.default
+        guard let names = try? fm.contentsOfDirectory(atPath: dir.path) else { return [] }
+        // Sort numerically so 10.jpg comes after 9.jpg, not after 1.jpg.
+        let sorted = names.sorted { (a: String, b: String) in
+            let ai = Int((a as NSString).deletingPathExtension) ?? Int.max
+            let bi = Int((b as NSString).deletingPathExtension) ?? Int.max
+            return ai < bi
+        }
+        return sorted.compactMap { try? Data(contentsOf: dir.appendingPathComponent($0)) }
     }
 
     static func clear(taskId: UUID) {
-        try? FileManager.default.removeItem(at: fileURL(for: taskId))
+        try? FileManager.default.removeItem(at: taskDirectory(for: taskId))
     }
 }

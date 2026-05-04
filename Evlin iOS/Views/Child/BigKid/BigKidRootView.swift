@@ -173,9 +173,9 @@ struct BigKidRootView: View {
                     bypassNav = t
                     taskNav = nil
                 },
-                onSubmit: { data, note in
+                onSubmit: { (photos: [Data], note: String?) in
                     do {
-                        _ = try await client.submitEvidence(taskId: t.id, photoData: data, note: note)
+                        _ = try await client.submitEvidence(taskId: t.id, photos: photos, note: note)
                     } catch {
                         // Surface in console so we know when the kid's
                         // upload silently fails (photo too large / network /

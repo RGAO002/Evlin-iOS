@@ -4,21 +4,33 @@ struct BigKidTaskDetailView: View {
     let task: BigKidTask
     var onBack: () -> Void
     var onBypass: () -> Void
-    var onSubmit: (Data, String?) async -> Void
+    /// Submit the kid's working set of photos plus an optional note.
+    /// The first element is the primary photo (parent sees it first in
+    /// the carousel). The list REPLACES any existing evidence on the
+    /// backend.
+    var onSubmit: ([Data], String?) async -> Void
 
     @State private var note: String = ""
-    @State private var photoData: Data?
+    /// Working set the kid is building up before tapping Submit. Empty
+    /// during a fresh `.input`/`.redo` phase, or hydrated from on-disk
+    /// cache after a successful submit.
+    @State private var photos: [Data] = []
     @State private var showCamera = false
     @State private var submitting = false
     @FocusState private var noteFocused: Bool
 
-    /// Hydrate `photoData` from the on-disk cache when the view appears so
-    /// the kid sees their last submitted photo even after the backend's
+    /// Hard cap matches the backend's `max 6 photos` guard so the kid
+    /// can't queue an over-limit batch and only learn at submit time.
+    private static let maxPhotos = 6
+
+    /// Hydrate `photos` from the on-disk cache when the view appears so
+    /// the kid sees their last submitted photos even after the backend's
     /// in-memory store gets wiped (which currently happens on every
     /// Railway redeploy). See `KidEvidenceCache`.
     private func hydrateFromCache() {
-        if photoData == nil, let cached = KidEvidenceCache.load(taskId: task.id) {
-            photoData = cached
+        if photos.isEmpty {
+            let cached = KidEvidenceCache.load(taskId: task.id)
+            if !cached.isEmpty { photos = cached }
         }
     }
 
@@ -60,7 +72,9 @@ struct BigKidTaskDetailView: View {
         .sheet(isPresented: $showCamera) {
             EvKidPhotoPicker { data in
                 showCamera = false
-                if let data { photoData = data }
+                if let data, photos.count < Self.maxPhotos {
+                    photos.append(data)
+                }
             }
             .ignoresSafeArea()
         }
@@ -154,19 +168,33 @@ struct BigKidTaskDetailView: View {
                 .foregroundStyle(EvlinKidColors.ink3)
             cameraButton
             noteField
-            EvKidBigButton(isDisabled: photoData == nil || submitting,
+            EvKidBigButton(isDisabled: photos.isEmpty || submitting,
                            action: submitAction) {
                 Text(submitting ? "Submitting…" : "Submit for approval")
             }
         }
     }
 
+    /// Heroes the first photo and shows the rest as a thumbnail strip
+    /// with an "+ Add" tile. Tap a thumbnail to remove it; tap the hero
+    /// to retake the primary. When the kid hasn't taken any photos yet,
+    /// degrades to the original single-tap "Take a photo" placeholder.
     @ViewBuilder
     private var cameraButton: some View {
-        if let data = photoData, let uiImage = UIImage(data: data) {
-            capturedPreview(uiImage: uiImage)
-        } else {
+        if photos.isEmpty {
             emptyCameraPlaceholder
+        } else {
+            VStack(spacing: 10) {
+                if let primary = photos.first, let img = UIImage(data: primary) {
+                    capturedPreview(uiImage: img)
+                }
+                photoStrip
+                if photos.count >= Self.maxPhotos {
+                    Text("Photo limit reached (\(Self.maxPhotos)).")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(EvlinKidColors.ink3)
+                }
+            }
         }
     }
 
@@ -183,7 +211,7 @@ struct BigKidTaskDetailView: View {
                 Text("Take a photo")
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(EvlinKidColors.ink2)
-                Text("Show us what you did")
+                Text("Show us what you did — you can add more after")
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(EvlinKidColors.ink3)
             }
@@ -194,6 +222,73 @@ struct BigKidTaskDetailView: View {
             .overlay(
                 RoundedRectangle(cornerRadius: EvlinKidMetrics.Radius.cardLarge)
                     .strokeBorder(style: StrokeStyle(lineWidth: 2, dash: [6]))
+                    .foregroundStyle(EvlinKidColors.ink4)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// Horizontal strip of every photo the kid has taken plus a trailing
+    /// "+ Add" tile (hidden once we hit `maxPhotos`). Each thumbnail has
+    /// a small X badge for removal. Indices are stable for the lifetime
+    /// of this view instance so the kid's tap target doesn't shift while
+    /// they're aiming for the X.
+    private var photoStrip: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 10) {
+                ForEach(Array(photos.enumerated()), id: \.offset) { idx, data in
+                    thumbnail(data: data, index: idx)
+                }
+                if photos.count < Self.maxPhotos {
+                    addTile
+                }
+            }
+            .padding(.vertical, 2) // give the X badge room to overflow
+        }
+    }
+
+    private func thumbnail(data: Data, index: Int) -> some View {
+        ZStack(alignment: .topTrailing) {
+            if let img = UIImage(data: data) {
+                Image(uiImage: img)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: 72, height: 72)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12)
+                            .stroke(index == 0 ? EvlinKidColors.primary : EvlinKidColors.line,
+                                    lineWidth: index == 0 ? 2 : 1)
+                    )
+            }
+            Button {
+                photos.remove(at: index)
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 20, weight: .bold))
+                    .foregroundStyle(.white, .black.opacity(0.7))
+            }
+            .buttonStyle(.plain)
+            .offset(x: 6, y: -6)
+            .accessibilityLabel("Remove photo \(index + 1)")
+        }
+    }
+
+    private var addTile: some View {
+        Button { showCamera = true } label: {
+            VStack(spacing: 4) {
+                Image(systemName: "plus")
+                    .font(.system(size: 22, weight: .semibold))
+                Text("Add")
+                    .font(.system(size: 12, weight: .semibold))
+            }
+            .foregroundStyle(EvlinKidColors.ink3)
+            .frame(width: 72, height: 72)
+            .background(EvlinKidColors.surface2)
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(style: StrokeStyle(lineWidth: 1.5, dash: [4]))
                     .foregroundStyle(EvlinKidColors.ink4)
             )
         }
@@ -215,9 +310,9 @@ struct BigKidTaskDetailView: View {
                     )
 
                 HStack(spacing: 6) {
-                    Image(systemName: "arrow.triangle.2.circlepath.camera.fill")
+                    Image(systemName: "plus.circle.fill")
                         .font(.system(size: 12, weight: .semibold))
-                    Text("Tap to retake")
+                    Text(photos.count >= Self.maxPhotos ? "Full" : "Add another")
                         .font(.system(size: 13, weight: .semibold))
                 }
                 .foregroundStyle(.white)
@@ -228,6 +323,7 @@ struct BigKidTaskDetailView: View {
             }
         }
         .buttonStyle(.plain)
+        .disabled(photos.count >= Self.maxPhotos)
     }
 
     private var noteField: some View {
@@ -254,15 +350,16 @@ struct BigKidTaskDetailView: View {
     }
 
     private func submitAction() {
-        guard let data = photoData else { return }
+        guard !photos.isEmpty else { return }
         submitting = true
-        // Cache the bytes locally so this kid always sees their photo on
-        // re-open, regardless of whether the backend kept its copy. Saves
-        // before the network call so a slow upload doesn't lose the cache
-        // if the user backgrounds the app mid-flight.
-        KidEvidenceCache.save(taskId: task.id, photoData: data)
+        // Cache the bytes locally so this kid always sees their photos on
+        // re-open, regardless of whether the backend kept its copies.
+        // Saves before the network call so a slow upload doesn't lose
+        // the cache if the user backgrounds the app mid-flight.
+        KidEvidenceCache.save(taskId: task.id, photos: photos)
+        let batch = photos
         Task {
-            await onSubmit(data, note.isEmpty ? nil : note)
+            await onSubmit(batch, note.isEmpty ? nil : note)
             submitting = false
         }
     }
@@ -297,66 +394,126 @@ struct BigKidTaskDetailView: View {
 
     private var evidencePreview: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("YOUR EVIDENCE")
-                .font(.system(size: 13, weight: .bold))
-                .tracking(0.8)
-                .foregroundStyle(EvlinKidColors.ink3)
-            // Priority: in-memory captured bytes (instant after submit) →
-            // backend URL via AsyncImage (re-opened later) → placeholder.
-            // Local bytes are cleared on view recreation, so AsyncImage is
-            // the canonical source after a navigation round-trip.
-            if let data = photoData, let img = UIImage(data: data) {
-                Image(uiImage: img)
-                    .resizable()
-                    .scaledToFill()
-                    .aspectRatio(4.0/3.0, contentMode: .fill)
-                    .clipShape(RoundedRectangle(cornerRadius: 18))
-            } else if let url = task.evidencePhotoUrl {
-                AsyncImage(url: url) { phase in
-                    switch phase {
-                    case .success(let img):
-                        img.resizable().scaledToFill()
-                    case .failure(let error):
-                        #if DEBUG
-                        ZStack(alignment: .topLeading) {
-                            placeholderImage
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("AsyncImage failed").font(.caption).bold()
-                                Text(url.absoluteString).font(.system(size: 9, design: .monospaced))
-                                    .lineLimit(3)
-                                Text(error.localizedDescription).font(.system(size: 9))
-                                    .foregroundStyle(.red)
-                            }
-                            .padding(8)
-                            .background(.white.opacity(0.85), in: RoundedRectangle(cornerRadius: 6))
-                            .padding(8)
-                        }
-                        #else
-                        placeholderImage
-                        #endif
-                    case .empty:
-                        ZStack {
-                            placeholderImage
-                            ProgressView()
-                        }
-                    @unknown default:
-                        placeholderImage
-                    }
+            HStack(alignment: .firstTextBaseline) {
+                Text("YOUR EVIDENCE")
+                    .font(.system(size: 13, weight: .bold))
+                    .tracking(0.8)
+                    .foregroundStyle(EvlinKidColors.ink3)
+                Spacer()
+                if evidenceTotalCount > 1 {
+                    Text("\(evidenceTotalCount) photos")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(EvlinKidColors.ink3)
                 }
-                .aspectRatio(4.0/3.0, contentMode: .fill)
-                .clipShape(RoundedRectangle(cornerRadius: 18))
-                .onAppear {
-                    print("[BigKid] evidencePreview loading URL: \(url.absoluteString)")
-                }
-            } else {
-                placeholderImage
             }
+            evidenceContent
             if let note = task.evidenceNote, !note.isEmpty {
                 Text("\u{201C}\(note)\u{201D}")
                     .font(.system(size: 14))
                     .italic()
                     .foregroundStyle(EvlinKidColors.ink2)
                     .padding(.top, 4)
+            }
+        }
+    }
+
+    /// Total number of photos to display, prioritising local cached bytes
+    /// (instant) over backend URLs (which arrive after the next state
+    /// poll). The two are mirrors — the cache is written from the same
+    /// list the kid just submitted.
+    private var evidenceTotalCount: Int {
+        if !photos.isEmpty { return photos.count }
+        return task.evidencePhotoUrls.count
+    }
+
+    /// Hero + thumbnail strip for submitted/approved phases. Single
+    /// photo collapses to just the hero (no strip).
+    @ViewBuilder
+    private var evidenceContent: some View {
+        if !photos.isEmpty {
+            evidenceFromLocalCache
+        } else if !task.evidencePhotoUrls.isEmpty {
+            evidenceFromBackend
+        } else {
+            placeholderImage
+        }
+    }
+
+    @State private var evidenceFocusIndex: Int = 0
+
+    private var evidenceFromLocalCache: some View {
+        VStack(spacing: 10) {
+            let idx = min(evidenceFocusIndex, photos.count - 1)
+            if let img = UIImage(data: photos[idx]) {
+                Image(uiImage: img)
+                    .resizable()
+                    .scaledToFill()
+                    .aspectRatio(4.0/3.0, contentMode: .fill)
+                    .clipShape(RoundedRectangle(cornerRadius: 18))
+            } else {
+                placeholderImage
+            }
+            if photos.count > 1 {
+                evidenceThumbStrip(count: photos.count) { i in
+                    if let img = UIImage(data: photos[i]) {
+                        Image(uiImage: img).resizable().scaledToFill()
+                    }
+                }
+            }
+        }
+    }
+
+    private var evidenceFromBackend: some View {
+        VStack(spacing: 10) {
+            let urls = task.evidencePhotoUrls
+            let idx = min(evidenceFocusIndex, urls.count - 1)
+            AsyncImage(url: urls[idx]) { phase in
+                switch phase {
+                case .success(let img): img.resizable().scaledToFill()
+                case .failure: placeholderImage
+                case .empty:
+                    ZStack { placeholderImage; ProgressView() }
+                @unknown default: placeholderImage
+                }
+            }
+            .aspectRatio(4.0/3.0, contentMode: .fill)
+            .clipShape(RoundedRectangle(cornerRadius: 18))
+            if urls.count > 1 {
+                evidenceThumbStrip(count: urls.count) { i in
+                    AsyncImage(url: urls[i]) { phase in
+                        switch phase {
+                        case .success(let img): img.resizable().scaledToFill()
+                        default: Color.gray.opacity(0.2)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Thumb strip used by both local-cache and backend evidence views.
+    /// Tapping a thumb sets `evidenceFocusIndex`, which the hero reads.
+    @ViewBuilder
+    private func evidenceThumbStrip<Thumb: View>(
+        count: Int, @ViewBuilder thumb: @escaping (Int) -> Thumb
+    ) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(0..<count, id: \.self) { i in
+                    Button { evidenceFocusIndex = i } label: {
+                        thumb(i)
+                            .frame(width: 56, height: 56)
+                            .clipShape(RoundedRectangle(cornerRadius: 10))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 10)
+                                    .stroke(i == evidenceFocusIndex
+                                            ? EvlinKidColors.primary
+                                            : EvlinKidColors.line,
+                                            lineWidth: i == evidenceFocusIndex ? 2 : 1)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                }
             }
         }
     }
@@ -484,21 +641,21 @@ struct BigKidTaskDetailView: View {
 #if DEBUG
 #Preview("Input") {
     BigKidTaskDetailView(task: .fixture(status: .todo, phase: .input),
-                         onBack: {}, onBypass: {}, onSubmit: { _, _ in })
+                         onBack: {}, onBypass: {}, onSubmit: { (_: [Data], _: String?) in })
 }
 #Preview("Submitted") {
     BigKidTaskDetailView(task: .fixture(status: .submitted, phase: .submitted),
-                         onBack: {}, onBypass: {}, onSubmit: { _, _ in })
+                         onBack: {}, onBypass: {}, onSubmit: { (_: [Data], _: String?) in })
 }
 private func _redoPreviewTask() -> BigKidTask {
     let t = BigKidTask.fixture(status: .todo, phase: .redo)
     return BigKidTask(id: t.id, title: t.title, description: t.description,
                       category: t.category, due: t.due, status: t.status, phase: t.phase,
                       redoReason: "Bed is still messy. Please smooth the covers.",
-                      evidencePhotoUrl: nil, evidenceNote: nil, bypass: nil)
+                      evidencePhotoUrls: [], evidenceNote: nil, bypass: nil)
 }
 #Preview("Redo") {
     BigKidTaskDetailView(task: _redoPreviewTask(),
-                         onBack: {}, onBypass: {}, onSubmit: { _, _ in })
+                         onBack: {}, onBypass: {}, onSubmit: { (_: [Data], _: String?) in })
 }
 #endif

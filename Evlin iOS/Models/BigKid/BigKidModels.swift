@@ -49,9 +49,16 @@ struct BigKidTask: Codable, Equatable, Sendable, Identifiable {
     let status: BigKidTaskStatus
     let phase: BigKidTaskPhase
     let redoReason: String?
-    let evidencePhotoUrl: URL?
+    /// All evidence photos the kid submitted for this task. Order is
+    /// preserved (first photo = primary). Empty when the task hasn't
+    /// been submitted yet, or after the parent sends it back for redo.
+    let evidencePhotoUrls: [URL]
     let evidenceNote: String?
     let bypass: BypassRequest?
+
+    /// Back-compat helper for older call sites that expect a single URL.
+    /// Prefer `evidencePhotoUrls` for new code.
+    var evidencePhotoUrl: URL? { evidencePhotoUrls.first }
 }
 
 struct QuizQuestion: Codable, Equatable, Sendable {
@@ -158,7 +165,7 @@ extension BigKidTask {
         BigKidTask(
             id: id, title: title, description: description, category: category,
             due: due, status: status, phase: phase, redoReason: nil,
-            evidencePhotoUrl: nil, evidenceNote: nil, bypass: bypass
+            evidencePhotoUrls: [], evidenceNote: nil, bypass: bypass
         )
     }
 }

@@ -18,7 +18,7 @@ final class BigKidModelsTests: XCTestCase {
               "status": "todo",
               "phase": "input",
               "redo_reason": null,
-              "evidence_photo_url": null,
+              "evidence_photo_urls": [],
               "bypass": null
             }
           ],

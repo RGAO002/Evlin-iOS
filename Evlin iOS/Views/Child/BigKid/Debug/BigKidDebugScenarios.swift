@@ -63,7 +63,7 @@ enum BigKidDebugScenario: String, CaseIterable, Identifiable {
                 category: original.category, due: original.due,
                 status: .todo, phase: .redo,
                 redoReason: "Looks like the bed is still a bit messy — can you smooth out the covers and take another photo?",
-                evidencePhotoUrl: nil, evidenceNote: nil, bypass: nil
+                evidencePhotoUrls: [], evidenceNote: nil, bypass: nil
             )
             return .fixture(tasks: tasks)
 
@@ -103,7 +103,7 @@ enum BigKidDebugScenario: String, CaseIterable, Identifiable {
                     id: t.id, title: t.title, description: t.description,
                     category: t.category, due: t.due,
                     status: .done, phase: .submitted,
-                    redoReason: nil, evidencePhotoUrl: nil, evidenceNote: nil, bypass: nil
+                    redoReason: nil, evidencePhotoUrls: [], evidenceNote: nil, bypass: nil
                 )
             }
             return .fixture(tasks: done, minutesLeft: 95, minutesMax: 120,
@@ -115,7 +115,7 @@ enum BigKidDebugScenario: String, CaseIterable, Identifiable {
                     id: t.id, title: t.title, description: t.description,
                     category: t.category, due: t.due,
                     status: .done, phase: .submitted,
-                    redoReason: nil, evidencePhotoUrl: nil, evidenceNote: nil, bypass: nil
+                    redoReason: nil, evidencePhotoUrls: [], evidenceNote: nil, bypass: nil
                 )
             }
             return .fixture(tasks: done, minutesLeft: 0, minutesMax: 120,

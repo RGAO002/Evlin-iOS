@@ -22,11 +22,16 @@ final class BigKidAPIClient: ObservableObject {
 
     // MARK: - Tasks
 
-    func submitEvidence(taskId: UUID, photoData: Data, note: String?) async throws -> BigKidTask {
+    /// Submit one or more evidence photos for a task. The `photos` array
+    /// is the FULL submission — backend replaces any prior evidence with
+    /// it. Order is preserved (first = primary). Per-photo cap 5MB,
+    /// total cap 6 photos (matches the backend endpoint contract).
+    func submitEvidence(taskId: UUID, photos: [Data], note: String?) async throws -> BigKidTask {
+        precondition(!photos.isEmpty, "submitEvidence requires at least one photo")
         var req = try makeRequest(path: "/child/task/\(taskId)/evidence", method: "POST")
         let boundary = UUID().uuidString
         req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
-        req.httpBody = Self.multipartBody(boundary: boundary, photoData: photoData, note: note)
+        req.httpBody = Self.multipartBody(boundary: boundary, photos: photos, note: note)
         return try await perform(req)
     }
 
@@ -151,14 +156,20 @@ final class BigKidAPIClient: ObservableObject {
         }
     }
 
-    private static func multipartBody(boundary: String, photoData: Data, note: String?) -> Data {
+    private static func multipartBody(boundary: String, photos: [Data], note: String?) -> Data {
         var body = Data()
         let crlf = "\r\n"
-        body.append("--\(boundary)\(crlf)".data(using: .utf8)!)
-        body.append("Content-Disposition: form-data; name=\"photo\"; filename=\"evidence.jpg\"\(crlf)".data(using: .utf8)!)
-        body.append("Content-Type: image/jpeg\(crlf)\(crlf)".data(using: .utf8)!)
-        body.append(photoData)
-        body.append(crlf.data(using: .utf8)!)
+        // One `photos` part per image — FastAPI's `list[UploadFile]` reads
+        // repeated form fields with the same name. Filenames just need to
+        // be distinct enough that the multipart parser doesn't trip; the
+        // backend ignores them and assigns its own UUID per upload.
+        for (idx, data) in photos.enumerated() {
+            body.append("--\(boundary)\(crlf)".data(using: .utf8)!)
+            body.append("Content-Disposition: form-data; name=\"photos\"; filename=\"evidence-\(idx).jpg\"\(crlf)".data(using: .utf8)!)
+            body.append("Content-Type: image/jpeg\(crlf)\(crlf)".data(using: .utf8)!)
+            body.append(data)
+            body.append(crlf.data(using: .utf8)!)
+        }
         if let note, !note.isEmpty {
             body.append("--\(boundary)\(crlf)".data(using: .utf8)!)
             body.append("Content-Disposition: form-data; name=\"note\"\(crlf)\(crlf)".data(using: .utf8)!)
