@@ -117,7 +117,17 @@ struct BigKidRootView: View {
         .environment(state)
         .environmentObject(client)
         .environmentObject(poller)
-        .onAppear { poller.start() }
+        .onAppear {
+            poller.start()
+            // Belt and suspenders: explicitly refresh on every appearance.
+            // SwiftUI doesn't always re-fire onAppear in a clean lifecycle
+            // (sheets, mode toggles), and `poller.start()`'s "fetch once
+            // immediately" path is guarded by `task == nil` — if the
+            // poller's still running from a previous appearance, no fresh
+            // fetch happens. Calling refreshNow here is idempotent and
+            // costs one /child/state request per appearance.
+            Task { await poller.refreshNow() }
+        }
         .onDisappear { poller.stop() }
         .onChange(of: scenePhase) { _, new in
             if new == .active {
