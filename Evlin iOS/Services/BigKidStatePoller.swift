@@ -2,9 +2,18 @@ import Combine
 import Foundation
 import SwiftUI
 
-/// Polls `/child/state` every 60s while app is foregrounded; refreshes
-/// immediately on `scenePhase == .active` transitions. Hands snapshots
-/// to `BigKidState` via the `apply(_:)` method.
+extension Notification.Name {
+    /// Broadcast by ChatViewModel after a successful /parent/agent/exec so
+    /// any active BigKidStatePoller refreshes right away. Without this the
+    /// kid would have to wait up to one poll interval to see a reflection
+    /// the parent just confirmed in chat.
+    static let bigKidStateInvalidated = Notification.Name("bigKidStateInvalidated")
+}
+
+/// Polls `/child/state` every 20s while app is foregrounded; refreshes
+/// immediately on `scenePhase == .active` transitions and on the
+/// `bigKidStateInvalidated` notification. Hands snapshots to
+/// `BigKidState` via the `apply(_:)` method.
 @MainActor
 final class BigKidStatePoller: ObservableObject {
     @Published var lastError: String?
@@ -13,10 +22,23 @@ final class BigKidStatePoller: ObservableObject {
     private let client: BigKidAPIClient
     private let state: BigKidState
     private var task: Task<Void, Never>?
+    private var invalidationObserver: NSObjectProtocol?
+
+    /// Polling cadence. 20s is short enough that a kid sees a reflection
+    /// landing within "a few seconds" without explicit triggering, while
+    /// still being polite to the backend. The notification path covers
+    /// the same-device parent→kid mode-toggle case more tightly.
+    private static let pollIntervalNanoseconds: UInt64 = 20_000_000_000
 
     init(client: BigKidAPIClient, state: BigKidState) {
         self.client = client
         self.state = state
+    }
+
+    deinit {
+        if let obs = invalidationObserver {
+            NotificationCenter.default.removeObserver(obs)
+        }
     }
 
     func start() {
@@ -24,11 +46,22 @@ final class BigKidStatePoller: ObservableObject {
         task = Task { [weak self] in
             await self?.runLoop()
         }
+        if invalidationObserver == nil {
+            invalidationObserver = NotificationCenter.default.addObserver(
+                forName: .bigKidStateInvalidated, object: nil, queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in await self?.refreshNow() }
+            }
+        }
     }
 
     func stop() {
         task?.cancel()
         task = nil
+        if let obs = invalidationObserver {
+            NotificationCenter.default.removeObserver(obs)
+            invalidationObserver = nil
+        }
     }
 
     /// Force an immediate refresh (e.g. on scenePhase change or after a write).
@@ -39,7 +72,7 @@ final class BigKidStatePoller: ObservableObject {
     private func runLoop() async {
         while !Task.isCancelled {
             await fetchOnce()
-            try? await Task.sleep(nanoseconds: 60_000_000_000)  // 60s
+            try? await Task.sleep(nanoseconds: Self.pollIntervalNanoseconds)
         }
     }
 

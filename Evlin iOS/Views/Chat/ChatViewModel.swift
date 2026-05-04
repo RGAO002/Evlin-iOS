@@ -627,6 +627,13 @@ class ChatViewModel: ObservableObject {
                 msg.receipts = (msg.receipts ?? []) + [receipt]
                 messages[i] = msg
             }
+            // Tell any active BigKidStatePoller to refresh immediately —
+            // this is what makes a parent-confirmed reflection / task /
+            // bypass appear on the kid side without waiting for the poll
+            // cycle. Same-device dev (parent + kid in one app) was the
+            // motivating case; on separate devices the kid still picks
+            // it up via the next poll.
+            NotificationCenter.default.post(name: .bigKidStateInvalidated, object: nil)
         } catch {
             errorMessage = (error as? LocalizedError)?.errorDescription
         }
