@@ -479,7 +479,15 @@ class ChatViewModel: ObservableObject {
     /// message's receiptState when the child acks. Times out at 30 s.
     private func startAckPoll(commandID: UUID, messageID: UUID, targetDisplay: String?, expiresAt: Date?) {
         let task = Task { [weak self] in
-            let deadline = Date().addingTimeInterval(30)
+            // Was 30s. With the single-device dev affordance the kid-side
+            // CommandPoller only runs in K mode, so a parent who confirms
+            // in chat needs time to flip the FloatingModeToggle to K
+            // before the command is picked up — 30s was too tight and
+            // surfaced 'command timed out' on receipts that were actually
+            // fine. 10 minutes covers a realistic switch-and-test loop;
+            // a real 2-device kid device acks within seconds anyway so
+            // this only changes the failure-mode timeout.
+            let deadline = Date().addingTimeInterval(600)
             while Date() < deadline, !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
                 guard let self else { return }
