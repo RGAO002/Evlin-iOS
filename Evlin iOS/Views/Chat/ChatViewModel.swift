@@ -572,8 +572,18 @@ class ChatViewModel: ObservableObject {
                 }
                 if done { return }
             }
-            // Deadline hit without a terminal status
+            // Deadline hit without a terminal status. Single-device dev
+            // mode (FloatingModeToggle): if the parent never flipped to
+            // K mode, the kid-side poller never ran and never acked. Don't
+            // surface that as 'Command timed out' — the command is still
+            // queued on the server and will execute as soon as K mode is
+            // entered. Leave the receipt as .pending; the next ack-poll
+            // (or a fresh chat round-trip) will finalise it.
+            let inParentMode = (UserDefaults.standard.string(forKey: "appMode") ?? "") == "parent"
             await MainActor.run {
+                if inParentMode {
+                    return
+                }
                 self?.applyReceipt(.failedTimeout, effective: nil, messageID: messageID)
             }
         }

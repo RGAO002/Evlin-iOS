@@ -42,7 +42,13 @@ struct ReceiptCard: View {
         case .pending:
             HStack(spacing: 8) {
                 ProgressView().controlSize(.small)
-                Text("Sending…").font(.subheadline)
+                // The command sits in the backend queue until the kid
+                // device polls and applies it. On a real two-device
+                // setup that's seconds. In single-device dev it's
+                // however long it takes to flip P→K — 'Sending…' read
+                // as a network failure when actually the request was
+                // accepted and is waiting on the kid.
+                Text("Queued — waiting for kid device").font(.subheadline)
             }
         case .confirmedExact(let verb, let name, let unlocksAt):
             HStack(spacing: 8) {
