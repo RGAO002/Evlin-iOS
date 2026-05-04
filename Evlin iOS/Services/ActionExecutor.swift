@@ -210,15 +210,28 @@ final class ActionExecutor: @unchecked Sendable {
         guard let bundleID = cmd.target.bundleID else {
             return .failed(.malformed)
         }
+        // Timed block: clamp to iOS DeviceActivitySchedule's hard 15-minute
+        // minimum same way shield does, so 'block IG for 5 min' becomes a
+        // 15-minute block rather than silently never-firing.
+        var expiresAt = cmd.expiresAt
+        if let exp = expiresAt, exp.timeIntervalSinceNow < TimeInterval(Self.minScheduleMinutes * 60) {
+            expiresAt = Date().addingTimeInterval(TimeInterval(Self.minScheduleMinutes * 60))
+        }
         let record = BlockRecord(
             bundleID: bundleID,
             displayName: cmd.target.targetDisplay ?? bundleID,
             blockedAt: cmd.issuedAt,
             lastCommandID: cmd.id,
             originalRequest: cmd.target.originalRequest,
-            targetChildID: cmd.target.targetChildID ?? UUID()
+            targetChildID: cmd.target.targetChildID ?? UUID(),
+            expiresAt: expiresAt
         )
         let result = await ActiveLockStore.shared.addBlock(record)
+        // Schedule auto-unblock for timed blocks. The DeviceActivityMonitor
+        // extension fires intervalDidEnd at expiry and removes the record.
+        if let exp = expiresAt {
+            try? scheduleAutoUnblock(bundleID: bundleID, expiresAt: exp)
+        }
         let query = AppQuery(bundleID: bundleID, categoryHint: nil)
         let state = await ActiveLockStore.shared.effectiveState(for: query)
         let eff = effectiveStateFrom(state.stillCovered, isBlocked: true, possibleSavedList: state.possibleSavedListCoverage)
@@ -228,6 +241,32 @@ final class ActionExecutor: @unchecked Sendable {
         case .alreadyBlocked:
             return .confirmedExact(verb: .block, displayName: "\(record.displayName) already blocked", effectiveState: eff)
         }
+    }
+
+    /// Schedule a DeviceActivityMonitor activity that fires intervalDidEnd
+    /// at `expiresAt`, so the extension can remove the BlockRecord and
+    /// recompute the effective state. Activity name namespace is
+    /// `evlin.block.<sha-of-bundleID>` so the extension knows it's a
+    /// block-expiry event vs a shield-expiry event.
+    private func scheduleAutoUnblock(bundleID: String, expiresAt: Date) throws {
+        let now = Date()
+        let requestedInterval = expiresAt.timeIntervalSince(now)
+        let minInterval = TimeInterval(Self.minScheduleMinutes * 60)
+        let clampedEnd = requestedInterval < minInterval
+            ? now.addingTimeInterval(minInterval)
+            : expiresAt
+        let calendar = Calendar.current
+        let startComp = calendar.dateComponents([.hour, .minute, .second], from: now)
+        let endComp = calendar.dateComponents([.hour, .minute, .second], from: clampedEnd)
+        let schedule = DeviceActivitySchedule(intervalStart: startComp, intervalEnd: endComp, repeats: false)
+        let name = DeviceActivityName(deviceActivityNameForBlock(bundleID: bundleID))
+        try activityCenter.startMonitoring(name, during: schedule)
+    }
+
+    private func deviceActivityNameForBlock(bundleID: String) -> String {
+        let data = bundleID.data(using: .utf8) ?? Data()
+        let bytes = sha256Hex16(data)
+        return "evlin.block.\(bytes)"
     }
 
     // MARK: - Unshield — spec §4.4

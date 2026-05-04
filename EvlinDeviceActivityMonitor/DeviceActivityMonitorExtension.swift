@@ -16,12 +16,20 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
     override func intervalDidEnd(for activity: DeviceActivityName) {
         super.intervalDidEnd(for: activity)
 
-        // Expected name format: "evlin.shield.<16-byte-hex>"
+        // Two activity namespaces fire here:
+        //   "evlin.shield.<16-byte-hex-of-recordKey>" — timed shield expiring
+        //   "evlin.block.<16-byte-hex-of-bundleID>"  — timed block expiring
+        // Both result in the matching record being dropped from the App
+        // Group store and the effective ManagedSettings state being
+        // recomputed from what remains.
         let raw = activity.rawValue
-        guard raw.hasPrefix("evlin.shield.") else { return }
-        let hashHex = String(raw.dropFirst("evlin.shield.".count))
-
-        removeShieldByHashAndRecompute(hashHex: hashHex)
+        if raw.hasPrefix("evlin.shield.") {
+            let hashHex = String(raw.dropFirst("evlin.shield.".count))
+            removeShieldByHashAndRecompute(hashHex: hashHex)
+        } else if raw.hasPrefix("evlin.block.") {
+            let hashHex = String(raw.dropFirst("evlin.block.".count))
+            removeBlockByHashAndRecompute(hashHex: hashHex)
+        }
     }
 
     override func eventDidReachThreshold(_ event: DeviceActivityEvent.Name,
@@ -78,6 +86,33 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         store.shield.applicationCategories = allCat.isEmpty ? nil : .specific(allCat)
         store.shield.webDomains = allWeb.isEmpty ? nil : allWeb
         store.shield.webDomainCategories = nil
+    }
+
+    /// Symmetric to `removeShieldByHashAndRecompute` but for timed
+    /// blocks: locate the BlockRecord whose bundleID hashes to this
+    /// activity, drop it, then recompute `application.blockedApplications`
+    /// from whatever's left.
+    private func removeBlockByHashAndRecompute(hashHex: String) {
+        guard let blockData = defaults?.data(forKey: blocksKey),
+              var blocks = try? PropertyListDecoder().decode([String: BlockRecord].self, from: blockData)
+        else { return }
+
+        let target = blocks.keys.first { bundleID in
+            let prefix = sha256Hex16(bundleID.data(using: .utf8) ?? Data())
+            return prefix == hashHex
+        }
+        guard let bundleID = target else { return }
+        blocks.removeValue(forKey: bundleID)
+
+        if let updated = try? PropertyListEncoder().encode(blocks) {
+            defaults?.set(updated, forKey: blocksKey)
+        }
+
+        // Re-derive blockedApplications from the surviving records.
+        let blockedApps = Set(blocks.values.map {
+            ManagedSettings.Application(bundleIdentifier: $0.bundleID)
+        })
+        store.application.blockedApplications = blockedApps.isEmpty ? nil : blockedApps
     }
 }
 
