@@ -20,6 +20,11 @@ struct HomeSettingsSheet: View {
     @State private var serverURL: String = ""
     @State private var isPickerPresented = false
 
+    /// DEBUG: family protection mode mirror — synced from backend on appear,
+    /// PUT-back via apiClient when the segmented control changes.
+    @State private var protectionMode: String = "std"
+    @State private var protectionModeStatus: String = ""
+
     var body: some View {
         NavigationStack {
             Form {
@@ -237,6 +242,43 @@ struct HomeSettingsSheet: View {
                 }
                 #endif
 
+                // MARK: - Protection Mode (DEBUG)
+                #if DEBUG
+                Section {
+                    if let famID = UUID(uuidString: familyID) {
+                        Picker("Protection Mode", selection: $protectionMode) {
+                            Text("Standard (.individual)").tag("std")
+                            Text("Maximum (.child)").tag("max")
+                        }
+                        .pickerStyle(.segmented)
+                        .onChange(of: protectionMode) { _, new in
+                            Task {
+                                do {
+                                    try await apiClient.setProtectionMode(familyID: famID, mode: new)
+                                    protectionModeStatus = "✅ Set to \(new.uppercased())"
+                                } catch {
+                                    protectionModeStatus = "⚠️ Failed: \(error.localizedDescription)"
+                                }
+                            }
+                        }
+                        if !protectionModeStatus.isEmpty {
+                            Text(protectionModeStatus)
+                                .font(.caption)
+                                .foregroundStyle(Color.evOnSurfaceVariant)
+                        }
+                        Text("Std blocks 'block' and 'shield single app' (E1/E2 cards). Max enables both. Toggling here only affects the backend family record.")
+                            .font(.caption)
+                            .foregroundStyle(Color.evOnSurfaceVariant)
+                    } else {
+                        Text("No paired family — pair a device first to use this toggle.")
+                            .font(.caption)
+                            .foregroundStyle(Color.evOnSurfaceVariant)
+                    }
+                } header: {
+                    Text("Protection Mode (DEBUG)")
+                }
+                #endif
+
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
@@ -259,6 +301,15 @@ struct HomeSettingsSheet: View {
             }
             .onAppear {
                 serverURL = apiClient.baseURL
+                // Sync DEBUG protection-mode picker from backend so the
+                // segmented control reflects truth, not the @State default.
+                if let famID = UUID(uuidString: familyID) {
+                    Task {
+                        if let m = try? await apiClient.getProtectionMode(familyID: famID) {
+                            await MainActor.run { protectionMode = m }
+                        }
+                    }
+                }
             }
             .sheet(item: $editing) { child in
                 ChildEditSheet(child: child) { updated in
