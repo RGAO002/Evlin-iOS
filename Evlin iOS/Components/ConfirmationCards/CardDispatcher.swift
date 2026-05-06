@@ -26,9 +26,14 @@ struct CardDispatcher: View {
         case .E4, .F1: ListSuggestionCard(payload: payload)
         case .R1: DangerConfirmCard(payload: payload)
         case .U1:
-            // U1 unlock-disambiguation card view comes in a later task.
-            // For now route to DangerConfirmCard so the switch stays exhaustive.
-            DangerConfirmCard(payload: payload)
+            U1Card(
+                entries: context.u1ShieldList,
+                onUnlockSelected: { indices in
+                    handlers.onU1UnlockSelected?(indices)
+                },
+                onUnlockEverything: { handlers.onU1UnlockEverything?() },
+                onCancel: { handlers.onCancel?() }
+            )
         }
     }
 
@@ -84,4 +89,6 @@ struct CardHandlers {
     /// name. Preferred over `onChildrenPicked` until we plumb UUID mapping.
     var onChildrenLabelsPicked: (([String]) -> Void)?
     var onListPicked: ((String) -> Void)?      // F1
+    var onU1UnlockSelected: (([Int]) -> Void)?
+    var onU1UnlockEverything: (() -> Void)?
 }
