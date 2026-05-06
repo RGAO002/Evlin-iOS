@@ -21,6 +21,12 @@ enum CardPayloadBuilder {
         case .F1: return f1(context, handlers)
         case .G1: return g1(context, handlers)
         case .R1: return r1(context, handlers)
+        case .U1:
+            // U1 doesn't use CardPayload — CardDispatcher renders U1Card
+            // directly from CardContext.u1Token + u1ShieldList. Return an
+            // empty payload as a defensive stub so the switch is exhaustive
+            // and any accidental builder call doesn't crash.
+            return CardPayload(id: .U1, icon: "lock.open", title: "", body: "", buttons: [])
         }
     }
 
