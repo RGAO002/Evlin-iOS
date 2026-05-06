@@ -45,19 +45,63 @@ struct CustomTokenPickerView: View {
     @State private var newlyAddedAppTokens: Set<ApplicationToken> = []
     @State private var newlyAddedCategoryTokens: Set<ActivityCategoryToken> = []
 
+    /// Filter text bound to the search field above the list.
+    @State private var searchText: String = ""
+
+    /// Best-effort display name for a token, derived by reverse-lookup
+    /// against LocalAliasStore (whose keys are case-insensitive and
+    /// include both display names and bundle ids — bundle ids contain
+    /// a dot, so we filter those out for sort/search). Returns nil when
+    /// the token has never been hydrated.
+    private func displayName(forApp token: ApplicationToken) -> String? {
+        LocalAliasStore.shared.applicationLookupKeys(equalTo: token)
+            .first { !$0.contains(".") }
+    }
+
+    private func displayName(forCategory token: ActivityCategoryToken) -> String? {
+        LocalAliasStore.shared.categoryLookupKeys(equalTo: token).first
+    }
+
+    /// Sort by display name (fallback to hashValue when no name); newly-added
+    /// tokens stay pinned at the top so the parent's last picker action is
+    /// visible without scrolling. Search filter applies after sort.
     private var sortedApps: [ApplicationToken] {
         let all = Array(screenTimeManager.selectedApps.applicationTokens)
-        let new = all.filter { newlyAddedAppTokens.contains($0) }
-        let rest = all.filter { !newlyAddedAppTokens.contains($0) }
-            .sorted { $0.hashValue < $1.hashValue }
-        return new.sorted { $0.hashValue < $1.hashValue } + rest
+        let q = searchText.trimmingCharacters(in: .whitespaces).lowercased()
+        let filtered = q.isEmpty
+            ? all
+            : all.filter { (displayName(forApp: $0) ?? "").lowercased().contains(q) }
+        let new = filtered.filter { newlyAddedAppTokens.contains($0) }
+        let rest = filtered.filter { !newlyAddedAppTokens.contains($0) }
+        let byName: (ApplicationToken, ApplicationToken) -> Bool = { a, b in
+            let na = displayName(forApp: a) ?? ""
+            let nb = displayName(forApp: b) ?? ""
+            // Tokens with no name sink to the bottom.
+            if na.isEmpty && !nb.isEmpty { return false }
+            if !na.isEmpty && nb.isEmpty { return true }
+            if na.isEmpty && nb.isEmpty { return a.hashValue < b.hashValue }
+            return na.localizedCaseInsensitiveCompare(nb) == .orderedAscending
+        }
+        return new.sorted(by: byName) + rest.sorted(by: byName)
     }
+
     private var sortedCategories: [ActivityCategoryToken] {
         let all = Array(screenTimeManager.selectedApps.categoryTokens)
-        let new = all.filter { newlyAddedCategoryTokens.contains($0) }
-        let rest = all.filter { !newlyAddedCategoryTokens.contains($0) }
-            .sorted { $0.hashValue < $1.hashValue }
-        return new.sorted { $0.hashValue < $1.hashValue } + rest
+        let q = searchText.trimmingCharacters(in: .whitespaces).lowercased()
+        let filtered = q.isEmpty
+            ? all
+            : all.filter { (displayName(forCategory: $0) ?? "").lowercased().contains(q) }
+        let new = filtered.filter { newlyAddedCategoryTokens.contains($0) }
+        let rest = filtered.filter { !newlyAddedCategoryTokens.contains($0) }
+        let byName: (ActivityCategoryToken, ActivityCategoryToken) -> Bool = { a, b in
+            let na = displayName(forCategory: a) ?? ""
+            let nb = displayName(forCategory: b) ?? ""
+            if na.isEmpty && !nb.isEmpty { return false }
+            if !na.isEmpty && nb.isEmpty { return true }
+            if na.isEmpty && nb.isEmpty { return a.hashValue < b.hashValue }
+            return na.localizedCaseInsensitiveCompare(nb) == .orderedAscending
+        }
+        return new.sorted(by: byName) + rest.sorted(by: byName)
     }
     private var canSave: Bool {
         switch request.kind {
@@ -70,6 +114,8 @@ struct CustomTokenPickerView: View {
         NavigationStack {
             VStack(spacing: 0) {
                 header
+                Divider()
+                searchBar
                 Divider()
                 listBody
                 Divider()
@@ -110,6 +156,28 @@ struct CustomTokenPickerView: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.evSurfaceContainerLow)
+    }
+
+    private var searchBar: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(Color.evOutline)
+            TextField("Search", text: $searchText)
+                .font(.custom("Inter", size: 14))
+                .autocorrectionDisabled()
+                .textInputAutocapitalization(.never)
+            if !searchText.isEmpty {
+                Button {
+                    searchText = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(Color.evOutline)
+                }
+            }
+        }
+        .padding(.vertical, 8)
+        .padding(.horizontal, 12)
         .background(Color.evSurfaceContainerLow)
     }
 
