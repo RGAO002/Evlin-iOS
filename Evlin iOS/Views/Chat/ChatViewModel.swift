@@ -457,6 +457,15 @@ class ChatViewModel: ObservableObject {
             // with force=["R1"] so the backend's reflect path skips the
             // confirmation gate and actually fires.
             resendWithForce(["R1"])
+
+        case .U1:
+            // U1 has no "primary" button — Unlock selected and Unlock
+            // everything are wired through onU1UnlockSelected /
+            // onU1UnlockEverything in CardHandlers (see CardDispatcher
+            // .U1 case + ChatViewModel.handleU1UnlockSelected /
+            // handleU1UnlockEverything). This branch only exists to keep
+            // the switch exhaustive; primary should never fire on U1.
+            currentCard = nil
         }
     }
 
