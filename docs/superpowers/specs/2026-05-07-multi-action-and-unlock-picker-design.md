@@ -1,8 +1,15 @@
 # Multi-Action Staging + Unlock Disambiguation + ask_pick Primitive — Design Spec
 
 **Date:** 2026-05-07
-**Status:** Draft awaiting review
+**Status:** Reviewed (round 1) — revisions applied; ask_pick split to Phase 2
 **Branch:** `feat/three-tier-lock`
+
+## Phasing
+
+This spec covers Phase 1 (now) + sketches Phase 2 (follow-up):
+
+- **Phase 1**: Components 1, 2, 4 (multi-action staging, U1, app icons)
+- **Phase 2**: Component 3 (ask_pick generic primitive) — split out to avoid scope creep; Phase 1 lays the agent_loop scaffolding (`ask_pick_payloads` accumulator) so Phase 2 only needs the tool definition + iOS card.
 
 ## Problem
 
@@ -113,23 +120,30 @@ if agent_resp.legacy_gemini_actions:
     )
 ```
 
-**New `_stage_legacy_actions`** function:
+**New `_stage_legacy_actions`** function. Reviewer flagged ambiguity in mixed eligibility. Resolution: **all legacy actions in a multi-action turn go through staging** (no eager mid-turn dispatch). Non-eligible actions get a degenerate single-row bundled proposal — the parent confirm step is no-op-cheap and unifies behavior. The single-action eager path still exists for turns where the agent emits exactly one non-eligible action (preserves D1/D3/D4 card flow).
 
 ```python
 async def _stage_legacy_actions(
     *, proposal_store, actions, req, message, reasoning, session,
 ) -> ChatResponse:
-    # Group by type — homogeneous bundling per design (mixed shield+unshield → 2 cards)
+    # Single-action turn → keep existing eager flow if non-eligible, so D1/D3/D4
+    # cards still surface from chat_resolver. Eligible single-action also goes
+    # through bundled proposal (length-1 bundle renders as single-row card).
+    if len(actions) == 1 and not _is_lazy_tag_eligible(actions[0], req.force_confirmations):
+        return await _handle_gemini_action(
+            gemini_action=actions[0], message=message, reasoning=reasoning,
+            req=req, session=session,
+        )
+
+    # Multi-action turn: group by type; bundle each type into a Proposal.
+    # Mixed eligible/non-eligible inside a multi-turn: still bundle (the
+    # alternative — splitting eager + proposals into one ChatResponse — is
+    # supported by the model but the iOS UX of mixed cards + receipt is
+    # confusing). Non-eligible rows skip pre-flight; their Confirm is
+    # always enabled.
     by_type: dict[str, list[dict]] = defaultdict(list)
     for a in actions:
-        # Eligibility check per action; non-eligible (e.g. type=block, target_kind=all)
-        # falls back to the eager dispatch path below.
-        if _is_lazy_tag_eligible(a, req.force_confirmations):
-            by_type[a["type"]].append(a)
-        else:
-            # Eager dispatch (existing _handle_gemini_action). Returns a
-            # ChatResponse; merge action / receipts into the response we build.
-            eager_responses.append(await _handle_gemini_action(...))
+        by_type[a["type"]].append(a)
 
     proposals: list[Proposal] = []
     for action_type, group in by_type.items():
@@ -177,13 +191,31 @@ def _stage_bundled_proposal(
     )
 
     # Bundled label: "Shield 2 apps for 15 min" / "Unshield 3 items"
+    # Reviewer caught: min() over {30, 15} silently picked 15 and dropped
+    # IG's 30. Now: only emit a duration suffix when ALL rows agree.
     targets = [a.get("target_request") or "?" for a in actions]
-    minutes_set = {a.get("duration_minutes") for a in actions if isinstance(a.get("duration_minutes"), int)}
-    duration_suffix = (
-        f" for {min(minutes_set)} min"
-        if len(minutes_set) == 1 and not is_unshield
-        else (" (mixed durations)" if not is_unshield and minutes_set else "")
+    durations = [
+        a.get("duration_minutes")
+        for a in actions
+        if isinstance(a.get("duration_minutes"), int)
+    ]
+    permanent_count = sum(
+        1 for a in actions if a.get("duration_state") == "permanent"
     )
+    all_uniform = (
+        not is_unshield
+        and len(durations) == len(actions)
+        and len(set(durations)) == 1
+    )
+    all_permanent = not is_unshield and permanent_count == len(actions)
+    if all_uniform:
+        duration_suffix = f" for {durations[0]} min"
+    elif all_permanent:
+        duration_suffix = " permanently"
+    elif not is_unshield and (durations or permanent_count):
+        duration_suffix = " (mixed durations)"
+    else:
+        duration_suffix = ""
     verb = "Unshield" if is_unshield else "Shield"
     label = (
         f"{verb} {targets[0]}{duration_suffix}"
@@ -285,46 +317,76 @@ Per design choice: **independent per action**. Each sub-action has its own Comma
 
 ## Component 2 — U1 Unlock Disambiguation Card
 
-### Trigger logic (chat_resolver path)
+### Trigger logic (parent_chat → chat_resolver)
 
-When `chat_resolver._route_unshield` sees:
-- `target_request` is empty / "everything" / "all" with `target_kind_hint` ∈ {"all", None}
-- AND backend's last-known kid effective state shows ≥ 2 active shields
+Reviewer caught: `chat_resolver` is a pure function (no DB). Two-step plumbing:
 
-→ return `DispatchResult(requires_card="U1", u1_shield_list=[...])` instead of routing to `unshield_all`.
+1. **In `parent_chat`** (just before calling `_handle_gemini_action`): if the agent / Gemini emitted an unshield with bare/ambiguous target (`target_request` empty / "everything" / "all" / "everything locked", AND `target_kind_hint` ∈ {"all", None}), call new helper `_load_effective_state(child_device_id)` → JSON list of active shields. Inject into the gemini_action dict as `_effective_shields: [...]` (private key, prefixed with underscore so other resolvers ignore it).
 
-If only 1 active shield, route directly to that specific unshield. If 0, return a `receipt_only_text="Nothing is locked right now."`.
+2. **In `chat_resolver._route_unshield`**: when `_effective_shields` is present:
+   - 0 shields → `DispatchResult(receipt_only_text="Nothing is locked right now.")`
+   - 1 shield → route directly to that specific `unshield_app` / `unshield_category` / etc.
+   - 2+ shields → `DispatchResult(requires_card="U1", u1_shield_list=action["_effective_shields"], u1_token=<new staged token>)`
+
+`u1_token` minted in chat_resolver via a callback or returned and the actual ProposalStore stage happens in parent_chat after dispatch. Cleanest: chat_resolver returns the raw `requires_card="U1"` + shield list, and **parent_chat** (which has DB session + ProposalStore access) does the staging immediately after dispatch:
+
+```python
+result = dispatch(...)
+if result.requires_card == "U1":
+    u1_token = proposal_store.stage(
+        tool="u1_card_state",
+        args={"shield_list": result.u1_shield_list},
+        chat_context={...standard...},
+    )
+    return ChatResponse(action=ChatAction(card_id="U1", u1_token=u1_token, ...))
+```
 
 ### Backend storage of effective state
 
-The kid posts `effectiveState` with each ack (already wired). Backend persists the **most recent** effectiveState per `child_device_id` (new column on Device or new table `device_effective_state`):
+The kid posts `effectiveState` with each ack (already wired — see `child_device.py:ack_command` lines 90-94). Backend persists the **most recent** effectiveState per `child_device_id` so parent_chat can read it on the next turn:
 
 ```sql
 ALTER TABLE evlin_devices ADD COLUMN last_effective_state JSONB;
 ALTER TABLE evlin_devices ADD COLUMN last_effective_state_at TIMESTAMP WITH TIME ZONE;
 ```
 
-Updated in `child_device.py:ack_command` when `req.detail.effective_state` is present.
+Updated in `child_device.py:ack_command` whenever `req.detail.effective_state` is present (mirror the existing `cmd.ack_effective_state` write but copy to the device row too).
 
-`_route_unshield` queries this column for the bundle's `child_device_id`.
+**`_load_effective_state(child_device_id)` helper** in parent_chat:
+- Read `device.last_effective_state` → return list of shield dicts in U1's expected shape
+- Returns `[]` if no last state OR if `last_effective_state_at` is older than 5 minutes (treated as stale → fall back to listing recent unack'd Commands; mark each as `stale: true`)
+
+### Display name source
+
+Reviewer flagged: where does `display_name` come from for the U1 row?
+
+**Source priority** (highest to lowest):
+1. For each `ShieldCover` in `last_effective_state.shieldsCovering`: use `displayName` field directly. The kid populated this when posting ack — for app shields it's the app's user-facing name (or alias if the kid resolved via LocalAliasStore); for category, it's the Apple category name; for saved list, it's the parent-given list name.
+2. If absent (legacy ack with no displayName): fall back to `tier.rawValue` (e.g. "Category", "Saved list").
+
+So no new field needed on the kid side — already shipping displayName per cover.
 
 ### U1 card payload
 
-`CardContext` (Backend → iOS) gets a new field `u1_shield_list`:
+`CardContext` (Backend → iOS) gets two new fields:
 
 ```python
 class CardContext(BaseModel):
     # ... existing
-    u1_shield_list: list[dict] | None = None   # [{kind, display_name, expires_at_iso}]
+    u1_token: str | None = None             # ProposalStore key for the cached shield_list
+    u1_shield_list: list[dict] | None = None  # rendered rows (parent picks indices into this)
 ```
 
-Each shield dict:
+`u1_token` is what iOS sends back when the parent confirms (see "Backend round-trip" below).
+
+Each shield dict in `u1_shield_list`:
 ```json
 {
   "kind": "app" | "category" | "list" | "all",
   "display_name": "Instagram",
-  "bundle_id": "com.burbn.instagram",   // optional, for app — helps iOS resolve token
-  "expires_at_iso": "2026-05-07T16:19:00Z"   // optional
+  "bundle_id": "com.burbn.instagram",   // optional, app only — for iOS Label(token) resolution
+  "expires_at_iso": "2026-05-07T16:19:00Z",  // optional; nil = permanent
+  "stale": false                         // true if effective state >5 min old
 }
 ```
 
@@ -362,25 +424,76 @@ Row layout:
 - Trailing: SwiftUI `Toggle` rendered as checkbox style
 
 Buttons:
-- **Unlock selected** — primary, disabled when 0 checked. Sends back `force_confirmations=["U1:selected:<idx,idx,...>"]`. Backend re-routes: stages a multi-action proposal with one `unshield_app` per selected item, runs through Component 1's bundled exec path.
-- **Unlock everything** — secondary, always enabled (assuming N ≥ 1). Sends back `force_confirmations=["U1:all"]`. Backend routes to `unshield_all`.
-- **Cancel** — dismisses card, no chat update.
+- **Unlock selected** — primary, disabled when 0 checked. Sends back `force_confirmations=["U1:<u1_token>:selected:0,2"]`.
+- **Unlock everything** — secondary, always enabled (assuming N ≥ 1). Sends back `force_confirmations=["U1:<u1_token>:all"]`.
+- **Cancel** — dismisses card; no chat update; the cached shield_list TTL-expires within 60s.
 
 ### Backend round-trip on U1 confirm
 
-iOS sends `POST /parent/chat` with the original message text + `force_confirmations=["U1:selected:0,2"]` (or `["U1:all"]`). Parent_chat parses the U1 marker:
+Reviewer P1: U1 confirm must be intercepted **before** the agent loop, otherwise Gemini sees "unlock" again and recursively re-renders U1.
+
+In `parent_chat()` at the very top of the request handler (before any agent / Gemini call):
 
 ```python
-u1_marker = next((fc for fc in req.force_confirmations or [] if fc.startswith("U1:")), None)
+u1_marker = next(
+    (fc for fc in (req.force_confirmations or []) if fc.startswith("U1:")),
+    None,
+)
 if u1_marker:
-    return await _handle_u1_confirm(u1_marker, req, session)
+    return await _handle_u1_confirm(u1_marker, req, session, proposal_store)
+# ... existing agent / legacy flow continues
 ```
 
-`_handle_u1_confirm`:
-- `U1:all` → dispatch `unshield_all` → queue Command → return ChatResponse with command_id.
-- `U1:selected:0,2` → look up the U1 card's stored shield_list (cached in proposal_store under a U1 token, or re-derived from current effectiveState), build N `unshield_app` actions for indices 0 and 2, dispatch each → return ChatResponse with `proposals=[bundled_unshield_proposal]` (Component 1 plumbing).
+**Marker format**: `U1:<u1_token>:<mode>[:<comma-indices>]`
+- `U1:abc123def:all`
+- `U1:abc123def:selected:0,2`
 
-The U1 card's shield_list **must be cached at U1-display time** so an interleaving shield doesn't shift indices. Use a short-lived (60s) entry in ProposalStore keyed by a U1 token returned in the original card response.
+**`_handle_u1_confirm`:**
+
+```python
+async def _handle_u1_confirm(marker, req, session, proposal_store):
+    parts = marker.split(":")
+    # parts = ["U1", token, "all"]  or  ["U1", token, "selected", "0,2"]
+    if len(parts) < 3:
+        raise HTTPException(400, "malformed U1 marker")
+    _, u1_token, mode, *rest = parts
+
+    # Pop cached shield_list from ProposalStore (60s TTL set at U1-display time).
+    popped = proposal_store.pop(u1_token)
+    if popped is None:
+        return ChatResponse(message="That unlock list expired. Ask me again to see what's locked.", action=None)
+    _tool, args, _ctx = popped
+    shield_list: list[dict] = args.get("shield_list") or []
+
+    if mode == "all":
+        # Single unshield_all action through eager dispatch (no need for bundling).
+        gemini_action = {"type": "unshield_all", "target_request": "everything", ...}
+        return await _handle_gemini_action(...)
+
+    if mode == "selected":
+        indices = [int(i) for i in rest[0].split(",") if i.strip().isdigit()]
+        selected_shields = [shield_list[i] for i in indices if 0 <= i < len(shield_list)]
+        # Convert each shield → an unshield_app gemini_action shape.
+        actions = []
+        for s in selected_shields:
+            actions.append({
+                "type": "unshield",
+                "target_request": s["display_name"],
+                "target_kind_hint": s["kind"],
+                "duration_minutes": None,
+                "category_hint_from_ai": None,
+                "child_name_hint": None,
+                "confirmation_required": False,
+                "confirmation_reason": None,
+            })
+        # Stage as bundled unshield proposal (Component 1's plumbing).
+        return await _stage_legacy_actions(
+            proposal_store=proposal_store, actions=actions,
+            req=req, message="", reasoning=None, session=session,
+        )
+```
+
+Cached shield_list is the source of truth — even if the kid acks a new shield mid-flow, U1's indices stay stable.
 
 ### Edge cases
 
@@ -390,7 +503,9 @@ The U1 card's shield_list **must be cached at U1-display time** so an interleavi
 
 ---
 
-## Component 3 — `ask_pick` Tool Primitive
+## Component 3 — `ask_pick` Tool Primitive  *(Phase 2 — out of scope for first plan)*
+
+Detailed below for design completeness; implementation deferred to a follow-up plan after Phase 1 ships and is verified. Phase 1 lays the necessary scaffolding in `agent_loop` (the `ask_pick_payloads` accumulator branch), so Phase 2 only needs the tool definition file + iOS card view + the round-trip handler in parent_chat.
 
 ### Tool definition
 
@@ -712,4 +827,13 @@ Order matters: Component 1 must deploy before 2 (U1 confirm depends on multi-act
 
 ## Open questions
 
-None — all design forks have been resolved during brainstorming. Reviewer should flag anything that feels under-specified.
+None — all design forks have been resolved during brainstorming + round 1 reviewer revisions.
+
+## Review log
+
+**Round 1 (2026-05-07)** — two AI reviewers, all P1 + P2 issues addressed:
+- P1 (U1 confirm interception): added explicit top-of-handler interception in parent_chat with `_handle_u1_confirm` that runs before agent loop; marker now includes u1_token.
+- P2-1 (mixed eligible/non-eligible merge): clarified single-action eager path preserved for non-eligible; multi-action turns always go through bundled staging.
+- P2-2 (u1_token + display_name source): u1_token now in CardContext; display_name comes from `ShieldCover.displayName` already shipped by kid in ack.
+- P2-3 (mixed-duration label bug): replaced `min(minutes_set)` with all-uniform check; falls back to `(mixed durations)` when not.
+- ask_pick scope creep: split to Phase 2; Phase 1 keeps only the agent_loop scaffolding for future hookup.
