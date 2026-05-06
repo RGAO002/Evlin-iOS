@@ -1,12 +1,12 @@
-# Lazy Tagging Implementation Plan
+# Lazy Tagging Implementation Plan v2
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Let parents say "lock IG" in chat and have iOS resolve "Instagram" → ApplicationToken → shield, with a one-tap fallback ("Tag Instagram") that opens a custom picker the first time iOS doesn't know an app name.
+**Goal:** Let parents say "lock IG" in chat and have iOS resolve "Instagram" → ApplicationToken → shield, with a one-tap Tag-before-Confirm flow when iOS doesn't yet know an app name.
 
-**Architecture:** ChatViewModel runs a pre-flight `LocalAliasStore` lookup on incoming `ProposalDTO`s with `tool == "shield_app"`. On miss, ProposalCard renders a Tag button + warning + disabled Confirm. The Tag button sets `activeLazyTagRequest`, which triggers a `.sheet(item:)` in ChatView presenting a `CustomTokenPickerView`. That view shows existing tokens via `Label(token)` for single-select, with an "Add via Apple picker" footer that widens `selectedApps` as an explicit, intentional side effect. Selection flows through `LazyTagPersistence` into `LocalAliasStore`, which is shared with `ActionExecutor` for shield resolution.
+**Architecture (Path 1 — Proposal-first):** `shield_app` for `target_kind ∈ {app, category}` does NOT short-circuit the agent loop with `legacy_gemini_action` anymore. Instead, parent_chat stages it as a `ProposalDTO` carrying enough chat context (family/child/mode) to re-run dispatcher later. iOS gets `resp.proposals`, runs LocalAliasStore pre-flight, blocks Confirm until any miss is tagged. On Confirm, `/parent/agent/exec` detects the staged-legacy entry and forwards to the existing `_handle_gemini_action` dispatcher, returning the normal `ChatResponse.action` (command_id / card_id) iOS already knows how to render.
 
-**Tech Stack:** Swift 5, SwiftUI, FamilyControls, ManagedSettings, XCTest. Single-device test mode and `.child` Max mode only — std two-device alias sync is deferred.
+**Tech Stack:** Python 3.13 / FastAPI / Pydantic on backend; Swift 5 / SwiftUI / FamilyControls / ManagedSettings / XCTest on iOS. Single-device test mode + `.child` Max mode only — std two-device alias sync deferred.
 
 **Spec:** `docs/superpowers/specs/2026-05-06-lazy-tagging-design.md`
 
@@ -14,39 +14,723 @@
 
 ## File Structure
 
-**Create (4 new files):**
-- `Evlin iOS/Models/AliasKind.swift` — enum shared by Persistence + ChatViewModel
-- `Evlin iOS/Models/LazyTagRequest.swift` — Identifiable struct driving `.sheet(item:)`
-- `Evlin iOS/Services/LazyTagPersistence.swift` — pure persistence helper, no UI
-- `Evlin iOS/Views/LazyTag/CustomTokenPickerView.swift` — single-select picker with Apple picker fallback
+**Backend create:** none.
 
-**Modify (3 files):**
-- `Evlin iOS/Views/Chat/ChatViewModel.swift` — pre-flight, state, hard guard, callbacks
-- `Evlin iOS/Components/ConfirmationCards/ProposalCard.swift` — alias-miss UI
-- `Evlin iOS/Views/Chat/ChatView.swift` — wire props + sheet
+**Backend modify (3 files):**
+- `adaptive-engine/backend/app/services/proposal_store.py` — store optional `chat_context: dict` alongside `(tool, args)`.
+- `adaptive-engine/backend/app/api/routes/parent_chat.py` — intercept `agent_resp.legacy_gemini_action` for shield_app app/category targets; stage as Proposal carrying chat context; return `ChatResponse(proposals=[...])`.
+- `adaptive-engine/backend/app/api/routes/parent_agent.py` — `/parent/agent/exec` detects staged-legacy entries and forwards to `_handle_gemini_action`; response schema accommodates legacy `ChatAction`.
 
-**Test (1 new test file):**
-- `Evlin iOSTests/LazyTagTests.swift` — pure-logic tests (extractAliasTarget, hard guard, persistence-error branches)
+**iOS create (4 files):**
+- `Evlin iOS/Models/AliasKind.swift`
+- `Evlin iOS/Models/LazyTagRequest.swift`
+- `Evlin iOS/Services/LazyTagPersistence.swift`
+- `Evlin iOS/Views/LazyTag/CustomTokenPickerView.swift`
+
+**iOS modify (4 files):**
+- `Evlin iOS/Services/AgentClient.swift` — `executeProposal` returns enum union `(.receipt | .legacyAction)`.
+- `Evlin iOS/Views/Chat/ChatViewModel.swift` — pre-flight, alias-miss state, hard guard, tag callbacks, legacy-exec path.
+- `Evlin iOS/Components/ConfirmationCards/ProposalCard.swift` — alias-miss UI.
+- `Evlin iOS/Views/Chat/ChatView.swift` — props + `.sheet(item:)`.
+
+**iOS test create (1 file):**
+- `Evlin iOSTests/LazyTagTests.swift`
 
 ---
 
-## Task 1: AliasKind enum + LazyTagRequest model
+# Phase 0 — Backend (Path 1 enabling)
+
+## Task 0.1: ProposalStore stores chat context
+
+**Files:**
+- Modify: `adaptive-engine/backend/app/services/proposal_store.py`
+
+Without chat context attached to a proposal, `/parent/agent/exec` can't reconstruct the dispatcher call. We extend the entry tuple with an optional `chat_context: dict | None`.
+
+- [ ] **Step 1: Replace the file**
+
+```python
+# adaptive-engine/backend/app/services/proposal_store.py
+"""ProposalStore — in-memory staging of tool calls awaiting parent
+confirmation. 10-min TTL so stale proposals get garbage-collected.
+
+`chat_context` is the carrier for legacy-shield staging: when the agent
+emits a shield_app legacy_gemini_action that we want gated by Tag-before-
+Confirm, parent_chat stages a proposal with the originating ChatRequest's
+context (family_id, child_name, child_device_id, protection_mode, etc.).
+On exec, the route re-runs `_handle_gemini_action` with that context so
+the dispatcher path is identical to the eager (non-staged) flow.
+"""
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from typing import Any
+from uuid import uuid4
+
+
+class ProposalStore:
+    def __init__(self, ttl_seconds: int = 600) -> None:
+        # token -> [tool_name, args_dict, expires_at, chat_context]
+        self._entries: dict[str, list] = {}
+        self._ttl = ttl_seconds
+
+    def stage(
+        self,
+        *,
+        tool: str,
+        args: dict,
+        chat_context: dict[str, Any] | None = None,
+    ) -> str:
+        token = uuid4().hex
+        self._entries[token] = [
+            tool,
+            args,
+            datetime.now(timezone.utc) + timedelta(seconds=self._ttl),
+            chat_context,
+        ]
+        return token
+
+    def pop(self, token: str) -> tuple[str, dict, dict[str, Any] | None] | None:
+        entry = self._entries.pop(token, None)
+        if entry is None:
+            return None
+        tool, args, expires_at, chat_context = entry
+        if expires_at < datetime.now(timezone.utc):
+            return None
+        return (tool, args, chat_context)
+
+
+_singleton: ProposalStore | None = None
+
+
+def get_proposal_store() -> ProposalStore:
+    global _singleton
+    if _singleton is None:
+        _singleton = ProposalStore()
+    return _singleton
+```
+
+- [ ] **Step 2: Update the existing exec endpoint to unpack the new 3-tuple**
+
+Edit `adaptive-engine/backend/app/api/routes/parent_agent.py` line 44:
+
+```python
+# Old:
+    popped = proposal_store.pop(body.token)
+    if popped is None:
+        raise HTTPException(...)
+    tool_name, args = popped
+
+# New:
+    popped = proposal_store.pop(body.token)
+    if popped is None:
+        raise HTTPException(
+            status_code=410, detail="proposal expired or already used",
+        )
+    tool_name, args, chat_context = popped
+```
+
+(Don't forget to use `chat_context` in Task 0.3 — for now, this is just unblocking the type change.)
+
+- [ ] **Step 3: Run backend tests to verify nothing broke**
+
+```bash
+cd /Users/fred/Desktop/Evlin/adaptive-engine
+pytest backend/tests/ -k "proposal_store or agent_loop or parent_chat" 2>&1 | tail -10
+```
+
+Expected: existing tests pass (the old 2-tuple consumers we updated in step 2 are the only callers).
+
+- [ ] **Step 4: Commit**
+
+```bash
+cd /Users/fred/Desktop/Evlin/adaptive-engine
+git add backend/app/services/proposal_store.py backend/app/api/routes/parent_agent.py
+git commit -m "feat(proposal-store): carry optional chat_context for legacy-staged proposals"
+```
+
+---
+
+## Task 0.2: parent_chat — stage shield_app as Proposal for app/category targets
+
+**Files:**
+- Modify: `adaptive-engine/backend/app/api/routes/parent_chat.py` (around line 404)
+
+When `agent_resp.legacy_gemini_action` represents a `shield` action with `target_kind_hint ∈ {app, category}`, do NOT immediately dispatch. Instead, stage as a Proposal carrying enough chat context to re-run dispatcher later, and return a `ChatResponse(proposals=[...])` for iOS. For `target_kind_hint ∈ {all, list}`, keep the existing eager dispatch path — no alias resolution needed.
+
+- [ ] **Step 1: Add the staging helper**
+
+Above the existing `_handle_gemini_action` definition (around line 429), add:
+
+```python
+def _is_lazy_tag_eligible(gemini_action: dict) -> bool:
+    """True for shield_app calls with app/category target_kind — these need
+    iOS-side LocalAliasStore resolution before dispatch.
+    'all' (whole-device) and 'list' (saved-list) don't need alias lookup,
+    so they go through the eager legacy dispatch as before."""
+    if gemini_action.get("type") not in {"shield", "block"}:
+        return False
+    return gemini_action.get("target_kind_hint") in {"app", "category"}
+
+
+def _stage_legacy_shield_proposal(
+    *,
+    proposal_store: ProposalStore,
+    gemini_action: dict,
+    req: ChatRequest,
+    message: str,
+    reasoning: str | None,
+) -> ChatResponse:
+    """Park the legacy_gemini_action in ProposalStore with chat context, return
+    a ChatResponse carrying a single ProposalDTO so iOS can run pre-flight
+    and gate Confirm on alias resolution.
+
+    The chat context is what `_handle_gemini_action` needs to reconstruct the
+    dispatcher call when /parent/agent/exec receives a Confirm later. We
+    serialize only JSON-safe primitives so it survives the in-memory store.
+    """
+    chat_context = {
+        "family_id": str(req.family_id) if req.family_id else None,
+        "child_id": str(req.child_id) if req.child_id else None,
+        "child_name": req.child_name,
+        "child_device_id": str(req.child_device_id) if req.child_device_id else None,
+        "protection_mode": req.protection_mode,
+        "parent_id": str(req.parent_id) if getattr(req, "parent_id", None) else None,
+        "message": message,
+        "reasoning": reasoning,
+    }
+    token = proposal_store.stage(
+        tool="shield_app_legacy",
+        args={"gemini_action": gemini_action},
+        chat_context=chat_context,
+    )
+
+    target = gemini_action.get("target_request") or "this app"
+    minutes = gemini_action.get("duration_minutes")
+    label_minutes = (
+        f" for {minutes} min"
+        if isinstance(minutes, int) and minutes > 0
+        else ""
+    )
+    label = f"Shield {target}{label_minutes}"
+
+    proposal = ProposalDTO(
+        tool="shield_app_legacy",
+        args={
+            "target": target,
+            "target_kind": gemini_action.get("target_kind_hint", "app"),
+            "minutes": minutes if isinstance(minutes, int) else None,
+        },
+        label=label,
+        danger="medium",
+        token=token,
+    )
+    return ChatResponse(
+        message=message or f"I'll shield {target} once you confirm.",
+        reasoning=reasoning,
+        action=None,
+        proposals=[proposal],
+    )
+```
+
+- [ ] **Step 2: Insert the intercept**
+
+Find the existing block at parent_chat.py:404:
+
+```python
+        if agent_resp.legacy_gemini_action is not None:
+            return await _handle_gemini_action(
+                gemini_action=agent_resp.legacy_gemini_action,
+                message=agent_resp.message or "",
+                reasoning=agent_resp.reasoning,
+                req=req, session=session,
+            )
+```
+
+Replace with:
+
+```python
+        if agent_resp.legacy_gemini_action is not None:
+            # Lazy-tag eligible (shield_app with app/category target):
+            # stage as Proposal so iOS can pre-flight LocalAliasStore and
+            # gate Confirm on Tag-before-Confirm. exec endpoint will
+            # forward back into _handle_gemini_action on confirm.
+            if _is_lazy_tag_eligible(agent_resp.legacy_gemini_action):
+                proposal_store = get_proposal_store()
+                return _stage_legacy_shield_proposal(
+                    proposal_store=proposal_store,
+                    gemini_action=agent_resp.legacy_gemini_action,
+                    req=req,
+                    message=agent_resp.message or "",
+                    reasoning=agent_resp.reasoning,
+                )
+            # Other legacy actions (target_kind=all/list, non-shield): keep
+            # eager dispatch — no alias resolution needed.
+            return await _handle_gemini_action(
+                gemini_action=agent_resp.legacy_gemini_action,
+                message=agent_resp.message or "",
+                reasoning=agent_resp.reasoning,
+                req=req, session=session,
+            )
+```
+
+- [ ] **Step 3: Add necessary imports at the top of parent_chat.py**
+
+If not already present:
+
+```python
+from backend.app.schemas.agent import ProposalDTO  # or wherever ProposalDTO lives
+from backend.app.services.proposal_store import (
+    ProposalStore, get_proposal_store,
+)
+```
+
+(Check existing imports — `ProposalDTO` should already be imported because `ChatResponse.proposals: list[ProposalDTO]` is used elsewhere in this file.)
+
+- [ ] **Step 4: Run backend tests**
+
+```bash
+cd /Users/fred/Desktop/Evlin/adaptive-engine
+pytest backend/tests/api/routes/test_parent_chat.py -v 2>&1 | tail -20
+```
+
+Expected: no regressions on existing tests. (We're adding a branch that only fires for shield_app app/category — should not touch other test paths.)
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add backend/app/api/routes/parent_chat.py
+git commit -m "feat(parent-chat): stage shield_app app/category as ProposalDTO for Tag-before-Confirm"
+```
+
+---
+
+## Task 0.3: /parent/agent/exec — forward staged-legacy proposals to dispatcher
+
+**Files:**
+- Modify: `adaptive-engine/backend/app/api/routes/parent_agent.py`
+
+When the popped proposal entry has `tool_name == "shield_app_legacy"` and a non-None `chat_context`, we do NOT call `GLOBAL_REGISTRY.call(tool_name, args)`. Instead we reconstruct a synthetic `ChatRequest` from `chat_context`, call `_handle_gemini_action` with the original `gemini_action`, and return its `ChatResponse` (which carries `action.command_id` / `card_id`) inside a new exec response shape.
+
+- [ ] **Step 1: Update exec response model + handler**
+
+Replace the entire body of `parent_agent.py` `exec_proposal`:
+
+```python
+"""POST /parent/agent/exec — execute a previously-staged proposal.
+
+Two paths:
+1. Standard tool: pop, call tool, return ReceiptDTO (existing).
+2. shield_app_legacy: pop, reconstruct ChatRequest from stored chat_context,
+   forward to _handle_gemini_action(), return its ChatResponse-shape
+   carrying action.command_id/card_id. iOS distinguishes via the
+   `legacy_action` field being non-None.
+"""
+from __future__ import annotations
+
+from typing import Any
+from uuid import UUID
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from backend.app.db import get_session
+from backend.app.schemas.agent import Receipt
+from backend.app.schemas.chat import ChatAction
+from backend.app.services.agent_tools import GLOBAL_REGISTRY
+from backend.app.services.parent_action_log import (
+    ParentActionLog, get_log as get_action_log,
+)
+from backend.app.services.proposal_store import (
+    ProposalStore, get_proposal_store,
+)
+
+# Force tool modules to import so @tool decorators register into
+# GLOBAL_REGISTRY at module load.
+from backend.app.services.agent_tools import (  # noqa: F401
+    read_tools, task_tools, reflection_tools, bypass_tools,
+    vision_tools, shield_tools,
+)
+
+
+router = APIRouter(tags=["Parent Agent"])
+
+
+class ExecBody(BaseModel):
+    token: str
+
+
+class ExecResponse(BaseModel):
+    """Union shape for v2 exec.
+    Exactly one of `receipt` or `legacy_action` is non-None.
+    iOS branches on which is present.
+    """
+    receipt: Receipt | None = None
+    legacy_action: ChatAction | None = None
+    message: str | None = None
+    reasoning: str | None = None
+
+
+@router.post("/parent/agent/exec", response_model=ExecResponse)
+async def exec_proposal(
+    body: ExecBody,
+    proposal_store: ProposalStore = Depends(get_proposal_store),
+    log: ParentActionLog = Depends(get_action_log),
+    session: AsyncSession = Depends(get_session),
+) -> ExecResponse:
+    popped = proposal_store.pop(body.token)
+    if popped is None:
+        raise HTTPException(
+            status_code=410, detail="proposal expired or already used",
+        )
+    tool_name, args, chat_context = popped
+
+    # Path 2: legacy shield proposal — forward to dispatcher.
+    if tool_name == "shield_app_legacy" and chat_context is not None:
+        return await _exec_legacy_shield(
+            args=args, chat_context=chat_context, session=session,
+        )
+
+    # Path 1: standard tool path (existing behavior).
+    if tool_name not in GLOBAL_REGISTRY.tools:
+        raise HTTPException(status_code=500, detail=f"tool gone: {tool_name}")
+    meta = GLOBAL_REGISTRY.tools[tool_name]
+
+    result = await GLOBAL_REGISTRY.call(tool_name, args)
+
+    undo_token: str | None = None
+    undo_expires_iso: str | None = None
+    if meta.inverse_action:
+        inverse_args = (
+            meta.inverse_args_builder(args, result)
+            if meta.inverse_args_builder else dict(args)
+        )
+        undo_token = log.record(
+            action_type=tool_name, args=args,
+            inverse_action=meta.inverse_action,
+            inverse_args=inverse_args,
+            source="agent",
+        )
+        entry = log.get(undo_token)
+        if entry is not None:
+            undo_expires_iso = entry.expires_at.isoformat()
+    receipt = Receipt(
+        tool=tool_name, args=args,
+        summary=result.public_summary or tool_name,
+        undo_token=undo_token,
+        undo_expires_at=undo_expires_iso,
+    )
+    return ExecResponse(receipt=receipt)
+
+
+async def _exec_legacy_shield(
+    *,
+    args: dict[str, Any],
+    chat_context: dict[str, Any],
+    session: AsyncSession,
+) -> ExecResponse:
+    """Re-run _handle_gemini_action with the chat context that was captured
+    when the proposal was staged. The original gemini_action dict is in
+    args["gemini_action"]; chat_context carries identifying info
+    (family_id, child_*, protection_mode, etc.) that the dispatcher needs.
+
+    We synthesize a minimal ChatRequest by importing the request type at
+    the call site (avoids circular imports at module top).
+    """
+    # Import here to avoid circular dependency between routes.
+    from backend.app.api.routes.parent_chat import (
+        _handle_gemini_action,
+    )
+    from backend.app.schemas.chat import ChatRequest
+
+    gemini_action = args.get("gemini_action") or {}
+
+    # Reconstruct ChatRequest. Field names must match ChatRequest schema —
+    # adjust if a field name differs in your codebase.
+    req_dict: dict[str, Any] = {
+        "message": chat_context.get("message", ""),
+        "child_name": chat_context.get("child_name") or "Liam",
+    }
+    if chat_context.get("family_id"):
+        req_dict["family_id"] = UUID(chat_context["family_id"])
+    if chat_context.get("child_id"):
+        req_dict["child_id"] = UUID(chat_context["child_id"])
+    if chat_context.get("child_device_id"):
+        req_dict["child_device_id"] = UUID(chat_context["child_device_id"])
+    if chat_context.get("parent_id"):
+        req_dict["parent_id"] = UUID(chat_context["parent_id"])
+    if chat_context.get("protection_mode"):
+        req_dict["protection_mode"] = chat_context["protection_mode"]
+
+    req = ChatRequest(**req_dict)
+
+    chat_response = await _handle_gemini_action(
+        gemini_action=gemini_action,
+        message=chat_context.get("message", ""),
+        reasoning=chat_context.get("reasoning"),
+        req=req,
+        session=session,
+    )
+    return ExecResponse(
+        legacy_action=chat_response.action,
+        message=chat_response.message,
+        reasoning=chat_response.reasoning,
+    )
+```
+
+- [ ] **Step 2: Verify ChatAction is importable from schemas.chat**
+
+```bash
+cd /Users/fred/Desktop/Evlin/adaptive-engine
+python3 -c "from backend.app.schemas.chat import ChatAction; print('ok')"
+```
+
+Expected: `ok`. If import fails, the field name might differ; grep for the type used in `ChatResponse.action`:
+
+```bash
+grep -n "action:" backend/app/schemas/chat.py | head -5
+```
+
+Adjust import accordingly.
+
+- [ ] **Step 3: Verify ChatRequest field names match what we synthesized**
+
+```bash
+grep -n "^class ChatRequest\|family_id\|child_device_id\|protection_mode\|parent_id" backend/app/schemas/chat.py | head -20
+```
+
+If a field is named differently (e.g. `child_uuid` instead of `child_id`), update the synthesizer accordingly. The chat_context dict structure in Task 0.2 must match.
+
+- [ ] **Step 4: Run backend tests**
+
+```bash
+cd /Users/fred/Desktop/Evlin/adaptive-engine
+pytest backend/tests/ 2>&1 | tail -10
+```
+
+Expected: existing tests still pass. (The new ExecResponse breaks the iOS contract — this is expected; iOS Task 1.1 fixes the iOS side.)
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add backend/app/api/routes/parent_agent.py
+git commit -m "feat(exec): forward staged-legacy shield proposals to dispatcher with chat_context"
+```
+
+---
+
+# Phase 1 — iOS contract bridge
+
+## Task 1.1: AgentClient.executeProposal returns enum union
+
+**Files:**
+- Modify: `Evlin iOS/Services/AgentClient.swift`
+
+Backend now returns either `{receipt: ...}` or `{legacy_action: ..., message: ..., reasoning: ...}` from `/parent/agent/exec`. We model this as a Swift enum so callers branch cleanly.
+
+- [ ] **Step 1: Find current executeProposal**
+
+```bash
+cd "/Users/fred/Desktop/Evlin/Evlin iOS"
+grep -n "executeProposal\|ExecResponse" "Evlin iOS/Services/AgentClient.swift"
+```
+
+- [ ] **Step 2: Update AgentClient with new response type**
+
+In `Evlin iOS/Services/AgentClient.swift`, find the existing executeProposal method. Replace its return type signature with:
+
+```swift
+/// Result of /parent/agent/exec. Backend returns either a tool-style
+/// receipt (existing tools) or a legacy ChatAction+message bundle (when
+/// the proposal was a staged shield_app_legacy entry — see backend
+/// parent_agent.py / parent_chat.py for staging).
+enum AgentExecResult {
+    case receipt(ReceiptDTO)
+    case legacyAction(action: ChatAction?, message: String?, reasoning: String?)
+}
+
+/// Server-side response shape mirroring backend ExecResponse.
+private struct ExecResponseDTO: Decodable {
+    let receipt: ReceiptDTO?
+    let legacy_action: ChatAction?
+    let message: String?
+    let reasoning: String?
+}
+
+func executeProposal(token: String) async throws -> AgentExecResult {
+    let url = URL(string: "\(baseURL)/parent/agent/exec")!
+    var req = URLRequest(url: url)
+    req.httpMethod = "POST"
+    req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    req.httpBody = try JSONEncoder().encode(["token": token])
+    let (data, resp) = try await URLSession.shared.data(for: req)
+    guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+        throw URLError(.badServerResponse)
+    }
+    let decoded = try JSONDecoder().decode(ExecResponseDTO.self, from: data)
+    if let receipt = decoded.receipt {
+        return .receipt(receipt)
+    }
+    return .legacyAction(
+        action: decoded.legacy_action,
+        message: decoded.message,
+        reasoning: decoded.reasoning
+    )
+}
+```
+
+(Adjust to match the file's existing style — use whatever URLSession / encoder helpers are conventional in the file. Replace any older `executeProposal` body. Make sure `ReceiptDTO` and `ChatAction` are visible/imported.)
+
+- [ ] **Step 3: Build verify**
+
+```bash
+cd "/Users/fred/Desktop/Evlin/Evlin iOS"
+xcodebuild -project "Evlin iOS.xcodeproj" -scheme "Evlin iOS" -destination "generic/platform=iOS" build 2>&1 | grep -E "error:" | head -10 && echo OK
+```
+
+Expected: errors at the existing `confirmProposal` call site (`let receipt = try await client.executeProposal(...)`) because the return type changed. That's expected — Task 1.2 fixes it.
+
+- [ ] **Step 4: Don't commit yet** — Task 1.2 must compile first.
+
+---
+
+## Task 1.2: ChatViewModel.confirmProposal handles legacyAction path
+
+**Files:**
+- Modify: `Evlin iOS/Views/Chat/ChatViewModel.swift` (line ~647 — existing `confirmProposal`)
+
+When the staged proposal was a legacy shield, the exec response carries a `ChatAction` whose `command_id` (or `card_id`) iOS already knows how to plumb. We hand it off to the existing pathway that processes ChatResponse.action.
+
+- [ ] **Step 1: Find or factor out the existing action handling**
+
+In ChatViewModel.swift, look at how `sendMessage` already processes `resp.action` for shield/lock — find the block that builds a pending command bubble and starts ack-polling. Note its signature (likely takes `ChatAction` + `messageID` + `targetDisplay`).
+
+```bash
+grep -n "action:\|ChatAction\|startAckPoll\|insertPendingCommand" "Evlin iOS/Views/Chat/ChatViewModel.swift" | head -20
+```
+
+We will REUSE that existing flow — extract the relevant part into a helper method `dispatchChatAction(_:message:reasoning:)` if it isn't already factored out.
+
+- [ ] **Step 2: Replace `confirmProposal(_:)` body**
+
+Find:
+
+```swift
+    @MainActor
+    func confirmProposal(_ p: ProposalDTO) async {
+        let client = AgentClient(baseURL: apiClient.baseURL)
+        do {
+            let receipt = try await client.executeProposal(token: p.token)
+            ...
+```
+
+Replace with:
+
+```swift
+    @MainActor
+    func confirmProposal(_ p: ProposalDTO) async {
+        // Hard guard: refuse to dispatch if alias miss is outstanding for
+        // this proposal. UI also disables Confirm; this is defense in depth.
+        if pendingAliasMisses[p.token] != nil {
+            errorMessage = "Tap \"Tag\" first so I know which app you mean."
+            return
+        }
+        let client = AgentClient(baseURL: apiClient.baseURL)
+        do {
+            let result = try await client.executeProposal(token: p.token)
+            switch result {
+            case .receipt(let receipt):
+                if let i = messages.lastIndex(where: { $0.role == .agent }) {
+                    var msg = messages[i]
+                    msg.proposals?.removeAll(where: { $0.token == p.token })
+                    msg.receipts = (msg.receipts ?? []) + [receipt]
+                    messages[i] = msg
+                }
+            case .legacyAction(let action, let message, let reasoning):
+                // Remove the proposal from the previous agent bubble.
+                if let i = messages.lastIndex(where: { $0.role == .agent }) {
+                    var msg = messages[i]
+                    msg.proposals?.removeAll(where: { $0.token == p.token })
+                    messages[i] = msg
+                }
+                // Inject a new agent message carrying the legacy action so
+                // the existing shield/lock command_id rendering + ack-poll
+                // pipeline kicks in. This is intentionally identical to
+                // what sendMessage produces when the eager dispatch path
+                // returned an action — so no special-case downstream code.
+                let bubble = ChatMessage(
+                    role: .agent,
+                    content: message ?? "",
+                    timestamp: Date(),
+                    reasoning: reasoning,
+                    action: action
+                )
+                messages.append(bubble)
+                if let act = action,
+                   let cid = act.command_id {
+                    // Start ack-poll for the queued command. Reuse whatever
+                    // helper sendMessage uses today (e.g. startAckPoll or
+                    // insertPendingCommand). Replace this comment with the
+                    // exact call that already exists in sendMessage's
+                    // action-handling branch.
+                    startAckPoll(
+                        commandID: cid,
+                        messageID: bubble.id,
+                        targetDisplay: act.target_display,
+                        expiresAt: act.duration_minutes.map {
+                            Date().addingTimeInterval(TimeInterval($0 * 60))
+                        }
+                    )
+                }
+            }
+            NotificationCenter.default.post(name: .bigKidStateInvalidated, object: nil)
+        } catch {
+            errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+```
+
+**Important:** the call to `startAckPoll(...)` shown above is illustrative. Find the exact helper that ChatViewModel uses today in `sendMessage` for `resp.action` shield processing (probably named `startAckPoll`, `kickoffAckPoll`, `insertPendingCommand`, or similar). Use the same call signature here so the legacy proposal exec produces an identical UX to the eager dispatch path.
+
+- [ ] **Step 3: Build verify**
+
+```bash
+xcodebuild -project "Evlin iOS.xcodeproj" -scheme "Evlin iOS" -destination "generic/platform=iOS" build 2>&1 | grep -E "error:" | head -10 && echo OK
+```
+
+Expected: `OK` only. If errors mention undeclared `pendingAliasMisses` — that's ok for now (added in Phase 2 Task 2.3). Move the empty `pendingAliasMisses: [String: AliasKind] = [:]` declaration up to this task and verify build is clean.
+
+If `pendingAliasMisses` is referenced before being declared, add this near the other `@Published` declarations:
+
+```swift
+    @Published var pendingAliasMisses: [String: AliasKind] = [:]
+```
+
+(Task 2.3 will add `extractAliasTarget` and pre-flight; we declare the state here so the hard guard compiles.)
+
+- [ ] **Step 4: Commit Phase 1**
+
+```bash
+git add "Evlin iOS/Services/AgentClient.swift" "Evlin iOS/Views/Chat/ChatViewModel.swift"
+git commit -m "feat(agent-exec): handle staged-legacy shield response (legacyAction enum case)"
+```
+
+---
+
+# Phase 2 — iOS lazy tag UI
+
+## Task 2.1: AliasKind enum + LazyTagRequest model
 
 **Files:**
 - Create: `Evlin iOS/Models/AliasKind.swift`
 - Create: `Evlin iOS/Models/LazyTagRequest.swift`
-
-Foundation types needed by every other task. No tests — these are 2-field structs / 2-case enums; tests would just assert syntax.
 
 - [ ] **Step 1: Create `AliasKind.swift`**
 
 ```swift
 // Evlin iOS/Models/AliasKind.swift
 //
-// Discriminator for lazy-tag flows. ChatViewModel sets this when an alias
-// miss is detected; LazyTagPersistence and CustomTokenPickerView branch on
-// it for the right token type and the right Apple-picker init.
-
+// Discriminator for lazy-tag flows.
 import Foundation
 
 enum AliasKind: Equatable {
@@ -60,11 +744,8 @@ enum AliasKind: Equatable {
 ```swift
 // Evlin iOS/Models/LazyTagRequest.swift
 //
-// Drives the `.sheet(item:)` in ChatView. `id` is the ProposalDTO.token of
-// the proposal that triggered the tag flow — that token doubles as a
-// stable identifier for the proposal AND satisfies Identifiable so SwiftUI
-// can present/dismiss the sheet correctly.
-
+// Drives `.sheet(item:)` in ChatView. `id` is the ProposalDTO.token of the
+// proposal that triggered the tag flow (also stable identifier for SwiftUI).
 import Foundation
 
 struct LazyTagRequest: Identifiable, Equatable {
@@ -76,8 +757,11 @@ struct LazyTagRequest: Identifiable, Equatable {
 
 - [ ] **Step 3: Build verify**
 
-Run: `xcodebuild -project "Evlin iOS.xcodeproj" -scheme "Evlin iOS" -destination "generic/platform=iOS" build 2>&1 | grep -E "error:" | head -5 && echo OK`
-Expected: `OK` only — no errors.
+```bash
+xcodebuild -project "Evlin iOS.xcodeproj" -scheme "Evlin iOS" -destination "generic/platform=iOS" build 2>&1 | grep -E "error:" | head -5 && echo OK
+```
+
+Expected: `OK`.
 
 - [ ] **Step 4: Commit**
 
@@ -88,15 +772,13 @@ git commit -m "feat(lazy-tag): AliasKind enum + LazyTagRequest model"
 
 ---
 
-## Task 2: LazyTagPersistence service
+## Task 2.2: LazyTagPersistence service + tests
 
 **Files:**
 - Create: `Evlin iOS/Services/LazyTagPersistence.swift`
-- Create: `Evlin iOSTests/LazyTagTests.swift` (test the wrong-type rejection — success path requires real tokens, which can't be minted in tests)
+- Create: `Evlin iOSTests/LazyTagTests.swift`
 
-Pure data layer. Validates token type matches AliasKind, calls into `LocalAliasStore.shared`. We use `Any` for the token parameter because we want callers to pass either `ApplicationToken` or `ActivityCategoryToken` from a `selectedApps` iteration where the static type is the union; the persistence layer enforces the right type at runtime.
-
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing tests**
 
 Create `Evlin iOSTests/LazyTagTests.swift`:
 
@@ -106,10 +788,6 @@ import XCTest
 @testable import Evlin_iOS
 
 final class LazyTagPersistenceTests: XCTestCase {
-    /// Passing a non-token Any (e.g. String) for `.app` mode must produce
-    /// `.wrongTokenType`. We can't mint real ApplicationToken in tests
-    /// (FamilyControls auth is unavailable), so we test only the
-    /// type-mismatch branch — the success branch is covered by manual E2E.
     func test_persistAlias_rejectsWrongTypeForApp() {
         let result = LazyTagPersistence.persistAlias(
             token: "not a token" as Any,
@@ -148,20 +826,21 @@ final class LazyTagPersistenceTests: XCTestCase {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails (no implementation yet)**
+- [ ] **Step 2: Run tests, verify failure**
 
-Run: `xcodebuild -project "Evlin iOS.xcodeproj" -scheme "Evlin iOS" -destination "platform=iOS Simulator,name=iPhone 15" test 2>&1 | grep -E "error:|LazyTagPersistence" | head -5`
-Expected: error along the lines of `cannot find 'LazyTagPersistence' in scope`.
+```bash
+xcodebuild -project "Evlin iOS.xcodeproj" -scheme "Evlin iOS" -destination "platform=iOS Simulator,name=iPhone 16e" test 2>&1 | grep -E "error:|LazyTagPersistence" | head -5
+```
+
+Expected: `cannot find 'LazyTagPersistence' in scope`.
 
 - [ ] **Step 3: Implement `LazyTagPersistence.swift`**
 
 ```swift
 // Evlin iOS/Services/LazyTagPersistence.swift
 //
-// Pure persistence helper for lazy tag. No UI, no presentation — just
-// validates that the token type matches the kind, then delegates to
-// LocalAliasStore. Caller (ChatViewModel.handleTagSelection) is
-// responsible for sheet dismissal + miss-state cleanup.
+// Pure persistence helper for lazy tag. No UI, no presentation. Validates
+// that the token type matches the kind, then delegates to LocalAliasStore.
 
 import Foundation
 import FamilyControls
@@ -203,10 +882,13 @@ enum LazyTagPersistence {
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 4: Run tests, verify pass**
 
-Run: `xcodebuild -project "Evlin iOS.xcodeproj" -scheme "Evlin iOS" -destination "platform=iOS Simulator,name=iPhone 15" test 2>&1 | grep -E "Test Case|FAILED|passed" | head -10`
-Expected: 3 LazyTagPersistenceTests pass. No FAILED output for these tests.
+```bash
+xcodebuild -project "Evlin iOS.xcodeproj" -scheme "Evlin iOS" -destination "platform=iOS Simulator,name=iPhone 16e" test 2>&1 | grep -E "Test Case|FAILED|passed" | head -10
+```
+
+Expected: 3 LazyTagPersistenceTests pass.
 
 - [ ] **Step 5: Commit**
 
@@ -217,17 +899,21 @@ git commit -m "feat(lazy-tag): LazyTagPersistence helper + type-rejection tests"
 
 ---
 
-## Task 3: ChatViewModel — extractAliasTarget + alias-miss state
+## Task 2.3: ChatViewModel — extractAliasTarget + alias-miss state + pre-flight
 
 **Files:**
 - Modify: `Evlin iOS/Views/Chat/ChatViewModel.swift`
-- Modify: `Evlin iOSTests/LazyTagTests.swift` (add `extractAliasTarget` tests)
+- Modify: `Evlin iOSTests/LazyTagTests.swift` (add ExtractAliasTargetTests)
 
-Adds the parsing function that reads `tool` + `args` from a ProposalDTO and returns `(target, kind)` if the proposal needs alias resolution.
+Adds:
+1. `nonisolated static func extractAliasTarget(from:)` — testable from XCTest without `@MainActor` isolation drama.
+2. `pendingAliasMisses` (already declared in Task 1.2 — verify present).
+3. `activeLazyTagRequest` for the sheet driver.
+4. Pre-flight loop where ProposalDTOs first arrive, with proposal type `"shield_app_legacy"` (Task 0.2 changed the tool name for staged shields).
 
-- [ ] **Step 1: Write failing test**
+- [ ] **Step 1: Write failing tests**
 
-Add to `Evlin iOSTests/LazyTagTests.swift` (append a new class at the bottom):
+Append to `Evlin iOSTests/LazyTagTests.swift`:
 
 ```swift
 final class ExtractAliasTargetTests: XCTestCase {
@@ -242,8 +928,8 @@ final class ExtractAliasTargetTests: XCTestCase {
         )
     }
 
-    func test_returnsAppTarget_forShieldApp_withAppKind() {
-        let p = proposal(tool: "shield_app", args: [
+    func test_returnsAppTarget_forShieldAppLegacy_withAppKind() {
+        let p = proposal(tool: "shield_app_legacy", args: [
             "target": "Instagram",
             "target_kind": "app"
         ])
@@ -252,30 +938,14 @@ final class ExtractAliasTargetTests: XCTestCase {
         XCTAssertEqual(result?.kind, .app)
     }
 
-    func test_returnsCategoryTarget_forShieldApp_withCategoryKind() {
-        let p = proposal(tool: "shield_app", args: [
+    func test_returnsCategoryTarget_forShieldAppLegacy_withCategoryKind() {
+        let p = proposal(tool: "shield_app_legacy", args: [
             "target": "games",
             "target_kind": "category"
         ])
         let result = ChatViewModel.extractAliasTarget(from: p)
         XCTAssertEqual(result?.target, "games")
         XCTAssertEqual(result?.kind, .category)
-    }
-
-    func test_returnsNil_forAllKind() {
-        let p = proposal(tool: "shield_app", args: [
-            "target": "his phone",
-            "target_kind": "all"
-        ])
-        XCTAssertNil(ChatViewModel.extractAliasTarget(from: p))
-    }
-
-    func test_returnsNil_forListKind() {
-        let p = proposal(tool: "shield_app", args: [
-            "target": "bedtime apps",
-            "target_kind": "list"
-        ])
-        XCTAssertNil(ChatViewModel.extractAliasTarget(from: p))
     }
 
     func test_returnsNil_forNonShieldTool() {
@@ -286,45 +956,56 @@ final class ExtractAliasTargetTests: XCTestCase {
     }
 
     func test_returnsNil_whenTargetMissing() {
-        let p = proposal(tool: "shield_app", args: [
+        let p = proposal(tool: "shield_app_legacy", args: [
             "target_kind": "app"
+        ])
+        XCTAssertNil(ChatViewModel.extractAliasTarget(from: p))
+    }
+
+    func test_returnsNil_forUnknownKind() {
+        let p = proposal(tool: "shield_app_legacy", args: [
+            "target": "x",
+            "target_kind": "weird"
         ])
         XCTAssertNil(ChatViewModel.extractAliasTarget(from: p))
     }
 }
 ```
 
-- [ ] **Step 2: Run test to verify failure**
+- [ ] **Step 2: Run, verify failure**
 
-Run: `xcodebuild -project "Evlin iOS.xcodeproj" -scheme "Evlin iOS" -destination "platform=iOS Simulator,name=iPhone 15" test 2>&1 | grep -E "error:" | head -5`
-Expected: error `type 'ChatViewModel' has no member 'extractAliasTarget'`.
+```bash
+xcodebuild -project "Evlin iOS.xcodeproj" -scheme "Evlin iOS" -destination "platform=iOS Simulator,name=iPhone 16e" test 2>&1 | grep -E "error:" | head -5
+```
 
-- [ ] **Step 3: Implement `extractAliasTarget` + alias-miss state**
+Expected: `type 'ChatViewModel' has no member 'extractAliasTarget'`.
 
-Modify `Evlin iOS/Views/Chat/ChatViewModel.swift`. Add to the `@Published` block (right after `@Published var errorMessage: String?` near line 11):
+- [ ] **Step 3: Add state + extractAliasTarget**
+
+In `Evlin iOS/Views/Chat/ChatViewModel.swift`, near the other `@Published` declarations (just below `activePolls` near line 19), add (or confirm — Task 1.2 may have added the first):
 
 ```swift
     /// ProposalToken → kind for proposals whose alias didn't resolve at
-    /// pre-flight. Drives ProposalCard's "Tag <target>" UI and the hard
-    /// guard inside `confirmProposal(_:)`.
+    /// pre-flight. Drives ProposalCard's "Tag <target>" UI and the
+    /// hard guard inside `confirmProposal(_:)`.
     @Published var pendingAliasMisses: [String: AliasKind] = [:]
 
     /// Non-nil when ChatView should present the lazy-tag sheet.
-    /// Set when parent taps "Tag <target>"; cleared on save / cancel.
     @Published var activeLazyTagRequest: LazyTagRequest? = nil
 ```
 
-Add the parsing function as a `static` method on ChatViewModel (anywhere in the class — pick a spot after `init` for visibility, e.g. just before `// MARK: - Agent envelope handlers (Phase E)` near line 641):
+Then add a new MARK section above `// MARK: - Agent envelope handlers (Phase E)` (around line 641):
 
 ```swift
     // MARK: - Lazy tagging
 
     /// Pure parser: pull `(target, kind)` out of a ProposalDTO if it's a
-    /// `shield_app` call with a kind that needs alias resolution (`"app"`
-    /// or `"category"`). Returns nil for `"all"`, `"list"`, missing target,
-    /// or any other tool.
-    static func extractAliasTarget(from proposal: ProposalDTO) -> (target: String, kind: AliasKind)? {
-        guard proposal.tool == "shield_app" else { return nil }
+    /// `shield_app_legacy` call with a kind that needs alias resolution.
+    /// `nonisolated` so XCTest can call without @MainActor isolation drama.
+    nonisolated static func extractAliasTarget(
+        from proposal: ProposalDTO
+    ) -> (target: String, kind: AliasKind)? {
+        guard proposal.tool == "shield_app_legacy" else { return nil }
         guard let target = proposal.args["target"]?.value as? String,
               !target.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         else { return nil }
@@ -332,32 +1013,32 @@ Add the parsing function as a `static` method on ChatViewModel (anywhere in the 
         switch rawKind {
         case "app": return (target, .app)
         case "category": return (target, .category)
-        default: return nil   // "all", "list", anything else: no alias needed
+        default: return nil
         }
     }
 
-    /// Computed view of whether a proposal needs alias resolution before Confirm.
-    /// True = OK to confirm, false = miss outstanding.
+    /// True if the proposal currently has no alias miss outstanding.
     func aliasHit(for proposal: ProposalDTO) -> Bool {
         pendingAliasMisses[proposal.token] == nil
     }
 
-    /// Returns the alias-miss target string (e.g. "Instagram") for ProposalCard
-    /// rendering — nil if no miss for this proposal.
+    /// String to render in ProposalCard's miss UI; nil when no miss.
+    /// Re-derives via extractAliasTarget so a hit (alias added since
+    /// pre-flight) reflects immediately even if pendingAliasMisses
+    /// hasn't been swept yet.
     func aliasMissTarget(for proposal: ProposalDTO) -> String? {
         guard pendingAliasMisses[proposal.token] != nil else { return nil }
         return Self.extractAliasTarget(from: proposal)?.target
     }
 ```
 
-Now wire pre-flight detection at the spot where ProposalDTOs first enter the view model. Find the block in `sendMessage` near line 213 that reads:
+- [ ] **Step 4: Wire pre-flight on incoming proposals**
+
+In `sendMessage`, find the existing block at line ~213:
 
 ```swift
         if (resp.proposals?.isEmpty == false) || (resp.receipts?.isEmpty == false) {
-            var msg = ChatMessage(
-                role: .agent, content: resp.message, timestamp: Date(),
-                reasoning: resp.reasoning, action: nil
-            )
+            var msg = ChatMessage(...)
             msg.proposals = resp.proposals
             msg.receipts = resp.receipts
             messages.append(msg)
@@ -366,14 +1047,12 @@ Now wire pre-flight detection at the spot where ProposalDTOs first enter the vie
         }
 ```
 
-Replace it with:
+Replace with:
 
 ```swift
         if (resp.proposals?.isEmpty == false) || (resp.receipts?.isEmpty == false) {
-            // Pre-flight every incoming proposal: if it's shield_app with an
-            // app/category target we don't know yet, mark it as a miss so
-            // ProposalCard can render the "Tag <target>" button and Confirm
-            // is held back until the alias is bound.
+            // Pre-flight every proposal: shield_app_legacy with app/category
+            // kind needs LocalAliasStore resolution before Confirm.
             for p in resp.proposals ?? [] {
                 guard let (target, kind) = Self.extractAliasTarget(from: p) else { continue }
                 let aliasResolved: Bool = {
@@ -398,12 +1077,15 @@ Replace it with:
         }
 ```
 
-- [ ] **Step 4: Run tests + build to verify pass**
+- [ ] **Step 5: Run tests + build**
 
-Run: `xcodebuild -project "Evlin iOS.xcodeproj" -scheme "Evlin iOS" -destination "platform=iOS Simulator,name=iPhone 15" test 2>&1 | grep -E "error:|Test Case '-\[Evlin_iOSTests\.ExtractAliasTargetTests" | head -10`
-Expected: 6 ExtractAliasTargetTests pass, no errors.
+```bash
+xcodebuild -project "Evlin iOS.xcodeproj" -scheme "Evlin iOS" -destination "platform=iOS Simulator,name=iPhone 16e" test 2>&1 | grep -E "error:|ExtractAliasTargetTests" | head -10
+```
 
-- [ ] **Step 5: Commit**
+Expected: 5 ExtractAliasTargetTests pass, no errors.
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add "Evlin iOS/Views/Chat/ChatViewModel.swift" "Evlin iOSTests/LazyTagTests.swift"
@@ -412,71 +1094,16 @@ git commit -m "feat(lazy-tag): pre-flight alias detection in ChatViewModel"
 
 ---
 
-## Task 4: ChatViewModel — `confirmProposal` hard guard
-
-**Files:**
-- Modify: `Evlin iOS/Views/Chat/ChatViewModel.swift` (line ~647 — `confirmProposal`)
-
-Defense-in-depth: even if the UI lets a Confirm tap through (state race, future entry point, etc.), the view model itself refuses to dispatch when an alias miss is outstanding.
-
-- [ ] **Step 1: Modify `confirmProposal(_:)`**
-
-Find:
-
-```swift
-    @MainActor
-    func confirmProposal(_ p: ProposalDTO) async {
-        let client = AgentClient(baseURL: apiClient.baseURL)
-        do {
-            let receipt = try await client.executeProposal(token: p.token)
-```
-
-Replace the opening with:
-
-```swift
-    @MainActor
-    func confirmProposal(_ p: ProposalDTO) async {
-        // Hard guard: never dispatch if the alias for this proposal hasn't
-        // been bound yet. The UI also disables the button, but this catches
-        // races and future programmatic entry points.
-        if pendingAliasMisses[p.token] != nil {
-            errorMessage = "Tap \"Tag\" first so I know which app you mean."
-            return
-        }
-        let client = AgentClient(baseURL: apiClient.baseURL)
-        do {
-            let receipt = try await client.executeProposal(token: p.token)
-```
-
-- [ ] **Step 2: Build verify**
-
-Run: `xcodebuild -project "Evlin iOS.xcodeproj" -scheme "Evlin iOS" -destination "generic/platform=iOS" build 2>&1 | grep -E "error:" | head -5 && echo OK`
-Expected: `OK` only.
-
-- [ ] **Step 3: Commit**
-
-```bash
-git add "Evlin iOS/Views/Chat/ChatViewModel.swift"
-git commit -m "feat(lazy-tag): hard guard in confirmProposal — refuse if alias miss"
-```
-
----
-
-## Task 5: ChatViewModel — tag flow callbacks
+## Task 2.4: Tag flow callbacks (begin / handleSelection / cancel) + stale-miss sweeping
 
 **Files:**
 - Modify: `Evlin iOS/Views/Chat/ChatViewModel.swift`
 
-Adds three small callbacks: parent taps "Tag" (open sheet), parent picks a token (persist + cleanup), parent cancels (close sheet, leave miss intact).
+Adds: `beginLazyTag(for:)`, `handleTagSelection(token:request:)`, `cancelLazyTag()`, plus stale-miss sweeping (when one tag succeeds, ALL pending misses with same target+kind clear, so multi-card scenarios resolve at once). Also have `skipProposal` clear that proposal's miss.
 
-- [ ] **Step 1: Add the three methods**
-
-In `ChatViewModel.swift`, append inside the `// MARK: - Lazy tagging` section (right after `aliasMissTarget(for:)` from Task 3):
+- [ ] **Step 1: Append callbacks to the `// MARK: - Lazy tagging` section**
 
 ```swift
-    /// Called from ProposalCard "Tag <target>" button. Opens the lazy-tag
-    /// sheet by setting `activeLazyTagRequest`. Caller's responsibility:
-    /// proposal must currently have a miss in `pendingAliasMisses`.
     @MainActor
     func beginLazyTag(for proposal: ProposalDTO) {
         guard let kind = pendingAliasMisses[proposal.token] else { return }
@@ -488,8 +1115,6 @@ In `ChatViewModel.swift`, append inside the `// MARK: - Lazy tagging` section (r
         )
     }
 
-    /// Called from CustomTokenPickerView's `onSelect` after parent taps Save.
-    /// Persists the alias and clears the miss for this proposal token.
     @MainActor
     func handleTagSelection(token: Any, request: LazyTagRequest) {
         let result = LazyTagPersistence.persistAlias(
@@ -499,59 +1124,96 @@ In `ChatViewModel.swift`, append inside the `// MARK: - Lazy tagging` section (r
         )
         switch result {
         case .success:
-            pendingAliasMisses.removeValue(forKey: request.id)
+            // Clear THIS proposal's miss + sweep any other pending misses
+            // for the same (target, kind) — handles multi-card chats like
+            // "lock IG and TikTok" where two cards reference Instagram.
+            sweepResolvedMisses(target: request.target, kind: request.kind)
             activeLazyTagRequest = nil
         case .failure(let err):
             errorMessage = "Couldn't save the tag: \(err)"
-            // Leave activeLazyTagRequest intact so user can retry without
-            // losing the sheet context.
+            // Leave activeLazyTagRequest intact so user can retry.
         }
     }
 
-    /// Called from CustomTokenPickerView's `onCancel`. Dismisses the sheet
-    /// but leaves `pendingAliasMisses` intact — Tag button stays visible
-    /// on the card so parent can retry.
     @MainActor
     func cancelLazyTag() {
         activeLazyTagRequest = nil
     }
+
+    /// Removes any `pendingAliasMisses` entries whose proposal's
+    /// (target, kind) match. Called after a successful tag — even if the
+    /// chat had multiple cards referencing the same name, they all clear.
+    @MainActor
+    private func sweepResolvedMisses(target: String, kind: AliasKind) {
+        // For each currently-known miss, re-extract its (target, kind) from
+        // the latest message containing the proposal. If it matches, drop.
+        let normalizedTarget = target.lowercased()
+        for token in Array(pendingAliasMisses.keys) {
+            if let p = findProposal(byToken: token),
+               let (t, k) = Self.extractAliasTarget(from: p),
+               k == kind,
+               t.lowercased() == normalizedTarget {
+                pendingAliasMisses.removeValue(forKey: token)
+            }
+        }
+    }
+
+    private func findProposal(byToken token: String) -> ProposalDTO? {
+        for msg in messages.reversed() {
+            if let proposals = msg.proposals,
+               let found = proposals.first(where: { $0.token == token }) {
+                return found
+            }
+        }
+        return nil
+    }
 ```
 
-- [ ] **Step 2: Build verify**
+- [ ] **Step 2: Patch `skipProposal` to also clear its miss**
 
-Run: `xcodebuild -project "Evlin iOS.xcodeproj" -scheme "Evlin iOS" -destination "generic/platform=iOS" build 2>&1 | grep -E "error:" | head -5 && echo OK`
-Expected: `OK` only.
+Find `func skipProposal` (line ~781). Just inside the function add:
 
-- [ ] **Step 3: Commit**
+```swift
+    func skipProposal(_ p: ProposalDTO) {
+        // Clear any outstanding alias miss — Skip means "don't do this",
+        // which doesn't need a tag. Keeps state tidy.
+        pendingAliasMisses.removeValue(forKey: p.token)
+        // ... existing body of the function follows unchanged ...
+```
+
+- [ ] **Step 3: Build verify**
+
+```bash
+xcodebuild -project "Evlin iOS.xcodeproj" -scheme "Evlin iOS" -destination "generic/platform=iOS" build 2>&1 | grep -E "error:" | head -5 && echo OK
+```
+
+Expected: `OK`.
+
+- [ ] **Step 4: Commit**
 
 ```bash
 git add "Evlin iOS/Views/Chat/ChatViewModel.swift"
-git commit -m "feat(lazy-tag): beginLazyTag / handleTagSelection / cancelLazyTag callbacks"
+git commit -m "feat(lazy-tag): tag flow callbacks + stale-miss sweep + skip clears miss"
 ```
 
 ---
 
-## Task 6: ProposalCard — alias-miss UI
+## Task 2.5: ProposalCard — alias-miss UI
 
 **Files:**
 - Modify: `Evlin iOS/Components/ConfirmationCards/ProposalCard.swift`
 
-Adds two parameters and a conditional warning + Tag button. When `aliasMissTarget` is nil, the card renders exactly as today.
+Adds two parameters: `aliasMissTarget: String?` and `onTag: () -> Void`. When `aliasMissTarget != nil` renders warning + Tag button + disables Confirm. When nil, renders exactly as today.
 
-- [ ] **Step 1: Replace the file with the new version**
-
-Rewrite `Evlin iOS/Components/ConfirmationCards/ProposalCard.swift`:
+- [ ] **Step 1: Replace ProposalCard.swift**
 
 ```swift
 import SwiftUI
 
-/// Generic AI proposal card — surface AI-staged tool calls for parent
-/// approval. One card per Proposal in the agent response. Tap Confirm
-/// → POST /parent/agent/exec → in-place becomes a ReceiptBubble.
-///
-/// When `aliasMissTarget` is non-nil, the card renders an additional
-/// warning row + "Tag <target>" button and disables Confirm until the
-/// view model removes the miss (after lazy-tag flow saves an alias).
+/// Generic AI proposal card. When `aliasMissTarget` is non-nil, renders an
+/// orange warning row + "Tag <target>" button and disables Confirm — the
+/// view model removes the miss after lazy-tag flow saves an alias, at
+/// which point the next render unblocks Confirm.
 struct ProposalCard: View {
     let proposal: ProposalDTO
     var onConfirm: () async -> Void
@@ -610,8 +1272,6 @@ struct ProposalCard: View {
         )
     }
 
-    /// Warning row + "Tag <target>" button shown above the Confirm/Skip bar
-    /// when an alias miss is outstanding.
     @ViewBuilder
     private func aliasMissBlock(target: String) -> some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -683,8 +1343,11 @@ struct ProposalCard: View {
 
 - [ ] **Step 2: Build verify**
 
-Run: `xcodebuild -project "Evlin iOS.xcodeproj" -scheme "Evlin iOS" -destination "generic/platform=iOS" build 2>&1 | grep -E "error:" | head -5 && echo OK`
-Expected: `OK` only. (ChatView still passes the old 3-arg init, but Swift will accept it because the new params have defaults.)
+```bash
+xcodebuild -project "Evlin iOS.xcodeproj" -scheme "Evlin iOS" -destination "generic/platform=iOS" build 2>&1 | grep -E "error:" | head -5 && echo OK
+```
+
+Expected: `OK`.
 
 - [ ] **Step 3: Commit**
 
@@ -695,27 +1358,30 @@ git commit -m "feat(lazy-tag): ProposalCard renders warning + Tag button when al
 
 ---
 
-## Task 7: CustomTokenPickerView
+## Task 2.6: CustomTokenPickerView (with picker diff highlighting)
 
 **Files:**
 - Create: `Evlin iOS/Views/LazyTag/CustomTokenPickerView.swift`
 
-The single-select picker shown in the sheet. Lists `Label(token)` rows from `screenTimeManager.selectedApps` (apps or categories per `request.kind`), with an "Add via Apple picker" footer. The Apple picker fallback for category mode MUST use `FamilyActivitySelection(includeEntireCategory: true)` — without that flag, tapping a category row enumerates individual app tokens instead of producing a category token.
+Single-select sheet UI. After Apple-picker fallback returns, computes diff (newly-added tokens), bumps them to the top, auto-selects if exactly 1 was added.
 
 - [ ] **Step 1: Create the file**
-
-Create `Evlin iOS/Views/LazyTag/CustomTokenPickerView.swift`:
 
 ```swift
 // Evlin iOS/Views/LazyTag/CustomTokenPickerView.swift
 //
 // Single-select picker presented as a `.sheet(item:)` from ChatView when
 // ChatViewModel sets `activeLazyTagRequest`. Reads existing tokens from
-// `screenTimeManager.selectedApps` (the source of truth for what's
-// shieldable). Provides an "Add via Apple picker" footer that opens the
-// system FamilyActivityPicker — picking there both widens selectedApps
-// (so the token becomes shieldable) AND surfaces it in our custom list
-// for the parent to bind.
+// `screenTimeManager.selectedApps` and provides an "Add via Apple picker"
+// footer to widen selection. After Apple-picker fallback, computes the
+// before/after diff: if exactly 1 token was newly added, auto-select it
+// (most common case — parent picked just the target app); if multiple,
+// surface them at the top of the list.
+//
+// Note: There's a debug-only `Views/Debug/TokenPickerView.swift` that
+// implements a similar primitive — that one is for the Settings probe
+// page and is being kept as-is. CustomTokenPickerView is the production
+// component. We don't migrate the debug view.
 
 import SwiftUI
 import FamilyControls
@@ -732,19 +1398,30 @@ struct CustomTokenPickerView: View {
     @State private var selectedAppToken: ApplicationToken? = nil
     @State private var selectedCategoryToken: ActivityCategoryToken? = nil
     @State private var applePickerOpen = false
-    /// For .app: empty selection so Apple picker starts blank; we read
-    /// it via .onChange and merge into screenTimeManager.selectedApps.
-    /// For .category: MUST be `includeEntireCategory: true` so a category-row
-    /// tap produces an ActivityCategoryToken instead of N app tokens.
     @State private var pickerSelection: FamilyActivitySelection = FamilyActivitySelection()
 
-    private var apps: [ApplicationToken] {
-        Array(screenTimeManager.selectedApps.applicationTokens)
+    /// Captured before opening Apple picker so we can compute diff on dismiss.
+    @State private var preApplePickerAppTokens: Set<ApplicationToken> = []
+    @State private var preApplePickerCategoryTokens: Set<ActivityCategoryToken> = []
+
+    /// Tokens added in the most recent Apple-picker session (rendered at top
+    /// of list). Cleared when user picks one from the diff or cancels.
+    @State private var newlyAddedAppTokens: Set<ApplicationToken> = []
+    @State private var newlyAddedCategoryTokens: Set<ActivityCategoryToken> = []
+
+    private var sortedApps: [ApplicationToken] {
+        let all = Array(screenTimeManager.selectedApps.applicationTokens)
+        let new = all.filter { newlyAddedAppTokens.contains($0) }
+        let rest = all.filter { !newlyAddedAppTokens.contains($0) }
             .sorted { $0.hashValue < $1.hashValue }
+        return new.sorted { $0.hashValue < $1.hashValue } + rest
     }
-    private var categories: [ActivityCategoryToken] {
-        Array(screenTimeManager.selectedApps.categoryTokens)
+    private var sortedCategories: [ActivityCategoryToken] {
+        let all = Array(screenTimeManager.selectedApps.categoryTokens)
+        let new = all.filter { newlyAddedCategoryTokens.contains($0) }
+        let rest = all.filter { !newlyAddedCategoryTokens.contains($0) }
             .sorted { $0.hashValue < $1.hashValue }
+        return new.sorted { $0.hashValue < $1.hashValue } + rest
     }
     private var canSave: Bool {
         switch request.kind {
@@ -804,14 +1481,14 @@ struct CustomTokenPickerView: View {
     private var listBody: some View {
         switch request.kind {
         case .app:
-            if apps.isEmpty {
+            if sortedApps.isEmpty {
                 emptyState(
                     message: "No apps in Managed Apps yet. Tap \u{201C}Add via Apple picker\u{201D} below to add \(request.target)."
                 )
             } else {
                 ScrollView {
                     LazyVStack(spacing: 6) {
-                        ForEach(Array(apps.enumerated()), id: \.offset) { _, tok in
+                        ForEach(Array(sortedApps.enumerated()), id: \.offset) { _, tok in
                             appRow(token: tok)
                         }
                     }
@@ -820,14 +1497,14 @@ struct CustomTokenPickerView: View {
                 }
             }
         case .category:
-            if categories.isEmpty {
+            if sortedCategories.isEmpty {
                 emptyState(
                     message: "No categories yet. Tap \u{201C}Add via Apple picker\u{201D} and tap the \(request.target) row."
                 )
             } else {
                 ScrollView {
                     LazyVStack(spacing: 6) {
-                        ForEach(Array(categories.enumerated()), id: \.offset) { _, tok in
+                        ForEach(Array(sortedCategories.enumerated()), id: \.offset) { _, tok in
                             categoryRow(token: tok)
                         }
                     }
@@ -855,6 +1532,7 @@ struct CustomTokenPickerView: View {
 
     private func appRow(token: ApplicationToken) -> some View {
         let isSelected = selectedAppToken == token
+        let isNew = newlyAddedAppTokens.contains(token)
         return Button {
             selectedAppToken = token
         } label: {
@@ -866,6 +1544,15 @@ struct CustomTokenPickerView: View {
                     .font(.custom("Inter", size: 15).weight(.semibold))
                     .foregroundStyle(Color.evOnSurface)
                 Spacer()
+                if isNew {
+                    Text("Just added")
+                        .font(.system(size: 10, weight: .heavy))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.evPrimary)
+                        .foregroundStyle(.white)
+                        .clipShape(Capsule())
+                }
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 12)
@@ -881,6 +1568,7 @@ struct CustomTokenPickerView: View {
 
     private func categoryRow(token: ActivityCategoryToken) -> some View {
         let isSelected = selectedCategoryToken == token
+        let isNew = newlyAddedCategoryTokens.contains(token)
         return Button {
             selectedCategoryToken = token
         } label: {
@@ -892,6 +1580,15 @@ struct CustomTokenPickerView: View {
                     .font(.custom("Inter", size: 15).weight(.semibold))
                     .foregroundStyle(Color.evOnSurface)
                 Spacer()
+                if isNew {
+                    Text("Just added")
+                        .font(.system(size: 10, weight: .heavy))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.evPrimary)
+                        .foregroundStyle(.white)
+                        .clipShape(Capsule())
+                }
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 12)
@@ -910,7 +1607,7 @@ struct CustomTokenPickerView: View {
             Text("Don't see \u{201C}\(request.target)\u{201D}?")
                 .font(.custom("Inter", size: 12).weight(.semibold))
                 .foregroundStyle(Color.evOnSurfaceVariant)
-            Text("Open Apple's picker to add it. New tokens will appear in the list above.")
+            Text("Open Apple's picker to add it. New tokens will appear at the top of the list.")
                 .font(.custom("Inter", size: 11))
                 .foregroundStyle(Color.evOutline)
                 .fixedSize(horizontal: false, vertical: true)
@@ -928,9 +1625,13 @@ struct CustomTokenPickerView: View {
     }
 
     private func openApplePicker() {
-        // Required init flag for category mode — without `includeEntireCategory: true`,
-        // tapping a category row in the system picker enumerates individual apps
-        // instead of producing a single ActivityCategoryToken.
+        // Snapshot before so we can diff on dismiss.
+        preApplePickerAppTokens = screenTimeManager.selectedApps.applicationTokens
+        preApplePickerCategoryTokens = screenTimeManager.selectedApps.categoryTokens
+        // For category mode, the Apple picker MUST be initialized with
+        // includeEntireCategory: true — without this, tapping a category row
+        // enumerates individual app tokens instead of producing a single
+        // ActivityCategoryToken.
         switch request.kind {
         case .app:
             pickerSelection = FamilyActivitySelection()
@@ -940,16 +1641,39 @@ struct CustomTokenPickerView: View {
         applePickerOpen = true
     }
 
-    /// Apple picker dismissed → merge whatever was picked into the persisted
-    /// `selectedApps` so the row appears in our custom list and the token
-    /// is also in the FamilyControls authorization scope (shieldable).
+    /// Apple picker dismissed. Merge into selectedApps (preserves shieldable
+    /// authorization scope), compute diff, surface "just added" tokens at
+    /// list top, auto-select if exactly one was added.
     private func mergePickerIntoSelectedApps() {
         var merged = screenTimeManager.selectedApps
         merged.applicationTokens.formUnion(pickerSelection.applicationTokens)
         merged.categoryTokens.formUnion(pickerSelection.categoryTokens)
         merged.webDomainTokens.formUnion(pickerSelection.webDomainTokens)
+        // Preserve metadata arrays in case Apple gave us non-nil names this
+        // pass (Max .child mode is more likely to expose them than .individual).
+        merged.applications.formUnion(pickerSelection.applications)
+        merged.categories.formUnion(pickerSelection.categories)
         screenTimeManager.selectedApps = merged
         screenTimeManager.saveSelection()
+
+        // Compute diff for highlighting + auto-select.
+        let nowApps = screenTimeManager.selectedApps.applicationTokens
+        let nowCats = screenTimeManager.selectedApps.categoryTokens
+        let addedApps = nowApps.subtracting(preApplePickerAppTokens)
+        let addedCats = nowCats.subtracting(preApplePickerCategoryTokens)
+        newlyAddedAppTokens = addedApps
+        newlyAddedCategoryTokens = addedCats
+
+        // Auto-select if exactly one new (the common case: parent picked
+        // just the target app).
+        switch request.kind {
+        case .app where addedApps.count == 1:
+            selectedAppToken = addedApps.first
+        case .category where addedCats.count == 1:
+            selectedCategoryToken = addedCats.first
+        default:
+            break
+        }
     }
 
     private func saveTapped() {
@@ -969,28 +1693,31 @@ struct CustomTokenPickerView: View {
 
 - [ ] **Step 2: Build verify**
 
-Run: `xcodebuild -project "Evlin iOS.xcodeproj" -scheme "Evlin iOS" -destination "generic/platform=iOS" build 2>&1 | grep -E "error:" | head -5 && echo OK`
-Expected: `OK` only.
+```bash
+xcodebuild -project "Evlin iOS.xcodeproj" -scheme "Evlin iOS" -destination "generic/platform=iOS" build 2>&1 | grep -E "error:" | head -5 && echo OK
+```
+
+Expected: `OK`.
 
 - [ ] **Step 3: Commit**
 
 ```bash
 git add "Evlin iOS/Views/LazyTag/CustomTokenPickerView.swift"
-git commit -m "feat(lazy-tag): CustomTokenPickerView with single-select + Apple picker fallback"
+git commit -m "feat(lazy-tag): CustomTokenPickerView with diff highlighting + auto-select"
 ```
 
 ---
 
-## Task 8: ChatView wiring
+## Task 2.7: ChatView wiring
 
 **Files:**
 - Modify: `Evlin iOS/Views/Chat/ChatView.swift`
 
-Pass alias-miss state into ProposalCard, present the lazy-tag sheet, ensure `screenTimeManager` is in the environment.
+Pass alias-miss state into ProposalCard, present the lazy-tag sheet.
 
-- [ ] **Step 1: Update ProposalCard call site**
+- [ ] **Step 1: Update ProposalCard call site (~line 76)**
 
-Find in `Evlin iOS/Views/Chat/ChatView.swift` (around line 76):
+Replace:
 
 ```swift
                                         ForEach(proposals, id: \.token) { p in
@@ -1002,7 +1729,7 @@ Find in `Evlin iOS/Views/Chat/ChatView.swift` (around line 76):
                                         }
 ```
 
-Replace with:
+With:
 
 ```swift
                                         ForEach(proposals, id: \.token) { p in
@@ -1016,9 +1743,9 @@ Replace with:
                                         }
 ```
 
-- [ ] **Step 2: Add the lazy-tag sheet modifier**
+- [ ] **Step 2: Add the .sheet modifier**
 
-Find the existing modifier chain at the bottom of `ChatView.body` (look for `.environmentObject` / `.onAppear` / `.background` near the outer container). Add a `.sheet(item:)` next to the existing modifiers. If no obvious spot, attach it to the `NavigationStack` or root container:
+At the bottom of ChatView's body chain (next to other modifiers like `.environmentObject` or `.onAppear`), attach:
 
 ```swift
         .sheet(item: $viewModel.activeLazyTagRequest) { req in
@@ -1034,112 +1761,145 @@ Find the existing modifier chain at the bottom of `ChatView.body` (look for `.en
         }
 ```
 
-If `screenTimeManager` is not already in the environment of the view tree containing ChatView, propagate it. In single-device test mode, it's typically injected at app root via `@EnvironmentObject` — verify with a grep:
+- [ ] **Step 3: Verify screenTimeManager is in environment**
 
 ```bash
-grep -rn "environmentObject(screenTimeManager\|screenTimeManager: ScreenTimeManager()" "Evlin iOS/" | head -5
+grep -n "environmentObject(screenTimeManager\|@StateObject.*ScreenTimeManager\|@EnvironmentObject var screenTimeManager" "Evlin iOS/" -r | head -5
 ```
 
-If it's at app root: nothing more to do — `.sheet`'s root view inherits the environment. If not: add `.environmentObject(screenTimeManager)` to the sheet content.
+If injected at app root: nothing more to do. If not, attach `.environmentObject(screenTimeManager)` to the sheet content.
 
-- [ ] **Step 3: Build verify**
+- [ ] **Step 4: Build verify**
 
-Run: `xcodebuild -project "Evlin iOS.xcodeproj" -scheme "Evlin iOS" -destination "generic/platform=iOS" build 2>&1 | grep -E "error:" | head -10 && echo OK`
-Expected: `OK` only. If errors mention `screenTimeManager` not found in CustomTokenPickerView, fix per Step 2 fallback.
+```bash
+xcodebuild -project "Evlin iOS.xcodeproj" -scheme "Evlin iOS" -destination "generic/platform=iOS" build 2>&1 | grep -E "error:" | head -5 && echo OK
+```
 
-- [ ] **Step 4: Commit**
+Expected: `OK`.
+
+- [ ] **Step 5: Commit**
 
 ```bash
 git add "Evlin iOS/Views/Chat/ChatView.swift"
-git commit -m "feat(lazy-tag): wire ProposalCard alias-miss + sheet presentation in ChatView"
+git commit -m "feat(lazy-tag): ChatView wires alias-miss + presents lazy-tag sheet"
 ```
 
 ---
 
-## Task 9: Manual E2E smoke test
+## Task 2.8: Manual E2E smoke test
 
-**No code changes. Verifies the integrated flow end-to-end on a real device.**
+**No code changes.** Verify the integrated flow on a real device with the deployed backend.
 
-Single device, parent + kid mode toggle. Picker should already have at least one specific app selected (recommended onboarding path). If `selectedApps.applicationTokens` is empty, Step 4 below tests the Apple-picker-fallback path explicitly.
+- [ ] **Step 1: Deploy backend** (if not auto-deployed by CI)
 
-- [ ] **Step 1: Install on device**
+```bash
+cd /Users/fred/Desktop/Evlin/adaptive-engine
+git push fred feat/three-tier-lock
+# wait for Railway deploy, ~30s
+```
 
-Run from Xcode (▶︎). Wait for app to launch and reach Chat tab.
+- [ ] **Step 2: Install iOS build on device**
 
-- [ ] **Step 2: Pre-test — verify alias is empty**
+Xcode → Run on real iPhone.
+
+- [ ] **Step 3: Test Tag-before-Confirm happy path**
 
 In chat, type: `lock Instagram`
-Expected: Backend returns ProposalDTO. Card appears. Card shows orange "Evlin doesn't know which app is "Instagram" yet." warning + "Tag Instagram" button. Confirm button is grey/disabled.
+Expected: ProposalCard appears with orange "Evlin doesn't know which app is "Instagram" yet" warning + "Tag Instagram" button. Confirm grey/disabled.
 
-- [ ] **Step 3: Tag flow with existing token in selection**
+Tap "Tag Instagram". Sheet opens titled "Tag app". List shows already-selected apps. Tap Instagram (or use "Add via Apple picker" → pick IG → close → row appears at top with "Just added" badge, auto-selected). Tap Save.
 
-Tap "Tag Instagram". Sheet slides up titled "Tag app". Header reads "Which one is "Instagram"?". List shows already-selected apps as `Label(token)` rows with radio circles.
+Sheet dismisses; card warning vanishes; Confirm enabled. Tap Confirm.
 
-If Instagram is in the list: tap that row (radio fills). Tap "Save" (top-right). Sheet dismisses. Card warning vanishes; Confirm becomes red/active. Tap Confirm. Receipt bubble appears, IG locked.
+Expected: Receipt bubble + IG actually shielded on device. The `legacy_action.command_id` flow drives the existing ack-poll UI.
 
-- [ ] **Step 4: Tag flow via Apple picker fallback**
-
-In chat, type: `lock Snapchat` (assuming Snapchat is NOT yet in selectedApps).
-Expected: Card with miss warning.
-Tap "Tag Snapchat". Sheet slides up. List doesn't contain Snapchat.
-Tap "Open Apple picker" footer button. Apple's FamilyActivityPicker opens.
-Tap Snapchat to select it. Tap Done.
-Apple picker closes; back in custom picker. List now contains a new Label(token) row. Tap it (radio fills). Tap Save.
-Sheet dismisses, Card warning gone, Confirm enabled. Tap Confirm. Receipt + Snapchat shielded.
-
-- [ ] **Step 5: Repeat-hit (alias persisted)**
+- [ ] **Step 4: Test repeat-hit (alias persisted)**
 
 In chat, type: `lock instagram` (lowercase).
-Expected: Card appears WITHOUT alias-miss warning. Confirm directly active. Tap Confirm. Works.
+Expected: Card appears WITHOUT warning. Confirm directly active. Tap Confirm. Works.
 
-- [ ] **Step 6: Cancel flow**
+- [ ] **Step 5: Test Add via Apple picker fallback**
 
-In chat, type: `lock TikTok` (assuming not yet tagged).
-Card appears with miss warning. Tap "Tag TikTok". Sheet opens. Tap "Cancel" (top-left).
-Expected: Sheet dismisses. Card STILL shows the warning + Tag button. Confirm STILL disabled. Parent can retry by tapping Tag again.
+In chat: `lock Snapchat` (assume not yet tagged + not in selection).
+Tap Tag → sheet → list doesn't contain Snapchat → Tap "Open Apple picker" → pick Snapchat → close.
+Expected: row appears at top with "Just added" badge, auto-selected. Tap Save.
 
-- [ ] **Step 7: Hard guard verification**
+- [ ] **Step 6: Test Cancel**
 
-Open Xcode debugger console while card has outstanding miss. Have to find a way to call `confirmProposal` programmatically — easiest is to set a breakpoint on `confirmProposal`, then from LLDB:
+In chat: `lock TikTok`.
+Card has miss. Tap Tag → sheet opens → tap Cancel.
+Expected: sheet dismisses. Card STILL shows warning + Tag. Confirm STILL disabled. Retry possible.
 
+- [ ] **Step 7: Test hard guard via observable error**
+
+Trigger any miss state. In the chat input field, force a quick consecutive Confirm via fast-tapping (or use Xcode debugger to call `viewModel.confirmProposal(p)` directly with miss in `pendingAliasMisses`).
+Expected: chat shows error message "Tap "Tag" first so I know which app you mean." No command dispatched.
+
+- [ ] **Step 8: Test category flow**
+
+In chat: `lock games`.
+Card with miss. Tap Tag → sheet "Tag category" → list of category tokens (or empty + Apple picker fallback). Apple picker uses `includeEntireCategory: true` so tapping Games row produces a single ActivityCategoryToken.
+Save → Confirm → Receipt.
+
+- [ ] **Step 9: Test multi-target sweep**
+
+In chat: `lock IG and TikTok`. Two ProposalCards appear, each with their own miss + Tag buttons. Tag IG normally. After save, the IG card unblocks; TikTok card unaffected (different target). Tag TikTok separately. Both confirm.
+
+If parent says `lock Instagram and Insta` (both reference Instagram, two cards), tagging once should sweep both — verify the second card unblocks automatically after the first save.
+
+- [ ] **Step 10: Smoke test backend Phase 0 path**
+
+Use curl to verify the Proposal-first staging:
+
+```bash
+# Replace AUTH_HEADER + family_id with real values
+curl -s -X POST https://your-backend/parent/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "lock Instagram", "child_name": "Liam", "family_id": "..."}' | jq
 ```
-po viewModel.pendingAliasMisses
-```
 
-Should show `[token: kind]`. Then continue past the guard — should hit the `errorMessage` set, not the `executeProposal` call. If you can't easily test the LLDB path, consider this verified by code inspection of Task 4.
+Expected: response has non-empty `proposals` array with `tool == "shield_app_legacy"`, NOT `action.command_id` directly. (If `action` is non-null with command_id, Phase 0 staging didn't fire — debug there.)
 
-- [ ] **Step 8: Category tag flow**
-
-In chat, type: `lock games`
-Expected: Card with miss warning ("Evlin doesn't know which app is "games" yet" — wording is generic, copy can be refined later).
-Tap "Tag games". Sheet titled "Tag category". List shows existing category tokens.
-If empty: tap Apple picker footer. Apple picker opens. Tap the "Games" category row (top-level row, NOT a specific game app). Tap Done.
-Custom picker now shows the Games category token. Tap it, Save.
-Sheet dismisses, card Confirm enables, tap Confirm. Receipt — games category shielded.
-
-- [ ] **Step 9: Final commit (smoke test docs)**
-
-Nothing to commit unless any wording/copy issues turned up. If they did, fix and commit.
+- [ ] **Step 11: No code commit** unless smoke test surfaced a fix.
 
 ---
 
-## Self-Review Notes
+# Self-Review
 
-Spec coverage check:
-- Pre-flight detection ✓ Task 3
-- ProposalCard miss UI ✓ Task 6
-- Hard guard ✓ Task 4
-- ChatViewModel callbacks (begin/handle/cancel) ✓ Task 5
-- CustomTokenPickerView with single-select + Apple picker fallback ✓ Task 7
-- Category mode with `includeEntireCategory: true` ✓ Task 7 step 1
-- LazyTagPersistence type validation ✓ Task 2
-- ChatView .sheet(item:) ✓ Task 8
-- Manual E2E happy path + cancel + category + repeat-hit ✓ Task 9
+**Spec coverage:**
+- Pre-flight detection ✓ Task 2.3
+- Hard guard ✓ Task 1.2
+- Tag callbacks ✓ Task 2.4
+- ProposalCard miss UI ✓ Task 2.5
+- CustomTokenPickerView with diff highlighting ✓ Task 2.6
+- Category mode `includeEntireCategory: true` ✓ Task 2.6
+- LazyTagPersistence type validation ✓ Task 2.2
+- ChatView .sheet(item:) ✓ Task 2.7
+- Backend Proposal staging ✓ Phase 0
+- Legacy exec dispatcher forward ✓ Task 0.3
+- iOS legacy exec response handling ✓ Task 1.1, 1.2
+- Stale-miss sweep ✓ Task 2.4
+- Skip clears miss ✓ Task 2.4
 
-Out of scope (per spec, not included in this plan):
+**Out of scope (per spec):**
 - Std two-device alias sync — separate spec
 - Multi-target merged tag wizard — future
 - Tag editing/deletion UI — future
-- DeviceActivityReport extension write-back — abandoned
 
-Type consistency check (single pass): `AliasKind` only appears with `.app` / `.category`; `LazyTagRequest.id` is `String` (proposalToken) everywhere; `aliasMissTarget` is `String?` everywhere; `LazyTagError` cases used: `.wrongTokenType`, `.emptyTarget` — match between Task 2 implementation and Task 2 tests.
+**Type consistency:**
+- `AliasKind`: `.app` / `.category` everywhere
+- `LazyTagRequest.id`: String (proposalToken)
+- Tool name `shield_app_legacy` in extractAliasTarget matches the staging name in parent_chat.py Task 0.2 (`tool="shield_app_legacy"`)
+- `LazyTagError.wrongTokenType` / `.emptyTarget` consistent between Task 2.2 impl + tests
+- `AgentExecResult.receipt` / `.legacyAction` matches backend `ExecResponse.receipt` / `.legacy_action` field names (Swift snake-case decoding handled in DTO)
+
+**R1 fixes incorporated:**
+- Simulator name `iPhone 16e`
+- Hard guard verification via observable `errorMessage` (no LLDB)
+- `mergePickerIntoSelectedApps` includes `applications` / `categories` formUnion
+
+**R2 fixes incorporated:**
+- Apple picker diff highlighting + auto-select on single addition (Task 2.6)
+- Stale miss sweep on tag success + skipProposal clears miss (Task 2.4)
+- `nonisolated static func extractAliasTarget` (Task 2.3)
+- TokenPickerView (debug) deprecation note inline in CustomTokenPickerView header
