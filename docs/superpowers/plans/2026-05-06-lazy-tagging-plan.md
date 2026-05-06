@@ -1,4 +1,4 @@
-# Lazy Tagging Implementation Plan v4
+# Lazy Tagging Implementation Plan v5
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -6,9 +6,13 @@
 
 **Architecture (Path 1 — Proposal-first):** `shield_app` for `target_kind ∈ {app, category}` does NOT short-circuit the agent loop with `legacy_gemini_action` anymore. Instead, parent_chat stages it as a `Proposal` carrying minimal chat context (`message`, `family_id`, `child_name`, `child_device_id`, `reasoning` — only fields defined on ChatRequest) to re-run dispatcher later. iOS gets `resp.proposals`, runs LocalAliasStore pre-flight, blocks Confirm until any miss is tagged. On Confirm, `/parent/agent/exec` detects the staged-legacy entry and forwards to the existing `_handle_gemini_action` dispatcher, returning the normal `ChatResponse.action` (with `command_id`) iOS already knows how to render via `startAckPoll`.
 
-**Tech Stack:** Python 3.13 / FastAPI / Pydantic on backend; Swift 5 / SwiftUI / FamilyControls / ManagedSettings / XCTest on iOS. Single-device test mode + `.child` Max mode only — std two-device alias sync deferred.
+**Tech Stack:** Python 3.13 / FastAPI / Pydantic on backend; Swift 5 / SwiftUI / FamilyControls / ManagedSettings / XCTest on iOS.
 
-**Spec:** `docs/superpowers/specs/2026-05-06-lazy-tagging-design.md`
+**Scope (revised in v4 round-4):** **single-device test mode only** for v1. The earlier `.child` Max-mode coverage claim was wrong: in two-device Max, the Tag flow runs on the parent device (writes to parent's LocalAliasStore), but the shield Command runs on the kid device (reads kid's LocalAliasStore — which doesn't have the alias). Without alias relay or token-in-Command transport, Max two-device hits `application_not_configured`. **Both Max two-device AND std two-device are deferred to a separate spec covering alias relay or sending the resolved ApplicationToken inside the Command itself.**
+
+**Required deployment flag:** Backend `AGENT_ENABLED=1` (env var or settings). Without it, `parent_chat` skips the agent loop entirely, `legacy_gemini_action` is never produced, and our staging interceptor never fires. Verified: `backend/app/core/settings.py:59` defaults `agent_enabled = False`. **Pre-flight: ensure deployment env has `AGENT_ENABLED=1`.**
+
+**Spec:** `docs/superpowers/specs/2026-05-06-lazy-tagging-design.md` (note: spec still mentions Max — supersede with this scope clarification).
 
 ---
 
@@ -39,6 +43,147 @@
 ---
 
 # Phase 0 — Backend (Path 1 enabling)
+
+## Task 0.0: Verify AGENT_ENABLED=1 in target deployment
+
+**Prerequisite for the entire plan.** Without `AGENT_ENABLED=1`, the agent loop never runs, no `legacy_gemini_action` is produced, and our intercept in Task 0.2 is dead code.
+
+- [ ] **Step 1: Check current deployment**
+
+```bash
+# Production / Railway:
+curl -s https://your-backend/health | jq   # or whatever readiness probe exists; check that boot logs show "agent_enabled=true"
+# Local dev:
+grep -n "agent_enabled\|AGENT_ENABLED" /Users/fred/Desktop/Evlin/adaptive-engine/.env 2>/dev/null
+```
+
+- [ ] **Step 2: If unset, set it**
+
+For local dev: add `AGENT_ENABLED=1` to `.env` at repo root.
+For Railway / production: set `AGENT_ENABLED=1` env var on the service.
+
+- [ ] **Step 3: Verify it's actually applied**
+
+After redeploy / restart, send any chat message that would normally produce a proposal (e.g. `lock his phone`) and confirm the response contains `proposals` (or `receipts` / agent-loop fields). If response only has `action`, agent_enabled is still false.
+
+```bash
+curl -s -X POST https://your-backend/api/parent/chat -H "Content-Type: application/json" -d '{"message":"lock his phone","child_name":"Liam"}' | jq '.proposals,.action'
+```
+
+Expected: `proposals` array exists in response (even empty) — confirms agent loop is running.
+
+- [ ] **Step 4: No commit needed.** Pure config / deployment task.
+
+---
+
+## Task 0.05: shield_app — explicit permanent intent
+
+**Files:**
+- Modify: `adaptive-engine/backend/app/services/agent_tools/shield_tools.py`
+- Modify: `adaptive-engine/backend/app/services/chat_resolver.py`
+
+**Why:** Currently `shield_app(minutes=None)` emits `duration_minutes="missing"` regardless of whether the parent meant "permanent" or "I forgot to specify". Both end up at D1. To support `lock Instagram permanently`, we add a separate `permanent: bool` arg so Gemini can express explicit permanent intent. `_route_shield` and `_is_lazy_tag_eligible` both branch on this.
+
+- [ ] **Step 1: Add `permanent` arg to `shield_app`**
+
+In `backend/app/services/agent_tools/shield_tools.py`:
+
+Update the tool description (around line 28) to document the new arg:
+
+```python
+        "  'lock his phone for 30 min'        → target='his phone', target_kind='all', minutes=30\n"
+        "  'lock his phone permanently'       → target='his phone', target_kind='all', permanent=true\n"
+        "  'block Instagram forever'          → target='Instagram', target_kind='app', permanent=true\n"
+        ... (other examples) ...
+        "\n"
+        "PERMANENT vs MISSING: only set permanent=true when the parent EXPLICITLY says 'permanent', "
+        "'forever', 'always', 'until I unlock'. If they just said 'lock IG' with no time hint, "
+        "leave permanent=false and minutes=None — the dispatcher will ask via D1.\n"
+```
+
+Update the function signature:
+
+```python
+async def shield_app(
+    target: str,
+    target_kind: str,
+    minutes: Optional[int] = None,
+    category_hint: Optional[str] = None,
+    permanent: bool = False,
+) -> ToolResult:
+```
+
+Update the legacy_action dict construction:
+
+```python
+    minutes_int = int(minutes) if minutes is not None else None
+    # Three duration states:
+    # - explicit positive int → timed shield (proceeds eagerly or via lazy-tag staging)
+    # - permanent=True → no expiry (dispatcher returns ResolvedAction with duration=None)
+    # - neither → "missing" (dispatcher returns D1 card to ask for duration)
+    if minutes_int is not None and minutes_int > 0:
+        duration_field: int | str = minutes_int
+        duration_state = "set"
+    elif permanent:
+        duration_field = None     # type: ignore[assignment]
+        duration_state = "permanent"
+    else:
+        duration_field = "missing"
+        duration_state = "missing"
+    legacy_action = {
+        "type": "shield",
+        "target_request": target,
+        "target_kind_hint": target_kind,
+        "duration_minutes": duration_field,
+        "duration_state": duration_state,   # "set" | "permanent" | "missing"
+        "category_hint_from_ai": category_hint,
+        "child_name_hint": None,
+        "confirmation_required": False,
+        "confirmation_reason": None,
+    }
+```
+
+- [ ] **Step 2: Patch `chat_resolver._route_shield` for permanent**
+
+Insert ABOVE the existing `if duration == "missing"` check (around line 203):
+
+```python
+    duration_state = action.get("duration_state")  # "set" | "permanent" | "missing"
+
+    # Permanent intent: skip D1 entirely. duration is None on the
+    # ResolvedAction; ActionExecutor treats nil expiresAt as no auto-unshield.
+    if duration_state == "permanent":
+        duration = None  # explicitly permanent
+    # otherwise leave existing "missing"/int handling intact.
+```
+
+(Keep all subsequent existing logic unchanged. The `if duration == "missing"` D1 block now never matches when state is "permanent" because we cleared duration above.)
+
+- [ ] **Step 3: Update Gemini system-prompt-test if any exists**
+
+```bash
+cd /Users/fred/Desktop/Evlin/adaptive-engine
+grep -rn "shield_app\|permanent" backend/tests/ | head -10
+```
+
+If a test exists for shield_app args, add a case for permanent=True. Otherwise skip.
+
+- [ ] **Step 4: Run tests**
+
+```bash
+pytest backend/tests/services/test_agent_tools_shield.py backend/tests/services/test_chat_resolver.py -v 2>&1 | tail -20
+```
+
+Expected: existing tests pass; the new branch is unverified by automation but covered by E2E in Task 2.8 ("lock IG permanently").
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add backend/app/services/agent_tools/shield_tools.py backend/app/services/chat_resolver.py
+git commit -m "feat(shield_app): explicit permanent intent (permanent: bool) — distinguish from missing duration"
+```
+
+---
 
 ## Task 0.1: ProposalStore stores chat context
 
@@ -165,29 +310,45 @@ When `agent_resp.legacy_gemini_action` represents a `shield` action with `target
 Above the existing `_handle_gemini_action` definition (around line 429), add:
 
 ```python
-def _is_lazy_tag_eligible(gemini_action: dict) -> bool:
+def _is_lazy_tag_eligible(
+    gemini_action: dict,
+    force_confirmations: list[str] | None = None,
+) -> bool:
     """True only for shield calls with app/category target_kind AND a
-    concrete int duration. Excludes:
+    resolved duration intent (concrete int OR explicit permanent).
+    Excludes:
     - `block` (uses bundle-id catalog, not ApplicationToken)
     - `all` / `list` target kinds (no alias lookup needed)
-    - duration_minutes == "missing" (dispatcher must show D1 first; after
-      parent picks duration, the next round comes back here with int
-      duration and stages cleanly).
-    - duration_minutes > 24*60 without D3 confirmation (D3 long-duration
-      card must show first; parent confirming D3 re-submits with
-      force_confirmations=["D3"] which we treat as eligible).
+    - duration_state == "missing" (dispatcher must show D1 first; after
+      parent picks duration, the next round comes back here with state
+      "set" and stages cleanly).
+    - duration > 24h without `force_confirmations=["D3"]` (D3 long-duration
+      card must show first; parent confirming D3 re-submits with that
+      flag and we accept the second round).
     """
     if gemini_action.get("type") != "shield":
         return False
     if gemini_action.get("target_kind_hint") not in {"app", "category"}:
         return False
+    state = gemini_action.get("duration_state")
+    # Permanent intent passes through directly.
+    if state == "permanent":
+        return True
+    # Concrete int (after Task 0.05 sets state="set") or legacy raw int.
+    if state == "missing":
+        return False
     duration = gemini_action.get("duration_minutes")
-    # Coerce same way chat_resolver does — protobuf often sends float/str.
     if isinstance(duration, float):
         duration = int(duration)
     elif isinstance(duration, str) and duration.isdigit():
         duration = int(duration)
     if not isinstance(duration, int) or duration <= 0:
+        return False
+    # D3 long-duration gate: defer to dispatcher unless parent confirmed D3.
+    skip_long_duration_guard = bool(
+        force_confirmations and "D3" in force_confirmations
+    )
+    if duration > 24 * 60 and not skip_long_duration_guard:
         return False
     return True
 
@@ -272,8 +433,13 @@ Replace with:
             # Lazy-tag eligible (shield_app with app/category target):
             # stage as Proposal so iOS can pre-flight LocalAliasStore and
             # gate Confirm on Tag-before-Confirm. exec endpoint will
-            # forward back into _handle_gemini_action on confirm.
-            if _is_lazy_tag_eligible(agent_resp.legacy_gemini_action):
+            # forward back into _handle_gemini_action on confirm. Pass
+            # req.force_confirmations so D3 (long-duration confirm) re-
+            # submits are recognized as eligible.
+            if _is_lazy_tag_eligible(
+                agent_resp.legacy_gemini_action,
+                req.force_confirmations,
+            ):
                 proposal_store = get_proposal_store()
                 return _stage_legacy_shield_proposal(
                     proposal_store=proposal_store,
@@ -2151,3 +2317,9 @@ Expected: response has non-empty `proposals` array with `tool == "shield_app_leg
 - **Duration gating (Task 0.2)**: `_is_lazy_tag_eligible` now also requires `duration_minutes` to be a positive int. Missing-duration shields fall through to eager dispatch (which returns D1 duration card). After parent picks duration, the next round of dispatch produces a shield_app with concrete duration → THIS round stages as lazy-tag → tag flow → exec → exactApp Command. D1 card flow stays in the existing card pipeline, never enters /parent/agent/exec.
 - **Build verify commands fixed (P2)**: replaced broken `grep -E "error:" | head -10 && echo OK` pattern (which printed OK when build had errors and silent when it succeeded) with `tee /tmp/build.log; if grep -q "error:" then BUILD FAILED else OK`.
 - **Self-review formUnion contradiction (P3)**: cleaned up.
+
+**Round-4 reviewer fixes (post-v4 first draft):**
+- **AGENT_ENABLED prereq (Task 0.0)**: New task at very front of plan verifies `AGENT_ENABLED=1` is set in deployment env. Without it the agent loop never runs and our intercept is dead code.
+- **Scope reduced to single-device only (Header)**: Earlier "Max .child mode covered" claim was wrong. In two-device Max, the Tag flow runs on parent device (writes parent's LocalAliasStore) but shield Command runs on kid device (reads its own LocalAliasStore — empty). Both Max two-device AND std two-device deferred to separate spec. Spec scope section updated to match.
+- **Permanent shield support (Task 0.05)**: New task. `shield_app` adds `permanent: bool = False`. `legacy_action` carries new `duration_state ∈ {"set", "permanent", "missing"}` field. `chat_resolver._route_shield` skips D1 when state is "permanent". `_is_lazy_tag_eligible` accepts "permanent" as eligible. Now `lock Instagram permanently` flows: shield_app(permanent=True) → eligible → stage Proposal → tag → confirm → ResolvedAction(duration=None) → kid device shields with no expiresAt (permanent).
+- **D3 long-duration confirmation now wired (Task 0.2)**: `_is_lazy_tag_eligible` now takes `force_confirmations` param. Caller passes `req.force_confirmations`. When `"D3"` is in the list, eligibility check skips the >24h gate. Without this, "lock Instagram for 3 days" → D3 card → parent confirms → eager dispatch → E1 dead end. Now: D3 confirm re-submits → stages → tag → confirm → exactApp.

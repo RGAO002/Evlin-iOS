@@ -28,8 +28,10 @@ Build the simplest possible UX where:
 This spec delivers the **demo / MVP local path only**:
 
 - ✅ **Single-device test mode** (parent + kid on the same physical iPhone via the existing app-mode toggle) — fully covered.
-- ✅ **`.child` Max mode** (production future) — fully covered. Parent's tag on parent device persists in parent's LocalAliasStore; shield commands route to kid's device with token already known.
-- ❌ **Std two-device production** (parent iPhone + kid iPhone, `.individual` auth) — NOT covered. In std production, aliases must live on the kid device (where the shield command runs and resolves), but the tag flow is initiated from the parent device. Cross-device alias sync (e.g. parent → backend → kid) is **deferred to a separate spec**. Implementing this spec verbatim into std two-device production will not work; further design needed.
+- ❌ **`.child` Max mode (two-device)** — NOT covered. Parent's tag persists in PARENT device's LocalAliasStore, but shield Command runs on KID device which reads its own (empty) LocalAliasStore. Result: `application_not_configured`. Either alias relay (parent → backend → kid) or token-in-Command transport is required. **Deferred to a separate spec.**
+- ❌ **Std two-device production** (parent iPhone + kid iPhone, `.individual` auth) — NOT covered, same reason as Max two-device above.
+
+In short: **v1 is single-device test mode only.** Two-device production (any mode) needs cross-device alias transport — separate spec.
 
 ## Non-Goals
 
