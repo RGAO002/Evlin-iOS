@@ -4,7 +4,7 @@
 
 **Goal:** Let parents say "lock IG" in chat and have iOS resolve "Instagram" → ApplicationToken → shield, with a one-tap Tag-before-Confirm flow when iOS doesn't yet know an app name.
 
-**Architecture (Path 1 — Proposal-first):** `shield_app` for `target_kind ∈ {app, category}` does NOT short-circuit the agent loop with `legacy_gemini_action` anymore. Instead, parent_chat stages it as a `ProposalDTO` carrying enough chat context (family/child/mode) to re-run dispatcher later. iOS gets `resp.proposals`, runs LocalAliasStore pre-flight, blocks Confirm until any miss is tagged. On Confirm, `/parent/agent/exec` detects the staged-legacy entry and forwards to the existing `_handle_gemini_action` dispatcher, returning the normal `ChatResponse.action` (command_id / card_id) iOS already knows how to render.
+**Architecture (Path 1 — Proposal-first):** `shield_app` for `target_kind ∈ {app, category}` does NOT short-circuit the agent loop with `legacy_gemini_action` anymore. Instead, parent_chat stages it as a `Proposal` carrying minimal chat context (`message`, `family_id`, `child_name`, `child_device_id`, `reasoning` — only fields defined on ChatRequest) to re-run dispatcher later. iOS gets `resp.proposals`, runs LocalAliasStore pre-flight, blocks Confirm until any miss is tagged. On Confirm, `/parent/agent/exec` detects the staged-legacy entry and forwards to the existing `_handle_gemini_action` dispatcher, returning the normal `ChatResponse.action` (with `command_id`) iOS already knows how to render via `startAckPoll`.
 
 **Tech Stack:** Python 3.13 / FastAPI / Pydantic on backend; Swift 5 / SwiftUI / FamilyControls / ManagedSettings / XCTest on iOS. Single-device test mode + `.child` Max mode only — std two-device alias sync deferred.
 
@@ -57,7 +57,7 @@ confirmation. 10-min TTL so stale proposals get garbage-collected.
 `chat_context` is the carrier for legacy-shield staging: when the agent
 emits a shield_app legacy_gemini_action that we want gated by Tag-before-
 Confirm, parent_chat stages a proposal with the originating ChatRequest's
-context (family_id, child_name, child_device_id, protection_mode, etc.).
+context (only fields actually defined on ChatRequest).
 On exec, the route re-runs `_handle_gemini_action` with that context so
 the dispatcher path is identical to the eager (non-staged) flow.
 """
@@ -132,14 +132,16 @@ Edit `adaptive-engine/backend/app/api/routes/parent_agent.py` line 44:
 
 (Don't forget to use `chat_context` in Task 0.3 — for now, this is just unblocking the type change.)
 
-- [ ] **Step 3: Run backend tests to verify nothing broke**
+- [ ] **Step 3: Run backend tests to discover impact**
 
 ```bash
 cd /Users/fred/Desktop/Evlin/adaptive-engine
-pytest backend/tests/ -k "proposal_store or agent_loop or parent_chat" 2>&1 | tail -10
+pytest backend/tests/ -k "proposal_store or agent_loop or parent_chat" 2>&1 | tail -20
 ```
 
-Expected: existing tests pass (the old 2-tuple consumers we updated in step 2 are the only callers).
+Expected: `test_proposal_store.py` may fail because tests destructure `pop()` as 2-tuple. Don't fix here yet — Task 0.3 Step 3 batches both ProposalStore + parent_agent endpoint test patches. We use this run only to confirm the failure locations.
+
+If `agent_loop` or `parent_chat` tests fail, they're touching `proposal_store.pop()` directly — also handled in Task 0.3 Step 3.
 
 - [ ] **Step 4: Commit**
 
@@ -164,11 +166,13 @@ Above the existing `_handle_gemini_action` definition (around line 429), add:
 
 ```python
 def _is_lazy_tag_eligible(gemini_action: dict) -> bool:
-    """True for shield_app calls with app/category target_kind — these need
+    """True for shield calls with app/category target_kind — these need
     iOS-side LocalAliasStore resolution before dispatch.
     'all' (whole-device) and 'list' (saved-list) don't need alias lookup,
-    so they go through the eager legacy dispatch as before."""
-    if gemini_action.get("type") not in {"shield", "block"}:
+    so they go through the eager legacy dispatch as before. `block` uses
+    bundle-id-based catalog lookup (app_catalog.py), NOT ApplicationToken,
+    so a tagged token is useless for block — keep block on eager path."""
+    if gemini_action.get("type") != "shield":
         return False
     return gemini_action.get("target_kind_hint") in {"app", "category"}
 
@@ -177,27 +181,25 @@ def _stage_legacy_shield_proposal(
     *,
     proposal_store: ProposalStore,
     gemini_action: dict,
-    req: ChatRequest,
+    req: "ChatRequest",
     message: str,
     reasoning: str | None,
-) -> ChatResponse:
+) -> "ChatResponse":
     """Park the legacy_gemini_action in ProposalStore with chat context, return
-    a ChatResponse carrying a single ProposalDTO so iOS can run pre-flight
+    a ChatResponse carrying a single Proposal so iOS can run pre-flight
     and gate Confirm on alias resolution.
 
-    The chat context is what `_handle_gemini_action` needs to reconstruct the
-    dispatcher call when /parent/agent/exec receives a Confirm later. We
-    serialize only JSON-safe primitives so it survives the in-memory store.
+    The chat context stores ONLY fields that actually exist on ChatRequest
+    (verified against parent_chat.py:217). Adding fields like child_id /
+    protection_mode / parent_id would AttributeError. Dispatcher's
+    `_handle_gemini_action` only reads from req what's actually defined.
     """
     chat_context = {
-        "family_id": str(req.family_id) if req.family_id else None,
-        "child_id": str(req.child_id) if req.child_id else None,
-        "child_name": req.child_name,
-        "child_device_id": str(req.child_device_id) if req.child_device_id else None,
-        "protection_mode": req.protection_mode,
-        "parent_id": str(req.parent_id) if getattr(req, "parent_id", None) else None,
         "message": message,
         "reasoning": reasoning,
+        "family_id": str(req.family_id) if req.family_id else None,
+        "child_name": req.child_name,
+        "child_device_id": str(req.child_device_id) if req.child_device_id else None,
     }
     token = proposal_store.stage(
         tool="shield_app_legacy",
@@ -214,7 +216,8 @@ def _stage_legacy_shield_proposal(
     )
     label = f"Shield {target}{label_minutes}"
 
-    proposal = ProposalDTO(
+    # Backend Proposal (NOT ProposalDTO — there is no ProposalDTO class).
+    proposal = Proposal(
         tool="shield_app_legacy",
         args={
             "target": target,
@@ -279,13 +282,13 @@ Replace with:
 If not already present:
 
 ```python
-from backend.app.schemas.agent import ProposalDTO  # or wherever ProposalDTO lives
+from backend.app.schemas.agent import Proposal
 from backend.app.services.proposal_store import (
     ProposalStore, get_proposal_store,
 )
 ```
 
-(Check existing imports — `ProposalDTO` should already be imported because `ChatResponse.proposals: list[ProposalDTO]` is used elsewhere in this file.)
+(`Proposal` is the actual class name — there is no `ProposalDTO` in the backend. `Proposal` is already used in `parent_chat.py` because `ChatResponse.proposals: list[Proposal]` is defined here at line ~256.)
 
 - [ ] **Step 4: Run backend tests**
 
@@ -300,7 +303,7 @@ Expected: no regressions on existing tests. (We're adding a branch that only fir
 
 ```bash
 git add backend/app/api/routes/parent_chat.py
-git commit -m "feat(parent-chat): stage shield_app app/category as ProposalDTO for Tag-before-Confirm"
+git commit -m "feat(parent-chat): stage shield app/category as Proposal for Tag-before-Confirm"
 ```
 
 ---
@@ -320,23 +323,25 @@ Replace the entire body of `parent_agent.py` `exec_proposal`:
 """POST /parent/agent/exec — execute a previously-staged proposal.
 
 Two paths:
-1. Standard tool: pop, call tool, return ReceiptDTO (existing).
+1. Standard tool: pop, call tool, return Receipt under `.receipt` field.
 2. shield_app_legacy: pop, reconstruct ChatRequest from stored chat_context,
    forward to _handle_gemini_action(), return its ChatResponse-shape
-   carrying action.command_id/card_id. iOS distinguishes via the
-   `legacy_action` field being non-None.
+   under `.legacy_action` etc. iOS distinguishes via which field is non-None.
+
+Note on schemas: ChatRequest / ChatResponse / ChatAction are defined in
+`backend.app.api.routes.parent_chat` (no shared schemas.chat module exists).
+We import them at function scope to avoid import cycles between routes.
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, TYPE_CHECKING
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.db import get_session
+from backend.app.db.engine import get_async_session
 from backend.app.schemas.agent import Receipt
-from backend.app.schemas.chat import ChatAction
 from backend.app.services.agent_tools import GLOBAL_REGISTRY
 from backend.app.services.parent_action_log import (
     ParentActionLog, get_log as get_action_log,
@@ -352,6 +357,11 @@ from backend.app.services.agent_tools import (  # noqa: F401
     vision_tools, shield_tools,
 )
 
+if TYPE_CHECKING:
+    # Avoid circular import at runtime. parent_chat imports parent_agent
+    # via routers registration. Use string types in signatures.
+    from backend.app.api.routes.parent_chat import ChatAction
+
 
 router = APIRouter(tags=["Parent Agent"])
 
@@ -362,11 +372,21 @@ class ExecBody(BaseModel):
 
 class ExecResponse(BaseModel):
     """Union shape for v2 exec.
-    Exactly one of `receipt` or `legacy_action` is non-None.
-    iOS branches on which is present.
+    For standard tools, only `.receipt` is set.
+    For staged-legacy shield, only `.legacy_action` + `.message` + `.reasoning`
+    are set (mirroring the relevant subset of ChatResponse).
+    iOS branches on which field is present.
+
+    v1 scope: legacy path returns `ChatAction` with `command_id` (or `card_id`).
+    A receipt-only legacy path (e.g. dispatcher returns text only, no action)
+    is unsupported in v1 — iOS falls back to displaying `.message` as plain
+    text in that case. Future enhancement if needed.
     """
+    # Use Any for legacy_action because ChatAction lives in parent_chat.py
+    # and importing it eagerly creates an import cycle. Pydantic accepts
+    # the dict-form of ChatAction at JSON serialization time.
     receipt: Receipt | None = None
-    legacy_action: ChatAction | None = None
+    legacy_action: dict[str, Any] | None = None  # ChatAction dict
     message: str | None = None
     reasoning: str | None = None
 
@@ -376,7 +396,7 @@ async def exec_proposal(
     body: ExecBody,
     proposal_store: ProposalStore = Depends(get_proposal_store),
     log: ParentActionLog = Depends(get_action_log),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_async_session),
 ) -> ExecResponse:
     popped = proposal_store.pop(body.token)
     if popped is None:
@@ -429,38 +449,27 @@ async def _exec_legacy_shield(
     chat_context: dict[str, Any],
     session: AsyncSession,
 ) -> ExecResponse:
-    """Re-run _handle_gemini_action with the chat context that was captured
-    when the proposal was staged. The original gemini_action dict is in
-    args["gemini_action"]; chat_context carries identifying info
-    (family_id, child_*, protection_mode, etc.) that the dispatcher needs.
-
-    We synthesize a minimal ChatRequest by importing the request type at
-    the call site (avoids circular imports at module top).
+    """Re-run _handle_gemini_action with the chat context captured at
+    staging. The gemini_action dict is in args["gemini_action"]; chat_context
+    carries the ChatRequest fields that actually exist (no child_id /
+    protection_mode / parent_id — they aren't on ChatRequest).
     """
     # Import here to avoid circular dependency between routes.
     from backend.app.api.routes.parent_chat import (
-        _handle_gemini_action,
+        _handle_gemini_action, ChatRequest,
     )
-    from backend.app.schemas.chat import ChatRequest
 
     gemini_action = args.get("gemini_action") or {}
 
-    # Reconstruct ChatRequest. Field names must match ChatRequest schema —
-    # adjust if a field name differs in your codebase.
+    # Reconstruct ChatRequest using ONLY fields defined in parent_chat.py:217.
     req_dict: dict[str, Any] = {
         "message": chat_context.get("message", ""),
         "child_name": chat_context.get("child_name") or "Liam",
     }
     if chat_context.get("family_id"):
         req_dict["family_id"] = UUID(chat_context["family_id"])
-    if chat_context.get("child_id"):
-        req_dict["child_id"] = UUID(chat_context["child_id"])
     if chat_context.get("child_device_id"):
         req_dict["child_device_id"] = UUID(chat_context["child_device_id"])
-    if chat_context.get("parent_id"):
-        req_dict["parent_id"] = UUID(chat_context["parent_id"])
-    if chat_context.get("protection_mode"):
-        req_dict["protection_mode"] = chat_context["protection_mode"]
 
     req = ChatRequest(**req_dict)
 
@@ -471,50 +480,70 @@ async def _exec_legacy_shield(
         req=req,
         session=session,
     )
+    # ChatResponse.action is a ChatAction Pydantic model; serialize to dict
+    # so ExecResponse.legacy_action (typed dict[str, Any]) accepts it cleanly.
+    action_dict: dict[str, Any] | None = None
+    if chat_response.action is not None:
+        action_dict = chat_response.action.model_dump(mode="json")
     return ExecResponse(
-        legacy_action=chat_response.action,
+        legacy_action=action_dict,
         message=chat_response.message,
         reasoning=chat_response.reasoning,
     )
 ```
 
-- [ ] **Step 2: Verify ChatAction is importable from schemas.chat**
+- [ ] **Step 2: Verify ChatRequest fields match what we synthesize**
 
 ```bash
 cd /Users/fred/Desktop/Evlin/adaptive-engine
-python3 -c "from backend.app.schemas.chat import ChatAction; print('ok')"
+grep -n "^class ChatRequest" -A 20 backend/app/api/routes/parent_chat.py | head -25
 ```
 
-Expected: `ok`. If import fails, the field name might differ; grep for the type used in `ChatResponse.action`:
+Expected: ChatRequest fields are exactly `message, family_id, child_name, history, force_confirmations, child_device_id`. If anything has been renamed, adjust the chat_context synthesis (Task 0.2) AND the `req_dict` construction here in lockstep.
+
+- [ ] **Step 3: Update existing backend tests for new shapes**
+
+The shape changes from this phase break two test files. Run them and patch the assertions:
 
 ```bash
-grep -n "action:" backend/app/schemas/chat.py | head -5
+cd /Users/fred/Desktop/Evlin/adaptive-engine
+pytest backend/tests/services/test_proposal_store.py backend/tests/api/routes/test_parent_agent_endpoints.py -v 2>&1 | tail -30
 ```
 
-Adjust import accordingly.
+Expected failures + fixes:
 
-- [ ] **Step 3: Verify ChatRequest field names match what we synthesized**
+a. `test_proposal_store.py` — `pop()` now returns 3-tuple `(tool, args, chat_context)`. Existing 2-tuple unpacks fail:
+   - Replace `tool, args = popped` with `tool, args, _ctx = popped` in tests.
+   - Add a focused test: `def test_pop_returns_chat_context_when_staged()`:
+     ```python
+     def test_pop_returns_chat_context_when_staged():
+         store = ProposalStore()
+         token = store.stage(tool="t", args={}, chat_context={"hello": 1})
+         result = store.pop(token)
+         assert result == ("t", {}, {"hello": 1})
+     ```
 
-```bash
-grep -n "^class ChatRequest\|family_id\|child_device_id\|protection_mode\|parent_id" backend/app/schemas/chat.py | head -20
-```
+b. `test_parent_agent_endpoints.py` — receipt is now nested under `.receipt`, not at the top level of the response body:
+   - Old: `assert resp.json()["tool"] == "x"` and `resp.json()["summary"] == "..."`
+   - New: `assert resp.json()["receipt"]["tool"] == "x"` and `resp.json()["receipt"]["summary"] == "..."`
+   - `assert resp.json()["legacy_action"] is None` for standard tool path.
 
-If a field is named differently (e.g. `child_uuid` instead of `child_id`), update the synthesizer accordingly. The chat_context dict structure in Task 0.2 must match.
+Patch the assertions, re-run, confirm green.
 
-- [ ] **Step 4: Run backend tests**
+- [ ] **Step 4: Run full backend test suite**
 
 ```bash
 cd /Users/fred/Desktop/Evlin/adaptive-engine
 pytest backend/tests/ 2>&1 | tail -10
 ```
 
-Expected: existing tests still pass. (The new ExecResponse breaks the iOS contract — this is expected; iOS Task 1.1 fixes the iOS side.)
+Expected: all green. New legacy shield staging behavior isn't covered by existing tests; that's OK — the iOS E2E in Task 2.8 covers it.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add backend/app/api/routes/parent_agent.py
-git commit -m "feat(exec): forward staged-legacy shield proposals to dispatcher with chat_context"
+git add backend/app/api/routes/parent_agent.py backend/tests/services/test_proposal_store.py backend/tests/api/routes/test_parent_agent_endpoints.py
+git commit -m "feat(exec): forward staged-legacy shield proposals to dispatcher; update tests for new shapes"
 ```
 
 ---
@@ -544,15 +573,20 @@ In `Evlin iOS/Services/AgentClient.swift`, find the existing executeProposal met
 /// receipt (existing tools) or a legacy ChatAction+message bundle (when
 /// the proposal was a staged shield_app_legacy entry — see backend
 /// parent_agent.py / parent_chat.py for staging).
+///
+/// IMPORTANT: legacy action uses `APIClient.ChatActionResponse` — the same
+/// type that decodes /parent/chat's `action` field. The other `ChatAction`
+/// in `Models/ChatModels.swift` is a legacy enum unrelated to /parent/chat
+/// responses; do not use it here.
 enum AgentExecResult {
     case receipt(ReceiptDTO)
-    case legacyAction(action: ChatAction?, message: String?, reasoning: String?)
+    case legacyAction(action: APIClient.ChatActionResponse?, message: String?, reasoning: String?)
 }
 
 /// Server-side response shape mirroring backend ExecResponse.
 private struct ExecResponseDTO: Decodable {
     let receipt: ReceiptDTO?
-    let legacy_action: ChatAction?
+    let legacy_action: APIClient.ChatActionResponse?
     let message: String?
     let reasoning: String?
 }
@@ -579,7 +613,7 @@ func executeProposal(token: String) async throws -> AgentExecResult {
 }
 ```
 
-(Adjust to match the file's existing style — use whatever URLSession / encoder helpers are conventional in the file. Replace any older `executeProposal` body. Make sure `ReceiptDTO` and `ChatAction` are visible/imported.)
+(Adjust to match the file's existing style — use whatever URLSession / encoder helpers are conventional in the file. Replace any older `executeProposal` body. `ReceiptDTO` lives in this same file; `APIClient.ChatActionResponse` is in `Services/APIClient.swift` — fully-qualified reference avoids import puzzling.)
 
 - [ ] **Step 3: Build verify**
 
@@ -601,15 +635,33 @@ Expected: errors at the existing `confirmProposal` call site (`let receipt = try
 
 When the staged proposal was a legacy shield, the exec response carries a `ChatAction` whose `command_id` (or `card_id`) iOS already knows how to plumb. We hand it off to the existing pathway that processes ChatResponse.action.
 
-- [ ] **Step 1: Find or factor out the existing action handling**
+- [ ] **Step 1: Locate the existing command_id processing block**
 
-In ChatViewModel.swift, look at how `sendMessage` already processes `resp.action` for shield/lock — find the block that builds a pending command bubble and starts ack-polling. Note its signature (likely takes `ChatAction` + `messageID` + `targetDisplay`).
+It lives inside `processResponse(_:userMessage:)` near line 190. The relevant pattern (verified against current code):
 
-```bash
-grep -n "action:\|ChatAction\|startAckPoll\|insertPendingCommand" "Evlin iOS/Views/Chat/ChatViewModel.swift" | head -20
+```swift
+if let act = resp.action, let cmdID = act.command_id {
+    var msg = ChatMessage(
+        role: .agent, content: resp.message, timestamp: Date(),
+        reasoning: resp.reasoning, action: nil
+    )
+    msg.commandID = cmdID
+    msg.receiptState = .pending
+    messages.append(msg)
+    startAckPoll(
+        commandID: cmdID,
+        messageID: msg.id,
+        targetDisplay: act.target_display,
+        expiresAt: act.duration_minutes.map { Date().addingTimeInterval(TimeInterval($0 * 60)) }
+    )
+    isThinking = false
+    return
+}
 ```
 
-We will REUSE that existing flow — extract the relevant part into a helper method `dispatchChatAction(_:message:reasoning:)` if it isn't already factored out.
+Notes for the legacy-exec path:
+- `ChatMessage.init(... action:)` accepts an old enum `ChatAction?` — we always pass `nil`. Don't try to thread the new `APIClient.ChatActionResponse` through that param; it's the wrong type and the message doesn't store it anyway.
+- The card_id branch (lines 174–182) is ALSO possible from the dispatcher, but for v1 lazy-tag legacy-exec we only handle command_id. If `act.card_id` is non-nil, fall back to appending the message text only and surface a one-time errorMessage explaining the unsupported branch — avoids silently dropping the response.
 
 - [ ] **Step 2: Replace `confirmProposal(_:)` body**
 
@@ -647,40 +699,66 @@ Replace with:
                     messages[i] = msg
                 }
             case .legacyAction(let action, let message, let reasoning):
-                // Remove the proposal from the previous agent bubble.
+                // Remove the proposal from the previous agent bubble so the
+                // ProposalCard disappears. We do NOT thread the legacy action
+                // through ChatMessage.init(action:) — that param is for the
+                // old ChatAction enum and isn't read by ChatView anyway.
                 if let i = messages.lastIndex(where: { $0.role == .agent }) {
                     var msg = messages[i]
                     msg.proposals?.removeAll(where: { $0.token == p.token })
                     messages[i] = msg
                 }
-                // Inject a new agent message carrying the legacy action so
-                // the existing shield/lock command_id rendering + ack-poll
-                // pipeline kicks in. This is intentionally identical to
-                // what sendMessage produces when the eager dispatch path
-                // returned an action — so no special-case downstream code.
-                let bubble = ChatMessage(
-                    role: .agent,
-                    content: message ?? "",
-                    timestamp: Date(),
-                    reasoning: reasoning,
-                    action: action
-                )
-                messages.append(bubble)
-                if let act = action,
-                   let cid = act.command_id {
-                    // Start ack-poll for the queued command. Reuse whatever
-                    // helper sendMessage uses today (e.g. startAckPoll or
-                    // insertPendingCommand). Replace this comment with the
-                    // exact call that already exists in sendMessage's
-                    // action-handling branch.
+                // Mirror processResponse's command_id branch: append a fresh
+                // agent bubble carrying message + reasoning, then if the
+                // dispatcher gave us a command_id, attach pending state and
+                // start ack-poll. The bubble's commandID is what drives
+                // ChatView's ReceiptCard rendering + ack updates.
+                if let act = action, let cid = act.command_id {
+                    var msg = ChatMessage(
+                        role: .agent,
+                        content: message ?? "",
+                        timestamp: Date(),
+                        reasoning: reasoning,
+                        action: nil    // legacy enum field, intentionally nil
+                    )
+                    msg.commandID = cid
+                    msg.receiptState = .pending
+                    messages.append(msg)
                     startAckPoll(
                         commandID: cid,
-                        messageID: bubble.id,
+                        messageID: msg.id,
                         targetDisplay: act.target_display,
                         expiresAt: act.duration_minutes.map {
                             Date().addingTimeInterval(TimeInterval($0 * 60))
                         }
                     )
+                } else if let act = action, act.card_id != nil {
+                    // v1 doesn't render dispatcher-staged secondary cards
+                    // (D1 duration picker, A1 destructive confirm) on the
+                    // legacy-exec path. Surface a clear message instead of
+                    // silently dropping. This is rare for confirmed shields
+                    // since duration/destructive confirms happen BEFORE the
+                    // proposal stage.
+                    let bubble = ChatMessage(
+                        role: .agent,
+                        content: message ?? "(unsupported response)",
+                        timestamp: Date(),
+                        reasoning: reasoning,
+                        action: nil
+                    )
+                    messages.append(bubble)
+                    errorMessage = "Couldn't show the next step. Try again."
+                } else {
+                    // No command_id, no card — text-only response. Display
+                    // it as plain agent message.
+                    let bubble = ChatMessage(
+                        role: .agent,
+                        content: message ?? "",
+                        timestamp: Date(),
+                        reasoning: reasoning,
+                        action: nil
+                    )
+                    messages.append(bubble)
                 }
             }
             NotificationCenter.default.post(name: .bigKidStateInvalidated, object: nil)
@@ -690,7 +768,7 @@ Replace with:
     }
 ```
 
-**Important:** the call to `startAckPoll(...)` shown above is illustrative. Find the exact helper that ChatViewModel uses today in `sendMessage` for `resp.action` shield processing (probably named `startAckPoll`, `kickoffAckPoll`, `insertPendingCommand`, or similar). Use the same call signature here so the legacy proposal exec produces an identical UX to the eager dispatch path.
+The `startAckPoll(...)` signature above is verified against `ChatViewModel.swift` line 487 — exactly the same parameters as the eager-dispatch path uses. No new helper needed.
 
 - [ ] **Step 3: Build verify**
 
@@ -1382,6 +1460,12 @@ Single-select sheet UI. After Apple-picker fallback returns, computes diff (newl
 // implements a similar primitive — that one is for the Settings probe
 // page and is being kept as-is. CustomTokenPickerView is the production
 // component. We don't migrate the debug view.
+//
+// ForEach id note: `Array(sortedApps.enumerated()), id: \.offset` uses
+// list position as identity. Sheet lifecycle is short (~seconds per use)
+// and the only reorder is once when Apple-picker fallback adds tokens.
+// Acceptable risk for v1 — if reuse glitches surface during QA, swap to
+// a stable wrapper keyed on `tok.hashValue`.
 
 import SwiftUI
 import FamilyControls
@@ -1649,10 +1733,12 @@ struct CustomTokenPickerView: View {
         merged.applicationTokens.formUnion(pickerSelection.applicationTokens)
         merged.categoryTokens.formUnion(pickerSelection.categoryTokens)
         merged.webDomainTokens.formUnion(pickerSelection.webDomainTokens)
-        // Preserve metadata arrays in case Apple gave us non-nil names this
-        // pass (Max .child mode is more likely to expose them than .individual).
-        merged.applications.formUnion(pickerSelection.applications)
-        merged.categories.formUnion(pickerSelection.categories)
+        // NOTE: `selection.applications` and `.categories` are get-only on
+        // FamilyActivitySelection — see ScreenTimeManager.swift:49 ("get-only
+        // — cannot restore metadata after plist decode"). We can't merge
+        // them. The Label(token) view on the merged tokens still renders
+        // names if Apple supplies them at view-time (Max .child auth mode);
+        // the .applications metadata array isn't required for shield calls.
         screenTimeManager.selectedApps = merged
         screenTimeManager.saveSelection()
 
@@ -1903,3 +1989,17 @@ Expected: response has non-empty `proposals` array with `tool == "shield_app_leg
 - Stale miss sweep on tag success + skipProposal clears miss (Task 2.4)
 - `nonisolated static func extractAliasTarget` (Task 2.3)
 - TokenPickerView (debug) deprecation note inline in CustomTokenPickerView header
+
+**Round-2 reviewer fixes (post-v2 first draft):**
+- `_is_lazy_tag_eligible` now matches `type == "shield"` only — removed `block`. Block uses bundle-id catalog lookup, doesn't benefit from lazy-tagged tokens.
+- Backend class is `Proposal` (not `ProposalDTO`). Imported from `backend.app.schemas.agent`.
+- `ChatRequest` / `ChatAction` / `ChatResponse` defined in `parent_chat.py` directly (no `schemas.chat` module). Imports done inside function bodies to avoid circular routing.
+- `chat_context` only stores fields that exist on ChatRequest: `message`, `family_id`, `child_name`, `child_device_id`, `reasoning`. Removed nonexistent `child_id`, `protection_mode`, `parent_id`.
+- Session dependency is `get_async_session` (from `backend.app.db.engine`), not `get_session`.
+- `ExecResponse.legacy_action` typed as `dict[str, Any]` (serialized ChatAction) to avoid the cross-route import cycle. iOS still decodes into `APIClient.ChatActionResponse`.
+- iOS uses `APIClient.ChatActionResponse` for the legacy action type — NOT `Models/ChatModels.swift::ChatAction` (the latter is an unrelated legacy enum).
+- `confirmProposal` legacy path mirrors `processResponse`'s command_id handling exactly: append agent bubble, set `commandID` + `receiptState = .pending`, call `startAckPoll(...)`. Does NOT pass action through `ChatMessage.init(action:)`.
+- Card-id branch on legacy path produces a clear errorMessage (v1 doesn't render dispatcher cards from /parent/agent/exec).
+- Backend tests for `test_proposal_store.py` and `test_parent_agent_endpoints.py` updated for 3-tuple `pop()` and nested `.receipt` response shape (Task 0.3 Step 3).
+- `merged.applications.formUnion` / `merged.categories.formUnion` removed — these are get-only computed properties on `FamilyActivitySelection`.
+- ForEach offset-id risk noted; acceptable for sheet lifetime.
