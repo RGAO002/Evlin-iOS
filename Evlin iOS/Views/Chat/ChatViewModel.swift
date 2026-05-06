@@ -670,7 +670,11 @@ class ChatViewModel: ObservableObject {
     nonisolated static func extractAliasTarget(
         from proposal: ProposalDTO
     ) -> (target: String, kind: AliasKind)? {
-        guard proposal.tool == "shield_app_legacy" else { return nil }
+        // shield_app_legacy and unshield_app_legacy both stage the same
+        // {target, target_kind} args shape — pre-flight runs identically.
+        guard proposal.tool == "shield_app_legacy"
+            || proposal.tool == "unshield_app_legacy"
+        else { return nil }
         guard let target = proposal.args["target"]?.value as? String,
               !target.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         else { return nil }
