@@ -76,7 +76,9 @@ struct ChatView: View {
                                             ProposalCard(
                                                 proposal: p,
                                                 onConfirm: { await viewModel.confirmProposal(p) },
-                                                onSkip: { viewModel.skipProposal(p) }
+                                                onSkip: { viewModel.skipProposal(p) },
+                                                aliasMissTarget: viewModel.aliasMissTarget(for: p),
+                                                onTag: { viewModel.beginLazyTag(for: p) }
                                             )
                                         }
                                     }
@@ -90,6 +92,24 @@ struct ChatView: View {
                                             })
                                         }
                                     }
+                                }
+
+                                // BigKid: reflection essay submitted → parent approves in-chat
+                                if message.role == .agent,
+                                   let reflection = message.reflectionSubmissionReview {
+                                    ReflectionSubmissionReviewCard(
+                                        childName: viewModel.childName,
+                                        writingPrompt: reflection.writingPrompt,
+                                        essayText: reflection.essayText,
+                                        resolved: reflection.resolved,
+                                        onApprove: { note in
+                                            await viewModel.approveReflectionSubmissionFromChat(
+                                                messageId: message.id,
+                                                reflectionId: reflection.reflectionId,
+                                                parentNoteTrimmed: note
+                                            )
+                                        }
+                                    )
                                 }
                             }
                             .id(message.id)
@@ -152,6 +172,28 @@ struct ChatView: View {
             if let active = activeChild {
                 viewModel.childName = active.name
             }
+            guard !isPreview else { return }
+            viewModel.startReflectionSubmissionPolling()
+            Task { await viewModel.tickReflectionSubmissionPoll() }
+        }
+        .onDisappear {
+            guard !isPreview else { return }
+            viewModel.stopReflectionSubmissionPolling()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .bigKidStateInvalidated)) { _ in
+            guard !isPreview else { return }
+            Task { await viewModel.tickReflectionSubmissionPoll() }
+        }
+        .sheet(item: $viewModel.activeLazyTagRequest) { req in
+            CustomTokenPickerView(
+                request: req,
+                onSelect: { token, request in
+                    viewModel.handleTagSelection(token: token, request: request)
+                },
+                onCancel: {
+                    viewModel.cancelLazyTag()
+                }
+            )
         }
     }
 
