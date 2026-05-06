@@ -1,4 +1,4 @@
-# Lazy Tagging Implementation Plan v2
+# Lazy Tagging Implementation Plan v4
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -166,15 +166,30 @@ Above the existing `_handle_gemini_action` definition (around line 429), add:
 
 ```python
 def _is_lazy_tag_eligible(gemini_action: dict) -> bool:
-    """True for shield calls with app/category target_kind — these need
-    iOS-side LocalAliasStore resolution before dispatch.
-    'all' (whole-device) and 'list' (saved-list) don't need alias lookup,
-    so they go through the eager legacy dispatch as before. `block` uses
-    bundle-id-based catalog lookup (app_catalog.py), NOT ApplicationToken,
-    so a tagged token is useless for block — keep block on eager path."""
+    """True only for shield calls with app/category target_kind AND a
+    concrete int duration. Excludes:
+    - `block` (uses bundle-id catalog, not ApplicationToken)
+    - `all` / `list` target kinds (no alias lookup needed)
+    - duration_minutes == "missing" (dispatcher must show D1 first; after
+      parent picks duration, the next round comes back here with int
+      duration and stages cleanly).
+    - duration_minutes > 24*60 without D3 confirmation (D3 long-duration
+      card must show first; parent confirming D3 re-submits with
+      force_confirmations=["D3"] which we treat as eligible).
+    """
     if gemini_action.get("type") != "shield":
         return False
-    return gemini_action.get("target_kind_hint") in {"app", "category"}
+    if gemini_action.get("target_kind_hint") not in {"app", "category"}:
+        return False
+    duration = gemini_action.get("duration_minutes")
+    # Coerce same way chat_resolver does — protobuf often sends float/str.
+    if isinstance(duration, float):
+        duration = int(duration)
+    elif isinstance(duration, str) and duration.isdigit():
+        duration = int(duration)
+    if not isinstance(duration, int) or duration <= 0:
+        return False
+    return True
 
 
 def _stage_legacy_shield_proposal(
@@ -548,6 +563,133 @@ git commit -m "feat(exec): forward staged-legacy shield proposals to dispatcher;
 
 ---
 
+## Task 0.4: chat_resolver — exactApp bypass for lazy-tag-confirmed app shields
+
+**Files:**
+- Modify: `adaptive-engine/backend/app/services/chat_resolver.py` (around line 266 — the `if kind == "app":` branch)
+
+**Why:** Without this, even a tagged shield never queues an exactApp command. `_route_shield` currently always returns E1 (category-fallback card) for `target_kind == "app"`, regardless of whether iOS has bound an alias. We add a `force_exact_app` flag that the lazy-tag exec path sets — when set, dispatcher trusts that the iOS LocalAliasStore can resolve the target and queues a `tier="exactApp"` Command directly. The Command's `target_display` is the canonical name (e.g. "Instagram"), and ActionExecutor's `resolveExactApp` looks up the token via `LocalAliasStore.applicationToken(forLookupKey:)`.
+
+- [ ] **Step 1: Patch `_route_shield`'s app branch**
+
+Find the existing block at chat_resolver.py:266:
+
+```python
+    if kind == "app":
+        # Std can't shield single apps; Max remote picker not in MVP → both offer E1 fallback.
+        return DispatchResult(
+            requires_card="E1",
+            category_guess=action.get("category_hint_from_ai"),
+            ...
+        )
+```
+
+Replace with:
+
+```python
+    if kind == "app":
+        # Lazy-tag confirmed path: when /parent/agent/exec re-submits a
+        # staged shield_app_legacy, it sets `force_exact_app=True` so we
+        # know iOS has already bound (target_request → ApplicationToken)
+        # in LocalAliasStore. Queue a `tier="exactApp"` Command directly;
+        # the kid device's ActionExecutor.resolveExactApp(...) resolves
+        # the token via LocalAliasStore.applicationToken(forLookupKey:
+        # target_display). bundle_id is None — the kid resolves by
+        # display-name lookup key.
+        if action.get("force_exact_app"):
+            return DispatchResult(
+                resolved=ResolvedAction(
+                    action="shield",
+                    tier="exactApp",
+                    target_display=target,
+                    duration_minutes=duration if isinstance(duration, int) else None,
+                    force_downgrade=force_downgrade,
+                )
+            )
+        # Eager (non-lazy-tag) path: still falls back to E1 because the
+        # backend has no way to know the right token without iOS-side
+        # tagging. Behavior unchanged for non-staged calls.
+        return DispatchResult(
+            requires_card="E1",
+            category_guess=action.get("category_hint_from_ai"),
+            # Preserve any other fields from the original line — keep
+            # the existing trailing parameters.
+        )
+```
+
+(Re-verify the existing trailing kwargs of the `requires_card="E1"` branch and preserve them in the fallback. The diff is purely additive — adds the `if action.get("force_exact_app"): ...` branch above the existing fallback.)
+
+- [ ] **Step 2: Set the flag in `_exec_legacy_shield`**
+
+Edit `backend/app/api/routes/parent_agent.py` `_exec_legacy_shield` — between `gemini_action = args.get("gemini_action") or {}` and the `_handle_gemini_action` call, add:
+
+```python
+    # Tell the dispatcher this is a tag-confirmed app shield. _route_shield
+    # checks this flag and routes to tier="exactApp" instead of returning E1.
+    # category target_kind already routes to tier="category" cleanly — no flag.
+    if gemini_action.get("target_kind_hint") == "app":
+        gemini_action["force_exact_app"] = True
+```
+
+- [ ] **Step 3: Add a chat_resolver test for the bypass**
+
+Append to `backend/tests/services/test_chat_resolver.py` (or wherever shield routing is tested):
+
+```python
+def test_route_shield_app_with_force_exact_app_returns_exact_app():
+    """Lazy-tag-confirmed app shield bypasses E1, queues exactApp command."""
+    action = {
+        "type": "shield",
+        "target_kind_hint": "app",
+        "target_request": "Instagram",
+        "duration_minutes": 30,
+        "force_exact_app": True,
+    }
+    result = _route_shield(
+        mode="std", saved_list_names=[], action=action, force_confirmations=[],
+    )
+    assert result.requires_card is None
+    assert result.resolved is not None
+    assert result.resolved.tier == "exactApp"
+    assert result.resolved.target_display == "Instagram"
+    assert result.resolved.duration_minutes == 30
+
+
+def test_route_shield_app_without_flag_still_returns_e1():
+    """Eager (non-staged) app shields still get E1 fallback — behavior unchanged."""
+    action = {
+        "type": "shield",
+        "target_kind_hint": "app",
+        "target_request": "Instagram",
+        "duration_minutes": 30,
+    }
+    result = _route_shield(
+        mode="std", saved_list_names=[], action=action, force_confirmations=[],
+    )
+    assert result.requires_card == "E1"
+    assert result.resolved is None
+```
+
+(Adjust the import / module path of `_route_shield` to match the test file's existing imports.)
+
+- [ ] **Step 4: Run tests**
+
+```bash
+cd /Users/fred/Desktop/Evlin/adaptive-engine
+pytest backend/tests/services/test_chat_resolver.py -v 2>&1 | tail -20
+```
+
+Expected: 2 new tests pass, no regression on existing tests.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add backend/app/services/chat_resolver.py backend/app/api/routes/parent_agent.py backend/tests/services/test_chat_resolver.py
+git commit -m "feat(chat-resolver): bypass E1 for lazy-tag-confirmed app shields (force_exact_app flag)"
+```
+
+---
+
 # Phase 1 — iOS contract bridge
 
 ## Task 1.1: AgentClient.executeProposal returns enum union
@@ -619,7 +761,7 @@ func executeProposal(token: String) async throws -> AgentExecResult {
 
 ```bash
 cd "/Users/fred/Desktop/Evlin/Evlin iOS"
-xcodebuild -project "Evlin iOS.xcodeproj" -scheme "Evlin iOS" -destination "generic/platform=iOS" build 2>&1 | grep -E "error:" | head -10 && echo OK
+xcodebuild -project "Evlin iOS.xcodeproj" -scheme "Evlin iOS" -destination "generic/platform=iOS" build 2>&1 | tee /tmp/build.log | grep -E "error:" | head -5; if grep -q "^.*error:" /tmp/build.log; then echo "BUILD FAILED"; else echo OK; fi
 ```
 
 Expected: errors at the existing `confirmProposal` call site (`let receipt = try await client.executeProposal(...)`) because the return type changed. That's expected — Task 1.2 fixes it.
@@ -773,7 +915,7 @@ The `startAckPoll(...)` signature above is verified against `ChatViewModel.swift
 - [ ] **Step 3: Build verify**
 
 ```bash
-xcodebuild -project "Evlin iOS.xcodeproj" -scheme "Evlin iOS" -destination "generic/platform=iOS" build 2>&1 | grep -E "error:" | head -10 && echo OK
+xcodebuild -project "Evlin iOS.xcodeproj" -scheme "Evlin iOS" -destination "generic/platform=iOS" build 2>&1 | tee /tmp/build.log | grep -E "error:" | head -5; if grep -q "^.*error:" /tmp/build.log; then echo "BUILD FAILED"; else echo OK; fi
 ```
 
 Expected: `OK` only. If errors mention undeclared `pendingAliasMisses` — that's ok for now (added in Phase 2 Task 2.3). Move the empty `pendingAliasMisses: [String: AliasKind] = [:]` declaration up to this task and verify build is clean.
@@ -836,7 +978,7 @@ struct LazyTagRequest: Identifiable, Equatable {
 - [ ] **Step 3: Build verify**
 
 ```bash
-xcodebuild -project "Evlin iOS.xcodeproj" -scheme "Evlin iOS" -destination "generic/platform=iOS" build 2>&1 | grep -E "error:" | head -5 && echo OK
+xcodebuild -project "Evlin iOS.xcodeproj" -scheme "Evlin iOS" -destination "generic/platform=iOS" build 2>&1 | tee /tmp/build.log | grep -E "error:" | head -5; if grep -q "^.*error:" /tmp/build.log; then echo "BUILD FAILED"; else echo OK; fi
 ```
 
 Expected: `OK`.
@@ -1262,7 +1404,7 @@ Find `func skipProposal` (line ~781). Just inside the function add:
 - [ ] **Step 3: Build verify**
 
 ```bash
-xcodebuild -project "Evlin iOS.xcodeproj" -scheme "Evlin iOS" -destination "generic/platform=iOS" build 2>&1 | grep -E "error:" | head -5 && echo OK
+xcodebuild -project "Evlin iOS.xcodeproj" -scheme "Evlin iOS" -destination "generic/platform=iOS" build 2>&1 | tee /tmp/build.log | grep -E "error:" | head -5; if grep -q "^.*error:" /tmp/build.log; then echo "BUILD FAILED"; else echo OK; fi
 ```
 
 Expected: `OK`.
@@ -1422,7 +1564,7 @@ struct ProposalCard: View {
 - [ ] **Step 2: Build verify**
 
 ```bash
-xcodebuild -project "Evlin iOS.xcodeproj" -scheme "Evlin iOS" -destination "generic/platform=iOS" build 2>&1 | grep -E "error:" | head -5 && echo OK
+xcodebuild -project "Evlin iOS.xcodeproj" -scheme "Evlin iOS" -destination "generic/platform=iOS" build 2>&1 | tee /tmp/build.log | grep -E "error:" | head -5; if grep -q "^.*error:" /tmp/build.log; then echo "BUILD FAILED"; else echo OK; fi
 ```
 
 Expected: `OK`.
@@ -1780,7 +1922,7 @@ struct CustomTokenPickerView: View {
 - [ ] **Step 2: Build verify**
 
 ```bash
-xcodebuild -project "Evlin iOS.xcodeproj" -scheme "Evlin iOS" -destination "generic/platform=iOS" build 2>&1 | grep -E "error:" | head -5 && echo OK
+xcodebuild -project "Evlin iOS.xcodeproj" -scheme "Evlin iOS" -destination "generic/platform=iOS" build 2>&1 | tee /tmp/build.log | grep -E "error:" | head -5; if grep -q "^.*error:" /tmp/build.log; then echo "BUILD FAILED"; else echo OK; fi
 ```
 
 Expected: `OK`.
@@ -1858,7 +2000,7 @@ If injected at app root: nothing more to do. If not, attach `.environmentObject(
 - [ ] **Step 4: Build verify**
 
 ```bash
-xcodebuild -project "Evlin iOS.xcodeproj" -scheme "Evlin iOS" -destination "generic/platform=iOS" build 2>&1 | grep -E "error:" | head -5 && echo OK
+xcodebuild -project "Evlin iOS.xcodeproj" -scheme "Evlin iOS" -destination "generic/platform=iOS" build 2>&1 | tee /tmp/build.log | grep -E "error:" | head -5; if grep -q "^.*error:" /tmp/build.log; then echo "BUILD FAILED"; else echo OK; fi
 ```
 
 Expected: `OK`.
@@ -1982,7 +2124,7 @@ Expected: response has non-empty `proposals` array with `tool == "shield_app_leg
 **R1 fixes incorporated:**
 - Simulator name `iPhone 16e`
 - Hard guard verification via observable `errorMessage` (no LLDB)
-- `mergePickerIntoSelectedApps` includes `applications` / `categories` formUnion
+- `mergePickerIntoSelectedApps` only merges token sets (applicationTokens / categoryTokens / webDomainTokens). The `applications` / `categories` metadata arrays are get-only and cannot be merged — see Round-2 reviewer fixes below.
 
 **R2 fixes incorporated:**
 - Apple picker diff highlighting + auto-select on single addition (Task 2.6)
@@ -2003,3 +2145,9 @@ Expected: response has non-empty `proposals` array with `tool == "shield_app_leg
 - Backend tests for `test_proposal_store.py` and `test_parent_agent_endpoints.py` updated for 3-tuple `pop()` and nested `.receipt` response shape (Task 0.3 Step 3).
 - `merged.applications.formUnion` / `merged.categories.formUnion` removed — these are get-only computed properties on `FamilyActivitySelection`.
 - ForEach offset-id risk noted; acceptable for sheet lifetime.
+
+**Round-3 reviewer fixes (post-v3):**
+- **chat_resolver E1 bypass (Task 0.4)**: `_route_shield`'s `kind == "app"` branch now checks `force_exact_app` flag. When true (set by `_exec_legacy_shield`), returns `ResolvedAction(tier="exactApp", target_display=target, ...)` instead of the E1 fallback card. Without this, lazy-tag confirm would still hit the E1 dead end and never queue an actual shield Command.
+- **Duration gating (Task 0.2)**: `_is_lazy_tag_eligible` now also requires `duration_minutes` to be a positive int. Missing-duration shields fall through to eager dispatch (which returns D1 duration card). After parent picks duration, the next round of dispatch produces a shield_app with concrete duration → THIS round stages as lazy-tag → tag flow → exec → exactApp Command. D1 card flow stays in the existing card pipeline, never enters /parent/agent/exec.
+- **Build verify commands fixed (P2)**: replaced broken `grep -E "error:" | head -10 && echo OK` pattern (which printed OK when build had errors and silent when it succeeded) with `tee /tmp/build.log; if grep -q "error:" then BUILD FAILED else OK`.
+- **Self-review formUnion contradiction (P3)**: cleaned up.
