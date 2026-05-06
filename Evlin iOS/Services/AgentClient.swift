@@ -29,6 +29,13 @@ struct AgentClient {
         if let receipt = decoded.receipt {
             return .receipt(receipt)
         }
+        if let plural = decoded.legacy_actions, !plural.isEmpty {
+            return .legacyActions(
+                results: plural,
+                message: decoded.message,
+                reasoning: decoded.reasoning
+            )
+        }
         return .legacyAction(
             action: decoded.legacy_action,
             message: decoded.message,
@@ -79,13 +86,25 @@ struct RevertResult: Codable {
 /// responses; do not use it here.
 enum AgentExecResult {
     case receipt(ReceiptDTO)
+    /// Singular legacy action — kept for backwards compat with old
+    /// proposals in flight at deploy time. New code emits `legacyActions`.
     case legacyAction(action: APIClient.ChatActionResponse?, message: String?, reasoning: String?)
+    /// Plural: each entry is one staged sub-action's exec result. iOS
+    /// appends a separate ChatMessage + starts a separate ack-poll per
+    /// item with a non-nil command_id.
+    case legacyActions(results: [LegacyActionResult], message: String?, reasoning: String?)
+}
+
+struct LegacyActionResult: Decodable {
+    let action: APIClient.ChatActionResponse?
+    let message: String?
 }
 
 /// Server-side response shape mirroring backend ExecResponse.
 private struct ExecResponseDTO: Decodable {
     let receipt: ReceiptDTO?
     let legacy_action: APIClient.ChatActionResponse?
+    let legacy_actions: [LegacyActionResult]?
     let message: String?
     let reasoning: String?
 }
