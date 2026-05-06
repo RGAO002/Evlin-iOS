@@ -9,7 +9,13 @@ enum ReceiptState: Sendable, Equatable, Codable {
     case failedPermission
     case failedListNotFound(listName: String)
     case failedCategoryNotConfigured(category: String)
+    case failedAppNotConfigured(appReference: String)
     case failedTimeout
+    /// Kid device hasn't acked within the local deadline. Distinct from
+    /// `failedTimeout` (which is a real backend timeout): the command is
+    /// still queued server-side and will run when the kid comes back —
+    /// we just stopped polling so the parent isn't staring at a spinner.
+    case kidNotResponding
     case failedOther(reason: String)
 }
 
@@ -84,9 +90,23 @@ struct ReceiptCard: View {
         case .failedCategoryNotConfigured(let cat):
             Label("Category \(cat) not configured.", systemImage: "xmark.octagon")
                 .font(.subheadline).foregroundStyle(.red)
+        case .failedAppNotConfigured(let ref):
+            Label("App \(ref) not found in Managed Apps.", systemImage: "xmark.octagon")
+                .font(.subheadline).foregroundStyle(.red)
         case .failedTimeout:
             Label("Command timed out.", systemImage: "clock")
                 .font(.subheadline).foregroundStyle(.red)
+        case .kidNotResponding:
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.bubble")
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Kid's phone hasn't responded yet")
+                        .font(.subheadline).fontWeight(.medium)
+                        .foregroundStyle(.orange)
+                    Text("Still queued — will apply when Evlin opens on their device.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
         case .failedOther(let reason):
             Label(reason, systemImage: "xmark.octagon").font(.subheadline).foregroundStyle(.red)
         }

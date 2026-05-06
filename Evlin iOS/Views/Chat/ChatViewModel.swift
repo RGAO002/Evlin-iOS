@@ -510,13 +510,14 @@ class ChatViewModel: ObservableObject {
     /// message's receiptState when the child acks. Times out at 30 s.
     private func startAckPoll(commandID: UUID, messageID: UUID, targetDisplay: String?, expiresAt: Date?) {
         let task = Task { [weak self] in
-            // 24h deadline. Was 10min; even that stranded the receipt on
-            // single-device dev when the parent took their time switching
-            // to K mode (or did a few unrelated things first). Real 2-device
-            // kids ack within seconds, so the upper bound only governs the
-            // 'parent never came back' edge case. 24h means the receipt
-            // resolves whenever the kid eventually picks the command up.
-            let deadline = Date().addingTimeInterval(24 * 3600)
+            // 90s deadline. Real two-device kids ack within seconds; if
+            // we've waited 90s the device almost certainly isn't online.
+            // Was 24h, which left an indefinite spinner whenever the
+            // parent stayed in P mode (single-device test) or the kid
+            // device was offline. Honest "kid hasn't responded" state
+            // beats infinite ProgressView — the command itself remains
+            // queued server-side regardless of when we stop polling.
+            let deadline = Date().addingTimeInterval(90)
             while Date() < deadline, !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
                 guard let self else { return }
@@ -605,19 +606,15 @@ class ChatViewModel: ObservableObject {
                 }
                 if done { return }
             }
-            // Deadline hit without a terminal status. Single-device dev
-            // mode (FloatingModeToggle): if the parent never flipped to
-            // K mode, the kid-side poller never ran and never acked. Don't
-            // surface that as 'Command timed out' — the command is still
-            // queued on the server and will execute as soon as K mode is
-            // entered. Leave the receipt as .pending; the next ack-poll
-            // (or a fresh chat round-trip) will finalise it.
-            let inParentMode = (UserDefaults.standard.string(forKey: "appMode") ?? "") == "parent"
+            // Deadline hit without a terminal status. Show
+            // `.kidNotResponding` instead of leaving the spinner up —
+            // the receipt is honest (kid hasn't acked yet) without
+            // claiming the command itself failed. Applies whether the
+            // parent stayed in P mode (single-device dev) or the kid
+            // device is genuinely offline; the server-queued command
+            // still executes once the kid comes back.
             await MainActor.run {
-                if inParentMode {
-                    return
-                }
-                self?.applyReceipt(.failedTimeout, effective: nil, messageID: messageID)
+                self?.applyReceipt(.kidNotResponding, effective: nil, messageID: messageID)
             }
         }
         activePolls[commandID] = task
