@@ -6,7 +6,7 @@
 
 **Architecture:** Backend agent_loop accumulates legacy actions instead of short-circuiting on the first; new staging path bundles by type into multi-row Proposals. Backend persists kid's last `effectiveState` per device; bare unlock dispatches a U1 card whose confirm marker (`U1:<token>:all` / `U1:<token>:selected:0,2`) is intercepted at the top of `parent_chat` to bypass the agent loop. iOS gets a multi-row `ProposalCard`, a new `U1Card`, and a `NameWithIcon` helper that uses `Label(token).labelStyle(.iconOnly)` to render Apple's app icon next to display names.
 
-**Tech Stack:** Python 3.11 / FastAPI / SQLAlchemy 2 / Alembic / pytest (backend); Swift 5.9 / SwiftUI / FamilyControls / XCTest (iOS).
+**Tech Stack:** Python 3.11 / FastAPI / SQLAlchemy 2 / pytest (backend; no Alembic — `Base.metadata.create_all` on startup, manual SQL scripts under `backend/scripts/migrations/` for prod ALTER TABLE); Swift 5.9 / SwiftUI / FamilyControls / XCTest (iOS).
 
 ---
 
@@ -28,7 +28,8 @@
 
 | File | Responsibility |
 |---|---|
-| `backend/alembic/versions/<timestamp>_add_last_effective_state.py` | Alembic migration adding the two device columns |
+| `backend/scripts/migrations/2026_05_07_add_last_effective_state.sql` | Manual SQL migration (no Alembic in repo); applied to Railway prod before backend deploy |
+| `backend/scripts/migrations/README.md` | Migration runbook explaining create_all + manual ALTER pattern |
 | `backend/tests/services/test_agent_loop_multi_action.py` | Accumulator behavior |
 | `backend/tests/api/test_parent_chat_multi_action.py` | Bundled proposal staging + label generation |
 | `backend/tests/services/test_chat_resolver_u1.py` | U1 routing branch |
@@ -292,6 +293,10 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock
 from backend.app.services.agent_loop import AgentLoop, AgentInput
 from backend.app.services.agent_tools.decorator import GLOBAL_REGISTRY
+# Tool registration is import-side-effect: pull in the shield/unshield
+# module so GLOBAL_REGISTRY knows `shield_app`. Without this, the test
+# returns unknown-tool errors and 0 legacy actions.
+from backend.app.services.agent_tools import shield_tools  # noqa: F401
 from backend.app.schemas.agent import AgentResponse
 
 
@@ -738,8 +743,28 @@ async def _stage_legacy_actions(
                 req=req, session=session,
             )
 
+    # Phase 1 scope: bundle only `shield` and `unshield`. `block` and
+    # `unblock` use the bundle-id catalog path and don't share the
+    # ApplicationToken / lazy-tag plumbing — bundling them under
+    # shield_app_legacy would mislabel and misroute. Send any
+    # block/unblock/other through eager dispatch one at a time. If
+    # multiple non-bundleable actions exist in a single turn, only the
+    # first runs; the rest are dropped and the parent re-emits via
+    # Gemini next round (matches today's pre-Phase-1 behavior for those
+    # types — no regression).
+    BUNDLEABLE = {"shield", "unshield"}
+    bundleable = [a for a in actions if a.get("type") in BUNDLEABLE]
+    other = [a for a in actions if a.get("type") not in BUNDLEABLE]
+
+    if other and not bundleable:
+        # Pure non-bundleable turn — eager dispatch the first one.
+        return await _handle_gemini_action(
+            gemini_action=other[0], message=message, reasoning=reasoning,
+            req=req, session=session,
+        )
+
     by_type: dict[str, list[dict]] = defaultdict(list)
-    for a in actions:
+    for a in bundleable:
         by_type[a["type"]].append(a)
 
     proposals: list[Proposal] = []
@@ -753,6 +778,18 @@ async def _stage_legacy_actions(
                 message=message,
                 reasoning=reasoning,
             )
+        )
+
+    # If the turn mixed bundleable + non-bundleable, log the dropped
+    # non-bundleable ones — the bundled proposals still flow but the
+    # parent should know we partial-handled.
+    if other:
+        from loguru import logger
+        logger.warning(
+            "multi-action turn mixed bundleable {} with non-bundleable {} — "
+            "non-bundleable actions deferred to next Gemini round",
+            [a.get("type") for a in bundleable],
+            [a.get("type") for a in other],
         )
 
     return ChatResponse(
@@ -1539,8 +1576,13 @@ async def _handle_u1_confirm(
     shield_list: list[dict] = args.get("shield_list") or []
 
     if mode == "all":
+        # Use type="unshield_all" (not type="unshield" + target_kind_hint="all"),
+        # because the latter passes through Task 10's effective_state injection
+        # and chat_resolver._route_unshield could re-render U1 with the same
+        # N≥2 shields. unshield_all routes directly to the bulk dispatch path
+        # via _route_unshield_all without consulting effective state.
         gemini_action = {
-            "type": "unshield",
+            "type": "unshield_all",
             "target_request": "everything",
             "target_kind_hint": "all",
             "duration_minutes": None,
@@ -2959,13 +3001,16 @@ In ChatViewModel, find where `currentCard` is set for cards (search for `current
 ```swift
 case .U1:
     let token = act.u1_token ?? ""
+    // Each dict value is an AnyCodable wrapper — unwrap via `.value` before
+    // casting. Casting `dict["kind"] as? String` directly fails (the value
+    // IS AnyCodable), giving a row of all-defaults.
     let entries = (act.u1_shield_list ?? []).enumerated().map { idx, dict -> U1ShieldEntry in
         U1ShieldEntry(
             index: idx,
-            kind: dict["kind"] as? String ?? "app",
-            displayName: dict["display_name"] as? String ?? "(unknown)",
-            expiresAtISO: dict["expires_at_iso"] as? String,
-            stale: dict["stale"] as? Bool ?? false
+            kind: dict["kind"]?.value as? String ?? "app",
+            displayName: dict["display_name"]?.value as? String ?? "(unknown)",
+            expiresAtISO: dict["expires_at_iso"]?.value as? String,
+            stale: dict["stale"]?.value as? Bool ?? false
         )
     }
     let context = CardContext.defaultContext(
@@ -3122,6 +3167,14 @@ If any fail: open issue with the failing scenario number + console `[AckPoll]` l
 - **P2 simulator name:** `iPhone 15` → `iPhone 16e` everywhere.
 - **P2 E2E prereq:** Task 20 now states the lazy-tagging plan must be deployed first.
 - **P3 LazyTagRequest spec:** explicit struct definition with id / proposalToken / rowIndex / target / kind, replacing the "if needed" hand-wave.
+
+**Round 3 (2026-05-07)** — second review pass; 4 P1 + 1 P3 fixes applied:
+
+- **P1 AgentLoop test missing tool import:** added `from backend.app.services.agent_tools import shield_tools  # noqa: F401` so GLOBAL_REGISTRY knows `shield_app` when the test runs in isolation.
+- **P1 block/unblock multi-action misroute:** `_stage_legacy_actions` now scopes bundling to `{shield, unshield}`. `block`/`unblock` actions in a multi-action turn go through eager dispatch (first-only); a logger.warning surfaces dropped siblings. Phase 1 explicitly does not bundle bundle-id-based tools.
+- **P1 U1 "all" recursion:** `_handle_u1_confirm` mode=all now builds `type="unshield_all"` (not `unshield`+kind=all). Task 10's effective_state injection guard `type == "unshield"` is False for `unshield_all` → no re-render of U1.
+- **P1 U1 row parsing AnyCodable wrap:** changed `dict["kind"] as? String` to `dict["kind"]?.value as? String` everywhere in the U1 row-mapping closure. Without this, every row was kind="app" / displayName="(unknown)" / stale=false regardless of backend payload.
+- **P3 File Structure Alembic stale mention:** swapped to `backend/scripts/migrations/2026_05_07_add_last_effective_state.sql` + README; tech stack line clarified.
 
 ## Out of scope (explicit)
 
