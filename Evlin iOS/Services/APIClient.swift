@@ -45,6 +45,11 @@ class APIClient: ObservableObject {
         let confirmation_reason: String?
         let list_suggestions: [String]?
         let category_guess: String?
+        // U1 unlock-disambiguation card fields. Backend sets these when
+        // emitting card_id == "U1". `u1_shield_list` is parsed via AnyCodable
+        // (an array of dicts) — ChatViewModel unwraps to [U1ShieldEntry].
+        let u1_token: String?
+        let u1_shield_list: AnyCodable?
     }
 
     struct ChatResponse: Codable, Sendable {

@@ -28,6 +28,10 @@ class ChatViewModel: ObservableObject {
     /// or when a terminal status is received.
     private var activePolls: [UUID: Task<Void, Never>] = [:]
 
+    /// Captured at sendMessage time so U1 confirm handlers can re-send the
+    /// original parent message with the marker appended.
+    private var lastUserMessageForCard: String = ""
+
     /// Dedup reflection rows so polling doesn't stack duplicates.
     private var surfacedReflectionSubmissionIDs: Set<UUID> = []
     private var reflectionSubmissionPoll: AnyCancellable?
@@ -119,6 +123,7 @@ class ChatViewModel: ObservableObject {
         isThinking = true
         errorMessage = nil
 
+        lastUserMessageForCard = text
         dispatchChat(userMessage: text, forceConfirmations: [])
     }
 
@@ -291,6 +296,44 @@ class ChatViewModel: ObservableObject {
 
     @MainActor
     private func renderCard(cardID: CardID, action act: APIClient.ChatActionResponse) {
+        // U1 unlock-disambiguation has its own context shape — parse the
+        // shield list out of AnyCodable (recursive — value is [Any] of dicts).
+        if cardID == .U1 {
+            let token = act.u1_token ?? ""
+            let rawList = (act.u1_shield_list?.value as? [Any]) ?? []
+            let entries = rawList.enumerated().compactMap { idx, item -> U1ShieldEntry? in
+                guard let dict = item as? [String: Any] else { return nil }
+                return U1ShieldEntry(
+                    index: idx,
+                    kind: dict["kind"] as? String ?? "app",
+                    displayName: dict["display_name"] as? String ?? "(unknown)",
+                    expiresAtISO: dict["expires_at_iso"] as? String,
+                    stale: dict["stale"] as? Bool ?? false
+                )
+            }
+            let ctx = CardContext(
+                targetDisplay: "",
+                childName: self.childName,
+                durationMinutes: nil, categoryGuess: nil,
+                listSuggestions: [], existingLists: [], blockItems: [],
+                childDevices: [], mode: self.protectionMode,
+                existingRecordKey: nil, requestedExpiryISO: nil, existingMode: nil,
+                u1Token: token,
+                u1ShieldList: entries
+            )
+            let handlers = CardHandlers(
+                onCancel: { [weak self] in self?.currentCard = nil },
+                onU1UnlockSelected: { [weak self] indices in
+                    self?.handleU1UnlockSelected(token: token, indices: indices)
+                },
+                onU1UnlockEverything: { [weak self] in
+                    self?.handleU1UnlockEverything(token: token)
+                }
+            )
+            self.currentCard = (cardID, ctx, handlers)
+            return
+        }
+
         let context = CardContext(
             targetDisplay: act.target_display ?? "",
             childName: self.childName,
@@ -313,6 +356,39 @@ class ChatViewModel: ObservableObject {
             onListPicked: { [weak self] name in self?.handleListPicked(name, action: act) }
         )
         self.currentCard = (cardID, context, handlers)
+    }
+
+    // MARK: - U1 unlock-disambiguation
+
+    enum U1Mode {
+        case all
+        case selected([Int])
+    }
+
+    nonisolated static func buildU1Marker(token: String, mode: U1Mode) -> String? {
+        switch mode {
+        case .all:
+            return "U1:\(token):all"
+        case .selected(let indices):
+            guard !indices.isEmpty else { return nil }
+            let idx = indices.sorted().map(String.init).joined(separator: ",")
+            return "U1:\(token):selected:\(idx)"
+        }
+    }
+
+    func handleU1UnlockSelected(token: String, indices: [Int]) {
+        guard let marker = Self.buildU1Marker(token: token, mode: .selected(indices))
+        else { return }
+        let originalMessage = lastUserMessageForCard
+        dispatchChat(userMessage: originalMessage, forceConfirmations: [marker])
+        currentCard = nil
+    }
+
+    func handleU1UnlockEverything(token: String) {
+        let marker = Self.buildU1Marker(token: token, mode: .all)!
+        let originalMessage = lastUserMessageForCard
+        dispatchChat(userMessage: originalMessage, forceConfirmations: [marker])
+        currentCard = nil
     }
 
     // MARK: - Card button handlers (P1-2 fix — no more dead slots)
@@ -692,7 +768,8 @@ class ChatViewModel: ObservableObject {
             duration_minutes: Int(ctx["requested_duration_minutes"] ?? ""),
             confirmation_required: true,
             card_id: cardID.rawValue,
-            confirmation_reason: nil, list_suggestions: nil, category_guess: nil
+            confirmation_reason: nil, list_suggestions: nil, category_guess: nil,
+            u1_token: nil, u1_shield_list: nil
         )
         let handlers = CardHandlers(
             onPrimary: { [weak self] in self?.handleCardPrimary(cardID: cardID, action: fakeAction) },
