@@ -57,29 +57,31 @@ struct ReceiptCard: View {
                 Text("Queued — waiting for kid device").font(.subheadline)
             }
         case .confirmedExact(let verb, let name, let unlocksAt):
-            HStack(spacing: 8) {
-                Image(systemName: iconForVerb(verb))
-                VStack(alignment: .leading) {
-                    Text(titleForVerb(verb, displayName: name))
-                        .font(.subheadline).fontWeight(.medium)
-                    if verb == .shield {
-                        if let at = unlocksAt {
-                            Text("Unlocks at \(timeString(at))").font(.caption).foregroundStyle(.secondary)
-                        } else {
-                            Text("Until you unlock").font(.caption).foregroundStyle(.secondary)
-                        }
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    NameWithIcon(name: name, kind: .app, titleFont: .subheadline.weight(.medium))
+                    Spacer()
+                    Image(systemName: iconForVerb(verb))
+                }
+                if verb == .shield {
+                    if let at = unlocksAt {
+                        Text("Unlocks at \(timeString(at))")
+                            .font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        Text("Until you unlock")
+                            .font(.caption).foregroundStyle(.secondary)
                     }
                 }
             }
-        case .confirmedFallback(let verb, _, let category, let orig):
-            HStack(spacing: 8) {
-                Image(systemName: "arrow.triangle.branch")
-                VStack(alignment: .leading) {
-                    Text(fallbackTitleForVerb(verb, category: category))
-                        .font(.subheadline).fontWeight(.medium)
-                    Text("No exact match for \(orig); applied to \(category) instead.")
-                        .font(.caption).foregroundStyle(.secondary)
+        case .confirmedFallback(_, let name, let category, let orig):
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    NameWithIcon(name: name, kind: .app, titleFont: .subheadline.weight(.medium))
+                    Spacer()
+                    Image(systemName: "arrow.triangle.branch")
                 }
+                Text("No exact match for \(orig); applied to \(category) instead.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
         case .failedPermission:
             Label("Screen Time permission required.", systemImage: "exclamationmark.triangle")
@@ -88,11 +90,19 @@ struct ReceiptCard: View {
             Label("List \"\(listName)\" not found.", systemImage: "xmark.octagon")
                 .font(.subheadline).foregroundStyle(.red)
         case .failedCategoryNotConfigured(let cat):
-            Label("Category \(cat) not configured.", systemImage: "xmark.octagon")
-                .font(.subheadline).foregroundStyle(.red)
+            HStack(spacing: 6) {
+                Image(systemName: "xmark.octagon").foregroundStyle(.red)
+                Text("Category ").font(.subheadline).foregroundStyle(.red)
+                NameWithIcon(name: cat, kind: .category, titleFont: .subheadline)
+                Text(" not configured.").font(.subheadline).foregroundStyle(.red)
+            }
         case .failedAppNotConfigured(let ref):
-            Label("App \(ref) not found in Managed Apps.", systemImage: "xmark.octagon")
-                .font(.subheadline).foregroundStyle(.red)
+            HStack(spacing: 6) {
+                Image(systemName: "xmark.octagon").foregroundStyle(.red)
+                Text("App ").font(.subheadline).foregroundStyle(.red)
+                NameWithIcon(name: ref, kind: .app, titleFont: .subheadline)
+                Text(" not found in Managed Apps.").font(.subheadline).foregroundStyle(.red)
+            }
         case .failedTimeout:
             Label("Command timed out.", systemImage: "clock")
                 .font(.subheadline).foregroundStyle(.red)

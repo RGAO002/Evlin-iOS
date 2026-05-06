@@ -32,18 +32,19 @@ struct AliasManagementView: View {
                 } else {
                     ForEach(apps, id: \.label) { entry in
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(entry.label.capitalized)
-                                .font(.body)
+                            NameWithIcon(name: entry.label, kind: .app, titleFont: .body)
                             if let bid = entry.bundleID {
                                 Text(bid)
                                     .font(.caption.monospaced())
                                     .foregroundStyle(.secondary)
+                                    .padding(.leading, 32)
                             }
                             let aliasKeys = entry.keys.filter { $0 != entry.bundleID?.lowercased() }
                             if aliasKeys.count > 1 {
                                 Text("Also matches: \(aliasKeys.filter { $0 != entry.label.lowercased() }.joined(separator: ", "))")
                                     .font(.caption2)
                                     .foregroundStyle(.secondary)
+                                    .padding(.leading, 32)
                             }
                         }
                     }
@@ -63,7 +64,7 @@ struct AliasManagementView: View {
                         .foregroundStyle(.secondary)
                 } else {
                     ForEach(categories, id: \.self) { name in
-                        Text(name.capitalized)
+                        NameWithIcon(name: name, kind: .category, titleFont: .body)
                     }
                     .onDelete { indexSet in
                         for i in indexSet {
@@ -77,7 +78,7 @@ struct AliasManagementView: View {
             if !lists.isEmpty {
                 Section("Saved Lists (\(lists.count))") {
                     ForEach(lists, id: \.self) { name in
-                        Text(name.capitalized)
+                        NameWithIcon(name: name, kind: .savedList, titleFont: .body)
                     }
                 }
             }
