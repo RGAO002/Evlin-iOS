@@ -9,8 +9,10 @@ struct AgentClient {
         self.baseURL = baseURL
     }
 
-    /// Confirm a staged proposal. Returns the executed receipt.
-    func executeProposal(token: String) async throws -> ReceiptDTO {
+    /// Confirm a staged proposal. Returns either a tool-style receipt
+    /// (existing tools) or a legacy ChatAction+message bundle (when the
+    /// proposal was a staged shield_app_legacy entry).
+    func executeProposal(token: String) async throws -> AgentExecResult {
         let url = URL(string: "\(baseURL)/parent/agent/exec")!
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
@@ -23,7 +25,15 @@ struct AgentClient {
                 code: (resp as? HTTPURLResponse)?.statusCode ?? 0,
                 detail: String(data: data, encoding: .utf8) ?? "")
         }
-        return try JSONDecoder().decode(ReceiptDTO.self, from: data)
+        let decoded = try JSONDecoder().decode(ExecResponseDTO.self, from: data)
+        if let receipt = decoded.receipt {
+            return .receipt(receipt)
+        }
+        return .legacyAction(
+            action: decoded.legacy_action,
+            message: decoded.message,
+            reasoning: decoded.reasoning
+        )
     }
 
     /// Revert a previously executed action by undo_token.
@@ -56,6 +66,28 @@ struct RevertResult: Codable {
         case revertedActionID = "reverted_action_id"
         case newUndoToken = "new_undo_token"
     }
+}
+
+/// Result of /parent/agent/exec. Backend returns either a tool-style
+/// receipt (existing tools) or a legacy ChatAction+message bundle (when
+/// the proposal was a staged shield_app_legacy entry — see backend
+/// parent_agent.py / parent_chat.py for staging).
+///
+/// IMPORTANT: legacy action uses `APIClient.ChatActionResponse` — the same
+/// type that decodes /parent/chat's `action` field. The other `ChatAction`
+/// in `Models/ChatModels.swift` is a legacy enum unrelated to /parent/chat
+/// responses; do not use it here.
+enum AgentExecResult {
+    case receipt(ReceiptDTO)
+    case legacyAction(action: APIClient.ChatActionResponse?, message: String?, reasoning: String?)
+}
+
+/// Server-side response shape mirroring backend ExecResponse.
+private struct ExecResponseDTO: Decodable {
+    let receipt: ReceiptDTO?
+    let legacy_action: APIClient.ChatActionResponse?
+    let message: String?
+    let reasoning: String?
 }
 
 enum AgentError: LocalizedError {

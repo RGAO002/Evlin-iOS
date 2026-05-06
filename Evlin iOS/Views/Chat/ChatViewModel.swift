@@ -14,9 +14,20 @@ class ChatViewModel: ObservableObject {
     /// Set when backend returns `action.card_id`, cleared when user answers.
     @Published var currentCard: (CardID, CardContext, CardHandlers)?
 
+    /// ProposalToken → kind for proposals whose alias didn't resolve at
+    /// pre-flight. Drives ProposalCard's "Tag <target>" UI and the
+    /// hard guard inside `confirmProposal(_:)`. Task 2.3 wires up the
+    /// pre-flight that populates this; here we declare it so the hard
+    /// guard compiles.
+    @Published var pendingAliasMisses: [String: AliasKind] = [:]
+
     /// In-flight ack-status polls, keyed by command_id. Cancelled on clearHistory
     /// or when a terminal status is received.
     private var activePolls: [UUID: Task<Void, Never>] = [:]
+
+    /// Dedup reflection rows so polling doesn't stack duplicates.
+    private var surfacedReflectionSubmissionIDs: Set<UUID> = []
+    private var reflectionSubmissionPoll: AnyCancellable?
 
     let quickPrompts = QuickPrompt.defaults
     var apiClient: APIClient = APIClient()
@@ -44,7 +55,9 @@ class ChatViewModel: ObservableObject {
             forName: .evlinClearChat, object: nil, queue: .main
         ) { [weak self] _ in
             self?.messages.removeAll()
+            self?.surfacedReflectionSubmissionIDs.removeAll()
         }
+        rebuildSurfacedReflectionSubmissionIndex()
     }
 
     // MARK: - Persistence
@@ -66,6 +79,7 @@ class ChatViewModel: ObservableObject {
 
     func clearHistory() {
         messages.removeAll()
+        surfacedReflectionSubmissionIDs.removeAll()
         UserDefaults.standard.removeObject(forKey: Self.storageKey)
     }
 
@@ -548,6 +562,10 @@ class ChatViewModel: ObservableObject {
                             state = .failedCategoryNotConfigured(
                                 category: (detail["category"]?.value as? String) ?? "(unknown)"
                             )
+                        case "application_not_configured":
+                            state = .failedAppNotConfigured(
+                                appReference: (detail["app_reference"]?.value as? String) ?? "(unknown)"
+                            )
                         case "nothing_to_unlock":
                             state = .failedOther(reason: "Nothing matched to unlock.")
                         case "malformed":
@@ -634,14 +652,85 @@ class ChatViewModel: ObservableObject {
     /// so the card flips into a ReceiptBubble in place.
     @MainActor
     func confirmProposal(_ p: ProposalDTO) async {
+        // Hard guard: refuse to dispatch if alias miss is outstanding for
+        // this proposal. UI also disables Confirm; this is defense in depth.
+        if pendingAliasMisses[p.token] != nil {
+            errorMessage = "Tap \"Tag\" first so I know which app you mean."
+            return
+        }
         let client = AgentClient(baseURL: apiClient.baseURL)
         do {
-            let receipt = try await client.executeProposal(token: p.token)
-            if let i = messages.lastIndex(where: { $0.role == .agent }) {
-                var msg = messages[i]
-                msg.proposals?.removeAll(where: { $0.token == p.token })
-                msg.receipts = (msg.receipts ?? []) + [receipt]
-                messages[i] = msg
+            let result = try await client.executeProposal(token: p.token)
+            switch result {
+            case .receipt(let receipt):
+                if let i = messages.lastIndex(where: { $0.role == .agent }) {
+                    var msg = messages[i]
+                    msg.proposals?.removeAll(where: { $0.token == p.token })
+                    msg.receipts = (msg.receipts ?? []) + [receipt]
+                    messages[i] = msg
+                }
+            case .legacyAction(let action, let message, let reasoning):
+                // Remove the proposal from the previous agent bubble so the
+                // ProposalCard disappears. We do NOT thread the legacy action
+                // through ChatMessage.init(action:) — that param is for the
+                // old ChatAction enum and isn't read by ChatView anyway.
+                if let i = messages.lastIndex(where: { $0.role == .agent }) {
+                    var msg = messages[i]
+                    msg.proposals?.removeAll(where: { $0.token == p.token })
+                    messages[i] = msg
+                }
+                // Mirror processResponse's command_id branch: append a fresh
+                // agent bubble carrying message + reasoning, then if the
+                // dispatcher gave us a command_id, attach pending state and
+                // start ack-poll. The bubble's commandID is what drives
+                // ChatView's ReceiptCard rendering + ack updates.
+                if let act = action, let cid = act.command_id {
+                    var msg = ChatMessage(
+                        role: .agent,
+                        content: message ?? "",
+                        timestamp: Date(),
+                        reasoning: reasoning,
+                        action: nil    // legacy enum field, intentionally nil
+                    )
+                    msg.commandID = cid
+                    msg.receiptState = .pending
+                    messages.append(msg)
+                    startAckPoll(
+                        commandID: cid,
+                        messageID: msg.id,
+                        targetDisplay: act.target_display,
+                        expiresAt: act.duration_minutes.map {
+                            Date().addingTimeInterval(TimeInterval($0 * 60))
+                        }
+                    )
+                } else if let act = action, act.card_id != nil {
+                    // v1 doesn't render dispatcher-staged secondary cards
+                    // (D1 duration picker, A1 destructive confirm) on the
+                    // legacy-exec path. Surface a clear message instead of
+                    // silently dropping. This is rare for confirmed shields
+                    // since duration/destructive confirms happen BEFORE the
+                    // proposal stage.
+                    let bubble = ChatMessage(
+                        role: .agent,
+                        content: message ?? "(unsupported response)",
+                        timestamp: Date(),
+                        reasoning: reasoning,
+                        action: nil
+                    )
+                    messages.append(bubble)
+                    errorMessage = "Couldn't show the next step. Try again."
+                } else {
+                    // No command_id, no card — text-only response. Display
+                    // it as plain agent message.
+                    let bubble = ChatMessage(
+                        role: .agent,
+                        content: message ?? "",
+                        timestamp: Date(),
+                        reasoning: reasoning,
+                        action: nil
+                    )
+                    messages.append(bubble)
+                }
             }
             // Tell any active BigKidStatePoller to refresh immediately —
             // this is what makes a parent-confirmed reflection / task /
@@ -651,8 +740,118 @@ class ChatViewModel: ObservableObject {
             // it up via the next poll.
             NotificationCenter.default.post(name: .bigKidStateInvalidated, object: nil)
         } catch {
-            errorMessage = (error as? LocalizedError)?.errorDescription
+            errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }
+    }
+
+    // MARK: - BigKid reflection submission (poll /child/state → chat bubble)
+
+    private func rebuildSurfacedReflectionSubmissionIndex() {
+        surfacedReflectionSubmissionIDs = Set(
+            messages.compactMap { msg in
+                guard let r = msg.reflectionSubmissionReview, !r.resolved else { return nil }
+                return r.reflectionId
+            }
+        )
+    }
+
+    func startReflectionSubmissionPolling() {
+        reflectionSubmissionPoll?.cancel()
+        rebuildSurfacedReflectionSubmissionIndex()
+        reflectionSubmissionPoll = Timer.publish(every: 28, tolerance: 8, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in
+                Task { await self?.tickReflectionSubmissionPoll() }
+            }
+    }
+
+    func stopReflectionSubmissionPolling() {
+        reflectionSubmissionPoll?.cancel()
+        reflectionSubmissionPoll = nil
+    }
+
+    func tickReflectionSubmissionPoll() async {
+        guard let raw = UserDefaults.standard.string(forKey: "evlin.childDeviceID"),
+              let childUUID = UUID(uuidString: raw),
+              !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return }
+
+        do {
+            let state = try await apiClient.fetchChildStateForParentReview(childDeviceId: childUUID)
+            surfaceReflectionSubmissionBubbleIfNeeded(state: state)
+        } catch {}
+    }
+
+    /// Approve from `ReflectionSubmissionReviewCard` — same POST as `ParentBigKidDebugSheet`.
+    func approveReflectionSubmissionFromChat(
+        messageId: UUID,
+        reflectionId: UUID,
+        parentNoteTrimmed: String
+    ) async {
+        errorMessage = nil
+        let noteToSend = parentNoteTrimmed.isEmpty
+            ? ReflectionParentNoteFallback.thanksHonest
+            : parentNoteTrimmed
+        do {
+            try await apiClient.approveChildReflectionSubmission(
+                reflectionId: reflectionId,
+                parentNote: noteToSend
+            )
+            if let idx = messages.firstIndex(where: { $0.id == messageId }) {
+                var m = messages[idx]
+                if var r = m.reflectionSubmissionReview {
+                    r.resolved = true
+                    m.reflectionSubmissionReview = r
+                    messages[idx] = m
+                }
+            }
+            let noteLine = "\n\nYour note to them: “\(noteToSend)”"
+            messages.append(ChatMessage(
+                role: .agent,
+                content:
+                    "You approved \(childName)’s reflection. They’ll move forward on their device with your message.\(noteLine)",
+                timestamp: Date()
+            ))
+            NotificationCenter.default.post(name: .bigKidStateInvalidated, object: nil)
+        } catch {
+            errorMessage = error.localizedDescription
+            messages.append(ChatMessage(
+                role: .agent,
+                content:
+                    "I couldn’t approve the reflection right now — \(error.localizedDescription). Tap Approve to try again.",
+                timestamp: Date()
+            ))
+        }
+    }
+
+    private func surfaceReflectionSubmissionBubbleIfNeeded(state: ChildStateResponse) {
+        guard let req = state.reflectionRequest,
+              req.status == .submitted,
+              let essay = req.essayText,
+              !essay.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return }
+
+        guard !surfacedReflectionSubmissionIDs.contains(req.id) else { return }
+
+        let prompt = req.writingPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty else { return }
+
+        surfacedReflectionSubmissionIDs.insert(req.id)
+
+        let preamble = """
+        \(childName) has finished the reflection exercise and submitted an essay below.
+
+        **Essay prompt** and **their writing** follow. Review them, optionally add a short closing note for them on-device, then tap **Approve**.
+        """
+
+        var msg = ChatMessage(role: .agent, content: preamble, timestamp: Date())
+        msg.reflectionSubmissionReview = ReflectionSubmissionReviewPayload(
+            reflectionId: req.id,
+            writingPrompt: prompt,
+            essayText: essay,
+            resolved: false
+        )
+        messages.append(msg)
     }
 
     /// Parent tapped Skip — drop the proposal from the most recent agent message.
