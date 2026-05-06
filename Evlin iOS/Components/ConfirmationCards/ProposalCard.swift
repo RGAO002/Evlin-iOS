@@ -69,7 +69,7 @@ struct ProposalCard: View {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(Color.orange)
                     .font(.system(size: 13))
-                Text("Evlin doesn't know which app is \u{201C}\(target)\u{201D} yet.")
+                Text("First time locking \u{201C}\(target)\u{201D} — tap below to confirm which app it is.")
                     .font(.system(size: 13))
                     .foregroundStyle(Color.evOnSurfaceVariant)
             }

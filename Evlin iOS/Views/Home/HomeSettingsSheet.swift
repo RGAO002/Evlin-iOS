@@ -1,5 +1,6 @@
 import SwiftUI
 import FamilyControls
+import AVFoundation
 
 struct HomeSettingsSheet: View {
     @EnvironmentObject var apiClient: APIClient
@@ -20,8 +21,12 @@ struct HomeSettingsSheet: View {
     @State private var serverURL: String = ""
     @State private var isPickerPresented = false
 
-    /// DEBUG: family protection mode mirror — synced from backend on appear,
-    /// PUT-back via apiClient when the segmented control changes.
+    @AppStorage("evlin.protectionMode") private var savedProtectionMode: String = "std"
+
+    /// Bumps SwiftUI redraw after camera permission callbacks.
+    @State private var cameraPermissionFreshness: Int = 0
+
+    /// Family protection mode mirror — synced from backend on appear, PUT-back when the segmented control changes.
     @State private var protectionMode: String = "std"
     @State private var protectionModeStatus: String = ""
 
@@ -106,8 +111,40 @@ struct HomeSettingsSheet: View {
                                 .foregroundStyle(Color.evSecondary)
                         } else {
                             Button("Authorize") {
-                                Task { await screenTimeManager.requestAuthorization() }
+                                Task { await screenTimeManager.requestScreenTimeAuthorization() }
                             }
+                        }
+                    }
+
+                    Text(
+                        savedProtectionMode == "max"
+                            ? "Mode: Maximum — Screen Time authorization uses the child's Apple ID on this phone."
+                            : "Mode: Standard — authorization is tied to this Apple ID."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(Color.evOutline)
+
+                    if let authErr = screenTimeManager.errorMessage, !authErr.isEmpty {
+                        Text(authErr)
+                            .font(.caption)
+                            .foregroundStyle(Color.evError)
+                    }
+
+                    Button {
+                        Task { await screenTimeManager.openScreenTimeSettings() }
+                    } label: {
+                        Label("Screen Time Settings", systemImage: "gearshape")
+                    }
+
+                    Toggle(isOn: Binding(
+                        get: { screenTimeManager.deletionProtectionEnabled },
+                        set: { screenTimeManager.setDeletionProtectionEnabled($0) }
+                    )) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Prevent deleting apps")
+                            Text("Uses Screen Time. When ON, uninstalling Evlin — and usually other apps — is blocked.")
+                                .font(.caption)
+                                .foregroundStyle(Color.evOutline)
                         }
                     }
 
@@ -119,14 +156,14 @@ struct HomeSettingsSheet: View {
                     } label: {
                         HStack {
                             VStack(alignment: .leading, spacing: 2) {
-                                Text("Managed Apps")
+                                Text("Managed Apps & Categories")
                                     .foregroundStyle(Color.evOnSurface)
                                 if appCount > 0 || catCount > 0 {
                                     Text("\(appCount) apps, \(catCount) categories")
                                         .font(.caption)
                                         .foregroundStyle(Color.evOutline)
                                 } else {
-                                    Text("No apps selected")
+                                    Text("Nothing selected yet")
                                         .font(.caption)
                                         .foregroundStyle(Color.evOutline)
                                 }
@@ -136,6 +173,54 @@ struct HomeSettingsSheet: View {
                                 .font(.caption)
                                 .foregroundStyle(Color.evOutline)
                         }
+                    }
+
+                    Text("Tip: tap a category row's header (e.g. \"Games\") to lock the whole group, or tap individual apps to lock just those.")
+                        .font(.caption)
+                        .foregroundStyle(Color.evOutline)
+
+                    ManagedActivitySelectionDiagnostics(selection: screenTimeManager.selectedApps)
+
+                    NavigationLink {
+                        LabelTokenInspectorView()
+                    } label: {
+                        Label("Label(token) snapshot test", systemImage: "rectangle.and.text.magnifyingglass")
+                    }
+
+                    NavigationLink {
+                        DeviceActivityReportMetadataProbeView()
+                    } label: {
+                        Label("DeviceActivityReport metadata test", systemImage: "chart.bar.doc.horizontal")
+                    }
+
+                    NavigationLink {
+                        TokenScreenshotImportView()
+                    } label: {
+                        Label("Auto-tag via screenshots", systemImage: "camera.viewfinder")
+                    }
+
+                    NavigationLink {
+                        TokenPickerProbeView()
+                    } label: {
+                        Label("Lazy-tag picker test", systemImage: "tag")
+                    }
+
+                    NavigationLink {
+                        AliasManagementView()
+                    } label: {
+                        Label("Saved tags (chat aliases)", systemImage: "tag.fill")
+                    }
+
+                    NavigationLink {
+                        AliasLibraryInspectorView()
+                    } label: {
+                        Label("Alias library (after hydrate)", systemImage: "books.vertical")
+                    }
+
+                    NavigationLink {
+                        AliasE2ETestView()
+                    } label: {
+                        Label("Alias E2E test (start here)", systemImage: "checkmark.seal")
                     }
 
                     if appCount > 0 || catCount > 0 {
@@ -153,6 +238,50 @@ struct HomeSettingsSheet: View {
                         Label("Unlock All Apps", systemImage: "lock.open.fill")
                             .foregroundStyle(Color.evSecondary)
                     }
+                }
+
+                Section("Camera & Photos") {
+                    HStack(spacing: 12) {
+                        Image(systemName: "camera.fill")
+                            .foregroundStyle(Color.evOutline)
+                            .frame(width: 24)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Camera")
+                                .foregroundStyle(Color.evOnSurface)
+                            Text(cameraStatusText)
+                                .font(.caption)
+                                .foregroundStyle(Color.evOutline)
+                        }
+                        Spacer()
+                    }
+                    Group {
+                        if cameraIsAuthorized {
+                            Text("Ready for task evidence and profile photos.")
+                                .font(.caption)
+                                .foregroundStyle(Color.evSecondary)
+                        } else {
+                            Button(cameraPermissionActionTitle) {
+                                handleCameraPermissionTap()
+                            }
+                        }
+                    }
+                    .id(cameraPermissionFreshness)
+
+                    Text("Camera is used when your child submits task photos or evidence.")
+                        .font(.caption)
+                        .foregroundStyle(Color.evOutline)
+
+                    Button {
+                        if let url = URL(string: UIApplication.openSettingsURLString) {
+                            UIApplication.shared.open(url)
+                        }
+                    } label: {
+                        Label("Open Evlin Settings", systemImage: "slider.horizontal.3")
+                    }
+
+                    Label("Choosing photos may offer limited-library access instead of full Photos permission.", systemImage: "photo.on.rectangle.angled")
+                        .font(.caption)
+                        .foregroundStyle(Color.evOutline)
                 }
 
                 Section("Device Status") {
@@ -190,6 +319,7 @@ struct HomeSettingsSheet: View {
 
                     if appMode == "parent" {
                         Button {
+                            EvlinDemoShortcuts.seedPlaceholderChildUUIDIfMissing()
                             appMode = "child"
                             onClose()
                         } label: {
@@ -216,6 +346,7 @@ struct HomeSettingsSheet: View {
                         UserDefaults.standard.removeObject(forKey: "evlin.childDeviceID")
                         UserDefaults.standard.removeObject(forKey: "evlin_chat_history")
                         UserDefaults.standard.removeObject(forKey: "serverURL")
+                        EvlinDemoShortcuts.clearFlag()
                         NotificationCenter.default.post(name: .evlinClearChat, object: nil)
                         appMode = ""
                         onClose()
@@ -242,8 +373,6 @@ struct HomeSettingsSheet: View {
                 }
                 #endif
 
-                // MARK: - Protection Mode (DEBUG)
-                #if DEBUG
                 Section {
                     if let famID = UUID(uuidString: familyID) {
                         Picker("Protection Mode", selection: $protectionMode) {
@@ -251,13 +380,20 @@ struct HomeSettingsSheet: View {
                             Text("Maximum (.child)").tag("max")
                         }
                         .pickerStyle(.segmented)
-                        .onChange(of: protectionMode) { _, new in
+                        .onChange(of: protectionMode) { old, new in
                             Task {
                                 do {
                                     try await apiClient.setProtectionMode(familyID: famID, mode: new)
-                                    protectionModeStatus = "✅ Set to \(new.uppercased())"
+                                    await MainActor.run {
+                                        protectionModeStatus = "✅ Set to \(new.uppercased())"
+                                        UserDefaults.standard.set(new, forKey: "evlin.protectionMode")
+                                    }
                                 } catch {
-                                    protectionModeStatus = "⚠️ Failed: \(error.localizedDescription)"
+                                    await MainActor.run {
+                                        protectionMode = old
+                                        UserDefaults.standard.set(old, forKey: "evlin.protectionMode")
+                                        protectionModeStatus = "⚠️ Failed: \(error.localizedDescription)"
+                                    }
                                 }
                             }
                         }
@@ -266,18 +402,22 @@ struct HomeSettingsSheet: View {
                                 .font(.caption)
                                 .foregroundStyle(Color.evOnSurfaceVariant)
                         }
-                        Text("Std blocks 'block' and 'shield single app' (E1/E2 cards). Max enables both. Toggling here only affects the backend family record.")
-                            .font(.caption)
-                            .foregroundStyle(Color.evOnSurfaceVariant)
+                        Text(
+                            """
+                            Backend policy: Standard limits certain lock actions; Maximum enables broader blocks. \
+                            This also drives which Screen Time authorization type applies on this phone (Settings → Screen Time → Authorize).
+                            """
+                        )
+                        .font(.caption)
+                        .foregroundStyle(Color.evOnSurfaceVariant)
                     } else {
-                        Text("No paired family — pair a device first to use this toggle.")
+                        Text("Pair a device first — we need a family id to sync protection mode.")
                             .font(.caption)
                             .foregroundStyle(Color.evOnSurfaceVariant)
                     }
                 } header: {
-                    Text("Protection Mode (DEBUG)")
+                    Text("Protection Mode")
                 }
-                #endif
 
             }
             .navigationTitle("Settings")
@@ -296,17 +436,28 @@ struct HomeSettingsSheet: View {
                 isPresented: $isPickerPresented,
                 selection: $screenTimeManager.selectedApps
             )
+            .onChange(of: isPickerPresented) { _, open in
+                // `FamilyActivitySelection` equality can ignore picker-only metadata deltas; always
+                // persist when the sheet closes so `LocalAliasStore` + label snapshots refresh.
+                if !open {
+                    screenTimeManager.saveSelection()
+                }
+            }
             .onChange(of: screenTimeManager.selectedApps) { _, _ in
                 screenTimeManager.saveSelection()
             }
             .onAppear {
                 serverURL = apiClient.baseURL
+                screenTimeManager.refreshAuthorizationStatus()
                 // Sync DEBUG protection-mode picker from backend so the
                 // segmented control reflects truth, not the @State default.
                 if let famID = UUID(uuidString: familyID) {
                     Task {
                         if let m = try? await apiClient.getProtectionMode(familyID: famID) {
-                            await MainActor.run { protectionMode = m }
+                            await MainActor.run {
+                                protectionMode = m
+                                UserDefaults.standard.set(m, forKey: "evlin.protectionMode")
+                            }
                         }
                     }
                 }
@@ -327,6 +478,45 @@ struct HomeSettingsSheet: View {
             }
         }
         .preferredColorScheme(.light)
+    }
+
+    private var cameraIsAuthorized: Bool {
+        _ = cameraPermissionFreshness
+        if case .authorized = AVCaptureDevice.authorizationStatus(for: .video) { return true }
+        return false
+    }
+
+    private var cameraStatusText: String {
+        _ = cameraPermissionFreshness
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .authorized: return "Allowed"
+        case .denied, .restricted: return "Blocked — use Evlin Settings below"
+        case .notDetermined: return "Not asked yet"
+        @unknown default: return "Unknown"
+        }
+    }
+
+    private var cameraPermissionActionTitle: String {
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .notDetermined: return "Allow Camera Access"
+        case .authorized: return ""
+        default: return "Fix Camera in Settings…"
+        }
+    }
+
+    private func handleCameraPermissionTap() {
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .notDetermined:
+            AVCaptureDevice.requestAccess(for: .video) { _ in
+                DispatchQueue.main.async {
+                    cameraPermissionFreshness += 1
+                }
+            }
+        default:
+            if let url = URL(string: UIApplication.openSettingsURLString) {
+                UIApplication.shared.open(url)
+            }
+        }
     }
 
     @ViewBuilder
