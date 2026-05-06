@@ -847,11 +847,16 @@ class ChatViewModel: ObservableObject {
     /// so the card flips into a ReceiptBubble in place.
     @MainActor
     func confirmProposal(_ p: ProposalDTO) async {
-        // Hard guard: refuse to dispatch if alias miss is outstanding for
-        // this proposal. UI also disables Confirm; this is defense in depth.
-        if pendingAliasMisses[p.token] != nil {
-            errorMessage = "Tap \"Tag\" first so I know which app you mean."
-            return
+        // Hard guard: refuse to dispatch if any per-row alias miss is
+        // outstanding for this proposal. UI also disables Confirm; this is
+        // defense in depth.
+        let targets = Self.extractAliasTargets(from: p)
+        for (idx, _) in targets.enumerated() {
+            let key = Self.aliasMissKey(token: p.token, rowIndex: idx)
+            if pendingAliasMisses[key] != nil {
+                errorMessage = "Tap \"Tag\" first so I know which app you mean."
+                return
+            }
         }
         let client = AgentClient(baseURL: apiClient.baseURL)
         do {
@@ -925,6 +930,48 @@ class ChatViewModel: ObservableObject {
                         action: nil
                     )
                     messages.append(bubble)
+                }
+            case .legacyActions(let results, _, let reasoning):
+                // Remove the proposal from the previous agent bubble (it's been
+                // confirmed; ProposalCard should disappear).
+                if let i = messages.lastIndex(where: { $0.role == .agent }) {
+                    var msg = messages[i]
+                    msg.proposals?.removeAll(where: { $0.token == p.token })
+                    messages[i] = msg
+                }
+                // For each sub-action with a command_id: append a fresh agent
+                // bubble + start its own ack-poll. Receipts update independently.
+                for result in results {
+                    guard let act = result.action, let cid = act.command_id else {
+                        // No command_id (text-only result) — append as plain bubble.
+                        let bubble = ChatMessage(
+                            role: .agent,
+                            content: result.message ?? "",
+                            timestamp: Date(),
+                            reasoning: reasoning,
+                            action: nil
+                        )
+                        messages.append(bubble)
+                        continue
+                    }
+                    var msg = ChatMessage(
+                        role: .agent,
+                        content: result.message ?? "",
+                        timestamp: Date(),
+                        reasoning: reasoning,
+                        action: nil
+                    )
+                    msg.commandID = cid
+                    msg.receiptState = .pending
+                    messages.append(msg)
+                    startAckPoll(
+                        commandID: cid,
+                        messageID: msg.id,
+                        targetDisplay: act.target_display,
+                        expiresAt: act.duration_minutes.map {
+                            Date().addingTimeInterval(TimeInterval($0 * 60))
+                        }
+                    )
                 }
             }
             // Tell any active BigKidStatePoller to refresh immediately —
