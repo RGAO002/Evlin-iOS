@@ -696,6 +696,68 @@ class ChatViewModel: ObservableObject {
         return Self.extractAliasTarget(from: proposal)?.target
     }
 
+    @MainActor
+    func beginLazyTag(for proposal: ProposalDTO) {
+        guard let kind = pendingAliasMisses[proposal.token] else { return }
+        guard let (target, _) = Self.extractAliasTarget(from: proposal) else { return }
+        activeLazyTagRequest = LazyTagRequest(
+            id: proposal.token,
+            target: target,
+            kind: kind
+        )
+    }
+
+    @MainActor
+    func handleTagSelection(token: Any, request: LazyTagRequest) {
+        let result = LazyTagPersistence.persistAlias(
+            token: token,
+            kind: request.kind,
+            target: request.target
+        )
+        switch result {
+        case .success:
+            // Clear THIS proposal's miss + sweep any other pending misses
+            // for the same (target, kind) — handles multi-card chats like
+            // "lock IG and TikTok" where two cards reference Instagram.
+            sweepResolvedMisses(target: request.target, kind: request.kind)
+            activeLazyTagRequest = nil
+        case .failure(let err):
+            errorMessage = "Couldn't save the tag: \(err)"
+            // Leave activeLazyTagRequest intact so user can retry.
+        }
+    }
+
+    @MainActor
+    func cancelLazyTag() {
+        activeLazyTagRequest = nil
+    }
+
+    /// Removes any `pendingAliasMisses` entries whose proposal's
+    /// (target, kind) match. Called after a successful tag — even if the
+    /// chat had multiple cards referencing the same name, they all clear.
+    @MainActor
+    private func sweepResolvedMisses(target: String, kind: AliasKind) {
+        let normalizedTarget = target.lowercased()
+        for token in Array(pendingAliasMisses.keys) {
+            if let p = findProposal(byToken: token),
+               let (t, k) = Self.extractAliasTarget(from: p),
+               k == kind,
+               t.lowercased() == normalizedTarget {
+                pendingAliasMisses.removeValue(forKey: token)
+            }
+        }
+    }
+
+    private func findProposal(byToken token: String) -> ProposalDTO? {
+        for msg in messages.reversed() {
+            if let proposals = msg.proposals,
+               let found = proposals.first(where: { $0.token == token }) {
+                return found
+            }
+        }
+        return nil
+    }
+
     // MARK: - Agent envelope handlers (Phase E)
 
     /// Parent tapped Confirm on a ProposalCard. POST /parent/agent/exec,
@@ -908,6 +970,9 @@ class ChatViewModel: ObservableObject {
     /// Parent tapped Skip — drop the proposal from the most recent agent message.
     @MainActor
     func skipProposal(_ p: ProposalDTO) {
+        // Clear any outstanding alias miss — Skip means "don't do this",
+        // which doesn't need a tag. Keeps state tidy.
+        pendingAliasMisses.removeValue(forKey: p.token)
         if let i = messages.lastIndex(where: { $0.role == .agent }) {
             var msg = messages[i]
             msg.proposals?.removeAll(where: { $0.token == p.token })
