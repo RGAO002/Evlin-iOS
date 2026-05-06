@@ -19,4 +19,6 @@ enum CardID: String, Codable, Sendable {
     case G1
     // Group R — reflection confirmation (big-kid mode)
     case R1
+    // Group U — unlock disambiguation
+    case U1
 }

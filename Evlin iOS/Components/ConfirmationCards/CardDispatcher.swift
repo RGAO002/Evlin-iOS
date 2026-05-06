@@ -25,6 +25,10 @@ struct CardDispatcher: View {
         case .E3: CatalogMissCard(payload: payload)
         case .E4, .F1: ListSuggestionCard(payload: payload)
         case .R1: DangerConfirmCard(payload: payload)
+        case .U1:
+            // U1 unlock-disambiguation card view comes in a later task.
+            // For now route to DangerConfirmCard so the switch stays exhaustive.
+            DangerConfirmCard(payload: payload)
         }
     }
 
@@ -48,6 +52,23 @@ struct CardContext {
     let existingRecordKey: String?
     let requestedExpiryISO: String?
     let existingMode: String?
+    // For U1 unlock-disambiguation card:
+    let u1Token: String?
+    let u1ShieldList: [U1ShieldEntry]
+}
+
+extension CardContext {
+    static func defaultContext(targetDisplay: String, childName: String) -> CardContext {
+        CardContext(
+            targetDisplay: targetDisplay, childName: childName,
+            durationMinutes: nil, categoryGuess: nil,
+            listSuggestions: [], existingLists: [],
+            blockItems: [], childDevices: [],
+            mode: "std",
+            existingRecordKey: nil, requestedExpiryISO: nil, existingMode: nil,
+            u1Token: nil, u1ShieldList: []
+        )
+    }
 }
 
 /// Handlers wired by ChatViewModel when rendering.

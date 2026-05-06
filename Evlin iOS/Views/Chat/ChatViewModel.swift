@@ -299,7 +299,8 @@ class ChatViewModel: ObservableObject {
             listSuggestions: act.list_suggestions ?? [],
             existingLists: [], blockItems: [], childDevices: [],
             mode: self.protectionMode,
-            existingRecordKey: nil, requestedExpiryISO: nil, existingMode: nil
+            existingRecordKey: nil, requestedExpiryISO: nil, existingMode: nil,
+            u1Token: nil, u1ShieldList: []
         )
         let handlers = CardHandlers(
             onPrimary: { [weak self] in self?.handleCardPrimary(cardID: cardID, action: act) },
@@ -682,7 +683,8 @@ class ChatViewModel: ObservableObject {
             mode: self.protectionMode,
             existingRecordKey: ctx["existing_record_key"],
             requestedExpiryISO: ctx["requested_expiry_iso"],
-            existingMode: ctx["existing_mode"]
+            existingMode: ctx["existing_mode"],
+            u1Token: nil, u1ShieldList: []
         )
         let fakeAction = APIClient.ChatActionResponse(
             type: "shield", command_id: nil, tier: nil,
