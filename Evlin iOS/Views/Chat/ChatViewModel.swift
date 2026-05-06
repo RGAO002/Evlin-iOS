@@ -61,6 +61,28 @@ class ChatViewModel: ObservableObject {
             self?.surfacedReflectionSubmissionIDs.removeAll()
         }
         rebuildSurfacedReflectionSubmissionIndex()
+        resumePendingAckPolls()
+    }
+
+    /// Re-attach ack-status polling for any persisted message still in
+    /// `.pending`. Without this, the original poll task is orphaned when
+    /// the VM dies (e.g. user toggled P↔K mode in single-device dev),
+    /// leaving the receipt frozen on "Queued — waiting for kid device".
+    /// Server holds the truth: cmd is either confirmed/failed by now (we
+    /// flip to that immediately) or still pending (we poll for ≤90s, then
+    /// .kidNotResponding).
+    private func resumePendingAckPolls() {
+        for msg in messages where msg.role == .agent
+            && msg.receiptState == .pending
+            && msg.commandID != nil {
+            print("[AckPoll] resume cmd=\(msg.commandID!) msg=\(msg.id) (VM re-init)")
+            startAckPoll(
+                commandID: msg.commandID!,
+                messageID: msg.id,
+                targetDisplay: nil,
+                expiresAt: nil
+            )
+        }
     }
 
     // MARK: - Persistence
