@@ -21,6 +21,9 @@ class ChatViewModel: ObservableObject {
     /// guard compiles.
     @Published var pendingAliasMisses: [String: AliasKind] = [:]
 
+    /// Non-nil when ChatView should present the lazy-tag sheet.
+    @Published var activeLazyTagRequest: LazyTagRequest? = nil
+
     /// In-flight ack-status polls, keyed by command_id. Cancelled on clearHistory
     /// or when a terminal status is received.
     private var activePolls: [UUID: Task<Void, Never>] = [:]
@@ -218,6 +221,20 @@ class ChatViewModel: ObservableObject {
         // beneath. Strictly opt-in — only fires when at least one is non-empty,
         // so existing card_id / command_id / shield-block flows are untouched.
         if (resp.proposals?.isEmpty == false) || (resp.receipts?.isEmpty == false) {
+            // Pre-flight every proposal: shield_app_legacy with app/category
+            // kind needs LocalAliasStore resolution before Confirm.
+            for p in resp.proposals ?? [] {
+                guard let (target, kind) = Self.extractAliasTarget(from: p) else { continue }
+                let aliasResolved: Bool = {
+                    switch kind {
+                    case .app: return LocalAliasStore.shared.applicationToken(forLookupKey: target) != nil
+                    case .category: return LocalAliasStore.shared.categoryToken(forName: target) != nil
+                    }
+                }()
+                if !aliasResolved {
+                    pendingAliasMisses[p.token] = kind
+                }
+            }
             var msg = ChatMessage(
                 role: .agent, content: resp.message, timestamp: Date(),
                 reasoning: resp.reasoning, action: nil
@@ -644,6 +661,40 @@ class ChatViewModel: ObservableObject {
     }
 
     // MARK: - Fetch video recommendation
+
+    // MARK: - Lazy tagging
+
+    /// Pure parser: pull `(target, kind)` out of a ProposalDTO if it's a
+    /// `shield_app_legacy` call with a kind that needs alias resolution.
+    /// `nonisolated` so XCTest can call without @MainActor isolation drama.
+    nonisolated static func extractAliasTarget(
+        from proposal: ProposalDTO
+    ) -> (target: String, kind: AliasKind)? {
+        guard proposal.tool == "shield_app_legacy" else { return nil }
+        guard let target = proposal.args["target"]?.value as? String,
+              !target.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return nil }
+        guard let rawKind = proposal.args["target_kind"]?.value as? String else { return nil }
+        switch rawKind {
+        case "app": return (target, .app)
+        case "category": return (target, .category)
+        default: return nil
+        }
+    }
+
+    /// True if the proposal currently has no alias miss outstanding.
+    func aliasHit(for proposal: ProposalDTO) -> Bool {
+        pendingAliasMisses[proposal.token] == nil
+    }
+
+    /// String to render in ProposalCard's miss UI; nil when no miss.
+    /// Re-derives via extractAliasTarget so a hit (alias added since
+    /// pre-flight) reflects immediately even if pendingAliasMisses
+    /// hasn't been swept yet.
+    func aliasMissTarget(for proposal: ProposalDTO) -> String? {
+        guard pendingAliasMisses[proposal.token] != nil else { return nil }
+        return Self.extractAliasTarget(from: proposal)?.target
+    }
 
     // MARK: - Agent envelope handlers (Phase E)
 

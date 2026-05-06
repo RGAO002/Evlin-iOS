@@ -43,3 +43,58 @@ final class LazyTagPersistenceTests: XCTestCase {
         }
     }
 }
+
+final class ExtractAliasTargetTests: XCTestCase {
+    private func proposal(tool: String, args: [String: Any]) -> ProposalDTO {
+        let typed = args.mapValues { AnyCodable($0) }
+        return ProposalDTO(
+            tool: tool,
+            args: typed,
+            label: "test",
+            danger: "low",
+            token: UUID().uuidString
+        )
+    }
+
+    func test_returnsAppTarget_forShieldAppLegacy_withAppKind() {
+        let p = proposal(tool: "shield_app_legacy", args: [
+            "target": "Instagram",
+            "target_kind": "app"
+        ])
+        let result = ChatViewModel.extractAliasTarget(from: p)
+        XCTAssertEqual(result?.target, "Instagram")
+        XCTAssertEqual(result?.kind, .app)
+    }
+
+    func test_returnsCategoryTarget_forShieldAppLegacy_withCategoryKind() {
+        let p = proposal(tool: "shield_app_legacy", args: [
+            "target": "games",
+            "target_kind": "category"
+        ])
+        let result = ChatViewModel.extractAliasTarget(from: p)
+        XCTAssertEqual(result?.target, "games")
+        XCTAssertEqual(result?.kind, .category)
+    }
+
+    func test_returnsNil_forNonShieldTool() {
+        let p = proposal(tool: "propose_reflection", args: [
+            "target": "anything"
+        ])
+        XCTAssertNil(ChatViewModel.extractAliasTarget(from: p))
+    }
+
+    func test_returnsNil_whenTargetMissing() {
+        let p = proposal(tool: "shield_app_legacy", args: [
+            "target_kind": "app"
+        ])
+        XCTAssertNil(ChatViewModel.extractAliasTarget(from: p))
+    }
+
+    func test_returnsNil_forUnknownKind() {
+        let p = proposal(tool: "shield_app_legacy", args: [
+            "target": "x",
+            "target_kind": "weird"
+        ])
+        XCTAssertNil(ChatViewModel.extractAliasTarget(from: p))
+    }
+}
