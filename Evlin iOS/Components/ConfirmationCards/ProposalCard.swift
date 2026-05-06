@@ -1,12 +1,15 @@
 import SwiftUI
 
-/// Generic AI proposal card — surface AI-staged tool calls for parent
-/// approval. One card per Proposal in the agent response. Tap Confirm
-/// → POST /parent/agent/exec → in-place becomes a ReceiptBubble.
+/// Generic AI proposal card. When `aliasMissTarget` is non-nil, renders an
+/// orange warning row + "Tag <target>" button and disables Confirm — the
+/// view model removes the miss after lazy-tag flow saves an alias, at
+/// which point the next render unblocks Confirm.
 struct ProposalCard: View {
     let proposal: ProposalDTO
     var onConfirm: () async -> Void
     var onSkip: () -> Void
+    var aliasMissTarget: String? = nil
+    var onTag: () -> Void = {}
     @State private var working = false
 
     var body: some View {
@@ -25,17 +28,20 @@ struct ProposalCard: View {
                     .foregroundStyle(Color.evOnSurfaceVariant)
                     .lineSpacing(2)
             }
+            if let missTarget = aliasMissTarget {
+                aliasMissBlock(target: missTarget)
+            }
             HStack(spacing: 10) {
                 Button(action: { Task { await runConfirm() } }) {
                     Text(working ? "Working…" : "Confirm")
                         .font(.system(size: 15, weight: .heavy))
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 11)
-                        .background(dangerColor)
+                        .background(confirmBackground)
                         .foregroundStyle(.white)
                         .clipShape(RoundedRectangle(cornerRadius: 12))
                 }
-                .disabled(working)
+                .disabled(confirmDisabled)
                 Button(action: onSkip) {
                     Text("Skip")
                         .font(.system(size: 15, weight: .heavy))
@@ -56,10 +62,42 @@ struct ProposalCard: View {
         )
     }
 
+    @ViewBuilder
+    private func aliasMissBlock(target: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 6) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(Color.orange)
+                    .font(.system(size: 13))
+                Text("Evlin doesn't know which app is \u{201C}\(target)\u{201D} yet.")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Color.evOnSurfaceVariant)
+            }
+            Button(action: onTag) {
+                Text("Tag \(target)")
+                    .font(.system(size: 14, weight: .heavy))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 9)
+                    .background(Color.orange)
+                    .foregroundStyle(.white)
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+            }
+        }
+        .padding(10)
+        .background(Color.orange.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+
     private func runConfirm() async {
         working = true
         await onConfirm()
         working = false
+    }
+
+    private var confirmDisabled: Bool { working || aliasMissTarget != nil }
+
+    private var confirmBackground: Color {
+        aliasMissTarget != nil ? Color.evOutline : dangerColor
     }
 
     private var dangerColor: Color {
@@ -79,8 +117,6 @@ struct ProposalCard: View {
     }
 
     private var bodyText: String {
-        // For v1, pull a few common keys from args. AI's `label` already
-        // describes the action; this gives extra context.
         if let reason = proposal.args["reason"]?.value as? String {
             return "Reason: \"\(reason)\""
         }
