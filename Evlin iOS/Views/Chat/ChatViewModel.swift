@@ -246,15 +246,18 @@ class ChatViewModel: ObservableObject {
             // Pre-flight every proposal: shield_app_legacy with app/category
             // kind needs LocalAliasStore resolution before Confirm.
             for p in resp.proposals ?? [] {
-                guard let (target, kind) = Self.extractAliasTarget(from: p) else { continue }
-                let aliasResolved: Bool = {
-                    switch kind {
-                    case .app: return LocalAliasStore.shared.applicationToken(forLookupKey: target) != nil
-                    case .category: return LocalAliasStore.shared.categoryToken(forName: target) != nil
+                let targets = Self.extractAliasTargets(from: p)
+                for (idx, entry) in targets.enumerated() {
+                    guard let (target, kind) = entry else { continue }
+                    let aliasResolved: Bool = {
+                        switch kind {
+                        case .app: return LocalAliasStore.shared.applicationToken(forLookupKey: target) != nil
+                        case .category: return LocalAliasStore.shared.categoryToken(forName: target) != nil
+                        }
+                    }()
+                    if !aliasResolved {
+                        pendingAliasMisses[Self.aliasMissKey(token: p.token, rowIndex: idx)] = kind
                     }
-                }()
-                if !aliasResolved {
-                    pendingAliasMisses[p.token] = kind
                 }
             }
             var msg = ChatMessage(
@@ -721,6 +724,44 @@ class ChatViewModel: ObservableObject {
         case "category": return (target, .category)
         default: return nil
         }
+    }
+
+    /// Multi-row variant. Returns `[Optional]` with same length as rows;
+    /// nil at index i means row i isn't an alias-eligible target (kind
+    /// outside {app, category}). Empty list when proposal has no rows
+    /// AND no top-level target/kind args.
+    nonisolated static func extractAliasTargets(
+        from proposal: ProposalDTO
+    ) -> [(target: String, kind: AliasKind)?] {
+        guard proposal.tool == "shield_app_legacy"
+            || proposal.tool == "unshield_app_legacy"
+        else { return [] }
+
+        // New shape: args.rows is an array of {target, target_kind, minutes}
+        if let rowsAny = proposal.args["rows"]?.value as? [Any] {
+            return rowsAny.map { rowAny -> (target: String, kind: AliasKind)? in
+                guard let row = rowAny as? [String: Any] else { return nil }
+                guard let target = row["target"] as? String,
+                      !target.trimmingCharacters(in: .whitespaces).isEmpty
+                else { return nil }
+                guard let rawKind = row["target_kind"] as? String else { return nil }
+                switch rawKind {
+                case "app": return (target, .app)
+                case "category": return (target, .category)
+                default: return nil
+                }
+            }
+        }
+
+        // Legacy shape: {target, target_kind} at top level. Return as 1-row list.
+        if let single = extractAliasTarget(from: proposal) {
+            return [single]
+        }
+        return []
+    }
+
+    nonisolated static func aliasMissKey(token: String, rowIndex: Int) -> String {
+        "\(token)#\(rowIndex)"
     }
 
     /// True if the proposal currently has no alias miss outstanding.

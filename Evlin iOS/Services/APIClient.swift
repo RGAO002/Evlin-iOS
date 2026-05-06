@@ -154,6 +154,43 @@ class APIClient: ObservableObject {
             throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
         }
     }
+
+    // MARK: - BigKid parent reads (same endpoints as `ParentBigKidDebugSheet`)
+
+    func fetchChildStateForParentReview(childDeviceId: UUID) async throws -> ChildStateResponse {
+        let trimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let url = URL(string: trimmed + "/child/state") else {
+            throw URLError(.badURL)
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "GET"
+        req.timeoutInterval = 22
+        req.setValue(childDeviceId.uuidString, forHTTPHeaderField: "X-Child-Id")
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+        return try JSONDecoder.bigKid.decode(ChildStateResponse.self, from: data)
+    }
+
+    func approveChildReflectionSubmission(reflectionId: UUID, parentNote: String?) async throws {
+        let trimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let url = URL(string: "\(trimmed)/parent/reflection/\(reflectionId.uuidString)/approve")
+        else { throw URLError(.badURL) }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.timeoutInterval = 28
+        let note = parentNote?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !note.isEmpty {
+            req.httpBody = try JSONSerialization.data(withJSONObject: ["parent_note": note])
+        }
+        let (_, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+    }
 }
 
 // MARK: - Error
@@ -170,7 +207,7 @@ enum APIError: LocalizedError {
 
 // MARK: - Three-tier lock command APIs
 
-struct PollTargetDTO: Codable {
+struct PollTargetDTO: Decodable {
     let bundle_id: String?
     let list_name: String?
     let list_id: String?                 // new: saved list UUID (spec §3.2)
@@ -181,9 +218,39 @@ struct PollTargetDTO: Codable {
     let target_display: String?
     let target_child_id: String?         // new: which child device (multi-child)
     let force_downgrade: Bool?           // new: parent-confirmed B1 downgrade
+
+    private enum CodingKeys: String, CodingKey {
+        case bundle_id
+        case list_name
+        case list_id
+        case has_pending_blob
+        case category_hint
+        case categoryHint
+        case target_all
+        case original_request
+        case target_display
+        case target_child_id
+        case force_downgrade
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        bundle_id = try c.decodeIfPresent(String.self, forKey: .bundle_id)
+        list_name = try c.decodeIfPresent(String.self, forKey: .list_name)
+        list_id = try c.decodeIfPresent(String.self, forKey: .list_id)
+        has_pending_blob = try c.decodeIfPresent(Bool.self, forKey: .has_pending_blob)
+        category_hint =
+            try c.decodeIfPresent(String.self, forKey: .category_hint)
+                ?? c.decodeIfPresent(String.self, forKey: .categoryHint)
+        target_all = try c.decodeIfPresent(Bool.self, forKey: .target_all)
+        original_request = try c.decodeIfPresent(String.self, forKey: .original_request) ?? ""
+        target_display = try c.decodeIfPresent(String.self, forKey: .target_display)
+        target_child_id = try c.decodeIfPresent(String.self, forKey: .target_child_id)
+        force_downgrade = try c.decodeIfPresent(Bool.self, forKey: .force_downgrade)
+    }
 }
 
-struct PollCommandDTO: Codable {
+struct PollCommandDTO: Decodable {
     let command_id: UUID
     let action: String
     let tier: String?
@@ -302,19 +369,45 @@ struct AnyCodable: Codable {
 
     init(from decoder: Decoder) throws {
         let container = try decoder.singleValueContainer()
-        if let int = try? container.decode(Int.self) { value = int }
-        else if let double = try? container.decode(Double.self) { value = double }
-        else if let string = try? container.decode(String.self) { value = string }
-        else if let bool = try? container.decode(Bool.self) { value = bool }
-        else { value = "" }
+        if container.decodeNil() {
+            value = NSNull()
+        } else if let int = try? container.decode(Int.self) {
+            value = int
+        } else if let double = try? container.decode(Double.self) {
+            value = double
+        } else if let bool = try? container.decode(Bool.self) {
+            value = bool
+        } else if let string = try? container.decode(String.self) {
+            value = string
+        } else if let arr = try? container.decode([AnyCodable].self) {
+            // Unwrap nested AnyCodable so `as? [Any]` works at call sites.
+            value = arr.map { $0.value }
+        } else if let dict = try? container.decode([String: AnyCodable].self) {
+            value = dict.mapValues { $0.value }
+        } else {
+            value = ""
+        }
     }
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.singleValueContainer()
-        if let int = value as? Int { try container.encode(int) }
-        else if let double = value as? Double { try container.encode(double) }
-        else if let string = value as? String { try container.encode(string) }
-        else if let bool = value as? Bool { try container.encode(bool) }
-        else { try container.encode("") }
+        switch value {
+        case is NSNull:
+            try container.encodeNil()
+        case let int as Int:
+            try container.encode(int)
+        case let double as Double:
+            try container.encode(double)
+        case let bool as Bool:
+            try container.encode(bool)
+        case let string as String:
+            try container.encode(string)
+        case let arr as [Any]:
+            try container.encode(arr.map { AnyCodable($0) })
+        case let dict as [String: Any]:
+            try container.encode(dict.mapValues { AnyCodable($0) })
+        default:
+            try container.encode("")
+        }
     }
 }
