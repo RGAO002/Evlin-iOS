@@ -77,8 +77,8 @@ struct ChatView: View {
                                                 proposal: p,
                                                 onConfirm: { await viewModel.confirmProposal(p) },
                                                 onSkip: { viewModel.skipProposal(p) },
-                                                aliasMissTarget: viewModel.aliasMissTarget(for: p),
-                                                onTag: { viewModel.beginLazyTag(for: p) }
+                                                rowAliasMissTargets: viewModel.rowAliasMissTargets(for: p),
+                                                onTagRow: { idx in viewModel.beginLazyTag(for: p, rowIndex: idx) }
                                             )
                                         }
                                     }

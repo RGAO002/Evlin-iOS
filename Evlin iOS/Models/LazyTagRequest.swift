@@ -8,7 +8,9 @@
 import Foundation
 
 struct LazyTagRequest: Identifiable, Equatable {
-    let id: String       // proposalToken
-    let target: String   // e.g. "Instagram"
+    var id: String { "\(proposalToken)#\(rowIndex)" }
+    let proposalToken: String
+    let rowIndex: Int
+    let target: String
     let kind: AliasKind
 }

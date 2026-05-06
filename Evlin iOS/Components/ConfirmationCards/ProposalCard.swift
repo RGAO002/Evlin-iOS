@@ -1,16 +1,39 @@
 import SwiftUI
 
-/// Generic AI proposal card. When `aliasMissTarget` is non-nil, renders an
-/// orange warning row + "Tag <target>" button and disables Confirm — the
-/// view model removes the miss after lazy-tag flow saves an alias, at
-/// which point the next render unblocks Confirm.
+/// Generic AI proposal card. Supports single-row (legacy `args["target"]`
+/// + `args["target_kind"]`) and multi-row (`args["rows"]` array of
+/// `{target, target_kind, minutes}`) layouts. Per-row alias-miss UI:
+/// each row that misses LocalAliasStore lookup shows a "Tag" button;
+/// Confirm is disabled until every row is resolved.
 struct ProposalCard: View {
     let proposal: ProposalDTO
     var onConfirm: () async -> Void
     var onSkip: () -> Void
-    var aliasMissTarget: String? = nil
-    var onTag: () -> Void = {}
+    /// Index-aligned with `rows`. nil means the row is good. Caller
+    /// (ChatView) supplies via `viewModel.rowAliasMissTargets(for:)`.
+    var rowAliasMissTargets: [String?] = []
+    var onTagRow: (Int) -> Void = { _ in }
     @State private var working = false
+
+    private var rows: [(target: String, kind: String, minutes: Int?)] {
+        if let rowsAny = proposal.args["rows"]?.value as? [Any] {
+            return rowsAny.compactMap { r in
+                guard let dict = r as? [String: Any],
+                      let target = dict["target"] as? String,
+                      let kind = dict["target_kind"] as? String
+                else { return nil }
+                let minutes = dict["minutes"] as? Int
+                return (target, kind, minutes)
+            }
+        }
+        // Legacy shape: derive single row from top-level args
+        if let target = proposal.args["target"]?.value as? String,
+           let kind = proposal.args["target_kind"]?.value as? String {
+            let minutes = proposal.args["minutes"]?.value as? Int
+            return [(target, kind, minutes)]
+        }
+        return []
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -22,18 +45,12 @@ struct ProposalCard: View {
                     .font(.system(size: 16, weight: .heavy))
                     .foregroundStyle(Color.evOnSurface)
             }
-            if !bodyText.isEmpty {
-                Text(bodyText)
-                    .font(.system(size: 14))
-                    .foregroundStyle(Color.evOnSurfaceVariant)
-                    .lineSpacing(2)
-            }
-            if let missTarget = aliasMissTarget {
-                aliasMissBlock(target: missTarget)
+            ForEach(Array(rows.enumerated()), id: \.offset) { idx, row in
+                rowView(idx: idx, row: row)
             }
             HStack(spacing: 10) {
                 Button(action: { Task { await runConfirm() } }) {
-                    Text(working ? "Working…" : "Confirm")
+                    Text(working ? "Working…" : (rows.count > 1 ? "Confirm all" : "Confirm"))
                         .font(.system(size: 15, weight: .heavy))
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 11)
@@ -63,29 +80,47 @@ struct ProposalCard: View {
     }
 
     @ViewBuilder
-    private func aliasMissBlock(target: String) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .top, spacing: 6) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundStyle(Color.orange)
-                    .font(.system(size: 13))
-                Text("First time locking \u{201C}\(target)\u{201D} — tap below to confirm which app it is.")
-                    .font(.system(size: 13))
-                    .foregroundStyle(Color.evOnSurfaceVariant)
+    private func rowView(idx: Int, row: (target: String, kind: String, minutes: Int?)) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                NameWithIcon(
+                    name: row.target,
+                    kind: row.kind == "category" ? .category : .app,
+                    titleFont: .system(size: 15, weight: .medium)
+                )
+                Spacer()
+                if rowMissTarget(idx: idx) == nil && rows.count > 1 {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(Color.evSecondary)
+                }
             }
-            Button(action: onTag) {
-                Text("Tag \(target)")
-                    .font(.system(size: 14, weight: .heavy))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 9)
+            if let missTarget = rowMissTarget(idx: idx) {
+                Button(action: { onTagRow(idx) }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.white)
+                        Text("First time locking — tap to confirm \"\(missTarget)\"")
+                            .font(.system(size: 13, weight: .heavy))
+                            .foregroundStyle(.white)
+                            .lineLimit(2)
+                            .multilineTextAlignment(.leading)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .background(Color.orange)
-                    .foregroundStyle(.white)
                     .clipShape(RoundedRectangle(cornerRadius: 10))
+                }
             }
         }
-        .padding(10)
-        .background(Color.orange.opacity(0.08))
+        .padding(8)
+        .background(Color.evSurfaceContainerLow)
         .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+
+    private func rowMissTarget(idx: Int) -> String? {
+        guard idx < rowAliasMissTargets.count else { return nil }
+        return rowAliasMissTargets[idx]
     }
 
     private func runConfirm() async {
@@ -94,10 +129,12 @@ struct ProposalCard: View {
         working = false
     }
 
-    private var confirmDisabled: Bool { working || aliasMissTarget != nil }
+    private var confirmDisabled: Bool {
+        working || rowAliasMissTargets.contains(where: { $0 != nil })
+    }
 
     private var confirmBackground: Color {
-        aliasMissTarget != nil ? Color.evOutline : dangerColor
+        rowAliasMissTargets.contains(where: { $0 != nil }) ? Color.evOutline : dangerColor
     }
 
     private var dangerColor: Color {
@@ -114,18 +151,5 @@ struct ProposalCard: View {
         case "medium": return "questionmark.circle.fill"
         default: return "sparkles"
         }
-    }
-
-    private var bodyText: String {
-        if let reason = proposal.args["reason"]?.value as? String {
-            return "Reason: \"\(reason)\""
-        }
-        if let title = proposal.args["title"]?.value as? String {
-            return "Title: \(title)"
-        }
-        if let minutes = proposal.args["minutes"]?.value as? Int {
-            return "Duration: \(minutes) min"
-        }
-        return ""
     }
 }

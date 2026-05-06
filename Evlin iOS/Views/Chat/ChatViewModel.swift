@@ -764,26 +764,38 @@ class ChatViewModel: ObservableObject {
         "\(token)#\(rowIndex)"
     }
 
-    /// True if the proposal currently has no alias miss outstanding.
+    /// True if the proposal currently has no alias miss outstanding on
+    /// any of its rows.
     func aliasHit(for proposal: ProposalDTO) -> Bool {
-        pendingAliasMisses[proposal.token] == nil
+        let targets = Self.extractAliasTargets(from: proposal)
+        for idx in 0..<targets.count {
+            let key = Self.aliasMissKey(token: proposal.token, rowIndex: idx)
+            if pendingAliasMisses[key] != nil { return false }
+        }
+        return true
     }
 
-    /// String to render in ProposalCard's miss UI; nil when no miss.
-    /// Re-derives via extractAliasTarget so a hit (alias added since
-    /// pre-flight) reflects immediately even if pendingAliasMisses
-    /// hasn't been swept yet.
-    func aliasMissTarget(for proposal: ProposalDTO) -> String? {
-        guard pendingAliasMisses[proposal.token] != nil else { return nil }
-        return Self.extractAliasTarget(from: proposal)?.target
+    /// Per-row miss targets for ProposalCard. Index-aligned with the
+    /// proposal's rows. nil at i means row i has no outstanding miss.
+    func rowAliasMissTargets(for proposal: ProposalDTO) -> [String?] {
+        let targets = Self.extractAliasTargets(from: proposal)
+        return targets.enumerated().map { idx, entry in
+            let key = Self.aliasMissKey(token: proposal.token, rowIndex: idx)
+            // pendingAliasMisses is [String: AliasKind] — presence means MISS.
+            if pendingAliasMisses[key] != nil {
+                return entry?.target
+            }
+            return nil
+        }
     }
 
     @MainActor
-    func beginLazyTag(for proposal: ProposalDTO) {
-        guard let kind = pendingAliasMisses[proposal.token] else { return }
-        guard let (target, _) = Self.extractAliasTarget(from: proposal) else { return }
+    func beginLazyTag(for proposal: ProposalDTO, rowIndex: Int) {
+        let targets = Self.extractAliasTargets(from: proposal)
+        guard rowIndex < targets.count, let (target, kind) = targets[rowIndex] else { return }
         activeLazyTagRequest = LazyTagRequest(
-            id: proposal.token,
+            proposalToken: proposal.token,
+            rowIndex: rowIndex,
             target: target,
             kind: kind
         )
@@ -798,9 +810,13 @@ class ChatViewModel: ObservableObject {
         )
         switch result {
         case .success:
-            // Clear THIS proposal's miss + sweep any other pending misses
-            // for the same (target, kind) — handles multi-card chats like
-            // "lock IG and TikTok" where two cards reference Instagram.
+            // Clear THIS row's miss + sweep any other pending per-row misses
+            // for the same (target, kind) — handles multi-card and multi-row
+            // chats like "lock IG and TikTok" where two rows reference Instagram.
+            let key = Self.aliasMissKey(
+                token: request.proposalToken, rowIndex: request.rowIndex
+            )
+            pendingAliasMisses.removeValue(forKey: key)
             sweepResolvedMisses(target: request.target, kind: request.kind)
             activeLazyTagRequest = nil
         case .failure(let err):
@@ -814,18 +830,26 @@ class ChatViewModel: ObservableObject {
         activeLazyTagRequest = nil
     }
 
-    /// Removes any `pendingAliasMisses` entries whose proposal's
+    /// Removes any `pendingAliasMisses` entries whose proposal-row's
     /// (target, kind) match. Called after a successful tag — even if the
-    /// chat had multiple cards referencing the same name, they all clear.
+    /// chat had multiple cards/rows referencing the same name, they all clear.
+    /// Keys in `pendingAliasMisses` are `"\(proposalToken)#\(rowIndex)"`.
     @MainActor
     private func sweepResolvedMisses(target: String, kind: AliasKind) {
         let normalizedTarget = target.lowercased()
-        for token in Array(pendingAliasMisses.keys) {
-            if let p = findProposal(byToken: token),
-               let (t, k) = Self.extractAliasTarget(from: p),
-               k == kind,
-               t.lowercased() == normalizedTarget {
-                pendingAliasMisses.removeValue(forKey: token)
+        for key in Array(pendingAliasMisses.keys) {
+            let parts = key.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false)
+            guard parts.count == 2,
+                  let rowIndex = Int(parts[1])
+            else { continue }
+            let token = String(parts[0])
+            guard let p = findProposal(byToken: token) else { continue }
+            let targets = Self.extractAliasTargets(from: p)
+            guard rowIndex < targets.count,
+                  let (t, k) = targets[rowIndex]
+            else { continue }
+            if k == kind && t.lowercased() == normalizedTarget {
+                pendingAliasMisses.removeValue(forKey: key)
             }
         }
     }
@@ -1099,9 +1123,12 @@ class ChatViewModel: ObservableObject {
     /// Parent tapped Skip — drop the proposal from the most recent agent message.
     @MainActor
     func skipProposal(_ p: ProposalDTO) {
-        // Clear any outstanding alias miss — Skip means "don't do this",
-        // which doesn't need a tag. Keeps state tidy.
-        pendingAliasMisses.removeValue(forKey: p.token)
+        // Clear any outstanding alias misses on every row — Skip means
+        // "don't do this", which doesn't need a tag. Keeps state tidy.
+        let prefix = "\(p.token)#"
+        for key in Array(pendingAliasMisses.keys) where key.hasPrefix(prefix) {
+            pendingAliasMisses.removeValue(forKey: key)
+        }
         if let i = messages.lastIndex(where: { $0.role == .agent }) {
             var msg = messages[i]
             msg.proposals?.removeAll(where: { $0.token == p.token })
