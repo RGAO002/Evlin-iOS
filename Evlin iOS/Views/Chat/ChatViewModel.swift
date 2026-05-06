@@ -562,8 +562,19 @@ class ChatViewModel: ObservableObject {
                     case "confirmed", "confirmed_exact":
                         let verb = AckVerb(rawValue: resp.verb ?? "shield") ?? .shield
                         let name = resp.displayName ?? targetDisplay ?? ""
+                        // Prefer kid-reported expiry over parent-estimated. The
+                        // legacy-exec path through /parent/agent/exec sometimes
+                        // returns legacy_action with duration_minutes=nil even
+                        // when the shield was timed (round-trip loss in
+                        // staging), which made every confirmed receipt say
+                        // "Until you unlock". Kid's effectiveState carries the
+                        // actually-applied expiresAtISO; use that when present.
+                        let actualUnlocksAt = resp.effectiveState
+                            .flatMap { $0.shieldsCovering.first?.expiresAtISO }
+                            .flatMap { ISO8601DateFormatter().date(from: $0) }
+                            ?? expiresAt
                         self.applyReceipt(
-                            .confirmedExact(verb: verb, displayName: name, unlocksAt: expiresAt),
+                            .confirmedExact(verb: verb, displayName: name, unlocksAt: actualUnlocksAt),
                             effective: resp.effectiveState,
                             messageID: messageID
                         )

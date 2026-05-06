@@ -143,6 +143,7 @@ enum CardPayloadBuilder {
             body: "",
             buttons: [
                 CardButton(label: "15 minutes", style: .secondary, action: { h.onDurationPicked?(15) }),
+                CardButton(label: "30 minutes", style: .secondary, action: { h.onDurationPicked?(30) }),
                 CardButton(label: "1 hour", style: .secondary, action: { h.onDurationPicked?(60) }),
                 CardButton(label: "Permanently", style: .secondary, action: { h.onDurationPicked?(nil) }),
                 CardButton(label: "Cancel", style: .cancel, action: h.onCancel ?? {}),
