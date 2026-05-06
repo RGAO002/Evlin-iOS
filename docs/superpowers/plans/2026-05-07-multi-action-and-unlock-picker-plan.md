@@ -69,21 +69,22 @@ Backend tasks 1-9 are backwards-compatible (older iOS clients see the singular f
 
 ### Task 1: Add `last_effective_state` columns to Device
 
+**Note:** This repo has no Alembic — `backend/app/db/engine.py:48-56` uses `Base.metadata.create_all` on startup. New columns appear automatically on next process restart for fresh schemas. For Railway (existing data), an explicit ADD COLUMN is required because `create_all` is no-op on existing tables.
+
 **Files:**
 - Modify: `backend/app/db/models/device.py`
-- Create: `backend/alembic/versions/<timestamp>_add_last_effective_state.py`
+- Create: `backend/scripts/migrations/2026_05_07_add_last_effective_state.sql`
 
 - [ ] **Step 1: Add columns to the SQLAlchemy model**
 
-Open `backend/app/db/models/device.py` and add inside the `Device` class (after existing `Mapped[...]` columns):
+Open `backend/app/db/models/device.py` and add inside the `Device` class (after the existing `mode` column):
 
 ```python
 from datetime import datetime
-from typing import Any
 from sqlalchemy import DateTime
 from sqlalchemy.dialects.postgresql import JSONB
 
-last_effective_state: Mapped[dict[str, Any] | None] = mapped_column(
+last_effective_state: Mapped[dict | None] = mapped_column(
     JSONB, nullable=True, default=None
 )
 last_effective_state_at: Mapped[datetime | None] = mapped_column(
@@ -91,31 +92,56 @@ last_effective_state_at: Mapped[datetime | None] = mapped_column(
 )
 ```
 
-- [ ] **Step 2: Generate Alembic migration**
+- [ ] **Step 2: Write the SQL migration script**
 
-Run:
-```bash
-cd /Users/fred/Desktop/Evlin/adaptive-engine/backend
-alembic revision --autogenerate -m "add_last_effective_state_to_device"
+Create `backend/scripts/migrations/2026_05_07_add_last_effective_state.sql`:
+
+```sql
+-- Phase 1 multi-action plan: U1 unlock card needs the most-recent
+-- effectiveState the kid posted with each ack. Stored on the device row
+-- so parent_chat can read without joining through the latest Command.
+ALTER TABLE evlin_devices
+    ADD COLUMN IF NOT EXISTS last_effective_state JSONB,
+    ADD COLUMN IF NOT EXISTS last_effective_state_at TIMESTAMP WITH TIME ZONE;
 ```
 
-Expected: a new file under `backend/alembic/versions/` containing `add_column('evlin_devices', sa.Column('last_effective_state', JSONB))` and the timestamp column.
+- [ ] **Step 3: Apply locally for tests**
 
-- [ ] **Step 3: Apply migration**
-
-Run:
-```bash
-alembic upgrade head
-```
-
-Expected: "Running upgrade ... -> ..., add_last_effective_state_to_device" with no error.
-
-- [ ] **Step 4: Commit**
+Local dev / CI test DBs use `create_all` on startup, so a fresh container picks up the columns automatically. To run tests against the new columns immediately without restart:
 
 ```bash
-git add backend/app/db/models/device.py backend/alembic/versions/
-git commit -m "feat(db): add last_effective_state columns to device for U1 source data"
+cd /Users/fred/Desktop/Evlin/adaptive-engine
+psql "$DATABASE_URL" -f backend/scripts/migrations/2026_05_07_add_last_effective_state.sql
 ```
+
+Expected: `ALTER TABLE` (with no error if already applied).
+
+- [ ] **Step 4: Document Railway deploy step**
+
+Add a one-liner under `backend/scripts/migrations/README.md` (create if missing):
+
+```markdown
+# Manual SQL migrations
+
+This repo doesn't use Alembic. New columns added to SQLAlchemy models
+appear automatically on fresh DBs via `Base.metadata.create_all`. For
+existing DBs (Railway production), apply each script in order against
+the production DB before restarting the backend. Do not skip — `create_all`
+is no-op against existing tables and won't add new columns.
+
+| Date | Script | Reason |
+|---|---|---|
+| 2026-05-07 | `2026_05_07_add_last_effective_state.sql` | U1 unlock card data source |
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add backend/app/db/models/device.py backend/scripts/migrations/
+git commit -m "feat(db): add last_effective_state columns to device + manual migration script"
+```
+
+**Railway deploy step (informational, not part of this task):** the user (or release runbook) must `psql $RAILWAY_DATABASE_URL -f 2026_05_07_add_last_effective_state.sql` before pushing the backend code.
 
 ---
 
@@ -135,6 +161,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 from httpx import AsyncClient
 from backend.app.db.models import Family, Device, Command
+from backend.app.db.models.device import DeviceMode
 from backend.app.db.models.command import AckStatus
 
 
@@ -143,7 +170,7 @@ async def test_ack_persists_effective_state_on_device(
     client: AsyncClient, session
 ):
     family = Family(id=uuid4())
-    device = Device(id=uuid4(), family_id=family.id, label="Liam", role="child")
+    device = Device(id=uuid4(), family_id=family.id, label="Liam", mode=DeviceMode.child)
     cmd = Command(
         family_id=family.id, target_device_id=device.id,
         payload={}, ack_status=AckStatus.pending,
@@ -263,25 +290,31 @@ Create `backend/tests/services/test_agent_loop_multi_action.py`:
 ```python
 import pytest
 from unittest.mock import AsyncMock, MagicMock
-from backend.app.services.agent_loop import AgentLoop
-from backend.app.services.agent_tools.decorator import (
-    GLOBAL_REGISTRY, ToolResult, tool,
-)
+from backend.app.services.agent_loop import AgentLoop, AgentInput
+from backend.app.services.agent_tools.decorator import GLOBAL_REGISTRY
 from backend.app.schemas.agent import AgentResponse
 
 
 @pytest.mark.asyncio
 async def test_two_legacy_calls_in_one_turn_both_accumulate():
-    """Two shield_app-style calls in the same turn should both end up in
-    legacy_gemini_actions, not short-circuit on the first."""
+    """Two shield_app calls in the same turn should both end up in
+    legacy_gemini_actions, not short-circuit on the first.
 
-    # Build a minimal AgentLoop with a fake Gemini that returns two parallel
-    # tool_calls in one shot, then no tool_calls.
-    fake_gemini = MagicMock()
-    call_a = MagicMock(id="c1", name="shield_app", args={"target": "A", "target_kind": "app", "minutes": 15})
-    call_b = MagicMock(id="c2", name="shield_app", args={"target": "B", "target_kind": "app", "minutes": 15})
+    AgentLoop calls `gemini.chat(...)` (not generate). The Gemini stub
+    returns one turn with 2 parallel tool_calls; our accumulator code
+    should drain both before returning.
+    """
+    call_a = MagicMock(
+        id="c1", name="shield_app",
+        args={"target": "A", "target_kind": "app", "minutes": 15},
+    )
+    call_b = MagicMock(
+        id="c2", name="shield_app",
+        args={"target": "B", "target_kind": "app", "minutes": 15},
+    )
     first_resp = MagicMock(tool_calls=[call_a, call_b], text="")
-    fake_gemini.generate = AsyncMock(side_effect=[first_resp])
+    fake_gemini = MagicMock()
+    fake_gemini.chat = AsyncMock(side_effect=[first_resp])
 
     loop = AgentLoop(
         gemini=fake_gemini,
@@ -290,7 +323,14 @@ async def test_two_legacy_calls_in_one_turn_both_accumulate():
         action_log=None,
     )
 
-    inp = MagicMock(force_confirmations=[])
+    inp = AgentInput(
+        message="lock A and B for 15 min",
+        history=[],
+        child_device_id=None,
+        child_name="Liam",
+        state_snapshot=None,
+        force_confirmations=[],
+    )
     resp = await loop.run(inp)
 
     assert isinstance(resp, AgentResponse)
@@ -667,6 +707,37 @@ async def _stage_legacy_actions(
             req=req, session=session,
         )
 
+    # D1 / D3 gating: if ANY action in a multi-turn would normally bounce
+    # back as D1 (missing duration) or D3 (>24h, unconfirmed), we cannot
+    # bundle — those cards must surface BEFORE proposal exec, otherwise
+    # the legacy dispatcher fires inside _exec_legacy_shield and returns
+    # an unsupported card mid-confirm. Detect and route the offending
+    # action through the eager path instead. Only one card surfaces at a
+    # time — that action becomes the bottleneck; siblings get re-emitted
+    # by Gemini on the next round.
+    for a in actions:
+        if a.get("type") != "shield":
+            continue
+        state = a.get("duration_state")
+        dur = a.get("duration_minutes")
+        if isinstance(dur, float):
+            dur = int(dur)
+        elif isinstance(dur, str) and dur.isdigit():
+            dur = int(dur)
+        if state == "missing":
+            return await _handle_gemini_action(
+                gemini_action=a, message=message, reasoning=reasoning,
+                req=req, session=session,
+            )
+        if (
+            isinstance(dur, int) and dur > 24 * 60
+            and "D3" not in (req.force_confirmations or [])
+        ):
+            return await _handle_gemini_action(
+                gemini_action=a, message=message, reasoning=reasoning,
+                req=req, session=session,
+            )
+
     by_type: dict[str, list[dict]] = defaultdict(list)
     for a in actions:
         by_type[a["type"]].append(a)
@@ -760,6 +831,7 @@ from uuid import uuid4
 from httpx import AsyncClient
 from backend.app.services.proposal_store import get_proposal_store
 from backend.app.db.models import Family, Device
+from backend.app.db.models.device import DeviceMode
 
 
 @pytest.mark.asyncio
@@ -767,7 +839,7 @@ async def test_exec_two_shield_actions_returns_two_legacy_actions(
     client: AsyncClient, session
 ):
     family = Family(id=uuid4())
-    device = Device(id=uuid4(), family_id=family.id, label="Liam", role="child")
+    device = Device(id=uuid4(), family_id=family.id, label="Liam", mode=DeviceMode.child)
     session.add_all([family, device])
     await session.commit()
 
@@ -928,12 +1000,13 @@ from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 from backend.app.api.routes.parent_chat import _load_effective_state
 from backend.app.db.models import Family, Device
+from backend.app.db.models.device import DeviceMode
 
 
 @pytest.mark.asyncio
 async def test_returns_empty_when_no_state(session):
     family = Family(id=uuid4())
-    device = Device(id=uuid4(), family_id=family.id, label="Liam", role="child")
+    device = Device(id=uuid4(), family_id=family.id, label="Liam", mode=DeviceMode.child)
     session.add_all([family, device])
     await session.commit()
     result = await _load_effective_state(session, device.id)
@@ -952,7 +1025,7 @@ async def test_returns_active_shields_from_recent_state(session):
         "possibleSavedListCoverage": False,
     }
     device = Device(
-        id=uuid4(), family_id=family.id, label="Liam", role="child",
+        id=uuid4(), family_id=family.id, label="Liam", mode=DeviceMode.child,
         last_effective_state=eff,
         last_effective_state_at=datetime.now(timezone.utc),
     )
@@ -973,7 +1046,7 @@ async def test_marks_stale_when_older_than_5_min(session):
         {"displayName": "IG", "expiresAtISO": None, "tier": "exactApp"}
     ], "possibleSavedListCoverage": False}
     device = Device(
-        id=uuid4(), family_id=family.id, label="Liam", role="child",
+        id=uuid4(), family_id=family.id, label="Liam", mode=DeviceMode.child,
         last_effective_state=eff,
         last_effective_state_at=datetime.now(timezone.utc) - timedelta(minutes=10),
     )
@@ -1174,14 +1247,44 @@ def _route_unshield(mode: str, action: dict) -> DispatchResult:
             return DispatchResult(receipt_only_text="Nothing is locked right now.")
         if len(eff_shields) == 1:
             sh = eff_shields[0]
+            tier = _TIER_FROM_KIND.get(sh["kind"], "exactApp")
+            display = sh["display_name"]
+            # Kind-specific ResolvedAction so list/all/category each strip
+            # the right shield layer. Mirrors the regular branches below.
+            if tier == "savedList":
+                return DispatchResult(
+                    resolved=ResolvedAction(
+                        action="unshield",
+                        tier="savedList",
+                        list_name=display,
+                        target_display=display,
+                    )
+                )
+            if tier == "all":
+                return DispatchResult(
+                    resolved=ResolvedAction(
+                        action="unshield",
+                        tier="all",
+                        target_all=True,
+                        target_display=display,
+                    )
+                )
+            if tier == "category":
+                return DispatchResult(
+                    resolved=ResolvedAction(
+                        action="unshield",
+                        tier="category",
+                        category_hint=display.lower(),
+                        target_display=display,
+                    )
+                )
+            # exactApp default
             return DispatchResult(
                 resolved=ResolvedAction(
                     action="unshield",
-                    tier=_TIER_FROM_KIND.get(sh["kind"], "exactApp"),
-                    target_display=sh["display_name"],
-                    category_hint=(
-                        sh["display_name"].lower() if sh["kind"] == "category" else None
-                    ),
+                    tier="exactApp",
+                    target_display=display,
+                    bundle_id=None,
                 )
             )
         return DispatchResult(
@@ -1292,12 +1395,13 @@ from uuid import uuid4
 from httpx import AsyncClient
 from backend.app.services.proposal_store import get_proposal_store
 from backend.app.db.models import Family, Device
+from backend.app.db.models.device import DeviceMode
 
 
 @pytest.mark.asyncio
 async def test_u1_all_marker_dispatches_unshield_all(client: AsyncClient, session):
     family = Family(id=uuid4())
-    device = Device(id=uuid4(), family_id=family.id, label="Liam", role="child")
+    device = Device(id=uuid4(), family_id=family.id, label="Liam", mode=DeviceMode.child)
     session.add_all([family, device])
     await session.commit()
 
@@ -1331,7 +1435,7 @@ async def test_u1_all_marker_dispatches_unshield_all(client: AsyncClient, sessio
 @pytest.mark.asyncio
 async def test_u1_selected_marker_stages_bundled_unshield(client: AsyncClient, session):
     family = Family(id=uuid4())
-    device = Device(id=uuid4(), family_id=family.id, label="Liam", role="child")
+    device = Device(id=uuid4(), family_id=family.id, label="Liam", mode=DeviceMode.child)
     session.add_all([family, device])
     await session.commit()
 
@@ -1367,7 +1471,7 @@ async def test_u1_selected_marker_stages_bundled_unshield(client: AsyncClient, s
 @pytest.mark.asyncio
 async def test_expired_u1_token_returns_friendly_message(client: AsyncClient, session):
     family = Family(id=uuid4())
-    device = Device(id=uuid4(), family_id=family.id, label="Liam", role="child")
+    device = Device(id=uuid4(), family_id=family.id, label="Liam", mode=DeviceMode.child)
     session.add_all([family, device])
     await session.commit()
 
@@ -1801,9 +1905,90 @@ git commit -m "feat(ios): adopt NameWithIcon in ReceiptCard + AliasManagementVie
 
 ### Task 13: `extractAliasTargets` plural + per-row `pendingAliasMisses`
 
+**Important prerequisite:** the current `AnyCodable` (at `APIClient.swift:365-387`) only decodes scalars (Int/Double/String/Bool) and collapses arrays/dicts to `""`. The `args.rows` plural shape is a JSON array of dicts → would decode as `""` and `extractAliasTargets` would return empty. **Step 0 below adds nested support before any other change.**
+
 **Files:**
+- Modify: `Evlin iOS/Services/APIClient.swift:365-387` (recursive AnyCodable)
 - Modify: `Evlin iOS/Views/Chat/ChatViewModel.swift` (`extractAliasTarget` → `extractAliasTargets`; `pendingAliasMisses` becomes per-row keyed)
 - Test: `Evlin iOSTests/MultiActionStagingTests.swift`
+
+- [ ] **Step 0: Replace AnyCodable with recursive version**
+
+In `Evlin iOS/Services/APIClient.swift` (replace the existing `AnyCodable` struct at line 365):
+
+```swift
+struct AnyCodable: Codable {
+    let value: Any
+
+    init(_ value: Any) { self.value = value }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if container.decodeNil() {
+            value = NSNull()
+        } else if let int = try? container.decode(Int.self) {
+            value = int
+        } else if let double = try? container.decode(Double.self) {
+            value = double
+        } else if let bool = try? container.decode(Bool.self) {
+            value = bool
+        } else if let string = try? container.decode(String.self) {
+            value = string
+        } else if let arr = try? container.decode([AnyCodable].self) {
+            // Unwrap nested AnyCodable so `as? [Any]` works at call sites.
+            value = arr.map { $0.value }
+        } else if let dict = try? container.decode([String: AnyCodable].self) {
+            value = dict.mapValues { $0.value }
+        } else {
+            value = ""
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch value {
+        case is NSNull:
+            try container.encodeNil()
+        case let int as Int:
+            try container.encode(int)
+        case let double as Double:
+            try container.encode(double)
+        case let bool as Bool:
+            try container.encode(bool)
+        case let string as String:
+            try container.encode(string)
+        case let arr as [Any]:
+            try container.encode(arr.map { AnyCodable($0) })
+        case let dict as [String: Any]:
+            try container.encode(dict.mapValues { AnyCodable($0) })
+        default:
+            try container.encode("")
+        }
+    }
+}
+```
+
+- [ ] **Step 0.5: Add unit test for nested decode**
+
+Append to `Evlin iOSTests/MultiActionStagingTests.swift` (or create the file if not yet — Step 1 creates it):
+
+```swift
+final class AnyCodableNestedTests: XCTestCase {
+    func test_decodesNestedArrayOfDicts() throws {
+        let json = """
+        {"rows": [{"target": "IG", "target_kind": "app", "minutes": 15}]}
+        """.data(using: .utf8)!
+        struct Wrap: Decodable { let rows: AnyCodable }
+        let decoded = try JSONDecoder().decode(Wrap.self, from: json)
+        let rows = decoded.rows.value as? [Any]
+        XCTAssertNotNil(rows)
+        XCTAssertEqual(rows?.count, 1)
+        let first = rows?.first as? [String: Any]
+        XCTAssertEqual(first?["target"] as? String, "IG")
+        XCTAssertEqual(first?["minutes"] as? Int, 15)
+    }
+}
+```
 
 - [ ] **Step 1: Write failing test**
 
@@ -1872,7 +2057,7 @@ final class ExtractAliasTargetsTests: XCTestCase {
 - [ ] **Step 2: Run to confirm failure**
 
 ```bash
-xcodebuild test -scheme "Evlin iOS" -destination "platform=iOS Simulator,name=iPhone 15" -only-testing:Evlin_iOSTests/ExtractAliasTargetsTests 2>&1 | tail -20
+xcodebuild test -scheme "Evlin iOS" -destination "platform=iOS Simulator,name=iPhone 16e" -only-testing:Evlin_iOSTests/ExtractAliasTargetsTests 2>&1 | tail -20
 ```
 
 Expected: FAIL — `extractAliasTargets` doesn't exist.
@@ -1959,7 +2144,7 @@ for proposal in proposals {
 - [ ] **Step 6: Run to confirm pass**
 
 ```bash
-xcodebuild test -scheme "Evlin iOS" -destination "platform=iOS Simulator,name=iPhone 15" -only-testing:Evlin_iOSTests/ExtractAliasTargetsTests 2>&1 | tail -20
+xcodebuild test -scheme "Evlin iOS" -destination "platform=iOS Simulator,name=iPhone 16e" -only-testing:Evlin_iOSTests/ExtractAliasTargetsTests 2>&1 | tail -20
 ```
 
 Expected: PASS (3 tests).
@@ -2352,7 +2537,19 @@ func beginLazyTag(for proposal: ProposalDTO, rowIndex: Int) {
 }
 ```
 
-Update `LazyTagRequest` model if needed (add `rowIndex: Int`). Update `handleTagSelection` to clear the per-row key:
+Update `LazyTagRequest` — fully specified. In `Evlin iOS/Models/LazyTagRequest.swift` (or wherever the type currently lives), replace with:
+
+```swift
+struct LazyTagRequest: Identifiable, Equatable {
+    var id: String { "\(proposalToken)#\(rowIndex)" }
+    let proposalToken: String
+    let rowIndex: Int
+    let target: String
+    let kind: AliasKind
+}
+```
+
+Update `handleTagSelection` to clear the per-row key:
 
 ```swift
 func handleTagSelection(token: Any, request: LazyTagRequest) {
@@ -2700,14 +2897,29 @@ final class U1MarkerBuilderTests: XCTestCase {
 - [ ] **Step 2: Run to confirm failure**
 
 ```bash
-xcodebuild test -scheme "Evlin iOS" -destination "platform=iOS Simulator,name=iPhone 15" -only-testing:Evlin_iOSTests/U1MarkerBuilderTests 2>&1 | tail -10
+xcodebuild test -scheme "Evlin iOS" -destination "platform=iOS Simulator,name=iPhone 16e" -only-testing:Evlin_iOSTests/U1MarkerBuilderTests 2>&1 | tail -10
 ```
 
 Expected: FAIL — `buildU1Marker` doesn't exist.
 
 - [ ] **Step 3: Add marker builder + handlers in ChatViewModel**
 
-In `Evlin iOS/Views/Chat/ChatViewModel.swift`, add:
+In `Evlin iOS/Views/Chat/ChatViewModel.swift`, add the message-capture state near the top with the other @Published vars:
+
+```swift
+/// Captured at sendMessage time so U1 confirm handlers can re-send the
+/// original parent message with the marker appended. Reset whenever
+/// `currentCard` clears (cancel / new chat round).
+private var lastUserMessageForCard: String = ""
+```
+
+Inside `sendMessage()`, immediately before the `dispatchChat(userMessage: text, ...)` call, add:
+
+```swift
+lastUserMessageForCard = text
+```
+
+Then add the marker builder + handlers:
 
 ```swift
 enum U1Mode {
@@ -2770,7 +2982,14 @@ case .U1:
         u1Token: token,
         u1ShieldList: entries
     )
-    let originalMessage = userMessageThatTriggeredCard   // capture from caller
+    // Source: ChatViewModel must store the user's last typed message
+    // (the one that just produced this U1 card) on a property so the
+    // U1 confirm round-trip can re-send it with the U1 marker. Add
+    // `private var lastUserMessageForCard: String = ""` near the
+    // other @Published vars, and assign it inside `sendMessage()`
+    // right before calling `dispatchChat(...)`:
+    //   lastUserMessageForCard = text
+    let originalMessage = lastUserMessageForCard
     let handlers = CardHandlers(
         onCancel: { [weak self] in self?.currentCard = nil },
         onU1UnlockSelected: { [weak self] indices in
@@ -2800,7 +3019,7 @@ If `[String: AnyCodable]` doesn't decode cleanly from a JSON dict, adapt to a Co
 - [ ] **Step 6: Build + run U1 marker test**
 
 ```bash
-xcodebuild test -scheme "Evlin iOS" -destination "platform=iOS Simulator,name=iPhone 15" -only-testing:Evlin_iOSTests/U1MarkerBuilderTests 2>&1 | tail -10
+xcodebuild test -scheme "Evlin iOS" -destination "platform=iOS Simulator,name=iPhone 16e" -only-testing:Evlin_iOSTests/U1MarkerBuilderTests 2>&1 | tail -10
 ```
 
 Expected: PASS.
@@ -2819,6 +3038,8 @@ git commit -m "feat(ios): U1 marker builder + ChatViewModel U1 handlers + CardDi
 ## Section G — End-to-end Smoke Test
 
 ### Task 20: Manual E2E verification
+
+**Prerequisite:** the lazy-tagging plan (`docs/superpowers/plans/2026-05-06-lazy-tagging-plan.md`) must be fully implemented and deployed. This E2E exercises Saved tags, `CustomTokenPickerView`, and the alias pre-flight infrastructure built there. Without that foundation, Steps 2 and 6 below will fail at the lazy-tag picker.
 
 **Files:** none (manual test script).
 
@@ -2886,6 +3107,21 @@ If any fail: open issue with the failing scenario number + console `[AckPoll]` l
 - [x] **Type consistency:** `extractAliasTargets` (plural) used consistently from Task 13 onward; `args.rows` shape consistent across backend Task 6 and iOS Task 13/16; `pendingAliasMisses` keyed by `aliasMissKey(token:rowIndex:)` everywhere.
 - [x] **Backwards compat:** singular `legacy_gemini_action` and `legacy_action` fields populated when len==1 (Tasks 4, 7); iOS handles both `legacyAction` and `legacyActions` enum cases (Task 14).
 - [x] **Deploy order safe:** backend lands first (Tasks 1-10) — old iOS clients see the singular field. iOS lands second (Tasks 11-19) handling both.
+
+## Review log
+
+**Round 2 (2026-05-07)** — two AI reviewers; 7 P1 + 3 small fixes applied:
+
+- **P1 Alembic absent:** repo uses `Base.metadata.create_all` startup. Task 1 rewritten — model edit + raw SQL migration script under `backend/scripts/migrations/` + Railway runbook note. No Alembic introduced.
+- **P1 Device fixture field:** all `role="child"` swapped to `mode=DeviceMode.child` with explicit `from backend.app.db.models.device import DeviceMode` import in every test file.
+- **P1 AgentLoop test API:** mock `gemini.chat` (not generate); construct real `AgentInput` (not bare MagicMock).
+- **P1 D1/D3 gating bypass in multi-action:** added explicit pre-check loop in `_stage_legacy_actions` — if any action has missing duration or unconfirmed >24h, route THAT action through eager `_handle_gemini_action` so D1/D3 surfaces. Siblings re-emerge from Gemini next round.
+- **P1 AnyCodable nested decode:** Step 0 of Task 13 swaps in a recursive AnyCodable that handles `[AnyCodable]` and `[String: AnyCodable]` plus a unit test in MultiActionStagingTests.
+- **P1 U1 single-active list/all routing:** kind-specific `ResolvedAction` branches added — list_name for "list", target_all=true for "all", category_hint for "category", default for "exactApp".
+- **P1 `userMessageThatTriggeredCard` placeholder:** replaced with `lastUserMessageForCard` private var on ChatViewModel, captured inside `sendMessage()` before `dispatchChat()`.
+- **P2 simulator name:** `iPhone 15` → `iPhone 16e` everywhere.
+- **P2 E2E prereq:** Task 20 now states the lazy-tagging plan must be deployed first.
+- **P3 LazyTagRequest spec:** explicit struct definition with id / proposalToken / rowIndex / target / kind, replacing the "if needed" hand-wave.
 
 ## Out of scope (explicit)
 
