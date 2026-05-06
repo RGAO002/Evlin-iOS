@@ -509,6 +509,7 @@ class ChatViewModel: ObservableObject {
     /// Polls /parent/ack-status for a queued command and mutates the agent
     /// message's receiptState when the child acks. Times out at 30 s.
     private func startAckPoll(commandID: UUID, messageID: UUID, targetDisplay: String?, expiresAt: Date?) {
+        print("[AckPoll] start cmd=\(commandID) msg=\(messageID) deadline=90s")
         let task = Task { [weak self] in
             // 90s deadline. Real two-device kids ack within seconds; if
             // we've waited 90s the device almost certainly isn't online.
@@ -518,15 +519,19 @@ class ChatViewModel: ObservableObject {
             // beats infinite ProgressView — the command itself remains
             // queued server-side regardless of when we stop polling.
             let deadline = Date().addingTimeInterval(90)
+            var tickCount = 0
             while Date() < deadline, !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
-                guard let self else { return }
+                guard let self else { print("[AckPoll] self gone cmd=\(commandID)"); return }
+                tickCount += 1
                 let resp: AckStatusResponse
                 do {
                     resp = try await self.apiClient.fetchRichAckStatus(commandID: commandID)
                 } catch {
-                    continue  // transient; retry next tick
+                    print("[AckPoll] tick=\(tickCount) cmd=\(commandID) fetch error: \(error)")
+                    continue
                 }
+                print("[AckPoll] tick=\(tickCount) cmd=\(commandID) status=\(resp.status)")
 
                 let done = await MainActor.run { () -> Bool in
                     switch resp.status {
@@ -613,8 +618,10 @@ class ChatViewModel: ObservableObject {
             // parent stayed in P mode (single-device dev) or the kid
             // device is genuinely offline; the server-queued command
             // still executes once the kid comes back.
+            print("[AckPoll] deadline hit cmd=\(commandID) ticks=\(tickCount) cancelled=\(Task.isCancelled) — applying .kidNotResponding")
             await MainActor.run {
                 self?.applyReceipt(.kidNotResponding, effective: nil, messageID: messageID)
+                print("[AckPoll] applyReceipt done cmd=\(commandID)")
             }
         }
         activePolls[commandID] = task
