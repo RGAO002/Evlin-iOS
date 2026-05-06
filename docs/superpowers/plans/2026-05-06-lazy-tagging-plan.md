@@ -1,4 +1,4 @@
-# Lazy Tagging Implementation Plan v5
+# Lazy Tagging Implementation Plan v6
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -12,7 +12,7 @@
 
 **Required deployment flag:** Backend `AGENT_ENABLED=1` (env var or settings). Without it, `parent_chat` skips the agent loop entirely, `legacy_gemini_action` is never produced, and our staging interceptor never fires. Verified: `backend/app/core/settings.py:59` defaults `agent_enabled = False`. **Pre-flight: ensure deployment env has `AGENT_ENABLED=1`.**
 
-**Spec:** `docs/superpowers/specs/2026-05-06-lazy-tagging-design.md` (note: spec still mentions Max — supersede with this scope clarification).
+**Spec:** `docs/superpowers/specs/2026-05-06-lazy-tagging-design.md` (v1 scope is single-device test mode only; all two-device alias/token transport is deferred).
 
 ---
 
@@ -20,10 +20,12 @@
 
 **Backend create:** none.
 
-**Backend modify (3 files):**
+**Backend modify (5 files):**
 - `adaptive-engine/backend/app/services/proposal_store.py` — store optional `chat_context: dict` alongside `(tool, args)`.
 - `adaptive-engine/backend/app/api/routes/parent_chat.py` — intercept `agent_resp.legacy_gemini_action` for shield_app app/category targets; stage as Proposal carrying chat context; return `ChatResponse(proposals=[...])`.
 - `adaptive-engine/backend/app/api/routes/parent_agent.py` — `/parent/agent/exec` detects staged-legacy entries and forwards to `_handle_gemini_action`; response schema accommodates legacy `ChatAction`.
+- `adaptive-engine/backend/app/services/agent_tools/shield_tools.py` — add explicit `permanent: bool` to distinguish permanent shield from missing duration.
+- `adaptive-engine/backend/app/services/chat_resolver.py` — handle `duration_state="permanent"` and `force_exact_app` bypass.
 
 **iOS create (4 files):**
 - `Evlin iOS/Models/AliasKind.swift`
@@ -64,13 +66,37 @@ For Railway / production: set `AGENT_ENABLED=1` env var on the service.
 
 - [ ] **Step 3: Verify it's actually applied**
 
-After redeploy / restart, send any chat message that would normally produce a proposal (e.g. `lock his phone`) and confirm the response contains `proposals` (or `receipts` / agent-loop fields). If response only has `action`, agent_enabled is still false.
+Do **not** use `lock his phone` or an empty `proposals` array as proof:
+- `lock his phone` is `target_kind=all`, which intentionally remains eager-dispatch and returns `action`, not a lazy-tag `Proposal`.
+- `ChatResponse.proposals` has a default empty list, so merely seeing `"proposals": []` does not prove the agent path ran.
+
+Use config/log verification before code changes, then run the end-to-end staging smoke after Task 0.2.
 
 ```bash
-curl -s -X POST https://your-backend/api/parent/chat -H "Content-Type: application/json" -d '{"message":"lock his phone","child_name":"Liam"}' | jq '.proposals,.action'
+# Local config check:
+cd /Users/fred/Desktop/Evlin/adaptive-engine
+AGENT_ENABLED=1 python - <<'PY'
+from backend.app.core.settings import settings
+print("agent_enabled=", settings.agent_enabled)
+assert settings.agent_enabled is True
+PY
+
+# Production / Railway:
+# verify AGENT_ENABLED=1 in service env and startup logs after redeploy.
 ```
 
-Expected: `proposals` array exists in response (even empty) — confirms agent loop is running.
+Expected: local script prints `agent_enabled= True`; production env explicitly has `AGENT_ENABLED=1`.
+
+After Task 0.2 is implemented, run the real lazy-tag staging smoke:
+
+```bash
+curl -s -X POST https://your-backend/api/v1/parent/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message":"lock Instagram for 30 minutes","child_name":"Liam"}' \
+  | jq '{message, action, proposals}'
+```
+
+Expected after Task 0.2: `action == null` and `proposals[0].tool == "shield_app_legacy"`. If `action.command_id` is present, staging did not fire.
 
 - [ ] **Step 4: No commit needed.** Pure config / deployment task.
 
@@ -93,7 +119,7 @@ Update the tool description (around line 28) to document the new arg:
 ```python
         "  'lock his phone for 30 min'        → target='his phone', target_kind='all', minutes=30\n"
         "  'lock his phone permanently'       → target='his phone', target_kind='all', permanent=true\n"
-        "  'block Instagram forever'          → target='Instagram', target_kind='app', permanent=true\n"
+        "  'lock Instagram forever'           → target='Instagram', target_kind='app', permanent=true\n"
         ... (other examples) ...
         "\n"
         "PERMANENT vs MISSING: only set permanent=true when the parent EXPLICITLY says 'permanent', "
@@ -159,27 +185,71 @@ Insert ABOVE the existing `if duration == "missing"` check (around line 203):
 
 (Keep all subsequent existing logic unchanged. The `if duration == "missing"` D1 block now never matches when state is "permanent" because we cleared duration above.)
 
-- [ ] **Step 3: Update Gemini system-prompt-test if any exists**
+- [ ] **Step 3: Update backend tests**
 
-```bash
-cd /Users/fred/Desktop/Evlin/adaptive-engine
-grep -rn "shield_app\|permanent" backend/tests/ | head -10
+Patch the existing files:
+- `backend/tests/test_shield_tools.py`
+- `backend/tests/services/test_verb_dispatcher.py`
+
+Append this case to `backend/tests/test_shield_tools.py`:
+
+```python
+@pytest.mark.asyncio
+async def test_shield_app_permanent_sets_duration_state() -> None:
+    result = await GLOBAL_REGISTRY.call("shield_app", {
+        "target": "Instagram",
+        "target_kind": "app",
+        "permanent": True,
+    })
+    action = result.public["legacy_gemini_action"]
+    assert action["type"] == "shield"
+    assert action["target_request"] == "Instagram"
+    assert action["target_kind_hint"] == "app"
+    assert action["duration_minutes"] is None
+    assert action["duration_state"] == "permanent"
 ```
 
-If a test exists for shield_app args, add a case for permanent=True. Otherwise skip.
+Append this case to `backend/tests/services/test_verb_dispatcher.py`:
+
+```python
+def test_shield_category_permanent_skips_d1_and_resolves() -> None:
+    action = {
+        "type": "shield",
+        "target_request": "Social",
+        "target_kind_hint": "category",
+        "duration_minutes": None,
+        "duration_state": "permanent",
+        "category_hint_from_ai": "social",
+        "child_name_hint": None,
+        "confirmation_required": False,
+        "confirmation_reason": None,
+    }
+    result = dispatch(
+        family_id=uuid4(),
+        protection_mode="std",
+        child_count=1,
+        saved_list_names=[],
+        gemini_action=action,
+    )
+    assert result.requires_card is None
+    assert result.resolved is not None
+    assert result.resolved.tier == "category"
+    assert result.resolved.duration_minutes is None
+```
 
 - [ ] **Step 4: Run tests**
 
 ```bash
-pytest backend/tests/services/test_agent_tools_shield.py backend/tests/services/test_chat_resolver.py -v 2>&1 | tail -20
+cd /Users/fred/Desktop/Evlin/adaptive-engine
+pytest backend/tests/test_shield_tools.py backend/tests/services/test_verb_dispatcher.py -v 2>&1 | tail -30
 ```
 
-Expected: existing tests pass; the new branch is unverified by automation but covered by E2E in Task 2.8 ("lock IG permanently").
+Expected: existing tests pass, plus the two new permanent-intent tests pass.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add backend/app/services/agent_tools/shield_tools.py backend/app/services/chat_resolver.py
+git add backend/app/services/agent_tools/shield_tools.py backend/app/services/chat_resolver.py backend/tests/test_shield_tools.py backend/tests/services/test_verb_dispatcher.py
 git commit -m "feat(shield_app): explicit permanent intent (permanent: bool) — distinguish from missing duration"
 ```
 
@@ -797,12 +867,12 @@ Edit `backend/app/api/routes/parent_agent.py` `_exec_legacy_shield` — between 
         gemini_action["force_exact_app"] = True
 ```
 
-- [ ] **Step 3: Add a chat_resolver test for the bypass**
+- [ ] **Step 3: Add dispatcher tests for the bypass**
 
-Append to `backend/tests/services/test_chat_resolver.py` (or wherever shield routing is tested):
+Append to the existing dispatcher test file `backend/tests/services/test_verb_dispatcher.py`:
 
 ```python
-def test_route_shield_app_with_force_exact_app_returns_exact_app():
+def test_shield_app_with_force_exact_app_returns_exact_app():
     """Lazy-tag-confirmed app shield bypasses E1, queues exactApp command."""
     action = {
         "type": "shield",
@@ -811,8 +881,17 @@ def test_route_shield_app_with_force_exact_app_returns_exact_app():
         "duration_minutes": 30,
         "force_exact_app": True,
     }
-    result = _route_shield(
-        mode="std", saved_list_names=[], action=action, force_confirmations=[],
+        "category_hint_from_ai": None,
+        "child_name_hint": None,
+        "confirmation_required": False,
+        "confirmation_reason": None,
+    }
+    result = dispatch(
+        family_id=uuid4(),
+        protection_mode="std",
+        child_count=1,
+        saved_list_names=[],
+        gemini_action=action,
     )
     assert result.requires_card is None
     assert result.resolved is not None
@@ -821,36 +900,71 @@ def test_route_shield_app_with_force_exact_app_returns_exact_app():
     assert result.resolved.duration_minutes == 30
 
 
-def test_route_shield_app_without_flag_still_returns_e1():
+def test_shield_app_without_force_exact_app_still_returns_e1():
     """Eager (non-staged) app shields still get E1 fallback — behavior unchanged."""
     action = {
         "type": "shield",
         "target_kind_hint": "app",
         "target_request": "Instagram",
         "duration_minutes": 30,
+        "category_hint_from_ai": None,
+        "child_name_hint": None,
+        "confirmation_required": False,
+        "confirmation_reason": None,
     }
-    result = _route_shield(
-        mode="std", saved_list_names=[], action=action, force_confirmations=[],
+    result = dispatch(
+        family_id=uuid4(),
+        protection_mode="std",
+        child_count=1,
+        saved_list_names=[],
+        gemini_action=action,
     )
     assert result.requires_card == "E1"
     assert result.resolved is None
+
+
+def test_shield_app_with_force_exact_app_and_permanent_returns_exact_app() -> None:
+    """Permanent lazy-tag-confirmed app shield also bypasses E1."""
+    action = {
+        "type": "shield",
+        "target_kind_hint": "app",
+        "target_request": "Instagram",
+        "duration_minutes": None,
+        "duration_state": "permanent",
+        "force_exact_app": True,
+        "category_hint_from_ai": None,
+        "child_name_hint": None,
+        "confirmation_required": False,
+        "confirmation_reason": None,
+    }
+    result = dispatch(
+        family_id=uuid4(),
+        protection_mode="std",
+        child_count=1,
+        saved_list_names=[],
+        gemini_action=action,
+    )
+    assert result.requires_card is None
+    assert result.resolved is not None
+    assert result.resolved.tier == "exactApp"
+    assert result.resolved.duration_minutes is None
 ```
 
-(Adjust the import / module path of `_route_shield` to match the test file's existing imports.)
+This file already imports `dispatch` and `uuid4`; do not import private `_route_shield`.
 
 - [ ] **Step 4: Run tests**
 
 ```bash
 cd /Users/fred/Desktop/Evlin/adaptive-engine
-pytest backend/tests/services/test_chat_resolver.py -v 2>&1 | tail -20
+pytest backend/tests/services/test_verb_dispatcher.py -v 2>&1 | tail -30
 ```
 
-Expected: 2 new tests pass, no regression on existing tests.
+Expected: 3 new tests pass, no regression on existing tests.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add backend/app/services/chat_resolver.py backend/app/api/routes/parent_agent.py backend/tests/services/test_chat_resolver.py
+git add backend/app/services/chat_resolver.py backend/app/api/routes/parent_agent.py backend/tests/services/test_verb_dispatcher.py
 git commit -m "feat(chat-resolver): bypass E1 for lazy-tag-confirmed app shields (force_exact_app flag)"
 ```
 
@@ -2198,7 +2312,7 @@ Xcode → Run on real iPhone.
 
 - [ ] **Step 3: Test Tag-before-Confirm happy path**
 
-In chat, type: `lock Instagram`
+In chat, type: `lock Instagram for 30 minutes`
 Expected: ProposalCard appears with orange "Evlin doesn't know which app is "Instagram" yet" warning + "Tag Instagram" button. Confirm grey/disabled.
 
 Tap "Tag Instagram". Sheet opens titled "Tag app". List shows already-selected apps. Tap Instagram (or use "Add via Apple picker" → pick IG → close → row appears at top with "Just added" badge, auto-selected). Tap Save.
@@ -2209,18 +2323,18 @@ Expected: Receipt bubble + IG actually shielded on device. The `legacy_action.co
 
 - [ ] **Step 4: Test repeat-hit (alias persisted)**
 
-In chat, type: `lock instagram` (lowercase).
+In chat, type: `lock instagram for 30 minutes` (lowercase).
 Expected: Card appears WITHOUT warning. Confirm directly active. Tap Confirm. Works.
 
 - [ ] **Step 5: Test Add via Apple picker fallback**
 
-In chat: `lock Snapchat` (assume not yet tagged + not in selection).
+In chat: `lock Snapchat for 30 minutes` (assume not yet tagged + not in selection).
 Tap Tag → sheet → list doesn't contain Snapchat → Tap "Open Apple picker" → pick Snapchat → close.
 Expected: row appears at top with "Just added" badge, auto-selected. Tap Save.
 
 - [ ] **Step 6: Test Cancel**
 
-In chat: `lock TikTok`.
+In chat: `lock TikTok for 30 minutes`.
 Card has miss. Tap Tag → sheet opens → tap Cancel.
 Expected: sheet dismisses. Card STILL shows warning + Tag. Confirm STILL disabled. Retry possible.
 
@@ -2231,15 +2345,15 @@ Expected: chat shows error message "Tap "Tag" first so I know which app you mean
 
 - [ ] **Step 8: Test category flow**
 
-In chat: `lock games`.
+In chat: `lock games for 30 minutes`.
 Card with miss. Tap Tag → sheet "Tag category" → list of category tokens (or empty + Apple picker fallback). Apple picker uses `includeEntireCategory: true` so tapping Games row produces a single ActivityCategoryToken.
 Save → Confirm → Receipt.
 
 - [ ] **Step 9: Test multi-target sweep**
 
-In chat: `lock IG and TikTok`. Two ProposalCards appear, each with their own miss + Tag buttons. Tag IG normally. After save, the IG card unblocks; TikTok card unaffected (different target). Tag TikTok separately. Both confirm.
+In chat: `lock IG and TikTok for 30 minutes`. Two ProposalCards appear, each with their own miss + Tag buttons. Tag IG normally. After save, the IG card unblocks; TikTok card unaffected (different target). Tag TikTok separately. Both confirm.
 
-If parent says `lock Instagram and Insta` (both reference Instagram, two cards), tagging once should sweep both — verify the second card unblocks automatically after the first save.
+If parent says `lock Instagram and Insta for 30 minutes` (both reference Instagram, two cards), tagging once should sweep both — verify the second card unblocks automatically after the first save.
 
 - [ ] **Step 10: Smoke test backend Phase 0 path**
 
@@ -2247,9 +2361,9 @@ Use curl to verify the Proposal-first staging:
 
 ```bash
 # Replace AUTH_HEADER + family_id with real values
-curl -s -X POST https://your-backend/parent/chat \
+curl -s -X POST https://your-backend/api/v1/parent/chat \
   -H "Content-Type: application/json" \
-  -d '{"message": "lock Instagram", "child_name": "Liam", "family_id": "..."}' | jq
+  -d '{"message": "lock Instagram for 30 minutes", "child_name": "Liam", "family_id": "..."}' | jq
 ```
 
 Expected: response has non-empty `proposals` array with `tool == "shield_app_legacy"`, NOT `action.command_id` directly. (If `action` is non-null with command_id, Phase 0 staging didn't fire — debug there.)
@@ -2276,7 +2390,7 @@ Expected: response has non-empty `proposals` array with `tool == "shield_app_leg
 - Skip clears miss ✓ Task 2.4
 
 **Out of scope (per spec):**
-- Std two-device alias sync — separate spec
+- Two-device alias/token transport for both Std and Max — separate spec
 - Multi-target merged tag wizard — future
 - Tag editing/deletion UI — future
 

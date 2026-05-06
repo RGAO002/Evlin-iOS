@@ -66,6 +66,179 @@ Backend tasks 1-9 are backwards-compatible (older iOS clients see the singular f
 
 ---
 
+## Section 0 — Backend Test Harness Prerequisite
+
+### Task 0: Add API + async DB fixtures for new backend tests
+
+**Why this exists:** the current backend test suite only has process-local singleton reset fixtures. It does **not** provide `client` / `session` fixtures for DB-backed API tests. Tasks 2, 7, 8, and 10 use both, so this fixture layer must land first or pytest fails before reaching the feature assertions.
+
+**Runtime prerequisite:** this phase exercises the AgentLoop path, not the legacy Gemini-only branch. Backend deploys and local `.env` must have `AGENT_ENABLED=1`; otherwise multi-action staging never runs and iOS will not receive proposals/cards from this plan.
+
+**Files:**
+- Modify: `backend/tests/conftest.py`
+- Create: `backend/tests/test_db_fixtures_smoke.py`
+
+- [ ] **Step 0: Verify the agent path is enabled**
+
+Local:
+
+```bash
+cd /Users/fred/Desktop/Evlin/adaptive-engine
+grep -E '^AGENT_ENABLED=1$' .env
+```
+
+Railway:
+
+```bash
+railway variables | grep AGENT_ENABLED
+```
+
+Expected: `AGENT_ENABLED=1`. If missing, set it before starting Task 1:
+
+```bash
+railway variables --set "AGENT_ENABLED=1"
+```
+
+- [ ] **Step 1: Add test DB fixtures**
+
+Append to `backend/tests/conftest.py`:
+
+```python
+import os
+import pytest_asyncio
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+
+@pytest_asyncio.fixture(scope="session")
+async def test_engine():
+    """Async SQLAlchemy engine for DB-backed API tests.
+
+    Safety: never point this at Railway/prod. Prefer:
+      EVLIN_TEST_DATABASE_URL=postgresql+asyncpg://ale_user:ale_pass@localhost:5433/ale_test
+
+    If EVLIN_TEST_DATABASE_URL is not set, fall back to settings.database_url
+    only when it is clearly local.
+    """
+    from backend.app.core.settings import settings
+    url = os.getenv("EVLIN_TEST_DATABASE_URL") or settings.database_url
+    lowered = url.lower()
+    assert "railway" not in lowered and "localhost" in lowered, (
+        "Refusing to run DB tests against a non-local database. "
+        "Set EVLIN_TEST_DATABASE_URL to a local Postgres test DB."
+    )
+
+    from backend.app.db.base import Base
+    import backend.app.db.models  # noqa: F401 — register all ORM models
+
+    engine = create_async_engine(url, pool_pre_ping=True)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.run_sync(Base.metadata.create_all)
+    try:
+        yield engine
+    finally:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.drop_all)
+        await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def session(test_engine):
+    maker = async_sessionmaker(test_engine, expire_on_commit=False)
+    async with maker() as s:
+        yield s
+        await s.rollback()
+
+
+@pytest_asyncio.fixture
+async def client(session):
+    """Async ASGI client whose get_async_session dependency uses the test session."""
+    from backend.app.main import app
+    from backend.app.db.engine import get_async_session
+
+    async def override_session():
+        yield session
+
+    app.dependency_overrides[get_async_session] = override_session
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://testserver/api/v1",
+        ) as c:
+            yield c
+    finally:
+        app.dependency_overrides.clear()
+```
+
+- [ ] **Step 1a: Include shield tools in registry isolation**
+
+In the existing `_isolate_global_tool_registry` fixture in `backend/tests/conftest.py`, make sure the eager import list includes `shield_tools`:
+
+```python
+for mod in (
+    "read_tools",
+    "vision_tools",
+    "task_tools",
+    "reflection_tools",
+    "bypass_tools",
+    "lock_tools",
+    "shield_tools",
+):
+    try:
+        importlib.import_module(f"backend.app.services.agent_tools.{mod}")
+    except Exception:
+        pass
+```
+
+Why: tools are registered by module import side effects. If another test imports `shield_tools` before the registry-reset fixture snapshots the registry, a later plain `import shield_tools` can be a no-op and `GLOBAL_REGISTRY` can still miss `shield_app`. Eager-importing it inside the fixture makes the new AgentLoop tests deterministic.
+
+- [ ] **Step 2: Create local test DB if missing**
+
+```bash
+createdb -h localhost -p 5433 -U ale_user ale_test || true
+export EVLIN_TEST_DATABASE_URL="postgresql+asyncpg://ale_user:ale_pass@localhost:5433/ale_test"
+```
+
+Expected: DB exists locally. Do **not** use Railway production URL.
+
+- [ ] **Step 3: Smoke the fixtures**
+
+Create `backend/tests/test_db_fixtures_smoke.py`:
+
+```python
+import pytest
+
+from backend.app.db.models import Family
+
+
+@pytest.mark.asyncio
+async def test_db_session_fixture_smoke(session):
+    fam = Family()
+    session.add(fam)
+    await session.commit()
+    await session.refresh(fam)
+
+    assert fam.id is not None
+```
+
+```bash
+cd /Users/fred/Desktop/Evlin/adaptive-engine
+EVLIN_TEST_DATABASE_URL="postgresql+asyncpg://ale_user:ale_pass@localhost:5433/ale_test" \
+pytest backend/tests/test_db_fixtures_smoke.py -q
+```
+
+Expected: PASS.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add backend/tests/conftest.py backend/tests/test_db_fixtures_smoke.py
+git commit -m "test(backend): add async client/session fixtures for DB-backed API tests"
+```
+
+---
+
 ## Section A — Backend: Schema + Effective State Persistence
 
 ### Task 1: Add `last_effective_state` columns to Device
@@ -609,6 +782,24 @@ async def test_mixed_shield_unshield_two_proposals():
     assert len(resp.proposals) == 2
     tools = {p.tool for p in resp.proposals}
     assert tools == {"shield_app_legacy", "unshield_app_legacy"}
+
+
+@pytest.mark.asyncio
+async def test_mixed_block_is_not_silently_dropped():
+    store = ProposalStore()
+    actions = [
+        {"type": "shield", "target_request": "IG", "target_kind_hint": "app",
+         "duration_minutes": 15, "duration_state": "set"},
+        {"type": "block", "target_request": "TikTok", "target_kind_hint": "app"},
+    ]
+    req = ChatRequest(message="lock IG and block TikTok", child_name="Liam")
+    resp = await _stage_legacy_actions(
+        proposal_store=store, actions=actions, req=req,
+        message="", reasoning=None, session=None,
+    )
+    assert resp.proposals == []
+    assert resp.action is None
+    assert "separate" in resp.message.lower()
 ```
 
 - [ ] **Step 2: Run to confirm failure**
@@ -746,15 +937,25 @@ async def _stage_legacy_actions(
     # Phase 1 scope: bundle only `shield` and `unshield`. `block` and
     # `unblock` use the bundle-id catalog path and don't share the
     # ApplicationToken / lazy-tag plumbing — bundling them under
-    # shield_app_legacy would mislabel and misroute. Send any
-    # block/unblock/other through eager dispatch one at a time. If
-    # multiple non-bundleable actions exist in a single turn, only the
-    # first runs; the rest are dropped and the parent re-emits via
-    # Gemini next round (matches today's pre-Phase-1 behavior for those
-    # types — no regression).
+    # shield_app_legacy would mislabel and misroute. If a turn mixes
+    # bundleable and non-bundleable actions, do NOT partially execute or
+    # silently drop rows. Ask the parent to split the block/unblock
+    # command so behavior remains explicit and auditable.
     BUNDLEABLE = {"shield", "unshield"}
     bundleable = [a for a in actions if a.get("type") in BUNDLEABLE]
     other = [a for a in actions if a.get("type") not in BUNDLEABLE]
+
+    if other and bundleable:
+        return ChatResponse(
+            message=(
+                "I can handle multiple lock/unlock actions together, but "
+                "block/unblock needs a separate message for now. Please send "
+                "the block/unblock command separately."
+            ),
+            reasoning=reasoning,
+            action=None,
+            proposals=[],
+        )
 
     if other and not bundleable:
         # Pure non-bundleable turn — eager dispatch the first one.
@@ -778,18 +979,6 @@ async def _stage_legacy_actions(
                 message=message,
                 reasoning=reasoning,
             )
-        )
-
-    # If the turn mixed bundleable + non-bundleable, log the dropped
-    # non-bundleable ones — the bundled proposals still flow but the
-    # parent should know we partial-handled.
-    if other:
-        from loguru import logger
-        logger.warning(
-            "multi-action turn mixed bundleable {} with non-bundleable {} — "
-            "non-bundleable actions deferred to next Gemini round",
-            [a.get("type") for a in bundleable],
-            [a.get("type") for a in other],
         )
 
     return ChatResponse(
@@ -3092,6 +3281,14 @@ git commit -m "feat(ios): U1 marker builder + ChatViewModel U1 handlers + CardDi
 
 Push backend to Railway (auto-deploys). In Xcode: Clean Build Folder (`Shift+Cmd+K`) → Run on real device.
 
+Backend prerequisite check before testing:
+
+```bash
+railway variables | grep AGENT_ENABLED
+```
+
+Expected: `AGENT_ENABLED=1`.
+
 - [ ] **Step 2: Test multi-action shield**
 
 1. Saved tags → Clear all aliases.
@@ -3171,7 +3368,7 @@ If any fail: open issue with the failing scenario number + console `[AckPoll]` l
 **Round 3 (2026-05-07)** — second review pass; 4 P1 + 1 P3 fixes applied:
 
 - **P1 AgentLoop test missing tool import:** added `from backend.app.services.agent_tools import shield_tools  # noqa: F401` so GLOBAL_REGISTRY knows `shield_app` when the test runs in isolation.
-- **P1 block/unblock multi-action misroute:** `_stage_legacy_actions` now scopes bundling to `{shield, unshield}`. `block`/`unblock` actions in a multi-action turn go through eager dispatch (first-only); a logger.warning surfaces dropped siblings. Phase 1 explicitly does not bundle bundle-id-based tools.
+- **P1 block/unblock multi-action misroute:** `_stage_legacy_actions` now scopes bundling to `{shield, unshield}`. Pure `block`/`unblock` turns keep the legacy eager path; mixed bundleable + block/unblock turns are rejected with a split-command message so no action is silently dropped or partially executed.
 - **P1 U1 "all" recursion:** `_handle_u1_confirm` mode=all now builds `type="unshield_all"` (not `unshield`+kind=all). Task 10's effective_state injection guard `type == "unshield"` is False for `unshield_all` → no re-render of U1.
 - **P1 U1 row parsing AnyCodable wrap:** changed `dict["kind"] as? String` to `dict["kind"]?.value as? String` everywhere in the U1 row-mapping closure. Without this, every row was kind="app" / displayName="(unknown)" / stale=false regardless of backend payload.
 - **P3 File Structure Alembic stale mention:** swapped to `backend/scripts/migrations/2026_05_07_add_last_effective_state.sql` + README; tech stack line clarified.
@@ -3186,4 +3383,4 @@ If any fail: open issue with the failing scenario number + console `[AckPoll]` l
 
 ---
 
-**End of Phase 1 plan. 19 implementation tasks + 1 manual E2E.**
+**End of Phase 1 plan. 20 implementation tasks + 1 manual E2E.**
