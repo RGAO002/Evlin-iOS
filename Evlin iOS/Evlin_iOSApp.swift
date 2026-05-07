@@ -24,6 +24,15 @@ struct Evlin_iOSApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
+                // The Evlin design system ("Informed Sentinel") is a
+                // light-mode-only spec — surface containers, card
+                // backgrounds, ghost borders all assume light. Without
+                // this, system dark mode flips Text() to white but
+                // leaves our hardcoded light backgrounds light → white
+                // text on white card → invisible (e.g. Instagram label
+                // on ProposalCard, app names on the lazy-tag picker).
+                // Force light app-wide instead of patching each view.
+                .preferredColorScheme(.light)
                 .environmentObject(apiClient)
                 .environmentObject(screenTimeManager)
                 .simultaneousGesture(
@@ -45,6 +54,11 @@ struct Evlin_iOSApp: App {
                 .onChange(of: appMode) { _, _ in
                     // Toggling P↔K starts/stops the poller — see the
                     // doc on startPollerIfPaired for why.
+                    startPollerIfPaired()
+                }
+                .onReceive(NotificationCenter.default.publisher(for: .bigKidStateInvalidated)) { _ in
+                    // Demo bootstrap (or parent approve) can rewrite `evlin.childDeviceID` while
+                    // already in K mode — restart polling with the fresh UUID.
                     startPollerIfPaired()
                 }
         }
