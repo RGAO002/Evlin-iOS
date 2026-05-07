@@ -1385,14 +1385,11 @@ class ChatViewModel: ObservableObject {
             return
         }
 
-        // Build the API base URL. APIClient.baseURL is a String like
-        // "https://evlin-backend.onrender.com/api/v1" — strip the
-        // "/api/v1" suffix because PlanPatchClient appends the full
-        // path "/parent/chat/plan-patch" itself.
-        guard
-            let rawBase = self.apiClient?.baseURL,
-            let trimmed = URL(string: rawBase.replacingOccurrences(of: "/api/v1", with: "") + "/api/v1")
-        else {
+        // Build the API base URL. APIClient.baseURL is a non-optional
+        // String like "https://evlin-backend.onrender.com/api/v1".
+        // PlanPatchClient appends "/parent/chat/plan-patch" itself.
+        let rawBase = self.apiClient.baseURL
+        guard !rawBase.isEmpty, let trimmed = URL(string: rawBase) else {
             self.messages.append(ChatMessage(role: .agent, content: "No backend URL configured.", timestamp: Date()))
             return
         }
