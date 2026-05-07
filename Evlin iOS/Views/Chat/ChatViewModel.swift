@@ -1353,12 +1353,95 @@ class ChatViewModel: ObservableObject {
     /// pendingPlanArchCard (caller should skip legacy proposal/action
     /// branches in that case). Backwards-compatible: legacy responses
     /// have no card_payload and this returns false.
+    ///
+    /// ALSO appends a chat bubble with the card's title (+ body) so the
+    /// parent sees a normal agent reply in the message list while the
+    /// PlanArchCardView renders below for interaction.
     func tryHandlePlanArchCard(from data: Data) -> Bool {
         guard let card = PlanArchCardPayload.decodeFromChatResponseData(data) else {
             return false
         }
         self.pendingPlanArchCard = card
+        let composed: String
+        if let body = card.body, !body.isEmpty {
+            composed = "\(card.title)\n\n\(body)"
+        } else {
+            composed = card.title
+        }
+        self.messages.append(ChatMessage(role: .agent, content: composed, timestamp: Date()))
         return true
+    }
+
+    /// Plan-arch card option tapped. Cancel option → drop the staged plan
+    /// and surface a "Cancelled." reply. All other options → POST the
+    /// patch to /parent/chat/plan-patch and surface the next outcome
+    /// (executed receipt / follow-up card / expiry / error) as a chat bubble.
+    func handlePlanArchOption(_ opt: PlanArchCardOption) {
+        guard let card = self.pendingPlanArchCard else { return }
+        self.pendingPlanArchCard = nil
+
+        if opt.cancelsPlan {
+            self.messages.append(ChatMessage(role: .agent, content: "Cancelled.", timestamp: Date()))
+            return
+        }
+
+        // Build the API base URL. APIClient.baseURL is a String like
+        // "https://evlin-backend.onrender.com/api/v1" — strip the
+        // "/api/v1" suffix because PlanPatchClient appends the full
+        // path "/parent/chat/plan-patch" itself.
+        guard
+            let rawBase = self.apiClient?.baseURL,
+            let trimmed = URL(string: rawBase.replacingOccurrences(of: "/api/v1", with: "") + "/api/v1")
+        else {
+            self.messages.append(ChatMessage(role: .agent, content: "No backend URL configured.", timestamp: Date()))
+            return
+        }
+
+        // Convert PlanArchAnyCodable patch into a plain [String: Any] dict
+        // suitable for JSONSerialization in PlanPatchClient.
+        let patchDict: [String: Any] = opt.patch.mapValues { $0.value }
+
+        Task { [weak self] in
+            guard let self = self else { return }
+            let client = PlanPatchClient(baseURL: trimmed)
+            let outcome = await client.submitPatch(
+                planToken: card.planToken,
+                stepIndex: card.stepIndex,
+                patch: patchDict,
+                cancel: false,
+                clientAliasState: nil,
+                familyID: nil,
+                childDeviceID: nil
+            )
+            await MainActor.run {
+                switch outcome {
+                case .executed(let message, _):
+                    self.messages.append(ChatMessage(role: .agent, content: message, timestamp: Date()))
+                case .followUpCard(let next):
+                    self.pendingPlanArchCard = next
+                    let body = next.body.map { "\(next.title)\n\n\($0)" } ?? next.title
+                    self.messages.append(ChatMessage(role: .agent, content: body, timestamp: Date()))
+                case .rejected(let message), .expired(let message):
+                    self.messages.append(ChatMessage(role: .agent, content: message, timestamp: Date()))
+                case .error(let err):
+                    self.messages.append(ChatMessage(role: .agent, content: "Error: \(err.localizedDescription)", timestamp: Date()))
+                }
+            }
+        }
+    }
+
+    /// Plan-arch lazy_tag entry point. Phase 1: surface a placeholder
+    /// message. Full FamilyActivityPicker integration is a follow-on
+    /// iOS task that wires the picker selection back into a plan-patch
+    /// with `{target: {alias_confirmed: true}}`.
+    func handlePlanArchLazyTag(for card: PlanArchCardPayload) {
+        self.pendingPlanArchCard = nil
+        let targetName = (card.detail["target_name"]?.value as? String) ?? "the app"
+        self.messages.append(ChatMessage(
+            role: .agent,
+            content: "Tag-an-app flow for \(targetName) not yet wired in this build — coming in next iOS update.",
+            timestamp: Date()
+        ))
     }
 
 }

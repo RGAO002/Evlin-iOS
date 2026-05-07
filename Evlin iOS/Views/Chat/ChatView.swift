@@ -125,6 +125,19 @@ struct ChatView: View {
                                 .padding(.top, Spacing.md)
                                 .transition(.opacity.combined(with: .scale))
                         }
+
+                        // Plan-arch card (AGENT_PLAN_ARCH=1) — typed CardPayload
+                        // from the new orchestrator. Rendered via PlanArchCardView
+                        // with option taps wired to PlanPatchClient.
+                        if let planArchCard = viewModel.pendingPlanArchCard {
+                            PlanArchCardView(
+                                card: planArchCard,
+                                onOption: { opt in viewModel.handlePlanArchOption(opt) },
+                                onLazyTag: { card in viewModel.handlePlanArchLazyTag(for: card) }
+                            )
+                            .padding(.top, Spacing.md)
+                            .transition(.opacity.combined(with: .scale))
+                        }
                     }
                     .padding(.horizontal, Spacing.xl)
                     .padding(.top, Spacing.md)
