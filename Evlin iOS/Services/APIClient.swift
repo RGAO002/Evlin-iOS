@@ -4,10 +4,24 @@ import Combine
 class APIClient: ObservableObject {
     @Published var baseURL: String
 
-    static let defaultURL = "https://adaptive-engine-production.up.railway.app/api/v1"
+    static let defaultURL = "https://evlin-backend.onrender.com/api/v1"
+
+    /// One-shot migration: 2026-05-07 backend split moved the Evlin Backend
+    /// from the old `adaptive-engine` Railway service to its own Render
+    /// service. Existing users have the old URL persisted in UserDefaults
+    /// and won't see the new default unless we rewrite the saved value.
+    /// Only the first launch after upgrade hits this branch.
+    private static let legacyURLs: Set<String> = [
+        "https://adaptive-engine-production.up.railway.app/api/v1",
+        "http://adaptive-engine-production.up.railway.app/api/v1",
+    ]
 
     init(baseURL: String = "") {
-        let saved = UserDefaults.standard.string(forKey: "serverURL") ?? ""
+        var saved = UserDefaults.standard.string(forKey: "serverURL") ?? ""
+        if Self.legacyURLs.contains(saved) {
+            saved = Self.defaultURL
+            UserDefaults.standard.set(saved, forKey: "serverURL")
+        }
         // Ignore old localhost/LAN URLs
         let useSaved = !saved.isEmpty && !saved.contains("192.168") && !saved.contains("localhost")
         let raw = baseURL.isEmpty
