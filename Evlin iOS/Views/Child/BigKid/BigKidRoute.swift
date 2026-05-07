@@ -19,10 +19,19 @@ enum BigKidRouter {
         if let req = s.reflectionRequest {
             return req.stepsCompleted.count >= 3 ? .homeReflectionB : .homeReflectionA
         }
-        if s.allTasksDone, s.minutesLeft <= 0, !s.screenTimeFinishedAcknowledged {
+        // `allTasksDone` is `tasks.allSatisfy(...)` which is vacuously TRUE
+        // on an empty array. On first render after a mode switch the kid
+        // state is still loading: tasks=[] and minutesLeft=0 → would route
+        // to .screenTimeFinished and flash "0 of 0" before real data
+        // arrives. Gate on minutesMax > 0 (the kid was actually given some
+        // time today) to suppress that empty-state flicker.
+        if s.allTasksDone, s.minutesMax > 0, s.minutesLeft <= 0,
+           !s.screenTimeFinishedAcknowledged {
             return .screenTimeFinished
         }
-        if s.allTasksDone, !s.dailyCompleteAcknowledged {
+        // Same vacuous-truth concern: only route to dailyComplete when
+        // there was at least one task to complete in the first place.
+        if s.allTasksDone, !s.tasks.isEmpty, !s.dailyCompleteAcknowledged {
             return .dailyComplete
         }
         return .home
