@@ -10,15 +10,17 @@ class APIClient: ObservableObject {
     /// from the old `adaptive-engine` Railway service to its own Render
     /// service. Existing users have the old URL persisted in UserDefaults
     /// and won't see the new default unless we rewrite the saved value.
-    /// Only the first launch after upgrade hits this branch.
-    private static let legacyURLs: Set<String> = [
-        "https://adaptive-engine-production.up.railway.app/api/v1",
-        "http://adaptive-engine-production.up.railway.app/api/v1",
+    /// Substring match — catches trailing-slash, mixed-scheme, or any
+    /// variant a parent might have typed. Only the first launch after
+    /// upgrade hits this branch.
+    private static let legacyHostFragments: [String] = [
+        "adaptive-engine-production.up.railway.app",
+        // Any other railway service we previously pointed parents at.
     ]
 
     init(baseURL: String = "") {
         var saved = UserDefaults.standard.string(forKey: "serverURL") ?? ""
-        if Self.legacyURLs.contains(saved) {
+        if Self.legacyHostFragments.contains(where: { saved.contains($0) }) {
             saved = Self.defaultURL
             UserDefaults.standard.set(saved, forKey: "serverURL")
         }
