@@ -189,12 +189,23 @@ class ChatViewModel: ObservableObject {
         Task { [weak self] in
             guard let self else { return }
             do {
-                let resp = try await self.apiClient.sendChatMessage(
+                // Fetch both the decoded ChatResponse AND the raw HTTP body so that
+                // tryHandlePlanArchCard (plan-arch dual-path) can inspect card_payload
+                // without requiring APIClient changes.
+                let (resp, rawData) = try await self.sendChatMessageWithRawData(
                     message: userMessage,
                     childName: self.childName,
                     history: history,
                     forceConfirmations: forceConfirmations
                 )
+                // Plan-arch dual-path: if the backend returned a card_payload field
+                // (AGENT_PLAN_ARCH=1), surface it via the new renderer path and skip
+                // the legacy proposal/action handling. Backwards-compatible: when
+                // AGENT_PLAN_ARCH=0, card_payload is absent, and this returns false.
+                if await MainActor.run(body: { self.tryHandlePlanArchCard(from: rawData) }) {
+                    await MainActor.run { self.isThinking = false }
+                    return
+                }
                 await MainActor.run { self.processResponse(resp, userMessage: userMessage) }
             } catch {
                 await MainActor.run {
@@ -1276,6 +1287,65 @@ class ChatViewModel: ObservableObject {
         } catch {
             print("[Chat] Failed to fetch video: \(error)")
         }
+    }
+
+    /// Mirrors APIClient.sendChatMessage but returns the raw HTTP Data alongside
+    /// the decoded ChatResponse. Used by dispatchChat so tryHandlePlanArchCard
+    /// can inspect card_payload (a plan-arch-only field not in ChatResponse).
+    /// Inherits the same retry / timeout semantics as APIClient.
+    private func sendChatMessageWithRawData(
+        message: String,
+        childName: String,
+        history: [[String: String]],
+        forceConfirmations: [String]
+    ) async throws -> (APIClient.ChatResponse, Data) {
+        let familyID = UserDefaults.standard.string(forKey: "evlin.familyID")
+        let bigKidChildID = UserDefaults.standard.string(forKey: "evlin.childDeviceID")
+
+        let bodyObj = APIClient.ChatRequest(
+            message: message,
+            child_name: childName,
+            history: history,
+            family_id: familyID,
+            force_confirmations: forceConfirmations,
+            child_device_id: (bigKidChildID?.isEmpty == false) ? bigKidChildID : nil
+        )
+        let encodedBody = try JSONEncoder().encode(bodyObj)
+
+        var lastStatus = 0
+        for attempt in 0..<3 {
+            let url = URL(string: "\(apiClient.baseURL)/parent/chat")!
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.timeoutInterval = 30
+            request.httpBody = encodedBody
+
+            do {
+                let (data, response) = try await URLSession.shared.data(for: request)
+                let http = response as? HTTPURLResponse
+                lastStatus = http?.statusCode ?? 0
+
+                if lastStatus == 200 {
+                    let decoded = try JSONDecoder().decode(APIClient.ChatResponse.self, from: data)
+                    return (decoded, data)
+                }
+                if (lastStatus == 500 || lastStatus == 503), attempt < 2 {
+                    try? await Task.sleep(nanoseconds: UInt64(800_000_000 * (attempt + 1)))
+                    continue
+                }
+                throw APIError.serverError(lastStatus)
+            } catch let err as APIError {
+                throw err
+            } catch {
+                if attempt < 2 {
+                    try? await Task.sleep(nanoseconds: 600_000_000)
+                    continue
+                }
+                throw error
+            }
+        }
+        throw APIError.serverError(lastStatus)
     }
 
     /// Called by the chat response handler with the raw HTTP body Data.
