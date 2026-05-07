@@ -24,6 +24,13 @@ class ChatViewModel: ObservableObject {
     /// Non-nil when ChatView should present the lazy-tag sheet.
     @Published var activeLazyTagRequest: LazyTagRequest? = nil
 
+    // MARK: - Plan-arch dual-path
+
+    /// Set when the backend (with AGENT_PLAN_ARCH=1) returns a
+    /// card_payload field in the chat response. Phase 1 surfaces this
+    /// to UI; full wiring lands in a follow-on iOS task.
+    @Published var pendingPlanArchCard: PlanArchCardPayload?
+
     /// In-flight ack-status polls, keyed by command_id. Cancelled on clearHistory
     /// or when a terminal status is received.
     private var activePolls: [UUID: Task<Void, Never>] = [:]
@@ -1269,6 +1276,19 @@ class ChatViewModel: ObservableObject {
         } catch {
             print("[Chat] Failed to fetch video: \(error)")
         }
+    }
+
+    /// Called by the chat response handler with the raw HTTP body Data.
+    /// Returns true if a PlanArchCardPayload was detected and stashed in
+    /// pendingPlanArchCard (caller should skip legacy proposal/action
+    /// branches in that case). Backwards-compatible: legacy responses
+    /// have no card_payload and this returns false.
+    func tryHandlePlanArchCard(from data: Data) -> Bool {
+        guard let card = PlanArchCardPayload.decodeFromChatResponseData(data) else {
+            return false
+        }
+        self.pendingPlanArchCard = card
+        return true
     }
 
 }

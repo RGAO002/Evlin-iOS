@@ -23,6 +23,43 @@ import SwiftUI
 import FamilyControls
 import ManagedSettings
 
+// MARK: - Plan-arch lazy_tag factory
+
+/// Plan-arch lazy_tag flow: drive the picker from a PlanArchCardPayload's
+/// detail.target_name + target_kind. After the parent picks the app,
+/// the caller is responsible for posting a plan-patch with
+/// {target: {alias_confirmed: true}}.
+///
+/// Uses a freestanding factory rather than an extension init because
+/// CustomTokenPickerView receives ScreenTimeManager via @EnvironmentObject
+/// and cannot call self.init(...) cleanly from an extension.
+func customTokenPickerForCard(
+    card: PlanArchCardPayload,
+    onPicked: @escaping (String) -> Void,
+    onCancel: @escaping () -> Void
+) -> CustomTokenPickerView {
+    // Pull target_name + target_kind from card.detail. Default
+    // gracefully if missing.
+    let targetName = (card.detail["target_name"]?.value as? String) ?? "the app"
+    let rawKind = (card.detail["target_kind"]?.value as? String) ?? "app"
+    let kind: AliasKind = rawKind == "category" ? .category : .app
+
+    // Synthesise a LazyTagRequest from the plan-arch card detail so the
+    // existing CustomTokenPickerView can render without modification.
+    let request = LazyTagRequest(
+        proposalToken: card.planToken,
+        rowIndex: card.stepIndex,
+        target: targetName,
+        kind: kind
+    )
+
+    return CustomTokenPickerView(
+        request: request,
+        onSelect: { token, _ in onPicked(String(describing: token)) },
+        onCancel: onCancel
+    )
+}
+
 struct CustomTokenPickerView: View {
     let request: LazyTagRequest
     let onSelect: (Any, LazyTagRequest) -> Void
