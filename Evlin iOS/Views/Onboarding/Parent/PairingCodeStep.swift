@@ -16,6 +16,9 @@ struct PairingCodeStep: View {
     @State private var pairing = false
     @State private var errorText: String?
     @State private var status: String = ""
+    /// Gated continuation: child-side `/family/create` may fill `familyID` **before** the parent POST
+    /// `/family/pair` completes (same-device flow). Continue must unlock only after a successful pair in *this* step.
+    @State private var pairedInThisStep = false
 
     var body: some View {
         VStack(spacing: Spacing.section) {
@@ -37,6 +40,11 @@ struct PairingCodeStep: View {
                 .font(.system(size: 42, weight: .bold, design: .monospaced))
                 .multilineTextAlignment(.center)
                 .tracking(8)
+                // Force black text + dark gray placeholder regardless of
+                // light/dark mode — the card background is white and dark-
+                // mode default white text disappears against it.
+                .foregroundStyle(Color.black)
+                .tint(Color.black)
                 .padding(.vertical, Spacing.section)
                 .frame(maxWidth: .infinity)
                 .background(
@@ -101,13 +109,16 @@ struct PairingCodeStep: View {
             .padding(.vertical, Spacing.lg)
             .background(
                 RoundedRectangle(cornerRadius: CornerRadius.md)
-                    .fill(familyID != nil ? Color.evPrimary : Color.evOutline)
+                    .fill(pairedInThisStep ? Color.evPrimary : Color.evOutline)
             )
-            .disabled(familyID == nil)
+            .disabled(!pairedInThisStep)
         }
         .padding(Spacing.xl)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.evSurface)
+        .onAppear {
+            pairedInThisStep = false
+        }
     }
 
     private func tryPair() async {
@@ -159,6 +170,7 @@ struct PairingCodeStep: View {
             UserDefaults.standard.set(r.child_device_id.uuidString, forKey: "evlin.childDeviceID")
 
             status = "Paired ✓"
+            pairedInThisStep = true
         } catch {
             errorText = error.localizedDescription
         }
