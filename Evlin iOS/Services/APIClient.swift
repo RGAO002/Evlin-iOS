@@ -48,6 +48,9 @@ class APIClient: ObservableObject {
         // BigKid child id (UUID string). Used by `reflect` action only.
         // Same source as the BigKid debug panel: @AppStorage("evlin.childDeviceID").
         let child_device_id: String?
+        // Plan-arch: parent-side LocalAliasStore snapshot so the validator can
+        // avoid lazy_tag cards for apps/categories already known on this device.
+        let client_alias_state: [String: [String]]?
     }
 
     struct ChatActionResponse: Codable, Sendable {
@@ -108,7 +111,11 @@ class APIClient: ObservableObject {
                 history: history,
                 family_id: familyID,
                 force_confirmations: forceConfirmations,
-                child_device_id: (bigKidChildID?.isEmpty == false) ? bigKidChildID : nil
+                child_device_id: (bigKidChildID?.isEmpty == false) ? bigKidChildID : nil,
+                client_alias_state: [
+                    "known_apps": LocalAliasStore.shared.allApplicationKeys(),
+                    "known_categories": LocalAliasStore.shared.allCategoryNames()
+                ]
             )
             request.httpBody = try JSONEncoder().encode(body)
 

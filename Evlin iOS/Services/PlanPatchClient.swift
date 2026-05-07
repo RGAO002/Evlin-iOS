@@ -11,11 +11,27 @@
 import Foundation
 
 enum PlanPatchOutcome {
-    case executed(message: String, reasoning: String?)
+    case executed(message: String, reasoning: String?, queuedCommands: [PlanPatchQueuedCommand])
     case followUpCard(PlanArchCardPayload)
     case rejected(message: String)
     case expired(message: String)
     case error(Error)
+}
+
+struct PlanPatchQueuedCommand: Decodable {
+    let commandID: UUID
+    let action: String?
+    let targetDisplay: String?
+    let durationMinutes: Int?
+    let tier: String?
+
+    enum CodingKeys: String, CodingKey {
+        case commandID = "command_id"
+        case action
+        case targetDisplay = "target_display"
+        case durationMinutes = "duration_minutes"
+        case tier
+    }
 }
 
 struct PlanPatchClient {
@@ -81,7 +97,15 @@ struct PlanPatchClient {
             if json["expired"] as? Bool == true {
                 return .expired(message: message)
             }
-            return .executed(message: message, reasoning: reasoning)
+            let queuedCommands: [PlanPatchQueuedCommand]
+            if let raw = json["queued_commands"],
+               JSONSerialization.isValidJSONObject(["queued_commands": raw]),
+               let payload = try? JSONSerialization.data(withJSONObject: raw) {
+                queuedCommands = (try? JSONDecoder().decode([PlanPatchQueuedCommand].self, from: payload)) ?? []
+            } else {
+                queuedCommands = []
+            }
+            return .executed(message: message, reasoning: reasoning, queuedCommands: queuedCommands)
         } catch {
             return .error(error)
         }

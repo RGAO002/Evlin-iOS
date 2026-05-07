@@ -31,6 +31,11 @@ class ChatViewModel: ObservableObject {
     /// to UI; full wiring lands in a follow-on iOS task.
     @Published var pendingPlanArchCard: PlanArchCardPayload?
 
+    /// Lazy-tag sheets can come from the legacy ProposalDTO path or the new
+    /// plan-arch card path. The plan-arch path must POST a plan-patch after
+    /// saving the local alias; legacy only clears pendingAliasMisses.
+    private var planArchLazyTagRequestIDs: Set<String> = []
+
     /// In-flight ack-status polls, keyed by command_id. Cancelled on clearHistory
     /// or when a terminal status is received.
     private var activePolls: [UUID: Task<Void, Never>] = [:]
@@ -42,6 +47,23 @@ class ChatViewModel: ObservableObject {
     /// Dedup reflection rows so polling doesn't stack duplicates.
     private var surfacedReflectionSubmissionIDs: Set<UUID> = []
     private var reflectionSubmissionPoll: AnyCancellable?
+
+    private func currentClientAliasStateCodable() -> [String: [String]] {
+        [
+            "known_apps": LocalAliasStore.shared.allApplicationKeys(),
+            "known_categories": LocalAliasStore.shared.allCategoryNames()
+        ]
+    }
+
+    private func currentClientAliasStateJSON() -> [String: Any] {
+        currentClientAliasStateCodable()
+    }
+
+    private func currentFamilyAndChildIDs() -> (familyID: UUID?, childDeviceID: UUID?) {
+        let familyID = UserDefaults.standard.string(forKey: "evlin.familyID").flatMap(UUID.init(uuidString:))
+        let childID = UserDefaults.standard.string(forKey: "evlin.childDeviceID").flatMap(UUID.init(uuidString:))
+        return (familyID, childID)
+    }
 
     let quickPrompts = QuickPrompt.defaults
     var apiClient: APIClient = APIClient()
@@ -916,6 +938,7 @@ class ChatViewModel: ObservableObject {
         )
         switch result {
         case .success:
+            let isPlanArchLazyTag = planArchLazyTagRequestIDs.remove(request.id) != nil
             // Clear THIS row's miss + sweep any other pending per-row misses
             // for the same (target, kind) — handles multi-card and multi-row
             // chats like "lock IG and TikTok" where two rows reference Instagram.
@@ -925,6 +948,9 @@ class ChatViewModel: ObservableObject {
             pendingAliasMisses.removeValue(forKey: key)
             sweepResolvedMisses(target: request.target, kind: request.kind)
             activeLazyTagRequest = nil
+            if isPlanArchLazyTag {
+                resumePlanArchAfterLazyTag(request)
+            }
         case .failure(let err):
             errorMessage = "Couldn't save the tag: \(err)"
             // Leave activeLazyTagRequest intact so user can retry.
@@ -932,7 +958,46 @@ class ChatViewModel: ObservableObject {
     }
 
     @MainActor
+    private func resumePlanArchAfterLazyTag(_ request: LazyTagRequest) {
+        guard !apiClient.baseURL.isEmpty, let baseURL = URL(string: apiClient.baseURL) else {
+            messages.append(ChatMessage(role: .agent, content: "No backend URL configured.", timestamp: Date()))
+            return
+        }
+        let ids = currentFamilyAndChildIDs()
+        let aliasState = currentClientAliasStateJSON()
+        Task { [weak self] in
+            guard let self else { return }
+            let outcome = await PlanPatchClient(baseURL: baseURL).submitPatch(
+                planToken: request.proposalToken,
+                stepIndex: request.rowIndex,
+                patch: ["target": ["alias_confirmed": true]],
+                cancel: false,
+                clientAliasState: aliasState,
+                familyID: ids.familyID,
+                childDeviceID: ids.childDeviceID
+            )
+            await MainActor.run {
+                switch outcome {
+                case .executed(let message, let reasoning, let queuedCommands):
+                    self.appendPlanPatchExecutedMessage(message: message, reasoning: reasoning, queuedCommands: queuedCommands)
+                case .followUpCard(let next):
+                    self.pendingPlanArchCard = next
+                    let body = next.body.map { "\(next.title)\n\n\($0)" } ?? next.title
+                    self.messages.append(ChatMessage(role: .agent, content: body, timestamp: Date()))
+                case .rejected(let message), .expired(let message):
+                    self.messages.append(ChatMessage(role: .agent, content: message, timestamp: Date()))
+                case .error(let err):
+                    self.messages.append(ChatMessage(role: .agent, content: "Error: \(err.localizedDescription)", timestamp: Date()))
+                }
+            }
+        }
+    }
+
+    @MainActor
     func cancelLazyTag() {
+        if let req = activeLazyTagRequest {
+            planArchLazyTagRequestIDs.remove(req.id)
+        }
         activeLazyTagRequest = nil
     }
 
@@ -1308,7 +1373,8 @@ class ChatViewModel: ObservableObject {
             history: history,
             family_id: familyID,
             force_confirmations: forceConfirmations,
-            child_device_id: (bigKidChildID?.isEmpty == false) ? bigKidChildID : nil
+            child_device_id: (bigKidChildID?.isEmpty == false) ? bigKidChildID : nil,
+            client_alias_state: currentClientAliasStateCodable()
         )
         let encodedBody = try JSONEncoder().encode(bodyObj)
 
@@ -1401,19 +1467,21 @@ class ChatViewModel: ObservableObject {
         Task { [weak self] in
             guard let self = self else { return }
             let client = PlanPatchClient(baseURL: trimmed)
+            let ids = await MainActor.run { self.currentFamilyAndChildIDs() }
+            let aliasState = await MainActor.run { self.currentClientAliasStateJSON() }
             let outcome = await client.submitPatch(
                 planToken: card.planToken,
                 stepIndex: card.stepIndex,
                 patch: patchDict,
                 cancel: false,
-                clientAliasState: nil,
-                familyID: nil,
-                childDeviceID: nil
+                clientAliasState: aliasState,
+                familyID: ids.familyID,
+                childDeviceID: ids.childDeviceID
             )
             await MainActor.run {
                 switch outcome {
-                case .executed(let message, _):
-                    self.messages.append(ChatMessage(role: .agent, content: message, timestamp: Date()))
+                case .executed(let message, let reasoning, let queuedCommands):
+                    self.appendPlanPatchExecutedMessage(message: message, reasoning: reasoning, queuedCommands: queuedCommands)
                 case .followUpCard(let next):
                     self.pendingPlanArchCard = next
                     let body = next.body.map { "\(next.title)\n\n\($0)" } ?? next.title
@@ -1427,18 +1495,45 @@ class ChatViewModel: ObservableObject {
         }
     }
 
-    /// Plan-arch lazy_tag entry point. Phase 1: surface a placeholder
-    /// message. Full FamilyActivityPicker integration is a follow-on
-    /// iOS task that wires the picker selection back into a plan-patch
-    /// with `{target: {alias_confirmed: true}}`.
+    @MainActor
+    private func appendPlanPatchExecutedMessage(
+        message: String,
+        reasoning: String?,
+        queuedCommands: [PlanPatchQueuedCommand]
+    ) {
+        var msg = ChatMessage(role: .agent, content: message, timestamp: Date(), reasoning: reasoning)
+        if let first = queuedCommands.first {
+            msg.commandID = first.commandID
+            msg.receiptState = .pending
+        }
+        messages.append(msg)
+        if let first = queuedCommands.first {
+            startAckPoll(
+                commandID: first.commandID,
+                messageID: msg.id,
+                targetDisplay: first.targetDisplay,
+                expiresAt: first.durationMinutes.map { Date().addingTimeInterval(TimeInterval($0 * 60)) }
+            )
+        }
+    }
+
+    /// Plan-arch lazy_tag entry point. Opens the existing production
+    /// FamilyActivityPicker-backed tag sheet. After selection,
+    /// `handleTagSelection` saves the local alias and resumes the staged plan
+    /// via `/parent/chat/plan-patch`.
     func handlePlanArchLazyTag(for card: PlanArchCardPayload) {
         self.pendingPlanArchCard = nil
         let targetName = (card.detail["target_name"]?.value as? String) ?? "the app"
-        self.messages.append(ChatMessage(
-            role: .agent,
-            content: "Tag-an-app flow for \(targetName) not yet wired in this build — coming in next iOS update.",
-            timestamp: Date()
-        ))
+        let rawKind = (card.detail["target_kind"]?.value as? String) ?? "app"
+        let kind: AliasKind = rawKind == "category" ? .category : .app
+        let request = LazyTagRequest(
+            proposalToken: card.planToken,
+            rowIndex: card.stepIndex,
+            target: targetName,
+            kind: kind
+        )
+        planArchLazyTagRequestIDs.insert(request.id)
+        activeLazyTagRequest = request
     }
 
 }
