@@ -139,10 +139,44 @@ final class CommandPoller {
             }
         }()
 
+        var ackDetail = detail
+        if status == "confirmed" {
+            var d = ackDetail ?? [:]
+            if let global = await globalEffectiveStateDictionary() {
+                d["global_effective_state"] = global
+            }
+            ackDetail = d
+        }
+
         do {
-            try await api.ack(commandID: cmd.id, status: status, detail: detail)
+            try await api.ack(commandID: cmd.id, status: status, detail: ackDetail)
         } catch {
             print("[CommandPoller] ack failed for \(cmd.id): \(error)")
         }
+    }
+
+    private func globalEffectiveStateDictionary() async -> [String: Any]? {
+        let current = await ActiveLockStore.shared.allCurrent()
+        let covers = current.shields
+            .sorted { lhs, rhs in
+                if lhs.displayName == rhs.displayName {
+                    return lhs.recordKey < rhs.recordKey
+                }
+                return lhs.displayName < rhs.displayName
+            }
+            .map {
+                AckEffectiveState.ShieldCover(
+                    displayName: $0.displayName,
+                    expiresAtISO: $0.expiresAt.map { ISO8601DateFormatter().string(from: $0) },
+                    tier: $0.tier.rawValue
+                )
+            }
+        let snapshot = AckEffectiveState(
+            isBlocked: !current.blocks.isEmpty,
+            shieldsCovering: covers,
+            possibleSavedListCoverage: false
+        )
+        guard let data = try? JSONEncoder().encode(snapshot) else { return nil }
+        return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
     }
 }
