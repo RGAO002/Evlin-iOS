@@ -78,9 +78,11 @@ class APIClient: ObservableObject {
         let proposals: [ProposalDTO]?
         let receipts: [ReceiptDTO]?
         let cancelledProposals: [String]?
+        let queuedCommands: [PlanPatchQueuedCommand]?
 
         enum CodingKeys: String, CodingKey {
             case message, reasoning, action, proposals, receipts
+            case queuedCommands = "queued_commands"
             case cancelledProposals = "cancelled_proposals"
         }
     }

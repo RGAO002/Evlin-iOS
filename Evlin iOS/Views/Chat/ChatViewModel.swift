@@ -258,6 +258,20 @@ class ChatViewModel: ObservableObject {
             return
         }
 
+        // 1.5 Plan-arch executed response. The backend can queue multiple
+        // child commands from a single parent request, e.g. "lock IG and
+        // Venmo". Each command needs its own receipt/ack poll; otherwise the
+        // UI only shows the first queued lock.
+        if let queuedCommands = resp.queuedCommands, !queuedCommands.isEmpty {
+            appendPlanPatchExecutedMessage(
+                message: resp.message,
+                reasoning: resp.reasoning,
+                queuedCommands: queuedCommands
+            )
+            isThinking = false
+            return
+        }
+
         // 2. Queued command — append bubble + start ack poll.
         // Note: no longer sets msg.lockMinutes/lockChildName — the legacy
         // LockConfirmationCard was mock UI ("Liam's device has been restricted")
@@ -1501,19 +1515,49 @@ class ChatViewModel: ObservableObject {
         reasoning: String?,
         queuedCommands: [PlanPatchQueuedCommand]
     ) {
-        var msg = ChatMessage(role: .agent, content: message, timestamp: Date(), reasoning: reasoning)
-        if let first = queuedCommands.first {
-            msg.commandID = first.commandID
-            msg.receiptState = .pending
+        guard !queuedCommands.isEmpty else {
+            messages.append(ChatMessage(role: .agent, content: message, timestamp: Date(), reasoning: reasoning))
+            return
         }
-        messages.append(msg)
-        if let first = queuedCommands.first {
-            startAckPoll(
-                commandID: first.commandID,
-                messageID: msg.id,
-                targetDisplay: first.targetDisplay,
-                expiresAt: first.durationMinutes.map { Date().addingTimeInterval(TimeInterval($0 * 60)) }
+
+        for (index, command) in queuedCommands.enumerated() {
+            let content = queuedCommands.count == 1
+                ? message
+                : Self.queuedCommandMessage(command)
+            var msg = ChatMessage(
+                role: .agent,
+                content: content,
+                timestamp: Date(),
+                reasoning: index == 0 ? reasoning : nil
             )
+            msg.commandID = command.commandID
+            msg.receiptState = .pending
+            messages.append(msg)
+            startAckPoll(
+                commandID: command.commandID,
+                messageID: msg.id,
+                targetDisplay: command.targetDisplay,
+                expiresAt: command.durationMinutes.map { Date().addingTimeInterval(TimeInterval($0 * 60)) }
+            )
+        }
+    }
+
+    private static func queuedCommandMessage(_ command: PlanPatchQueuedCommand) -> String {
+        let target = command.targetDisplay ?? "target"
+        switch command.action?.lowercased() {
+        case "shield":
+            if let minutes = command.durationMinutes {
+                return "Shield \(target) for \(minutes) min"
+            }
+            return "Shield \(target)"
+        case "unshield":
+            return "Unshield \(target)"
+        case "block":
+            return "Block \(target)"
+        case "unblock":
+            return "Unblock \(target)"
+        default:
+            return target
         }
     }
 

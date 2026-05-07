@@ -18,6 +18,7 @@ struct PlanArchCardView: View {
     /// For lazy_tag specifically: called when the parent should be
     /// driven into FamilyActivityPicker. ChatViewModel wires this up.
     let onLazyTag: ((PlanArchCardPayload) -> Void)?
+    @State private var selectedUnlockOptionIDs: Set<UUID> = []
 
     init(card: PlanArchCardPayload,
          onOption: @escaping (PlanArchCardOption) -> Void,
@@ -54,20 +55,12 @@ struct PlanArchCardView: View {
                         .foregroundStyle(.white)
                         .clipShape(RoundedRectangle(cornerRadius: 12))
                 }
-            }
-
-            // Standard options: render each as a button.
-            ForEach(card.options) { opt in
-                Button {
-                    onOption(opt)
-                } label: {
-                    Text(opt.label)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 12)
-                        .padding(.horizontal, 16)
-                        .background(opt.cancelsPlan ? Color.gray.opacity(0.2) : Color.blue.opacity(0.1))
-                        .foregroundStyle(opt.cancelsPlan ? Color.secondary : Color.blue)
-                        .clipShape(RoundedRectangle(cornerRadius: 10))
+            } else if card.type == .unlockPicker {
+                unlockPickerBody
+            } else {
+                // Standard options: render each as a button.
+                ForEach(card.options) { opt in
+                    optionButton(opt)
                 }
             }
         }
@@ -87,5 +80,98 @@ struct PlanArchCardView: View {
                     .padding(8)
             }
         }
+    }
+
+    @ViewBuilder
+    private var unlockPickerBody: some View {
+        let unlockOptions = card.options.filter { !$0.cancelsPlan && !$0.isUnlockEverything }
+        let everythingOption = card.options.first(where: { $0.isUnlockEverything })
+        let cancelOption = card.options.first(where: { $0.cancelsPlan })
+
+        if unlockOptions.count <= 1 {
+            ForEach(card.options) { opt in optionButton(opt) }
+        } else {
+            VStack(spacing: 10) {
+                ForEach(unlockOptions) { opt in
+                    Button {
+                        if selectedUnlockOptionIDs.contains(opt.id) {
+                            selectedUnlockOptionIDs.remove(opt.id)
+                        } else {
+                            selectedUnlockOptionIDs.insert(opt.id)
+                        }
+                    } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: selectedUnlockOptionIDs.contains(opt.id)
+                                  ? "checkmark.circle.fill"
+                                  : "circle")
+                                .foregroundStyle(selectedUnlockOptionIDs.contains(opt.id) ? .blue : .secondary)
+                            Text(opt.label)
+                                .foregroundStyle(.primary)
+                            Spacer()
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                        .padding(.horizontal, 16)
+                        .background(Color.blue.opacity(0.08))
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                Button {
+                    let selected = unlockOptions.filter { selectedUnlockOptionIDs.contains($0.id) }
+                    guard !selected.isEmpty else { return }
+                    onOption(PlanArchCardOption.unlockSelected(selected))
+                } label: {
+                    Text("Unlock selected")
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                        .padding(.horizontal, 16)
+                        .background(selectedUnlockOptionIDs.isEmpty ? Color.gray.opacity(0.2) : Color.blue)
+                        .foregroundStyle(selectedUnlockOptionIDs.isEmpty ? Color.secondary : Color.white)
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                }
+                .disabled(selectedUnlockOptionIDs.isEmpty)
+
+                if let everythingOption {
+                    optionButton(everythingOption)
+                }
+                if let cancelOption {
+                    optionButton(cancelOption)
+                }
+            }
+        }
+    }
+
+    private func optionButton(_ opt: PlanArchCardOption) -> some View {
+        Button {
+            onOption(opt)
+        } label: {
+            Text(opt.label)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+                .padding(.horizontal, 16)
+                .background(opt.cancelsPlan ? Color.gray.opacity(0.2) : Color.blue.opacity(0.1))
+                .foregroundStyle(opt.cancelsPlan ? Color.secondary : Color.blue)
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+        }
+    }
+}
+
+private extension PlanArchCardOption {
+    var isUnlockEverything: Bool {
+        guard let target = patch["target"]?.value as? [String: Any],
+              let kind = target["kind"] as? String else { return false }
+        return kind == "all"
+    }
+
+    static func unlockSelected(_ options: [PlanArchCardOption]) -> PlanArchCardOption {
+        let targets = options.compactMap { opt -> [String: Any]? in
+            opt.patch["target"]?.value as? [String: Any]
+        }
+        return PlanArchCardOption(
+            label: "Unlock selected",
+            patch: ["selected_targets": PlanArchAnyCodable(targets)]
+        )
     }
 }

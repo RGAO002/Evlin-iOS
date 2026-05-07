@@ -18,7 +18,7 @@ enum PlanPatchOutcome {
     case error(Error)
 }
 
-struct PlanPatchQueuedCommand: Decodable {
+struct PlanPatchQueuedCommand: Codable, Sendable {
     let commandID: UUID
     let action: String?
     let targetDisplay: String?
