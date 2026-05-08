@@ -18,6 +18,29 @@
 
 import Foundation
 
+/// Mirror of backend Task 14B `_LEGACY_TYPE_TO_KIND`. Used only when an
+/// older backend deploy returns `type` without `kind`.
+enum PlanArchLegacyKindBridge {
+    static func mapLegacyType(_ legacy: PlanArchCardType) -> String {
+        switch legacy {
+        case .durationPicker:           return "phone.missing_duration"
+        case .longDurationConfirm:      return "phone.below_min_duration"
+        case .lazyTag:                  return "phone.alias_miss"
+        case .unlockPicker:             return "phone.unlock_picker"
+        case .rejectionWithAlternative: return "phone.unsupported_exclusion"
+        case .splitCommandRequest:      return "phone.bulk_action_confirm"
+        case .dangerConfirm:            return "phone.danger_confirm"
+        case .blockIntentConfirm:       return "phone.proposal_confirm"
+        }
+    }
+}
+
+enum PlanArchCardSource: String, Codable {
+    case plan
+    case event
+    case query
+}
+
 enum PlanArchCardType: String, Codable {
     case durationPicker = "duration_picker"
     case longDurationConfirm = "long_duration_confirm"
@@ -126,11 +149,17 @@ struct PlanArchCardPayload: Codable {
     let detail: [String: PlanArchAnyCodable]
     let danger: PlanArchCardDanger
 
+    // Phase 2A additions — populated from either the new wire fields
+    // (preferred) or by mapping the legacy `type` enum.
+    let kind: String
+    let source: PlanArchCardSource
+
     enum CodingKeys: String, CodingKey {
         case type, title, body
         case planToken = "plan_token"
         case stepIndex = "step_index"
         case options, detail, danger
+        case kind, source
     }
 
     init(from decoder: Decoder) throws {
@@ -138,11 +167,19 @@ struct PlanArchCardPayload: Codable {
         type = try c.decode(PlanArchCardType.self, forKey: .type)
         title = try c.decode(String.self, forKey: .title)
         body = try? c.decode(String.self, forKey: .body)
-        planToken = try c.decode(String.self, forKey: .planToken)
-        stepIndex = try c.decode(Int.self, forKey: .stepIndex)
+        planToken = (try? c.decode(String.self, forKey: .planToken)) ?? ""
+        stepIndex = (try? c.decode(Int.self, forKey: .stepIndex)) ?? 0
         options = (try? c.decode([PlanArchCardOption].self, forKey: .options)) ?? []
         detail = (try? c.decode([String: PlanArchAnyCodable].self, forKey: .detail)) ?? [:]
         danger = (try? c.decode(PlanArchCardDanger.self, forKey: .danger)) ?? .low
+
+        // Backwards-compatible bridge: prefer new `kind`, else map legacy.
+        if let k = try? c.decode(String.self, forKey: .kind), !k.isEmpty {
+            kind = k
+        } else {
+            kind = PlanArchLegacyKindBridge.mapLegacyType(type)
+        }
+        source = (try? c.decode(PlanArchCardSource.self, forKey: .source)) ?? .plan
     }
 
     /// Pull a PlanArchCardPayload out of arbitrary chat-response JSON Data

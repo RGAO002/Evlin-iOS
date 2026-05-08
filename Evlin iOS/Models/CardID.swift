@@ -21,4 +21,8 @@ enum CardID: String, Codable, Sendable {
     case R1
     // Group U — unlock disambiguation
     case U1
+
+    // Phase 2B placeholders (will be populated by reflection family work):
+    case reflectionReview                // reflection.confirm_approve / event.* review
+    case contentGenFailed                // reflection.content_generation_failed
 }

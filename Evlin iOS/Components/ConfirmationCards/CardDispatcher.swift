@@ -34,6 +34,11 @@ struct CardDispatcher: View {
                 onUnlockEverything: { handlers.onU1UnlockEverything?() },
                 onCancel: { handlers.onCancel?() }
             )
+        case .reflectionReview, .contentGenFailed:
+            // Phase 2B will wire these to ReflectionSubmissionReviewCard /
+            // ReflectionContentFailedCard. Until then, render nothing —
+            // 2A backend never emits these kinds, so this branch is dead.
+            EmptyView()
         }
     }
 

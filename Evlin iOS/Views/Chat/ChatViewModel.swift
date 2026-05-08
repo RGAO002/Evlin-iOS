@@ -520,6 +520,10 @@ class ChatViewModel: ObservableObject {
             // handleU1UnlockEverything). This branch only exists to keep
             // the switch exhaustive; primary should never fire on U1.
             currentCard = nil
+
+        case .reflectionReview, .contentGenFailed:
+            // Phase 2B placeholders — 2A backend never emits these.
+            currentCard = nil
         }
     }
 
@@ -1452,12 +1456,25 @@ class ChatViewModel: ObservableObject {
         return true
     }
 
-    /// Plan-arch card option tapped. Cancel option → drop the staged plan
-    /// and surface a "Cancelled." reply. All other options → POST the
-    /// patch to /parent/chat/plan-patch and surface the next outcome
-    /// (executed receipt / follow-up card / expiry / error) as a chat bubble.
+    /// Plan-arch card option tapped. Switches on payload.source to route:
+    ///   .plan  → POST /parent/chat/plan-patch (submitPlanArchPatch)
+    ///   .event → handleEventCardStub (2B placeholder)
+    ///   .query → handleQueryCardStub (2D placeholder)
     func handlePlanArchOption(_ opt: PlanArchCardOption) {
         guard let card = self.pendingPlanArchCard else { return }
+        switch card.source {
+        case .plan:
+            submitPlanArchPatch(card: card, option: opt)
+        case .event:
+            handleEventCardStub(card: card, option: opt)
+        case .query:
+            handleQueryCardStub(card: card, option: opt)
+        }
+    }
+
+    /// Extracted from the original handlePlanArchOption body (no behaviour change).
+    /// Handles cancel + plan-patch POST for .plan source cards.
+    private func submitPlanArchPatch(card: PlanArchCardPayload, option opt: PlanArchCardOption) {
         self.pendingPlanArchCard = nil
 
         if opt.cancelsPlan {
@@ -1506,6 +1523,26 @@ class ChatViewModel: ObservableObject {
                     self.messages.append(ChatMessage(role: .agent, content: "Error: \(err.localizedDescription)", timestamp: Date()))
                 }
             }
+        }
+    }
+
+    private func handleEventCardStub(card: PlanArchCardPayload, option: PlanArchCardOption) {
+        // 2A stub — event family is not yet emitted by backend; populated
+        // in 2B alongside the reflection submission review polling change.
+        Task { @MainActor in
+            self.errorMessage = "Event-card actions arrive in Phase 2B."
+            self.pendingPlanArchCard = nil
+        }
+    }
+
+    private func handleQueryCardStub(card: PlanArchCardPayload, option: PlanArchCardOption) {
+        // 2A stub — Query family ships in 2D. Spec invariant 4 forbids
+        // any mutation; we surface a transient message and dismiss the
+        // card. 2D will replace this with input-field prefill against the
+        // real composer state.
+        Task { @MainActor in
+            self.errorMessage = "Query-result actions arrive in Phase 2D."
+            self.pendingPlanArchCard = nil
         }
     }
 
@@ -1580,6 +1617,112 @@ class ChatViewModel: ObservableObject {
         activeLazyTagRequest = request
     }
 
+}
+
+// MARK: - Task 25: Plan-arch handler factory
+
+extension ChatViewModel {
+    /// Build a CardHandlers wired to the existing plan-patch flow.
+    /// Each handler synthesises the matching PlanArchCardOption and
+    /// forwards through `handlePlanArchOption(_:)`. This keeps the
+    /// patch-endpoint contract identical to Phase 1 while the adapter
+    /// renders polished UI.
+    func makePlanArchHandlers(for card: PlanArchCardPayload) -> CardHandlers {
+        var handlers = CardHandlers()
+
+        // D1 / MissingInfoCard primary tap → user picked a duration.
+        handlers.onDurationPicked = { [weak self] minutes in
+            guard let self else { return }
+            let patchDict: [String: Any]
+            if let m = minutes {
+                patchDict = ["duration_minutes": m]
+            } else {
+                patchDict = ["duration_kind": "permanent"]
+            }
+            let opt = PlanArchCardOption.synthesise(fromCard: card, patch: patchDict)
+            self.handlePlanArchOption(opt)
+        }
+
+        // U1 / unlock picker callbacks.
+        handlers.onU1UnlockSelected = { [weak self] indices in
+            let opt = PlanArchCardOption.synthesise(
+                fromCard: card, patch: ["selected_indices": indices]
+            )
+            self?.handlePlanArchOption(opt)
+        }
+        handlers.onU1UnlockEverything = { [weak self] in
+            let opt = PlanArchCardOption.synthesise(
+                fromCard: card, patch: ["unlock_everything": true]
+            )
+            self?.handlePlanArchOption(opt)
+        }
+
+        // F1 / list-suggestion picker.
+        handlers.onListPicked = { [weak self] listName in
+            let opt = PlanArchCardOption.synthesise(
+                fromCard: card, patch: ["selected_list": listName]
+            )
+            self?.handlePlanArchOption(opt)
+        }
+
+        // D4 multi-child labels — 2A backend never emits this kind, so
+        // this is purely defensive plumbing.
+        handlers.onChildrenLabelsPicked = { [weak self] labels in
+            let opt = PlanArchCardOption.synthesise(
+                fromCard: card, patch: ["selected_children": labels]
+            )
+            self?.handlePlanArchOption(opt)
+        }
+
+        // Generic primary/secondary/cancel for A1/A3/B1/D2/D3/E1/E3 cards.
+        handlers.onPrimary = { [weak self] in
+            let opt = PlanArchCardOption.synthesise(
+                fromCard: card, patch: ["intent_confirmed": true]
+            )
+            self?.handlePlanArchOption(opt)
+        }
+        handlers.onSecondary = { [weak self] in
+            // Most secondary buttons are "back" / "no-op" — surface as
+            // primary-with-cancel so the existing handler clears the card.
+            self?.handlePlanArchOption(PlanArchCardOption.cancel(fromCard: card))
+        }
+        handlers.onCancel = { [weak self] in
+            self?.handlePlanArchOption(PlanArchCardOption.cancel(fromCard: card))
+        }
+
+        // Tertiary is rarely used (G1 onboarding); leave nil.
+        return handlers
+    }
+}
+
+// MARK: - PlanArchCardOption synthesis helpers
+
+extension PlanArchCardOption {
+    /// Build an option that matches the existing plan-patch wire format.
+    /// The real `PlanArchCardOption.patch` is `[String: PlanArchAnyCodable]`
+    /// (NOT a single PlanArchAnyCodable wrapping the whole dict). Each
+    /// top-level entry of the JSON-merge patch must be wrapped
+    /// individually via `mapValues`.
+    static func synthesise(
+        fromCard card: PlanArchCardPayload, patch: [String: Any]
+    ) -> PlanArchCardOption {
+        let wrapped: [String: PlanArchAnyCodable] = patch.mapValues {
+            PlanArchAnyCodable($0)
+        }
+        return PlanArchCardOption(
+            label: "",
+            patch: wrapped,
+            cancelsPlan: false
+        )
+    }
+
+    static func cancel(fromCard card: PlanArchCardPayload) -> PlanArchCardOption {
+        return PlanArchCardOption(
+            label: "Cancel",
+            patch: [:],
+            cancelsPlan: true
+        )
+    }
 }
 
 // DTO for YouTube API response

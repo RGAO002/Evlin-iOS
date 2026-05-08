@@ -127,16 +127,32 @@ struct ChatView: View {
                         }
 
                         // Plan-arch card (AGENT_PLAN_ARCH=1) — typed CardPayload
-                        // from the new orchestrator. Rendered via PlanArchCardView
-                        // with option taps wired to PlanPatchClient.
+                        // from the new orchestrator. Phase 2A dispatches through
+                        // PlanArchCardAdapter → CardDispatcher (polished cards).
+                        // Falls back to PlanArchCardView for unknown / future kinds.
                         if let planArchCard = viewModel.pendingPlanArchCard {
-                            PlanArchCardView(
-                                card: planArchCard,
-                                onOption: { opt in viewModel.handlePlanArchOption(opt) },
-                                onLazyTag: { card in viewModel.handlePlanArchLazyTag(for: card) }
-                            )
-                            .padding(.top, Spacing.md)
-                            .transition(.opacity.combined(with: .scale))
+                            if let renderModel = PlanArchCardAdapter.adapt(
+                                planArchCard, childName: viewModel.childName
+                            ) {
+                                // Phase 2A: dispatch through the adapter back onto polished cards.
+                                CardDispatcher(
+                                    cardID: renderModel.cardID,
+                                    context: renderModel.context,
+                                    handlers: viewModel.makePlanArchHandlers(for: planArchCard)
+                                )
+                                .padding(.top, Spacing.md)
+                                .transition(.opacity.combined(with: .scale))
+                            } else {
+                                // Unknown kind — debug fallback only. Spec §1 acceptance requires
+                                // every known kind to go through the adapter.
+                                PlanArchCardView(
+                                    card: planArchCard,
+                                    onOption: { opt in viewModel.handlePlanArchOption(opt) },
+                                    onLazyTag: { card in viewModel.handlePlanArchLazyTag(for: card) }
+                                )
+                                .padding(.top, Spacing.md)
+                                .transition(.opacity.combined(with: .scale))
+                            }
                         }
                     }
                     .padding(.horizontal, Spacing.xl)

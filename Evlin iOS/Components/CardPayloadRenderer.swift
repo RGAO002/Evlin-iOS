@@ -2,6 +2,11 @@
 //  CardPayloadRenderer.swift
 //  Evlin iOS
 //
+//  Phase 2A: PlanArchCardView is now a DEBUG FALLBACK only. Every known
+//  CardPayload kind must route through PlanArchCardAdapter →
+//  CardDispatcher. This view renders only when the adapter returns nil
+//  (unknown / future kind). Spec §1 acceptance.
+//
 //  Plan-arch dual-path renderer: dispatches on PlanArchCardType to render
 //  one of 8 templates. Phase 1 uses a unified option-list layout
 //  for all card types; Phase 2 may add per-type custom views.

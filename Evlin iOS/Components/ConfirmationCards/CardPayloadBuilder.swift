@@ -27,6 +27,9 @@ enum CardPayloadBuilder {
             // empty payload as a defensive stub so the switch is exhaustive
             // and any accidental builder call doesn't crash.
             return CardPayload(id: .U1, icon: "lock.open", title: "", body: "", buttons: [])
+        case .reflectionReview, .contentGenFailed:
+            // Phase 2B placeholder — never built in 2A. Use G1-style fallback.
+            return g1(context, handlers)
         }
     }
 

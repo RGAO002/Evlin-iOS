@@ -1,0 +1,205 @@
+//
+//  PhoneCardAdapter.swift
+//  Evlin iOS
+//
+//  Task 24: Maps all 11 phone.* kinds to real CardID / CardContext.
+//
+//  CardContext fields are all `let` — constructed via makeContext() in one shot.
+//  U1ShieldEntry uses `kind: String` ("app"|"category"|"list"|"all") per
+//  the real U1Models.swift — not `category: String?` as shown in the plan.
+//
+
+import Foundation
+
+enum PhoneCardAdapter {
+    static func adapt(_ payload: PlanArchCardPayload, childName: String) -> CardRenderModel? {
+        switch payload.kind {
+
+        case "phone.missing_duration":
+            let target = stringFromDetail(payload, "target_name")
+                ?? stringFromDetail(payload, "target")
+                ?? payload.title
+            return CardRenderModel(
+                cardID: .D1,
+                context: makeContext(target: target, childName: childName)
+            )
+
+        case "phone.below_min_duration":
+            let target = stringFromDetail(payload, "target_name") ?? payload.title
+            let requested = intFromDetail(payload, "requested_minutes")
+            return CardRenderModel(
+                cardID: .D1,
+                context: makeContext(
+                    target: target, childName: childName,
+                    durationMinutes: requested
+                )
+            )
+
+        case "phone.alias_miss":
+            let raw = stringFromDetail(payload, "raw_name")
+                ?? stringFromDetail(payload, "target_name")
+                ?? payload.title
+            return CardRenderModel(
+                cardID: .E3,
+                context: makeContext(
+                    target: raw, childName: childName,
+                    categoryGuess: stringFromDetail(payload, "category_guess")
+                )
+            )
+
+        case "phone.unlock_picker":
+            let shields = u1ShieldEntriesFromDetail(payload)
+            return CardRenderModel(
+                cardID: .U1,
+                context: makeContext(
+                    target: "", childName: childName,
+                    u1Token: payload.planToken, u1ShieldList: shields
+                )
+            )
+
+        case "phone.unsupported_exclusion":
+            let target = stringFromDetail(payload, "excluded_target")
+                ?? stringFromDetail(payload, "target_name")
+                ?? payload.title
+            return CardRenderModel(
+                cardID: .D2,
+                context: makeContext(target: target, childName: childName)
+            )
+
+        case "phone.replace_mode_required":
+            let target = stringFromDetail(payload, "target_name") ?? payload.title
+            return CardRenderModel(
+                cardID: .B1,
+                context: makeContext(
+                    target: target, childName: childName,
+                    existingRecordKey: stringFromDetail(payload, "existing_record_key"),
+                    requestedExpiryISO: stringFromDetail(payload, "requested_expiry"),
+                    existingMode: stringFromDetail(payload, "existing_mode")
+                )
+            )
+
+        case "phone.bulk_action_confirm":
+            let parts = stringArrayFromDetail(payload, "targets")
+                ?? stringArrayFromDetail(payload, "items")
+                ?? []
+            return CardRenderModel(
+                cardID: .A3,
+                context: makeContext(
+                    target: payload.title, childName: childName,
+                    blockItems: parts
+                )
+            )
+
+        case "phone.danger_confirm", "phone.proposal_confirm":
+            let summary = stringFromDetail(payload, "action_summary") ?? payload.title
+            return CardRenderModel(
+                cardID: .A1,
+                context: makeContext(target: summary, childName: childName)
+            )
+
+        case "phone.unsupported_in_mode":
+            let target = stringFromDetail(payload, "target_name") ?? payload.title
+            return CardRenderModel(
+                cardID: .E1,
+                context: makeContext(
+                    target: target, childName: childName,
+                    mode: stringFromDetail(payload, "mode") ?? "std"
+                )
+            )
+
+        case "phone.list_suggestion":
+            let target = stringFromDetail(payload, "target_name") ?? payload.title
+            return CardRenderModel(
+                cardID: .F1,
+                context: makeContext(
+                    target: target, childName: childName,
+                    listSuggestions: stringArrayFromDetail(payload, "suggestions") ?? [],
+                    existingLists: stringArrayFromDetail(payload, "existing_lists") ?? []
+                )
+            )
+
+        default:
+            return nil
+        }
+    }
+
+    // MARK: - one-shot CardContext factory
+
+    /// Constructs CardContext (whose fields are all `let`) in one shot.
+    private static func makeContext(
+        target: String, childName: String,
+        durationMinutes: Int? = nil,
+        categoryGuess: String? = nil,
+        listSuggestions: [String] = [],
+        existingLists: [String] = [],
+        blockItems: [String] = [],
+        childDevices: [(id: UUID, label: String)] = [],
+        mode: String = "std",
+        existingRecordKey: String? = nil,
+        requestedExpiryISO: String? = nil,
+        existingMode: String? = nil,
+        u1Token: String? = nil,
+        u1ShieldList: [U1ShieldEntry] = []
+    ) -> CardContext {
+        return CardContext(
+            targetDisplay: target,
+            childName: childName,
+            durationMinutes: durationMinutes,
+            categoryGuess: categoryGuess,
+            listSuggestions: listSuggestions,
+            existingLists: existingLists,
+            blockItems: blockItems,
+            childDevices: childDevices,
+            mode: mode,
+            existingRecordKey: existingRecordKey,
+            requestedExpiryISO: requestedExpiryISO,
+            existingMode: existingMode,
+            u1Token: u1Token,
+            u1ShieldList: u1ShieldList
+        )
+    }
+
+    // MARK: - small helpers reading from PlanArchAnyCodable
+
+    private static func detailDict(_ payload: PlanArchCardPayload) -> [String: Any]? {
+        return payload.detail.mapValues { $0.value } as? [String: Any]
+            ?? (payload.detail as [String: Any])
+    }
+
+    private static func stringFromDetail(_ p: PlanArchCardPayload, _ key: String) -> String? {
+        (p.detail[key]?.value) as? String
+    }
+
+    private static func intFromDetail(_ p: PlanArchCardPayload, _ key: String) -> Int? {
+        if let n = p.detail[key]?.value as? Int { return n }
+        if let d = p.detail[key]?.value as? Double { return Int(d) }
+        return nil
+    }
+
+    private static func stringArrayFromDetail(_ p: PlanArchCardPayload, _ key: String) -> [String]? {
+        p.detail[key]?.value as? [String]
+    }
+
+    private static func u1ShieldEntriesFromDetail(_ p: PlanArchCardPayload) -> [U1ShieldEntry] {
+        // Backend may emit either ["IG", "TikTok"] or richer dicts; both accepted.
+        // U1ShieldEntry uses `kind: String` ("app"|"category"|"list"|"all").
+        if let strings = p.detail["active_shields"]?.value as? [String] {
+            return strings.enumerated().map { (i, name) in
+                U1ShieldEntry(index: i, kind: "app", displayName: name,
+                              expiresAtISO: nil, stale: false)
+            }
+        }
+        if let arr = p.detail["active_shields"]?.value as? [[String: Any]] {
+            return arr.enumerated().map { (i, dict) in
+                U1ShieldEntry(
+                    index: i,
+                    kind: (dict["kind"] as? String) ?? "app",
+                    displayName: (dict["display_name"] as? String) ?? "?",
+                    expiresAtISO: dict["expires_at_iso"] as? String,
+                    stale: (dict["stale"] as? Bool) ?? false
+                )
+            }
+        }
+        return []
+    }
+}
