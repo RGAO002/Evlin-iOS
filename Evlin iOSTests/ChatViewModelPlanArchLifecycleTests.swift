@@ -124,18 +124,45 @@ final class ChatViewModelPlanArchLifecycleTests: XCTestCase {
         XCTAssertEqual(vm.errorMessage, "Event-card actions arrive in Phase 2B.")
     }
 
-    func testQuerySourceSetsErrorMessageAndClearsCard() async {
+    // MARK: - Phase 2D query-stub lifecycle
+
+    /// Spec §1 invariant 4: tapping a query result row prefills inputText and
+    /// clears pendingPlanArchCard — NO errorMessage is set, NO plan-patch is posted.
+    func testQuerySourcePrefillsInputTextAndClearsCard() async {
         let vm = ChatViewModel()
         let card = makePayload(kind: "query.result_pending_submissions", source: "query")
         vm.pendingPlanArchCard = card
 
-        let opt = PlanArchCardOption(label: "OK", patch: [:], cancelsPlan: false)
+        let opt = PlanArchCardOption(label: "Approve Clean room", patch: [:], cancelsPlan: false)
         vm.handlePlanArchOption(opt)
 
         try? await Task.sleep(nanoseconds: 100_000_000)
 
-        XCTAssertNil(vm.pendingPlanArchCard, "card should be cleared after query stub")
-        XCTAssertEqual(vm.errorMessage, "Query-result actions arrive in Phase 2D.")
+        XCTAssertNil(vm.pendingPlanArchCard,
+                     "pendingPlanArchCard must be cleared after query stub")
+        XCTAssertEqual(vm.inputText, "Approve Clean room",
+                       "inputText must be prefilled with option.label")
+        // Must NOT set errorMessage — errorMessage is reserved for hard failures,
+        // not spec-compliant query prefill flows.
+        XCTAssertNil(vm.errorMessage,
+                     "query stub must not set errorMessage (spec §1 invariant 4)")
+    }
+
+    /// Confirms empty label is handled gracefully (inputText stays unchanged).
+    func testQuerySourceEmptyLabelLeavesInputTextUnchanged() async {
+        let vm = ChatViewModel()
+        vm.inputText = "existing text"
+        let card = makePayload(kind: "query.result_pending_bypass", source: "query")
+        vm.pendingPlanArchCard = card
+
+        let opt = PlanArchCardOption(label: "", patch: [:], cancelsPlan: false)
+        vm.handlePlanArchOption(opt)
+
+        try? await Task.sleep(nanoseconds: 100_000_000)
+
+        XCTAssertNil(vm.pendingPlanArchCard, "card must still be cleared for empty label")
+        XCTAssertEqual(vm.inputText, "existing text",
+                       "empty label must not overwrite existing inputText")
     }
 
     func testPlanSourceCancelClearsCardImmediately() {

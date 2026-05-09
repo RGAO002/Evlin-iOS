@@ -1593,13 +1593,15 @@ class ChatViewModel: ObservableObject {
         }
     }
 
-    private func handleQueryCardStub(card: PlanArchCardPayload, option: PlanArchCardOption) {
-        // 2A stub — Query family ships in 2D. Spec invariant 4 forbids
-        // any mutation; we surface a transient message and dismiss the
-        // card. 2D will replace this with input-field prefill against the
-        // real composer state.
+    private func handleQueryCardStub(
+        card: PlanArchCardPayload, option: PlanArchCardOption
+    ) {
         Task { @MainActor in
-            self.errorMessage = "Query-result actions arrive in Phase 2D."
+            // Query result rows prefill the next chat utterance — they
+            // must NOT mutate state (spec §1 invariant 4).
+            if !option.label.isEmpty {
+                self.inputText = option.label
+            }
             self.pendingPlanArchCard = nil
         }
     }
@@ -1714,10 +1716,20 @@ extension ChatViewModel {
             self.handleU1UnlockEverything(token: current.planToken)
         }
 
-        // F1 / list-suggestion picker — handleListPicked takes an `action:`
-        // param (legacy flow) that we don't have here; no-op for Phase 2A.
-        // Phase 2B will wire this once F1 is integrated into plan-arch.
-        handlers.onListPicked = nil
+        // F1 / list-suggestion picker.
+        // For query-source cards (Phase 2D): tapping a row prefills inputText
+        // via handleQueryCardStub — NEVER posts plan-patch (spec §1 invariant 4).
+        // For all other sources: onListPicked is not wired (plan-arch F1 cards
+        // from the plan/event source have their own patch synthesis path).
+        if card.source == .query {
+            handlers.onListPicked = { [weak self] name in
+                guard let self else { return }
+                let opt = PlanArchCardOption(label: name, patch: [:], cancelsPlan: false)
+                self.handleQueryCardStub(card: card, option: opt)
+            }
+        } else {
+            handlers.onListPicked = nil
+        }
 
         // D4 multi-child labels — 2A backend never emits this kind;
         // cancel defensively rather than posting a malformed patch.
