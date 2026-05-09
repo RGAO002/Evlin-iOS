@@ -1,5 +1,6 @@
 import SwiftUI
 import Combine
+import FamilyControls
 
 @MainActor
 class ChatViewModel: ObservableObject {
@@ -49,8 +50,9 @@ class ChatViewModel: ObservableObject {
     private var reflectionSubmissionPoll: AnyCancellable?
 
     private func currentClientAliasStateCodable() -> [String: [String]] {
-        [
-            "known_apps": LocalAliasStore.shared.allApplicationKeys(),
+        let activeAppTokens = ScreenTimeManager.shared.selectedApps.applicationTokens
+        return [
+            "known_apps": LocalAliasStore.shared.allActiveApplicationKeys(activeTokens: activeAppTokens),
             "known_categories": LocalAliasStore.shared.allCategoryNames()
         ]
     }
@@ -139,6 +141,53 @@ class ChatViewModel: ObservableObject {
         messages.removeAll()
         surfacedReflectionSubmissionIDs.removeAll()
         UserDefaults.standard.removeObject(forKey: Self.storageKey)
+    }
+
+    // MARK: - Strategy-agent T11: conversation_id + answer-question + feedback
+
+    @AppStorage("evlin.conversation_id") private var conversationIdString: String = ""
+
+    /// Stable per-device conversation token; auto-rotates when blank.
+    /// Mirror of SmartModeStore.conversationId so ChatViewModel can stamp it
+    /// onto outgoing /parent/chat and /parent/chat/answer-question requests.
+    private var conversationId: UUID {
+        if let u = UUID(uuidString: conversationIdString) { return u }
+        let fresh = UUID()
+        conversationIdString = fresh.uuidString
+        return fresh
+    }
+
+    /// Strategy-agent T11.11 — POST /parent/chat/answer-question and feed
+    /// the response back through the existing chat pipeline.
+    func sendAnswer(_ body: AnswerQuestionBody) async {
+        guard let url = URL(string: "\(apiClient.baseURL)/parent/chat/answer-question") else {
+            return
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONEncoder().encode(body)
+        do {
+            let (data, _) = try await URLSession.shared.data(for: req)
+            let response = try JSONDecoder().decode(APIClient.ChatResponse.self, from: data)
+            await MainActor.run {
+                self.processResponse(response, userMessage: "")
+            }
+        } catch {
+            print("answer-question failed: \(error)")
+        }
+    }
+
+    /// Strategy-agent T11.11 — POST 👍/👎 feedback for an assistant turn.
+    func sendFeedback(messageId: String, rating: ChatFeedbackRating) async {
+        let (familyID, _) = currentFamilyAndChildIDs()
+        guard let fam = familyID else { return }
+        try? await FeedbackService(baseURL: apiClient.baseURL).submit(
+            familyId: fam,
+            conversationId: conversationId,
+            messageId: messageId,
+            rating: rating
+        )
     }
 
     // MARK: - Send
@@ -308,12 +357,7 @@ class ChatViewModel: ObservableObject {
                 let targets = Self.extractAliasTargets(from: p)
                 for (idx, entry) in targets.enumerated() {
                     guard let (target, kind) = entry else { continue }
-                    let aliasResolved: Bool = {
-                        switch kind {
-                        case .app: return LocalAliasStore.shared.applicationToken(forLookupKey: target) != nil
-                        case .category: return LocalAliasStore.shared.categoryToken(forName: target) != nil
-                        }
-                    }()
+                    let aliasResolved = aliasResolvedForLazyTagPreflight(target: target, kind: kind)
                     if !aliasResolved {
                         pendingAliasMisses[Self.aliasMissKey(token: p.token, rowIndex: idx)] = kind
                     }
@@ -884,18 +928,36 @@ class ChatViewModel: ObservableObject {
         else { return [] }
 
         // New shape: args.rows is an array of {target, target_kind, minutes}
-        if let rowsAny = proposal.args["rows"]?.value as? [Any] {
+        func parseRow(_ row: [String: Any]) -> (target: String, kind: AliasKind)? {
+            guard let target = row["target"] as? String,
+                  !target.trimmingCharacters(in: .whitespaces).isEmpty
+            else { return nil }
+            guard let rawKind = row["target_kind"] as? String else { return nil }
+            switch rawKind {
+            case "app": return (target, .app)
+            case "category": return (target, .category)
+            default: return nil
+            }
+        }
+
+        let rowsValue = proposal.args["rows"]?.value
+        if let rows = rowsValue as? [[String: AnyCodable]] {
+            return rows.map { row in
+                parseRow(row.mapValues { $0.value })
+            }
+        }
+        if let rows = rowsValue as? [[String: Any]] {
+            return rows.map(parseRow)
+        }
+        if let rowsAny = rowsValue as? [Any] {
             return rowsAny.map { rowAny -> (target: String, kind: AliasKind)? in
-                guard let row = rowAny as? [String: Any] else { return nil }
-                guard let target = row["target"] as? String,
-                      !target.trimmingCharacters(in: .whitespaces).isEmpty
-                else { return nil }
-                guard let rawKind = row["target_kind"] as? String else { return nil }
-                switch rawKind {
-                case "app": return (target, .app)
-                case "category": return (target, .category)
-                default: return nil
+                if let row = rowAny as? [String: Any] {
+                    return parseRow(row)
                 }
+                if let row = rowAny as? [String: AnyCodable] {
+                    return parseRow(row.mapValues { $0.value })
+                }
+                return nil
             }
         }
 
@@ -908,6 +970,19 @@ class ChatViewModel: ObservableObject {
 
     nonisolated static func aliasMissKey(token: String, rowIndex: Int) -> String {
         "\(token)#\(rowIndex)"
+    }
+
+    private func aliasResolvedForLazyTagPreflight(target: String, kind: AliasKind) -> Bool {
+        switch kind {
+        case .app:
+            let activeTokens = ScreenTimeManager.shared.selectedApps.applicationTokens
+            return LocalAliasStore.shared.activeApplicationToken(
+                forLookupKey: target,
+                activeTokens: activeTokens
+            ) != nil
+        case .category:
+            return LocalAliasStore.shared.categoryToken(forName: target) != nil
+        }
     }
 
     /// True if the proposal currently has no alias miss outstanding on

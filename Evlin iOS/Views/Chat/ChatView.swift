@@ -111,6 +111,19 @@ struct ChatView: View {
                                         }
                                     )
                                 }
+
+                                // Strategy-agent T11.12 — 👍/👎 feedback row under each
+                                // agent bubble that has visible content.
+                                if message.role == .agent, !message.content.isEmpty {
+                                    AssistantFeedbackButtons(messageId: message.id.uuidString) { rating in
+                                        Task {
+                                            await viewModel.sendFeedback(
+                                                messageId: message.id.uuidString,
+                                                rating: rating
+                                            )
+                                        }
+                                    }
+                                }
                             }
                             .id(message.id)
                         }
@@ -131,7 +144,20 @@ struct ChatView: View {
                         // PlanArchCardAdapter → CardDispatcher (polished cards).
                         // Falls back to PlanArchCardView for unknown / future kinds.
                         if let planArchCard = viewModel.pendingPlanArchCard {
-                            if let renderModel = PlanArchCardAdapter.adapt(
+                            // Strategy-agent T11.12 — question.<style> card path.
+                            if let qcard = QuestionCardAdapter.parse(planArchCard) {
+                                QuestionCardView(
+                                    card: qcard,
+                                    onAnswer: { body in
+                                        Task { await viewModel.sendAnswer(body) }
+                                    },
+                                    onCancel: {
+                                        viewModel.pendingPlanArchCard = nil
+                                    }
+                                )
+                                .padding(.top, Spacing.md)
+                                .transition(.opacity.combined(with: .scale))
+                            } else if let renderModel = PlanArchCardAdapter.adapt(
                                 planArchCard, childName: viewModel.childName
                             ) {
                                 // Phase 2A: dispatch through the adapter back onto polished cards.
