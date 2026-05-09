@@ -30,9 +30,16 @@ struct HomeSettingsSheet: View {
     @State private var protectionMode: String = "std"
     @State private var protectionModeStatus: String = ""
 
+    /// Strategy-agent T11.13 — Smart Mode toggle (iOS-side gate for the
+    /// thinking/QuestionCard pipeline). When ON the agent can think and ask
+    /// follow-up questions; when OFF only simple commands are accepted.
+    @StateObject private var smartMode = SmartModeStore()
+
     var body: some View {
         NavigationStack {
             Form {
+                SmartModeToggle().environmentObject(smartMode)
+
                 Section("Children") {
                     ForEach(children) { c in
                         Button { editing = c } label: {
