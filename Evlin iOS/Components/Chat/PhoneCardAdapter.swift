@@ -36,16 +36,13 @@ enum PhoneCardAdapter {
             )
 
         case "phone.alias_miss":
-            let raw = stringFromDetail(payload, "raw_name")
-                ?? stringFromDetail(payload, "target_name")
-                ?? payload.title
-            return CardRenderModel(
-                cardID: .E3,
-                context: makeContext(
-                    target: raw, childName: childName,
-                    categoryGuess: stringFromDetail(payload, "category_guess")
-                )
-            )
+            // Phase 2A intentional fallback: alias_miss needs the
+            // FamilyActivityPicker which CatalogMissCard (E3) doesn't expose.
+            // Returning nil causes ChatView to fall back to PlanArchCardView
+            // where the existing onLazyTag / handlePlanArchLazyTag plumbing
+            // still works. Phase 2B will add onLazyTag to CardHandlers and
+            // wire it into CatalogMissCard so the polished E3 UI can be used.
+            return nil
 
         case "phone.unlock_picker":
             let shields = u1ShieldEntriesFromDetail(payload)

@@ -1631,61 +1631,49 @@ extension ChatViewModel {
         var handlers = CardHandlers()
 
         // D1 / MissingInfoCard primary tap → user picked a duration.
+        // Backend wire format: {"duration": {"kind": "minutes", "value": N}}
+        // or {"duration": {"kind": "permanent"}} — NOT "duration_minutes"/"duration_kind".
         handlers.onDurationPicked = { [weak self] minutes in
             guard let self else { return }
-            let patchDict: [String: Any]
-            if let m = minutes {
-                patchDict = ["duration_minutes": m]
-            } else {
-                patchDict = ["duration_kind": "permanent"]
-            }
-            let opt = PlanArchCardOption.synthesise(fromCard: card, patch: patchDict)
+            let durationDict: [String: Any] = minutes.map {
+                ["kind": "minutes", "value": $0] as [String: Any]
+            } ?? ["kind": "permanent"]
+            let opt = PlanArchCardOption.synthesise(
+                fromCard: card, patch: ["duration": durationDict]
+            )
             self.handlePlanArchOption(opt)
         }
 
-        // U1 / unlock picker callbacks.
+        // U1 / unlock picker — do NOT synthesise a plan-patch for these.
+        // The U1 flow uses chat re-dispatch (U1Marker → dispatchChat), not
+        // plan-patch. Calling the existing ViewModel helpers preserves that.
         handlers.onU1UnlockSelected = { [weak self] indices in
-            let opt = PlanArchCardOption.synthesise(
-                fromCard: card, patch: ["selected_indices": indices]
-            )
-            self?.handlePlanArchOption(opt)
+            guard let self, let current = self.pendingPlanArchCard else { return }
+            self.handleU1UnlockSelected(token: current.planToken, indices: indices)
         }
         handlers.onU1UnlockEverything = { [weak self] in
-            let opt = PlanArchCardOption.synthesise(
-                fromCard: card, patch: ["unlock_everything": true]
-            )
-            self?.handlePlanArchOption(opt)
+            guard let self, let current = self.pendingPlanArchCard else { return }
+            self.handleU1UnlockEverything(token: current.planToken)
         }
 
-        // F1 / list-suggestion picker.
-        handlers.onListPicked = { [weak self] listName in
-            let opt = PlanArchCardOption.synthesise(
-                fromCard: card, patch: ["selected_list": listName]
-            )
-            self?.handlePlanArchOption(opt)
-        }
+        // F1 / list-suggestion picker — handleListPicked takes an `action:`
+        // param (legacy flow) that we don't have here; no-op for Phase 2A.
+        // Phase 2B will wire this once F1 is integrated into plan-arch.
+        handlers.onListPicked = nil
 
-        // D4 multi-child labels — 2A backend never emits this kind, so
-        // this is purely defensive plumbing.
-        handlers.onChildrenLabelsPicked = { [weak self] labels in
-            let opt = PlanArchCardOption.synthesise(
-                fromCard: card, patch: ["selected_children": labels]
-            )
-            self?.handlePlanArchOption(opt)
-        }
-
-        // Generic primary/secondary/cancel for A1/A3/B1/D2/D3/E1/E3 cards.
-        handlers.onPrimary = { [weak self] in
-            let opt = PlanArchCardOption.synthesise(
-                fromCard: card, patch: ["intent_confirmed": true]
-            )
-            self?.handlePlanArchOption(opt)
-        }
-        handlers.onSecondary = { [weak self] in
-            // Most secondary buttons are "back" / "no-op" — surface as
-            // primary-with-cancel so the existing handler clears the card.
+        // D4 multi-child labels — 2A backend never emits this kind;
+        // cancel defensively rather than posting a malformed patch.
+        handlers.onChildrenLabelsPicked = { [weak self] _ in
             self?.handlePlanArchOption(PlanArchCardOption.cancel(fromCard: card))
         }
+
+        // Generic primary/secondary: set to nil so each polished card drives
+        // its own primary action. Synthesising "intent_confirmed: true" would
+        // be rejected by CardPatchPayload (extra="forbid") and cause silent
+        // failures. Cards that need a primary tap wire it internally.
+        handlers.onPrimary = nil
+        handlers.onSecondary = nil
+
         handlers.onCancel = { [weak self] in
             self?.handlePlanArchOption(PlanArchCardOption.cancel(fromCard: card))
         }
