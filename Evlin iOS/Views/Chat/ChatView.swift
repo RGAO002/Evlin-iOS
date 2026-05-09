@@ -204,10 +204,12 @@ struct ChatView: View {
             guard !isPreview else { return }
             viewModel.startReflectionSubmissionPolling()
             Task { await viewModel.tickReflectionSubmissionPoll() }
+            viewModel.startReflectionEventPolling()
         }
         .onDisappear {
             guard !isPreview else { return }
             viewModel.stopReflectionSubmissionPolling()
+            viewModel.stopReflectionEventPolling()
         }
         .onReceive(NotificationCenter.default.publisher(for: .bigKidStateInvalidated)) { _ in
             guard !isPreview else { return }

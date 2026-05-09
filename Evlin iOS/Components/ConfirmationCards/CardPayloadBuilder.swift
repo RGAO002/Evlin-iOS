@@ -27,8 +27,12 @@ enum CardPayloadBuilder {
             // empty payload as a defensive stub so the switch is exhaustive
             // and any accidental builder call doesn't crash.
             return CardPayload(id: .U1, icon: "lock.open", title: "", body: "", buttons: [])
-        case .reflectionReview, .contentGenFailed:
-            // Phase 2B placeholder — never built in 2A. Use G1-style fallback.
+        case .contentGenFailed:
+            return contentGenFailed(context, handlers)
+        case .reflectionReview:
+            // Phase 2B: adapter returns nil for confirm_approve / confirm_redo,
+            // falling back to PlanArchCardView. This branch is dead until Phase 2C
+            // adds ReflectionReviewCard. Use G1-style stub as defensive fallback.
             return g1(context, handlers)
         }
     }
@@ -50,6 +54,27 @@ enum CardPayloadBuilder {
             buttons: [
                 CardButton(label: "Send reflection", style: .primary, action: h.onPrimary ?? {}),
                 CardButton(label: "Just venting — skip", style: .cancel, action: h.onCancel ?? {}),
+            ]
+        )
+    }
+
+    // MARK: - contentGenFailed
+
+    private static func contentGenFailed(_ ctx: CardContext, _ h: CardHandlers) -> CardPayload {
+        // ctx.targetDisplay carries the failure_reason (or title) from the backend.
+        // ReflectionContentFailedCard reads payload.title and payload.body directly.
+        let title = ctx.targetDisplay.isEmpty
+            ? "Couldn't prepare reflection"
+            : ctx.targetDisplay
+        return CardPayload(
+            id: .contentGenFailed,
+            icon: "exclamationmark.triangle",
+            title: title,
+            body: "The AI couldn't generate the reflection content. You can retry, use a simpler template, or cancel.",
+            buttons: [
+                CardButton(label: "Retry", style: .primary, action: h.onPrimary ?? {}),
+                CardButton(label: "Use simpler template", style: .secondary, action: h.onSecondary ?? {}),
+                CardButton(label: "Cancel", style: .cancel, action: h.onCancel ?? {}),
             ]
         )
     }

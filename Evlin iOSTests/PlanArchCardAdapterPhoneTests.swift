@@ -33,9 +33,13 @@ final class PlanArchCardAdapterPhoneTests: XCTestCase {
         XCTAssertNil(PlanArchCardAdapter.adapt(card, childName: "Liam"))
     }
 
-    func testAdaptReflectionPrefixReturnsNilIn2A() {
+    func testAdaptReflectionPrefixDispatchesIn2B() {
+        // Phase 2B: reflection.confirm_propose now routes to .A1 via ReflectionCardAdapter.
+        // (Was nil in 2A — updated when ReflectionCardAdapter was filled in.)
         let card = payload(kind: "reflection.confirm_propose")
-        XCTAssertNil(PlanArchCardAdapter.adapt(card, childName: "Liam"))
+        let model = PlanArchCardAdapter.adapt(card, childName: "Liam")
+        XCTAssertNotNil(model, "reflection.confirm_propose must produce A1 in Phase 2B")
+        XCTAssertEqual(model?.cardID, .A1)
     }
 }
 

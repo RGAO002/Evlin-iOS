@@ -2,14 +2,104 @@
 //  ReflectionCardAdapter.swift
 //  Evlin iOS
 //
-//  Task 23 stub — returns nil for all reflection.* kinds.
-//  Filled in Phase 2B.
+//  Phase 2B: Dispatches all reflection.* kinds.
+//
+//  Mapping (spec §6.3):
+//   reflection.confirm_propose        → .A1 (DangerConfirmCard) — parent confirms Gemini will spend tokens
+//   reflection.confirm_cancel         → .A1 (DangerConfirmCard) — confirm cancelling an active reflection
+//   reflection.confirm_bypass_response → .A1 (DangerConfirmCard) — respond to bypass request from child
+//   reflection.confirm_approve        → nil (fallback to PlanArchCardView until polished review card lands)
+//   reflection.confirm_redo           → nil (fallback to PlanArchCardView until polished review card lands)
+//   reflection.content_generation_failed → .contentGenFailed (ReflectionContentFailedCard)
+//   unknown reflection.* kind         → nil (fallback)
 //
 
 import Foundation
 
 enum ReflectionCardAdapter {
-    /// 2A: stubs return nil so unknown reflection.* kinds fall back to the
-    /// generic debug view. Filled in 2B.
-    static func adapt(_ payload: PlanArchCardPayload, childName: String) -> CardRenderModel? { nil }
+    static func adapt(_ payload: PlanArchCardPayload, childName: String) -> CardRenderModel? {
+        switch payload.kind {
+
+        case "reflection.confirm_propose":
+            // "About to trigger reflection: <reason>". Confirm = Esen explicitly approves
+            // Gemini spending tokens. Cancel = abandon.
+            let reason = stringFromDetail(payload, "reflection_reason")
+                ?? stringFromDetail(payload, "reason")
+                ?? payload.title
+            let summary = "About to trigger reflection: \(reason)"
+            return CardRenderModel(
+                cardID: .A1,
+                context: makeContext(target: summary, childName: childName)
+            )
+
+        case "reflection.confirm_cancel":
+            // "Cancel active reflection?"
+            let summary = stringFromDetail(payload, "reason")
+                ?? payload.title
+            return CardRenderModel(
+                cardID: .A1,
+                context: makeContext(target: summary, childName: childName)
+            )
+
+        case "reflection.confirm_bypass_response":
+            // "Respond to bypass request from <child>"
+            let who = childName.isEmpty ? "child" : childName
+            let bypassSummary = stringFromDetail(payload, "bypass_reason")
+                ?? "bypass request from \(who)"
+            let summary = "Respond to \(bypassSummary)"
+            return CardRenderModel(
+                cardID: .A1,
+                context: makeContext(target: summary, childName: childName)
+            )
+
+        case "reflection.confirm_approve", "reflection.confirm_redo":
+            // Deferred: requires polished ReflectionReviewCard showing essay excerpt
+            // + quiz score + Approve/Redo buttons. PlanArchCardView already handles
+            // essay text rendering and is an acceptable fallback for Phase 2B.
+            // TODO(Phase 2C): implement ReflectionReviewCard and route here.
+            return nil
+
+        case "reflection.content_generation_failed":
+            // New in Phase 2B: ReflectionContentFailedCard with Retry / SimplerTemplate / Cancel.
+            let summary = stringFromDetail(payload, "failure_reason")
+                ?? payload.title
+            return CardRenderModel(
+                cardID: .contentGenFailed,
+                context: makeContext(target: summary, childName: childName)
+            )
+
+        default:
+            // Unknown reflection.* kind — fall back to PlanArchCardView.
+            return nil
+        }
+    }
+
+    // MARK: - One-shot CardContext factory
+    // CardContext fields are all `let`, so construct in one shot.
+
+    private static func makeContext(
+        target: String,
+        childName: String
+    ) -> CardContext {
+        CardContext(
+            targetDisplay: target,
+            childName: childName,
+            durationMinutes: nil,
+            categoryGuess: nil,
+            listSuggestions: [],
+            existingLists: [],
+            blockItems: [],
+            childDevices: [],
+            mode: "std",
+            existingRecordKey: nil,
+            requestedExpiryISO: nil,
+            existingMode: nil,
+            u1Token: nil,
+            u1ShieldList: []
+        )
+    }
+
+    private static func stringFromDetail(_ p: PlanArchCardPayload, _ key: String) -> String? {
+        (p.detail[key]?.value) as? String
+    }
 }

@@ -34,10 +34,21 @@ struct CardDispatcher: View {
                 onUnlockEverything: { handlers.onU1UnlockEverything?() },
                 onCancel: { handlers.onCancel?() }
             )
-        case .reflectionReview, .contentGenFailed:
-            // Phase 2B will wire these to ReflectionSubmissionReviewCard /
-            // ReflectionContentFailedCard. Until then, render nothing —
-            // 2A backend never emits these kinds, so this branch is dead.
+        case .contentGenFailed:
+            // Phase 2B: ReflectionContentFailedCard.
+            // onPrimary  → Retry  (patch intent_confirmed: true)
+            // onSecondary → Use simpler template  (patch use_simpler_template: true)
+            // onCancel   → Cancel
+            ReflectionContentFailedCard(
+                payload: payload,
+                onRetry: { handlers.onPrimary?() },
+                onSimplerTemplate: { handlers.onSecondary?() },
+                onCancel: { handlers.onCancel?() }
+            )
+        case .reflectionReview:
+            // Phase 2B: adapter returns nil for confirm_approve / confirm_redo,
+            // so this branch is dead — PlanArchCardView handles those via fallback.
+            // Phase 2C will add ReflectionReviewCard and route here.
             EmptyView()
         }
     }

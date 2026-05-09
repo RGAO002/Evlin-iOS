@@ -1225,6 +1225,64 @@ class ChatViewModel: ObservableObject {
         reflectionSubmissionPoll = nil
     }
 
+    // MARK: - Reflection event polling (Phase 2B)
+    // Polls GET /parent/reflection/pending-events every 30s while ChatView is
+    // visible and no card is already pending. Backend returns an empty list when
+    // the AGENT_PLAN_ARCH_REFLECTION flag is off, so this is safe to run always.
+
+    private var reflectionEventPoll: AnyCancellable?
+
+    func startReflectionEventPolling() {
+        reflectionEventPoll?.cancel()
+        reflectionEventPoll = Timer.publish(every: 30, tolerance: 5, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in
+                Task { await self?.tickReflectionEventPoll() }
+            }
+        // Fire once immediately
+        Task { await tickReflectionEventPoll() }
+    }
+
+    func stopReflectionEventPolling() {
+        reflectionEventPoll?.cancel()
+        reflectionEventPoll = nil
+    }
+
+    func tickReflectionEventPoll() async {
+        // Don't interrupt a card already in-flight
+        guard await MainActor.run(body: { self.pendingPlanArchCard == nil }) else { return }
+
+        let rawBase = await MainActor.run { self.apiClient.baseURL }
+        guard !rawBase.isEmpty, let _ = URL(string: rawBase) else { return }
+
+        let url = URL(string: "\(rawBase)/parent/reflection/pending-events")!
+        do {
+            let (data, response) = try await URLSession.shared.data(from: url)
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else { return }
+
+            // Backend returns a JSON array of card_payload objects.
+            guard let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]],
+                  let first = arr.first,
+                  let cardData = try? JSONSerialization.data(withJSONObject: first),
+                  let card = try? JSONDecoder().decode(PlanArchCardPayload.self, from: cardData)
+            else { return }
+
+            await MainActor.run {
+                guard self.pendingPlanArchCard == nil else { return }
+                self.pendingPlanArchCard = card
+                let composed: String
+                if let body = card.body, !body.isEmpty {
+                    composed = "\(card.title)\n\n\(body)"
+                } else {
+                    composed = card.title
+                }
+                self.messages.append(ChatMessage(role: .agent, content: composed, timestamp: Date()))
+            }
+        } catch {
+            print("[ReflectionEventPoll] fetch error: \(error)")
+        }
+    }
+
     func tickReflectionSubmissionPoll() async {
         guard let raw = UserDefaults.standard.string(forKey: "evlin.childDeviceID"),
               let childUUID = UUID(uuidString: raw),
@@ -1667,12 +1725,30 @@ extension ChatViewModel {
             self?.handlePlanArchOption(PlanArchCardOption.cancel(fromCard: card))
         }
 
-        // Generic primary/secondary: set to nil so each polished card drives
-        // its own primary action. Synthesising "intent_confirmed: true" would
-        // be rejected by CardPatchPayload (extra="forbid") and cause silent
-        // failures. Cards that need a primary tap wire it internally.
-        handlers.onPrimary = nil
-        handlers.onSecondary = nil
+        // For reflection.content_generation_failed, wire Retry / SimplerTemplate
+        // via synthesised patches (spec §7.3). For all other card kinds, leave
+        // onPrimary/onSecondary nil — polished cards drive their own primary action;
+        // synthesising "intent_confirmed: true" would be rejected by CardPatchPayload
+        // (extra="forbid") and cause silent failures.
+        if card.kind == "reflection.content_generation_failed" {
+            handlers.onPrimary = { [weak self] in
+                guard let self else { return }
+                let opt = PlanArchCardOption.synthesise(
+                    fromCard: card, patch: ["intent_confirmed": true]
+                )
+                self.handlePlanArchOption(opt)
+            }
+            handlers.onSecondary = { [weak self] in
+                guard let self else { return }
+                let opt = PlanArchCardOption.synthesise(
+                    fromCard: card, patch: ["use_simpler_template": true]
+                )
+                self.handlePlanArchOption(opt)
+            }
+        } else {
+            handlers.onPrimary = nil
+            handlers.onSecondary = nil
+        }
 
         handlers.onCancel = { [weak self] in
             self?.handlePlanArchOption(PlanArchCardOption.cancel(fromCard: card))
