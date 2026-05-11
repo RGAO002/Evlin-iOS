@@ -1,10 +1,10 @@
 import SwiftUI
 
-/// Chooses which child-side shell to show. The historical `ChildModeView`
-/// (lock status + pairing hints) stays as a **fallback** when we don't yet
-/// have the credentials the big-kid stack needs. Once `evlin.childDeviceID`
-/// parses as a UUID and the shared `APIClient` has a usable API root, we
-/// show `BigKidRootView` — that's the JSX-matched big-kid product UI.
+/// Child-side shell router. When the device is paired (UUID present + API
+/// base URL set) we show `BigKidRootView` — the JSX-matched big-kid UI.
+/// Pre-pairing we show a minimal "ask parent to finish setup" placeholder.
+/// (Previously this branch fell back to the legacy ChildModeView; that
+/// view was deleted along with SettingsView once BigKid took over.)
 struct ChildModeExperienceView: View {
     @EnvironmentObject private var apiClient: APIClient
     @AppStorage("evlin.childDeviceID") private var childDeviceID: String = ""
@@ -28,9 +28,27 @@ struct ChildModeExperienceView: View {
                         ScreenTimeManager.shared.syncDeletionProtectionToManagedSettings()
                     }
             } else {
-                ChildModeView()
+                notPairedPlaceholder
             }
         }
+    }
+
+    private var notPairedPlaceholder: some View {
+        VStack(spacing: Spacing.lg) {
+            Image(systemName: "link.circle")
+                .font(.system(size: 48))
+                .foregroundStyle(Color.evOutline)
+            Text("Waiting for setup")
+                .font(.evHeadlineSmall)
+                .foregroundStyle(Color.evOnSurface)
+            Text("Ask the parent to finish pairing this device.")
+                .font(.evBodyMedium)
+                .foregroundStyle(Color.evOnSurfaceVariant)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, Spacing.section)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.evSurface)
     }
 
     private var trimmedBase: String {

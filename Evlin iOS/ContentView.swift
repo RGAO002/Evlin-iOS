@@ -37,8 +37,8 @@ struct ContentView: View {
                 } else if appMode == "parent" {
                     ParentRootView()
                 } else {
-                    // Big-kid product UI (`BigKidRootView`) when paired + API base is
-                    // known; otherwise legacy lock / pairing shell (`ChildModeView`).
+                    // Big-kid product UI (`BigKidRootView`) when paired + API base
+                    // is known; otherwise a minimal "waiting for setup" placeholder.
                     ChildModeExperienceView()
                 }
             }

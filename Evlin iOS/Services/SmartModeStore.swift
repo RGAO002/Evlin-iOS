@@ -60,7 +60,7 @@ final class SmartModeStore: ObservableObject {
     }
 
     /// Push the toggle state to backend whenever it changes (call from a
-    /// `.onChange(of: isOn)` modifier in the SettingsView).
+    /// `.onChange(of: isOn)` modifier in HomeSettingsSheet).
     func push(familyId: UUID) async {
         // Backend endpoint: PUT /parent/settings  body: {family_id, smart_mode}
         // Implementation deferred to whichever endpoint is canonical for parent
