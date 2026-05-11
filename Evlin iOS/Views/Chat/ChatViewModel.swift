@@ -174,6 +174,8 @@ class ChatViewModel: ObservableObject {
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try? JSONEncoder().encode(body)
+        self.isThinking = true
+        defer { self.isThinking = false }
         do {
             let (data, _) = try await URLSession.shared.data(for: req)
             let response = try JSONDecoder().decode(APIClient.ChatResponse.self, from: data)
@@ -1153,6 +1155,8 @@ class ChatViewModel: ObservableObject {
                 return
             }
         }
+        self.isThinking = true
+        defer { self.isThinking = false }
         let client = AgentClient(baseURL: apiClient.baseURL)
         do {
             let result = try await client.executeProposal(token: p.token)
@@ -1387,6 +1391,8 @@ class ChatViewModel: ObservableObject {
         let noteToSend = parentNoteTrimmed.isEmpty
             ? ReflectionParentNoteFallback.thanksHonest
             : parentNoteTrimmed
+        self.isThinking = true
+        defer { self.isThinking = false }
         do {
             try await apiClient.approveChildReflectionSubmission(
                 reflectionId: reflectionId,
@@ -1473,6 +1479,8 @@ class ChatViewModel: ObservableObject {
     /// button when the chat view rebuilds (tab switch, scroll-into-view).
     @MainActor
     func undoReceipt(token: String) async {
+        self.isThinking = true
+        defer { self.isThinking = false }
         let client = AgentClient(baseURL: apiClient.baseURL)
         do {
             _ = try await client.revertAction(actionID: token)
