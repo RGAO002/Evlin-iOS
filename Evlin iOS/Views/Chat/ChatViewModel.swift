@@ -1827,16 +1827,40 @@ extension ChatViewModel {
             self.handlePlanArchOption(opt)
         }
 
-        // U1 / unlock picker — do NOT synthesise a plan-patch for these.
-        // The U1 flow uses chat re-dispatch (U1Marker → dispatchChat), not
-        // plan-patch. Calling the existing ViewModel helpers preserves that.
+        // U1 / unlock picker — strategy_agent's phone.unlock_picker stages
+        // an ActionPlan and expects a plan-patch back, not a chat re-dispatch
+        // with a U1Marker (that path was for legacy plan_arch and reads from
+        // a different ProposalStore). Translate the U1Card's index-based
+        // callback into the option-shaped patch the backend's _build_unlock_picker_*
+        // emitted:
+        //   onUnlockSelected([i, j]) → take options[i] + options[j] target dicts,
+        //                              send {selected_targets: [...]} via plan-patch
+        //   onUnlockEverything()     → send the option whose target.kind == "all"
         handlers.onU1UnlockSelected = { [weak self] indices in
             guard let self, let current = self.pendingPlanArchCard else { return }
-            self.handleU1UnlockSelected(token: current.planToken, indices: indices)
+            let targets: [[String: Any]] = indices.compactMap { idx in
+                guard idx < current.options.count else { return nil }
+                return current.options[idx].patch["target"]?.value as? [String: Any]
+            }
+            guard !targets.isEmpty else { return }
+            let synthesised = PlanArchCardOption(
+                label: "Unlock selected",
+                patch: ["selected_targets": PlanArchAnyCodable(targets)]
+            )
+            self.handlePlanArchOption(synthesised)
         }
         handlers.onU1UnlockEverything = { [weak self] in
             guard let self, let current = self.pendingPlanArchCard else { return }
-            self.handleU1UnlockEverything(token: current.planToken)
+            // The backend's "Unlock everything" option carries target.kind=="all".
+            let everyOpt = current.options.first(where: { opt in
+                guard let target = opt.patch["target"]?.value as? [String: Any] else {
+                    return false
+                }
+                return (target["kind"] as? String) == "all"
+            })
+            if let opt = everyOpt {
+                self.handlePlanArchOption(opt)
+            }
         }
 
         // F1 / list-suggestion picker.
