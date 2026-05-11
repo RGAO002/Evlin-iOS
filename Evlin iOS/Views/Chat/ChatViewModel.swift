@@ -1640,6 +1640,12 @@ class ChatViewModel: ObservableObject {
         // suitable for JSONSerialization in PlanPatchClient.
         let patchDict: [String: Any] = opt.patch.mapValues { $0.value }
 
+        // Show the thinking indicator while plan-patch is in flight. Without
+        // this the chat is blank between "user tapped Confirm" and the
+        // executor's response — which on a real Gemini-backed reflection
+        // executor is 5-15 seconds and feels like the app froze.
+        self.isThinking = true
+
         Task { [weak self] in
             guard let self = self else { return }
             let client = PlanPatchClient(baseURL: trimmed)
@@ -1655,6 +1661,7 @@ class ChatViewModel: ObservableObject {
                 childDeviceID: ids.childDeviceID
             )
             await MainActor.run {
+                self.isThinking = false
                 switch outcome {
                 case .executed(let message, let reasoning, let queuedCommands):
                     self.appendPlanPatchExecutedMessage(message: message, reasoning: reasoning, queuedCommands: queuedCommands)
