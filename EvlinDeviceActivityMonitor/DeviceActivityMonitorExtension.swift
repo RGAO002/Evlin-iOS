@@ -32,8 +32,21 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         if raw.hasPrefix("evlin.shield.") {
             let hashHex = String(raw.dropFirst("evlin.shield.".count))
             let found = removeShieldByHashAndRecompute(hashHex: hashHex)
-            defaults?.set("\(marker) shieldRemoved=\(found)", forKey: "evlin.lastIntervalDidEnd")
-            NSLog("[Evlin/Ext] shield remove found=%d hash=%@", found ? 1 : 0, hashHex)
+            // On miss, surface what keys ARE in the dict so we can tell whether
+            // the stored key drifted from what we hashed against, or the dict
+            // is empty (main-app sweepExpired already cleared it).
+            var detail = "\(marker) shieldRemoved=\(found)"
+            if !found {
+                let keys: [String] = {
+                    guard let data = defaults?.data(forKey: shieldsKey),
+                          let shields = decodeShields(from: data)
+                    else { return [] }
+                    return Array(shields.keys)
+                }()
+                detail += " keysCount=\(keys.count) keys=\(keys)"
+            }
+            defaults?.set(detail, forKey: "evlin.lastIntervalDidEnd")
+            NSLog("[Evlin/Ext] %@", detail)
         } else if raw.hasPrefix("evlin.block.") {
             let hashHex = String(raw.dropFirst("evlin.block.".count))
             let found = removeBlockByHashAndRecompute(hashHex: hashHex)
