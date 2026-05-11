@@ -18,7 +18,7 @@ final class LocalAliasStore: @unchecked Sendable {
 
     func saveCategoryToken(_ token: ActivityCategoryToken, forName name: String) {
         var dict = loadCategoryDict()
-        if let data = try? PropertyListEncoder().encode(token) {
+        if let data = _encodeTokenJSON(token) {
             dict[name.lowercased()] = data
             persistCategoryDict(dict)
         }
@@ -27,14 +27,14 @@ final class LocalAliasStore: @unchecked Sendable {
     func categoryToken(forName name: String) -> ActivityCategoryToken? {
         let dict = loadCategoryDict()
         guard let data = dict[name.lowercased()] else { return nil }
-        return try? PropertyListDecoder().decode(ActivityCategoryToken.self, from: data)
+        return _decodeTokenAny(ActivityCategoryToken.self, from: data)
     }
 
     // MARK: - Applications (Managed Apps → token lookup)
 
     /// Persists the same `ApplicationToken` under bundle id and/or display name keys.
     func saveApplicationAliases(token: ApplicationToken, displayName: String?, bundleIdentifier: String?) {
-        guard let data = try? PropertyListEncoder().encode(token) else { return }
+        guard let data = _encodeTokenJSON(token) else { return }
         var tokMap = loadApplicationTokenDict()
         if let bid = bundleIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines), !bid.isEmpty {
             let b = bid.lowercased()
@@ -57,7 +57,22 @@ final class LocalAliasStore: @unchecked Sendable {
         let k = key.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !k.isEmpty else { return nil }
         guard let data = loadApplicationTokenDict()[k] else { return nil }
-        return try? PropertyListDecoder().decode(ApplicationToken.self, from: data)
+        return _decodeTokenAny(ApplicationToken.self, from: data)
+    }
+
+    /// Case-insensitive app lookup that rejects aliases whose saved token is no
+    /// longer present in the current Managed Apps selection. Treating that as a
+    /// miss makes chat fall back to lazy tagging instead of applying stale tokens.
+    func activeApplicationToken(
+        forLookupKey key: String,
+        activeTokens: Set<ApplicationToken>
+    ) -> ApplicationToken? {
+        guard let token = applicationToken(forLookupKey: key) else { return nil }
+        guard activeTokens.contains(token) else {
+            markStale(forLookupKey: key)
+            return nil
+        }
+        return token
     }
 
     /// When the command names an app by display string, map to its bundle id for stable `exactApp` keys.
@@ -70,7 +85,7 @@ final class LocalAliasStore: @unchecked Sendable {
     /// Debug: all persisted category lookup keys whose decoded token matches `token`.
     func categoryLookupKeys(equalTo token: ActivityCategoryToken) -> [String] {
         loadCategoryDict().compactMap { key, data -> String? in
-            guard let t = try? PropertyListDecoder().decode(ActivityCategoryToken.self, from: data),
+            guard let t = _decodeTokenAny(ActivityCategoryToken.self, from: data),
                   t == token
             else { return nil }
             return key
@@ -81,7 +96,7 @@ final class LocalAliasStore: @unchecked Sendable {
     /// Debug: all persisted application lookup keys whose decoded token matches `token`.
     func applicationLookupKeys(equalTo token: ApplicationToken) -> [String] {
         loadApplicationTokenDict().compactMap { key, data -> String? in
-            guard let t = try? PropertyListDecoder().decode(ApplicationToken.self, from: data),
+            guard let t = _decodeTokenAny(ApplicationToken.self, from: data),
                   t == token
             else { return nil }
             return key
@@ -194,15 +209,14 @@ final class LocalAliasStore: @unchecked Sendable {
         let fileData = readAliasSnapshotFile()
         let userDefaultsData = defaults.data(forKey: "evlin.aliasSnapshot")
         guard let data = fileData ?? userDefaultsData else { return .noSnapshot }
-        let snapshot: AliasSnapshot
-        do {
-            snapshot = try PropertyListDecoder().decode(AliasSnapshot.self, from: data)
-        } catch {
+        // _decodeTokenAny tries JSON first, falls back to PropertyList for legacy
+        // payloads. iOS 26 broke PropertyListEncoder on FamilyControls tokens.
+        guard let snapshot = _decodeTokenAny(AliasSnapshot.self, from: data) else {
             return ReportHydrationResult(
                 appsSaved: 0,
                 categoriesSaved: 0,
                 generatedAt: nil,
-                status: "Snapshot plist decode failed: \(error.localizedDescription)",
+                status: "Snapshot decode failed (tried JSON + plist)",
                 snapshotBytes: data.count,
                 snapshotApps: 0,
                 snapshotCategories: 0,
@@ -217,7 +231,7 @@ final class LocalAliasStore: @unchecked Sendable {
         var skippedEmptyApps = 0
         var appsSaved = 0
         for app in snapshot.applications {
-            guard let token = try? PropertyListDecoder().decode(ApplicationToken.self, from: app.tokenData) else {
+            guard let token = _decodeTokenAny(ApplicationToken.self, from: app.tokenData) else {
                 appDecodeFailures += 1
                 continue
             }
@@ -237,7 +251,7 @@ final class LocalAliasStore: @unchecked Sendable {
 
         var catsSaved = 0
         for cat in snapshot.categories {
-            guard let token = try? PropertyListDecoder().decode(ActivityCategoryToken.self, from: cat.tokenData) else {
+            guard let token = _decodeTokenAny(ActivityCategoryToken.self, from: cat.tokenData) else {
                 categoryDecodeFailures += 1
                 continue
             }
@@ -273,6 +287,18 @@ final class LocalAliasStore: @unchecked Sendable {
     /// same `ApplicationToken`. Sorted.
     func allApplicationKeys() -> [String] {
         loadApplicationTokenDict().keys.sorted()
+    }
+
+    /// Saved app keys whose token is still in the active Managed Apps selection.
+    /// Used for backend alias-state so stale aliases do not suppress lazy-tag cards.
+    func allActiveApplicationKeys(activeTokens: Set<ApplicationToken>) -> [String] {
+        loadApplicationTokenDict().compactMap { key, data -> String? in
+            guard let token = _decodeTokenAny(ApplicationToken.self, from: data),
+                  activeTokens.contains(token)
+            else { return nil }
+            return key
+        }
+        .sorted()
     }
 
     /// Application aliases grouped by underlying token. Each group's keys
@@ -319,6 +345,40 @@ final class LocalAliasStore: @unchecked Sendable {
         persistDisplayToBundleDict(bMap)
     }
 
+    /// Mark a saved app alias as stale by removing every lookup key backed by
+    /// the same encoded token. This handles display-name + bundle-id aliases as
+    /// one logical tag, so the next command prompts a fresh picker selection.
+    @discardableResult
+    func markStale(forLookupKey key: String) -> Bool {
+        let k = key.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !k.isEmpty else { return false }
+
+        var tokMap = loadApplicationTokenDict()
+        guard let staleData = tokMap[k] else { return false }
+        let staleKeys = Set(tokMap.compactMap { alias, data in
+            data == staleData ? alias : nil
+        })
+        guard !staleKeys.isEmpty else { return false }
+
+        for alias in staleKeys {
+            tokMap.removeValue(forKey: alias)
+        }
+        persistApplicationTokenDict(tokMap)
+
+        var bMap = loadDisplayToBundleDict()
+        for alias in staleKeys {
+            bMap.removeValue(forKey: alias)
+        }
+        let staleDisplayKeys = bMap.compactMap { display, bundle in
+            staleKeys.contains(bundle) ? display : nil
+        }
+        for display in staleDisplayKeys {
+            bMap.removeValue(forKey: display)
+        }
+        persistDisplayToBundleDict(bMap)
+        return true
+    }
+
     /// Remove every alias key in `keys` in one pass — used when the parent
     /// deletes "Instagram" and we want both the display-name key and the
     /// bundle-id key gone.
@@ -348,7 +408,7 @@ final class LocalAliasStore: @unchecked Sendable {
 
     func saveList(_ selection: FamilyActivitySelection, named name: String) {
         var dict = loadListDict()
-        if let data = try? PropertyListEncoder().encode(selection) {
+        if let data = _encodeTokenJSON(selection) {
             dict[name.lowercased()] = data
             persistListDict(dict)
         }
@@ -357,7 +417,7 @@ final class LocalAliasStore: @unchecked Sendable {
     func savedList(named name: String) -> FamilyActivitySelection? {
         let dict = loadListDict()
         guard let data = dict[name.lowercased()] else { return nil }
-        return try? PropertyListDecoder().decode(FamilyActivitySelection.self, from: data)
+        return _decodeTokenAny(FamilyActivitySelection.self, from: data)
     }
 
     func allListNames() -> [String] {
@@ -397,4 +457,29 @@ final class LocalAliasStore: @unchecked Sendable {
     private func persistDisplayToBundleDict(_ dict: [String: String]) {
         defaults?.set(dict, forKey: applicationDisplayToBundleKey)
     }
+}
+
+
+// MARK: - Token-codable helpers (iOS 26 PropertyListEncoder crash workaround)
+
+/// `PropertyListEncoder` trips `swift_dynamicCastFailure` when encoding
+/// FamilyControls tokens on iOS 26 (binary plist Swift rewrite regression).
+/// JSON encoding round-trips the same tokens without hitting that codepath.
+@inline(__always)
+fileprivate func _encodeTokenJSON<T: Encodable>(_ value: T) -> Data? {
+    let e = JSONEncoder()
+    e.dateEncodingStrategy = .iso8601
+    return try? e.encode(value)
+}
+
+/// Try JSON first (new format), fall back to PropertyList (legacy data already
+/// in UserDefaults from previous app versions). On the first successful plist
+/// decode of any field, the caller's next save will re-write as JSON, gradually
+/// migrating the user's storage.
+@inline(__always)
+fileprivate func _decodeTokenAny<T: Decodable>(_ type: T.Type, from data: Data) -> T? {
+    let jd = JSONDecoder()
+    jd.dateDecodingStrategy = .iso8601
+    if let v = try? jd.decode(type, from: data) { return v }
+    return try? PropertyListDecoder().decode(type, from: data)
 }

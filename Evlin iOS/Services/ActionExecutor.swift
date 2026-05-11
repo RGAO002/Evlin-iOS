@@ -102,7 +102,10 @@ final class ActionExecutor: @unchecked Sendable {
 
     private func currentEffectiveState(forShieldRecord record: ShieldRecord, cmd: LockCommand) async -> AckEffectiveState? {
         let query: AppQuery
-        if let bid = cmd.target.bundleID {
+        if cmd.tier == .exactApp, let resolved = try? resolveExactApp(from: cmd.target) {
+            let bundleForQuery = canonicalBundleID(for: cmd.target)
+            query = AppQuery(bundleID: bundleForQuery, token: resolved.token, categoryHint: nil)
+        } else if let bid = cmd.target.bundleID {
             query = AppQuery(bundleID: bid, categoryHint: cmd.target.categoryHint?.lowercased())
         } else {
             query = AppQuery(bundleID: nil, categoryHint: cmd.target.categoryHint?.lowercased())
@@ -142,14 +145,20 @@ final class ActionExecutor: @unchecked Sendable {
 
         switch tier {
         case .exactApp:
-            // GAP: No token source is wired in MVP. See plan Phase 3 Task 3.1.
-            throw ExecuteError.notImplemented(
-                "exactApp shield requires Phase 5 token mapping — this path should be unreachable"
-            )
+            let resolved = try resolveExactApp(from: cmd.target, requireActiveToken: true)
+            appTokens = [resolved.token]
+            targetKey = resolved.targetKey
+            displayName = cmd.target.targetDisplay
+                ?? cmd.target.bundleID
+                ?? cmd.target.categoryHint
+                ?? "App"
         case .savedList:
             let sel: FamilyActivitySelection
+            // iOS 26 PropertyListEncoder crashes on FamilyControls tokens; try JSON first,
+            // fall back to plist for legacy server payloads. See LocalAliasStore._decodeTokenAny.
             if let blob = blob,
-               let decoded = try? PropertyListDecoder().decode(FamilyActivitySelection.self, from: blob) {
+               let decoded = (try? JSONDecoder().decode(FamilyActivitySelection.self, from: blob))
+                          ?? (try? PropertyListDecoder().decode(FamilyActivitySelection.self, from: blob)) {
                 sel = decoded
             } else if let name = cmd.target.listName,
                       let local = LocalAliasStore.shared.savedList(named: name) {
@@ -284,13 +293,82 @@ final class ActionExecutor: @unchecked Sendable {
         case .all:
             return await removeExplicit(tier: .all, targetKey: "all")
         case .exactApp:
-            guard let bid = cmd.target.bundleID else { return .failed(.malformed) }
+            guard let resolved = try? resolveExactApp(from: cmd.target, requireActiveToken: false) else {
+                return .failed(.applicationNotConfigured(resolveExactAppFailureReference(from: cmd.target)))
+            }
+            let bundleForQuery = canonicalBundleID(for: cmd.target)
+            let display = cmd.target.targetDisplay ?? bundleForQuery ?? cmd.target.categoryHint ?? "App"
             return await unshieldAppByBundle(
-                bundleID: bid,
-                displayName: cmd.target.targetDisplay ?? bid,
+                bundleID: bundleForQuery,
+                token: resolved.token,
+                displayName: display,
                 categoryHint: cmd.target.categoryHint
             )
         }
+    }
+
+    /// Bundle id when known (command or Managed Apps lookup); may be nil for display-only aliases.
+    private func canonicalBundleID(for target: CommandTarget) -> String? {
+        if let raw = target.bundleID?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty {
+            return raw
+        }
+        let hints = [target.targetDisplay, target.categoryHint]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        for hint in hints {
+            if let bid = LocalAliasStore.shared.primaryBundleID(forDisplayOrHint: hint) {
+                return bid
+            }
+        }
+        return nil
+    }
+
+    private func resolveExactAppFailureReference(from target: CommandTarget) -> String {
+        if let bid = target.bundleID?.trimmingCharacters(in: .whitespacesAndNewlines), !bid.isEmpty {
+            return bid
+        }
+        return target.targetDisplay
+            ?? target.categoryHint
+            ?? target.originalRequest
+    }
+
+    private struct ExactAppResolution {
+        let token: ApplicationToken
+        /// Matches `ShieldRecord.targetKey`: preferred lowercased bundle id, else lowercased display hint.
+        let targetKey: String
+    }
+
+    private func resolveExactApp(
+        from target: CommandTarget,
+        requireActiveToken: Bool = false
+    ) throws -> ExactAppResolution {
+        let store = LocalAliasStore.shared
+        let activeTokens = ScreenTimeManager.shared.selectedApps.applicationTokens
+        func lookup(_ key: String) -> ApplicationToken? {
+            if requireActiveToken {
+                return store.activeApplicationToken(forLookupKey: key, activeTokens: activeTokens)
+            }
+            return store.applicationToken(forLookupKey: key)
+        }
+
+        if let rawBid = target.bundleID?.trimmingCharacters(in: .whitespacesAndNewlines), !rawBid.isEmpty {
+            let bidLower = rawBid.lowercased()
+            if let t = lookup(rawBid) {
+                return ExactAppResolution(token: t, targetKey: bidLower)
+            }
+        }
+        var seen = Set<String>()
+        let hintStrings = [target.targetDisplay, target.categoryHint]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        for hint in hintStrings {
+            let norm = hint.lowercased()
+            guard seen.insert(norm).inserted else { continue }
+            guard let tok = lookup(hint) else { continue }
+            let key = store.primaryBundleID(forDisplayOrHint: hint)?.lowercased() ?? norm
+            return ExactAppResolution(token: tok, targetKey: key)
+        }
+        throw ExecuteError.applicationNotConfigured(resolveExactAppFailureReference(from: target))
     }
 
     private func removeExplicit(tier: ShieldTier, targetKey: String) async -> AckResult {
@@ -358,8 +436,14 @@ final class ActionExecutor: @unchecked Sendable {
         return .confirmedExact(verb: .unshield, displayName: removed.record.displayName, effectiveState: eff)
     }
 
-    private func unshieldAppByBundle(bundleID: String, displayName: String, categoryHint: String?) async -> AckResult {
-        let query = AppQuery(bundleID: bundleID, categoryHint: categoryHint?.lowercased())
+    private func unshieldAppByBundle(
+        bundleID: String?,
+        token: ApplicationToken?,
+        displayName: String,
+        categoryHint: String?
+    ) async -> AckResult {
+        let tk = token ?? bundleID.flatMap { LocalAliasStore.shared.applicationToken(forLookupKey: $0) }
+        let query = AppQuery(bundleID: bundleID, token: tk, categoryHint: categoryHint?.lowercased())
         let state = await ActiveLockStore.shared.effectiveState(for: query)
 
         if let exactAppShield = state.shieldsCovering.first(where: { $0.tier == .exactApp }) {
@@ -457,6 +541,7 @@ enum ExecuteError: Error {
     case malformed
     case listNotFound(String)
     case categoryNotConfigured(String)
+    case applicationNotConfigured(String)
     case notImplemented(String)
 
     var ackFailure: AckFailure {
@@ -464,6 +549,7 @@ enum ExecuteError: Error {
         case .malformed: return .malformed
         case .listNotFound(let n): return .listNotFound(n)
         case .categoryNotConfigured(let n): return .categoryNotConfigured(n)
+        case .applicationNotConfigured(let n): return .applicationNotConfigured(n)
         case .notImplemented(let reason): return .execution("Not implemented in MVP: \(reason)")
         }
     }

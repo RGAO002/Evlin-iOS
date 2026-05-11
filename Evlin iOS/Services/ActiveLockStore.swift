@@ -256,17 +256,23 @@ actor ActiveLockStore {
         // `PropertyListEncoder` can trip `swift_dynamicCastFailure` encoding
         // `ShieldRecord`'s FamilyControls token sets (crash seen iOS 26 / TestFlight).
         // JSON survives the full Codable surface for `[String: ShieldRecord]`.
-        if let data = try? JSONEncoder().encode(shieldRecords) {
+        // Explicit ISO8601 date strategy pins the on-wire format so future encoder
+        // changes can't shift Date representation under us.
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        if let data = try? encoder.encode(shieldRecords) {
             defaults?.set(data, forKey: shieldsKey)
         }
-        if let data = try? JSONEncoder().encode(blockRecords) {
+        if let data = try? encoder.encode(blockRecords) {
             defaults?.set(data, forKey: blocksKey)
         }
     }
 
     private func restore() {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
         if let data = defaults?.data(forKey: shieldsKey) {
-            if let decoded = try? JSONDecoder().decode([String: ShieldRecord].self, from: data) {
+            if let decoded = try? decoder.decode([String: ShieldRecord].self, from: data) {
                 shieldRecords = decoded
             } else if let decoded = try? PropertyListDecoder().decode([String: ShieldRecord].self, from: data) {
                 shieldRecords = decoded
@@ -275,7 +281,7 @@ actor ActiveLockStore {
             }
         }
         if let data = defaults?.data(forKey: blocksKey) {
-            if let decoded = try? JSONDecoder().decode([String: BlockRecord].self, from: data) {
+            if let decoded = try? decoder.decode([String: BlockRecord].self, from: data) {
                 blockRecords = decoded
             } else if let decoded = try? PropertyListDecoder().decode([String: BlockRecord].self, from: data) {
                 blockRecords = decoded
