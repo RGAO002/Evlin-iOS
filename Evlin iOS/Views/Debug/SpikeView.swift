@@ -5,6 +5,7 @@ import ManagedSettings
 
 struct SpikeView: View {
     @EnvironmentObject var apiClient: APIClient
+    @EnvironmentObject var screenTimeManager: ScreenTimeManager
     @AppStorage("onboardingComplete") private var onboardingComplete = false
     @AppStorage("appMode") private var appMode: String = ""
     @State private var log: [String] = []
@@ -99,6 +100,12 @@ struct SpikeView: View {
                 }
 
                 Section("Diagnostics") {
+                    NavigationLink {
+                        TokenAliasInspectionView()
+                    } label: {
+                        Label("Tokens ↔ aliases (Managed Apps)", systemImage: "list.bullet.rectangle")
+                    }
+
                     Button("Poll child commands NOW") {
                         Task { await pollChildCommandsNow() }
                     }
@@ -261,7 +268,7 @@ struct SpikeView: View {
     }
 
     private func setDenyRemoval(_ flag: Bool) {
-        store.application.denyAppRemoval = flag
+        ScreenTimeManager.shared.setDeletionProtectionEnabled(flag)
         record("denyAppRemoval = \(flag)")
     }
 
@@ -270,64 +277,17 @@ struct SpikeView: View {
     private func setupTestMode() async {
         record("setup: creating family…")
         do {
-            // 1. Create family as the child side, then pair this same device as parent.
-            let createURL = URL(string: "\(apiClient.baseURL)/family/create")!
-            var req = URLRequest(url: createURL)
-            req.httpMethod = "POST"
-            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            req.httpBody = try JSONSerialization.data(withJSONObject: [
-                "child_device_label": UIDevice.current.name + " (child-mode)",
-                "protection_mode": "std",
-            ])
-            let (data1, resp1) = try await URLSession.shared.data(for: req)
-            guard (resp1 as? HTTPURLResponse)?.statusCode == 200 else {
-                let body = String(data: data1, encoding: .utf8) ?? "?"
-                record("setup FAIL /create: \(body.prefix(200))")
-                return
-            }
-            struct CreateR: Codable {
-                let family_id: UUID
-                let child_device_id: UUID
-                let pairing_code: String
-            }
-            let c = try JSONDecoder().decode(CreateR.self, from: data1)
-            record("setup: got code \(c.pairing_code), pairing…")
-
-            // 2. Pair as the parent side on the same device.
-            let pairURL = URL(string: "\(apiClient.baseURL)/family/pair")!
-            var req2 = URLRequest(url: pairURL)
-            req2.httpMethod = "POST"
-            req2.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            req2.httpBody = try JSONSerialization.data(withJSONObject: [
-                "code": c.pairing_code,
-                "parent_device_label": UIDevice.current.name + " (parent-mode)",
-                "protection_mode": "std",
-            ])
-            let (data2, resp2) = try await URLSession.shared.data(for: req2)
-            guard (resp2 as? HTTPURLResponse)?.statusCode == 200 else {
-                let body = String(data: data2, encoding: .utf8) ?? "?"
-                record("setup FAIL /pair: \(body.prefix(200))")
-                return
-            }
-            struct PairR: Codable {
-                let family_id: UUID
-                let child_device_id: UUID
-                let parent_device_id: UUID
-                let protection_mode: String
-            }
-            let p = try JSONDecoder().decode(PairR.self, from: data2)
-
-            // 3. Persist IDs
-            UserDefaults.standard.set(p.family_id.uuidString, forKey: "evlin.familyID")
-            UserDefaults.standard.set(p.child_device_id.uuidString, forKey: "evlin.childDeviceID")
-            UserDefaults.standard.set(p.parent_device_id.uuidString, forKey: "evlin.parentDeviceID")
-            UserDefaults.standard.set(p.protection_mode, forKey: "evlin.protectionMode")
+            let p = try await DemoFamilyBootstrap.pairSingleDeviceOnBackend(baseURL: apiClient.baseURL)
+            UserDefaults.standard.set(p.familyID.uuidString, forKey: "evlin.familyID")
+            UserDefaults.standard.set(p.childDeviceID.uuidString, forKey: "evlin.childDeviceID")
+            UserDefaults.standard.set(p.parentDeviceID.uuidString, forKey: "evlin.parentDeviceID")
+            UserDefaults.standard.set(p.protectionMode, forKey: "evlin.protectionMode")
 
             await MainActor.run {
-                testFamilyID = p.family_id.uuidString
-                testChildDeviceID = p.child_device_id.uuidString
-                testParentDeviceID = p.parent_device_id.uuidString
-                record("setup ✓ family=\(p.family_id.uuidString.prefix(8))… child=\(p.child_device_id.uuidString.prefix(8))…")
+                testFamilyID = p.familyID.uuidString
+                testChildDeviceID = p.childDeviceID.uuidString
+                testParentDeviceID = p.parentDeviceID.uuidString
+                record("setup ✓ family=\(p.familyID.uuidString.prefix(8))… child=\(p.childDeviceID.uuidString.prefix(8))…")
                 record("next: use Switch to PARENT / CHILD buttons")
             }
 

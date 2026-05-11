@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  DeviceActivityReportExtension uses the ExtensionFoundation-style entry
+	  point declared by EXAppExtensionAttributes. Do not add a partial
+	  NSExtension dictionary here: App Store validation treats it as a legacy
+	  extension and requires NSExtensionPrincipalClass or
+	  NSExtensionMainStoryboard, which @main report extensions do not use.
+	-->
+	<key>EXAppExtensionAttributes</key>
+	<dict>
+		<key>EXExtensionPointIdentifier</key>
+		<string>com.apple.deviceactivityui.report-extension</string>
+	</dict>
+</dict>
+</plist>

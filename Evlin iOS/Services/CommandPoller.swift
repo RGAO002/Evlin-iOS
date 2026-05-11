@@ -56,11 +56,14 @@ final class CommandPoller {
     private func execute(poll: PollCommandDTO, api: APIClient) async {
         // tier maps to new ShieldTier set; backend emits "exactApp"|"savedList"|"category"|"all"
         let tier = poll.tier.flatMap(ShieldTier.init(rawValue:))
+        let trimmedHint = poll.target.category_hint?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let categoryHint = (trimmedHint?.isEmpty == false) ? trimmedHint : nil
         let target = CommandTarget(
             bundleID: poll.target.bundle_id,
             listName: poll.target.list_name,
             listID: poll.target.list_id.flatMap(UUID.init(uuidString:)),
-            categoryHint: poll.target.category_hint,
+            categoryHint: categoryHint,
             targetAll: poll.target.target_all ?? false,
             originalRequest: poll.target.original_request,
             targetDisplay: poll.target.target_display,
@@ -127,6 +130,9 @@ final class CommandPoller {
                 case .categoryNotConfigured(let c):
                     d["reason"] = "category_not_configured"
                     d["category"] = c
+                case .applicationNotConfigured(let a):
+                    d["reason"] = "application_not_configured"
+                    d["app_reference"] = a
                 case .nothingToUnlock:
                     d["reason"] = "nothing_to_unlock"
                 case .malformed:

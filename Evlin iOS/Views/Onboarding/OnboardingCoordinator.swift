@@ -26,6 +26,7 @@ enum OnboardingStep: Equatable {
 }
 
 struct OnboardingCoordinator: View {
+
     @AppStorage("onboardingComplete") private var onboardingComplete = false
     @AppStorage("appMode") private var appMode: String = ""
 
@@ -47,14 +48,24 @@ struct OnboardingCoordinator: View {
             // Debug escape hatch — always available during onboarding
             Menu {
                 Button("Skip to Parent mode (test)") {
+                    EvlinDemoShortcuts.enable()
+                    EvlinDemoShortcuts.seedPlaceholderChildUUIDIfMissing()
                     appMode = "parent"
                     onboardingComplete = true
+                    EvlinDemoShortcuts.scheduleBackendDemoPairingIfNeeded()
                 }
                 Button("Skip to Child mode (test)") {
+                    EvlinDemoShortcuts.enable()
                     appMode = "child"
+                    UserDefaults.standard.set(
+                        OnboardingDemoPlaceholders.childDeviceUUIDString,
+                        forKey: "evlin.childDeviceID"
+                    )
                     onboardingComplete = true
+                    EvlinDemoShortcuts.scheduleBackendDemoPairingIfNeeded()
                 }
                 Button("Reset everything (hard)", role: .destructive) {
+                    EvlinDemoShortcuts.clearFlag()
                     UserDefaults.standard.removeObject(forKey: "onboardingComplete")
                     UserDefaults.standard.removeObject(forKey: "appMode")
                     step = .welcome
@@ -82,16 +93,34 @@ struct OnboardingCoordinator: View {
                 WelcomeStep { step = .modeSelect }
 
             case .modeSelect:
-                ModeSelectStep { mode in
-                    switch mode {
-                    case .parent:
-                        appMode = "parent"
-                        step = .parentProtectionLevel   // AddChildStep removed — name inferred from child device label
-                    case .child:
-                        appMode = "child"
-                        step = .childEnterPairingCode
+                ModeSelectStep(
+                    onSelect: { mode in
+                        switch mode {
+                        case .parent:
+                            appMode = "parent"
+                            step = .parentProtectionLevel
+                        case .child:
+                            appMode = "child"
+                            step = .childEnterPairingCode
+                        }
+                    },
+                    onDemoJump: { mode in
+                        EvlinDemoShortcuts.enable()
+                        switch mode {
+                        case .parent:
+                            EvlinDemoShortcuts.seedPlaceholderChildUUIDIfMissing()
+                            appMode = "parent"
+                        case .child:
+                            appMode = "child"
+                            UserDefaults.standard.set(
+                                OnboardingDemoPlaceholders.childDeviceUUIDString,
+                                forKey: "evlin.childDeviceID"
+                            )
+                        }
+                        onboardingComplete = true
+                        EvlinDemoShortcuts.scheduleBackendDemoPairingIfNeeded()
                     }
-                }
+                )
 
             // MARK: - Parent flow
 
@@ -158,7 +187,7 @@ struct OnboardingCoordinator: View {
 
             case .childGrantPermission:
                 GrantPermissionStep(
-                    childDeviceID: childDeviceID ?? UUID(),
+                    childDeviceID: childDeviceID ?? OnboardingDemoPlaceholders.childDeviceUUID,
                     protectionMode: protectionMode
                 ) {
                     step = .childDeletionProtection
@@ -176,13 +205,16 @@ struct OnboardingCoordinator: View {
             case .childFirstSavedList:
                 ChildFirstSavedListStep(
                     familyID: familyID ?? UUID(),
-                    childDeviceID: childDeviceID ?? UUID()
+                    childDeviceID: childDeviceID ?? OnboardingDemoPlaceholders.childDeviceUUID
                 ) {
                     step = .childReady
                 }
 
             case .childReady:
-                ChildReadyStep {
+                ChildReadyStep(
+                    childDeviceID: childDeviceID,
+                    familyID: familyID
+                ) {
                     // onboardingComplete flipped inside ChildReadyStep; appMode already set
                 }
             }

@@ -60,9 +60,7 @@ struct BigKidVideoView: View {
                 progressBar.padding(.top, 20)
                 lockHint
             }
-            #if DEBUG
-            debugSkipButton.padding(.top, 12)
-            #endif
+            demoSkipSection.padding(.top, 12)
             Spacer(minLength: 16)
             primaryButton.padding(.top, 20)
         }
@@ -71,26 +69,32 @@ struct BigKidVideoView: View {
         .background(EvlinKidColors.surface.ignoresSafeArea())
     }
 
-    #if DEBUG
-    private var debugSkipButton: some View {
-        Button {
-            bridge.skipToNearEnd(secondsRemaining: 5)
-        } label: {
-            HStack(spacing: 6) {
-                Image(systemName: "forward.end.fill")
-                    .font(.system(size: 11, weight: .semibold))
-                Text("DEBUG: skip to last 5s")
-                    .font(.system(size: 12, weight: .semibold))
+    /// Ships in all builds for investor / TestFlight demos; clearly labeled — not meant for prod kid UX.
+    private var demoSkipSection: some View {
+        VStack(spacing: 6) {
+            Button {
+                bridge.skipToNearEnd(secondsRemaining: 5)
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "forward.end.fill")
+                        .font(.system(size: 11, weight: .semibold))
+                    Text("Skip to last 5 seconds")
+                        .font(.system(size: 12, weight: .semibold))
+                }
+                .foregroundStyle(.orange)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .overlay(Capsule().stroke(.orange.opacity(0.5), lineWidth: 1))
             }
-            .foregroundStyle(.orange)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 7)
-            .overlay(Capsule().stroke(.orange.opacity(0.5), lineWidth: 1))
+            .buttonStyle(.plain)
+            .frame(maxWidth: .infinity, alignment: .center)
+            Text("Demo / QA only — bypasses watching the clip. This button won't appear in production.")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(EvlinKidColors.ink3)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 8)
         }
-        .buttonStyle(.plain)
-        .frame(maxWidth: .infinity, alignment: .center)
     }
-    #endif
 
     private var watched: Bool { ended || playbackPercent >= 99 }
 
@@ -150,9 +154,7 @@ final class VideoBridge: ObservableObject {
     fileprivate weak var webView: WKWebView?
 
     /// Seek the underlying HTML5 `<video>` to (duration − secondsRemaining).
-    /// No-op while the duration is still 0 (e.g. video metadata not loaded
-    /// yet). DEBUG-only call sites; safe to leave the API in release since
-    /// nothing in production calls it.
+    /// No-op while the duration is still 0 (e.g. video metadata not loaded yet).
     func skipToNearEnd(secondsRemaining: Double) {
         let js = """
         (function() {
@@ -353,8 +355,15 @@ private struct VideoEmbedView: UIViewRepresentable {
 
 #if DEBUG
 #Preview {
-    BigKidVideoView(videoId: "dQw4w9WgXcQ",
-                    videoTitle: "Why rest time matters for your brain",
-                    onComplete: {})
+    BigKidVideoView(
+        videoId: ReflectionVideoDisplay.rickRollVideoId,
+        videoTitle: ReflectionVideoDisplay.cardTitle(
+            videoId: ReflectionVideoDisplay.rickRollVideoId,
+            serverTitle: "Ignored for Rick Roll",
+            displayReason: "You stayed up past your bedtime on your tablet.",
+            rawReason: "bedtime"
+        ),
+        onComplete: {}
+    )
 }
 #endif

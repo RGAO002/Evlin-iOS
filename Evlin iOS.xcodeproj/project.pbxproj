@@ -8,11 +8,20 @@
 
 /* Begin PBXBuildFile section */
 		B6CD8CCD2FA1981D00FD6C13 /* YouTubePlayerKit in Frameworks */ = {isa = PBXBuildFile; productRef = B6CD8CCC2FA1981D00FD6C13 /* YouTubePlayerKit */; };
+		B6DA0F46F9B04EB7F720FB2C /* DeviceActivity.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B6FA97342F81C6A000DA619E /* DeviceActivity.framework */; };
+		B6DAA529E2C458B05AA98DA9 /* EvlinDeviceActivityReport.appex in Embed ExtensionKit Extensions */ = {isa = PBXBuildFile; fileRef = B6DA38FBB53DCE8A672F032D /* EvlinDeviceActivityReport.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		B6FA97352F81C6A000DA619E /* DeviceActivity.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B6FA97342F81C6A000DA619E /* DeviceActivity.framework */; };
 		B6FA973D2F81C6A000DA619E /* EvlinDeviceActivityMonitor.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = B6FA97322F81C6A000DA619E /* EvlinDeviceActivityMonitor.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
+		B6DAF491F4677AB7A0D11C8F /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = B6FA97182F81BB9400DA619E /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = B6DAAB4D91B508BEF6F0AEF8;
+			remoteInfo = EvlinDeviceActivityReport;
+		};
 		B6F164562F999B35008E858C /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = B6FA97182F81BB9400DA619E /* Project object */;
@@ -30,6 +39,17 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
+		B6DA74B32FB6000100DA619E /* Embed ExtensionKit Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = Extensions;
+			dstSubfolderSpec = 1;
+			files = (
+				B6DAA529E2C458B05AA98DA9 /* EvlinDeviceActivityReport.appex in Embed ExtensionKit Extensions */,
+			);
+			name = "Embed ExtensionKit Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		B6FA97422F81C6A000DA619E /* Embed Foundation Extensions */ = {
 			isa = PBXCopyFilesBuildPhase;
 			buildActionMask = 2147483647;
@@ -44,6 +64,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		B6DA38FBB53DCE8A672F032D /* EvlinDeviceActivityReport.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = EvlinDeviceActivityReport.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		B6F164522F999B35008E858C /* Evlin iOSTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "Evlin iOSTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		B6FA97202F81BB9400DA619E /* Evlin iOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Evlin iOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		B6FA97322F81C6A000DA619E /* EvlinDeviceActivityMonitor.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = EvlinDeviceActivityMonitor.appex; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -58,6 +79,13 @@
 				"Fonts/Manrope-Variable.ttf",
 			);
 			target = B6FA971F2F81BB9400DA619E /* Evlin iOS */;
+		};
+		B6DA173ECA4AF4938E49558C /* Exceptions for "EvlinDeviceActivityReport" folder in "EvlinDeviceActivityReport" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = B6DAAB4D91B508BEF6F0AEF8 /* EvlinDeviceActivityReport */;
 		};
 		B6F1645E2F999D8A008E858C /* Exceptions for "Evlin iOS" folder in "EvlinDeviceActivityMonitor" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
@@ -79,6 +107,14 @@
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
+		B6DA9E4D2E1E013E071E3C34 /* EvlinDeviceActivityReport */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				B6DA173ECA4AF4938E49558C /* Exceptions for "EvlinDeviceActivityReport" folder in "EvlinDeviceActivityReport" target */,
+			);
+			path = EvlinDeviceActivityReport;
+			sourceTree = "<group>";
+		};
 		B6F164532F999B35008E858C /* Evlin iOSTests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = "Evlin iOSTests";
@@ -104,6 +140,14 @@
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		B6DAA47C3AD6301068E8735B /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B6DA0F46F9B04EB7F720FB2C /* DeviceActivity.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		B6F1644F2F999B35008E858C /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -135,6 +179,7 @@
 			children = (
 				B6FA97222F81BB9400DA619E /* Evlin iOS */,
 				B6FA97362F81C6A000DA619E /* EvlinDeviceActivityMonitor */,
+				B6DA9E4D2E1E013E071E3C34 /* EvlinDeviceActivityReport */,
 				B6F164532F999B35008E858C /* Evlin iOSTests */,
 				B6FA97332F81C6A000DA619E /* Frameworks */,
 				B6FA97212F81BB9400DA619E /* Products */,
@@ -146,6 +191,7 @@
 			children = (
 				B6FA97202F81BB9400DA619E /* Evlin iOS.app */,
 				B6FA97322F81C6A000DA619E /* EvlinDeviceActivityMonitor.appex */,
+				B6DA38FBB53DCE8A672F032D /* EvlinDeviceActivityReport.appex */,
 				B6F164522F999B35008E858C /* Evlin iOSTests.xctest */,
 			);
 			name = Products;
@@ -162,6 +208,28 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		B6DAAB4D91B508BEF6F0AEF8 /* EvlinDeviceActivityReport */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = B6DAF4ECD43DAF59721AE041 /* Build configuration list for PBXNativeTarget "EvlinDeviceActivityReport" */;
+			buildPhases = (
+				B6DA8028EB36CA1D4DDDBD51 /* Sources */,
+				B6DAA47C3AD6301068E8735B /* Frameworks */,
+				B6DAF1892A377096ABAA5595 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				B6DA9E4D2E1E013E071E3C34 /* EvlinDeviceActivityReport */,
+			);
+			name = EvlinDeviceActivityReport;
+			packageProductDependencies = (
+			);
+			productName = EvlinDeviceActivityReport;
+			productReference = B6DA38FBB53DCE8A672F032D /* EvlinDeviceActivityReport.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 		B6F164512F999B35008E858C /* Evlin iOSTests */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = B6F164582F999B35008E858C /* Build configuration list for PBXNativeTarget "Evlin iOSTests" */;
@@ -193,11 +261,13 @@
 				B6FA971D2F81BB9400DA619E /* Frameworks */,
 				B6FA971E2F81BB9400DA619E /* Resources */,
 				B6FA97422F81C6A000DA619E /* Embed Foundation Extensions */,
+				B6DA74B32FB6000100DA619E /* Embed ExtensionKit Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
 				B6FA973C2F81C6A000DA619E /* PBXTargetDependency */,
+				B6DACB967B2B4C1973EDDA35 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				B6FA97222F81BB9400DA619E /* Evlin iOS */,
@@ -242,6 +312,9 @@
 				LastSwiftUpdateCheck = 2630;
 				LastUpgradeCheck = 2630;
 				TargetAttributes = {
+					B6DAAB4D91B508BEF6F0AEF8 = {
+						CreatedOnToolsVersion = 26.3;
+					};
 					B6F164512F999B35008E858C = {
 						CreatedOnToolsVersion = 26.3;
 						TestTargetID = B6FA971F2F81BB9400DA619E;
@@ -273,12 +346,20 @@
 			targets = (
 				B6FA971F2F81BB9400DA619E /* Evlin iOS */,
 				B6FA97312F81C6A000DA619E /* EvlinDeviceActivityMonitor */,
+				B6DAAB4D91B508BEF6F0AEF8 /* EvlinDeviceActivityReport */,
 				B6F164512F999B35008E858C /* Evlin iOSTests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		B6DAF1892A377096ABAA5595 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		B6F164502F999B35008E858C /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -303,6 +384,13 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		B6DA8028EB36CA1D4DDDBD51 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		B6F1644E2F999B35008E858C /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -327,6 +415,11 @@
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
+		B6DACB967B2B4C1973EDDA35 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = B6DAAB4D91B508BEF6F0AEF8 /* EvlinDeviceActivityReport */;
+			targetProxy = B6DAF491F4677AB7A0D11C8F /* PBXContainerItemProxy */;
+		};
 		B6F164572F999B35008E858C /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = B6FA971F2F81BB9400DA619E /* Evlin iOS */;
@@ -340,13 +433,79 @@
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
+		B6DA2150DFE7A84A6C352D52 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = EvlinDeviceActivityReport/EvlinDeviceActivityReport.entitlements;
+				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "iPhone Distribution";
+				CODE_SIGN_STYLE = Manual;
+				CURRENT_PROJECT_VERSION = 5;
+				DEVELOPMENT_TEAM = "";
+				"DEVELOPMENT_TEAM[sdk=iphoneos*]" = D9FM36P37F;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = EvlinDeviceActivityReport/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = EvlinDeviceActivityReport;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.evlin.Evlin-iOS.EvlinDeviceActivityReport";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				"PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]" = "Evlin DAR iOS AppStore";
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		B6DAECC309D3A97C87E91725 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = EvlinDeviceActivityReport/EvlinDeviceActivityReport.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 5;
+				DEVELOPMENT_TEAM = D9FM36P37F;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = EvlinDeviceActivityReport/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = EvlinDeviceActivityReport;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.evlin.Evlin-iOS.EvlinDeviceActivityReport";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
 		B6F164592F999B35008E858C /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = 2YH938GFHS;
+				CURRENT_PROJECT_VERSION = 5;
+				DEVELOPMENT_TEAM = D9FM36P37F;
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
 				MARKETING_VERSION = 1.0;
@@ -367,8 +526,8 @@
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = 2YH938GFHS;
+				CURRENT_PROJECT_VERSION = 5;
+				DEVELOPMENT_TEAM = D9FM36P37F;
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
 				MARKETING_VERSION = 1.0;
@@ -511,13 +670,15 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = "Evlin iOS/Evlin iOS.entitlements";
+				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 5;
 				DEVELOPMENT_TEAM = D9FM36P37F;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Evlin-iOS-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Evlin;
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -531,6 +692,7 @@
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "com.evlin.Evlin-iOS";
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
@@ -547,13 +709,17 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = "Evlin iOS/Evlin iOS.entitlements";
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = D9FM36P37F;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "iPhone Distribution";
+				CODE_SIGN_STYLE = Manual;
+				CURRENT_PROJECT_VERSION = 5;
+				DEVELOPMENT_TEAM = "";
+				"DEVELOPMENT_TEAM[sdk=iphoneos*]" = D9FM36P37F;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Evlin-iOS-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Evlin;
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -567,6 +733,8 @@
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "com.evlin.Evlin-iOS";
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				"PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]" = "Evlin iOS AppStore";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
@@ -581,8 +749,9 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = EvlinDeviceActivityMonitor/EvlinDeviceActivityMonitor.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 5;
 				DEVELOPMENT_TEAM = D9FM36P37F;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = EvlinDeviceActivityMonitor/Info.plist;
@@ -597,6 +766,7 @@
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "com.evlin.Evlin-iOS.EvlinDeviceActivityMonitor";
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				SKIP_INSTALL = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
@@ -611,9 +781,11 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = EvlinDeviceActivityMonitor/EvlinDeviceActivityMonitor.entitlements;
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = D9FM36P37F;
+				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "iPhone Distribution";
+				CODE_SIGN_STYLE = Manual;
+				CURRENT_PROJECT_VERSION = 5;
+				DEVELOPMENT_TEAM = "";
+				"DEVELOPMENT_TEAM[sdk=iphoneos*]" = D9FM36P37F;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = EvlinDeviceActivityMonitor/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = EvlinDeviceActivityMonitor;
@@ -627,6 +799,8 @@
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "com.evlin.Evlin-iOS.EvlinDeviceActivityMonitor";
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				"PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]" = "Evlin DAM iOS AppStore";
 				SKIP_INSTALL = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
@@ -640,6 +814,15 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		B6DAF4ECD43DAF59721AE041 /* Build configuration list for PBXNativeTarget "EvlinDeviceActivityReport" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				B6DAECC309D3A97C87E91725 /* Debug */,
+				B6DA2150DFE7A84A6C352D52 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 		B6F164582F999B35008E858C /* Build configuration list for PBXNativeTarget "Evlin iOSTests" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (

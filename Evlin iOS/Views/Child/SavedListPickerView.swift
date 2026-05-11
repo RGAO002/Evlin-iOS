@@ -78,6 +78,7 @@ struct SavedListPickerView: View {
 
         // 1. Write tokens locally (the source of truth for lookups)
         LocalAliasStore.shared.saveList(selection, named: trimmed)
+        ManagedSelectionAliasSync.syncAll(from: selection)
 
         // 2. POST metadata to backend (so parent UI knows the list name exists)
         do {

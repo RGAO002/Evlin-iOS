@@ -24,11 +24,11 @@ enum ActiveLockMigration {
         _ = legacyData  // referenced to silence unused-var warnings
         defaults?.removeObject(forKey: legacyKey)
 
-        // Initialize empty new keys so subsequent reads succeed.
-        if let emptyShields = try? PropertyListEncoder().encode([String: String]()) {
+        // Initialize empty keys (same format as ActiveLockStore: JSON-encoded dicts).
+        if let emptyShields = try? JSONEncoder().encode([String: ShieldRecord]()) {
             defaults?.set(emptyShields, forKey: shieldsKey)
         }
-        if let emptyBlocks = try? PropertyListEncoder().encode([String: String]()) {
+        if let emptyBlocks = try? JSONEncoder().encode([String: BlockRecord]()) {
             defaults?.set(emptyBlocks, forKey: blocksKey)
         }
     }

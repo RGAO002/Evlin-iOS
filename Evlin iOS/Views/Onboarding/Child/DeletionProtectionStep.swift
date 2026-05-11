@@ -1,8 +1,4 @@
 import SwiftUI
-import FamilyControls
-import ManagedSettings
-
-/// Child onboarding step — explicit toggle (default ON) for denyAppRemoval.
 /// Shows side-effect copy when enabled; hides it when user turns off.
 /// Per spec §2 D5 + user feedback.
 struct DeletionProtectionStep: View {
@@ -37,7 +33,7 @@ struct DeletionProtectionStep: View {
             Toggle("Prevent Evlin from being deleted", isOn: $isEnabled)
                 .padding(.horizontal, Spacing.xl)
                 .onChange(of: isEnabled) { _, newValue in
-                    applyDenyAppRemoval(newValue)
+                    ScreenTimeManager.shared.setDeletionProtectionEnabled(newValue)
                 }
 
             if isEnabled {
@@ -52,6 +48,7 @@ struct DeletionProtectionStep: View {
             Spacer()
 
             Button {
+                ScreenTimeManager.shared.setDeletionProtectionEnabled(isEnabled)
                 onContinue()
             } label: {
                 Text("Continue")
@@ -69,13 +66,7 @@ struct DeletionProtectionStep: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.evSurface)
         .onAppear {
-            // Initialize ManagedSettings to match the default (ON).
-            applyDenyAppRemoval(true)
+            isEnabled = ScreenTimeManager.shared.deletionProtectionEnabled
         }
-    }
-
-    private func applyDenyAppRemoval(_ flag: Bool) {
-        let store = ManagedSettingsStore()
-        store.application.denyAppRemoval = flag
     }
 }

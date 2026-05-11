@@ -7,7 +7,11 @@ struct CategoryDefaultsStep: View {
     let onContinue: () -> Void
 
     @State private var selections: [String: FamilyActivitySelection] = [:]
-    @State private var pickerSelection = FamilyActivitySelection()
+    // `includeEntireCategory: true` so a category-row tap captures the whole
+    // category as one ActivityCategoryToken instead of expanding to N app tokens.
+    // Without this flag iOS treats the row as "select all apps inside" — which
+    // (a) gives no category token at all and (b) misses apps installed later.
+    @State private var pickerSelection = FamilyActivitySelection(includeEntireCategory: true)
     @State private var activeCategory: SemanticCategory?
     @State private var showPicker = false
 
@@ -95,7 +99,8 @@ struct CategoryDefaultsStep: View {
 
         return Button {
             activeCategory = category
-            pickerSelection = selections[category.key] ?? FamilyActivitySelection()
+            pickerSelection = selections[category.key]
+                ?? FamilyActivitySelection(includeEntireCategory: true)
             showPicker = true
         } label: {
             HStack(spacing: Spacing.lg) {
@@ -147,7 +152,7 @@ struct CategoryDefaultsStep: View {
         guard let category = activeCategory else { return }
         defer {
             activeCategory = nil
-            pickerSelection = FamilyActivitySelection()
+            pickerSelection = FamilyActivitySelection(includeEntireCategory: true)
         }
 
         guard !pickerSelection.categoryTokens.isEmpty else { return }

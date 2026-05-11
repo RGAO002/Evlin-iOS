@@ -17,9 +17,8 @@ struct BigKidRootView: View {
 
     init(baseURL: URL, childId: UUID) {
         let client = BigKidAPIClient(baseURL: baseURL, childId: childId)
-        #if DEBUG
-        let initialState = BigKidState(snapshot: .fixture())
-        #else
+        // Always start empty — `BigKidStatePoller` paints the real snapshot ASAP.
+        // DEBUG `.fixture()` here caused a visible flicker (default tasks swapped for server tasks).
         let initialState = BigKidState(snapshot: ChildStateResponse(
             childName: "", minutesLeft: 0, minutesMax: 0,
             tasks: [], reflectionRequest: nil,
@@ -27,7 +26,6 @@ struct BigKidRootView: View {
             dailyCompleteAcknowledged: false,
             screenTimeFinishedAcknowledged: false
         ))
-        #endif
         let poller = BigKidStatePoller(client: client, state: initialState)
         _client = StateObject(wrappedValue: client)
         _state = State(initialValue: initialState)
@@ -282,7 +280,10 @@ struct BigKidRootView: View {
             .navigationBarBackButtonHidden(true)
         case .video:
             if let r = state.reflectionRequest {
-                BigKidVideoView(videoId: r.videoId, videoTitle: r.videoTitle) {
+                BigKidVideoView(
+                    videoId: r.videoId,
+                    videoTitle: ReflectionVideoDisplay.cardTitle(for: r)
+                ) {
                     applyLocalStepCompletion(.video)
                     _ = try? await client.reflectionStepComplete(rid: r.id, step: .video)
                     await poller.refreshNow()

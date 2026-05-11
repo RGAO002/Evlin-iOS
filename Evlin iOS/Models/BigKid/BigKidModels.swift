@@ -69,9 +69,9 @@ struct QuizQuestion: Codable, Equatable, Sendable {
 struct ReflectionRequest: Codable, Equatable, Sendable, Identifiable {
     let id: UUID
     let reason: String
-    /// Gemini-rephrased, kid-appropriate second-person sentence
-    /// (e.g. "You called me a hurtful name."). Backend leaves this nil
-    /// on the fixture path; iOS falls back to the raw `reason` then.
+    /// Gemini-rephrased, kid-appropriate second-person line for *this*
+    /// incident. Also drives the Rick Roll reflection step headline via
+    /// `ReflectionVideoDisplay` when `video_title` from the API is generic.
     let displayReason: String?
     let videoId: String
     let videoTitle: String
@@ -231,7 +231,8 @@ extension ReflectionRequest {
             reason: "stayed up past bedtime",
             displayReason: "You stayed up past your bedtime on your tablet.",
             videoId: "dQw4w9WgXcQ",
-            videoTitle: "Why rest time matters for your brain",
+            // Stub JSON field — headline comes from Gemini `videoLessonTitle` via API (`ReflectionVideoDisplay` handles stale placeholders).
+            videoTitle: "A clip about calming down together (fixture)",
             writingPrompt: "What were you feeling when time ran out, and what could you do differently tomorrow?",
             quiz: ReflectionRequest.defaultFixtureQuiz,
             stepsCompleted: stepsCompleted, quizScore: nil, essayText: nil,

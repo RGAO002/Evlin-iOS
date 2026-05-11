@@ -175,18 +175,24 @@ struct BigKidHomeReflectionView: View {
         .padding(.horizontal, 4)
     }
 
+    private var submittedAwaitingReviewCount: Int {
+        state.tasks.filter { $0.status == .submitted }.count
+    }
+
     private var questPips: some View {
         HStack(spacing: 5) {
-            ForEach(state.tasks) { t in
-                Capsule().fill(pipColor(for: t)).frame(height: EvlinKidMetrics.Size.segPip)
+            ForEach(0..<state.tasks.count, id: \.self) { index in
+                Capsule()
+                    .fill(questPipColor(at: index))
+                    .frame(height: EvlinKidMetrics.Size.segPip)
             }
         }
         .padding(.horizontal, 4)
     }
 
-    private func pipColor(for t: BigKidTask) -> Color {
-        if t.status == .done || t.bypass?.status == .approved { return EvlinKidColors.Reflection.pipDone }
-        if t.status == .submitted { return EvlinKidColors.Reflection.pipSubmitted }
+    private func questPipColor(at index: Int) -> Color {
+        if index < doneCount { return EvlinKidColors.Reflection.pipDone }
+        if index < doneCount + submittedAwaitingReviewCount { return EvlinKidColors.Reflection.pipSubmitted }
         return EvlinKidColors.Reflection.pipTodo
     }
 

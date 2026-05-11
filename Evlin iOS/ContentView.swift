@@ -21,6 +21,12 @@ struct ContentView: View {
     @AppStorage("onboardingComplete") private var onboardingComplete = false
     @AppStorage("appMode") private var appMode: String = ""
 
+    /// Draggable Parent / Child mode pill (`FloatingModeToggle`). Shipped in **all** builds —
+    /// not DEBUG-only — whenever onboarding finished and shell is Parent or Child.
+    private var showsSingleDeviceModesToggle: Bool {
+        onboardingComplete && (appMode == "parent" || appMode == "child")
+    }
+
     var body: some View {
         ZStack {
             Group {
@@ -37,15 +43,12 @@ struct ContentView: View {
                 }
             }
 
-            #if DEBUG
-            // Single-device dev affordance: float a small P/K pill that
-            // toggles parent ↔ child mode. Drag to reposition.
-            if onboardingComplete && (appMode == "parent" || appMode == "child") {
+            if showsSingleDeviceModesToggle {
                 FloatingModeToggle()
             }
-            // Parent-side BigKid debug — opens the trigger / approve /
-            // review-task sheet that calls /api/v1/parent/* endpoints.
-            // Only surfaces while we're actually in parent mode.
+
+            #if DEBUG
+            // Parent-side BigKid debug — `/api/v1/parent/*` harness. Ships only in Debug.
             if onboardingComplete && appMode == "parent" {
                 VStack {
                     HStack {

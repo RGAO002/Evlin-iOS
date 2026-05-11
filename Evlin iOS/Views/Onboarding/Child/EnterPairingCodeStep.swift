@@ -104,16 +104,28 @@ struct EnterPairingCodeStep: View {
             .disabled(!parentJoined)
 
             #if DEBUG
-            // Dev-only escape hatch for single-device testing. Skips waiting for
-            // a parent to enter the 6-digit code and forces the flow forward
-            // with protectionMode=std. Backend stays unpaired — that's fine for
-            // exercising the remaining child-onboarding steps (DeletionProtection,
-            // CategoryDefaults, FirstSavedList, ChildReady).
-            // Gated by #if DEBUG so release builds can't see it.
+            // DEV ONLY: Skip waiting for parent. Without persisting `evlin.childDeviceID`,
+            // the post-onboarding shell falls back to the legacy lock screen — mirror
+            // `OnboardingDemoPlaceholders` + `/family/create` success path here.
             Button {
                 protectionMode = "std"
                 parentJoined = true
                 status = "⚠️ Skipped (DEBUG) — proceeding as Std mode"
+
+                let placeholderChild = OnboardingDemoPlaceholders.childDeviceUUID
+                childDeviceID = placeholderChild
+                if familyID == nil {
+                    familyID = UUID(uuidString: "00000000-0000-4000-8000-000000000001")
+                }
+
+                UserDefaults.standard.set(
+                    placeholderChild.uuidString,
+                    forKey: "evlin.childDeviceID"
+                )
+                if let fid = familyID {
+                    UserDefaults.standard.set(fid.uuidString, forKey: "evlin.familyID")
+                }
+
                 onContinue()
             } label: {
                 Text("⚠️ DEBUG: Skip pairing (single-device)")
@@ -133,6 +145,8 @@ struct EnterPairingCodeStep: View {
         s.map(String.init).joined(separator: " ")
     }
 
+    /// Writes bindings + UserDefaults — must stay on the main actor so SwiftUI `@AppStorage` sees updates immediately after pairing.
+    @MainActor
     private func createFamily() async {
         guard !creating else { return }
         creating = true

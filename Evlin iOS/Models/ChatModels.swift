@@ -1,5 +1,47 @@
 import Foundation
 
+/// Inline reflection review surfaced in Chat (kid essay submitted → parent approves).
+/// Same lifecycle as `ParentBigKidDebugSheet.approveReflection` / `refreshKidState`.
+struct ReflectionSubmissionReviewPayload: Codable, Equatable, Sendable {
+    let reflectionId: UUID
+    let writingPrompt: String
+    let essayText: String
+    var resolved: Bool
+
+    init(reflectionId: UUID, writingPrompt: String, essayText: String, resolved: Bool = false) {
+        self.reflectionId = reflectionId
+        self.writingPrompt = writingPrompt
+        self.essayText = essayText
+        self.resolved = resolved
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case reflectionId, writingPrompt, essayText, resolved
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        reflectionId = try c.decode(UUID.self, forKey: .reflectionId)
+        writingPrompt = try c.decode(String.self, forKey: .writingPrompt)
+        essayText = try c.decode(String.self, forKey: .essayText)
+        resolved = try c.decodeIfPresent(Bool.self, forKey: .resolved) ?? false
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(reflectionId, forKey: .reflectionId)
+        try c.encode(writingPrompt, forKey: .writingPrompt)
+        try c.encode(essayText, forKey: .essayText)
+        try c.encode(resolved, forKey: .resolved)
+    }
+}
+
+/// When the parent approves a submitted reflection via Chat but leaves the note field empty,
+/// we still POST this `parent_note` so the child always sees something warm on-device.
+enum ReflectionParentNoteFallback {
+    static let thanksHonest = "Thanks for being honest."
+}
+
 extension Notification.Name {
     static let evlinClearChat = Notification.Name("evlinClearChat")
     static let evlinLockStateChanged = Notification.Name("evlinLockStateChanged")
@@ -43,6 +85,9 @@ struct ChatMessage: Identifiable, Codable {
     // ChatView renders ProposalCard / ReceiptBubble beneath the bubble.
     var proposals: [ProposalDTO]? = nil
     var receipts: [ReceiptDTO]? = nil
+
+    /// Big-kid: kid submitted reflection essay (`status=submitted`). Approve path = debug sheet.
+    var reflectionSubmissionReview: ReflectionSubmissionReviewPayload? = nil
 
     var isStrategyArtifact: Bool { strategyTitle != nil }
 

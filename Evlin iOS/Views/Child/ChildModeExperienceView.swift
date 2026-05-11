@@ -24,6 +24,9 @@ struct ChildModeExperienceView: View {
             if let url = apiRootURL, let childId = pairedChildUUID {
                 BigKidRootView(baseURL: url, childId: childId)
                     .id("\(trimmedBase)|\(childDeviceID)")
+                    .onAppear {
+                        ScreenTimeManager.shared.syncDeletionProtectionToManagedSettings()
+                    }
             } else {
                 ChildModeView()
             }

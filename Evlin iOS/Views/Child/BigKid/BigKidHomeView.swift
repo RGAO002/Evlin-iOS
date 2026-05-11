@@ -168,18 +168,28 @@ struct BigKidHomeView: View {
         .padding(.horizontal, 4)
     }
 
+    /// Submitted, waiting for parent (not yet `.done`). Fills **after** done
+    /// segments, still left-to-right — same as counting "available" slots.
+    private var submittedAwaitingReviewCount: Int {
+        state.tasks.filter { $0.status == .submitted }.count
+    }
+
     private var questPips: some View {
         HStack(spacing: 5) {
-            ForEach(state.tasks) { t in
-                Capsule().fill(pipColor(for: t)).frame(height: EvlinKidMetrics.Size.segPip)
+            ForEach(0..<state.tasks.count, id: \.self) { index in
+                Capsule()
+                    .fill(questPipColor(at: index))
+                    .frame(height: EvlinKidMetrics.Size.segPip)
             }
         }
         .padding(.horizontal, 4)
     }
 
-    private func pipColor(for t: BigKidTask) -> Color {
-        if t.status == .done || t.bypass?.status == .approved { return EvlinKidColors.green500 }
-        if t.status == .submitted { return EvlinKidColors.green300 }
+    /// Left → right: `doneCount` deep green, then `submittedAwaitingReviewCount`
+    /// light green, then neutral (todo / not yet submitted).
+    private func questPipColor(at index: Int) -> Color {
+        if index < doneCount { return EvlinKidColors.green500 }
+        if index < doneCount + submittedAwaitingReviewCount { return EvlinKidColors.green300 }
         return EvlinKidColors.line
     }
 

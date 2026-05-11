@@ -1,7 +1,10 @@
 import SwiftUI
 
 struct ModeSelectStep: View {
+    /// Chooses Parent vs Child → continues into the normal pairing / permissions flow.
     let onSelect: (OnboardingMode) -> Void
+    /// Bypasses onboarding for demos — must never replace real pairing / Screen Time in production.
+    let onDemoJump: (OnboardingMode) -> Void
 
     var body: some View {
         VStack(spacing: Spacing.section) {
@@ -27,19 +30,22 @@ struct ModeSelectStep: View {
             }
 
             VStack(spacing: Spacing.lg) {
-                modeCard(
+                selectionCard(
                     title: "Parent Device",
                     description: "Set up Evlin on your phone to manage your child's device.",
                     icon: "person.fill.checkmark"
                 ) { onSelect(.parent) }
 
-                modeCard(
+                selectionCard(
                     title: "Child Device",
                     description: "This is my child's phone. Pair it with the parent's Evlin.",
                     icon: "person.fill"
                 ) { onSelect(.child) }
             }
             .padding(.horizontal, Spacing.xl)
+
+            // Demo shortcuts only — skips pairing/Screen-Time onboarding. Full product expects `onSelect` path.
+            demoFooterSection
 
             Spacer()
         }
@@ -48,8 +54,39 @@ struct ModeSelectStep: View {
         .background(Color.evSurface)
     }
 
+    /// English-only copy; cards below match `selectionCard` so layout feels like the primary choices.
+    private var demoFooterSection: some View {
+        VStack(alignment: .center, spacing: Spacing.lg) {
+            Text("Demo only — skips pairing")
+                .font(.evCaption)
+                .foregroundStyle(Color.evOutline)
+                .multilineTextAlignment(.center)
+
+            VStack(spacing: Spacing.lg) {
+                selectionCard(
+                    title: "Parent (demo)",
+                    description: "Jump to parent shell without pairing.",
+                    icon: "person.fill.checkmark"
+                ) { onDemoJump(.parent) }
+
+                selectionCard(
+                    title: "Child (demo)",
+                    description: "Jump to child shell without pairing.",
+                    icon: "person.fill"
+                ) { onDemoJump(.child) }
+            }
+            .padding(.horizontal, Spacing.xl)
+
+            Text("Use Parent / Child buttons above for a real setup.")
+                .font(.evCaption)
+                .foregroundStyle(Color.evOnSurfaceVariant)
+                .multilineTextAlignment(.center)
+        }
+        .padding(.top, Spacing.section)
+    }
+
     @ViewBuilder
-    private func modeCard(title: String, description: String, icon: String, action: @escaping () -> Void) -> some View {
+    private func selectionCard(title: String, description: String, icon: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: Spacing.xl) {
                 Image(systemName: icon)

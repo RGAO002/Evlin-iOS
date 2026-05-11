@@ -42,7 +42,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
 
     private func removeShieldByHashAndRecompute(hashHex: String) {
         guard let shieldData = defaults?.data(forKey: shieldsKey),
-              var shields = try? PropertyListDecoder().decode([String: ShieldRecord].self, from: shieldData)
+              var shields = decodeShields(from: shieldData)
         else { return }
 
         // Find the record whose derived name matches the hash
@@ -54,14 +54,14 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         guard let recordKey = targetKey else { return }
         shields.removeValue(forKey: recordKey)
 
-        if let updated = try? PropertyListEncoder().encode(shields) {
+        if let updated = encodeShields(shields) {
             defaults?.set(updated, forKey: shieldsKey)
         }
 
         // Recompute & apply (same logic as ActiveLockStore.recomputeAndApply)
         let blocks: [String: BlockRecord] = {
             guard let d = defaults?.data(forKey: blocksKey),
-                  let decoded = try? PropertyListDecoder().decode([String: BlockRecord].self, from: d) else {
+                  let decoded = decodeBlocks(from: d) else {
                 return [:]
             }
             return decoded
@@ -94,7 +94,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
     /// from whatever's left.
     private func removeBlockByHashAndRecompute(hashHex: String) {
         guard let blockData = defaults?.data(forKey: blocksKey),
-              var blocks = try? PropertyListDecoder().decode([String: BlockRecord].self, from: blockData)
+              var blocks = decodeBlocks(from: blockData)
         else { return }
 
         let target = blocks.keys.first { bundleID in
@@ -104,7 +104,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         guard let bundleID = target else { return }
         blocks.removeValue(forKey: bundleID)
 
-        if let updated = try? PropertyListEncoder().encode(blocks) {
+        if let updated = encodeBlocks(blocks) {
             defaults?.set(updated, forKey: blocksKey)
         }
 
@@ -114,6 +114,25 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         })
         store.application.blockedApplications = blockedApps.isEmpty ? nil : blockedApps
     }
+}
+
+/// Match `ActiveLockStore` — JSON for token-heavy `ShieldRecord`; plist only for legacy payloads.
+private func decodeShields(from data: Data) -> [String: ShieldRecord]? {
+    if let d = try? JSONDecoder().decode([String: ShieldRecord].self, from: data) { return d }
+    return try? PropertyListDecoder().decode([String: ShieldRecord].self, from: data)
+}
+
+private func encodeShields(_ shields: [String: ShieldRecord]) -> Data? {
+    try? JSONEncoder().encode(shields)
+}
+
+private func decodeBlocks(from data: Data) -> [String: BlockRecord]? {
+    if let d = try? JSONDecoder().decode([String: BlockRecord].self, from: data) { return d }
+    return try? PropertyListDecoder().decode([String: BlockRecord].self, from: data)
+}
+
+private func encodeBlocks(_ blocks: [String: BlockRecord]) -> Data? {
+    try? JSONEncoder().encode(blocks)
 }
 
 private func sha256Hex16(_ data: Data) -> String {

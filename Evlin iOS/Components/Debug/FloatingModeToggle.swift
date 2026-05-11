@@ -1,13 +1,9 @@
 import SwiftUI
 
-#if DEBUG
-/// Small draggable floating button that toggles `@AppStorage("appMode")`
-/// between "parent" and "child". Used during single-device development
-/// when you only have one phone and need to flip between the two products
-/// without going through onboarding each time.
+/// Draggable float: `@AppStorage("appMode")` **parent ↔ child**.
+/// Universal **Parent ⇄ Child** quick switch (all builds once onboarding + mode shell is shown).
 ///
-/// Position is persisted across launches via `@AppStorage`. Defaults to
-/// the bottom-right corner just above the home indicator.
+/// Position persists via `evlin.debugToggle.{x,y}`. Defaults above the home indicator bottom-right.
 struct FloatingModeToggle: View {
     @AppStorage("appMode") private var appMode: String = "parent"
     @AppStorage("evlin.debugToggle.x") private var savedX: Double = -1
@@ -32,7 +28,11 @@ struct FloatingModeToggle: View {
 
     private var label: some View {
         Button {
-            appMode = (appMode == "parent") ? "child" : "parent"
+            let nextMode = (appMode == "parent") ? "child" : "parent"
+            if nextMode == "child" {
+                EvlinDemoShortcuts.seedPlaceholderChildUUIDIfMissing()
+            }
+            appMode = nextMode
         } label: {
             ZStack {
                 Circle()
@@ -85,6 +85,7 @@ struct FloatingModeToggle: View {
     }
 }
 
+#if DEBUG
 #Preview {
     ZStack {
         Color.gray.opacity(0.2).ignoresSafeArea()

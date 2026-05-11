@@ -38,14 +38,104 @@ final class BigKidModelsTests: XCTestCase {
     }
 
     func testAllTasksDoneWithApprovedBypass() throws {
-        let task = BigKidTask.fixture(status: .todo, bypass: .fixture(status: .approved))
-        let state = BigKidState(snapshot: ChildStateResponse.fixture(tasks: [task]))
+        let bypass = BypassRequest(
+            id: UUID(),
+            taskId: UUID(),
+            reason: "test bypass",
+            status: .approved,
+            parentResponse: nil,
+            createdAt: Date(),
+            respondedAt: nil
+        )
+        let task = BigKidTask(
+            id: UUID(),
+            title: "Chore",
+            description: "",
+            category: .chores,
+            due: nil,
+            status: .todo,
+            phase: .input,
+            redoReason: nil,
+            evidencePhotoUrls: [],
+            evidenceNote: nil,
+            bypass: bypass
+        )
+        let snapshot = ChildStateResponse(
+            childName: "Test",
+            minutesLeft: 0,
+            minutesMax: 120,
+            tasks: [task],
+            reflectionRequest: nil,
+            notifyParentCooldownEndsAt: nil,
+            dailyCompleteAcknowledged: false,
+            screenTimeFinishedAcknowledged: false
+        )
+        let state = BigKidState(snapshot: snapshot)
         XCTAssertTrue(state.allTasksDone)
     }
 
-    func testAllTasksDoneFalseWithPendingBypass() throws {
-        let task = BigKidTask.fixture(status: .todo, bypass: .fixture(status: .pending))
-        let state = BigKidState(snapshot: ChildStateResponse.fixture(tasks: [task]))
-        XCTAssertFalse(state.allTasksDone)
+    func testRickRollIgnoresStaleServerTitleUsesDisplayReason() {
+        let r = ReflectionRequest(
+            id: UUID(),
+            reason: "called sister mean names",
+            displayReason: "You used words that hurt your sister's feelings.",
+            videoId: ReflectionVideoDisplay.rickRollVideoId,
+            videoTitle: "Why rest time matters for your brain",
+            writingPrompt: "—",
+            quiz: [],
+            stepsCompleted: [],
+            quizScore: nil,
+            essayText: nil,
+            status: .pending,
+            parentNote: nil,
+            submittedAt: nil,
+            approvedAt: nil
+        )
+        let title = ReflectionVideoDisplay.cardTitle(for: r)
+        XCTAssertFalse(title.lowercased().contains("brain"))
+        XCTAssertTrue(title.localizedCaseInsensitiveContains("sister"))
+    }
+
+    func testRickRollUsesFreshServerLessonTitleFromBackend() {
+        let r = ReflectionRequest(
+            id: UUID(),
+            reason: "yelled at dad",
+            displayReason: "You raised your voice at dinner.",
+            videoId: ReflectionVideoDisplay.rickRollVideoId,
+            videoTitle: "Cooling down when frustration shows up.",
+            writingPrompt: "—",
+            quiz: [],
+            stepsCompleted: [],
+            quizScore: nil,
+            essayText: nil,
+            status: .pending,
+            parentNote: nil,
+            submittedAt: nil,
+            approvedAt: nil
+        )
+        XCTAssertEqual(
+            ReflectionVideoDisplay.cardTitle(for: r),
+            "Cooling down when frustration shows up"
+        )
+    }
+
+    func testNonPlaceholderVideoUsesServerVideoTitle() {
+        let r = ReflectionRequest(
+            id: UUID(),
+            reason: "x",
+            displayReason: "You did something.",
+            videoId: "abc123notrick",
+            videoTitle: "Authentic server title",
+            writingPrompt: "—",
+            quiz: [],
+            stepsCompleted: [],
+            quizScore: nil,
+            essayText: nil,
+            status: .pending,
+            parentNote: nil,
+            submittedAt: nil,
+            approvedAt: nil
+        )
+        XCTAssertEqual(ReflectionVideoDisplay.cardTitle(for: r), "Authentic server title")
     }
 }

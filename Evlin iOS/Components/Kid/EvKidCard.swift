@@ -2,7 +2,8 @@ import SwiftUI
 
 /// Mirrors `primitives.jsx :: EvCard`. 6 tones, 20pt radius, 1px border.
 struct EvKidCard<Content: View>: View {
-    enum Tone { case plain, amber, green, red, violet, tinted }
+    /// `bypassNotice` — parent declined a skip/bypass request (purple frame, matches parent bypass accent).
+    enum Tone { case plain, amber, green, red, violet, tinted, bypassNotice }
     let tone: Tone
     let padding: CGFloat
     @ViewBuilder let content: () -> Content
@@ -35,6 +36,7 @@ struct EvKidCard<Content: View>: View {
         case .red:    return EvlinKidColors.green200
         case .violet: return EvlinKidColors.green50
         case .tinted: return EvlinKidColors.surface2
+        case .bypassNotice: return EvlinAddPalette.bypassBg
         }
     }
     private var border: Color {
@@ -43,6 +45,7 @@ struct EvKidCard<Content: View>: View {
         case .amber, .violet: return EvlinKidColors.green200
         case .green:          return EvlinKidColors.green200
         case .red:            return EvlinKidColors.green300
+        case .bypassNotice:   return EvlinAddPalette.bypass.opacity(0.42)
         }
     }
 }

@@ -182,6 +182,9 @@ struct BigKidTaskDetailView: View {
     // MARK: - Input phase
     private var inputPhase: some View {
         VStack(alignment: .leading, spacing: 16) {
+            if task.bypass?.status == .denied {
+                bypassDeniedNotice
+            }
             Text("SHOW US")
                 .font(.system(size: 13, weight: .bold))
                 .tracking(0.8)
@@ -275,7 +278,7 @@ struct BigKidTaskDetailView: View {
     }
 
     private func thumbnail(data: Data, index: Int) -> some View {
-        ZStack(alignment: .topTrailing) {
+        ZStack {
             if let img = UIImage(data: data) {
                 Image(uiImage: img)
                     .resizable()
@@ -283,18 +286,6 @@ struct BigKidTaskDetailView: View {
             } else {
                 Color.gray.opacity(0.2)
             }
-            // X stays inside the tile — keeps thumbnail's bounding box
-            // identical to the + tile so they line up perfectly in the row.
-            Button {
-                photos.remove(at: index)
-            } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 18, weight: .bold))
-                    .foregroundStyle(.white, .black.opacity(0.7))
-                    .padding(4)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Remove photo \(index + 1)")
         }
         .frame(width: Self.stripTileSize, height: Self.stripTileSize)
         .clipShape(RoundedRectangle(cornerRadius: Self.stripTileRadius, style: .continuous))
@@ -303,6 +294,20 @@ struct BigKidTaskDetailView: View {
                 .stroke(index == 0 ? EvlinKidColors.primary : EvlinKidColors.line,
                         lineWidth: 1)
         )
+        // Draw the remove control *after* clipping so the glyph isn't cut off at the top corner.
+        .overlay(alignment: .topTrailing) {
+            Button {
+                photos.remove(at: index)
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .symbolRenderingMode(.palette)
+                    .foregroundStyle(.white, Color.black.opacity(0.55))
+                    .font(.system(size: 16, weight: .bold))
+            }
+            .buttonStyle(.plain)
+            .padding(6)
+            .accessibilityLabel("Remove photo \(index + 1)")
+        }
     }
 
     private var addTile: some View {
@@ -550,6 +555,41 @@ struct BigKidTaskDetailView: View {
         }
     }
 
+    /// Parent declined the kid's request to skip this task — same layout rhythm as redo,
+    /// purple frame so it reads as “bypass outcome” not “try your photo again”.
+    private var bypassDeniedNotice: some View {
+        EvKidCard(tone: .bypassNotice, padding: 22) {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Your parent didn't approve skipping this")
+                    .font(.system(size: 17, weight: .bold))
+                    .foregroundStyle(EvlinKidColors.primaryInk)
+                Text("You'll need to finish this task the usual way — photos and all.")
+                    .font(.system(size: 14))
+                    .foregroundStyle(EvlinAddPalette.bypass)
+                    .lineSpacing(2)
+                if let note = task.bypass?.parentResponse, !note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("NOTE FROM YOUR PARENT")
+                            .font(.system(size: 12, weight: .bold))
+                            .tracking(0.6)
+                            .foregroundStyle(EvlinAddPalette.bypass)
+                        Text(note)
+                            .font(.system(size: 15))
+                            .foregroundStyle(EvlinKidColors.ink)
+                            .lineSpacing(2)
+                    }
+                    .padding(14)
+                    .background(Color.white)
+                    .clipShape(RoundedRectangle(cornerRadius: 14))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 14)
+                            .stroke(EvlinAddPalette.bypass.opacity(0.28), lineWidth: 1)
+                    )
+                }
+            }
+        }
+    }
+
     // MARK: - Redo phase
     /// Shown when a parent has clicked REQUEST REDO. Banner explains why,
     /// then the same camera + note + submit UI as the input phase so the
@@ -617,5 +657,40 @@ private func _redoPreviewTask() -> BigKidTask {
 #Preview("Redo") {
     BigKidTaskDetailView(task: _redoPreviewTask(),
                          onBack: {}, onBypass: {}, onSubmit: { (_: [Data], _: String?) in })
+}
+
+private func _bypassDeniedPreviewTask() -> BigKidTask {
+    let taskId = UUID()
+    let bypass = BypassRequest(
+        id: UUID(),
+        taskId: taskId,
+        reason: "Had practice",
+        status: .denied,
+        parentResponse: "We still need the bed made today — thanks.",
+        createdAt: Date(),
+        respondedAt: Date()
+    )
+    return BigKidTask(
+        id: taskId,
+        title: "Make bed",
+        description: "Smooth the covers and fluff the pillow.",
+        category: .chores,
+        due: "8:00 AM",
+        status: .todo,
+        phase: .input,
+        redoReason: nil,
+        evidencePhotoUrls: [],
+        evidenceNote: nil,
+        bypass: bypass
+    )
+}
+
+#Preview("Bypass denied") {
+    BigKidTaskDetailView(
+        task: _bypassDeniedPreviewTask(),
+        onBack: {},
+        onBypass: {},
+        onSubmit: { (_: [Data], _: String?) in }
+    )
 }
 #endif

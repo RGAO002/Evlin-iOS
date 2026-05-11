@@ -2,6 +2,11 @@ import SwiftUI
 
 struct ChildReadyStep: View {
     @AppStorage("onboardingComplete") private var onboardingComplete = false
+
+    /// From child pairing (`EnterPairingCodeStep`); re-persist before leaving onboarding so post-onboarding doesn’t briefly miss `evlin.childDeviceID`.
+    let childDeviceID: UUID?
+    let familyID: UUID?
+
     let onEnter: () -> Void
 
     var body: some View {
@@ -31,6 +36,7 @@ struct ChildReadyStep: View {
             Spacer()
 
             Button {
+                persistPairedIdentifiers()
                 onboardingComplete = true
                 onEnter()
             } label: {
@@ -49,5 +55,15 @@ struct ChildReadyStep: View {
         .padding(Spacing.xl)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.evSurface)
+    }
+
+    /// Mirror `EnterPairingCodeStep` success path — covers edge cases where UserDefaults lagged vs coordinator state.
+    private func persistPairedIdentifiers() {
+        if let id = childDeviceID {
+            UserDefaults.standard.set(id.uuidString, forKey: "evlin.childDeviceID")
+        }
+        if let fid = familyID {
+            UserDefaults.standard.set(fid.uuidString, forKey: "evlin.familyID")
+        }
     }
 }

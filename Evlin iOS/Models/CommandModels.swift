@@ -89,6 +89,7 @@ enum AckFailure: Codable, Sendable, Equatable {
     case notAuthorized
     case listNotFound(String)
     case categoryNotConfigured(String)
+    case applicationNotConfigured(String)
     case nothingToUnlock
     case malformed
     case execution(String)

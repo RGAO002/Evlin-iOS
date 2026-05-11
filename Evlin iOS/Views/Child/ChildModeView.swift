@@ -134,7 +134,7 @@ struct ChildModeView: View {
             SettingsView()
         }
         .onAppear {
-            screenTimeManager.enableDeletionProtection()
+            screenTimeManager.syncDeletionProtectionToManagedSettings()
         }
         .onAppear {
             // CommandPoller is started at the app level (Evlin_iOSApp) so it
