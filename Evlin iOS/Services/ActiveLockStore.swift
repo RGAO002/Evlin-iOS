@@ -136,12 +136,11 @@ actor ActiveLockStore {
 
     @discardableResult
     func sweepExpired(now: Date = Date()) -> [ShieldRecord] {
-        let expired = shieldRecords.values.filter { ($0.expiresAt ?? .distantFuture) <= now }
-        guard !expired.isEmpty else { return [] }
-        for record in expired { shieldRecords.removeValue(forKey: record.recordKey) }
+        let expired = purgeExpiredRecords(now: now)
+        guard !expired.shields.isEmpty || !expired.blocks.isEmpty else { return [] }
         persist()
         recomputeAndApply()
-        return expired
+        return expired.shields
     }
 
     // MARK: - Private: merge
@@ -228,6 +227,11 @@ actor ActiveLockStore {
     // MARK: - Private: recompute + persistence
 
     private func recomputeAndApply() {
+        let expired = purgeExpiredRecords()
+        if !expired.shields.isEmpty || !expired.blocks.isEmpty {
+            persist()
+        }
+
         // Blocks
         let blockedApps = Set(blockRecords.values.map { ManagedSettings.Application(bundleIdentifier: $0.bundleID) })
         store.application.blockedApplications = blockedApps.isEmpty ? nil : blockedApps
@@ -288,5 +292,25 @@ actor ActiveLockStore {
                 persist()
             }
         }
+        let expired = purgeExpiredRecords()
+        if !expired.shields.isEmpty || !expired.blocks.isEmpty {
+            persist()
+        }
+        recomputeAndApply()
+    }
+
+    @discardableResult
+    private func purgeExpiredRecords(now: Date = Date()) -> (shields: [ShieldRecord], blocks: [BlockRecord]) {
+        let expiredShields = shieldRecords.values.filter { ($0.expiresAt ?? .distantFuture) <= now }
+        for record in expiredShields {
+            shieldRecords.removeValue(forKey: record.recordKey)
+        }
+
+        let expiredBlocks = blockRecords.values.filter { ($0.expiresAt ?? .distantFuture) <= now }
+        for record in expiredBlocks {
+            blockRecords.removeValue(forKey: record.bundleID)
+        }
+
+        return (expiredShields, expiredBlocks)
     }
 }

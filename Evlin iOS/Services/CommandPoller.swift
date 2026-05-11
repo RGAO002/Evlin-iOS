@@ -44,6 +44,10 @@ final class CommandPoller {
         defer { isPolling = false }
 
         do {
+            // DeviceActivityMonitor is the primary expiry path, but Screen Time
+            // callbacks can be delayed or missed. Polling is our foreground
+            // fallback so timed shields/blocks don't stay applied forever.
+            _ = await ActiveLockStore.shared.sweepExpired()
             let cmds = try await api.pollCommands(deviceID: deviceID)
             for poll in cmds {
                 await execute(poll: poll, api: api)

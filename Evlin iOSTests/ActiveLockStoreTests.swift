@@ -198,6 +198,33 @@ final class ActiveLockStoreTests: XCTestCase {
         XCTAssertEqual(after, 1)
     }
 
+    func test_sweepExpired_removes_past_blocks() async {
+        let store = ActiveLockStore()
+        let live = BlockRecord(bundleID: "com.live.app",
+                               displayName: "Live",
+                               blockedAt: Date(),
+                               lastCommandID: UUID(),
+                               originalRequest: "test",
+                               targetChildID: UUID(),
+                               expiresAt: Date().addingTimeInterval(60))
+        let dead = BlockRecord(bundleID: "com.dead.app",
+                               displayName: "Dead",
+                               blockedAt: Date(),
+                               lastCommandID: UUID(),
+                               originalRequest: "test",
+                               targetChildID: UUID(),
+                               expiresAt: Date().addingTimeInterval(-5))
+
+        _ = await store.addBlock(live)
+        _ = await store.addBlock(dead)
+
+        _ = await store.sweepExpired()
+
+        let after = await store.allCurrent().blocks
+        XCTAssertEqual(after.count, 1)
+        XCTAssertEqual(after[0].bundleID, live.bundleID)
+    }
+
     // MARK: - Helpers
 
     private static func makeTimedShield(
