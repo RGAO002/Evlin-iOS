@@ -189,13 +189,22 @@ enum PhoneCardAdapter {
     private static func u1ShieldEntriesFromDetail(_ p: PlanArchCardPayload) -> [U1ShieldEntry] {
         // Backend may emit either ["IG", "TikTok"] or richer dicts; both accepted.
         // U1ShieldEntry uses `kind: String` ("app"|"category"|"list"|"all").
-        if let strings = p.detail["active_shields"]?.value as? [String] {
+        //
+        // Strategy-agent's _build_unlock_picker_* emits detail["shields"]
+        // (plural). The older U1 plumbing read detail["active_shields"].
+        // Accept both — fall through to whichever key is populated so a
+        // future drift in one direction doesn't silently empty the card.
+        let rawValue: Any? =
+            p.detail["shields"]?.value
+            ?? p.detail["active_shields"]?.value
+
+        if let strings = rawValue as? [String] {
             return strings.enumerated().map { (i, name) in
                 U1ShieldEntry(index: i, kind: "app", displayName: name,
                               expiresAtISO: nil, stale: false)
             }
         }
-        if let arr = p.detail["active_shields"]?.value as? [[String: Any]] {
+        if let arr = rawValue as? [[String: Any]] {
             return arr.enumerated().map { (i, dict) in
                 U1ShieldEntry(
                     index: i,
