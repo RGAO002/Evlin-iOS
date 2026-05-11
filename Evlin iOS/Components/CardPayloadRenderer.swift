@@ -35,11 +35,17 @@ struct PlanArchCardView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(card.title)
-                .font(.headline)
-                .multilineTextAlignment(.leading)
+            // Header: icon + title (mirrors DangerConfirmCard / other polished cards)
+            HStack(spacing: 8) {
+                Image(systemName: iconForKind(card.kind))
+                    .font(.title2)
+                    .foregroundStyle(iconTintForKind(card.kind))
+                Text(card.title)
+                    .font(.headline)
+                    .multilineTextAlignment(.leading)
+            }
 
-            if let body = card.body {
+            if let body = card.body, !body.isEmpty {
                 Text(body)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
@@ -55,25 +61,26 @@ struct PlanArchCardView: View {
                 } label: {
                     Text("Pick the app")
                         .frame(maxWidth: .infinity)
-                        .padding()
-                        .background(Color.blue)
-                        .foregroundStyle(.white)
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .padding(.vertical, 10)
+                        .background(Color.accentColor)
+                        .foregroundColor(.white)
+                        .cornerRadius(10)
                 }
             } else if card.type == .unlockPicker {
                 unlockPickerBody
             } else {
-                // Standard options: render each as a button.
-                ForEach(card.options) { opt in
-                    optionButton(opt)
+                // Standard options: render each as a styled button.
+                VStack(spacing: 8) {
+                    ForEach(card.options) { opt in
+                        optionButton(opt)
+                    }
                 }
             }
         }
         .padding(16)
-        .background(
-            RoundedRectangle(cornerRadius: 16)
-                .fill(Color(uiColor: .secondarySystemBackground))
-        )
+        .background(Color(.systemBackground))
+        .cornerRadius(12)
+        .shadow(color: Color.black.opacity(0.05), radius: 6)
         .overlay(alignment: .topTrailing) {
             if card.danger == .high {
                 Image(systemName: "exclamationmark.triangle.fill")
@@ -85,6 +92,43 @@ struct PlanArchCardView: View {
                     .padding(8)
             }
         }
+    }
+
+    /// Pick an SF Symbol from the card's kind. Generic icons that signal
+    /// what kind of action the card represents — keeps the visual cue
+    /// consistent across the polished + fallback paths.
+    private func iconForKind(_ kind: String?) -> String {
+        guard let kind else { return "questionmark.circle" }
+        if kind.hasPrefix("phone.") {
+            if kind.contains("unlock") || kind.contains("unshield") { return "lock.open.fill" }
+            if kind.contains("danger") || kind.contains("permanent") { return "exclamationmark.shield.fill" }
+            return "lock.shield.fill"
+        }
+        if kind.hasPrefix("reflection.") {
+            if kind.contains("cancel") { return "arrow.uturn.backward.circle" }
+            if kind.contains("approve") || kind.contains("redo") { return "checkmark.seal" }
+            if kind.contains("failed") { return "exclamationmark.triangle" }
+            return "brain.head.profile"
+        }
+        if kind.hasPrefix("task.") {
+            return "checklist"
+        }
+        if kind.hasPrefix("query.") {
+            return "magnifyingglass"
+        }
+        if kind.hasPrefix("question.") {
+            return "questionmark.bubble"
+        }
+        return "info.circle"
+    }
+
+    private func iconTintForKind(_ kind: String?) -> Color {
+        guard let kind else { return .accentColor }
+        if kind.hasPrefix("phone.") { return Color.accentColor }
+        if kind.hasPrefix("reflection.") { return Color.purple }
+        if kind.hasPrefix("task.") { return Color.green }
+        if kind.hasPrefix("query.") { return Color.gray }
+        return .accentColor
     }
 
     @ViewBuilder
@@ -149,16 +193,51 @@ struct PlanArchCardView: View {
     }
 
     private func optionButton(_ opt: PlanArchCardOption) -> some View {
-        Button {
+        let style = buttonStyle(for: opt)
+        return Button {
             onOption(opt)
         } label: {
             Text(opt.label)
                 .frame(maxWidth: .infinity)
-                .padding(.vertical, 12)
-                .padding(.horizontal, 16)
-                .background(opt.cancelsPlan ? Color.gray.opacity(0.2) : Color.blue.opacity(0.1))
-                .foregroundStyle(opt.cancelsPlan ? Color.secondary : Color.blue)
-                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .padding(.vertical, 10)
+                .background(backgroundColor(for: style))
+                .foregroundColor(foregroundColor(for: style))
+                .cornerRadius(10)
+        }
+    }
+
+    /// Pick a button style from the option's role. Same vocabulary as
+    /// DangerConfirmCard / other polished cards — keeps the look unified.
+    private enum OptionStyle { case primary, destructive, cancel, secondary }
+
+    private func buttonStyle(for opt: PlanArchCardOption) -> OptionStyle {
+        if opt.cancelsPlan { return .cancel }
+        let lower = opt.label.lowercased()
+        // "Unlock everything", "Block X permanently", "Delete X" — destructive intent.
+        if lower.contains("unlock everything")
+            || lower.contains("permanently")
+            || lower.starts(with: "block ")
+            || lower.starts(with: "delete ")
+            || lower.contains("remove all")
+        {
+            return .destructive
+        }
+        return .primary
+    }
+
+    private func backgroundColor(for style: OptionStyle) -> Color {
+        switch style {
+        case .primary:     return .accentColor
+        case .destructive: return .red
+        case .secondary:   return Color(.systemGray5)
+        case .cancel:      return Color(.systemGray6)
+        }
+    }
+
+    private func foregroundColor(for style: OptionStyle) -> Color {
+        switch style {
+        case .primary, .destructive: return .white
+        default: return .primary
         }
     }
 }
