@@ -16,19 +16,29 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
     override func intervalDidEnd(for activity: DeviceActivityName) {
         super.intervalDidEnd(for: activity)
 
+        let raw = activity.rawValue
+        // Diagnostic marker — every intervalDidEnd entry writes its name + ts
+        // to the App Group so the main app can show "extension fired at X"
+        // in Settings. Without this we can't tell whether iOS dispatched the
+        // callback at all (vs the extension running but failing to clear).
+        let ts = ISO8601DateFormatter().string(from: Date())
+        let marker = "fired \(ts) activity=\(raw)"
+        defaults?.set(marker, forKey: "evlin.lastIntervalDidEnd")
+        NSLog("[Evlin/Ext] intervalDidEnd %@", marker)
+
         // Two activity namespaces fire here:
         //   "evlin.shield.<16-byte-hex-of-recordKey>" — timed shield expiring
         //   "evlin.block.<16-byte-hex-of-bundleID>"  — timed block expiring
-        // Both result in the matching record being dropped from the App
-        // Group store and the effective ManagedSettings state being
-        // recomputed from what remains.
-        let raw = activity.rawValue
         if raw.hasPrefix("evlin.shield.") {
             let hashHex = String(raw.dropFirst("evlin.shield.".count))
-            removeShieldByHashAndRecompute(hashHex: hashHex)
+            let found = removeShieldByHashAndRecompute(hashHex: hashHex)
+            defaults?.set("\(marker) shieldRemoved=\(found)", forKey: "evlin.lastIntervalDidEnd")
+            NSLog("[Evlin/Ext] shield remove found=%d hash=%@", found ? 1 : 0, hashHex)
         } else if raw.hasPrefix("evlin.block.") {
             let hashHex = String(raw.dropFirst("evlin.block.".count))
-            removeBlockByHashAndRecompute(hashHex: hashHex)
+            let found = removeBlockByHashAndRecompute(hashHex: hashHex)
+            defaults?.set("\(marker) blockRemoved=\(found)", forKey: "evlin.lastIntervalDidEnd")
+            NSLog("[Evlin/Ext] block remove found=%d hash=%@", found ? 1 : 0, hashHex)
         }
     }
 
@@ -40,10 +50,11 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         }
     }
 
-    private func removeShieldByHashAndRecompute(hashHex: String) {
+    @discardableResult
+    private func removeShieldByHashAndRecompute(hashHex: String) -> Bool {
         guard let shieldData = defaults?.data(forKey: shieldsKey),
               var shields = decodeShields(from: shieldData)
-        else { return }
+        else { return false }
 
         // Find the record whose derived name matches the hash
         let targetKey = shields.keys.first(where: { key in
@@ -51,7 +62,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             let prefix = sha256Hex16(data)
             return prefix == hashHex
         })
-        guard let recordKey = targetKey else { return }
+        guard let recordKey = targetKey else { return false }
         shields.removeValue(forKey: recordKey)
 
         if let updated = encodeShields(shields) {
@@ -75,7 +86,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             store.shield.webDomainCategories = .all()
             store.shield.applications = nil
             store.shield.webDomains = nil
-            return
+            return true
         }
 
         let allApp = Set(shields.values.flatMap(\.appTokens))
@@ -86,22 +97,24 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         store.shield.applicationCategories = allCat.isEmpty ? nil : .specific(allCat)
         store.shield.webDomains = allWeb.isEmpty ? nil : allWeb
         store.shield.webDomainCategories = nil
+        return true
     }
 
     /// Symmetric to `removeShieldByHashAndRecompute` but for timed
     /// blocks: locate the BlockRecord whose bundleID hashes to this
     /// activity, drop it, then recompute `application.blockedApplications`
     /// from whatever's left.
-    private func removeBlockByHashAndRecompute(hashHex: String) {
+    @discardableResult
+    private func removeBlockByHashAndRecompute(hashHex: String) -> Bool {
         guard let blockData = defaults?.data(forKey: blocksKey),
               var blocks = decodeBlocks(from: blockData)
-        else { return }
+        else { return false }
 
         let target = blocks.keys.first { bundleID in
             let prefix = sha256Hex16(bundleID.data(using: .utf8) ?? Data())
             return prefix == hashHex
         }
-        guard let bundleID = target else { return }
+        guard let bundleID = target else { return false }
         blocks.removeValue(forKey: bundleID)
 
         if let updated = encodeBlocks(blocks) {
@@ -113,6 +126,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             ManagedSettings.Application(bundleIdentifier: $0.bundleID)
         })
         store.application.blockedApplications = blockedApps.isEmpty ? nil : blockedApps
+        return true
     }
 }
 

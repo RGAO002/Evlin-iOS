@@ -329,6 +329,27 @@ struct HomeSettingsSheet: View {
                         .foregroundStyle(.secondary)
                 }
 
+                // Diagnostic: did the DeviceActivityMonitor extension actually
+                // fire when the interval ended? Written by the extension itself
+                // (see EvlinDeviceActivityMonitor). If the schedule says ok but
+                // this is empty after expiresAt, iOS isn't dispatching the
+                // callback — likely an extension-install / auth issue.
+                Section {
+                    let lastFired = UserDefaults(suiteName: "group.com.evlin.ios")?
+                        .string(forKey: "evlin.lastIntervalDidEnd")
+                        ?? "(extension never fired since launch)"
+                    Text(lastFired)
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(lastFired.contains("shieldRemoved=false") ? Color.orange : Color.evOnSurface)
+                        .textSelection(.enabled)
+                } header: {
+                    Text("Last Extension Fire")
+                } footer: {
+                    Text("After a timed lock expires this should update within 1-2 min. If empty long after expiresAt, the extension isn't being woken — check that EvlinDeviceActivityMonitor is signed and installed.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+
                 Section("Mode") {
                     HStack {
                         Text("Current Mode")
