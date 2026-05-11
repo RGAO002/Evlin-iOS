@@ -242,6 +242,7 @@ actor ActiveLockStore {
             store.shield.webDomainCategories = .all()
             store.shield.applications = nil
             store.shield.webDomains = nil
+            writeRecomputeDiag(branch: "all", appTokens: 0, catTokens: 0, webTokens: 0)
             return
         }
 
@@ -254,6 +255,23 @@ actor ActiveLockStore {
         store.shield.applicationCategories = allCatTokens.isEmpty ? nil : .specific(allCatTokens)
         store.shield.webDomains = allWebTokens.isEmpty ? nil : allWebTokens
         store.shield.webDomainCategories = nil
+        writeRecomputeDiag(
+            branch: "union",
+            appTokens: allAppTokens.count,
+            catTokens: allCatTokens.count,
+            webTokens: allWebTokens.count
+        )
+    }
+
+    /// Records the most recent recomputeAndApply() invocation to the App Group
+    /// so HomeSettingsSheet can surface it. This is the only way to verify
+    /// that sweepExpired → recomputeAndApply actually executed AND what value
+    /// it wrote to `store.shield.applications` (which we can't read back).
+    private func writeRecomputeDiag(branch: String, appTokens: Int, catTokens: Int, webTokens: Int) {
+        let ts = ISO8601DateFormatter().string(from: Date())
+        let line = "\(ts) branch=\(branch) shields=\(shieldRecords.count) blocks=\(blockRecords.count)"
+            + " apps=\(appTokens) cats=\(catTokens) webs=\(webTokens)"
+        defaults?.set(line, forKey: "evlin.lastRecompute")
     }
 
     private func persist() {

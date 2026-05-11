@@ -65,21 +65,36 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
 
     @discardableResult
     private func removeShieldByHashAndRecompute(hashHex: String) -> Bool {
-        guard let shieldData = defaults?.data(forKey: shieldsKey),
-              var shields = decodeShields(from: shieldData)
-        else { return false }
+        // Read whatever the App Group says is current. If main-app sweepExpired
+        // already pre-empted us, this dict may already be missing the hashed
+        // record — that's fine, we still need to force-recompute the store
+        // (the previous `store.shield.applications` write may not have
+        // propagated, or sweepExpired set it from an actor thread that
+        // springboard hasn't picked up yet). Idempotent recompute is safe.
+        let shields: [String: ShieldRecord] = {
+            guard let data = defaults?.data(forKey: shieldsKey),
+                  let decoded = decodeShields(from: data) else { return [:] }
+            return decoded
+        }()
 
-        // Find the record whose derived name matches the hash
         let targetKey = shields.keys.first(where: { key in
             let data = key.data(using: .utf8) ?? Data()
             let prefix = sha256Hex16(data)
             return prefix == hashHex
         })
-        guard let recordKey = targetKey else { return false }
-        shields.removeValue(forKey: recordKey)
 
-        if let updated = encodeShields(shields) {
-            defaults?.set(updated, forKey: shieldsKey)
+        var mutated = shields
+        let removedRecord: Bool
+        if let recordKey = targetKey {
+            mutated.removeValue(forKey: recordKey)
+            if let updated = encodeShields(mutated) {
+                defaults?.set(updated, forKey: shieldsKey)
+            }
+            removedRecord = true
+        } else {
+            // Dict already swept by main app — still recompute to ensure
+            // the store reflects the current (possibly empty) record set.
+            removedRecord = false
         }
 
         // Recompute & apply (same logic as ActiveLockStore.recomputeAndApply)
@@ -94,23 +109,35 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         let blockedApps = Set(blocks.values.map { ManagedSettings.Application(bundleIdentifier: $0.bundleID) })
         store.application.blockedApplications = blockedApps.isEmpty ? nil : blockedApps
 
-        if shields.values.contains(where: { $0.appliesToAll }) {
+        if mutated.values.contains(where: { $0.appliesToAll }) {
             store.shield.applicationCategories = .all()
             store.shield.webDomainCategories = .all()
             store.shield.applications = nil
             store.shield.webDomains = nil
-            return true
+        } else {
+            let allApp = Set(mutated.values.flatMap(\.appTokens))
+            let allCat = Set(mutated.values.flatMap(\.categoryTokens))
+            let allWeb = Set(mutated.values.flatMap(\.webDomainTokens))
+
+            store.shield.applications = allApp.isEmpty ? nil : allApp
+            store.shield.applicationCategories = allCat.isEmpty ? nil : .specific(allCat)
+            store.shield.webDomains = allWeb.isEmpty ? nil : allWeb
+            store.shield.webDomainCategories = nil
         }
 
-        let allApp = Set(shields.values.flatMap(\.appTokens))
-        let allCat = Set(shields.values.flatMap(\.categoryTokens))
-        let allWeb = Set(shields.values.flatMap(\.webDomainTokens))
+        // Mark that the extension forced its own recompute. The diagnostic in
+        // HomeSettingsSheet's "Last Extension Fire" already shows shieldRemoved;
+        // augment it so we can tell apart 'pre-empted by main app + idempotent
+        // recompute' (removedRecord=false) from 'extension did the work itself'
+        // (removedRecord=true).
+        let ts = ISO8601DateFormatter().string(from: Date())
+        defaults?.set(
+            "ext_recompute_at=\(ts) shieldsRemaining=\(mutated.count)"
+                + " blocksRemaining=\(blocks.count) removedHere=\(removedRecord)",
+            forKey: "evlin.lastRecompute"
+        )
 
-        store.shield.applications = allApp.isEmpty ? nil : allApp
-        store.shield.applicationCategories = allCat.isEmpty ? nil : .specific(allCat)
-        store.shield.webDomains = allWeb.isEmpty ? nil : allWeb
-        store.shield.webDomainCategories = nil
-        return true
+        return removedRecord
     }
 
     /// Symmetric to `removeShieldByHashAndRecompute` but for timed

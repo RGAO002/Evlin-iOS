@@ -1,5 +1,7 @@
 import SwiftUI
 import FamilyControls
+import ManagedSettings
+import DeviceActivity
 import AVFoundation
 
 struct HomeSettingsSheet: View {
@@ -245,6 +247,28 @@ struct HomeSettingsSheet: View {
                         Label("Unlock All Apps", systemImage: "lock.open.fill")
                             .foregroundStyle(Color.evSecondary)
                     }
+
+                    // Nuclear reset — only use this when ActiveLockStore + the
+                    // ManagedSettings store have desynced (e.g. "lock IG" does
+                    // nothing but "lock FB" then locks both). Wipes every code
+                    // path that could write to the shield/block state:
+                    //   1. ManagedSettings.store.clearAllSettings() — Apple's
+                    //      official "drop every policy on this device" hammer
+                    //   2. ActiveLockStore.shieldRecords + blockRecords
+                    //   3. DeviceActivityCenter.stopMonitoring(.all) — kills
+                    //      every scheduled intervalDidEnd callback, so no
+                    //      ghost record can be re-applied later
+                    //   4. App Group UserDefaults — every evlin.* key
+                    //   5. Re-enable deletion protection (clearAllSettings
+                    //      drops application.denyAppRemoval too, which we
+                    //      MUST put back so the user can't accidentally
+                    //      uninstall Evlin and lose enforcement)
+                    Button(role: .destructive) {
+                        Task { await nuclearReset() }
+                    } label: {
+                        Label("Nuclear Reset (lock state)", systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(Color.evError)
+                    }
                 }
 
                 Section("Camera & Photos") {
@@ -346,6 +370,29 @@ struct HomeSettingsSheet: View {
                     Text("Last Extension Fire")
                 } footer: {
                     Text("After a timed lock expires this should update within 1-2 min. If empty long after expiresAt, the extension isn't being woken — check that EvlinDeviceActivityMonitor is signed and installed.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+
+                // Diagnostic: every recomputeAndApply() call writes here, both
+                // from the main app (ActiveLockStore.sweepExpired path) AND
+                // from any code path that mutates shields/blocks. If a timed
+                // shield's expiry passes and this stamp is FRESHER than the
+                // shield's expiresAt with apps=0, then the main app already
+                // cleared store.shield.applications — meaning the OS just
+                // hasn't propagated the ManagedSettings mutation yet.
+                Section {
+                    let lastRecompute = UserDefaults(suiteName: "group.com.evlin.ios")?
+                        .string(forKey: "evlin.lastRecompute")
+                        ?? "(no recompute since install)"
+                    Text(lastRecompute)
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(Color.evOnSurface)
+                        .textSelection(.enabled)
+                } header: {
+                    Text("Last Recompute")
+                } footer: {
+                    Text("Shows what ActiveLockStore last pushed to ManagedSettings. apps=0 means shield.applications was set to nil. If you see apps=0 but Apple is still shielding an app, the OS hasn't propagated the mutation yet.")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }
@@ -579,6 +626,54 @@ struct HomeSettingsSheet: View {
                 .font(.system(size: 12, design: .monospaced))
                 .foregroundStyle(Color.evOnSurfaceVariant)
                 .textSelection(.enabled)
+        }
+    }
+
+    /// Nuclear reset — wipes every layer that holds lock state. See the
+    /// Button comment above for rationale. Idempotent: safe to call when
+    /// nothing is locked. Async because ActiveLockStore is an actor.
+    private func nuclearReset() async {
+        // 1. Stop every scheduled DeviceActivity callback FIRST. If we don't,
+        //    a pending intervalDidEnd could fire mid-reset and write its own
+        //    recompute back on top of us.
+        DeviceActivityCenter().stopMonitoring()
+
+        // 2. Drop every ManagedSettings policy this app has set. This is
+        //    broader than clearLockRestrictions() — it also clears categories,
+        //    webDomains, application.denyAppRemoval, etc. We restore the
+        //    deletion-protection one explicitly in step 5.
+        ManagedSettingsStore().clearAllSettings()
+
+        // 3. Wipe ActiveLockStore's record dicts. unshieldAll/unblockAll also
+        //    re-run recomputeAndApply which (with empty dicts) writes nils
+        //    again — belt and suspenders after step 2.
+        _ = await ActiveLockStore.shared.unshieldAll()
+        _ = await ActiveLockStore.shared.unblockAll()
+
+        // 4. Scrub every evlin.* key in the App Group. Even though steps 1-3
+        //    cover the live state, persisted JSON for shield/block records
+        //    and diagnostic markers could mislead future debugging if left.
+        if let groupDefaults = UserDefaults(suiteName: "group.com.evlin.ios") {
+            for key in [
+                "evlin.shieldRecords",
+                "evlin.blockRecords",
+                "evlin.lastScheduleResult",
+                "evlin.lastIntervalDidEnd",
+                "evlin.lastRecompute",
+            ] {
+                groupDefaults.removeObject(forKey: key)
+            }
+        }
+
+        // 5. Re-enable deletion protection. clearAllSettings() drops
+        //    application.denyAppRemoval, which means after step 2 the parent
+        //    could accidentally delete Evlin → lose enforcement. Put it
+        //    back before returning.
+        await MainActor.run {
+            screenTimeManager.enableDeletionProtection()
+            // Update the local UI flag so the lock indicator agrees.
+            screenTimeManager.isUnlocked = true
+            NotificationCenter.default.post(name: .evlinLockStateChanged, object: false)
         }
     }
 }

@@ -288,18 +288,51 @@ struct ChatView: View {
                         .foregroundStyle(Color.evPrimaryFixedDim)
                 )
 
-            HStack(spacing: 4) {
-                ForEach(0..<3, id: \.self) { _ in
-                    Circle()
-                        .fill(Color.evOutlineVariant)
-                        .frame(width: 5, height: 5)
-                }
-            }
-            .opacity(0.8)
+            TypingDots()
 
             Spacer()
         }
         .padding(.vertical, Spacing.md)
+    }
+}
+
+/// Three dots that pulse in sequence — the standard "AI is thinking…" affordance.
+///
+/// Driven by TimelineView (not @State + repeatForever animations) so the loop
+/// stays perfectly smooth regardless of view-tree churn, scroll updates, or
+/// onAppear races. Each dot's scale + opacity are pure functions of clock
+/// time minus a per-dot phase offset, so there's no animation to "restart"
+/// when the view recomposes.
+private struct TypingDots: View {
+    /// Total loop length. 1.0s feels natural — slower than a heartbeat,
+    /// faster than impatient.
+    private let cycle: TimeInterval = 1.0
+    /// Stagger between dot 1 / 2 / 3 — a third of the cycle apart so the
+    /// pulse reads as a clean left-to-right wave.
+    private let stagger: TimeInterval = 0.18
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: false)) { context in
+            let t = context.date.timeIntervalSinceReferenceDate
+            HStack(spacing: 5) {
+                ForEach(0..<3, id: \.self) { i in
+                    let phase = (t - Double(i) * stagger).truncatingRemainder(dividingBy: cycle) / cycle
+                    // Bell curve over [0,1]: peak at 0.5, valley at 0/1.
+                    // sin(πx) is C¹-smooth so the pulse has no visible "snap".
+                    let pulse = sin(phase * .pi)
+                    let scale = 0.65 + 0.55 * pulse        // 0.65 → 1.2 → 0.65
+                    let opacity = 0.45 + 0.45 * pulse      // 0.45 → 0.9 → 0.45
+                    Circle()
+                        .fill(Color.evOutlineVariant)
+                        .frame(width: 6, height: 6)
+                        .scaleEffect(scale)
+                        .opacity(opacity)
+                }
+            }
+            // Reserve the maximum bounding height so the row doesn't jitter
+            // vertically as dots scale past 1.0.
+            .frame(height: 12)
+        }
     }
 }
 
