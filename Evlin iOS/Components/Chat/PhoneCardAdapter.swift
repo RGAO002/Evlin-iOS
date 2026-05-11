@@ -55,13 +55,12 @@ enum PhoneCardAdapter {
             )
 
         case "phone.unsupported_exclusion":
-            let target = stringFromDetail(payload, "excluded_target")
-                ?? stringFromDetail(payload, "target_name")
-                ?? payload.title
-            return CardRenderModel(
-                cardID: .D2,
-                context: makeContext(target: target, childName: childName)
-            )
+            // CardID.D2's view hardcodes "What does \"everything\" mean?" +
+            // "Lock ALL apps on Liam's phone" / "Just distracting categories"
+            // — that's the legacy ambiguity flow, not what backend's
+            // phone.unsupported_exclusion actually says. Return nil so
+            // PlanArchCardView renders the backend's real title/body/options.
+            return nil
 
         case "phone.replace_mode_required":
             let target = stringFromDetail(payload, "target_name") ?? payload.title
