@@ -186,13 +186,41 @@ struct PlanArchCardPayload: Codable {
     /// without requiring edits to ChatResponse. Returns nil if the
     /// data is not JSON or has no card_payload key.
     static func decodeFromChatResponseData(_ data: Data) -> PlanArchCardPayload? {
+        decodeAllFromChatResponseData(data).first
+    }
+
+    /// Pull ALL PlanArchCardPayloads from the response. Strategy-agent
+    /// responses can carry multiple cards in `card_payloads` (plural) when
+    /// the AI decided to emit several proposals + a question. Legacy
+    /// responses carry a single `card_payload` (singular). Read both,
+    /// dedupe by reference, return ordered list.
+    static func decodeAllFromChatResponseData(_ data: Data) -> [PlanArchCardPayload] {
         guard
-            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-            let raw = json["card_payload"]
-        else { return nil }
-        guard !(raw is NSNull) else { return nil }
-        guard let cardData = try? JSONSerialization.data(withJSONObject: raw)
-        else { return nil }
-        return try? JSONDecoder().decode(PlanArchCardPayload.self, from: cardData)
+            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return [] }
+        var raws: [Any] = []
+        if let list = json["card_payloads"] as? [Any] {
+            raws.append(contentsOf: list)
+        }
+        if let single = json["card_payload"], !(single is NSNull) {
+            // Avoid duplicating: if `card_payloads` already starts with the
+            // same dict (backend sets both for legacy compat), skip the
+            // singular copy.
+            let dupeOfFirst = raws.first.map { lhs in
+                NSDictionary(dictionary: lhs as? [String: Any] ?? [:])
+                    .isEqual(to: single as? [String: Any] ?? [:])
+            } ?? false
+            if !dupeOfFirst {
+                raws.append(single)
+            }
+        }
+        var out: [PlanArchCardPayload] = []
+        for raw in raws {
+            guard let cardData = try? JSONSerialization.data(withJSONObject: raw),
+                  let card = try? JSONDecoder().decode(PlanArchCardPayload.self, from: cardData)
+            else { continue }
+            out.append(card)
+        }
+        return out
     }
 }

@@ -27,9 +27,16 @@ class ChatViewModel: ObservableObject {
 
     // MARK: - Plan-arch dual-path
 
-    /// Set when the backend (with AGENT_PLAN_ARCH=1) returns a
-    /// card_payload field in the chat response. Phase 1 surfaces this
-    /// to UI; full wiring lands in a follow-on iOS task.
+    /// FIFO queue of cards the backend returned in this turn. Strategy-agent
+    /// responses can carry multiple cards (e.g. lock IG proposal + reflection
+    /// question for the name-calling part of a compound message). UI renders
+    /// queue.first, and when the user acts on it we removeFirst() so the next
+    /// card slides in.
+    @Published var pendingPlanArchCardQueue: [PlanArchCardPayload] = []
+
+    /// Convenience: the card currently visible in the UI. Read-only;
+    /// mutate via the queue. Kept as a property (not computed) so existing
+    /// SwiftUI bindings (`$viewModel.pendingPlanArchCard`) still compile.
     @Published var pendingPlanArchCard: PlanArchCardPayload?
 
     /// Lazy-tag sheets can come from the legacy ProposalDTO path or the new
@@ -1575,14 +1582,18 @@ class ChatViewModel: ObservableObject {
     /// parent sees a normal agent reply in the message list while the
     /// PlanArchCardView renders below for interaction.
     func tryHandlePlanArchCard(from data: Data, message: String? = nil) -> Bool {
-        guard let card = PlanArchCardPayload.decodeFromChatResponseData(data) else {
-            return false
-        }
-        self.pendingPlanArchCard = card
+        let cards = PlanArchCardPayload.decodeAllFromChatResponseData(data)
+        guard !cards.isEmpty else { return false }
+
+        // Replace the queue with this turn's cards. (Don't append — if a
+        // prior turn had unanswered cards, this turn's set supersedes.)
+        self.pendingPlanArchCardQueue = cards
+        self.pendingPlanArchCard = cards.first
+
         // Append a text bubble ONLY when the backend included a meaningful
         // message (strategy_agent's reasoning_summary). Fast-path responses
         // pass an empty message so the card alone speaks for itself with no
-        // redundant "Confirm action" chatter above it.
+        // redundant chatter above it.
         let trimmedMessage = (message ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmedMessage.isEmpty {
             self.messages.append(ChatMessage(role: .agent, content: trimmedMessage, timestamp: Date()))
@@ -1609,7 +1620,7 @@ class ChatViewModel: ObservableObject {
     /// Extracted from the original handlePlanArchOption body (no behaviour change).
     /// Handles cancel + plan-patch POST for .plan source cards.
     private func submitPlanArchPatch(card: PlanArchCardPayload, option opt: PlanArchCardOption) {
-        self.pendingPlanArchCard = nil
+        self.advancePlanArchCardQueue()
 
         if opt.cancelsPlan {
             self.messages.append(ChatMessage(role: .agent, content: "Cancelled.", timestamp: Date()))
@@ -1665,7 +1676,7 @@ class ChatViewModel: ObservableObject {
         // in 2B alongside the reflection submission review polling change.
         Task { @MainActor in
             self.errorMessage = "Event-card actions arrive in Phase 2B."
-            self.pendingPlanArchCard = nil
+            self.advancePlanArchCardQueue()
         }
     }
 
@@ -1678,8 +1689,18 @@ class ChatViewModel: ObservableObject {
             if !option.label.isEmpty {
                 self.inputText = option.label
             }
-            self.pendingPlanArchCard = nil
+            self.advancePlanArchCardQueue()
         }
+    }
+
+    /// Pop the front of the plan-arch card queue and bring the next card
+    /// (if any) into view. Used after the user acts on / dismisses a card.
+    @MainActor
+    func advancePlanArchCardQueue() {
+        if !pendingPlanArchCardQueue.isEmpty {
+            pendingPlanArchCardQueue.removeFirst()
+        }
+        pendingPlanArchCard = pendingPlanArchCardQueue.first
     }
 
     @MainActor
@@ -1739,7 +1760,7 @@ class ChatViewModel: ObservableObject {
     /// `handleTagSelection` saves the local alias and resumes the staged plan
     /// via `/parent/chat/plan-patch`.
     func handlePlanArchLazyTag(for card: PlanArchCardPayload) {
-        self.pendingPlanArchCard = nil
+        self.advancePlanArchCardQueue()
         let targetName = (card.detail["target_name"]?.value as? String) ?? "the app"
         let rawKind = (card.detail["target_kind"]?.value as? String) ?? "app"
         let kind: AliasKind = rawKind == "category" ? .category : .app
