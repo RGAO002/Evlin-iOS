@@ -26,8 +26,18 @@ struct NameWithIcon: View {
         HStack(spacing: 8) {
             iconView
                 .frame(width: 24, height: 24)
-            Text(name).font(titleFont)
+            Text(NameWithIcon.displayName(name)).font(titleFont)
         }
+    }
+
+    /// Show the name with an uppercase first letter. `name` is preserved
+    /// verbatim for icon-token lookup; only the rendered text is touched.
+    /// Uses `prefix(1).uppercased() + dropFirst()` rather than `.capitalized`
+    /// so multi-word names like "school apps" don't become "School Apps"
+    /// (we only want first-letter capitalization, not title-case).
+    static func displayName(_ name: String) -> String {
+        guard !name.isEmpty else { return name }
+        return name.prefix(1).uppercased() + name.dropFirst()
     }
 
     @ViewBuilder

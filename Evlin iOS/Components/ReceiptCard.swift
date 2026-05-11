@@ -138,10 +138,11 @@ struct ReceiptCard: View {
                 return (a.1 ?? .distantPast) > (b.1 ?? .distantPast)
             }
             let (strongest, strongestExpires) = sorted[0]
+            let shown = NameWithIcon.displayName(strongest.displayName)
             if let exp = strongestExpires {
-                return "Still shielded by \(strongest.displayName) until \(timeString(exp))."
+                return "Still shielded by \(shown) until \(timeString(exp))."
             }
-            return "Still shielded by \(strongest.displayName) permanently."
+            return "Still shielded by \(shown) permanently."
         }
 
         if effectiveState.possibleSavedListCoverage {
