@@ -309,6 +309,26 @@ struct HomeSettingsSheet: View {
                     }
                 }
 
+                // Diagnostic: last DeviceActivitySchedule attempt. If a timed
+                // shield isn't auto-releasing, this surfaces the exact reason
+                // (auth missing, interval invalid, monitoring limit hit, etc.).
+                // ActionExecutor writes this on every shield/block schedule.
+                Section {
+                    let lastResult = UserDefaults(suiteName: "group.com.evlin.ios")?
+                        .string(forKey: "evlin.lastScheduleResult")
+                        ?? "(no schedule attempted yet — set a timed lock first)"
+                    Text(lastResult)
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(lastResult.contains("FAILED") ? Color.red : Color.evOnSurface)
+                        .textSelection(.enabled)
+                } header: {
+                    Text("Last Auto-Unshield Schedule")
+                } footer: {
+                    Text("Should say 'schedule_ok' after every timed lock. If 'FAILED', the auto-unlock won't fire — copy the error and tell us.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+
                 Section("Mode") {
                     HStack {
                         Text("Current Mode")
