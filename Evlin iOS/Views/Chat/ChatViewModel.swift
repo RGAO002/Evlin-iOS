@@ -205,6 +205,17 @@ class ChatViewModel: ObservableObject {
         let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
 
+        // Dismiss any stale card / queue from the previous turn. The user
+        // typing a new question signals they've moved on; otherwise the
+        // old card stays pinned to the bottom and the new user bubble +
+        // thinking indicator render ABOVE it, breaking the
+        // "newest at the bottom" chat convention. The staged plan_token
+        // on the backend expires from ProposalStore naturally (TTL 600s);
+        // no explicit cancel needed for this UX fix.
+        pendingPlanArchCard = nil
+        pendingPlanArchCardQueue = []
+        currentCard = nil
+
         messages.append(ChatMessage(role: .parent, content: text, timestamp: Date()))
         inputText = ""
         isThinking = true
