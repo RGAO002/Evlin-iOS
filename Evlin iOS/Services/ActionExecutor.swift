@@ -50,7 +50,29 @@ final class ActionExecutor: @unchecked Sendable {
             switch result {
             case .added, .upgradedToPermanent, .extendedTimed:
                 if let expiresAt = record.expiresAt {
-                    try? scheduleRelock(recordKey: record.recordKey, expiresAt: expiresAt)
+                    // Don't swallow scheduling errors with try? — when this
+                    // throws, the shield gets applied but the auto-unshield
+                    // never fires, and the parent only finds out 15 minutes
+                    // later when the app is still locked. Log to NSLog so it
+                    // shows in Xcode console + write a marker to App Group
+                    // UserDefaults so we can read it from the chat UI later.
+                    do {
+                        try scheduleRelock(recordKey: record.recordKey, expiresAt: expiresAt)
+                        let ok = "schedule_ok recordKey=\(record.recordKey) " +
+                                 "expiresAt=\(ISO8601DateFormatter().string(from: expiresAt))"
+                        NSLog("[Evlin] %@", ok)
+                        UserDefaults(suiteName: "group.com.evlin.ios")?.set(
+                            ok, forKey: "evlin.lastScheduleResult"
+                        )
+                    } catch {
+                        let err = "schedule_FAILED recordKey=\(record.recordKey) " +
+                                  "expiresAt=\(ISO8601DateFormatter().string(from: expiresAt)) " +
+                                  "error=\(error.localizedDescription)"
+                        NSLog("[Evlin] %@", err)
+                        UserDefaults(suiteName: "group.com.evlin.ios")?.set(
+                            err, forKey: "evlin.lastScheduleResult"
+                        )
+                    }
                 }
                 let eff = await currentEffectiveState(forShieldRecord: record, cmd: cmd)
                 return buildConfirmReceipt(verb: .shield, cmd: cmd, record: record, effectiveState: eff)
@@ -238,8 +260,20 @@ final class ActionExecutor: @unchecked Sendable {
         let result = await ActiveLockStore.shared.addBlock(record)
         // Schedule auto-unblock for timed blocks. The DeviceActivityMonitor
         // extension fires intervalDidEnd at expiry and removes the record.
+        // Don't swallow with try? — see executeShield for rationale.
         if let exp = expiresAt {
-            try? scheduleAutoUnblock(bundleID: bundleID, expiresAt: exp)
+            do {
+                try scheduleAutoUnblock(bundleID: bundleID, expiresAt: exp)
+                NSLog("[Evlin] block_schedule_ok bundleID=%@ expiresAt=%@",
+                      bundleID, ISO8601DateFormatter().string(from: exp))
+            } catch {
+                NSLog("[Evlin] block_schedule_FAILED bundleID=%@ error=%@",
+                      bundleID, error.localizedDescription)
+                UserDefaults(suiteName: "group.com.evlin.ios")?.set(
+                    "block_schedule_FAILED bundleID=\(bundleID) error=\(error.localizedDescription)",
+                    forKey: "evlin.lastScheduleResult"
+                )
+            }
         }
         let query = AppQuery(bundleID: bundleID, categoryHint: nil)
         let state = await ActiveLockStore.shared.effectiveState(for: query)

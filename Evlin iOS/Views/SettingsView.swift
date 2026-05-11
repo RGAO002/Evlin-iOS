@@ -261,6 +261,25 @@ struct SettingsView: View {
                     Text("Chat")
                 }
 
+                // MARK: - Schedule diagnostic
+                // Reads the last DeviceActivitySchedule result that ActionExecutor
+                // wrote to App Group UserDefaults. If a timed shield isn't auto-
+                // releasing, this tells us whether the schedule even registered.
+                Section {
+                    let lastResult = UserDefaults(suiteName: "group.com.evlin.ios")?
+                        .string(forKey: "evlin.lastScheduleResult") ?? "(no schedule attempted yet)"
+                    Text(lastResult)
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(lastResult.contains("FAILED") ? Color.red : Color.evOnSurface)
+                        .textSelection(.enabled)
+                } header: {
+                    Text("Last Auto-Unshield Schedule")
+                } footer: {
+                    Text("Should say 'schedule_ok' after every timed lock. If 'FAILED', the auto-unlock won't fire — paste the error.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+
                 // MARK: - Device Mode
                 Section {
                     HStack {
