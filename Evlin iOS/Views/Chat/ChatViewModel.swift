@@ -273,7 +273,7 @@ class ChatViewModel: ObservableObject {
                 // (AGENT_PLAN_ARCH=1), surface it via the new renderer path and skip
                 // the legacy proposal/action handling. Backwards-compatible: when
                 // AGENT_PLAN_ARCH=0, card_payload is absent, and this returns false.
-                if await MainActor.run(body: { self.tryHandlePlanArchCard(from: rawData) }) {
+                if await MainActor.run(body: { self.tryHandlePlanArchCard(from: rawData, message: resp.message) }) {
                     await MainActor.run { self.isThinking = false }
                     return
                 }
@@ -1574,18 +1574,19 @@ class ChatViewModel: ObservableObject {
     /// ALSO appends a chat bubble with the card's title (+ body) so the
     /// parent sees a normal agent reply in the message list while the
     /// PlanArchCardView renders below for interaction.
-    func tryHandlePlanArchCard(from data: Data) -> Bool {
+    func tryHandlePlanArchCard(from data: Data, message: String? = nil) -> Bool {
         guard let card = PlanArchCardPayload.decodeFromChatResponseData(data) else {
             return false
         }
         self.pendingPlanArchCard = card
-        let composed: String
-        if let body = card.body, !body.isEmpty {
-            composed = "\(card.title)\n\n\(body)"
-        } else {
-            composed = card.title
+        // Append a text bubble ONLY when the backend included a meaningful
+        // message (strategy_agent's reasoning_summary). Fast-path responses
+        // pass an empty message so the card alone speaks for itself with no
+        // redundant "Confirm action" chatter above it.
+        let trimmedMessage = (message ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedMessage.isEmpty {
+            self.messages.append(ChatMessage(role: .agent, content: trimmedMessage, timestamp: Date()))
         }
-        self.messages.append(ChatMessage(role: .agent, content: composed, timestamp: Date()))
         return true
     }
 
