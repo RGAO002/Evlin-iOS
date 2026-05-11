@@ -87,12 +87,21 @@ enum PhoneCardAdapter {
                 )
             )
 
-        case "phone.danger_confirm", "phone.proposal_confirm":
+        case "phone.danger_confirm":
+            // Block-style destructive confirm: 'Block X forever / unblock from
+            // home screen' UX. Keep A1 for this kind only.
             let summary = stringFromDetail(payload, "action_summary") ?? payload.title
             return CardRenderModel(
                 cardID: .A1,
                 context: makeContext(target: summary, childName: childName)
             )
+
+        case "phone.proposal_confirm":
+            // Generic 'Shield X for N min — confirm?' from strategy_agent or
+            // fast-path. A1 has hardcoded BLOCK copy that doesn't fit shield
+            // semantics. Return nil so ChatView falls back to PlanArchCardView,
+            // which renders title/body/options from the payload as-is.
+            return nil
 
         case "phone.unsupported_in_mode":
             let target = stringFromDetail(payload, "target_name") ?? payload.title
