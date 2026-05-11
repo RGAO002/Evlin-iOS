@@ -190,6 +190,12 @@ actor ActiveLockStore {
             return true
         case .exactApp:
             if let t = query.token, record.appTokens.contains(t) { return true }
+            if let raw = query.bundleID {
+                let bid = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !bid.isEmpty, record.targetKey == bid.lowercased() {
+                    return true
+                }
+            }
             return false
         case .savedList:
             if let t = query.token, record.appTokens.contains(t) { return true }
@@ -247,22 +253,34 @@ actor ActiveLockStore {
     }
 
     private func persist() {
-        if let data = try? PropertyListEncoder().encode(shieldRecords) {
+        // `PropertyListEncoder` can trip `swift_dynamicCastFailure` encoding
+        // `ShieldRecord`'s FamilyControls token sets (crash seen iOS 26 / TestFlight).
+        // JSON survives the full Codable surface for `[String: ShieldRecord]`.
+        if let data = try? JSONEncoder().encode(shieldRecords) {
             defaults?.set(data, forKey: shieldsKey)
         }
-        if let data = try? PropertyListEncoder().encode(blockRecords) {
+        if let data = try? JSONEncoder().encode(blockRecords) {
             defaults?.set(data, forKey: blocksKey)
         }
     }
 
     private func restore() {
-        if let data = defaults?.data(forKey: shieldsKey),
-           let decoded = try? PropertyListDecoder().decode([String: ShieldRecord].self, from: data) {
-            shieldRecords = decoded
+        if let data = defaults?.data(forKey: shieldsKey) {
+            if let decoded = try? JSONDecoder().decode([String: ShieldRecord].self, from: data) {
+                shieldRecords = decoded
+            } else if let decoded = try? PropertyListDecoder().decode([String: ShieldRecord].self, from: data) {
+                shieldRecords = decoded
+                // One-shot migrate legacy plist payloads to JSON.
+                persist()
+            }
         }
-        if let data = defaults?.data(forKey: blocksKey),
-           let decoded = try? PropertyListDecoder().decode([String: BlockRecord].self, from: data) {
-            blockRecords = decoded
+        if let data = defaults?.data(forKey: blocksKey) {
+            if let decoded = try? JSONDecoder().decode([String: BlockRecord].self, from: data) {
+                blockRecords = decoded
+            } else if let decoded = try? PropertyListDecoder().decode([String: BlockRecord].self, from: data) {
+                blockRecords = decoded
+                persist()
+            }
         }
     }
 }
