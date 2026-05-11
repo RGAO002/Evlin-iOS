@@ -21,16 +21,13 @@ enum ReflectionCardAdapter {
         switch payload.kind {
 
         case "reflection.confirm_propose":
-            // "About to trigger reflection: <reason>". Confirm = Esen explicitly approves
-            // Gemini spending tokens. Cancel = abandon.
-            let reason = stringFromDetail(payload, "reflection_reason")
-                ?? stringFromDetail(payload, "reason")
-                ?? payload.title
-            let summary = "About to trigger reflection: \(reason)"
-            return CardRenderModel(
-                cardID: .A1,
-                context: makeContext(target: summary, childName: childName)
-            )
+            // Strategy_agent emits reflection.confirm_propose with title like
+            // "Start a reflection?" + body=rationale + options=[Start reflection,
+            // Cancel]. A1 has hardcoded BLOCK copy ("Blocking hides the app...")
+            // that doesn't fit reflection semantics. Return nil so ChatView
+            // falls back to PlanArchCardView which renders title/body/options
+            // from the payload as-is. Same pattern as phone.proposal_confirm.
+            return nil
 
         case "reflection.confirm_cancel":
             // "Cancel active reflection?"
