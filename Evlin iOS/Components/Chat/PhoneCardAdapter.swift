@@ -103,6 +103,14 @@ enum PhoneCardAdapter {
             // which renders title/body/options from the payload as-is.
             return nil
 
+        case "phone.block_max_only":
+            // Validator rule_11: parent tried to block in Std mode. Backend
+            // builds the explanation + 'Shield X for 30 min instead' option
+            // directly into payload.title/body/options. PlanArchCardView
+            // renders those as-is. The legacy D2 ('What does everything mean?')
+            // routing was nonsense here — the payload semantic isn't ambiguity.
+            return nil
+
         case "phone.unsupported_in_mode":
             let target = stringFromDetail(payload, "target_name") ?? payload.title
             return CardRenderModel(
