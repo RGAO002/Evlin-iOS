@@ -52,14 +52,21 @@ struct PlanArchCardView: View {
                     .multilineTextAlignment(.leading)
             }
 
-            // lazy_tag CardType: render a single "Pick the app" CTA that
-            // drives into FamilyActivityPicker; CustomTokenPickerView
-            // handles the rest.
+            // lazy_tag CardType: render a single "Pick the app/category" CTA
+            // that drives into FamilyActivityPicker; CustomTokenPickerView
+            // handles the rest. The button label tracks detail.target_kind
+            // so "lock entertainment" (a category) reads "Pick the category"
+            // instead of "Pick the app" — the picker itself already
+            // distinguishes (CustomTokenPickerView reads target_kind), but
+            // the wrong label here misleads parents into thinking they
+            // need to tag an app.
             if card.type == .lazyTag {
+                let rawKind = (card.detail["target_kind"]?.value as? String) ?? "app"
+                let cta = rawKind == "category" ? "Pick the category" : "Pick the app"
                 Button {
                     onLazyTag?(card)
                 } label: {
-                    Text("Pick the app")
+                    Text(cta)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 10)
                         .background(Color.accentColor)
