@@ -123,6 +123,15 @@ struct ReceiptCard: View {
     }
 
     /// Effective-state line per spec §8.3 — honest about indeterminate coverage.
+    ///
+    /// "by Evlin" wording rationale: the previous "Still shielded by
+    /// {strongestShieldName}" produced self-referential nonsense like
+    /// "Still shielded by Instagram until 1:28 AM" after a parent shielded
+    /// Instagram — the shield NAME and the targeted APP are the same, so
+    /// "X is shielded by X" reads as a bug. The agent doing the shielding
+    /// is Evlin (this app), not the app being shielded. Reword to "by
+    /// Evlin" everywhere. We still pick the strongest cover internally
+    /// so we get the correct expiry timestamp.
     private var effectiveStateLine: String? {
         guard let effectiveState = effectiveState else { return nil }
         if effectiveState.isBlocked { return "Still blocked." }
@@ -137,12 +146,11 @@ struct ReceiptCard: View {
                 if a.1 != nil && b.1 == nil { return false }
                 return (a.1 ?? .distantPast) > (b.1 ?? .distantPast)
             }
-            let (strongest, strongestExpires) = sorted[0]
-            let shown = NameWithIcon.displayName(strongest.displayName)
+            let (_, strongestExpires) = sorted[0]
             if let exp = strongestExpires {
-                return "Still shielded by \(shown) until \(timeString(exp))."
+                return "Still shielded by Evlin until \(timeString(exp))."
             }
-            return "Still shielded by \(shown) permanently."
+            return "Still shielded by Evlin permanently."
         }
 
         if effectiveState.possibleSavedListCoverage {
