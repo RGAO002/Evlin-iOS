@@ -95,11 +95,20 @@ class APIClient: ObservableObject {
         let receipts: [ReceiptDTO]?
         let cancelledProposals: [String]?
         let queuedCommands: [PlanPatchQueuedCommand]?
+        // True when the deterministic fastpath router produced this
+        // response. False when the request fell through to strategy_agent.
+        // Drives whether ChatView shows the "This isn't what I meant"
+        // button — on AI-emitted cards, re-tapping reinterpret would just
+        // send the same message back to the same AI, which is useless.
+        // Defaults false for back-compat with older backends that don't
+        // set the field.
+        let viaFastpath: Bool?
 
         enum CodingKeys: String, CodingKey {
             case message, reasoning, action, proposals, receipts
             case queuedCommands = "queued_commands"
             case cancelledProposals = "cancelled_proposals"
+            case viaFastpath = "via_fastpath"
         }
     }
 

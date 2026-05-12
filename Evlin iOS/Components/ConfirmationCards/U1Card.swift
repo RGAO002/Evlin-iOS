@@ -34,14 +34,24 @@ struct U1Card: View {
                         .clipShape(RoundedRectangle(cornerRadius: 12))
                 }
                 .disabled(selected.isEmpty)
-                Button(action: onUnlockEverything) {
-                    Text("Unlock everything")
-                        .font(.system(size: 15, weight: .heavy))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 11)
-                        .background(Color.evSurfaceContainerLow)
-                        .foregroundStyle(Color.evError)
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
+
+                // "Unlock everything" is redundant for a single-shield card —
+                // there's only one thing to unlock, so "selected" and
+                // "everything" mean the same thing. Worse, the backend's
+                // single-shield card factory doesn't emit a target.kind=="all"
+                // option, so the handler that maps "everything" to that
+                // option becomes a no-op (it taps and nothing happens).
+                // Hide the button when there's nothing to disambiguate.
+                if entries.count > 1 {
+                    Button(action: onUnlockEverything) {
+                        Text("Unlock everything")
+                            .font(.system(size: 15, weight: .heavy))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 11)
+                            .background(Color.evSurfaceContainerLow)
+                            .foregroundStyle(Color.evError)
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                    }
                 }
                 Button(action: onCancel) {
                     Text("Cancel")
@@ -107,10 +117,16 @@ struct U1Card: View {
             default: return entry.kind.capitalized
             }
         }()
+        // Expiry copy options:
+        //   - has expiresAtISO       → "Unlocks 1:28 AM"
+        //   - no expiry (permanent)  → "Permanent — manual unlock only"
+        // The previous fallback "Until you unlock" was ambiguous — it
+        // suggested an actual time would resolve later, but for permanent
+        // shields none ever will. Make the permanence explicit.
         let expiry: String = {
             guard let iso = entry.expiresAtISO,
                   let date = ISO8601DateFormatter().date(from: iso)
-            else { return "Until you unlock" }
+            else { return "Permanent — manual unlock only" }
             let f = DateFormatter()
             f.dateStyle = .none
             f.timeStyle = .short

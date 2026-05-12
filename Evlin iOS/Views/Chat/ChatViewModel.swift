@@ -39,6 +39,12 @@ class ChatViewModel: ObservableObject {
     /// SwiftUI bindings (`$viewModel.pendingPlanArchCard`) still compile.
     @Published var pendingPlanArchCard: PlanArchCardPayload?
 
+    /// True iff the most recent backend response came from the
+    /// deterministic fastpath router (vs strategy_agent). Drives whether
+    /// "This isn't what I meant" shows on the current card. Reset when
+    /// the user sends a new message; updated on every chat response.
+    @Published var lastResponseViaFastpath: Bool = false
+
     /// Lazy-tag sheets can come from the legacy ProposalDTO path or the new
     /// plan-arch card path. The plan-arch path must POST a plan-patch after
     /// saving the local alias; legacy only clears pendingAliasMisses.
@@ -323,6 +329,13 @@ class ChatViewModel: ObservableObject {
                     forceConfirmations: forceConfirmations,
                     skipFastpath: skipFastpath
                 )
+                // Source flag for "This isn't what I meant" gating — must
+                // be updated BEFORE the response handlers append the
+                // pendingPlanArchCard so ChatView's card-render branch
+                // observes the correct flag value on the same render pass.
+                await MainActor.run {
+                    self.lastResponseViaFastpath = resp.viaFastpath ?? false
+                }
                 // Plan-arch dual-path: if the backend returned a card_payload field
                 // (AGENT_PLAN_ARCH=1), surface it via the new renderer path and skip
                 // the legacy proposal/action handling. Backwards-compatible: when

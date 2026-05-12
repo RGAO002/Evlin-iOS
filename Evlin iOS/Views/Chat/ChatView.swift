@@ -289,26 +289,33 @@ struct ChatView: View {
 
     // MARK: - "This isn't what I meant" escape hatch
     //
-    // Shown below every confirm-style card. Tapping resends the parent's
-    // most recent user message with `skip_fastpath=true` so the backend
-    // routes it through strategy_agent (the LLM) instead of the
+    // Shown ONLY below fastpath-emitted cards. Tapping resends the
+    // parent's most recent user message with `skip_fastpath=true` so the
+    // backend routes it through strategy_agent (the LLM) instead of the
     // deterministic fastpath router that produced the current card.
     //
-    // Disabled (greyed out) when there's no parent-side message in
-    // history yet — that should never happen if a card is on screen
-    // (a card requires a prior user turn), but defending against
-    // weird states is cheap.
+    // Hidden entirely on AI-emitted cards. Re-tapping reinterpret there
+    // would just send the same message back to the same LLM — useless.
+    // Backend signals source via `ChatResponse.via_fastpath`; iOS mirrors
+    // that into `viewModel.lastResponseViaFastpath`.
+    //
+    // Also gated on the presence of a parent-side message in history
+    // (defensive — a card on screen should always imply one, but
+    // empty-history rendering shouldn't fire reinterpret).
+    @ViewBuilder
     private var reinterpretButton: some View {
-        Button {
-            viewModel.reinterpretWithAI()
-        } label: {
-            Text("This isn't what I meant")
-                .font(.evBodySmall)
-                .foregroundStyle(Color.evPrimary)
-                .padding(.vertical, Spacing.sm)
-                .frame(maxWidth: .infinity)
+        if viewModel.lastResponseViaFastpath {
+            Button {
+                viewModel.reinterpretWithAI()
+            } label: {
+                Text("This isn't what I meant")
+                    .font(.evBodySmall)
+                    .foregroundStyle(Color.evPrimary)
+                    .padding(.vertical, Spacing.sm)
+                    .frame(maxWidth: .infinity)
+            }
+            .disabled(!viewModel.messages.contains(where: { $0.role == .parent }))
         }
-        .disabled(!viewModel.messages.contains(where: { $0.role == .parent }))
     }
 
     // MARK: - Thinking Indicator
