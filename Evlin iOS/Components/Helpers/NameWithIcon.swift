@@ -32,13 +32,39 @@ struct NameWithIcon: View {
 
     /// Show the name with an uppercase first letter. `name` is preserved
     /// verbatim for icon-token lookup; only the rendered text is touched.
-    /// Uses `prefix(1).uppercased() + dropFirst()` rather than `.capitalized`
-    /// so multi-word names like "school apps" don't become "School Apps"
-    /// (we only want first-letter capitalization, not title-case).
+    /// Upgrade a routing-keyed name ("ig") to its user-facing display
+    /// form ("Instagram"). Mirrors backend's
+    /// `app.services.fastpath.intent_dictionary.BUILTIN_ALIASES` so the
+    /// receipt card and the chat bubble agree on naming.
+    ///
+    /// Routing keys (`LocalAliasStore` lookups, `ActiveLockStore` keys)
+    /// stay lowercase — only this display string is upgraded.
+    /// Non-builtin names fall through to first-letter capitalization
+    /// ("school apps" → "School apps") rather than `.capitalized`
+    /// (which would title-case to "School Apps").
     static func displayName(_ name: String) -> String {
         guard !name.isEmpty else { return name }
+        let low = name.lowercased()
+        if let formal = builtinAliasDisplayName[low] {
+            return formal
+        }
         return name.prefix(1).uppercased() + name.dropFirst()
     }
+
+    /// MUST stay in sync with backend's `BUILTIN_ALIASES`. Adding here
+    /// without the backend (or vice versa) means the chat bubble and
+    /// the receipt card disagree on whether to say "Ig" or "Instagram".
+    private static let builtinAliasDisplayName: [String: String] = [
+        "ig": "Instagram",
+        "insta": "Instagram",
+        "fb": "Facebook",
+        "tt": "TikTok",
+        "yt": "YouTube",
+        "wa": "WhatsApp",
+        "sc": "Snapchat",
+        "twit": "Twitter",
+        "discord": "Discord",
+    ]
 
     @ViewBuilder
     private var iconView: some View {
