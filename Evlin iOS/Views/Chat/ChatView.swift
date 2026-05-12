@@ -134,9 +134,12 @@ struct ChatView: View {
 
                         // Confirmation card (Phase 9) — rendered below the message list.
                         if let (cardID, context, handlers) = viewModel.currentCard {
-                            CardDispatcher(cardID: cardID, context: context, handlers: handlers)
-                                .padding(.top, Spacing.md)
-                                .transition(.opacity.combined(with: .scale))
+                            VStack(spacing: Spacing.sm) {
+                                CardDispatcher(cardID: cardID, context: context, handlers: handlers)
+                                reinterpretButton
+                            }
+                            .padding(.top, Spacing.md)
+                            .transition(.opacity.combined(with: .scale))
                         }
 
                         // Plan-arch card (AGENT_PLAN_ARCH=1) — typed CardPayload
@@ -146,36 +149,45 @@ struct ChatView: View {
                         if let planArchCard = viewModel.pendingPlanArchCard {
                             // Strategy-agent T11.12 — question.<style> card path.
                             if let qcard = QuestionCardAdapter.parse(planArchCard) {
-                                QuestionCardView(
-                                    card: qcard,
-                                    onAnswer: { body in
-                                        Task { await viewModel.sendAnswer(body) }
-                                    },
-                                    onCancel: {
-                                        viewModel.pendingPlanArchCard = nil
-                                    }
-                                )
+                                VStack(spacing: Spacing.sm) {
+                                    QuestionCardView(
+                                        card: qcard,
+                                        onAnswer: { body in
+                                            Task { await viewModel.sendAnswer(body) }
+                                        },
+                                        onCancel: {
+                                            viewModel.pendingPlanArchCard = nil
+                                        }
+                                    )
+                                    reinterpretButton
+                                }
                                 .padding(.top, Spacing.md)
                                 .transition(.opacity.combined(with: .scale))
                             } else if let renderModel = PlanArchCardAdapter.adapt(
                                 planArchCard, childName: viewModel.childName
                             ) {
                                 // Phase 2A: dispatch through the adapter back onto polished cards.
-                                CardDispatcher(
-                                    cardID: renderModel.cardID,
-                                    context: renderModel.context,
-                                    handlers: viewModel.makePlanArchHandlers(for: planArchCard)
-                                )
+                                VStack(spacing: Spacing.sm) {
+                                    CardDispatcher(
+                                        cardID: renderModel.cardID,
+                                        context: renderModel.context,
+                                        handlers: viewModel.makePlanArchHandlers(for: planArchCard)
+                                    )
+                                    reinterpretButton
+                                }
                                 .padding(.top, Spacing.md)
                                 .transition(.opacity.combined(with: .scale))
                             } else {
                                 // Unknown kind — debug fallback only. Spec §1 acceptance requires
                                 // every known kind to go through the adapter.
-                                PlanArchCardView(
-                                    card: planArchCard,
-                                    onOption: { opt in viewModel.handlePlanArchOption(opt) },
-                                    onLazyTag: { card in viewModel.handlePlanArchLazyTag(for: card) }
-                                )
+                                VStack(spacing: Spacing.sm) {
+                                    PlanArchCardView(
+                                        card: planArchCard,
+                                        onOption: { opt in viewModel.handlePlanArchOption(opt) },
+                                        onLazyTag: { card in viewModel.handlePlanArchLazyTag(for: card) }
+                                    )
+                                    reinterpretButton
+                                }
                                 .padding(.top, Spacing.md)
                                 .transition(.opacity.combined(with: .scale))
                             }
@@ -273,6 +285,30 @@ struct ChatView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.vertical, 20)
+    }
+
+    // MARK: - "This isn't what I meant" escape hatch
+    //
+    // Shown below every confirm-style card. Tapping resends the parent's
+    // most recent user message with `skip_fastpath=true` so the backend
+    // routes it through strategy_agent (the LLM) instead of the
+    // deterministic fastpath router that produced the current card.
+    //
+    // Disabled (greyed out) when there's no parent-side message in
+    // history yet — that should never happen if a card is on screen
+    // (a card requires a prior user turn), but defending against
+    // weird states is cheap.
+    private var reinterpretButton: some View {
+        Button {
+            viewModel.reinterpretWithAI()
+        } label: {
+            Text("This isn't what I meant")
+                .font(.evBodySmall)
+                .foregroundStyle(Color.evPrimary)
+                .padding(.vertical, Spacing.sm)
+                .frame(maxWidth: .infinity)
+        }
+        .disabled(!viewModel.messages.contains(where: { $0.role == .parent }))
     }
 
     // MARK: - Thinking Indicator

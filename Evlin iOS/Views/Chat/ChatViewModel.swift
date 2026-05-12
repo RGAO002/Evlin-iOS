@@ -230,6 +230,35 @@ class ChatViewModel: ObservableObject {
         sendMessage()
     }
 
+    /// Re-send the parent's most recent user message with `skip_fastpath=true`
+    /// so the backend bypasses its deterministic router and routes through
+    /// strategy_agent (the LLM path). Wired to the "This isn't what I meant"
+    /// button below every confirm card — gives the parent a one-tap escape
+    /// when the fastpath interpreted their words wrong.
+    ///
+    /// Discards the current card / pending plan-arch queue so the next AI
+    /// reply replaces them; user sees typing dots immediately so the UI
+    /// doesn't feel frozen during the LLM round-trip.
+    func reinterpretWithAI() {
+        guard let lastUser = messages.last(where: { $0.role == .parent })?.content,
+              !lastUser.isEmpty else {
+            return
+        }
+
+        // Wipe the card surfaces — the new turn will repopulate them.
+        // We do NOT remove the user message from history; the LLM benefits
+        // from seeing both turns ("user said X, AI's first attempt was a
+        // wrong fastpath card, now reinterpret").
+        pendingPlanArchCard = nil
+        pendingPlanArchCardQueue = []
+        currentCard = nil
+        isThinking = true
+        errorMessage = nil
+        lastUserMessageForCard = lastUser
+
+        dispatchChat(userMessage: lastUser, forceConfirmations: [], skipFastpath: true)
+    }
+
     // MARK: - Seed initial messages
 
     private func seedInitialMessages() {
@@ -273,7 +302,11 @@ class ChatViewModel: ObservableObject {
     /// `userMessage` is the parent-visible text that produced this call.
     /// When the dispatcher rewrites the message (card → resend), the new parent
     /// bubble is appended BEFORE calling this so history ordering is correct.
-    private func dispatchChat(userMessage: String, forceConfirmations: [String]) {
+    private func dispatchChat(
+        userMessage: String,
+        forceConfirmations: [String],
+        skipFastpath: Bool = false,
+    ) {
         let history: [[String: String]] = messages.suffix(10).map { msg in
             ["role": msg.role == .parent ? "parent" : "agent", "content": msg.content]
         }
@@ -287,7 +320,8 @@ class ChatViewModel: ObservableObject {
                     message: userMessage,
                     childName: self.childName,
                     history: history,
-                    forceConfirmations: forceConfirmations
+                    forceConfirmations: forceConfirmations,
+                    skipFastpath: skipFastpath
                 )
                 // Plan-arch dual-path: if the backend returned a card_payload field
                 // (AGENT_PLAN_ARCH=1), surface it via the new renderer path and skip
@@ -1539,7 +1573,8 @@ class ChatViewModel: ObservableObject {
         message: String,
         childName: String,
         history: [[String: String]],
-        forceConfirmations: [String]
+        forceConfirmations: [String],
+        skipFastpath: Bool = false
     ) async throws -> (APIClient.ChatResponse, Data) {
         let familyID = UserDefaults.standard.string(forKey: "evlin.familyID")
         let bigKidChildID = UserDefaults.standard.string(forKey: "evlin.childDeviceID")
@@ -1551,7 +1586,8 @@ class ChatViewModel: ObservableObject {
             family_id: familyID,
             force_confirmations: forceConfirmations,
             child_device_id: (bigKidChildID?.isEmpty == false) ? bigKidChildID : nil,
-            client_alias_state: currentClientAliasStateCodable()
+            client_alias_state: currentClientAliasStateCodable(),
+            skip_fastpath: skipFastpath
         )
         let encodedBody = try JSONEncoder().encode(bodyObj)
 

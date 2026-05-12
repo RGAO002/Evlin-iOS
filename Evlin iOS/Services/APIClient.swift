@@ -61,6 +61,12 @@ class APIClient: ObservableObject {
         // Plan-arch: parent-side LocalAliasStore snapshot so the validator can
         // avoid lazy_tag cards for apps/categories already known on this device.
         let client_alias_state: [String: [String]]?
+        // When true the backend skips its deterministic fastpath router and
+        // sends the same message straight to strategy_agent. Used by the
+        // "This isn't what I meant" button below confirm cards so the parent
+        // can ask the AI to re-interpret a turn the fastpath got wrong.
+        // Default false → normal fastpath-first flow.
+        let skip_fastpath: Bool
     }
 
     struct ChatActionResponse: Codable, Sendable {
@@ -127,7 +133,12 @@ class APIClient: ObservableObject {
                 client_alias_state: [
                     "known_apps": LocalAliasStore.shared.allApplicationKeys(),
                     "known_categories": LocalAliasStore.shared.allCategoryNames()
-                ]
+                ],
+                // Legacy APIClient.chat() path always lets the backend fastpath
+                // attempt to handle the message — the reinterpret flow goes
+                // through ChatViewModel.sendChatMessageWithRawData(), which
+                // sets skip_fastpath=true explicitly.
+                skip_fastpath: false
             )
             request.httpBody = try JSONEncoder().encode(body)
 
