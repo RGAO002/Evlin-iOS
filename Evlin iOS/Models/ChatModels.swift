@@ -45,6 +45,15 @@ enum ReflectionParentNoteFallback {
 extension Notification.Name {
     static let evlinClearChat = Notification.Name("evlinClearChat")
     static let evlinLockStateChanged = Notification.Name("evlinLockStateChanged")
+
+    /// DEBUG-only: emitted by the child-side pairing screen when the
+    /// "Single-device testing? Switch to Parent" button is tapped.
+    /// `OnboardingCoordinator` listens for this and jumps to the parent's
+    /// `parentPairingCode` step so the same device can enter the code that
+    /// was just generated. The pairing code itself is passed via the
+    /// `evlin.dev.pendingPairingCode` UserDefaults key (cleared after read).
+    static let evlinSingleDeviceJumpToParent =
+        Notification.Name("evlinSingleDeviceJumpToParent")
 }
 
 struct ChatMessage: Identifiable, Codable {

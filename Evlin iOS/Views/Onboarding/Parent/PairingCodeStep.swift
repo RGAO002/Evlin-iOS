@@ -118,6 +118,20 @@ struct PairingCodeStep: View {
         .background(Color.evSurface)
         .onAppear {
             pairedInThisStep = false
+            #if DEBUG
+            // Single-device shortcut — if the child step posted a pending
+            // pairing code via UserDefaults (see EnterPairingCodeStep), pre-
+            // fill the field here. Clear the key immediately so the next
+            // fresh launch doesn't auto-paste a stale code from a previous
+            // run. Setting `code` triggers the existing onChange handler,
+            // which will fire tryPair() once length hits 6.
+            let key = "evlin.dev.pendingPairingCode"
+            if let pending = UserDefaults.standard.string(forKey: key),
+               !pending.isEmpty {
+                code = pending
+                UserDefaults.standard.removeObject(forKey: key)
+            }
+            #endif
         }
     }
 
@@ -139,10 +153,17 @@ struct PairingCodeStep: View {
             req.httpMethod = "POST"
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
             req.timeoutInterval = 15
+            // Onboarding order is now: pair FIRST, then ProtectionLevelStep.
+            // The parent hasn't picked Std vs Max yet when we hit /family/pair,
+            // so we send "std" (safer default — fewer downstream requirements)
+            // and let ProtectionLevelStep PUT a correction if the parent
+            // ultimately picks Max. The `protectionMode` binding is still
+            // honored when set explicitly (e.g. from Settings re-pair flow).
+            let modeAtPairTime = protectionMode.isEmpty ? "std" : protectionMode
             req.httpBody = try JSONSerialization.data(withJSONObject: [
                 "code": code,
                 "parent_device_label": UIDevice.current.name,
-                "protection_mode": protectionMode,
+                "protection_mode": modeAtPairTime,
             ])
             let (data, response) = try await URLSession.shared.data(for: req)
             if let http = response as? HTTPURLResponse, http.statusCode != 200 {

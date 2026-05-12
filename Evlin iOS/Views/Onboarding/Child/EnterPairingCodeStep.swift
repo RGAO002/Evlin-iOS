@@ -133,6 +133,42 @@ struct EnterPairingCodeStep: View {
                     .foregroundStyle(Color.evError)
                     .padding(.top, Spacing.md)
             }
+
+            // DEV ONLY — single-device "jump to parent" shortcut. Solves the
+            // most common dev pain: child generates a code, but the parent
+            // pairing screen is on the same device, and stale UserDefaults
+            // navigation means flipping to parent loses the code. This
+            // button copies the freshly-generated code to clipboard AND
+            // stashes it in UserDefaults so PairingCodeStep.onAppear can
+            // pre-fill the field. Pairing then happens in ONE tap on the
+            // parent side instead of switching modes manually + typing 6
+            // digits before they expire.
+            if !pairingCode.isEmpty {
+                Button {
+                    UIPasteboard.general.string = pairingCode
+                    UserDefaults.standard.set(
+                        pairingCode,
+                        forKey: "evlin.dev.pendingPairingCode",
+                    )
+                    NotificationCenter.default.post(
+                        name: .evlinSingleDeviceJumpToParent,
+                        object: nil,
+                    )
+                } label: {
+                    VStack(spacing: 4) {
+                        Text("⚠️ DEBUG: Single-device — switch to Parent + auto-fill this code")
+                            .font(.evBodySmall)
+                            .foregroundStyle(Color.evPrimary)
+                            .multilineTextAlignment(.center)
+                        Text("Use this when you're testing both roles on one iPhone.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Color.evOnSurfaceVariant)
+                            .multilineTextAlignment(.center)
+                    }
+                    .padding(.top, Spacing.md)
+                    .padding(.horizontal, Spacing.xl)
+                }
+            }
             #endif
         }
         .padding(Spacing.xl)

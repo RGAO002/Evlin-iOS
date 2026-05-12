@@ -77,6 +77,57 @@ struct HomeSettingsSheet: View {
                 }
 
                 Section("Connection") {
+                    #if DEBUG
+                    // Dev-only quick-swap. Production builds (DEBUG not
+                    // defined) hide this entirely so users never see the
+                    // local IP. Tapping a segment writes the corresponding
+                    // preset into both serverURL (the live text field) and
+                    // APIClient.baseURL via saveServerURL.
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Backend Preset")
+                            .font(.custom("Inter", size: 11).weight(.bold))
+                            .tracking(1.2)
+                            .textCase(.uppercase)
+                            .foregroundStyle(Color.evOutline)
+                        Picker("Backend", selection: $serverURL) {
+                            Text("Local").tag(APIClient.localDevURL)
+                            Text("Production").tag(APIClient.defaultURL)
+                        }
+                        .pickerStyle(.segmented)
+                        .onChange(of: serverURL) { oldValue, newValue in
+                            // Only persist when the new value matches one of
+                            // the two presets — otherwise the free-text
+                            // field below would re-fire this on every
+                            // keystroke. The custom-URL flow has its own
+                            // explicit Save button.
+                            let isPreset = newValue == APIClient.localDevURL
+                                || newValue == APIClient.defaultURL
+                            guard isPreset else { return }
+                            apiClient.saveServerURL(newValue)
+
+                            // Safety net for backend swap mid-session.
+                            // Pairing IDs are backend-scoped — Render's
+                            // family_id won't exist in Local's DB and vice
+                            // versa. Wipe pairing-related UserDefaults and
+                            // force onboarding to re-run so the next
+                            // /family/pair fresh-writes IDs for the new
+                            // backend. Without this clear, chat would keep
+                            // hitting "No child device is paired" after a
+                            // switch because the cached IDs are orphaned.
+                            //
+                            // Only fires when actually CHANGING backends —
+                            // initial onAppear-driven population (where
+                            // oldValue == newValue) is skipped.
+                            guard !oldValue.isEmpty, oldValue != newValue else { return }
+                            UserDefaults.standard.removeObject(forKey: "evlin.familyID")
+                            UserDefaults.standard.removeObject(forKey: "evlin.parentDeviceID")
+                            UserDefaults.standard.removeObject(forKey: "evlin.childDeviceID")
+                            UserDefaults.standard.set(false, forKey: "onboardingComplete")
+                            UserDefaults.standard.set("", forKey: "appMode")
+                        }
+                    }
+                    #endif
+
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Server URL")
                             .font(.custom("Inter", size: 11).weight(.bold))

@@ -6,6 +6,12 @@ class APIClient: ObservableObject {
 
     static let defaultURL = "https://evlin-backend.onrender.com/api/v1"
 
+    /// Local dev preset — used by the DEBUG-only Local/Production picker in
+    /// HomeSettingsSheet. IP is the Mac's LAN address (`ipconfig getifaddr en0`
+    /// on the dev machine). Path keeps `/api/v1` so chat / queue / etc. route
+    /// the same as on prod.
+    static let localDevURL = "http://192.168.1.175:8000/api/v1"
+
     /// One-shot migration: 2026-05-07 backend split moved the Evlin Backend
     /// from the old `adaptive-engine` Railway service to its own Render
     /// service. Existing users have the old URL persisted in UserDefaults
@@ -24,8 +30,12 @@ class APIClient: ObservableObject {
             saved = Self.defaultURL
             UserDefaults.standard.set(saved, forKey: "serverURL")
         }
-        // Ignore old localhost/LAN URLs
-        let useSaved = !saved.isEmpty && !saved.contains("192.168") && !saved.contains("localhost")
+        // Previously this code rejected any saved URL containing "192.168"
+        // or "localhost", forcing dev builds back to the Render default every
+        // launch — annoying when iterating against a local backend. Trust
+        // whatever the user explicitly saved. The DEBUG-only picker in
+        // HomeSettingsSheet still gives one-tap revert to production.
+        let useSaved = !saved.isEmpty
         let raw = baseURL.isEmpty
             ? (useSaved ? saved : Self.defaultURL)
             : baseURL
