@@ -82,12 +82,20 @@ struct BackendChoiceStep: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.evSurface)
         .onAppear {
-            // Pre-seed selection from whatever the user previously chose,
-            // if any — repeat onboardings shouldn't reset their backend.
-            let saved = apiClient.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-            if saved == APIClient.localDevURL || saved == APIClient.defaultURL {
-                selection = saved
-            }
+            // INTENTIONAL: do NOT pre-seed from `apiClient.baseURL`.
+            //
+            // APIClient.init defaults baseURL to Production (`defaultURL`)
+            // when UserDefaults `serverURL` is empty (e.g. fresh install
+            // / Reset Everything). Pre-seeding from that would silently
+            // commit the dev to Production on first onboarding even if
+            // they meant Local — exactly the bug that produced
+            // "No child device is paired" with mysterious orphaned UUIDs
+            // (the IDs ended up in Render's DB, not localhost's).
+            //
+            // Force the dev to make an explicit choice every onboarding
+            // pass. The default (`@State selection = localDevURL`) is
+            // Local because that's the common DEBUG case; one tap on
+            // Production switches if needed.
         }
     }
 }
