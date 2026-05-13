@@ -29,6 +29,16 @@ struct ProfileView: View {
     @State private var devicesExpanded = true
     @State private var rulesExpanded = true
     @State private var addMode: AddBottomMode? = nil
+    /// In-profile sub-tab toggle for when an active reflection exists.
+    /// The header card's CTA stripe flips between
+    ///   `.overview`   — shows Current Tasks / Devices / Rules
+    ///   `.reflection` — shows the Reflection Assignment listing inline
+    /// matching the design HTML pattern (`profileTab` in screen-profile).
+    /// Resets to `.overview` whenever the child changes.
+    @State private var profileTab: ProfileSubTab = .overview
+    @State private var showCancelReflectionAlert = false
+
+    enum ProfileSubTab { case overview, reflection }
 
     // Backend wiring (Phase 12 — Profile ↔ BigKid task loop).
     // Active when this is Liam AND we have a paired child UUID stored
@@ -116,56 +126,81 @@ struct ProfileView: View {
                 VStack(spacing: 26) {
                     // Header card: reflection state replaces time/lock UI
                     // while keeping the rest of the profile surface intact.
+                    // Per design (HTML lines 1265-1357), the reflection
+                    // header's CTA stripe is an inline sub-tab toggle:
+                    // tap to switch between "View reflection" (overview
+                    // sub-tab) and "Back to profile overview" (reflection
+                    // sub-tab). The body below switches accordingly.
                     if let summary = activeReflectionSummary {
                         ParentReflectionStatusCard(
                             child: displayChild,
                             summary: summary,
                             layout: .profileHeader,
-                            onViewReflection: { openReflection(summary) }
+                            showingBackToOverview: profileTab == .reflection,
+                            onViewReflection: {
+                                withAnimation(.easeOut(duration: 0.22)) {
+                                    profileTab = (profileTab == .reflection)
+                                        ? .overview
+                                        : .reflection
+                                }
+                            }
                         )
+
+                        if profileTab == .reflection {
+                            ReflectionAssignmentListing(
+                                summary: summary,
+                                showsSectionHeader: false,
+                                onCancel: { showCancelReflectionAlert = true }
+                            )
+                        }
                     } else {
                         summaryCard
                     }
 
-                    // Current Tasks (HTML 1058-1063)
-                    VStack(spacing: 0) {
-                        SectionHead(title: "Current Tasks") {
-                            tasksDonePill
-                        }
-                        VStack(spacing: 10) {
-                            ForEach(tasks) { t in
-                                TaskRow(
-                                    task: t,
-                                    onApprove: { handleApprove(t) },
-                                    onRedo: { handleRedo(t, reason: nil) },
-                                    onOpen: { onOpenTaskDetail(t) }
-                                )
+                    // Reflection sub-tab hides everything else (HTML lines
+                    // 1613-1660 only render Devices / Rules / Tasks in the
+                    // overview sub-tab when reflection is active).
+                    if profileTab == .overview || activeReflectionSummary == nil {
+                        // Current Tasks (HTML 1058-1063)
+                        VStack(spacing: 0) {
+                            SectionHead(title: "Current Tasks") {
+                                tasksDonePill
+                            }
+                            VStack(spacing: 10) {
+                                ForEach(tasks) { t in
+                                    TaskRow(
+                                        task: t,
+                                        onApprove: { handleApprove(t) },
+                                        onRedo: { handleRedo(t, reason: nil) },
+                                        onOpen: { onOpenTaskDetail(t) }
+                                    )
+                                }
+                            }
+                            if let err = backendError {
+                                Text("⚠︎ Couldn't refresh tasks: \(err)")
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundStyle(.red)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.top, 4)
                             }
                         }
-                        if let err = backendError {
-                            Text("⚠︎ Couldn't refresh tasks: \(err)")
-                                .font(.system(size: 11, weight: .medium))
-                                .foregroundStyle(.red)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.top, 4)
-                        }
+
+                        // NOTE: "Today's Schedule" section was removed because the
+                        // latest design HTML (Evlin Parent Dashboard (1).html) no
+                        // longer includes it on the kid profile screen. Keeping
+                        // the implementation commented in case we want to bring
+                        // it back. To restore, uncomment `todaysScheduleSection`
+                        // (defined below) and add it here between Tasks and
+                        // Devices.
+                        //
+                        // todaysScheduleSection
+
+                        // Enrolled Devices (collapsible — HTML 1064-1085)
+                        devicesSection
+
+                        // Active Rules (collapsible) — moved to bottom per HTML 1086-1121
+                        activeRulesSection
                     }
-
-                    // NOTE: "Today's Schedule" section was removed because the
-                    // latest design HTML (Evlin Parent Dashboard (1).html) no
-                    // longer includes it on the kid profile screen. Keeping
-                    // the implementation commented in case we want to bring
-                    // it back. To restore, uncomment `todaysScheduleSection`
-                    // (defined below) and add it here between Tasks and
-                    // Devices.
-                    //
-                    // todaysScheduleSection
-
-                    // Enrolled Devices (collapsible — HTML 1064-1085)
-                    devicesSection
-
-                    // Active Rules (collapsible) — moved to bottom per HTML 1086-1121
-                    activeRulesSection
                 }
                 .padding(.horizontal, 20)
                 .padding(.top, 16)
@@ -215,6 +250,28 @@ struct ProfileView: View {
                     },
                     onCancel: { editingRule = nil }
                 )
+            }
+        }
+        .alert("Cancel reflection?", isPresented: $showCancelReflectionAlert) {
+            Button("Keep reflection", role: .cancel) {}
+            Button("Cancel reflection", role: .destructive) {
+                // Prototype: clear local fixture and snap back to overview.
+                // TODO: wire to backend reflection cancel endpoint when available.
+                reflectionStore.clear(childId: child.id)
+                withAnimation(.easeOut(duration: 0.22)) {
+                    profileTab = .overview
+                }
+            }
+        } message: {
+            Text("\(displayChild.name)'s screen-time lock will be lifted and the reflection won't be saved.")
+        }
+        .onChange(of: activeReflectionSummary?.id) { _, newId in
+            // If the reflection clears while the user is on the
+            // reflection sub-tab (e.g. backend poll reports it's been
+            // approved, or chat approve cleared the fixture), snap back
+            // to the overview sub-tab so the empty state isn't shown.
+            if newId == nil, profileTab == .reflection {
+                profileTab = .overview
             }
         }
         .alert("Delete \(displayChild.name)?", isPresented: $showDeleteConfirm) {

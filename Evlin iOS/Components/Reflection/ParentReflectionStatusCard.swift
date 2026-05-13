@@ -14,12 +14,17 @@ enum ParentReflectionStatusCardLayout {
 ///
 /// `.profileHeader` mirrors the image-2 "Sam's Space" screenshot: a
 /// warm-cream summary card with an under-reflection badge and a
-/// full-width "View reflection" stripe CTA. The rest of the Profile
-/// surface (current tasks, devices, rules) renders unchanged below.
+/// full-width "View reflection" stripe CTA. The CTA stripe flips to
+/// "Back to profile overview" when `showingBackToOverview` is true so
+/// the Profile screen can use the same card as a sub-tab toggle.
 struct ParentReflectionStatusCard: View {
     let child: ChildProfile
     let summary: ParentReflectionSummary
     let layout: ParentReflectionStatusCardLayout
+    /// Only meaningful when `layout == .profileHeader`. When true the
+    /// stripe shows "Back to profile overview" + arrow-back icon; when
+    /// false it shows "View reflection" + meditation icon.
+    var showingBackToOverview: Bool = false
     let onViewReflection: () -> Void
 
     var body: some View {
@@ -27,7 +32,12 @@ struct ParentReflectionStatusCard: View {
         case .homeCard:
             HomeCardBody(child: child, summary: summary, onTap: onViewReflection)
         case .profileHeader:
-            ProfileHeaderBody(child: child, summary: summary, onTap: onViewReflection)
+            ProfileHeaderBody(
+                child: child,
+                summary: summary,
+                showingBackToOverview: showingBackToOverview,
+                onTap: onViewReflection
+            )
         }
     }
 }
@@ -139,6 +149,7 @@ private struct HomeCardBody: View {
 private struct ProfileHeaderBody: View {
     let child: ChildProfile
     let summary: ParentReflectionSummary
+    let showingBackToOverview: Bool
     let onTap: () -> Void
 
     var body: some View {
@@ -167,9 +178,13 @@ private struct ProfileHeaderBody: View {
 
             Button(action: onTap) {
                 HStack(spacing: 10) {
-                    Image(systemName: "figure.mind.and.body")
+                    Image(systemName: showingBackToOverview
+                          ? "arrow.backward"
+                          : "figure.mind.and.body")
                         .font(.system(size: 18, weight: .heavy))
-                    Text("View reflection")
+                    Text(showingBackToOverview
+                         ? "Back to profile overview"
+                         : "View reflection")
                         .font(.custom("Manrope", size: 15).weight(.heavy))
                         .tracking(-0.1)
                 }
@@ -186,7 +201,9 @@ private struct ProfileHeaderBody: View {
                 )
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("View \(child.name)'s reflection")
+            .accessibilityLabel(showingBackToOverview
+                                ? "Back to \(child.name)'s profile overview"
+                                : "View \(child.name)'s reflection")
         }
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)

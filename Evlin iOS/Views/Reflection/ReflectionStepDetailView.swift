@@ -167,6 +167,10 @@ private struct VideoStepBody: View {
 
     @ViewBuilder
     private var videoPlayer: some View {
+        // Compact preview — height matches the reference HTML (200pt).
+        // The kid-side player ships with a tall layout (progress bar +
+        // demo skip + primary button) that's irrelevant for the parent
+        // preview: parents just need to see the clip the kid sees.
         if let video = step.video {
             ZStack {
                 VideoEmbedView(
@@ -191,10 +195,10 @@ private struct VideoStepBody: View {
                     }
                     Spacer()
                 }
-                .padding(12)
+                .padding(10)
                 .allowsHitTesting(false)
             }
-            .frame(height: 220)
+            .frame(height: 200)
             .background(
                 LinearGradient(
                     gradient: Gradient(stops: [
@@ -222,12 +226,12 @@ private struct VideoStepBody: View {
                         endPoint: .bottomTrailing
                     )
                 )
-                .frame(height: 220)
+                .frame(height: 200)
                 .overlay(
                     Image(systemName: "play.fill")
-                        .font(.system(size: 28, weight: .heavy))
+                        .font(.system(size: 24, weight: .heavy))
                         .foregroundStyle(GreenPalette.deep)
-                        .frame(width: 64, height: 64)
+                        .frame(width: 56, height: 56)
                         .background(Circle().fill(Color.white.opacity(0.85)))
                 )
         }
