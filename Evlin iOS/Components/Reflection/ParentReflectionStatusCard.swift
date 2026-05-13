@@ -5,6 +5,17 @@ enum ParentReflectionStatusCardLayout {
     case profileHeader
 }
 
+/// Reflection-state replacement for the standard child summary card.
+///
+/// `.homeCard` mirrors the image-1 Sam screenshot: the regular Home
+/// `ProfileCard` shell with the status row, progress bar, and subtitle
+/// swapped for an under-reflection treatment (warm tan badge, full
+/// reflection bar, "Tap to see what reflection was assigned" hint).
+///
+/// `.profileHeader` mirrors the image-2 "Sam's Space" screenshot: a
+/// warm-cream summary card with an under-reflection badge and a
+/// full-width "View reflection" stripe CTA. The rest of the Profile
+/// surface (current tasks, devices, rules) renders unchanged below.
 struct ParentReflectionStatusCard: View {
     let child: ChildProfile
     let summary: ParentReflectionSummary
@@ -12,171 +23,211 @@ struct ParentReflectionStatusCard: View {
     let onViewReflection: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: metrics.verticalSpacing) {
-            HStack(alignment: .top, spacing: metrics.headerSpacing) {
-                reflectionAvatar
+        switch layout {
+        case .homeCard:
+            HomeCardBody(child: child, summary: summary, onTap: onViewReflection)
+        case .profileHeader:
+            ProfileHeaderBody(child: child, summary: summary, onTap: onViewReflection)
+        }
+    }
+}
 
-                VStack(alignment: .leading, spacing: Spacing.md) {
-                    badge
+// MARK: - Home card layout (image 1)
 
-                    VStack(alignment: .leading, spacing: Spacing.sm) {
-                        Text(title)
-                            .font(.custom("Manrope", size: metrics.titleSize).weight(.heavy))
-                            .tracking(-0.3)
+private struct HomeCardBody: View {
+    let child: ChildProfile
+    let summary: ParentReflectionSummary
+    let onTap: () -> Void
+    @State private var pressed = false
+
+    var body: some View {
+        Button(action: onTap) {
+            HStack(alignment: .top, spacing: 16) {
+                EvlinAvatarView(
+                    url: child.avatarURL,
+                    name: child.name,
+                    size: 56,
+                    status: child.status
+                )
+
+                VStack(alignment: .leading, spacing: 8) {
+                    // Line 1: Name · age X — matches ProfileCard exactly.
+                    HStack(spacing: 6) {
+                        Text(child.name)
+                            .font(.custom("Manrope", size: 17).weight(.heavy))
+                            .tracking(-0.2)
                             .foregroundStyle(Color.evPrimary)
-                            .lineLimit(2)
-                            .minimumScaleFactor(0.85)
-
-                        Text(summary.reason)
-                            .font(.custom("Inter", size: metrics.bodySize).weight(.medium))
-                            .foregroundStyle(Color.evOnReflectionBadge)
-                            .lineSpacing(2)
-                            .lineLimit(metrics.reasonLineLimit)
+                        Text("· age \(child.age)")
+                            .font(.custom("Inter", size: 13))
+                            .foregroundStyle(Color.evOnSurfaceVariant)
                     }
+
+                    // Line 2: under-reflection badge + label (no minutes).
+                    HStack(spacing: 8) {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .fill(ReflectionPalette.badgeBg)
+                            Image(systemName: "figure.mind.and.body")
+                                .font(.system(size: 11, weight: .heavy))
+                                .foregroundStyle(ReflectionPalette.badgeFg)
+                        }
+                        .frame(width: 20, height: 20)
+
+                        Text("UNDER REFLECTION")
+                            .font(.custom("Inter", size: 10).weight(.heavy))
+                            .tracking(1.6)
+                            .foregroundStyle(ReflectionPalette.badgeFg)
+                            .fixedSize(horizontal: true, vertical: false)
+                    }
+
+                    // Line 3: full-width tan progress bar (visual signal,
+                    // not a real countdown — the spec explicitly drops the
+                    // 15M timer copy).
+                    Capsule()
+                        .fill(ReflectionPalette.barFill)
+                        .frame(height: 5)
+                        .background(
+                            Capsule().fill(ReflectionPalette.barTrack)
+                        )
+
+                    // Line 4: subtitle hint.
+                    Text("Tap to see what reflection was assigned")
+                        .font(.custom("Inter", size: 12))
+                        .foregroundStyle(ReflectionPalette.badgeFg)
+                        .lineLimit(1)
                 }
 
-                Spacer(minLength: Spacing.sm)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Color.evOutline)
+                    .padding(.top, 4)
+            }
+            .padding(18)
+            .background(
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .fill(Color.evSurfaceContainerLowest)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .stroke(Color.evOutlineVariant.opacity(0.4), lineWidth: 1)
+            )
+            .shadow(
+                color: .black.opacity(pressed ? 0.08 : 0.04),
+                radius: pressed ? 40 : 30,
+                x: 0,
+                y: pressed ? 20 : 10
+            )
+            .scaleEffect(pressed ? 1.01 : 1.0)
+            .animation(.easeOut(duration: 0.18), value: pressed)
+        }
+        .buttonStyle(.plain)
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in pressed = true }
+                .onEnded { _ in pressed = false }
+        )
+        .accessibilityLabel("\(child.name) is under reflection. Tap to see the assignment.")
+    }
+}
+
+// MARK: - Profile header layout (image 2)
+
+private struct ProfileHeaderBody: View {
+    let child: ChildProfile
+    let summary: ParentReflectionSummary
+    let onTap: () -> Void
+
+    var body: some View {
+        VStack(spacing: 14) {
+            HStack(alignment: .center, spacing: 18) {
+                EvlinAvatarView(
+                    url: child.avatarURL,
+                    name: child.name,
+                    size: 64,
+                    status: .locked
+                )
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(child.name)
+                        .font(.custom("Manrope", size: 26).weight(.heavy))
+                        .tracking(-0.4)
+                        .foregroundStyle(ReflectionPalette.nameFg)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
+
+                    underReflectionPill
+                }
+
+                Spacer(minLength: 0)
             }
 
-            Button(action: onViewReflection) {
-                HStack(spacing: Spacing.md) {
+            Button(action: onTap) {
+                HStack(spacing: 10) {
+                    Image(systemName: "figure.mind.and.body")
+                        .font(.system(size: 18, weight: .heavy))
                     Text("View reflection")
-                        .font(.custom("Inter", size: 14).weight(.heavy))
-                        .tracking(0.6)
-
-                    Image(systemName: "arrow.right")
-                        .font(.system(size: 13, weight: .heavy))
+                        .font(.custom("Manrope", size: 15).weight(.heavy))
+                        .tracking(-0.1)
                 }
-                .foregroundStyle(Color.evPrimary)
+                .foregroundStyle(ReflectionPalette.nameFg)
                 .frame(maxWidth: .infinity)
-                .padding(.vertical, metrics.ctaVerticalPadding)
-                .background(Color.evSurfaceContainerLowest.opacity(0.72))
-                .clipShape(RoundedRectangle(cornerRadius: CornerRadius.lg, style: .continuous))
+                .padding(.vertical, 14)
+                .background(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(ReflectionPalette.ctaFill)
+                )
                 .overlay(
-                    RoundedRectangle(cornerRadius: CornerRadius.lg, style: .continuous)
-                        .stroke(Color.evReflectionBorder.opacity(0.85), lineWidth: 1.5)
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(ReflectionPalette.border, lineWidth: 1)
                 )
             }
             .buttonStyle(.plain)
             .accessibilityLabel("View \(child.name)'s reflection")
         }
-        .padding(metrics.padding)
+        .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            LinearGradient(
-                colors: [
-                    Color.evReflectionSurface,
-                    Color.evReflectionSurface.opacity(0.82),
-                    Color.evSurfaceContainerLowest.opacity(0.96)
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(ReflectionPalette.surface)
         )
-        .clipShape(RoundedRectangle(cornerRadius: CornerRadius.xl, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: CornerRadius.xl, style: .continuous)
-                .stroke(Color.evReflectionBorder.opacity(0.68), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(ReflectionPalette.border, lineWidth: 1)
         )
-        .shadow(color: Color.evReflectionBorder.opacity(0.14), radius: 18, x: 0, y: 10)
     }
 
-    private var reflectionAvatar: some View {
-        ZStack(alignment: .bottomTrailing) {
-            EvlinAvatarView(
-                url: child.avatarURL,
-                name: child.name,
-                size: metrics.avatarSize,
-                ring: true,
-                ringColor: Color.evReflectionBorder
-            )
-
-            Image(systemName: "text.book.closed.fill")
-                .font(.system(size: metrics.iconSize, weight: .heavy))
-                .foregroundStyle(Color.evOnReflectionBadge)
-                .frame(width: metrics.iconContainerSize, height: metrics.iconContainerSize)
-                .background(Color.evReflectionBadge)
-                .clipShape(Circle())
-                .overlay(Circle().stroke(Color.evSurfaceContainerLowest, lineWidth: 2))
-                .offset(x: 3, y: 3)
-        }
-        .frame(width: metrics.avatarSize, height: metrics.avatarSize)
-    }
-
-    private var badge: some View {
+    private var underReflectionPill: some View {
         HStack(spacing: 6) {
-            Image(systemName: "text.book.closed.fill")
-                .font(.system(size: 10, weight: .heavy))
-
-            Text("Under reflection")
-                .font(.custom("Inter", size: 10).weight(.heavy))
+            Image(systemName: "figure.mind.and.body")
+                .font(.system(size: 12, weight: .heavy))
+            Text("UNDER REFLECTION")
+                .font(.custom("Inter", size: 10.5).weight(.heavy))
                 .tracking(1.5)
-                .textCase(.uppercase)
         }
-        .foregroundStyle(Color.evOnReflectionBadge)
-        .padding(.horizontal, Spacing.lg)
-        .padding(.vertical, 7)
-        .background(Color.evReflectionBadge.opacity(0.9))
-        .clipShape(Capsule())
-        .overlay(
-            Capsule()
-                .stroke(Color.evReflectionBorder.opacity(0.38), lineWidth: 1)
+        .foregroundStyle(ReflectionPalette.badgeFg)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(
+            Capsule().fill(ReflectionPalette.pillBg)
         )
     }
-
-    private var title: String {
-        switch summary.state {
-        case .completedReady:
-            return "\(child.name)'s reflection is ready"
-        case .assignedPending, .none:
-            return "\(child.name) has a reflection assigned"
-        }
-    }
-
-    private var metrics: Metrics {
-        switch layout {
-        case .homeCard:
-            return Metrics(
-                padding: 18,
-                verticalSpacing: Spacing.lg,
-                headerSpacing: Spacing.xl,
-                avatarSize: 56,
-                iconContainerSize: 24,
-                iconSize: 11,
-                titleSize: 17,
-                bodySize: 12,
-                reasonLineLimit: 2,
-                ctaVerticalPadding: Spacing.lg
-            )
-        case .profileHeader:
-            return Metrics(
-                padding: Spacing.xxl,
-                verticalSpacing: Spacing.xl,
-                headerSpacing: Spacing.xl,
-                avatarSize: 72,
-                iconContainerSize: 28,
-                iconSize: 13,
-                titleSize: 22,
-                bodySize: 14,
-                reasonLineLimit: 3,
-                ctaVerticalPadding: Spacing.lg
-            )
-        }
-    }
 }
 
-private struct Metrics {
-    let padding: CGFloat
-    let verticalSpacing: CGFloat
-    let headerSpacing: CGFloat
-    let avatarSize: CGFloat
-    let iconContainerSize: CGFloat
-    let iconSize: CGFloat
-    let titleSize: CGFloat
-    let bodySize: CGFloat
-    let reasonLineLimit: Int
-    let ctaVerticalPadding: CGFloat
+// MARK: - Palette (mirrors reference HTML hex)
+
+private enum ReflectionPalette {
+    static let surface     = Color(red: 0xF4 / 255, green: 0xE8 / 255, blue: 0xD6 / 255)   // #F4E8D6
+    static let border      = Color(red: 0xB7 / 255, green: 0x93 / 255, blue: 0x5E / 255)   // #B7935E
+    static let badgeBg     = Color(red: 0xEA / 255, green: 0xD7 / 255, blue: 0xB4 / 255)   // #EAD7B4
+    static let badgeFg     = Color(red: 0x6E / 255, green: 0x4F / 255, blue: 0x26 / 255)   // #6E4F26
+    static let nameFg      = Color(red: 0x2E / 255, green: 0x1F / 255, blue: 0x08 / 255)   // #2E1F08
+    static let pillBg      = Color(red: 0x4A / 255, green: 0x32 / 255, blue: 0x15 / 255).opacity(0.12)
+    static let ctaFill     = Color(red: 0xEA / 255, green: 0xD7 / 255, blue: 0xB4 / 255)   // #EAD7B4
+    static let barFill     = Color(red: 0xB7 / 255, green: 0x93 / 255, blue: 0x5E / 255)   // #B7935E
+    static let barTrack    = Color(red: 0xF4 / 255, green: 0xE8 / 255, blue: 0xD6 / 255)   // #F4E8D6
 }
+
+// MARK: - Previews
 
 private enum ParentReflectionStatusCardPreviewData {
     static var pendingSummary: ParentReflectionSummary {
