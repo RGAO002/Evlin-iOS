@@ -11,8 +11,6 @@ struct ParentReflectionStatusCard: View {
     let layout: ParentReflectionStatusCardLayout
     let onViewReflection: () -> Void
 
-    @State private var pressed = false
-
     var body: some View {
         VStack(alignment: .leading, spacing: metrics.verticalSpacing) {
             HStack(alignment: .top, spacing: metrics.headerSpacing) {
@@ -60,6 +58,7 @@ struct ParentReflectionStatusCard: View {
                 )
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("View \(child.name)'s reflection")
         }
         .padding(metrics.padding)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -79,16 +78,7 @@ struct ParentReflectionStatusCard: View {
             RoundedRectangle(cornerRadius: CornerRadius.xl, style: .continuous)
                 .stroke(Color.evReflectionBorder.opacity(0.68), lineWidth: 1)
         )
-        .shadow(color: Color.evReflectionBorder.opacity(pressed ? 0.22 : 0.14), radius: pressed ? 26 : 18, x: 0, y: pressed ? 16 : 10)
-        .scaleEffect(pressed ? 1.01 : 1.0)
-        .animation(.easeOut(duration: 0.18), value: pressed)
-        .simultaneousGesture(
-            DragGesture(minimumDistance: 0)
-                .onChanged { _ in pressed = true }
-                .onEnded { _ in pressed = false }
-        )
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(child.name) is under reflection. \(summary.reason)")
+        .shadow(color: Color.evReflectionBorder.opacity(0.14), radius: 18, x: 0, y: 10)
     }
 
     private var reflectionAvatar: some View {
