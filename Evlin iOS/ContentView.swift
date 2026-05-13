@@ -70,6 +70,7 @@ struct ParentRootView: View {
     @State private var profilePath = NavigationPath()
     @State private var insightsPath = NavigationPath()
     @State private var banner: (title: String, body: String, avatarURL: String?)? = nil
+    @State private var reflectionStore = ParentReflectionFixtureStore()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -125,6 +126,7 @@ struct ParentRootView: View {
             }
         }
         .animation(.spring(response: 0.36, dampingFraction: 0.78), value: banner?.title)
+        .environment(reflectionStore)
     }
 }
 
