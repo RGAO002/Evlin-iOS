@@ -35,6 +35,12 @@ extension Color {
     static let evSurfaceContainerHighest = Color(hex: 0xE2E2E6)
     static let evSurfaceDim = Color(hex: 0xD9DADD)
 
+    // MARK: Reflection
+    static let evReflectionSurface = Color(hex: 0xF4E7CF)
+    static let evReflectionBorder = Color(hex: 0xC99B55)
+    static let evReflectionBadge = Color(hex: 0xDCCDB4)
+    static let evOnReflectionBadge = Color(hex: 0x5B4023)
+
     // MARK: On-Surface
     static let evOnSurface = Color(hex: 0x1A1C1E)
     static let evOnSurfaceVariant = Color(hex: 0x5A5E66)        // was 44474C
