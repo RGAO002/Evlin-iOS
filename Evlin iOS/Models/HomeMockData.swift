@@ -26,7 +26,7 @@ enum HomeMockData {
               title: "Liam completed reflection",
               body: "Liam finished his reflection and it's ready for your review.",
               time: "Just now", unread: true, kind: "reflection",
-              reflectionId: UUID(uuidString: "AAE163C8-35B4-4B4E-A7B1-5D58AD477E28")!),
+              reflectionId: UUID(uuidString: "936E3E6A-D651-490C-9110-7B73BDA4EA26")!),
         .init(id: 1, childId: "liam",   iconSystemName: "checkmark.circle",
               title: "Science Project — needs review",
               body: "Liam submitted his Science Project. Tap to review and approve.",

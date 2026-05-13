@@ -54,6 +54,7 @@ final class ParentReflectionFixtureStore {
 
     func summary(reflectionId: UUID) -> ParentReflectionSummary? {
         summariesByChildId.values.first { $0.id == reflectionId }
+            ?? Self.completedNotificationSummariesById[reflectionId]
     }
 
     func step(reflectionId: UUID, stepId: UUID) -> ParentReflectionStepArtifact? {
@@ -106,6 +107,29 @@ private extension ParentReflectionFixtureStore {
             takeaway: nil,
             steps: []
         )
+    }
+
+    static var liamCompletedNotificationSummary: ParentReflectionSummary {
+        ParentReflectionSummary(
+            id: UUID(uuidString: "936E3E6A-D651-490C-9110-7B73BDA4EA26")!,
+            childId: ChildProfile.liam.id,
+            childName: ChildProfile.liam.name,
+            state: .completedReady,
+            reason: "Used hurtful words during a sibling disagreement.",
+            assignedAt: "2026-05-13T19:30:00Z",
+            submittedAt: completedSubmittedAt,
+            parentNote: "Take a breath and think about how your words landed.",
+            prompt: "What happened, how did it affect someone else, and what can you try next time?",
+            essayText: completedEssayText,
+            takeaway: completedTakeaway,
+            steps: standardCompletedSteps
+        )
+    }
+
+    static var completedNotificationSummariesById: [UUID: ParentReflectionSummary] {
+        [
+            liamCompletedNotificationSummary.id: liamCompletedNotificationSummary
+        ]
     }
 
     static var standardCompletedSteps: [ParentReflectionStepArtifact] {
