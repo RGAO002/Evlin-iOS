@@ -1,7 +1,6 @@
 import SwiftUI
 
 struct HomeView: View {
-    @Environment(ParentReflectionFixtureStore.self) private var reflectionStore
     @AppStorage("parentName") private var parentName: String = "Morgan"
     @State private var showSettings = false
     @Binding var selectedTab: EvlinTab
@@ -18,32 +17,6 @@ struct HomeView: View {
 
     private var unreadCount: Int {
         notifications.filter(\.unread).count
-    }
-
-    @ViewBuilder
-    private func childRow(for child: ChildProfile) -> some View {
-        if let summary = reflectionStore.summary(for: child),
-           summary.state != .none {
-            ParentReflectionStatusCard(
-                child: child,
-                summary: summary,
-                layout: .homeCard,
-                onViewReflection: { onOpenProfile(child) }
-            )
-        } else {
-            ProfileCard(child: child) {
-                onOpenProfile(child)
-            }
-        }
-    }
-
-    /// Cheap key that flips when the child's reflection summary state
-    /// transitions (none ↔ assignedPending ↔ completedReady). The
-    /// reflection id is included so a brand-new reflection for the same
-    /// child also invalidates.
-    private func reflectionStateKey(for child: ChildProfile) -> String {
-        guard let summary = reflectionStore.summary(for: child) else { return "none" }
-        return "\(summary.state.rawValue)-\(summary.id.uuidString)"
     }
 
     var body: some View {
@@ -70,15 +43,19 @@ struct HomeView: View {
                     VStack(spacing: 14) {
                         SectionHead("Children", kicker: "Select a profile")
                         ForEach(ChildProfile.all) { child in
-                            childRow(for: child)
-                                // Force SwiftUI to re-evaluate this row
-                                // when the reflection state for *this* child
-                                // changes — needed because `@Observable`
-                                // tracking on a property mutated inside a
-                                // method call doesn't always invalidate
-                                // sibling views in a NavigationStack until
-                                // they become topmost again.
-                                .id("\(child.id)-\(reflectionStateKey(for: child))")
+                            // Each row is its OWN view that holds its
+                            // own @Environment(ParentReflectionFixtureStore.self)
+                            // observation. This sidesteps the SwiftUI/
+                            // NavigationStack quirk where a top-of-stack
+                            // child mutating the store doesn't invalidate
+                            // the underlying-stack parent's body. The
+                            // row, as a leaf observer, still re-evaluates
+                            // its own body when the store changes — no
+                            // need to wait for HomeView.body to re-run.
+                            HomeChildRow(
+                                child: child,
+                                onOpenProfile: onOpenProfile
+                            )
                         }
                     }
                 }
@@ -89,6 +66,35 @@ struct HomeView: View {
         .background(Color.evSurfaceContainerLow)
         .fullScreenCover(isPresented: $showSettings) {
             HomeSettingsSheet(onClose: { showSettings = false })
+        }
+    }
+}
+
+/// Per-child row used by the Home Children list. Lives in its own
+/// View struct so each row holds an independent
+/// `@Environment(ParentReflectionFixtureStore.self)` observation —
+/// each row's body re-evaluates the moment the store mutates,
+/// regardless of whether `HomeView` itself is the topmost view in a
+/// NavigationStack.
+private struct HomeChildRow: View {
+    let child: ChildProfile
+    var onOpenProfile: (ChildProfile) -> Void
+
+    @Environment(ParentReflectionFixtureStore.self) private var reflectionStore
+
+    var body: some View {
+        if let summary = reflectionStore.summary(for: child),
+           summary.state != .none {
+            ParentReflectionStatusCard(
+                child: child,
+                summary: summary,
+                layout: .homeCard,
+                onViewReflection: { onOpenProfile(child) }
+            )
+        } else {
+            ProfileCard(child: child) {
+                onOpenProfile(child)
+            }
         }
     }
 }
