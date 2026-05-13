@@ -177,7 +177,11 @@ final class VideoBridge: ObservableObject {
 /// page's HTML5 `<video>` element and forwards `timeupdate` + `ended`
 /// events to the host via a `WKScriptMessageHandler` named
 /// `evlinPlayer`. Kid touch is blocked at the WKWebView layer.
-private struct VideoEmbedView: UIViewRepresentable {
+/// YouTube embed view used by both the kid Step-1 player and the
+/// parent-side reflection preview. `internal` access so
+/// `ReflectionStepDetailView` can reuse it without duplicating the
+/// embed/Referer/script-bridge plumbing.
+struct VideoEmbedView: UIViewRepresentable {
     let videoId: String
     let bridge: VideoBridge
     let onProgress: (Double) -> Void
