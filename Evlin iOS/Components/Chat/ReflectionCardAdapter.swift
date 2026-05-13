@@ -5,11 +5,11 @@
 //  Phase 2B: Dispatches all reflection.* kinds.
 //
 //  Mapping (spec §6.3):
-//   reflection.confirm_propose        → .A1 (DangerConfirmCard) — parent confirms Gemini will spend tokens
+//   reflection.confirm_propose        → nil (fallback; backend copy is reflection-specific)
 //   reflection.confirm_cancel         → .A1 (DangerConfirmCard) — confirm cancelling an active reflection
 //   reflection.confirm_bypass_response → .A1 (DangerConfirmCard) — respond to bypass request from child
-//   reflection.confirm_approve        → nil (fallback to PlanArchCardView until polished review card lands)
-//   reflection.confirm_redo           → nil (fallback to PlanArchCardView until polished review card lands)
+//   reflection.confirm_approve        → .reflectionReview (ReflectionSubmissionReviewCard approve mode)
+//   reflection.confirm_redo           → .reflectionReview (ReflectionSubmissionReviewCard redo mode)
 //   reflection.content_generation_failed → .contentGenFailed (ReflectionContentFailedCard)
 //   unknown reflection.* kind         → nil (fallback)
 //
@@ -49,12 +49,11 @@ enum ReflectionCardAdapter {
                 context: makeContext(target: summary, childName: childName)
             )
 
-        case "reflection.confirm_approve", "reflection.confirm_redo":
-            // Deferred: requires polished ReflectionReviewCard showing essay excerpt
-            // + quiz score + Approve/Redo buttons. PlanArchCardView already handles
-            // essay text rendering and is an acceptable fallback for Phase 2B.
-            // TODO(Phase 2C): implement ReflectionReviewCard and route here.
-            return nil
+        case "reflection.confirm_approve":
+            return makeReviewModel(payload, childName: childName, mode: .approve)
+
+        case "reflection.confirm_redo":
+            return makeReviewModel(payload, childName: childName, mode: .redo)
 
         case "reflection.content_generation_failed":
             // New in Phase 2B: ReflectionContentFailedCard with Retry / SimplerTemplate / Cancel.
@@ -96,7 +95,53 @@ enum ReflectionCardAdapter {
         )
     }
 
+    private static func makeReviewModel(
+        _ payload: PlanArchCardPayload,
+        childName: String,
+        mode: ReflectionReviewMode
+    ) -> CardRenderModel? {
+        guard let prompt = firstNonEmptyString(
+            payload,
+            keys: ["prompt", "writing_prompt", "writingPrompt"]
+        ), let essay = firstNonEmptyString(
+            payload,
+            keys: ["essay", "essay_text", "essayText", "essay_excerpt", "essayExcerpt"]
+        ) else {
+            return nil
+        }
+
+        let redoReason = firstNonEmptyString(
+            payload,
+            keys: ["redo_reason", "redoReason", "reason"]
+        )
+
+        var context = CardContext.defaultContext(
+            targetDisplay: payload.title,
+            childName: childName
+        )
+        context.reflectionPrompt = prompt
+        context.reflectionEssay = essay
+        context.reflectionReviewMode = mode
+        context.reflectionRedoReason = redoReason
+
+        return CardRenderModel(cardID: .reflectionReview, context: context)
+    }
+
     private static func stringFromDetail(_ p: PlanArchCardPayload, _ key: String) -> String? {
         (p.detail[key]?.value) as? String
+    }
+
+    private static func firstNonEmptyString(
+        _ payload: PlanArchCardPayload,
+        keys: [String]
+    ) -> String? {
+        for key in keys {
+            guard let value = stringFromDetail(payload, key)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+                  !value.isEmpty
+            else { continue }
+            return value
+        }
+        return nil
     }
 }

@@ -1938,6 +1938,35 @@ extension ChatViewModel {
             self?.handlePlanArchOption(PlanArchCardOption.cancel(fromCard: card))
         }
 
+        // Reflection review cards need custom payloads: approve carries the
+        // optional parent note, while redo confirms the already-staged reason.
+        if card.kind == "reflection.confirm_approve" {
+            handlers.onReflectionApprove = { [weak self] note in
+                guard let self else { return }
+                let trimmed = note.trimmingCharacters(in: .whitespacesAndNewlines)
+                let noteToSend = trimmed.isEmpty
+                    ? ReflectionParentNoteFallback.thanksHonest
+                    : trimmed
+                let opt = PlanArchCardOption.synthesise(
+                    fromCard: card,
+                    patch: [
+                        "intent_confirmed": true,
+                        "parent_note": noteToSend,
+                    ]
+                )
+                self.handlePlanArchOption(opt)
+            }
+        } else if card.kind == "reflection.confirm_redo" {
+            handlers.onReflectionRedo = { [weak self] in
+                guard let self else { return }
+                let opt = PlanArchCardOption.synthesise(
+                    fromCard: card,
+                    patch: ["intent_confirmed": true]
+                )
+                self.handlePlanArchOption(opt)
+            }
+        }
+
         // For reflection.content_generation_failed, wire Retry / SimplerTemplate
         // via synthesised patches (spec §7.3). For all other card kinds, leave
         // onPrimary/onSecondary nil — polished cards drive their own primary action;

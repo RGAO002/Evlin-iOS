@@ -46,10 +46,30 @@ struct CardDispatcher: View {
                 onCancel: { handlers.onCancel?() }
             )
         case .reflectionReview:
-            // Phase 2B: adapter returns nil for confirm_approve / confirm_redo,
-            // so this branch is dead — PlanArchCardView handles those via fallback.
-            // Phase 2C will add ReflectionReviewCard and route here.
-            EmptyView()
+            if let prompt = context.reflectionPrompt,
+               let essay = context.reflectionEssay,
+               let mode = context.reflectionReviewMode {
+                ReflectionSubmissionReviewCard(
+                    childName: context.childName,
+                    writingPrompt: prompt,
+                    essayText: essay,
+                    mode: mode,
+                    redoReason: context.reflectionRedoReason,
+                    resolved: false,
+                    onApprove: { note in
+                        if let onReflectionApprove = handlers.onReflectionApprove {
+                            await onReflectionApprove(note)
+                        }
+                    },
+                    onRedo: {
+                        if let onReflectionRedo = handlers.onReflectionRedo {
+                            await onReflectionRedo()
+                        }
+                    }
+                )
+            } else {
+                EmptyView()
+            }
         }
     }
 
@@ -76,6 +96,10 @@ struct CardContext {
     // For U1 unlock-disambiguation card:
     let u1Token: String?
     let u1ShieldList: [U1ShieldEntry]
+    var reflectionPrompt: String? = nil
+    var reflectionEssay: String? = nil
+    var reflectionReviewMode: ReflectionReviewMode? = nil
+    var reflectionRedoReason: String? = nil
 }
 
 extension CardContext {
@@ -107,4 +131,6 @@ struct CardHandlers {
     var onListPicked: ((String) -> Void)?      // F1
     var onU1UnlockSelected: (([Int]) -> Void)?
     var onU1UnlockEverything: (() -> Void)?
+    var onReflectionApprove: ((String) async -> Void)?
+    var onReflectionRedo: (() async -> Void)?
 }
