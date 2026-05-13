@@ -167,10 +167,11 @@ private struct VideoStepBody: View {
 
     @ViewBuilder
     private var videoPlayer: some View {
-        // Compact preview — height matches the reference HTML (200pt).
-        // The kid-side player ships with a tall layout (progress bar +
-        // demo skip + primary button) that's irrelevant for the parent
-        // preview: parents just need to see the clip the kid sees.
+        // The parent preview shows the kid sees what the kid sees — so
+        // the embed should be roughly the same physical size as the
+        // kid-side player (`BigKidVideoView` uses `maxHeight: 440`).
+        // The reference HTML's `height: 200` is the dashboard mockup
+        // scale, not phone scale, and feels cramped on iPhone.
         if let video = step.video {
             ZStack {
                 VideoEmbedView(
@@ -184,21 +185,26 @@ private struct VideoStepBody: View {
                 VStack {
                     HStack {
                         Text(video.duration)
-                            .font(.custom("Inter", size: 11).weight(.heavy))
+                            .font(.custom("Inter", size: 12).weight(.heavy))
                             .foregroundStyle(GreenPalette.deep)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 4)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 5)
                             .background(
-                                Capsule().fill(Color.white.opacity(0.85))
+                                Capsule().fill(Color.white.opacity(0.88))
                             )
                         Spacer()
                     }
                     Spacer()
                 }
-                .padding(10)
+                .padding(14)
                 .allowsHitTesting(false)
             }
-            .frame(height: 200)
+            // Match `BigKidVideoView`'s `.frame(maxHeight: 440)` — the
+            // parent is reviewing what the kid sees, so use the same
+            // generous player area. WKWebView's YouTube embed will
+            // letterbox the actual 16:9 video inside this box.
+            .frame(maxWidth: .infinity)
+            .frame(height: 360)
             .background(
                 LinearGradient(
                     gradient: Gradient(stops: [
@@ -210,11 +216,11 @@ private struct VideoStepBody: View {
                     endPoint: .bottomTrailing
                 )
             )
-            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
         } else {
             // No video metadata — render the same gradient block but
             // without an embed (no media loaded for this fixture).
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
                 .fill(
                     LinearGradient(
                         gradient: Gradient(colors: [
@@ -226,12 +232,12 @@ private struct VideoStepBody: View {
                         endPoint: .bottomTrailing
                     )
                 )
-                .frame(height: 200)
+                .frame(height: 360)
                 .overlay(
                     Image(systemName: "play.fill")
-                        .font(.system(size: 24, weight: .heavy))
+                        .font(.system(size: 28, weight: .heavy))
                         .foregroundStyle(GreenPalette.deep)
-                        .frame(width: 56, height: 56)
+                        .frame(width: 72, height: 72)
                         .background(Circle().fill(Color.white.opacity(0.85)))
                 )
         }
