@@ -212,19 +212,16 @@ extension View {
                         if !path.wrappedValue.isEmpty { path.wrappedValue.removeLast() }
                     }
                 )
-            case .reflectionStepDetail(reflectionId: _, stepId: _):
-                ReflectionStepDetailPlaceholder()
+            case .reflectionStepDetail(let reflectionId, let stepId):
+                ReflectionStepDetailView(
+                    reflectionId: reflectionId,
+                    stepId: stepId,
+                    onBack: {
+                        if !path.wrappedValue.isEmpty { path.wrappedValue.removeLast() }
+                    }
+                )
             }
         }
-    }
-}
-
-private struct ReflectionStepDetailPlaceholder: View {
-    var body: some View {
-        VStack {
-            Text("ReflectionStepDetailView — wired in Task 9")
-        }
-        .navigationTitle("Reflection")
     }
 }
 

@@ -56,6 +56,10 @@ final class ParentReflectionFixtureStore {
         summariesByChildId.values.first { $0.id == reflectionId }
     }
 
+    func step(reflectionId: UUID, stepId: UUID) -> ParentReflectionStepArtifact? {
+        summary(reflectionId: reflectionId)?.steps.first { $0.id == stepId }
+    }
+
     func simulateCompletion(childId: String) {
         guard var summary = summariesByChildId[childId],
               summary.state == .assignedPending else {
