@@ -3,19 +3,57 @@
 Date: 2026-05-13
 Target repo: `/Users/fred/Desktop/Evlin/Evlin iOS`
 Reference spec: `/Users/fred/Desktop/Evlin/frontend_for_app_evlin/docs/superpowers/specs/2026-05-13-reflection-parent-ui-design.md`
+Status: v2, ready for review, not ready for execution until approved
 
 ## Hard Constraints
 
 - `frontend_for_app_evlin` is reference-only. Do not implement UI there.
 - Implement in the real iOS app under `Evlin iOS/Evlin iOS`.
-- Do not touch Small Kids screens in this plan.
+- Do not touch Small Kids screens.
 - Preserve parent-note/message support for reflection approval.
 - Do not fake child step progress. Pending assigned reflection uses the calm status page.
+- Use XCTest only for new tests in `Evlin iOSTests/`. Do not introduce Swift Testing.
+- Light-mode visual target only. Dynamic Type sanity-check is required; Dark Mode polish is out of scope.
+- This iteration is fixture-only for parent reflection state. Backend `reflection.confirm_approve` / `reflection.confirm_redo` events still render through chat, but they do not mutate `ParentReflectionFixtureStore`.
 - Do not start implementation until this plan is reviewed.
+
+## Verification Commands
+
+Use these at the end of every task unless the task explicitly says otherwise.
+
+Quick build:
+
+```bash
+xcodebuild build \
+  -project "Evlin iOS.xcodeproj" \
+  -scheme "Evlin iOS" \
+  -destination "generic/platform=iOS"
+```
+
+Tests:
+
+```bash
+xcodebuild test \
+  -project "Evlin iOS.xcodeproj" \
+  -scheme "Evlin iOS" \
+  -destination "platform=iOS Simulator,name=iPhone 15"
+```
+
+If `iPhone 15` is unavailable:
+
+```bash
+xcrun simctl list devices available | head -10
+```
+
+Then choose an available iPhone simulator and rerun the test command with that destination.
+
+Commit after every task. Do not make one mega-commit.
 
 ## Current Ground Truth
 
+- `ContentView.swift` owns parent navigation. `AppRoute` is the route enum and `appNavigationDestination` is the centralized destination resolver. `DashboardView.swift` is not the route owner.
 - Chat reflection review already exists at `Evlin iOS/Evlin iOS/Components/Chat/ReflectionSubmissionReviewCard.swift`.
+- Existing `ReflectionSubmissionReviewCard` already has prompt, essay, parent note, fallback note, and approve button. It should be restyled, not rewritten.
 - Reflection card routing exists at `Evlin iOS/Evlin iOS/Components/Chat/ReflectionCardAdapter.swift`, but `reflection.confirm_approve` and `reflection.confirm_redo` currently fall back to generic PlanArch rendering.
 - Child-side BigKid reflection steps exist:
   - `Views/Child/BigKid/Reflection/BigKidVideoView.swift`
@@ -25,239 +63,447 @@ Reference spec: `/Users/fred/Desktop/Evlin/frontend_for_app_evlin/docs/superpowe
 - Parent Home currently renders `ProfileCard(child:)` from `Views/Home/HomeView.swift`.
 - Parent Profile currently owns profile header + current tasks in `Views/Profile/ProfileView.swift`.
 
-## Task 1 — Add Parent Reflection UI Models
+## Visual Tokens To Use
+
+Use existing design system tokens where possible. Do not hardcode a parallel palette unless a token does not exist.
+
+- Reflection surface: `Color.evReflectionSurface` if added, backed by a warm cream close to `#F4E7CF`.
+- Reflection border: `Color.evReflectionBorder` if added, backed by a warm tan close to `#C99B55`.
+- Primary headline: existing dark navy `Color.evPrimary`.
+- Badge text: dark brown close to `#5B4023`.
+- Badge background: muted tan close to `#DCCDB4`.
+- Primary CTA: cream fill with tan border, dark brown/navy text.
+- Card radius: use existing `CornerRadius.xl` where available; otherwise match current large rounded cards.
+- Label style: uppercase, semibold/heavy, letter spacing around `0.12em` to `0.16em`.
+
+If adding new colors, add them in `DesignSystem/EvlinColors.swift` and keep names reflection-specific.
+
+## Task 0 — Plan Assumption Guard
+
+Files:
+
+- No code changes.
+
+Steps:
+
+- Confirm working tree only has expected untracked `build/` artifacts.
+- Confirm no Small Kids paths are touched.
+- Confirm `ContentView.swift` is route owner.
+- Confirm new tests will use XCTest.
+
+Verification:
+
+```bash
+git status --short
+rg -n "enum AppRoute|appNavigationDestination|NavigationStack" "Evlin iOS/ContentView.swift"
+```
+
+Commit:
+
+- No commit.
+
+## Task 1 — Parent Reflection Models + Fixture Store
 
 Files:
 
 - Add `Evlin iOS/Evlin iOS/Models/ParentReflectionModels.swift`
 - Add `Evlin iOS/Evlin iOSTests/ParentReflectionModelsTests.swift`
 
-Steps:
+Design decisions:
 
-- Define `ParentReflectionState`: `.none`, `.assignedPending`, `.completedReady`.
-- Define `ParentReflectionSummary` with `id`, `childId`, `childName`, `state`, `reason`, `assignedAt`, `submittedAt`, `parentNote`, `prompt`, `essayText`, `takeaway`.
-- Define `ParentReflectionStep`: `.video`, `.quiz`, `.writing`.
-- Add stable fixture data for Liam:
-  - one assigned pending reflection.
-  - one completed reflection artifact.
-- Keep this model local/prototype-oriented. Do not wire backend persistence in this plan.
+- Do not modify `ChildProfile`.
+- Use a sidecar store: `@Observable final class ParentReflectionFixtureStore`.
+- Inject store from `ParentRootView` using `.environment(reflectionStore)`.
+- Views read it with `@Environment(ParentReflectionFixtureStore.self)`.
+- This is fixture/prototype state only.
 
-Acceptance:
+Model sketch:
 
-- Tests verify decoding/fixtures and state transitions used by routing.
+```swift
+enum ParentReflectionState: String, Codable, Hashable {
+    case none
+    case assignedPending
+    case completedReady
+}
+
+enum ParentReflectionStepKind: String, Codable, Hashable {
+    case video
+    case quiz
+    case writing
+}
+
+struct ParentReflectionStepArtifact: Identifiable, Codable, Hashable {
+    let id: UUID
+    let kind: ParentReflectionStepKind
+    let title: String
+    let subtitle: String
+    let body: String
+}
+
+struct ParentReflectionSummary: Identifiable, Codable, Hashable {
+    let id: UUID
+    let childId: String
+    let childName: String
+    var state: ParentReflectionState
+    let reason: String
+    let assignedAt: String
+    var submittedAt: String?
+    var parentNote: String?
+    let prompt: String
+    var essayText: String?
+    var takeaway: String?
+    var steps: [ParentReflectionStepArtifact]
+}
+```
+
+Store behavior:
+
+- `summary(for child: ChildProfile) -> ParentReflectionSummary?`
+- `summary(childId: String) -> ParentReflectionSummary?`
+- `simulateCompletion(childId: String)` flips the fixture from `.assignedPending` to `.completedReady`, fills `submittedAt`, `essayText`, `takeaway`, and the 3 standard steps.
+- `resetToPending(childId: String)` is optional but useful for previews/tests.
+
+Debug trigger:
+
+- Expose `simulateCompletion()` through Profile's existing top-right `...` menu as a `#if DEBUG` menu item: `Simulate reflection complete`.
+- Do not add this to normal production UI.
+
+TDD steps:
+
+- Write XCTest that store returns Liam's assigned pending summary.
+- Write XCTest that `simulateCompletion(childId:)` flips Liam to `.completedReady`.
+- Write XCTest that standard completed fixture has exactly 3 steps: video, quiz, writing.
+- Run tests and confirm they fail before implementation.
+- Implement models/store/fixtures.
+- Run tests and quick build.
+- Commit: `feat(reflection): add parent reflection fixture models`
+
+## Task 1.5 — Pin Navigation Routes
+
+Files:
+
+- Modify `Evlin iOS/Evlin iOS/ContentView.swift`
+- Add route-focused tests only if practical; otherwise rely on build + manual route verification in later tasks.
+
+Add these route cases to `AppRoute`:
+
+```swift
+case reflectionPending(childId: String)
+case reflectionArtifact(reflectionId: UUID)
+case reflectionStepDetail(reflectionId: UUID, stepId: UUID)
+```
+
+Reasoning:
+
+- `String` child ids match existing `ChildProfile.id`.
+- `UUID` reflection and step ids match `ParentReflectionSummary.id` and `ParentReflectionStepArtifact.id`.
+- All payload types are `Hashable`, so `AppRoute` can keep synthesized `Hashable`.
+
+Destination behavior:
+
+- `reflectionPending` resolves child + summary and opens `ReflectionPendingView`.
+- `reflectionArtifact` resolves summary and opens `ReflectionArtifactView`.
+- `reflectionStepDetail` resolves summary + step and opens `ReflectionStepDetailView`.
+- If fixture lookup fails, show a small fallback error page with a back button. Do not crash.
+
+TDD/verification steps:
+
+- Add route cases first and compile.
+- Add placeholder destination views if needed to keep build green; later tasks replace placeholders.
+- Run quick build.
+- Commit: `feat(reflection): add parent reflection navigation routes`
 
 ## Task 2 — Restyle Chat Reflection Review Card
 
 Files:
 
 - Modify `Evlin iOS/Evlin iOS/Components/Chat/ReflectionSubmissionReviewCard.swift`
-- Modify or add tests in `Evlin iOS/Evlin iOSTests/PlanArchCardAdapterReflectionEventTests.swift`
+- Modify tests in `Evlin iOS/Evlin iOSTests/PlanArchCardAdapterReflectionEventTests.swift` only if behavior changes.
 
-Steps:
+Scope:
 
-- Restyle card to match the frontend reference: warm cream/white surface, dark navy headline, compact uppercase labels, rounded artifact sections.
-- Keep parent note input.
-- Keep fallback note logic via `ReflectionParentNoteFallback`.
-- Ensure copy is parent-facing:
-  - Pending approval title: `Approve reflection`
-  - Description: child completed reflection and parent can optionally leave a message.
-  - Parent note label: `Message for Liam`
-- Do not remove async `onApprove`.
+- Restyle only. Do not rewrite card structure.
+- Preserve current order:
+  1. title row.
+  2. explanatory copy.
+  3. essay prompt.
+  4. child reflection.
+  5. parent message/note.
+  6. approve CTA.
+- Preserve `ReflectionParentNoteFallback`.
+- Preserve async `onApprove`.
+- Preserve empty-essay disable behavior.
 
-Acceptance:
+Visual changes:
 
-- Existing note behavior still works.
-- Empty essay still disables approve.
-- Visual hierarchy has sections for prompt, child words, parent message, approve CTA.
+- Use reflection cream card background.
+- Use dark navy title.
+- Use uppercase section labels.
+- Wrap prompt, essay, and parent message in artifact-like rounded sections.
+- Keep parent note label: `Message for \(childName)`.
+- Placeholder: `Add a note for \(childName)...`
 
-## Task 3 — Route Reflection Approve/Redo To Polished Card
+TDD/verification steps:
+
+- If behavior is unchanged, do not add fragile visual tests.
+- Build after restyle.
+- Manually preview card in Xcode or existing chat fixture.
+- Commit: `feat(reflection): restyle parent review card`
+
+## Task 3 — Route Approve And Redo To Polished Chat Card
 
 Files:
 
 - Modify `Evlin iOS/Evlin iOS/Components/Chat/ReflectionCardAdapter.swift`
-- Modify `Evlin iOS/Evlin iOS/Components/Chat/PlanArchCardAdapter.swift` if needed.
+- Modify `Evlin iOS/Evlin iOS/Components/Chat/ReflectionSubmissionReviewCard.swift` if mode support is needed.
 - Tests: `Evlin iOS/Evlin iOSTests/PlanArchCardAdapterReflectionEventTests.swift`
 
-Steps:
+Decision:
 
-- Stop falling back to generic PlanArch for `reflection.confirm_approve` when detail contains enough review data.
-- Map review payload into a render model or dedicated reflection review route.
-- Keep fallback to generic PlanArch when required detail is missing.
-- Keep `reflection.confirm_redo` fallback unless there is already a polished redo card path.
+- Polish both `reflection.confirm_approve` and `reflection.confirm_redo` in this round.
+- Use one shared polished card with mode:
 
-Acceptance:
+```swift
+enum ReflectionReviewMode {
+    case approve
+    case redo
+}
+```
 
-- `reflection.confirm_approve` with prompt + essay renders polished review card.
-- Unknown/malformed detail still falls back safely.
+Implementation placement:
 
-## Task 4 — Home Card Under Reflection State
+- Keep payload parsing helpers private inside `ReflectionCardAdapter.swift`.
+- Do not create a new adapter file unless the helper exceeds roughly 100 lines.
+
+Behavior:
+
+- `reflection.confirm_approve` with prompt + essay routes to polished card mode `.approve`.
+- `reflection.confirm_redo` with prompt + essay routes to polished card mode `.redo`.
+- Malformed/missing prompt or essay falls back to generic PlanArch rendering.
+- Parent note remains available for approve.
+- Redo mode should show redo reason UI if detail includes reason; otherwise show generic redo copy.
+
+TDD steps:
+
+- Add XCTest for approve payload -> polished render model/card path.
+- Add XCTest for redo payload -> polished render model/card path.
+- Add XCTest for malformed payload -> fallback nil.
+- Confirm tests fail before implementation.
+- Implement adapter parsing and mode.
+- Run tests + quick build.
+- Commit: `feat(reflection): route review cards to polished renderer`
+
+## Task 4 — Shared Reflection Status Card Component
 
 Files:
 
-- Modify `Evlin iOS/Evlin iOS/Components/ProfileCard.swift`
-- Modify `Evlin iOS/Evlin iOS/Models/ChildProfile.swift` or add derived reflection state input if needed.
+- Add `Evlin iOS/Evlin iOS/Components/Reflection/ParentReflectionStatusCard.swift`
 - Modify `Evlin iOS/Evlin iOS/Views/Home/HomeView.swift`
+- Modify `Evlin iOS/Evlin iOS/Components/ProfileCard.swift`
+- Do not modify `ChildProfile`.
 
-Steps:
+Component requirements:
 
-- Add a rendering path for `UNDER REFLECTION`.
-- Remove any countdown/time-left treatment for reflection state.
-- Add `View reflection` CTA with reflection icon.
-- Keep existing normal/locked/unlocked profile card behavior unchanged.
-- For prototype fixture, Liam can be the reflection child.
+- This component is shared by Home and Profile; do not implement two divergent reflection cards.
+- Props:
+  - `child: ChildProfile`
+  - `summary: ParentReflectionSummary`
+  - `layout: .homeCard | .profileHeader`
+  - `onViewReflection: () -> Void`
+- Shows `UNDER REFLECTION`.
+- Removes any time/countdown UI.
+- Shows `View reflection` CTA.
+- Uses reflection icon consistently.
 
-Acceptance:
+TDD/verification steps:
 
-- Reflection child card resembles the provided screenshot structure.
-- No `15M` or countdown appears in reflection state.
-- Tapping `View reflection` routes to reflection flow, not just profile.
+- If component logic can be unit-tested without snapshot, add a small test for CTA route selection in store/helper.
+- Build and manually inspect Home.
+- Commit: `feat(reflection): add shared reflection status card`
 
 ## Task 5 — Profile Header Reflection State
 
 Files:
 
 - Modify `Evlin iOS/Evlin iOS/Views/Profile/ProfileView.swift`
-- Optionally add `Evlin iOS/Evlin iOS/Components/Reflection/ParentReflectionStatusCard.swift`
 
 Steps:
 
-- Extract the current summary card into a helper if needed.
-- Add reflection summary header matching screenshot:
-  - avatar.
-  - lock/status overlay.
-  - large child name.
-  - `UNDER REFLECTION` badge.
-  - `View reflection` CTA.
-- Use this header when `ParentReflectionState.assignedPending` or `.completedReady` exists for that child.
-- Keep current tasks/devices/rules sections below.
+- Read `ParentReflectionFixtureStore` from environment.
+- If `summary(for: child)` returns assigned/completed state, render `ParentReflectionStatusCard(layout: .profileHeader)`.
+- Wire `View reflection`:
+  - `.assignedPending` -> append `AppRoute.reflectionPending(childId: child.id)`.
+  - `.completedReady` -> append `AppRoute.reflectionArtifact(reflectionId: summary.id)`.
+- Keep current tasks/devices/rules below the header.
+- Add debug-only `Simulate reflection complete` to the existing top-right `...` menu.
 
-Acceptance:
+TDD/verification steps:
 
-- Profile top area matches screenshot.
-- CTA route depends on state:
-  - assigned pending -> pending page.
-  - completed ready -> artifact page.
+- Build.
+- Manually inspect Profile pending and completed state through fixture/debug toggle.
+- Commit: `feat(reflection): show reflection state on profile`
 
-## Task 6 — Add Parent Reflection Pending Page
+## Task 6 — Home Card Reflection State
+
+Files:
+
+- Modify `Evlin iOS/Evlin iOS/Views/Home/HomeView.swift`
+- Modify `Evlin iOS/Evlin iOS/Components/ProfileCard.swift` only if still needed after Task 4.
+
+Steps:
+
+- Read `ParentReflectionFixtureStore` from environment.
+- Render reflection state for child card when summary exists.
+- Wire `View reflection` CTA using the same state routing as Profile.
+- Keep normal card rendering for children without reflection.
+
+TDD/verification steps:
+
+- Build.
+- Manually inspect Home child card.
+- Confirm no `15M` or countdown appears.
+- Commit: `feat(reflection): show reflection state on home`
+
+## Task 7 — Pending Reflection Page
 
 Files:
 
 - Add `Evlin iOS/Evlin iOS/Views/Profile/ReflectionPendingView.swift`
-- Update navigation in parent stack, likely `ContentView.swift` / `DashboardView.swift` depending current route ownership.
 
-Steps:
+Button behavior:
 
-- Build calm status card:
-  - title: `Reflection in progress`
-  - body: `Liam hasn't finished this reflection yet. You'll get notified when it's ready to review.`
-  - actions: `Send reminder`, `Cancel reflection`
-- Do not show step progress.
-- Use warm reflection styling consistent with Home/Profile reflection card.
-- Buttons can be prototype no-op callbacks unless existing backend endpoints are already available.
+- `Send reminder`: prototype stub. Show local non-blocking feedback such as `Reminder queued`.
+- `Cancel reflection`: prototype stub. Show local confirmation text. Do not call backend.
+- Add comments:
 
-Acceptance:
+```swift
+// TODO: wire to backend reflection reminder endpoint when available.
+// TODO: wire to backend reflection cancel endpoint when available.
+```
 
-- Assigned pending state opens this page.
-- No fake Step 1/3 progress appears.
+UI copy:
 
-## Task 7 — Add Parent Reflection Artifact Page
+```text
+Reflection in progress
+Liam hasn't finished this reflection yet. You'll get notified when it's ready to review.
+```
+
+TDD/verification steps:
+
+- Build.
+- Manually route from Profile/Home to pending page.
+- Confirm no fake step progress.
+- Commit: `feat(reflection): add pending reflection page`
+
+## Task 8 — Completed Artifact Page
 
 Files:
 
 - Add `Evlin iOS/Evlin iOS/Views/Profile/ReflectionArtifactView.swift`
-- Add reusable components under `Evlin iOS/Evlin iOS/Components/Reflection/` if needed.
+- Add reusable subcomponents in `Evlin iOS/Evlin iOS/Components/Reflection/` only if needed.
 
-Steps:
+Button behavior:
 
-- Render completed artifact sections:
-  - assignment summary.
-  - Evlin prompt.
-  - child written words.
-  - quiz result/question if fixture available.
-  - Evlin takeaway.
-  - approve / request redo actions.
-  - optional parent response note.
-- Use existing child-side data concepts but parent-side styling.
-- Do not trigger Gemini or video network calls from this prototype page.
+- `Approve`: prototype stub unless existing callback is available in this surface. Show local feedback.
+- `Request redo`: prototype stub. Show local feedback.
+- Add TODO comments for backend wiring.
 
-Acceptance:
+Required sections:
 
-- Completed reflection notification and profile CTA open artifact page.
-- Prompt/text/takeaway visible.
-- Parent actions visible.
+- Reflection assignment summary.
+- Evlin prompt.
+- Child written words.
+- Quiz result or quiz question/answer fixture.
+- Evlin takeaway.
+- Parent actions.
+- Parent note/message area if responding to child.
 
-## Task 8 — Add Parent Reflection Step Detail Pages
+TDD/verification steps:
+
+- Build.
+- Manually route from completed Home/Profile/notification to artifact page.
+- Commit: `feat(reflection): add completed reflection artifact`
+
+## Task 9 — Step Detail Pages
 
 Files:
 
 - Add `Evlin iOS/Evlin iOS/Views/Profile/ReflectionStepDetailView.swift`
-- Optionally share display models with Task 7.
+- Modify `ReflectionArtifactView.swift` to link rows.
 
-Steps:
+Behavior:
 
-- Show `Step 1 of 3` video state.
-- Show `Step 2 of 3` quiz state.
-- Show `Step 3 of 3` written reflection state.
-- Reference child-side reflection files for structure, but do not copy child-only lock UI.
-- Represent fallback video as normal educational fallback, not joke/Rickroll copy.
+- Render steps from `summary.steps`.
+- Display `Step N of \(summary.steps.count)`.
+- Standard fixture has three steps: video, quiz, writing.
+- If a future fixture lacks quiz, do not render fake quiz; the numbering follows the actual `steps` array.
+- Parent UI should represent fallback video as normal educational fallback, not Rickroll copy.
 
-Acceptance:
+TDD/verification steps:
 
-- Artifact page can navigate to each step detail.
-- Step labels match `Step N of 3`.
+- Add model/store test if needed for step lookup.
+- Build.
+- Manually navigate artifact -> each step -> back.
+- Commit: `feat(reflection): add reflection step detail pages`
 
-## Task 9 — Home Notification Deep-Link
+## Task 10 — Notification Deep-Link
 
 Files:
 
 - Modify `Evlin iOS/Evlin iOS/Views/Home/NotificationPanel.swift`
-- Modify route owner (`ContentView.swift` or dashboard parent).
-- Add tests if route logic is testable.
+- Modify `Evlin iOS/Evlin iOS/ContentView.swift` only if route callback signature needs extension.
 
 Steps:
 
 - Add reflection completion notification fixture:
-  - title: `Liam completed reflection`
-  - body: `Liam finished his reflection and it's ready for your review.`
-- Tapping notification routes directly to `ReflectionArtifactView`.
+
+```text
+Liam completed reflection
+Liam finished his reflection and it's ready for your review.
+```
+
+- Tapping it appends `AppRoute.reflectionArtifact(reflectionId: summary.id)`.
 - Mark notification read after tap.
+- Existing task notification behavior must stay unchanged.
 
-Acceptance:
+TDD/verification steps:
 
-- Notification opens artifact page without requiring manual profile navigation.
+- Add XCTest only if notification route callback is isolated enough to test.
+- Build.
+- Manually tap notification and verify artifact opens.
+- Commit: `feat(reflection): deep-link reflection notification`
 
-## Task 10 — Navigation Integration
+## Task 11 — Reference Screenshot Baseline
 
 Files:
 
-- Inspect and modify the actual navigation owner:
-  - `Evlin iOS/Evlin iOS/ContentView.swift`
-  - `Evlin iOS/Evlin iOS/Views/Dashboard/DashboardView.swift`
-  - `Evlin iOS/Evlin iOS/Views/Profile/ProfileView.swift`
+- Add directory `Evlin iOS/docs/reflection/reference-screenshots/`
+- Add a short README in that directory.
 
 Steps:
 
-- Add route cases for:
-  - reflection pending.
-  - reflection artifact.
-  - reflection step detail.
-- Preserve existing profile/task/device navigation.
-- Keep back navigation and swipe-back behavior.
+- Save the provided profile reflection screenshot there if available as a local file, or add README instructions describing the reference.
+- Do not implement automated visual diff.
+- Include manual comparison checklist:
+  - Home reflection card.
+  - Profile reflection header.
+  - Pending page.
+  - Artifact page.
+  - Step pages.
+  - Chat review card.
 
-Acceptance:
+Verification:
 
-- Home -> reflection child card -> pending/artifact works.
-- Profile -> View reflection -> pending/artifact works.
-- Notification -> artifact works.
-- Artifact -> step detail -> back works.
+- Documentation-only commit.
+- Commit: `docs(reflection): add visual reference checklist`
 
-## Task 11 — Visual Verification
+## Task 12 — Final Verification
 
 Steps:
 
-- Build in Xcode.
-- Run iOS tests in Xcode.
-- Manually inspect:
+- Run quick build.
+- Run XCTest.
+- Xcode manual inspection:
   - Chat reflection review card.
   - Home reflection child card.
   - Profile reflection header.
@@ -265,21 +511,11 @@ Steps:
   - Completed artifact page.
   - Step detail pages.
   - Notification deep-link.
-- Compare against frontend reference and provided screenshot.
+- Confirm `git diff --name-only` contains no Small Kids files.
+- Confirm `build/` artifacts are not staged.
 
-Acceptance:
+Commit:
 
-- Pixel direction matches design: warm card, dark navy type, rounded borders, reflection badge, no countdown.
-- Parent note remains available.
-- No Small Kids files changed.
-
-## Task 12 — Commit Boundary
-
-Commit after tests/manual verification with message:
-
-```text
-feat(reflection): align parent reflection UI
-```
-
-Do not commit `build/` artifacts.
+- If final verification requires a code fix, commit it separately with a focused message.
+- Otherwise no commit.
 
