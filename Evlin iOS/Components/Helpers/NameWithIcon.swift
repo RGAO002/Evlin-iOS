@@ -21,12 +21,19 @@ struct NameWithIcon: View {
     let name: String
     let kind: NameIconKind
     var titleFont: Font = .body
+    /// Draw a strikethrough on the name text. Used by U1Card to indicate a
+    /// row that's hard-disabled because a broader shield (All Apps) covers
+    /// it — the strike + greyed icon together signal "you can't unlock
+    /// this alone". Off by default everywhere else.
+    var strikethrough: Bool = false
 
     var body: some View {
         HStack(spacing: 8) {
             iconView
                 .frame(width: 24, height: 24)
-            Text(NameWithIcon.displayName(name)).font(titleFont)
+            Text(NameWithIcon.displayName(name))
+                .font(titleFont)
+                .strikethrough(strikethrough, color: nil)
         }
     }
 

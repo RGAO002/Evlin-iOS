@@ -473,7 +473,12 @@ class ChatViewModel: ObservableObject {
                     kind: dict["kind"] as? String ?? "app",
                     displayName: dict["display_name"] as? String ?? "(unknown)",
                     expiresAtISO: dict["expires_at_iso"] as? String,
-                    stale: dict["stale"] as? Bool ?? false
+                    stale: dict["stale"] as? Bool ?? false,
+                    // Phase 1b coverage flags — defaulted so legacy U1
+                    // payloads (which don't emit these keys) decode as
+                    // "no coverage" and the row stays fully tappable.
+                    coveredByAll: dict["covered_by_all"] as? Bool ?? false,
+                    categoryWarnings: dict["category_warnings"] as? [String] ?? []
                 )
             }
             let ctx = CardContext(

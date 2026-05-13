@@ -218,7 +218,12 @@ enum PhoneCardAdapter {
                     kind: (dict["kind"] as? String) ?? "app",
                     displayName: (dict["display_name"] as? String) ?? "?",
                     expiresAtISO: dict["expires_at_iso"] as? String,
-                    stale: (dict["stale"] as? Bool) ?? false
+                    stale: (dict["stale"] as? Bool) ?? false,
+                    // Phase 1b coverage flags — defaulted so older backend
+                    // builds (or shapes that pre-date the field) keep
+                    // working as "no coverage, fully tappable".
+                    coveredByAll: (dict["covered_by_all"] as? Bool) ?? false,
+                    categoryWarnings: (dict["category_warnings"] as? [String]) ?? []
                 )
             }
         }
