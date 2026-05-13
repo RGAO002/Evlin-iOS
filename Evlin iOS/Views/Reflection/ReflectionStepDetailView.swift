@@ -133,14 +133,17 @@ private struct VideoStepBody: View {
     @State private var ended: Bool = false
 
     var body: some View {
-        // No outer card wrapper — the video player needs to span the
-        // entire device width, but a card with horizontal padding
-        // would inset it 40pt total (parent's 20 + card's 20). Drop
-        // the card and let the title/rule/footer ride the parent's
-        // padding; the video itself uses a negative horizontal
-        // padding to escape the parent's inset and go edge-to-edge.
-        VStack(alignment: .leading, spacing: 14) {
-            VStack(alignment: .leading, spacing: 8) {
+        // The whole page is one card that extends to the device edges
+        // (escapes the parent ScrollView's 20pt horizontal padding via
+        // negative padding on the outermost stack). Title / lock rule /
+        // footer have 20pt inner padding; the video has 0pt inner
+        // padding so it bleeds to the card edges = device edges.
+        //
+        // Mirrors the reference HTML card structure: header padding
+        // 18 20 12, video edge-to-card, lock rule 0 20 16, then a
+        // border-top divider before the footer note (padding 12 20 16).
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 6) {
                 stepLabel(index: index, total: total, suffix: "Video preview")
 
                 Text(step.title)
@@ -150,28 +153,46 @@ private struct VideoStepBody: View {
                     .lineSpacing(2)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            .padding(.horizontal, 20)
+            .padding(.top, 18)
+            .padding(.bottom, 12)
 
             videoPlayer
-                .padding(.horizontal, -20)
 
             if let video = step.video {
                 lockRule(video.lockRule)
+                    .padding(.horizontal, 20)
+                    .padding(.top, 14)
+                    .padding(.bottom, 16)
             }
 
-            footerNote(
-                "This is exactly what \(childName) watches before unlocking."
-            )
+            Rectangle()
+                .fill(Color.evOutlineVariant)
+                .frame(height: 1)
+
+            Text("This is exactly what \(childName) watches before unlocking.")
+                .font(.custom("Inter", size: 11))
+                .foregroundStyle(Color.evOnSurfaceVariant)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 20)
+                .padding(.top, 12)
+                .padding(.bottom, 16)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.evSurfaceContainerLowest)
+        .overlay(
+            Rectangle()
+                .stroke(Color.evOutlineVariant, lineWidth: 1)
+        )
+        .padding(.horizontal, -20)
     }
 
     @ViewBuilder
     private var videoPlayer: some View {
-        // The parent preview shows the kid sees what the kid sees — so
-        // the embed should be roughly the same physical size as the
-        // kid-side player (`BigKidVideoView` uses `maxHeight: 440`).
-        // The reference HTML's `height: 200` is the dashboard mockup
-        // scale, not phone scale, and feels cramped on iPhone.
+        // Edge-to-edge within the card (= device width since the card
+        // itself extends to device edges). No rounded corners on the
+        // video — they'd clash with the card's own top corners and
+        // the bleed-to-edge look. WKWebView's YouTube embed
+        // letterboxes the 16:9 video inside this box.
         if let video = step.video {
             ZStack {
                 VideoEmbedView(
@@ -199,10 +220,6 @@ private struct VideoStepBody: View {
                 .padding(14)
                 .allowsHitTesting(false)
             }
-            // Match `BigKidVideoView`'s `.frame(maxHeight: 440)` — the
-            // parent is reviewing what the kid sees, so use the same
-            // generous player area. WKWebView's YouTube embed will
-            // letterbox the actual 16:9 video inside this box.
             .frame(maxWidth: .infinity)
             .frame(height: 360)
             .background(
@@ -216,11 +233,10 @@ private struct VideoStepBody: View {
                     endPoint: .bottomTrailing
                 )
             )
-            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
         } else {
-            // No video metadata — render the same gradient block but
-            // without an embed (no media loaded for this fixture).
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
+            // Fallback (no fixture video) — same gradient block at the
+            // same edge-to-edge size, with a static play glyph.
+            Rectangle()
                 .fill(
                     LinearGradient(
                         gradient: Gradient(colors: [

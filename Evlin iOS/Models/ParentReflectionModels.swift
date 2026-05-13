@@ -58,6 +58,16 @@ struct ParentReflectionSummary: Identifiable, Codable, Hashable {
 
 @Observable
 final class ParentReflectionFixtureStore {
+    /// Belt-and-suspenders observation counter. SwiftUI's `@Observable`
+    /// tracking on dictionary subscript mutations doesn't always
+    /// invalidate views that are not currently topmost in a
+    /// NavigationStack (Home below pushed Profile is the canonical
+    /// case). Bumping a simple Int property on every mutation gives
+    /// child views a guaranteed observation hook — they read
+    /// `revision` in their body to register a dependency, and SwiftUI
+    /// reliably re-evaluates them when this Int changes.
+    private(set) var revision: Int = 0
+
     private var summariesByChildId: [String: ParentReflectionSummary]
 
     init() {
@@ -104,15 +114,18 @@ final class ParentReflectionFixtureStore {
         summary.takeaway = Self.completedTakeaway
         summary.steps = Self.standardCompletedSteps
         summariesByChildId[childId] = summary
+        revision &+= 1
     }
 
     func simulateAssignment(childId: String) {
         guard childId == ChildProfile.liam.id else { return }
         summariesByChildId[childId] = Self.liamPendingSummary
+        revision &+= 1
     }
 
     func clear(childId: String) {
         summariesByChildId[childId] = nil
+        revision &+= 1
     }
 
     func resetToPending(childId: String) {
@@ -122,6 +135,7 @@ final class ParentReflectionFixtureStore {
     func syncBackendReflection(for child: ChildProfile, request: ReflectionRequest?) {
         guard let request else {
             summariesByChildId[child.id] = nil
+            revision &+= 1
             return
         }
 
@@ -132,6 +146,7 @@ final class ParentReflectionFixtureStore {
         // would still take up a row in the store.
         guard mappedState != .none else {
             summariesByChildId[child.id] = nil
+            revision &+= 1
             return
         }
 
@@ -150,6 +165,7 @@ final class ParentReflectionFixtureStore {
             takeaway: Self.takeaway(for: request),
             steps: Self.steps(for: request)
         )
+        revision &+= 1
     }
 }
 
@@ -323,16 +339,31 @@ private extension ParentReflectionFixtureStore {
         // Both pending and completed reflections expose the three steps —
         // pending so the parent can preview, completed so they can review.
         // The Writing step omits `essayText` (it lives on the summary).
-        let mappedQuiz: [ParentReflectionQuizQuestion] = request.quiz.isEmpty
-            ? standardCompletedQuiz
-            : request.quiz.enumerated().map { idx, q in
-                ParentReflectionQuizQuestion(
+        let mappedQuiz: [ParentReflectionQuizQuestion]
+        if request.quiz.isEmpty {
+            mappedQuiz = standardCompletedQuiz
+        } else {
+            // The backend `QuizQuestion` doesn't carry a correct-answer
+            // index — the kid-side grades via a server roundtrip. For
+            // the parent preview, look up the index by matching the
+            // question text against the canonical seed
+            // (`standardCompletedQuiz`, which mirrors
+            // `bigkid_reflection_seed.json`). If a backend question
+            // doesn't match (e.g. a future Gemini-generated quiz),
+            // mark `correctIndex` as -1 so the renderer can hide the
+            // green highlight rather than mark a random option correct.
+            mappedQuiz = request.quiz.map { q in
+                let standardCorrect = standardCompletedQuiz
+                    .first { $0.q == q.q }?
+                    .correctIndex ?? -1
+                return ParentReflectionQuizQuestion(
                     id: UUID(),
                     q: q.q,
                     options: q.options,
-                    correctIndex: max(0, min(0, q.options.count - 1))
+                    correctIndex: standardCorrect
                 )
             }
+        }
         return [
             ParentReflectionStepArtifact(
                 id: UUID(uuidString: "1E3DD820-7AB7-4B0A-84EE-366A472E8616")!,

@@ -83,6 +83,13 @@ private struct HomeChildRow: View {
     @Environment(ParentReflectionFixtureStore.self) private var reflectionStore
 
     var body: some View {
+        // Touch the revision counter so SwiftUI's Observation
+        // framework reliably tracks this view against ANY mutation
+        // to the store — not just reads that happen to land on
+        // `summariesByChildId` (which sometimes don't invalidate
+        // views below the NavigationStack top).
+        let _ = reflectionStore.revision
+
         if let summary = reflectionStore.summary(for: child),
            summary.state != .none {
             ParentReflectionStatusCard(
