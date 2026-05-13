@@ -52,6 +52,10 @@ final class ParentReflectionFixtureStore {
         summariesByChildId[childId]
     }
 
+    func summary(reflectionId: UUID) -> ParentReflectionSummary? {
+        summariesByChildId.values.first { $0.id == reflectionId }
+    }
+
     func simulateCompletion(childId: String) {
         guard var summary = summariesByChildId[childId],
               summary.state == .assignedPending else {

@@ -205,21 +205,17 @@ extension View {
                         if !path.wrappedValue.isEmpty { path.wrappedValue.removeLast() }
                     }
                 )
-            case .reflectionArtifact(reflectionId: _):
-                ReflectionArtifactPlaceholder()
+            case .reflectionArtifact(let reflectionId):
+                ReflectionArtifactView(
+                    reflectionId: reflectionId,
+                    onBack: {
+                        if !path.wrappedValue.isEmpty { path.wrappedValue.removeLast() }
+                    }
+                )
             case .reflectionStepDetail(reflectionId: _, stepId: _):
                 ReflectionStepDetailPlaceholder()
             }
         }
-    }
-}
-
-private struct ReflectionArtifactPlaceholder: View {
-    var body: some View {
-        VStack {
-            Text("ReflectionArtifactView — wired in Task 8")
-        }
-        .navigationTitle("Reflection")
     }
 }
 
