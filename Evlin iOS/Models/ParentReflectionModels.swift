@@ -167,6 +167,81 @@ final class ParentReflectionFixtureStore {
         )
         revision &+= 1
     }
+
+    /// Parent-side overload — same as `syncBackendReflection(for:request:)`
+    /// but consumes the richer `ReflectionRequestForParent` payload that
+    /// carries each quiz question's correct-answer index. The Step-2
+    /// preview reads these indices directly instead of guessing from
+    /// the canonical seed by text-match.
+    func syncBackendReflection(
+        for child: ChildProfile,
+        parentRequest: ReflectionRequestForParent
+    ) {
+        let mappedState = Self.parentState(for: parentRequest.status)
+        guard mappedState != .none else {
+            summariesByChildId[child.id] = nil
+            revision &+= 1
+            return
+        }
+
+        let mappedQuiz: [ParentReflectionQuizQuestion] = parentRequest.quiz.map { q in
+            ParentReflectionQuizQuestion(
+                id: UUID(),
+                q: q.q,
+                options: q.options,
+                correctIndex: q.correctIndex
+            )
+        }
+        let mappedSteps: [ParentReflectionStepArtifact] = [
+            ParentReflectionStepArtifact(
+                id: UUID(uuidString: "1E3DD820-7AB7-4B0A-84EE-366A472E8616")!,
+                kind: .video,
+                title: parentRequest.videoTitle.isEmpty ? "Watch the coaching video" : parentRequest.videoTitle,
+                subtitle: "Short coaching video",
+                body: "The reflection started with a short video lesson about the assigned situation.",
+                video: ParentReflectionVideoFixture(
+                    youtubeId: parentRequest.videoId,
+                    duration: "2:14",
+                    lockRule: "Watch the whole video — no skipping."
+                )
+            ),
+            ParentReflectionStepArtifact(
+                id: UUID(uuidString: "B0D69D4A-CE58-43D6-A108-5C81BA8E9638")!,
+                kind: .quiz,
+                title: "Check Understanding",
+                subtitle: "Need 4 of 5 to pass",
+                body: parentRequest.quizScore.map { "Score: \($0)/\(max(parentRequest.quiz.count, 1))" }
+                    ?? "The quiz checks that the reflection lesson made sense.",
+                quiz: mappedQuiz
+            ),
+            ParentReflectionStepArtifact(
+                id: UUID(uuidString: "F56C8D81-C7D8-4477-9E2B-B2C0E426903C")!,
+                kind: .writing,
+                title: "Written Reflection",
+                subtitle: "Parent-ready response",
+                body: parentRequest.essayText ?? parentRequest.writingPrompt
+            )
+        ]
+        let takeaway: String? = parentRequest.essayText.map { _ in
+            "\(parentRequest.displayReason ?? parentRequest.reason) was completed and is ready for parent review."
+        }
+        let existing = summariesByChildId[child.id]
+        summariesByChildId[child.id] = ParentReflectionSummary(
+            id: parentRequest.id,
+            childId: child.id,
+            childName: child.name,
+            state: mappedState,
+            reason: parentRequest.displayReason ?? parentRequest.reason,
+            assignedAt: existing?.id == parentRequest.id ? existing?.assignedAt ?? Self.nowString() : Self.nowString(),
+            submittedAt: parentRequest.submittedAt.map(Self.string(from:)),
+            parentNote: parentRequest.parentNote,
+            prompt: parentRequest.writingPrompt,
+            essayText: parentRequest.essayText,
+            takeaway: takeaway,
+            steps: mappedSteps
+        )
+        revision &+= 1
+    }
 }
 
 private extension ParentReflectionFixtureStore {

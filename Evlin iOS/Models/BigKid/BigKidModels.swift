@@ -66,6 +66,36 @@ struct QuizQuestion: Codable, Equatable, Sendable {
     let options: [String]
 }
 
+/// Parent-only quiz question shape that carries the correct-answer
+/// index. Decoded from `GET /parent/reflection/{rid}` (see
+/// `bigkid_parent.py :: get_reflection_for_parent`). Never served to
+/// the child surface.
+struct QuizQuestionWithAnswer: Codable, Equatable, Sendable {
+    let q: String
+    let options: [String]
+    let correctIndex: Int
+}
+
+/// Parent-only reflection shape that exposes correct-answer indices
+/// for every quiz question. Used by the Step-2 quiz preview so the
+/// parent can see which option the child should have picked.
+struct ReflectionRequestForParent: Codable, Equatable, Sendable, Identifiable {
+    let id: UUID
+    let reason: String
+    let displayReason: String?
+    let videoId: String
+    let videoTitle: String
+    let writingPrompt: String
+    let quiz: [QuizQuestionWithAnswer]
+    let stepsCompleted: [BigKidReflectionStep]
+    let quizScore: Int?
+    let essayText: String?
+    let status: BigKidReflectionStatus
+    let parentNote: String?
+    let submittedAt: Date?
+    let approvedAt: Date?
+}
+
 struct ReflectionRequest: Codable, Equatable, Sendable, Identifiable {
     let id: UUID
     let reason: String

@@ -233,6 +233,26 @@ class APIClient: ObservableObject {
         return try JSONDecoder.bigKid.decode(ChildStateResponse.self, from: data)
     }
 
+    /// Parent-only fetch of a reflection's full content including each
+    /// quiz question's correct-answer index. The kid `/child/state`
+    /// endpoint strips correctIndex; this `/parent/reflection/{rid}`
+    /// endpoint returns it for the parent-review surfaces.
+    func fetchReflectionForParent(reflectionId: UUID) async throws -> ReflectionRequestForParent {
+        let trimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let url = URL(string: "\(trimmed)/parent/reflection/\(reflectionId.uuidString)") else {
+            throw URLError(.badURL)
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "GET"
+        req.timeoutInterval = 22
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+        return try JSONDecoder.bigKid.decode(ReflectionRequestForParent.self, from: data)
+    }
+
     func approveChildReflectionSubmission(reflectionId: UUID, parentNote: String?) async throws {
         let trimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty,

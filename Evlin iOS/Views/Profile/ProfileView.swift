@@ -355,6 +355,13 @@ struct ProfileView: View {
 
     /// Pull `/parent/state/{childId}` and rebuild `tasks` from real backend
     /// data. No-op when not paired.
+    ///
+    /// When the kid-state snapshot reports an active reflection, this
+    /// also fetches the richer `/parent/reflection/{rid}` payload so
+    /// the parent-side fixture store gets each quiz question's
+    /// correct-answer index (Step-2 highlighting). The kid endpoint
+    /// strips correctIndex by design — only the parent fetch carries
+    /// it.
     @MainActor
     private func refreshFromBackend() async {
         guard let cid = backendChildID, let client = bigKidParent else { return }
@@ -363,7 +370,22 @@ struct ProfileView: View {
             tasks = snapshot.tasks.enumerated().map { idx, t in
                 TaskItem.from(backend: t, sequenceID: idx + 1)
             }
-            reflectionStore.syncBackendReflection(for: child, request: snapshot.reflectionRequest)
+
+            if let req = snapshot.reflectionRequest {
+                // Best-effort: try the parent endpoint first so we get
+                // correct-answer indices. Fall back to the kid-state
+                // request shape if the parent endpoint fails (older
+                // backend, network blip, etc.) — the Step-2 UI will
+                // still render but mark no option as correct.
+                do {
+                    let parentReq = try await apiClient.fetchReflectionForParent(reflectionId: req.id)
+                    reflectionStore.syncBackendReflection(for: child, parentRequest: parentReq)
+                } catch {
+                    reflectionStore.syncBackendReflection(for: child, request: req)
+                }
+            } else {
+                reflectionStore.syncBackendReflection(for: child, request: nil)
+            }
             backendError = nil
         } catch {
             backendError = (error as? BigKidAPIError).map(\.detail) ?? error.localizedDescription
