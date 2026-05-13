@@ -217,7 +217,7 @@ private struct ReflectionPendingPlaceholder: View {
 private struct ReflectionArtifactPlaceholder: View {
     var body: some View {
         VStack {
-            Text("ReflectionArtifactView — wired in Task 7")
+            Text("ReflectionArtifactView — wired in Task 8")
         }
         .navigationTitle("Reflection")
     }
@@ -226,7 +226,7 @@ private struct ReflectionArtifactPlaceholder: View {
 private struct ReflectionStepDetailPlaceholder: View {
     var body: some View {
         VStack {
-            Text("ReflectionStepDetailView — wired in Task 7")
+            Text("ReflectionStepDetailView — wired in Task 9")
         }
         .navigationTitle("Reflection")
     }
