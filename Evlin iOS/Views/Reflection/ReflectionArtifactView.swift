@@ -254,19 +254,20 @@ struct ReflectionArtifactView: View {
         if step.kind == .writing, summary.state == .completedReady,
            let essay = summary.essayText,
            !essay.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            // Only the writing step in finished state surfaces a "Ready to
-            // review" pill — that's the action the parent needs to take.
-            Text("READY")
+            // Writing step + essay in + parent hasn't acted → match the
+            // reference HTML's "Needs review" tan pill (lines 1555-1558).
+            // Prototype state is fixture-only so the pill doesn't flip
+            // to Approved/Redo persistently when the parent taps an
+            // action — that's expected for this iteration.
+            Text("NEEDS REVIEW")
                 .font(.custom("Inter", size: 9).weight(.heavy))
                 .tracking(1.2)
-                .foregroundStyle(Color(red: 0x15 / 255, green: 0x80 / 255, blue: 0x3D / 255))
+                .foregroundStyle(ReflectionPalette.badgeFg)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 3)
-                .background(
-                    Capsule().fill(Color(red: 0xDC / 255, green: 0xFC / 255, blue: 0xE7 / 255))
-                )
+                .background(Capsule().fill(Color.white))
                 .overlay(
-                    Capsule().stroke(Color(red: 0x86 / 255, green: 0xEF / 255, blue: 0xAC / 255), lineWidth: 1)
+                    Capsule().stroke(ReflectionPalette.border, lineWidth: 1)
                 )
         } else {
             EmptyView()
