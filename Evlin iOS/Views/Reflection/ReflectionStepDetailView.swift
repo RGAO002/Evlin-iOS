@@ -133,17 +133,26 @@ private struct VideoStepBody: View {
     @State private var ended: Bool = false
 
     var body: some View {
+        // No outer card wrapper — the video player needs to span the
+        // entire device width, but a card with horizontal padding
+        // would inset it 40pt total (parent's 20 + card's 20). Drop
+        // the card and let the title/rule/footer ride the parent's
+        // padding; the video itself uses a negative horizontal
+        // padding to escape the parent's inset and go edge-to-edge.
         VStack(alignment: .leading, spacing: 14) {
-            stepLabel(index: index, total: total, suffix: "Video preview")
+            VStack(alignment: .leading, spacing: 8) {
+                stepLabel(index: index, total: total, suffix: "Video preview")
 
-            Text(step.title)
-                .font(.custom("Manrope", size: 19).weight(.heavy))
-                .tracking(-0.3)
-                .foregroundStyle(StepPalette.ink)
-                .lineSpacing(2)
-                .fixedSize(horizontal: false, vertical: true)
+                Text(step.title)
+                    .font(.custom("Manrope", size: 19).weight(.heavy))
+                    .tracking(-0.3)
+                    .foregroundStyle(StepPalette.ink)
+                    .lineSpacing(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             videoPlayer
+                .padding(.horizontal, -20)
 
             if let video = step.video {
                 lockRule(video.lockRule)
@@ -153,16 +162,7 @@ private struct VideoStepBody: View {
                 "This is exactly what \(childName) watches before unlocking."
             )
         }
-        .padding(20)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(Color.evSurfaceContainerLowest)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(Color.evOutlineVariant, lineWidth: 1)
-        )
     }
 
     @ViewBuilder
