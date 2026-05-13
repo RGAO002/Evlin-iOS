@@ -198,23 +198,19 @@ extension View {
                         if !path.wrappedValue.isEmpty { path.wrappedValue.removeLast() }
                     }
                 )
-            case .reflectionPending(childId: _):
-                ReflectionPendingPlaceholder()
+            case .reflectionPending(let childId):
+                ReflectionPendingView(
+                    childId: childId,
+                    onBack: {
+                        if !path.wrappedValue.isEmpty { path.wrappedValue.removeLast() }
+                    }
+                )
             case .reflectionArtifact(reflectionId: _):
                 ReflectionArtifactPlaceholder()
             case .reflectionStepDetail(reflectionId: _, stepId: _):
                 ReflectionStepDetailPlaceholder()
             }
         }
-    }
-}
-
-private struct ReflectionPendingPlaceholder: View {
-    var body: some View {
-        VStack {
-            Text("ReflectionPendingView — wired in Task 7")
-        }
-        .navigationTitle("Reflection")
     }
 }
 
