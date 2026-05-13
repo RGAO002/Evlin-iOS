@@ -164,6 +164,9 @@ extension View {
                         path.wrappedValue.append(
                             AppRoute.deviceDetail(device: device, childId: child.id)
                         )
+                    },
+                    onOpenReflection: { route in
+                        path.wrappedValue.append(route)
                     }
                 )
             case .notifications:

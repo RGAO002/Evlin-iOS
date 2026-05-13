@@ -14,6 +14,9 @@ struct ProfileView: View {
     /// route so the per-device app-limits screen slides in from the
     /// right and supports edge-swipe back.
     var onOpenDevice: (DeviceItem) -> Void = { _ in }
+    /// Called when the reflection status card CTA should push into the
+    /// parent reflection flow.
+    var onOpenReflection: (AppRoute) -> Void = { _ in }
 
     @State private var rules: [RuleItem] = []
     @State private var tasks: [TaskItem] = []
@@ -32,6 +35,7 @@ struct ProfileView: View {
     // (parent received it during 6-digit pairing). Falls back to
     // ProfileMockData for other children or when not paired.
     @AppStorage("evlin.childDeviceID") private var pairedChildID: String = ""
+    @Environment(ParentReflectionFixtureStore.self) private var reflectionStore
     @EnvironmentObject private var apiClient: APIClient
     @State private var backendError: String? = nil
     @State private var pollTask: Task<Void, Never>? = nil
@@ -78,6 +82,13 @@ struct ProfileView: View {
                     } label: {
                         Label("Edit Profile", systemImage: "pencil")
                     }
+                    #if DEBUG
+                    Button {
+                        reflectionStore.simulateCompletion(childId: child.id)
+                    } label: {
+                        Label("Simulate reflection complete", systemImage: "checkmark.seal")
+                    }
+                    #endif
                     Button(role: .destructive) {
                         showDeleteConfirm = true
                     } label: {
@@ -93,8 +104,18 @@ struct ProfileView: View {
 
             ScrollView {
                 VStack(spacing: 26) {
-                    // Summary card with Lock/Unlock CTA
-                    summaryCard
+                    // Header card: reflection state replaces time/lock UI
+                    // while keeping the rest of the profile surface intact.
+                    if let summary = activeReflectionSummary {
+                        ParentReflectionStatusCard(
+                            child: displayChild,
+                            summary: summary,
+                            layout: .profileHeader,
+                            onViewReflection: { openReflection(summary) }
+                        )
+                    } else {
+                        summaryCard
+                    }
 
                     // Current Tasks (HTML 1058-1063)
                     VStack(spacing: 0) {
@@ -396,6 +417,24 @@ struct ProfileView: View {
 
     // MARK: - Subsections (broken out so the body type-checks fast)
 
+    private var activeReflectionSummary: ParentReflectionSummary? {
+        guard let summary = reflectionStore.summary(for: child), summary.state != .none else {
+            return nil
+        }
+        return summary
+    }
+
+    private func openReflection(_ summary: ParentReflectionSummary) {
+        switch summary.state {
+        case .assignedPending:
+            onOpenReflection(.reflectionPending(childId: child.id))
+        case .completedReady:
+            onOpenReflection(.reflectionArtifact(reflectionId: summary.id))
+        case .none:
+            break
+        }
+    }
+
     /// Green pill with `doneCount/total` per HTML 1059.
     private var tasksDonePill: some View {
         let done = tasks.filter { $0.state == .done }.count
@@ -658,6 +697,7 @@ struct ProfileView: View {
         ProfileView(child: .liam)
     }
     .environmentObject(APIClient())
+    .environment(ParentReflectionFixtureStore())
 }
 
 #Preview("Maya") {
@@ -665,6 +705,7 @@ struct ProfileView: View {
         ProfileView(child: .maya)
     }
     .environmentObject(APIClient())
+    .environment(ParentReflectionFixtureStore())
 }
 
 #Preview("Emma (locked)") {
@@ -672,4 +713,5 @@ struct ProfileView: View {
         ProfileView(child: .emma)
     }
     .environmentObject(APIClient())
+    .environment(ParentReflectionFixtureStore())
 }
