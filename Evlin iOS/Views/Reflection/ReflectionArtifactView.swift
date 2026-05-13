@@ -218,6 +218,7 @@ struct ReflectionArtifactView: View {
                         .scrollContentBackground(.hidden)
                         .frame(minHeight: 104)
                         .padding(Spacing.sm)
+                        .accessibilityLabel("Message to \(summary.childName)")
                 }
                 .background(Color.evSurfaceContainerLowest.opacity(0.76))
                 .clipShape(RoundedRectangle(cornerRadius: CornerRadius.lg, style: .continuous))
