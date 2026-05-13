@@ -12,6 +12,9 @@ enum AppRoute: Hashable {
     /// Pushable per-device app-limits screen. Mirrors `taskDetail` —
     /// pushes onto the same stack so edge-swipe-back works.
     case deviceDetail(device: DeviceItem, childId: String)
+    case reflectionPending(childId: String)
+    case reflectionArtifact(reflectionId: UUID)
+    case reflectionStepDetail(reflectionId: UUID, stepId: UUID)
 }
 
 /// Compatibility alias — older code referenced `HomeRoute`.
@@ -191,8 +194,41 @@ extension View {
                         if !path.wrappedValue.isEmpty { path.wrappedValue.removeLast() }
                     }
                 )
+            case .reflectionPending(childId: _):
+                ReflectionPendingPlaceholder()
+            case .reflectionArtifact(reflectionId: _):
+                ReflectionArtifactPlaceholder()
+            case .reflectionStepDetail(reflectionId: _, stepId: _):
+                ReflectionStepDetailPlaceholder()
             }
         }
+    }
+}
+
+private struct ReflectionPendingPlaceholder: View {
+    var body: some View {
+        VStack {
+            Text("ReflectionPendingView — wired in Task 7")
+        }
+        .navigationTitle("Reflection")
+    }
+}
+
+private struct ReflectionArtifactPlaceholder: View {
+    var body: some View {
+        VStack {
+            Text("ReflectionArtifactView — wired in Task 7")
+        }
+        .navigationTitle("Reflection")
+    }
+}
+
+private struct ReflectionStepDetailPlaceholder: View {
+    var body: some View {
+        VStack {
+            Text("ReflectionStepDetailView — wired in Task 7")
+        }
+        .navigationTitle("Reflection")
     }
 }
 
