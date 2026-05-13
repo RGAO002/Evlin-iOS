@@ -84,7 +84,8 @@ struct ParentRootView: View {
                         HomeView(
                             selectedTab: $selectedTab,
                             onOpenProfile: { child in profilePath.append(AppRoute.profile(child)) },
-                            onOpenNotifications: { profilePath.append(AppRoute.notifications) }
+                            onOpenNotifications: { profilePath.append(AppRoute.notifications) },
+                            onOpenReflection: { route in profilePath.append(route) }
                         )
                         .appNavigationDestination(
                             path: $profilePath,
