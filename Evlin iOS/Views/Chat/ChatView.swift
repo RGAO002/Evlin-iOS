@@ -2,9 +2,19 @@ import SwiftUI
 
 struct ChatView: View {
     @EnvironmentObject var apiClient: APIClient
+    @Environment(ParentReflectionFixtureStore.self) private var reflectionStore
     @StateObject private var viewModel = ChatViewModel()
     var isPreview = false
     var activeChild: ChildProfile? = nil
+
+    /// Map `viewModel.childName` back to a `ChildProfile.id` so we can
+    /// clear / reset the parent-side reflection fixture store when the
+    /// parent approves or requests a redo from the chat card. The chat
+    /// surface deals in child *names* (display strings) — Home/Profile
+    /// deal in child *ids*.
+    private var matchedChildId: String? {
+        ChildProfile.all.first { $0.name == viewModel.childName }?.id
+    }
 
 
     var body: some View {
@@ -108,6 +118,31 @@ struct ChatView: View {
                                                 reflectionId: reflection.reflectionId,
                                                 parentNoteTrimmed: note
                                             )
+                                            // Parent approved → the
+                                            // reflection is done. Clear
+                                            // the home/profile under-
+                                            // reflection card right
+                                            // away. (Backend poll will
+                                            // eventually agree, but the
+                                            // UI shouldn't have to wait
+                                            // for it.)
+                                            if let childId = matchedChildId {
+                                                reflectionStore.clear(childId: childId)
+                                            }
+                                        },
+                                        onRedo: {
+                                            // Prototype: "Write again"
+                                            // sends the kid back to the
+                                            // writing step. Flip the
+                                            // fixture summary to pending
+                                            // so Home/Profile show the
+                                            // assigned state again.
+                                            // TODO: wire to backend
+                                            // reflection redo endpoint
+                                            // when available.
+                                            if let childId = matchedChildId {
+                                                reflectionStore.resetToPending(childId: childId)
+                                            }
                                         }
                                     )
                                 }

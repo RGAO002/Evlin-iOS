@@ -125,12 +125,22 @@ final class ParentReflectionFixtureStore {
             return
         }
 
+        let mappedState = Self.parentState(for: request.status)
+        // .approved on the backend → .none on the parent surface.
+        // Drop the row entirely so Home / Profile fall back to the
+        // normal child card; otherwise a stale summary with state=.none
+        // would still take up a row in the store.
+        guard mappedState != .none else {
+            summariesByChildId[child.id] = nil
+            return
+        }
+
         let existing = summariesByChildId[child.id]
         summariesByChildId[child.id] = ParentReflectionSummary(
             id: request.id,
             childId: child.id,
             childName: child.name,
-            state: Self.parentState(for: request.status),
+            state: mappedState,
             reason: request.displayReason ?? request.reason,
             assignedAt: existing?.id == request.id ? existing?.assignedAt ?? Self.nowString() : Self.nowString(),
             submittedAt: request.submittedAt.map(Self.string(from:)),
@@ -298,8 +308,14 @@ private extension ParentReflectionFixtureStore {
         switch status {
         case .pending:
             return .assignedPending
-        case .submitted, .approved:
+        case .submitted:
             return .completedReady
+        case .approved:
+            // Parent already approved → reflection is done. The Home
+            // and Profile screens should drop back to their normal
+            // (non-reflection) presentation, so report .none. Chat
+            // history still keeps the resolved review bubble.
+            return .none
         }
     }
 

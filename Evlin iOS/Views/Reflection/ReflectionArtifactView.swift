@@ -71,9 +71,9 @@ struct ReflectionArtifactView: View {
                 .tracking(-0.1)
                 .foregroundStyle(Color.evOnSurface)
 
-            statePill(state: state)
-
             Spacer(minLength: 0)
+
+            statePill(state: state)
         }
     }
 

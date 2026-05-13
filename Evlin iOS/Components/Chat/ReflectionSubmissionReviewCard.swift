@@ -125,24 +125,38 @@ struct ReflectionSubmissionReviewCard: View {
         }
     }
 
+    @ViewBuilder
     private var tonePill: some View {
-        HStack(spacing: 4) {
-            Image(systemName: resolved ? "checkmark.seal.fill" : "square.and.pencil")
-                .font(.system(size: 10, weight: .heavy))
-            Text(toneLabel)
-                .font(.custom("Inter", size: 10).weight(.heavy))
-                .tracking(0.6)
-                .textCase(.uppercase)
+        if resolved {
+            // After the parent approves, the header shows plain
+            // "Completed" text — no pill background — per design.
+            HStack(spacing: 4) {
+                Image(systemName: "checkmark.seal.fill")
+                    .font(.system(size: 11, weight: .heavy))
+                Text("Completed")
+                    .font(.custom("Inter", size: 11).weight(.heavy))
+                    .tracking(0.4)
+            }
+            .foregroundStyle(Color.evSecondary)
+        } else {
+            HStack(spacing: 4) {
+                Image(systemName: "square.and.pencil")
+                    .font(.system(size: 10, weight: .heavy))
+                Text(toneLabel)
+                    .font(.custom("Inter", size: 10).weight(.heavy))
+                    .tracking(0.6)
+                    .textCase(.uppercase)
+            }
+            .foregroundStyle(Color.evSecondary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(
+                Capsule().fill(Color.evSecondaryContainer.opacity(0.5))
+            )
+            .overlay(
+                Capsule().stroke(Color.evSecondary.opacity(0.35), lineWidth: 1)
+            )
         }
-        .foregroundStyle(Color.evSecondary)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(
-            Capsule().fill(Color.evSecondaryContainer.opacity(0.5))
-        )
-        .overlay(
-            Capsule().stroke(Color.evSecondary.opacity(0.35), lineWidth: 1)
-        )
     }
 
     // MARK: - Body sections
@@ -168,6 +182,13 @@ struct ReflectionSubmissionReviewCard: View {
     }
 
     private var wordsSection: some View {
+        // CSS analogue: `border: 1px solid outlineVariant; border-left: 3px solid primary;`
+        // both following border-radius. SwiftUI doesn't support
+        // per-edge borders natively, so we render the navy column
+        // BEFORE the clipShape — then clip everything to the rounded
+        // shape so the column's top/bottom ends curve along with the
+        // card corners. The thin outer stroke is applied AFTER the
+        // clip as a 1px stroke that traces the rounded boundary.
         VStack(alignment: .leading, spacing: 5) {
             sectionLabel("\(childName)'s words", color: Color.evPrimary)
             Text(essayDisplay)
@@ -180,25 +201,16 @@ struct ReflectionSubmissionReviewCard: View {
         .padding(.vertical, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.white)
+        .overlay(alignment: .leading) {
+            Rectangle()
+                .fill(Color.evPrimary)
+                .frame(width: 3)
+        }
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(Color.evOutlineVariant, lineWidth: 1)
         )
-        .overlay(alignment: .leading) {
-            Rectangle()
-                .fill(Color.evPrimary)
-                .frame(width: 3)
-                .clipShape(
-                    UnevenRoundedRectangle(
-                        topLeadingRadius: 12,
-                        bottomLeadingRadius: 12,
-                        bottomTrailingRadius: 0,
-                        topTrailingRadius: 0,
-                        style: .continuous
-                    )
-                )
-        }
     }
 
     private var takeawaySection: some View {
@@ -308,11 +320,19 @@ struct ReflectionSubmissionReviewCard: View {
     }
 
     private var secondaryActionButton: some View {
+        // Always clickable by default. If the call site didn't wire
+        // `onRedo` (e.g. chat-side `reflectionSubmissionReview` that
+        // historically only supported approve), fall back to a no-op
+        // dismiss so the button still feels alive instead of dead.
         Button {
             Task {
                 busy = true
                 if let onRedo {
                     await onRedo()
+                } else {
+                    // Cosmetic delay so the button shows the busy state
+                    // briefly even when there's no real handler.
+                    try? await Task.sleep(nanoseconds: 200_000_000)
                 }
                 busy = false
             }
@@ -338,7 +358,7 @@ struct ReflectionSubmissionReviewCard: View {
             )
         }
         .buttonStyle(.plain)
-        .disabled(busy || onRedo == nil)
+        .disabled(busy)
     }
 
     // MARK: - Helpers
