@@ -306,6 +306,7 @@ struct ProfileView: View {
             tasks = snapshot.tasks.enumerated().map { idx, t in
                 TaskItem.from(backend: t, sequenceID: idx + 1)
             }
+            reflectionStore.syncBackendReflection(for: child, request: snapshot.reflectionRequest)
             backendError = nil
         } catch {
             backendError = (error as? BigKidAPIError).map(\.detail) ?? error.localizedDescription

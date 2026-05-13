@@ -98,6 +98,29 @@ final class ParentReflectionFixtureStore {
     func resetToPending(childId: String) {
         simulateAssignment(childId: childId)
     }
+
+    func syncBackendReflection(for child: ChildProfile, request: ReflectionRequest?) {
+        guard let request else {
+            summariesByChildId[child.id] = nil
+            return
+        }
+
+        let existing = summariesByChildId[child.id]
+        summariesByChildId[child.id] = ParentReflectionSummary(
+            id: request.id,
+            childId: child.id,
+            childName: child.name,
+            state: Self.parentState(for: request.status),
+            reason: request.displayReason ?? request.reason,
+            assignedAt: existing?.id == request.id ? existing?.assignedAt ?? Self.nowString() : Self.nowString(),
+            submittedAt: request.submittedAt.map(Self.string(from:)),
+            parentNote: request.parentNote,
+            prompt: request.writingPrompt,
+            essayText: request.essayText,
+            takeaway: Self.takeaway(for: request),
+            steps: Self.steps(for: request)
+        )
+    }
 }
 
 private extension ParentReflectionFixtureStore {
@@ -179,5 +202,60 @@ private extension ParentReflectionFixtureStore {
 
     static func initialSummariesByChildId() -> [String: ParentReflectionSummary] {
         [:]
+    }
+
+    static func parentState(for status: BigKidReflectionStatus) -> ParentReflectionState {
+        switch status {
+        case .pending:
+            return .assignedPending
+        case .submitted, .approved:
+            return .completedReady
+        }
+    }
+
+    static func steps(for request: ReflectionRequest) -> [ParentReflectionStepArtifact] {
+        guard request.status != .pending else { return [] }
+
+        return [
+            ParentReflectionStepArtifact(
+                id: UUID(uuidString: "1E3DD820-7AB7-4B0A-84EE-366A472E8616")!,
+                kind: .video,
+                title: request.videoTitle.isEmpty ? "Watch the coaching video" : request.videoTitle,
+                subtitle: "Short coaching video",
+                body: "The reflection started with a short video lesson about the assigned situation."
+            ),
+            ParentReflectionStepArtifact(
+                id: UUID(uuidString: "B0D69D4A-CE58-43D6-A108-5C81BA8E9638")!,
+                kind: .quiz,
+                title: "Check Understanding",
+                subtitle: "\(request.quiz.count) reflection questions",
+                body: request.quizScore.map { "Score: \($0)/\(max(request.quiz.count, 1))" }
+                    ?? "The quiz checks that the reflection lesson made sense."
+            ),
+            ParentReflectionStepArtifact(
+                id: UUID(uuidString: "F56C8D81-C7D8-4477-9E2B-B2C0E426903C")!,
+                kind: .writing,
+                title: "Written Reflection",
+                subtitle: "Parent-ready response",
+                body: request.essayText ?? request.writingPrompt
+            )
+        ]
+    }
+
+    static func takeaway(for request: ReflectionRequest) -> String? {
+        guard request.status != .pending else { return nil }
+        return request.essayText.map { _ in
+            "\(request.displayReason ?? request.reason) was completed and is ready for parent review."
+        }
+    }
+
+    static func nowString() -> String {
+        string(from: Date())
+    }
+
+    static func string(from date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.string(from: date)
     }
 }
