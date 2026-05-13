@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct HomeView: View {
+    @Environment(ParentReflectionFixtureStore.self) private var reflectionStore
     @AppStorage("parentName") private var parentName: String = "Morgan"
     @State private var showSettings = false
     @Binding var selectedTab: EvlinTab
@@ -34,12 +35,27 @@ struct HomeView: View {
 
             ScrollView {
                 VStack(spacing: 28) {
-                    // Children section
+                    // Children section. When a child has an active or
+                    // completed reflection, swap the standard ProfileCard
+                    // for the warm under-reflection card (image-1 design).
+                    // Tap target is the same in both cases — open the
+                    // child's profile (which itself shows reflection
+                    // status + a "View reflection" CTA when applicable).
                     VStack(spacing: 14) {
                         SectionHead("Children", kicker: "Select a profile")
                         ForEach(ChildProfile.all) { child in
-                            ProfileCard(child: child) {
-                                onOpenProfile(child)
+                            if let summary = reflectionStore.summary(for: child),
+                               summary.state != .none {
+                                ParentReflectionStatusCard(
+                                    child: child,
+                                    summary: summary,
+                                    layout: .homeCard,
+                                    onViewReflection: { onOpenProfile(child) }
+                                )
+                            } else {
+                                ProfileCard(child: child) {
+                                    onOpenProfile(child)
+                                }
                             }
                         }
                     }
@@ -55,11 +71,24 @@ struct HomeView: View {
     }
 }
 
-#Preview {
+#Preview("Home — no reflection") {
     @Previewable @State var tab: EvlinTab = .home
     return HomeView(
         selectedTab: $tab,
         onOpenProfile: { _ in },
         onOpenNotifications: {}
     )
+    .environment(ParentReflectionFixtureStore())
+}
+
+#Preview("Home — Liam under reflection") {
+    @Previewable @State var tab: EvlinTab = .home
+    let store = ParentReflectionFixtureStore()
+    store.simulateAssignment(childId: ChildProfile.liam.id)
+    return HomeView(
+        selectedTab: $tab,
+        onOpenProfile: { _ in },
+        onOpenNotifications: {}
+    )
+    .environment(store)
 }
