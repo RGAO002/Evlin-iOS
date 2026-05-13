@@ -84,9 +84,19 @@ struct ProfileView: View {
                     }
                     #if DEBUG
                     Button {
+                        reflectionStore.simulateAssignment(childId: child.id)
+                    } label: {
+                        Label("Simulate reflection assigned", systemImage: "figure.mind.and.body")
+                    }
+                    Button {
                         reflectionStore.simulateCompletion(childId: child.id)
                     } label: {
                         Label("Simulate reflection complete", systemImage: "checkmark.seal")
+                    }
+                    Button {
+                        reflectionStore.clear(childId: child.id)
+                    } label: {
+                        Label("Clear reflection state", systemImage: "xmark.circle")
                     }
                     #endif
                     Button(role: .destructive) {

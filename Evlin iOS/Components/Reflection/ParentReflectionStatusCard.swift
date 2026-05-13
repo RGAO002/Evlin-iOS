@@ -180,7 +180,9 @@ private struct Metrics {
 
 private enum ParentReflectionStatusCardPreviewData {
     static var pendingSummary: ParentReflectionSummary {
-        ParentReflectionFixtureStore().summary(for: .liam)!
+        let store = ParentReflectionFixtureStore()
+        store.simulateAssignment(childId: ChildProfile.liam.id)
+        return store.summary(for: .liam)!
     }
 
     static var completedSummary: ParentReflectionSummary {

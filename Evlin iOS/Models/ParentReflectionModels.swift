@@ -52,6 +52,14 @@ final class ParentReflectionFixtureStore {
         summariesByChildId[childId]
     }
 
+    func completedReflectionId(childId: String) -> UUID? {
+        guard let summary = summariesByChildId[childId],
+              summary.state == .completedReady else {
+            return nil
+        }
+        return summary.id
+    }
+
     func summary(reflectionId: UUID) -> ParentReflectionSummary? {
         summariesByChildId.values.first { $0.id == reflectionId }
             ?? Self.completedNotificationSummariesById[reflectionId]
@@ -62,8 +70,11 @@ final class ParentReflectionFixtureStore {
     }
 
     func simulateCompletion(childId: String) {
-        guard var summary = summariesByChildId[childId],
-              summary.state == .assignedPending else {
+        if summariesByChildId[childId] == nil {
+            simulateAssignment(childId: childId)
+        }
+
+        guard var summary = summariesByChildId[childId] else {
             return
         }
 
@@ -75,9 +86,17 @@ final class ParentReflectionFixtureStore {
         summariesByChildId[childId] = summary
     }
 
-    func resetToPending(childId: String) {
+    func simulateAssignment(childId: String) {
         guard childId == ChildProfile.liam.id else { return }
         summariesByChildId[childId] = Self.liamPendingSummary
+    }
+
+    func clear(childId: String) {
+        summariesByChildId[childId] = nil
+    }
+
+    func resetToPending(childId: String) {
+        simulateAssignment(childId: childId)
     }
 }
 
@@ -159,8 +178,6 @@ private extension ParentReflectionFixtureStore {
     }
 
     static func initialSummariesByChildId() -> [String: ParentReflectionSummary] {
-        [
-            ChildProfile.liam.id: liamPendingSummary
-        ]
+        [:]
     }
 }

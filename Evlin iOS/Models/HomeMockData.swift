@@ -22,11 +22,6 @@ enum HomeMockData {
     /// Notifications array. Task entries deep-link to TaskDetail; reflection
     /// entries deep-link to the parent reflection artifact; the rest are informational.
     static let notifications: [HomeNotification] = [
-        .init(id: 9, childId: "liam",   iconSystemName: "text.book.closed.fill",
-              title: "Liam completed reflection",
-              body: "Liam finished his reflection and it's ready for your review.",
-              time: "Just now", unread: true, kind: "reflection",
-              reflectionId: UUID(uuidString: "936E3E6A-D651-490C-9110-7B73BDA4EA26")!),
         .init(id: 1, childId: "liam",   iconSystemName: "checkmark.circle",
               title: "Science Project — needs review",
               body: "Liam submitted his Science Project. Tap to review and approve.",
@@ -60,6 +55,17 @@ enum HomeMockData {
               body: "Family dinner is in 1 hour. Everyone to the dining room.",
               time: "3h ago", unread: false),
     ]
+
+    static func notifications(includingCompletedReflection reflectionId: UUID?) -> [HomeNotification] {
+        guard let reflectionId else { return notifications }
+        return [
+            .init(id: 9, childId: "liam", iconSystemName: "text.book.closed.fill",
+                  title: "Liam completed reflection",
+                  body: "Liam finished his reflection and it's ready for your review.",
+                  time: "Just now", unread: true, kind: "reflection",
+                  reflectionId: reflectionId)
+        ] + notifications
+    }
 
     static func childColor(_ id: String) -> Color {
         switch id {

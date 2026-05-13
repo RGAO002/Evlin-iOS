@@ -1,13 +1,12 @@
 import SwiftUI
 
 struct HomeView: View {
-    @Environment(ParentReflectionFixtureStore.self) private var reflectionStore
     @AppStorage("parentName") private var parentName: String = "Morgan"
     @State private var showSettings = false
     @Binding var selectedTab: EvlinTab
+    var notifications: [HomeNotification] = HomeMockData.notifications
     var onOpenProfile: (ChildProfile) -> Void
     var onOpenNotifications: () -> Void
-    var onOpenReflection: (AppRoute) -> Void
 
     private var greeting: String {
         let h = Calendar.current.component(.hour, from: Date())
@@ -17,7 +16,7 @@ struct HomeView: View {
     }
 
     private var unreadCount: Int {
-        HomeMockData.notifications.filter(\.unread).count
+        notifications.filter(\.unread).count
     }
 
     var body: some View {
@@ -39,19 +38,8 @@ struct HomeView: View {
                     VStack(spacing: 14) {
                         SectionHead("Children", kicker: "Select a profile")
                         ForEach(ChildProfile.all) { child in
-                            if let summary = reflectionStore.summary(for: child), summary.state != .none {
-                                ParentReflectionStatusCard(
-                                    child: child,
-                                    summary: summary,
-                                    layout: .homeCard,
-                                    onViewReflection: {
-                                        openReflection(summary, for: child)
-                                    }
-                                )
-                            } else {
-                                ProfileCard(child: child) {
-                                    onOpenProfile(child)
-                                }
+                            ProfileCard(child: child) {
+                                onOpenProfile(child)
                             }
                         }
                     }
@@ -65,17 +53,6 @@ struct HomeView: View {
             HomeSettingsSheet(onClose: { showSettings = false })
         }
     }
-
-    private func openReflection(_ summary: ParentReflectionSummary, for child: ChildProfile) {
-        switch summary.state {
-        case .assignedPending:
-            onOpenReflection(.reflectionPending(childId: child.id))
-        case .completedReady:
-            onOpenReflection(.reflectionArtifact(reflectionId: summary.id))
-        case .none:
-            break
-        }
-    }
 }
 
 #Preview {
@@ -83,8 +60,6 @@ struct HomeView: View {
     return HomeView(
         selectedTab: $tab,
         onOpenProfile: { _ in },
-        onOpenNotifications: {},
-        onOpenReflection: { _ in }
+        onOpenNotifications: {}
     )
-    .environment(ParentReflectionFixtureStore())
 }

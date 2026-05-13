@@ -83,13 +83,14 @@ struct ParentRootView: View {
                     NavigationStack(path: $profilePath) {
                         HomeView(
                             selectedTab: $selectedTab,
+                            notifications: homeNotifications,
                             onOpenProfile: { child in profilePath.append(AppRoute.profile(child)) },
-                            onOpenNotifications: { profilePath.append(AppRoute.notifications) },
-                            onOpenReflection: { route in profilePath.append(route) }
+                            onOpenNotifications: { profilePath.append(AppRoute.notifications) }
                         )
                         .appNavigationDestination(
                             path: $profilePath,
-                            selectedTab: $selectedTab
+                            selectedTab: $selectedTab,
+                            notifications: homeNotifications
                         )
                     }
                 case .calendar:
@@ -107,7 +108,8 @@ struct ParentRootView: View {
                         )
                         .appNavigationDestination(
                             path: $insightsPath,
-                            selectedTab: $selectedTab
+                            selectedTab: $selectedTab,
+                            notifications: homeNotifications
                         )
                     }
                 }
@@ -132,6 +134,12 @@ struct ParentRootView: View {
         .animation(.spring(response: 0.36, dampingFraction: 0.78), value: banner?.title)
         .environment(reflectionStore)
     }
+
+    private var homeNotifications: [HomeNotification] {
+        HomeMockData.notifications(
+            includingCompletedReflection: reflectionStore.completedReflectionId(childId: ChildProfile.liam.id)
+        )
+    }
 }
 
 // MARK: - Shared navigation destinations
@@ -144,7 +152,8 @@ extension View {
     @ViewBuilder
     func appNavigationDestination(
         path: Binding<NavigationPath>,
-        selectedTab: Binding<EvlinTab>
+        selectedTab: Binding<EvlinTab>,
+        notifications: [HomeNotification] = HomeMockData.notifications
     ) -> some View {
         self.navigationDestination(for: AppRoute.self) { route in
             switch route {
@@ -175,6 +184,7 @@ extension View {
                     onClose: {
                         if !path.wrappedValue.isEmpty { path.wrappedValue.removeLast() }
                     },
+                    notifications: notifications,
                     onOpenTask: { childId, taskId in
                         guard let child = ChildProfile.all.first(where: { $0.id == childId }) else { return }
                         path.wrappedValue.append(

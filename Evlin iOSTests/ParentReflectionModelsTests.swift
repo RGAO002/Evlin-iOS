@@ -2,11 +2,20 @@ import XCTest
 @testable import Evlin_iOS
 
 final class ParentReflectionModelsTests: XCTestCase {
-    func testStoreReturnsLiamAssignedPendingSummary() {
+    func testStoreStartsWithoutReflectionSummary() {
         let store = ParentReflectionFixtureStore()
 
         let summary = store.summary(for: .liam)
 
+        XCTAssertNil(summary)
+    }
+
+    func testSimulateAssignmentCreatesLiamPendingSummary() {
+        let store = ParentReflectionFixtureStore()
+
+        store.simulateAssignment(childId: ChildProfile.liam.id)
+
+        let summary = store.summary(for: .liam)
         XCTAssertNotNil(summary)
         XCTAssertEqual(summary?.childId, ChildProfile.liam.id)
         XCTAssertEqual(summary?.childName, ChildProfile.liam.name)

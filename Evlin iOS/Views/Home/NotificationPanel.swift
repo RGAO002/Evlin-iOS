@@ -7,7 +7,19 @@ struct NotificationPanel: View {
     /// push straight to TaskDetail through the parent navigation stack.
     var onOpenTask: (String, Int) -> Void = { _, _ in }
     var onOpenReflectionArtifact: (UUID) -> Void = { _ in }
-    @State private var notifs: [HomeNotification] = HomeMockData.notifications
+    @State private var notifs: [HomeNotification]
+
+    init(
+        onClose: @escaping () -> Void,
+        notifications: [HomeNotification] = HomeMockData.notifications,
+        onOpenTask: @escaping (String, Int) -> Void = { _, _ in },
+        onOpenReflectionArtifact: @escaping (UUID) -> Void = { _ in }
+    ) {
+        self.onClose = onClose
+        self.onOpenTask = onOpenTask
+        self.onOpenReflectionArtifact = onOpenReflectionArtifact
+        _notifs = State(initialValue: notifications)
+    }
 
     private var unread: Int { notifs.filter(\.unread).count }
 

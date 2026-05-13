@@ -392,7 +392,7 @@ private enum PendingReflectionAlert: Identifiable {
     NavigationStack {
         ReflectionPendingView(childId: ChildProfile.liam.id, onBack: {})
     }
-    .environment(ParentReflectionFixtureStore())
+    .environment(ReflectionPendingPreviewData.pendingStore)
 }
 
 #Preview("Pending Reflection Empty") {
@@ -400,4 +400,12 @@ private enum PendingReflectionAlert: Identifiable {
         ReflectionPendingView(childId: ChildProfile.maya.id, onBack: {})
     }
     .environment(ParentReflectionFixtureStore())
+}
+
+private enum ReflectionPendingPreviewData {
+    static var pendingStore: ParentReflectionFixtureStore {
+        let store = ParentReflectionFixtureStore()
+        store.simulateAssignment(childId: ChildProfile.liam.id)
+        return store
+    }
 }
