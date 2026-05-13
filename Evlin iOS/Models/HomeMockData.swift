@@ -9,17 +9,24 @@ struct HomeNotification: Identifiable, Hashable {
     let time: String
     var unread: Bool
 
-    /// "task" → tap opens ProfileView with TaskDetailSheet expanded for taskId.
+    /// "task" → tap opens TaskDetail for taskId.
+    /// "reflection" → tap opens ReflectionArtifactView for reflectionId.
     /// nil → tap only marks as read (legacy behavior).
     /// See HTML 220-228.
     var kind: String? = nil
     var taskId: Int? = nil
+    var reflectionId: UUID? = nil
 }
 
 enum HomeMockData {
-    /// Notifications array. Per HTML 219-228, the first 5 are 'task' kind that
-    /// deep-link into ProfileView; the last 3 are informational.
+    /// Notifications array. Task entries deep-link to TaskDetail; reflection
+    /// entries deep-link to the parent reflection artifact; the rest are informational.
     static let notifications: [HomeNotification] = [
+        .init(id: 9, childId: "liam",   iconSystemName: "text.book.closed.fill",
+              title: "Liam completed reflection",
+              body: "Liam finished his reflection and it's ready for your review.",
+              time: "Just now", unread: true, kind: "reflection",
+              reflectionId: UUID(uuidString: "AAE163C8-35B4-4B4E-A7B1-5D58AD477E28")!),
         .init(id: 1, childId: "liam",   iconSystemName: "checkmark.circle",
               title: "Science Project — needs review",
               body: "Liam submitted his Science Project. Tap to review and approve.",

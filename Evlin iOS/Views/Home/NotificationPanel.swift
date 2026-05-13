@@ -6,6 +6,7 @@ struct NotificationPanel: View {
     /// `onOpenProfile(childId, taskId?)` flow — task notifications now
     /// push straight to TaskDetail through the parent navigation stack.
     var onOpenTask: (String, Int) -> Void = { _, _ in }
+    var onOpenReflectionArtifact: (UUID) -> Void = { _ in }
     @State private var notifs: [HomeNotification] = HomeMockData.notifications
 
     private var unread: Int { notifs.filter(\.unread).count }
@@ -109,6 +110,8 @@ struct NotificationPanel: View {
             // No more close-then-reopen dance.
             if n.kind == "task", n.childId != "family", let tid = n.taskId {
                 onOpenTask(n.childId, tid)
+            } else if n.kind == "reflection", let reflectionId = n.reflectionId {
+                onOpenReflectionArtifact(reflectionId)
             }
         } label: {
             HStack(alignment: .top, spacing: 12) {

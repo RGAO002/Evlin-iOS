@@ -180,6 +180,11 @@ extension View {
                         path.wrappedValue.append(
                             AppRoute.taskDetail(child: child, taskId: taskId)
                         )
+                    },
+                    onOpenReflectionArtifact: { reflectionId in
+                        path.wrappedValue.append(
+                            AppRoute.reflectionArtifact(reflectionId: reflectionId)
+                        )
                     }
                 )
             case .taskDetail(let child, let taskId):
