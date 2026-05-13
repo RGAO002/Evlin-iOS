@@ -20,6 +20,32 @@ struct HomeView: View {
         notifications.filter(\.unread).count
     }
 
+    @ViewBuilder
+    private func childRow(for child: ChildProfile) -> some View {
+        if let summary = reflectionStore.summary(for: child),
+           summary.state != .none {
+            ParentReflectionStatusCard(
+                child: child,
+                summary: summary,
+                layout: .homeCard,
+                onViewReflection: { onOpenProfile(child) }
+            )
+        } else {
+            ProfileCard(child: child) {
+                onOpenProfile(child)
+            }
+        }
+    }
+
+    /// Cheap key that flips when the child's reflection summary state
+    /// transitions (none ↔ assignedPending ↔ completedReady). The
+    /// reflection id is included so a brand-new reflection for the same
+    /// child also invalidates.
+    private func reflectionStateKey(for child: ChildProfile) -> String {
+        guard let summary = reflectionStore.summary(for: child) else { return "none" }
+        return "\(summary.state.rawValue)-\(summary.id.uuidString)"
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             GlassmorphicHeader(title: "", kicker: "\(greeting), \(parentName)") {
@@ -44,19 +70,15 @@ struct HomeView: View {
                     VStack(spacing: 14) {
                         SectionHead("Children", kicker: "Select a profile")
                         ForEach(ChildProfile.all) { child in
-                            if let summary = reflectionStore.summary(for: child),
-                               summary.state != .none {
-                                ParentReflectionStatusCard(
-                                    child: child,
-                                    summary: summary,
-                                    layout: .homeCard,
-                                    onViewReflection: { onOpenProfile(child) }
-                                )
-                            } else {
-                                ProfileCard(child: child) {
-                                    onOpenProfile(child)
-                                }
-                            }
+                            childRow(for: child)
+                                // Force SwiftUI to re-evaluate this row
+                                // when the reflection state for *this* child
+                                // changes — needed because `@Observable`
+                                // tracking on a property mutated inside a
+                                // method call doesn't always invalidate
+                                // sibling views in a NavigationStack until
+                                // they become topmost again.
+                                .id("\(child.id)-\(reflectionStateKey(for: child))")
                         }
                     }
                 }

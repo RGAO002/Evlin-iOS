@@ -47,7 +47,11 @@ private struct HomeCardBody: View {
                     url: child.avatarURL,
                     name: child.name,
                     size: 56,
-                    status: child.status
+                    // Reflection state ALWAYS implies a screen-time lock
+                    // (kid's apps are restricted until reflection is
+                    // approved). Show the lock badge regardless of the
+                    // child's normal unlocked/quiet-time status.
+                    status: .locked
                 )
 
                 VStack(alignment: .leading, spacing: 8) {
