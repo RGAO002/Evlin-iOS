@@ -3,7 +3,7 @@
 Date: 2026-05-13
 Target repo: `/Users/fred/Desktop/Evlin/Evlin iOS`
 Reference spec: `/Users/fred/Desktop/Evlin/frontend_for_app_evlin/docs/superpowers/specs/2026-05-13-reflection-parent-ui-design.md`
-Status: v2, ready for review, not ready for execution until approved
+Status: v2.1, ready for review, not ready for execution until approved
 
 ## Hard Constraints
 
@@ -49,6 +49,8 @@ Then choose an available iPhone simulator and rerun the test command with that d
 
 Commit after every task. Do not make one mega-commit.
 
+All new SwiftUI views must include at least one `#Preview` block showing the most common state.
+
 ## Current Ground Truth
 
 - `ContentView.swift` owns parent navigation. `AppRoute` is the route enum and `appNavigationDestination` is the centralized destination resolver. `DashboardView.swift` is not the route owner.
@@ -62,6 +64,14 @@ Commit after every task. Do not make one mega-commit.
   - `Views/Child/BigKid/Reflection/BigKidCompleteView.swift`
 - Parent Home currently renders `ProfileCard(child:)` from `Views/Home/HomeView.swift`.
 - Parent Profile currently owns profile header + current tasks in `Views/Profile/ProfileView.swift`.
+
+## Task Boundary Rules
+
+- Task 4 creates the shared reflection status card component only. It does not wire Home or Profile.
+- Task 5 wires Profile.
+- Task 6 wires Home.
+- `ProfileCard` remains the normal non-reflection Home card. Reflection branching happens in `HomeView`, not inside `ProfileCard`.
+- `ParentReflectionFixtureStore` must be injected in Task 1. Any later `@Environment(ParentReflectionFixtureStore.self)` access assumes Task 1 already completed.
 
 ## Visual Tokens To Use
 
@@ -108,6 +118,7 @@ Files:
 
 - Add `Evlin iOS/Evlin iOS/Models/ParentReflectionModels.swift`
 - Add `Evlin iOS/Evlin iOSTests/ParentReflectionModelsTests.swift`
+- Modify `Evlin iOS/Evlin iOS/ContentView.swift`
 
 Design decisions:
 
@@ -165,8 +176,30 @@ Store behavior:
 
 Debug trigger:
 
-- Expose `simulateCompletion()` through Profile's existing top-right `...` menu as a `#if DEBUG` menu item: `Simulate reflection complete`.
-- Do not add this to normal production UI.
+- `simulateCompletion()` API is defined here only.
+- The actual Profile `...` menu wiring happens in Task 5.
+- Do not add any debug UI in Task 1.
+
+ParentRootView injection:
+
+```swift
+struct ParentRootView: View {
+    @State private var selectedTab: EvlinTab = .home
+    @State private var profilePath = NavigationPath()
+    @State private var insightsPath = NavigationPath()
+    @State private var banner: (title: String, body: String, avatarURL: String?)? = nil
+    @State private var reflectionStore = ParentReflectionFixtureStore()
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // existing shell
+        }
+        .environment(reflectionStore)
+    }
+}
+```
+
+If the actual `ParentRootView` body shape makes the exact placement awkward, attach `.environment(reflectionStore)` to the outermost view returned by `body`.
 
 TDD steps:
 
@@ -175,6 +208,7 @@ TDD steps:
 - Write XCTest that standard completed fixture has exactly 3 steps: video, quiz, writing.
 - Run tests and confirm they fail before implementation.
 - Implement models/store/fixtures.
+- Modify `ParentRootView` to create and inject `ParentReflectionFixtureStore`.
 - Run tests and quick build.
 - Commit: `feat(reflection): add parent reflection fixture models`
 
@@ -205,6 +239,21 @@ Destination behavior:
 - `reflectionArtifact` resolves summary and opens `ReflectionArtifactView`.
 - `reflectionStepDetail` resolves summary + step and opens `ReflectionStepDetailView`.
 - If fixture lookup fails, show a small fallback error page with a back button. Do not crash.
+
+Temporary placeholder shape:
+
+```swift
+private struct ReflectionPendingPlaceholder: View {
+    var body: some View {
+        VStack {
+            Text("ReflectionPendingView — wired in Task 7")
+        }
+        .navigationTitle("Reflection")
+    }
+}
+```
+
+Use similarly named placeholders for artifact and step detail if Task 1.5 lands before those views exist. Later tasks must delete these placeholder types.
 
 TDD/verification steps:
 
@@ -293,14 +342,15 @@ TDD steps:
 - Run tests + quick build.
 - Commit: `feat(reflection): route review cards to polished renderer`
 
-## Task 4 — Shared Reflection Status Card Component
+## Task 4 — Shared Reflection Status Card Component Only
 
 Files:
 
 - Add `Evlin iOS/Evlin iOS/Components/Reflection/ParentReflectionStatusCard.swift`
-- Modify `Evlin iOS/Evlin iOS/Views/Home/HomeView.swift`
-- Modify `Evlin iOS/Evlin iOS/Components/ProfileCard.swift`
 - Do not modify `ChildProfile`.
+- Do not modify `HomeView`.
+- Do not modify `ProfileView`.
+- Do not modify `ProfileCard`.
 
 Component requirements:
 
@@ -314,11 +364,12 @@ Component requirements:
 - Removes any time/countdown UI.
 - Shows `View reflection` CTA.
 - Uses reflection icon consistently.
+- Include `#Preview` for `.homeCard` and `.profileHeader`.
 
 TDD/verification steps:
 
 - If component logic can be unit-tested without snapshot, add a small test for CTA route selection in store/helper.
-- Build and manually inspect Home.
+- Build and manually inspect previews.
 - Commit: `feat(reflection): add shared reflection status card`
 
 ## Task 5 — Profile Header Reflection State
@@ -336,6 +387,8 @@ Steps:
   - `.completedReady` -> append `AppRoute.reflectionArtifact(reflectionId: summary.id)`.
 - Keep current tasks/devices/rules below the header.
 - Add debug-only `Simulate reflection complete` to the existing top-right `...` menu.
+- Wrap the debug menu item in `#if DEBUG`.
+- Call `reflectionStore.simulateCompletion(childId: child.id)`.
 
 TDD/verification steps:
 
@@ -348,12 +401,28 @@ TDD/verification steps:
 Files:
 
 - Modify `Evlin iOS/Evlin iOS/Views/Home/HomeView.swift`
-- Modify `Evlin iOS/Evlin iOS/Components/ProfileCard.swift` only if still needed after Task 4.
+- Do not modify `Evlin iOS/Evlin iOS/Components/ProfileCard.swift`.
 
 Steps:
 
 - Read `ParentReflectionFixtureStore` from environment.
-- Render reflection state for child card when summary exists.
+- In `HomeView`, conditionally render:
+
+```swift
+if let summary = reflectionStore.summary(for: child) {
+    ParentReflectionStatusCard(
+        child: child,
+        summary: summary,
+        layout: .homeCard,
+        onViewReflection: { /* append route based on summary.state */ }
+    )
+} else {
+    ProfileCard(child: child) {
+        onOpenProfile(child)
+    }
+}
+```
+
 - Wire `View reflection` CTA using the same state routing as Profile.
 - Keep normal card rendering for children without reflection.
 
@@ -381,6 +450,16 @@ Button behavior:
 // TODO: wire to backend reflection cancel endpoint when available.
 ```
 
+Feedback behavior:
+
+- Use simple SwiftUI `.alert(...)` for `Send reminder` and `Cancel reflection` stub feedback.
+- Do not introduce a custom toast system.
+
+Visual:
+
+- Use the Visual Tokens section colors and label style for new view surfaces.
+- Include `#Preview`.
+
 UI copy:
 
 ```text
@@ -407,6 +486,8 @@ Button behavior:
 - `Approve`: prototype stub unless existing callback is available in this surface. Show local feedback.
 - `Request redo`: prototype stub. Show local feedback.
 - Add TODO comments for backend wiring.
+- Parent note/message area is visible in the artifact action area by default.
+- Submitting the note is a prototype stub and does not save or call backend.
 
 Required sections:
 
@@ -417,6 +498,8 @@ Required sections:
 - Evlin takeaway.
 - Parent actions.
 - Parent note/message area if responding to child.
+- Use the Visual Tokens section colors and label style for new view surfaces.
+- Include `#Preview`.
 
 TDD/verification steps:
 
@@ -438,6 +521,8 @@ Behavior:
 - Standard fixture has three steps: video, quiz, writing.
 - If a future fixture lacks quiz, do not render fake quiz; the numbering follows the actual `steps` array.
 - Parent UI should represent fallback video as normal educational fallback, not Rickroll copy.
+- Use the Visual Tokens section colors and label style for new view surfaces.
+- Include `#Preview`.
 
 TDD/verification steps:
 
@@ -455,6 +540,7 @@ Files:
 
 Steps:
 
+- Read existing `NotificationPanel.swift` first and locate the current mock/fixture notification array before adding a reflection notification.
 - Add reflection completion notification fixture:
 
 ```text
@@ -518,4 +604,3 @@ Commit:
 
 - If final verification requires a code fix, commit it separately with a focused message.
 - Otherwise no commit.
-
