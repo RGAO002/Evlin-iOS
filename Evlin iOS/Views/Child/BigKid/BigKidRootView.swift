@@ -135,14 +135,21 @@ struct BigKidRootView: View {
         #if DEBUG
         .overlay(alignment: .bottom) {
             if let err = poller.lastError {
-                Text("⚠︎ poller: \(err)")
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(.red.opacity(0.85), in: Capsule())
-                    .padding(.bottom, 60)
-                    .frame(maxWidth: .infinity, alignment: .center)
+                HStack(spacing: 6) {
+                    Image(systemName: "wifi.exclamationmark")
+                        .font(.system(size: 11, weight: .bold))
+                    Text(err)
+                        .font(.system(size: 12, weight: .semibold))
+                }
+                .foregroundStyle(EvlinKidColors.ink2)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(.white.opacity(0.92), in: Capsule())
+                .overlay(
+                    Capsule().stroke(EvlinKidColors.line, lineWidth: 1)
+                )
+                .shadow(color: .black.opacity(0.12), radius: 12, y: 4)
+                .padding(.bottom, 58)
             }
         }
         #endif

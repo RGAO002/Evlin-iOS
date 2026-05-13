@@ -83,7 +83,20 @@ final class BigKidStatePoller: ObservableObject {
             lastFetchedAt = Date()
             lastError = nil
         } catch {
-            lastError = "\(error)"
+            print("[BigKidStatePoller] fetchState failed: \(error)")
+            lastError = Self.userFacingMessage(for: error)
         }
+    }
+
+    private static func userFacingMessage(for error: Error) -> String {
+        if let urlError = error as? URLError {
+            switch urlError.code {
+            case .cannotConnectToHost, .notConnectedToInternet, .networkConnectionLost, .timedOut:
+                return "Trying to reconnect"
+            default:
+                return "Couldn't refresh"
+            }
+        }
+        return "Couldn't refresh"
     }
 }
