@@ -275,10 +275,13 @@ private extension ParentReflectionFixtureStore {
             prompt: "What happened, how did it affect someone else, and what can you try next time?",
             essayText: nil,
             takeaway: nil,
-            // Pending shows the same three steps so the parent can preview
-            // exactly what the kid will see. Step 3 will render the
-            // prompt without an essay until the kid submits.
-            steps: standardCompletedSteps
+            // Pending shows the same three steps so the parent can
+            // preview exactly what the kid will see. The quiz uses
+            // its `standardPendingSteps` variant — correct answers
+            // are shown for parent visibility, but no `selectedIndex`
+            // is set, so no Wrong / Correct pills appear until the
+            // kid actually submits.
+            steps: standardPendingSteps
         )
     }
 
@@ -335,6 +338,35 @@ private extension ParentReflectionFixtureStore {
                 body: completedEssayText
             )
         ]
+    }
+
+    /// Same three steps as `standardCompletedSteps` but with the quiz
+    /// in its un-answered shape — every question keeps `correctIndex`
+    /// (parent can preview) but drops `selectedIndex` (kid hasn't
+    /// submitted anything yet). Used for the assigned-pending fixture
+    /// so the parent doesn't see fake right/wrong markings before the
+    /// kid actually completes the quiz.
+    static var standardPendingSteps: [ParentReflectionStepArtifact] {
+        standardCompletedSteps.map { step in
+            guard step.kind == .quiz else { return step }
+            return ParentReflectionStepArtifact(
+                id: step.id,
+                kind: step.kind,
+                title: step.title,
+                subtitle: step.subtitle,
+                body: step.body,
+                video: step.video,
+                quiz: step.quiz.map { q in
+                    ParentReflectionQuizQuestion(
+                        id: q.id,
+                        q: q.q,
+                        options: q.options,
+                        correctIndex: q.correctIndex,
+                        selectedIndex: nil
+                    )
+                }
+            )
+        }
     }
 
     /// Mirrors `BigKidModels.ReflectionRequest.defaultFixtureQuiz` plus
