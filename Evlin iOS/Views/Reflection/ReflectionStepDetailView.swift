@@ -24,6 +24,13 @@ struct ReflectionStepDetailView: View {
     @Environment(ParentReflectionFixtureStore.self) private var reflectionStore
     @EnvironmentObject private var apiClient: APIClient
     @State private var activeAlert: WritingActionAlert?
+    /// Local mutation + navigation pop is deferred until the user
+    /// dismisses the success alert; otherwise the underlying view
+    /// instantly re-renders the missing/empty state behind the open
+    /// alert, which reads as broken. Set in `handleApprove` /
+    /// `handleRedo` right before the alert opens; consumed in
+    /// `applyPendingCleanup()` when OK is tapped.
+    @State private var pendingCleanup: PendingCleanup? = nil
 
     private var summary: ParentReflectionSummary? {
         reflectionStore.summary(reflectionId: reflectionId)
@@ -59,9 +66,30 @@ struct ReflectionStepDetailView: View {
             Alert(
                 title: Text(alert.title),
                 message: Text(alert.message),
-                dismissButton: .default(Text("OK"))
+                dismissButton: .default(Text("OK")) {
+                    applyPendingCleanup()
+                }
             )
         }
+    }
+
+    /// Drains `pendingCleanup` once the user dismisses the success
+    /// alert. Mutates the local store (clear / apply-redo) and pops
+    /// back to Profile so the parent doesn't end up staring at the
+    /// now-empty Step view.
+    @MainActor
+    private func applyPendingCleanup() {
+        let cleanup = pendingCleanup
+        pendingCleanup = nil
+        switch cleanup {
+        case .approve(let childId):
+            reflectionStore.clear(childId: childId)
+        case .redo(let childId, let note):
+            reflectionStore.applyParentRedoLocally(childId: childId, redoNote: note)
+        case nil:
+            break
+        }
+        onBack?()
     }
 
     /// Top chrome — matches reference HTML lines 1083-1091: small back
@@ -147,33 +175,33 @@ struct ReflectionStepDetailView: View {
         }
     }
 
-    /// Approve a submitted reflection from Step 3. Optimistically
-    /// clears the parent-side store entry (so Home/Profile drop the
-    /// reflection card) and fires the backend approve POST as a
-    /// best-effort. Surfaces a confirmation alert either way.
+    /// Approve a submitted reflection from Step 3. Fires the
+    /// backend approve POST best-effort, captures the local cleanup
+    /// (store clear + nav pop) into `pendingCleanup`, and opens the
+    /// success alert. Cleanup runs when the user taps OK — by that
+    /// point the alert is closed and the view pops cleanly back to
+    /// Profile without the user seeing an empty Step Detail behind.
     @MainActor
     private func handleApprove(reflectionId: UUID, childId: String, note: String) async {
-        reflectionStore.clear(childId: childId)
         do {
             try await apiClient.approveChildReflectionSubmission(
                 reflectionId: reflectionId, parentNote: note
             )
         } catch {
             // Best-effort — fixture/DEBUG mode + offline both
-            // intentionally fail here. Local clear has already
-            // surfaced the right UX.
+            // intentionally fail here. The local cleanup queued
+            // below still surfaces the right UX on OK.
         }
-        activeAlert = .approved(summary?.childName ?? "your child")
+        let name = summary?.childName ?? "your child"
+        pendingCleanup = .approve(childId: childId)
+        activeAlert = .approved(name)
     }
 
-    /// Request a redo from Step 3. Optimistically flips the local
-    /// summary back to `.assignedPending` with the parent note so
-    /// the Home/Profile surfaces and the kid mirror update right
-    /// away. Backend POST runs best-effort; subsequent polls will
-    /// reconcile with the server state.
+    /// Request a redo from Step 3. Same deferred-cleanup pattern as
+    /// `handleApprove`: fires backend POST first, queues the local
+    /// store apply + pop until the user dismisses the success alert.
     @MainActor
     private func handleRedo(reflectionId: UUID, childId: String, note: String) async {
-        reflectionStore.applyParentRedoLocally(childId: childId, redoNote: note)
         do {
             try await apiClient.requestRedoChildReflection(
                 reflectionId: reflectionId, redoNote: note
@@ -181,7 +209,9 @@ struct ReflectionStepDetailView: View {
         } catch {
             // Best-effort — see handleApprove note.
         }
-        activeAlert = .redoRequested(summary?.childName ?? "your child")
+        let name = summary?.childName ?? "your child"
+        pendingCleanup = .redo(childId: childId, redoNote: note)
+        activeAlert = .redoRequested(name)
     }
 
     private var missingState: some View {
@@ -818,6 +848,16 @@ private enum RedPalette {
     static let tint50   = Color(red: 0xFE / 255, green: 0xE2 / 255, blue: 0xE2 / 255)
     /// Wrong-option border (`#FCA5A5`).
     static let tint200  = Color(red: 0xFC / 255, green: 0xA5 / 255, blue: 0xA5 / 255)
+}
+
+/// Captures the cleanup we want to run after the parent dismisses
+/// the post-action success alert. Keeping the store mutation and
+/// the navigation pop on the alert's OK button avoids the
+/// "Step unavailable" flash that would otherwise show behind the
+/// open alert when the store entry is cleared mid-flight.
+private enum PendingCleanup {
+    case approve(childId: String)
+    case redo(childId: String, redoNote: String)
 }
 
 private enum WritingActionAlert: Identifiable {
