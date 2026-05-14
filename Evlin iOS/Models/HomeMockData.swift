@@ -56,15 +56,55 @@ enum HomeMockData {
               time: "3h ago", unread: false),
     ]
 
-    static func notifications(includingCompletedReflection reflectionId: UUID?) -> [HomeNotification] {
+    /// One completion descriptor per child that has just finished a
+    /// reflection. The caller (ContentView) collects these by walking
+    /// the parent-side reflection store for every child in
+    /// `ChildProfile.all`, so the parent sees a separate notification
+    /// per kid (not just Liam).
+    struct ReflectionCompletion {
+        let childId: String
+        let childName: String
+        let reflectionId: UUID
+    }
+
+    static func notifications(
+        completedReflections: [ReflectionCompletion]
+    ) -> [HomeNotification] {
+        guard !completedReflections.isEmpty else { return notifications }
+        // Stable IDs in the 9000+ range so they don't collide with the
+        // baseline mock entries (1-8). One slot per child.
+        let reflectionNotifications: [HomeNotification] = completedReflections
+            .enumerated()
+            .map { idx, c in
+                HomeNotification(
+                    id: 9000 + idx,
+                    childId: c.childId,
+                    iconSystemName: "text.book.closed.fill",
+                    title: "\(c.childName) completed reflection",
+                    body: "\(c.childName) finished their reflection and it's ready for your review.",
+                    time: "Just now",
+                    unread: true,
+                    kind: "reflection",
+                    reflectionId: c.reflectionId
+                )
+            }
+        return reflectionNotifications + notifications
+    }
+
+    /// Back-compat shim — older single-child call sites kept working
+    /// during the multi-child rollout. Prefer the
+    /// `completedReflections:` form for new code.
+    static func notifications(
+        includingCompletedReflection reflectionId: UUID?
+    ) -> [HomeNotification] {
         guard let reflectionId else { return notifications }
-        return [
-            .init(id: 9, childId: "liam", iconSystemName: "text.book.closed.fill",
-                  title: "Liam completed reflection",
-                  body: "Liam finished his reflection and it's ready for your review.",
-                  time: "Just now", unread: true, kind: "reflection",
-                  reflectionId: reflectionId)
-        ] + notifications
+        return notifications(completedReflections: [
+            ReflectionCompletion(
+                childId: "liam",
+                childName: "Liam",
+                reflectionId: reflectionId
+            )
+        ])
     }
 
     static func childColor(_ id: String) -> Color {

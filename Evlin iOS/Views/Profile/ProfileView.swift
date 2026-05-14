@@ -3,6 +3,12 @@ import SwiftUI
 struct ProfileView: View {
     let child: ChildProfile
     var initialTaskId: Int? = nil
+    /// When true, the profile opens with `profileTab = .reflection`
+    /// (Step 1/2/3 listing visible inline under the reflection header
+    /// card) instead of the default overview sub-tab. Used by the
+    /// "{Name} completed reflection" notification deep-link so the
+    /// parent lands directly on the review surface.
+    var initialReflectionSubTab: Bool = false
     var onBack: () -> Void = {}
     var onOpenCalendar: () -> Void = {}
     /// Called when the user opens a task. The parent stack should push a
@@ -343,6 +349,14 @@ struct ProfileView: View {
             // jump straight to its detail screen.
             if let id = initialTaskId, let task = tasks.first(where: { $0.id == id }) {
                 DispatchQueue.main.async { onOpenTaskDetail(task) }
+            }
+            // Deep-link from a "completed reflection" notification:
+            // flip the profile sub-tab to .reflection so the parent
+            // sees Step 1/2/3 inline immediately. Harmless if no
+            // reflection summary is active — the conditional render
+            // in the body simply falls back to the overview content.
+            if initialReflectionSubTab {
+                profileTab = .reflection
             }
         }
         .onDisappear {

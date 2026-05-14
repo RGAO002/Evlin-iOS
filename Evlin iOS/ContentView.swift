@@ -5,6 +5,12 @@ import SwiftUI
 /// case here and handle it in `appNavigationDestination`.
 enum AppRoute: Hashable {
     case profile(ChildProfile, taskId: Int? = nil)
+    /// Deep-link from a "completed reflection" notification. Opens the
+    /// child's Profile with the reflection sub-tab already toggled on
+    /// (so the parent lands on the Step 1/2/3 listing inline under the
+    /// reflection header card, rather than the standalone
+    /// `reflectionArtifact` route used for non-notification entries).
+    case profileReflection(ChildProfile, reflectionId: UUID)
     case notifications
     /// Pushable Task Detail. We carry the full child + task by id so we
     /// can reach the live task model inside the view.
@@ -152,9 +158,22 @@ struct ParentRootView: View {
     }
 
     private var homeNotifications: [HomeNotification] {
-        HomeMockData.notifications(
-            includingCompletedReflection: reflectionStore.completedReflectionId(childId: ChildProfile.liam.id)
-        )
+        // Walk every child, pick up reflections that the parent-side
+        // store has flipped to `.completedReady`. In the current
+        // prototype only Liam can be paired with a real backend, so
+        // this will return at most one entry — but the shape supports
+        // multiple children once pairing generalises beyond Liam.
+        let completions: [HomeMockData.ReflectionCompletion] = ChildProfile.all.compactMap { child in
+            guard let rid = reflectionStore.completedReflectionId(childId: child.id) else {
+                return nil
+            }
+            return HomeMockData.ReflectionCompletion(
+                childId: child.id,
+                childName: child.name,
+                reflectionId: rid
+            )
+        }
+        return HomeMockData.notifications(completedReflections: completions)
     }
 
     private var pairedBackendChildID: UUID? {
@@ -244,6 +263,28 @@ extension View {
                         path.wrappedValue.append(route)
                     }
                 )
+            case .profileReflection(let child, _):
+                ProfileView(
+                    child: child,
+                    initialReflectionSubTab: true,
+                    onBack: {
+                        if !path.wrappedValue.isEmpty { path.wrappedValue.removeLast() }
+                    },
+                    onOpenCalendar: { selectedTab.wrappedValue = .calendar },
+                    onOpenTaskDetail: { task in
+                        path.wrappedValue.append(
+                            AppRoute.taskDetail(child: child, taskId: task.id)
+                        )
+                    },
+                    onOpenDevice: { device in
+                        path.wrappedValue.append(
+                            AppRoute.deviceDetail(device: device, childId: child.id)
+                        )
+                    },
+                    onOpenReflection: { route in
+                        path.wrappedValue.append(route)
+                    }
+                )
             case .notifications:
                 NotificationPanel(
                     onClose: {
@@ -256,9 +297,16 @@ extension View {
                             AppRoute.taskDetail(child: child, taskId: taskId)
                         )
                     },
-                    onOpenReflectionArtifact: { reflectionId in
+                    onOpenReflection: { childId, reflectionId in
+                        guard let child = ChildProfile.all.first(where: { $0.id == childId }) else { return }
+                        // Deep-link into the child's Profile with the
+                        // reflection sub-tab pre-toggled (Step 1/2/3
+                        // listing visible inline under the reflection
+                        // header card). Replaces the older standalone
+                        // ReflectionArtifactView push so the parent
+                        // lands inside the regular Profile context.
                         path.wrappedValue.append(
-                            AppRoute.reflectionArtifact(reflectionId: reflectionId)
+                            AppRoute.profileReflection(child, reflectionId: reflectionId)
                         )
                     }
                 )

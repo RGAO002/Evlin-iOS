@@ -6,18 +6,23 @@ struct NotificationPanel: View {
     /// `onOpenProfile(childId, taskId?)` flow — task notifications now
     /// push straight to TaskDetail through the parent navigation stack.
     var onOpenTask: (String, Int) -> Void = { _, _ in }
-    var onOpenReflectionArtifact: (UUID) -> Void = { _ in }
+    /// Open the parent reflection-review surface for a specific
+    /// (child, reflection). The caller routes this to the profile-
+    /// with-reflection-sub-tab destination so the parent lands on the
+    /// Step 1/2/3 listing inline. First arg is childId
+    /// (`ChildProfile.id`), second is the reflection UUID.
+    var onOpenReflection: (String, UUID) -> Void = { _, _ in }
     @State private var notifs: [HomeNotification]
 
     init(
         onClose: @escaping () -> Void,
         notifications: [HomeNotification] = HomeMockData.notifications,
         onOpenTask: @escaping (String, Int) -> Void = { _, _ in },
-        onOpenReflectionArtifact: @escaping (UUID) -> Void = { _ in }
+        onOpenReflection: @escaping (String, UUID) -> Void = { _, _ in }
     ) {
         self.onClose = onClose
         self.onOpenTask = onOpenTask
-        self.onOpenReflectionArtifact = onOpenReflectionArtifact
+        self.onOpenReflection = onOpenReflection
         _notifs = State(initialValue: notifications)
     }
 
@@ -123,7 +128,7 @@ struct NotificationPanel: View {
             if n.kind == "task", n.childId != "family", let tid = n.taskId {
                 onOpenTask(n.childId, tid)
             } else if n.kind == "reflection", let reflectionId = n.reflectionId {
-                onOpenReflectionArtifact(reflectionId)
+                onOpenReflection(n.childId, reflectionId)
             }
         } label: {
             HStack(alignment: .top, spacing: 12) {
