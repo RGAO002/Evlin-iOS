@@ -228,6 +228,7 @@ private struct ParentBigKidDebugSheet: View {
                 pendingReflectionStatus = (dict?["status"] as? String) ?? "pending"
                 pendingReflectionEssay = nil
             }
+            NotificationCenter.default.post(name: .bigKidStateInvalidated, object: nil)
             setStatus("✓ Reflection triggered (id=\(rid)). Switch to kid mode and watch State A appear within 60s.")
         } catch {
             setStatus("✗ Trigger failed: \(error)")

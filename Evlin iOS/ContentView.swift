@@ -74,6 +74,9 @@ struct ParentRootView: View {
     @State private var insightsPath = NavigationPath()
     @State private var banner: (title: String, body: String, avatarURL: String?)? = nil
     @State private var reflectionStore = ParentReflectionFixtureStore()
+    @State private var parentReflectionPollTask: Task<Void, Never>? = nil
+    @AppStorage("evlin.childDeviceID") private var pairedChildID: String = ""
+    @EnvironmentObject private var apiClient: APIClient
 
     var body: some View {
         VStack(spacing: 0) {
@@ -133,12 +136,74 @@ struct ParentRootView: View {
         }
         .animation(.spring(response: 0.36, dampingFraction: 0.78), value: banner?.title)
         .environment(reflectionStore)
+        .onAppear {
+            startParentReflectionPolling()
+        }
+        .onDisappear {
+            parentReflectionPollTask?.cancel()
+            parentReflectionPollTask = nil
+        }
+        .onChange(of: pairedChildID) { _, _ in
+            startParentReflectionPolling()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .bigKidStateInvalidated)) { _ in
+            Task { await refreshParentReflectionState() }
+        }
     }
 
     private var homeNotifications: [HomeNotification] {
         HomeMockData.notifications(
             includingCompletedReflection: reflectionStore.completedReflectionId(childId: ChildProfile.liam.id)
         )
+    }
+
+    private var pairedBackendChildID: UUID? {
+        guard !pairedChildID.isEmpty else { return nil }
+        return UUID(uuidString: pairedChildID)
+    }
+
+    private func startParentReflectionPolling() {
+        parentReflectionPollTask?.cancel()
+
+        guard pairedBackendChildID != nil,
+              BigKidParentClient(baseURLString: apiClient.baseURL) != nil else {
+            return
+        }
+
+        parentReflectionPollTask = Task {
+            await refreshParentReflectionState()
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 8_000_000_000)
+                await refreshParentReflectionState()
+            }
+        }
+    }
+
+    @MainActor
+    private func refreshParentReflectionState() async {
+        guard let childID = pairedBackendChildID,
+              let client = BigKidParentClient(baseURLString: apiClient.baseURL),
+              let child = ChildProfile.all.first(where: { $0.id == ChildProfile.liam.id }) else {
+            return
+        }
+
+        do {
+            let snapshot = try await client.fetchKidState(childId: childID)
+            if let req = snapshot.reflectionRequest {
+                do {
+                    let parentReq = try await apiClient.fetchReflectionForParent(reflectionId: req.id)
+                    reflectionStore.syncBackendReflection(for: child, parentRequest: parentReq)
+                } catch {
+                    reflectionStore.syncBackendReflection(for: child, request: req)
+                }
+            } else {
+                reflectionStore.syncBackendReflection(for: child, request: nil)
+            }
+        } catch {
+            // Home should keep rendering its last known state if the
+            // lightweight parent refresh misses once. ProfileView still
+            // surfaces detailed refresh errors in its own task section.
+        }
     }
 }
 
