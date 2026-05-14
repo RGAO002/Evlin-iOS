@@ -841,9 +841,9 @@ private enum WritingActionAlert: Identifiable {
     var message: String {
         switch self {
         case .approved(let name):
-            return "Prototype only: \(name)'s reflection would be marked approved."
+            return "\(name)'s reflection is approved."
         case .redoRequested(let name):
-            return "Prototype only: \(name) would be asked to write again."
+            return "\(name) will be asked to rework their reflection."
         }
     }
 }
