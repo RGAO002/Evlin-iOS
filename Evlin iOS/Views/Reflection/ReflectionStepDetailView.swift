@@ -2,20 +2,20 @@ import SwiftUI
 
 /// Per-step parent preview for a reflection.
 ///
-/// The three steps render very different UI:
-///  - **Video (step 1)** embeds the kid-side YouTube player so the
-///    parent sees the exact clip the child watches. Back navigation
-///    works at any point.
-///  - **Quiz (step 2)** lists every question with the correct option
-///    highlighted (parent visibility — opposite of the kid surface).
-///  - **Writing (step 3)** shows Evlin's prompt + the child's essay
-///    (if submitted). When essay is present + state is finished, the
-///    Approve / Request redo controls render at the bottom. When the
-///    child hasn't written yet, no action buttons and no "needs
-///    review" pill render.
-///
-/// Shell colors track the reference HTML: green step labels, warm
-/// reflection palette tokens are inherited from `ReflectionPalette`.
+/// Mirrors `Evlin Parent Dashboard (1).html` lines 1080-1212 exactly:
+///  - Single sticky top bar (back button + "Step N of 3 — {Video|Quiz|
+///    Written response}" — no kicker, no subtitle).
+///  - Page background is white. NO outer card wrappers; each step body
+///    is rendered directly on the page with its own padding rhythm.
+///  - **Video (step 1)** — full-bleed gradient block (~320pt+) with
+///    the kid-side YouTube embed and a duration chip overlay. Below
+///    it: title (Manrope 22) + lock-rule box + italic footer note.
+///  - **Quiz (step 2)** — single "Correct answers shown for parent
+///    visibility · {Name} needs 4 of 5 to pass." line, then numbered
+///    questions with correct options highlighted in green.
+///  - **Writing (step 3)** — optional review-state pill, prompt card
+///    (green), reflection text card (white outline), stats row, then
+///    either Approve/Request-redo buttons or a done-state strip.
 struct ReflectionStepDetailView: View {
     let reflectionId: UUID
     let stepId: UUID
@@ -38,22 +38,20 @@ struct ReflectionStepDetailView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            GlassmorphicHeader(title: "Reflection step", kicker: "Parent preview", onBack: onBack)
+            stickyHeader
 
             ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: 0) {
                     if let summary, let step, let stepIndex {
                         stepContent(step, summary: summary, index: stepIndex)
                     } else {
                         missingState
                     }
                 }
-                .padding(.horizontal, 20)
-                .padding(.top, 18)
-                .padding(.bottom, 80)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
-        .background(Color.evSurfaceContainerLow.ignoresSafeArea())
+        .background(Color.white.ignoresSafeArea())
         .navigationBarBackButtonHidden(true)
         .enableSwipeBack()
         .alert(item: $activeAlert) { alert in
@@ -65,6 +63,62 @@ struct ReflectionStepDetailView: View {
         }
     }
 
+    /// Top chrome — matches reference HTML lines 1083-1091: small back
+    /// button on the left + step label (no kicker, no subtitle). Solid
+    /// near-white background with a 1pt bottom border. SwiftUI keeps
+    /// this header pinned because it sits in the parent VStack above
+    /// the ScrollView (not inside it).
+    private var stickyHeader: some View {
+        HStack(spacing: 8) {
+            Button(action: { onBack?() }) {
+                Image(systemName: "arrow.backward")
+                    .font(.system(size: 18, weight: .heavy))
+                    .foregroundStyle(Color.evPrimary)
+                    .frame(width: 40, height: 40)
+                    .background(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .fill(Color.clear)
+                    )
+                    .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Back")
+
+            Text(stepHeaderTitle)
+                .font(.custom("Manrope", size: 16).weight(.heavy))
+                .tracking(-0.16)
+                .foregroundStyle(Color.evPrimary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.85)
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(red: 0xFC / 255, green: 0xFC / 255, blue: 0xFD / 255))
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(Color.evOutlineVariant)
+                .frame(height: 1)
+        }
+    }
+
+    /// "Step N of 3 — {Video | Quiz | Written response}". Falls back
+    /// to "Reflection" if the step / summary couldn't be resolved.
+    private var stepHeaderTitle: String {
+        guard let step, let summary, let stepIndex else {
+            return "Reflection"
+        }
+        let suffix: String
+        switch step.kind {
+        case .video:   suffix = "Video"
+        case .quiz:    suffix = "Quiz"
+        case .writing: suffix = "Written response"
+        }
+        return "Step \(stepIndex + 1) of \(summary.steps.count) — \(suffix)"
+    }
+
     @ViewBuilder
     private func stepContent(
         _ step: ParentReflectionStepArtifact,
@@ -73,14 +127,12 @@ struct ReflectionStepDetailView: View {
     ) -> some View {
         switch step.kind {
         case .video:
-            VideoStepBody(step: step, index: index, total: summary.steps.count, childName: summary.childName)
+            VideoStepBody(step: step, childName: summary.childName)
         case .quiz:
-            QuizStepBody(step: step, index: index, total: summary.steps.count, childName: summary.childName)
+            QuizStepBody(step: step, childName: summary.childName)
         case .writing:
             WritingStepBody(
                 step: step,
-                index: index,
-                total: summary.steps.count,
                 summary: summary,
                 onApprove: { activeAlert = .approved(summary.childName) },
                 onRedo: { activeAlert = .redoRequested(summary.childName) }
@@ -109,14 +161,6 @@ struct ReflectionStepDetailView: View {
         }
         .padding(20)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(StepPalette.warmSurface)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(StepPalette.border, lineWidth: 1)
-        )
     }
 }
 
@@ -124,8 +168,6 @@ struct ReflectionStepDetailView: View {
 
 private struct VideoStepBody: View {
     let step: ParentReflectionStepArtifact
-    let index: Int
-    let total: Int
     let childName: String
 
     @StateObject private var bridge = VideoBridge()
@@ -133,66 +175,43 @@ private struct VideoStepBody: View {
     @State private var ended: Bool = false
 
     var body: some View {
-        // The whole page is one card that extends to the device edges
-        // (escapes the parent ScrollView's 20pt horizontal padding via
-        // negative padding on the outermost stack). Title / lock rule /
-        // footer have 20pt inner padding; the video has 0pt inner
-        // padding so it bleeds to the card edges = device edges.
-        //
-        // Mirrors the reference HTML card structure: header padding
-        // 18 20 12, video edge-to-card, lock rule 0 20 16, then a
-        // border-top divider before the footer note (padding 12 20 16).
+        // Reference HTML lines 1093-1119: full-bleed gradient block at
+        // the top (flex: 1, minHeight: 320), then padded section below.
+        // No card wrappers — the page itself is the body.
         VStack(alignment: .leading, spacing: 0) {
-            VStack(alignment: .leading, spacing: 6) {
-                stepLabel(index: index, total: total, suffix: "Video preview")
-
-                Text(step.title)
-                    .font(.custom("Manrope", size: 19).weight(.heavy))
-                    .tracking(-0.3)
-                    .foregroundStyle(StepPalette.ink)
-                    .lineSpacing(2)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .padding(.horizontal, 20)
-            .padding(.top, 18)
-            .padding(.bottom, 12)
-
             videoPlayer
 
-            if let video = step.video {
-                lockRule(video.lockRule)
-                    .padding(.horizontal, 20)
-                    .padding(.top, 14)
-                    .padding(.bottom, 16)
+            VStack(alignment: .leading, spacing: 14) {
+                Text(step.title)
+                    .font(.custom("Manrope", size: 22).weight(.heavy))
+                    .tracking(-0.22)
+                    .foregroundStyle(Color.evOnSurface)
+                    .lineSpacing(3)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if let video = step.video {
+                    lockRule(video.lockRule)
+                }
+
+                Text("This is exactly what \(childName) watches before unlocking.")
+                    .font(.custom("Inter", size: 12))
+                    .italic()
+                    .foregroundStyle(Color.evOnSurfaceVariant)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
-
-            Rectangle()
-                .fill(Color.evOutlineVariant)
-                .frame(height: 1)
-
-            Text("This is exactly what \(childName) watches before unlocking.")
-                .font(.custom("Inter", size: 11))
-                .foregroundStyle(Color.evOnSurfaceVariant)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 20)
-                .padding(.top, 12)
-                .padding(.bottom, 16)
+            .padding(.horizontal, 20)
+            .padding(.top, 20)
+            .padding(.bottom, 30)
         }
-        .background(Color.evSurfaceContainerLowest)
-        .overlay(
-            Rectangle()
-                .stroke(Color.evOutlineVariant, lineWidth: 1)
-        )
-        .padding(.horizontal, -20)
     }
 
     @ViewBuilder
     private var videoPlayer: some View {
-        // Edge-to-edge within the card (= device width since the card
-        // itself extends to device edges). No rounded corners on the
-        // video — they'd clash with the card's own top corners and
-        // the bleed-to-edge look. WKWebView's YouTube embed
-        // letterboxes the 16:9 video inside this box.
+        // Full-bleed (no horizontal padding), height ~360pt — matches
+        // the design's flex: 1 / minHeight: 320 hero area while leaving
+        // room for title + lock rule + footer below on common iPhone
+        // sizes. Green gradient behind the embed lets the letterbox
+        // edges blend in with the design palette.
         if let video = step.video {
             ZStack {
                 VideoEmbedView(
@@ -202,22 +221,24 @@ private struct VideoStepBody: View {
                     onEnded: { ended = true }
                 )
 
-                // Top-left duration chip — matches the reference HTML.
+                // Top-left duration chip — matches reference HTML 1103-1105:
+                // padding 6/12, radius 999, white 0.85 bg, Inter 12/700,
+                // color #15803D, content "0:00 / {duration}".
                 VStack {
                     HStack {
-                        Text(video.duration)
+                        Text("0:00 / \(video.duration)")
                             .font(.custom("Inter", size: 12).weight(.heavy))
                             .foregroundStyle(GreenPalette.deep)
                             .padding(.horizontal, 12)
-                            .padding(.vertical, 5)
+                            .padding(.vertical, 6)
                             .background(
-                                Capsule().fill(Color.white.opacity(0.88))
+                                Capsule().fill(Color.white.opacity(0.85))
                             )
                         Spacer()
                     }
                     Spacer()
                 }
-                .padding(14)
+                .padding(16)
                 .allowsHitTesting(false)
             }
             .frame(maxWidth: .infinity)
@@ -234,8 +255,8 @@ private struct VideoStepBody: View {
                 )
             )
         } else {
-            // Fallback (no fixture video) — same gradient block at the
-            // same edge-to-edge size, with a static play glyph.
+            // No fixture video — same gradient block with a static
+            // 84pt play glyph (matches reference HTML 1100-1102).
             Rectangle()
                 .fill(
                     LinearGradient(
@@ -251,10 +272,11 @@ private struct VideoStepBody: View {
                 .frame(height: 360)
                 .overlay(
                     Image(systemName: "play.fill")
-                        .font(.system(size: 28, weight: .heavy))
+                        .font(.system(size: 36, weight: .heavy))
                         .foregroundStyle(GreenPalette.deep)
-                        .frame(width: 72, height: 72)
+                        .frame(width: 84, height: 84)
                         .background(Circle().fill(Color.white.opacity(0.85)))
+                        .shadow(color: .black.opacity(0.15), radius: 20, x: 0, y: 6)
                 )
         }
     }
@@ -286,95 +308,79 @@ private struct VideoStepBody: View {
 
 private struct QuizStepBody: View {
     let step: ParentReflectionStepArtifact
-    let index: Int
-    let total: Int
     let childName: String
 
     var body: some View {
+        // Reference HTML lines 1122-1153: padded section with a single
+        // intro line, then numbered questions on the page background.
+        // NO outer card.
         VStack(alignment: .leading, spacing: 0) {
-            VStack(alignment: .leading, spacing: 8) {
-                stepLabel(index: index, total: total, suffix: "Quiz preview")
-
-                Text("What \(childName) is asked")
-                    .font(.custom("Manrope", size: 19).weight(.heavy))
-                    .tracking(-0.3)
-                    .foregroundStyle(StepPalette.ink)
-
-                Text("Correct answers are shown for parent visibility — kids need 4 of 5 to pass.")
-                    .font(.custom("Inter", size: 12))
-                    .foregroundStyle(Color.evOnSurfaceVariant)
-                    .lineSpacing(2)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .padding(.horizontal, 20)
-            .padding(.top, 20)
-            .padding(.bottom, 14)
+            Text("Correct answers shown for parent visibility · \(childName) needs 4 of 5 to pass.")
+                .font(.custom("Inter", size: 12))
+                .foregroundStyle(Color.evOnSurfaceVariant)
+                .lineSpacing(2)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.bottom, 16)
 
             if step.quiz.isEmpty {
                 Text("Quiz questions are not available for this reflection yet.")
                     .font(.custom("Inter", size: 13))
                     .foregroundStyle(Color.evOnSurfaceVariant)
-                    .padding(20)
             } else {
                 ForEach(Array(step.quiz.enumerated()), id: \.element.id) { qi, question in
-                    if qi > 0 {
-                        Rectangle()
-                            .fill(Color.evOutlineVariant)
-                            .frame(height: 1)
-                    }
                     questionBlock(question, number: qi + 1)
+                        .padding(.bottom, qi == step.quiz.count - 1 ? 0 : 22)
                 }
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(Color.evSurfaceContainerLowest)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(Color.evOutlineVariant, lineWidth: 1)
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .padding(.horizontal, 20)
+        .padding(.top, 16)
+        .padding(.bottom, 30)
     }
 
     private func questionBlock(_ question: ParentReflectionQuizQuestion, number: Int) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 0) {
+            // Number chip + question — reference HTML 1129-1132.
             HStack(alignment: .top, spacing: 10) {
                 Text("\(number)")
-                    .font(.custom("Manrope", size: 11).weight(.heavy))
+                    .font(.custom("Manrope", size: 12).weight(.heavy))
                     .foregroundStyle(Color.evOnSurfaceVariant)
-                    .frame(width: 22, height: 22)
+                    .frame(width: 24, height: 24)
                     .background(
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
                             .fill(Color.evSurfaceContainerHigh)
                     )
+                    .padding(.top, 1)
 
                 Text(question.q)
-                    .font(.custom("Manrope", size: 14).weight(.heavy))
-                    .tracking(-0.1)
+                    .font(.custom("Manrope", size: 15).weight(.bold))
                     .foregroundStyle(Color.evOnSurface)
-                    .lineSpacing(2)
+                    .lineSpacing(3)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .padding(.bottom, 10)
 
+            // Options — reference HTML 1133-1150. padding-left 34
+            // (= 24 chip width + 10 gap), gap 6, option padding
+            // 10/14, radius 12. Correct option green-tinted.
             VStack(spacing: 6) {
                 ForEach(Array(question.options.enumerated()), id: \.offset) { oi, option in
                     optionRow(text: option, isCorrect: oi == question.correctIndex)
                 }
             }
-            .padding(.leading, 30)
+            .padding(.leading, 34)
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 16)
     }
 
     private func optionRow(text: String, isCorrect: Bool) -> some View {
         HStack(spacing: 10) {
             ZStack {
                 Circle()
-                    .stroke(isCorrect ? GreenPalette.green : Color.evOutline, lineWidth: 1.5)
+                    .stroke(
+                        isCorrect ? GreenPalette.green : Color.evOutline,
+                        lineWidth: 1.5
+                    )
                     .background(Circle().fill(isCorrect ? GreenPalette.green : Color.clear))
 
                 if isCorrect {
@@ -386,21 +392,21 @@ private struct QuizStepBody: View {
             .frame(width: 18, height: 18)
 
             Text(text)
-                .font(.custom("Inter", size: 13))
+                .font(.custom("Inter", size: 13.5))
                 .foregroundStyle(isCorrect ? GreenPalette.deep : Color.evOnSurface)
                 .fontWeight(isCorrect ? .semibold : .regular)
-                .lineSpacing(2)
+                .lineSpacing(3)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
         .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(isCorrect ? GreenPalette.tint50 : Color.white)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(isCorrect ? GreenPalette.tint200 : Color.evOutlineVariant, lineWidth: 1)
         )
     }
@@ -410,8 +416,6 @@ private struct QuizStepBody: View {
 
 private struct WritingStepBody: View {
     let step: ParentReflectionStepArtifact
-    let index: Int
-    let total: Int
     let summary: ParentReflectionSummary
     let onApprove: () -> Void
     let onRedo: () -> Void
@@ -426,84 +430,25 @@ private struct WritingStepBody: View {
     }
 
     var body: some View {
+        // Reference HTML lines 1156-1210: padded section. NO outer
+        // card. Optional review-state pill, prompt card, reflection
+        // text card, stats row, then either Approve/Request-redo
+        // buttons or a done-state strip.
         VStack(alignment: .leading, spacing: 0) {
-            VStack(alignment: .leading, spacing: 8) {
-                stepLabel(
-                    index: index, total: total,
-                    suffix: "\(summary.childName)'s reflection"
-                )
+            promptCard
+                .padding(.bottom, 14)
 
-                Text("Review what \(summary.childName) wrote")
-                    .font(.custom("Manrope", size: 19).weight(.heavy))
-                    .tracking(-0.3)
-                    .foregroundStyle(StepPalette.ink)
-            }
-            .padding(.horizontal, 20)
-            .padding(.top, 20)
-            .padding(.bottom, 14)
+            essayCard
+                .padding(.bottom, 10)
 
-            VStack(alignment: .leading, spacing: 14) {
-                promptCard
-                essayCard
-                if essay != nil {
-                    statsRow
-                }
-            }
-            .padding(.horizontal, 20)
+            statsRow
+                .padding(.bottom, 18)
 
-            if canReview {
-                Rectangle()
-                    .fill(Color.evOutlineVariant)
-                    .frame(height: 1)
-                    .padding(.top, 18)
-
-                HStack(spacing: 10) {
-                    Button(action: onApprove) {
-                        Text("Approve")
-                            .font(.custom("Manrope", size: 14).weight(.heavy))
-                            .foregroundStyle(.white)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 11)
-                            .background(
-                                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                    .fill(GreenPalette.green)
-                            )
-                    }
-                    .buttonStyle(.plain)
-
-                    Button(action: onRedo) {
-                        Text("Request redo")
-                            .font(.custom("Manrope", size: 14).weight(.heavy))
-                            .foregroundStyle(Color.evOnSurface)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 11)
-                            .background(
-                                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                    .fill(Color.white)
-                            )
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                    .stroke(Color.evOutlineVariant, lineWidth: 1)
-                            )
-                    }
-                    .buttonStyle(.plain)
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 14)
-            } else {
-                Spacer(minLength: 18)
-            }
+            actionRow
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(Color.evSurfaceContainerLowest)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(Color.evOutlineVariant, lineWidth: 1)
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .padding(.horizontal, 20)
+        .padding(.top, 16)
+        .padding(.bottom, 16)
     }
 
     private var promptCard: some View {
@@ -514,8 +459,7 @@ private struct WritingStepBody: View {
                 .foregroundStyle(GreenPalette.deep)
 
             Text(summary.prompt)
-                .font(.custom("Manrope", size: 15).weight(.heavy))
-                .tracking(-0.1)
+                .font(.custom("Manrope", size: 15).weight(.bold))
                 .foregroundStyle(Color.evOnSurface)
                 .lineSpacing(3)
                 .fixedSize(horizontal: false, vertical: true)
@@ -534,45 +478,21 @@ private struct WritingStepBody: View {
 
     @ViewBuilder
     private var essayCard: some View {
-        if let essay {
-            Text(essay)
-                .font(.custom("Inter", size: 14))
-                .foregroundStyle(Color.evOnSurface)
-                .lineSpacing(4)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(16)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .fill(Color.white)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .stroke(Color.evOutlineVariant, lineWidth: 1)
-                )
-        } else {
-            HStack(alignment: .top, spacing: 8) {
-                Image(systemName: "hourglass")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(Color.evOnSurfaceVariant)
-                    .padding(.top, 1)
-                Text("\(summary.childName) hasn't submitted a reflection yet. When they do, the written response will appear here and you'll be able to approve or request a redo.")
-                    .font(.custom("Inter", size: 13))
-                    .foregroundStyle(Color.evOnSurfaceVariant)
-                    .lineSpacing(3)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+        Text(essay ?? "\(summary.childName) hasn't submitted a reflection yet.")
+            .font(.custom("Inter", size: 14))
+            .foregroundStyle(essay == nil ? Color.evOnSurfaceVariant : Color.evOnSurface)
+            .lineSpacing(4)
+            .fixedSize(horizontal: false, vertical: true)
             .padding(16)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(Color.evSurfaceContainerLow)
+                    .fill(Color.white)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
                     .stroke(Color.evOutlineVariant, lineWidth: 1)
             )
-        }
     }
 
     private var statsRow: some View {
@@ -587,6 +507,45 @@ private struct WritingStepBody: View {
         }
     }
 
+    @ViewBuilder
+    private var actionRow: some View {
+        if canReview {
+            HStack(spacing: 10) {
+                Button(action: onApprove) {
+                    Text("Approve")
+                        .font(.custom("Manrope", size: 14).weight(.heavy))
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                        .background(
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .fill(GreenPalette.green)
+                        )
+                }
+                .buttonStyle(.plain)
+
+                Button(action: onRedo) {
+                    Text("Request redo")
+                        .font(.custom("Manrope", size: 14).weight(.heavy))
+                        .foregroundStyle(Color.evOnSurface)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                        .background(
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .fill(Color.white)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .stroke(Color.evOutlineVariant, lineWidth: 1)
+                        )
+                }
+                .buttonStyle(.plain)
+            }
+        } else {
+            EmptyView()
+        }
+    }
+
     private var essayStats: String {
         guard let essay else { return "—" }
         let sentences = essay
@@ -596,23 +555,6 @@ private struct WritingStepBody: View {
         let words = essay.split { !$0.isLetter && !$0.isNumber }.count
         return "\(sentences) sentences · \(words) words"
     }
-}
-
-// MARK: - Shared helpers
-
-private func stepLabel(index: Int, total: Int, suffix: String) -> some View {
-    Text("STEP \(index + 1) OF \(total) — \(suffix.uppercased())")
-        .font(.custom("Inter", size: 11).weight(.heavy))
-        .tracking(1.4)
-        .foregroundStyle(GreenPalette.green)
-}
-
-private func footerNote(_ text: String) -> some View {
-    Text(text)
-        .font(.custom("Inter", size: 11))
-        .foregroundStyle(Color.evOnSurfaceVariant)
-        .padding(.top, 4)
-        .frame(maxWidth: .infinity, alignment: .leading)
 }
 
 // MARK: - Palettes
@@ -626,9 +568,9 @@ private enum StepPalette {
 }
 
 private enum GreenPalette {
-    /// Step-label / correct-option accent (`#22C55E`).
+    /// Correct-option accent (`#22C55E`).
     static let green    = Color(red: 0x22 / 255, green: 0xC5 / 255, blue: 0x5E / 255)
-    /// Approve-button deep green (`#15803D`).
+    /// Deep green for chip text / Evlin-asks label (`#15803D`).
     static let deep     = Color(red: 0x15 / 255, green: 0x80 / 255, blue: 0x3D / 255)
     /// Prompt-card surface (`#DCFCE7`).
     static let tint50   = Color(red: 0xDC / 255, green: 0xFC / 255, blue: 0xE7 / 255)
