@@ -26,11 +26,21 @@ struct CalendarView: View {
     private var allDayItems: [AllDayItem] { CalendarMockData.allDay(for: selectedDate) }
     private var isViewingToday: Bool { calendar.isDateInToday(selectedDate) }
 
-    /// Visible columns: when no person focus, all 4. When focused, just that one.
-    private var visibleColumns: [CalendarPerson] {
-        guard let focusPerson else { return CalendarMockData.people }
-        return CalendarMockData.people.filter { $0.id == focusPerson }
+    /// All-day pills shown above the timeline. In focus mode we hide
+    /// pills that don't belong to the focused person — matches the
+    /// design's grid-per-column layout (only the focused column slot
+    /// renders).
+    private var visibleAllDayItems: [AllDayItem] {
+        guard let focusPerson else { return allDayItems }
+        return allDayItems.filter { $0.col == focusPerson }
     }
+
+    /// Shared animation curve for focus enter/exit. Mirrors the
+    /// design's "events expand outward, push others out" intent —
+    /// non-bouncy ease so the motion reads as a deliberate column
+    /// resize rather than a spring. Reuse the exact same curve in
+    /// every tap-handler so the reverse animation is symmetric.
+    private static let focusAnim: Animation = .easeInOut(duration: 0.32)
 
     var body: some View {
         VStack(spacing: 0) {
@@ -231,10 +241,45 @@ struct CalendarView: View {
 
     private var avatarRow: some View {
         HStack(spacing: 0) {
-            Color.clear.frame(width: CalendarMockData.TIME_W)
+            // Time-gutter slot — empty in normal mode; in focus mode
+            // surfaces a "people" return button that exits focus. The
+            // button conditionally renders with .transition so it
+            // fades + scales in/out alongside the column animation.
+            ZStack {
+                if focusPerson != nil {
+                    Button {
+                        withAnimation(Self.focusAnim) { focusPerson = nil }
+                    } label: {
+                        // Matches design jsx line 542-548:
+                        //   width 28, height 28, radius 9,
+                        //   surfaceContainerHigh bg, primary icon,
+                        //   Material "group" (3-person) glyph.
+                        Image(systemName: "person.3.fill")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(Color.evPrimary)
+                            .frame(width: 28, height: 28)
+                            .background(
+                                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                    .fill(Color.evSurfaceContainerHigh)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .transition(.opacity.combined(with: .scale(scale: 0.7)))
+                }
+            }
+            .frame(width: CalendarMockData.TIME_W)
+
+            // Avatars — non-focused ones collapse to 0 width + fade
+            // when another avatar is focused. Keeping every avatar
+            // in the hierarchy (not removed via ForEach filter) is
+            // what lets SwiftUI smoothly animate the frame change
+            // instead of pop-removing the views.
             ForEach(CalendarMockData.people) { p in
+                let visible = focusPerson == nil || focusPerson == p.id
                 avatarButton(for: p)
-                    .frame(maxWidth: .infinity)
+                    .frame(maxWidth: visible ? .infinity : 0)
+                    .opacity(visible ? 1 : 0)
+                    .clipped()
             }
         }
         .padding(.horizontal, 6)
@@ -245,7 +290,7 @@ struct CalendarView: View {
     private func avatarButton(for p: CalendarPerson) -> some View {
         let focused = focusPerson == p.id
         Button {
-            withAnimation(.easeInOut(duration: 0.2)) {
+            withAnimation(Self.focusAnim) {
                 focusPerson = (focusPerson == p.id) ? nil : p.id
             }
         } label: {
@@ -289,7 +334,7 @@ struct CalendarView: View {
 
     private var timelineBody: some View {
         VStack(alignment: .leading, spacing: 10) {
-            if !allDayItems.isEmpty {
+            if !visibleAllDayItems.isEmpty {
                 allDayBar
             }
 
@@ -306,22 +351,47 @@ struct CalendarView: View {
                     }
 
                     GeometryReader { geo in
-                        let colWidth = geo.size.width / CGFloat(visibleColumns.count)
-                        ForEach(Array(visibleColumns.enumerated()), id: \.element.id) { colIdx, person in
-                            let colEvents = visibleEvents.filter { $0.col == person.id }
+                        let totalW = geo.size.width
+                        let normalColW = totalW / CGFloat(CalendarMockData.people.count)
+
+                        // Render every person column unconditionally
+                        // so SwiftUI animates frame/offset/opacity
+                        // changes instead of removing-then-re-inserting
+                        // views. Each column's target geometry is:
+                        //   • no focus → normal grid slot
+                        //   • this one focused → x=0, width=totalW
+                        //     (expands outward to both edges)
+                        //   • another focused → width=0 + opacity 0
+                        //     (collapses in place, fades away)
+                        ForEach(Array(CalendarMockData.people.enumerated()), id: \.element.id) { colIdx, person in
+                            let isFocused = focusPerson == person.id
+                            let isAnyFocused = focusPerson != nil
+
+                            let targetW: CGFloat = isAnyFocused
+                                ? (isFocused ? totalW : 0)
+                                : normalColW
+                            let targetX: CGFloat = (isAnyFocused && isFocused)
+                                ? 0
+                                : CGFloat(colIdx) * normalColW
+                            let targetOpacity: Double = (!isAnyFocused || isFocused) ? 1.0 : 0.0
+
+                            let colEvents = events.filter { $0.col == person.id }
+
                             ZStack(alignment: .topLeading) {
                                 Rectangle()
                                     .fill(Color.clear)
                                     .contentShape(Rectangle())
-                                    .frame(width: colWidth, height: totalHeight)
+                                    .frame(width: max(0, targetW), height: totalHeight)
 
                                 ForEach(colEvents) { ev in
-                                    columnEventPill(ev, color: person.color, columnWidth: colWidth)
+                                    columnEventPill(ev, color: person.color, columnWidth: max(0, targetW))
                                         .offset(y: CalendarMockData.yFor(ev.start))
                                 }
                             }
-                            .frame(width: colWidth, alignment: .topLeading)
-                            .offset(x: colWidth * CGFloat(colIdx))
+                            .frame(width: max(0, targetW), height: totalHeight, alignment: .topLeading)
+                            .opacity(targetOpacity)
+                            .offset(x: targetX)
+                            .clipped()
                         }
                     }
                     .frame(height: totalHeight)
@@ -343,7 +413,7 @@ struct CalendarView: View {
                 .font(.custom("Inter", size: 10).weight(.heavy))
                 .tracking(1.4)
                 .foregroundStyle(Color.evOnSurfaceVariant)
-            ForEach(allDayItems) { item in
+            ForEach(visibleAllDayItems) { item in
                 let p = CalendarMockData.person(item.col)
                 Text(item.title)
                     .font(.custom("Inter", size: 12).weight(.semibold))
@@ -351,6 +421,7 @@ struct CalendarView: View {
                     .padding(.horizontal, 10)
                     .padding(.vertical, 5)
                     .background(Capsule().fill(p.bg))
+                    .transition(.opacity.combined(with: .scale(scale: 0.85)))
             }
         }
         .padding(.horizontal, 16)
