@@ -339,8 +339,12 @@ private struct QuizStepBody: View {
     }
 
     private func questionBlock(_ question: ParentReflectionQuizQuestion, number: Int) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            // Number chip + question — reference HTML 1129-1132.
+        // Per-question grading state — drives both the right-side pill
+        // and the per-option markings below.
+        let grading = QuestionGrading(question: question)
+
+        return VStack(alignment: .leading, spacing: 0) {
+            // Number chip + question + grading pill (right side)
             HStack(alignment: .top, spacing: 10) {
                 Text("\(number)")
                     .font(.custom("Manrope", size: 12).weight(.heavy))
@@ -358,43 +362,65 @@ private struct QuizStepBody: View {
                     .lineSpacing(3)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
+
+                gradingPill(grading)
+                    .padding(.top, 2)
             }
             .padding(.bottom, 10)
 
-            // Options — reference HTML 1133-1150. padding-left 34
-            // (= 24 chip width + 10 gap), gap 6, option padding
-            // 10/14, radius 12. Correct option green-tinted.
             VStack(spacing: 6) {
                 ForEach(Array(question.options.enumerated()), id: \.offset) { oi, option in
-                    optionRow(text: option, isCorrect: oi == question.correctIndex)
+                    optionRow(
+                        text: option,
+                        state: grading.optionState(at: oi)
+                    )
                 }
             }
             .padding(.leading, 34)
         }
     }
 
-    private func optionRow(text: String, isCorrect: Bool) -> some View {
-        HStack(spacing: 10) {
-            ZStack {
-                Circle()
-                    .stroke(
-                        isCorrect ? GreenPalette.green : Color.evOutline,
-                        lineWidth: 1.5
-                    )
-                    .background(Circle().fill(isCorrect ? GreenPalette.green : Color.clear))
-
-                if isCorrect {
-                    Image(systemName: "checkmark")
-                        .font(.system(size: 9, weight: .heavy))
-                        .foregroundStyle(.white)
-                }
+    @ViewBuilder
+    private func gradingPill(_ grading: QuestionGrading) -> some View {
+        switch grading.outcome {
+        case .unanswered:
+            EmptyView()
+        case .right:
+            HStack(spacing: 3) {
+                Image(systemName: "checkmark")
+                    .font(.system(size: 9, weight: .heavy))
+                Text("Correct")
+                    .font(.custom("Inter", size: 10).weight(.heavy))
+                    .tracking(0.4)
             }
-            .frame(width: 18, height: 18)
+            .foregroundStyle(GreenPalette.deep)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(Capsule().fill(GreenPalette.tint50))
+            .overlay(Capsule().stroke(GreenPalette.tint200, lineWidth: 1))
+        case .wrong:
+            HStack(spacing: 3) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .heavy))
+                Text("Wrong")
+                    .font(.custom("Inter", size: 10).weight(.heavy))
+                    .tracking(0.4)
+            }
+            .foregroundStyle(RedPalette.deep)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(Capsule().fill(RedPalette.tint50))
+            .overlay(Capsule().stroke(RedPalette.tint200, lineWidth: 1))
+        }
+    }
 
+    private func optionRow(text: String, state: QuizOptionState) -> some View {
+        HStack(spacing: 10) {
+            optionMarker(state)
             Text(text)
                 .font(.custom("Inter", size: 13.5))
-                .foregroundStyle(isCorrect ? GreenPalette.deep : Color.evOnSurface)
-                .fontWeight(isCorrect ? .semibold : .regular)
+                .foregroundStyle(optionTextColor(state))
+                .fontWeight(state == .neutral ? .regular : .semibold)
                 .lineSpacing(3)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -403,12 +429,105 @@ private struct QuizStepBody: View {
         .padding(.vertical, 10)
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(isCorrect ? GreenPalette.tint50 : Color.white)
+                .fill(optionBackground(state))
         )
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(isCorrect ? GreenPalette.tint200 : Color.evOutlineVariant, lineWidth: 1)
+                .stroke(optionBorder(state), lineWidth: 1)
         )
+    }
+
+    @ViewBuilder
+    private func optionMarker(_ state: QuizOptionState) -> some View {
+        switch state {
+        case .correct:
+            ZStack {
+                Circle()
+                    .fill(GreenPalette.green)
+                Image(systemName: "checkmark")
+                    .font(.system(size: 9, weight: .heavy))
+                    .foregroundStyle(.white)
+            }
+            .frame(width: 18, height: 18)
+        case .kidWrong:
+            ZStack {
+                Circle()
+                    .fill(RedPalette.bright)
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .heavy))
+                    .foregroundStyle(.white)
+            }
+            .frame(width: 18, height: 18)
+        case .neutral:
+            Circle()
+                .stroke(Color.evOutline, lineWidth: 1.5)
+                .frame(width: 18, height: 18)
+        }
+    }
+
+    private func optionTextColor(_ state: QuizOptionState) -> Color {
+        switch state {
+        case .correct:  return GreenPalette.deep
+        case .kidWrong: return RedPalette.deep
+        case .neutral:  return Color.evOnSurface
+        }
+    }
+
+    private func optionBackground(_ state: QuizOptionState) -> Color {
+        switch state {
+        case .correct:  return GreenPalette.tint50
+        case .kidWrong: return RedPalette.tint50
+        case .neutral:  return Color.white
+        }
+    }
+
+    private func optionBorder(_ state: QuizOptionState) -> Color {
+        switch state {
+        case .correct:  return GreenPalette.tint200
+        case .kidWrong: return RedPalette.tint200
+        case .neutral:  return Color.evOutlineVariant
+        }
+    }
+}
+
+// MARK: - Quiz grading helpers
+
+/// Per-option visual state when rendering the parent's Step 2 review.
+private enum QuizOptionState {
+    /// Always highlight the correct option in green (with ✓).
+    case correct
+    /// The kid picked this option, but it's wrong. Highlight in red
+    /// (with ✗) so the parent can see what the kid actually chose.
+    case kidWrong
+    /// Plain unanswered or other-incorrect option.
+    case neutral
+}
+
+/// Per-question grading outcome — drives the right-side pill.
+private enum QuestionOutcome {
+    case unanswered
+    case right
+    case wrong
+}
+
+private struct QuestionGrading {
+    let question: ParentReflectionQuizQuestion
+
+    var outcome: QuestionOutcome {
+        guard let selected = question.selectedIndex else { return .unanswered }
+        return selected == question.correctIndex ? .right : .wrong
+    }
+
+    func optionState(at index: Int) -> QuizOptionState {
+        if index == question.correctIndex { return .correct }
+        // Only mark the kid's *wrong* pick if they actually answered
+        // AND their pick is different from the correct option.
+        if let selected = question.selectedIndex,
+           selected != question.correctIndex,
+           index == selected {
+            return .kidWrong
+        }
+        return .neutral
     }
 }
 
@@ -578,6 +697,19 @@ private enum GreenPalette {
     static let tint200  = Color(red: 0x86 / 255, green: 0xEF / 255, blue: 0xAC / 255)
     /// Video gradient middle stop (`#86EFAC`).
     static let tint300  = Color(red: 0x86 / 255, green: 0xEF / 255, blue: 0xAC / 255)
+}
+
+private enum RedPalette {
+    /// Bright red for the kid's wrong-pick marker (`#EF4444`).
+    static let bright   = Color(red: 0xEF / 255, green: 0x44 / 255, blue: 0x44 / 255)
+    /// Deep red for "Wrong" pill text + wrong-option text
+    /// (`#B91C1C` — matches the design's redo-state palette).
+    static let deep     = Color(red: 0xB9 / 255, green: 0x1C / 255, blue: 0x1C / 255)
+    /// Wrong-option surface — same family as the redo pill bg
+    /// (`#FEE2E2`, slightly less saturated than the redo `#FFE4E6`).
+    static let tint50   = Color(red: 0xFE / 255, green: 0xE2 / 255, blue: 0xE2 / 255)
+    /// Wrong-option border (`#FCA5A5`).
+    static let tint200  = Color(red: 0xFC / 255, green: 0xA5 / 255, blue: 0xA5 / 255)
 }
 
 private enum WritingActionAlert: Identifiable {

@@ -39,6 +39,12 @@ struct ParentReflectionQuizQuestion: Identifiable, Codable, Hashable {
     let q: String
     let options: [String]
     let correctIndex: Int
+    /// Kid's submitted choice for this question. `nil` when the kid
+    /// hasn't answered yet (still pending). When non-nil and equal to
+    /// `correctIndex`, the parent UI shows a "Correct" badge on the
+    /// question. When non-nil and different, the wrong option is
+    /// marked with an X and the question is flagged as incorrect.
+    var selectedIndex: Int? = nil
 }
 
 struct ParentReflectionSummary: Identifiable, Codable, Hashable {
@@ -189,7 +195,8 @@ final class ParentReflectionFixtureStore {
                 id: UUID(),
                 q: q.q,
                 options: q.options,
-                correctIndex: q.correctIndex
+                correctIndex: q.correctIndex,
+                selectedIndex: q.selectedIndex
             )
         }
         let mappedSteps: [ParentReflectionStepArtifact] = [
@@ -330,9 +337,13 @@ private extension ParentReflectionFixtureStore {
         ]
     }
 
-    /// Mirrors `BigKidModels.ReflectionRequest.defaultFixtureQuiz` but with
-    /// the correct-answer index pinned so Step 2 can highlight it for the
-    /// parent. (Kid-side hides correctness; parent-side surfaces it.)
+    /// Mirrors `BigKidModels.ReflectionRequest.defaultFixtureQuiz` plus
+    /// per-question correct-answer index AND a realistic
+    /// `selectedIndex` for the simulated-complete demo — Liam gets
+    /// Q1, Q2, Q4 right and Q3, Q5 wrong, mirroring a kid who passes
+    /// the 4-of-5 threshold but stumbles on a couple. The wrong picks
+    /// are deliberately the "tempting wrong answer" so the parent
+    /// review screen has something interesting to show.
     static let standardCompletedQuiz: [ParentReflectionQuizQuestion] = [
         ParentReflectionQuizQuestion(
             id: UUID(uuidString: "11111111-0000-0000-0000-000000000001")!,
@@ -343,7 +354,8 @@ private extension ParentReflectionFixtureStore {
                 "So adults can use the TV",
                 "It doesn't really matter"
             ],
-            correctIndex: 0
+            correctIndex: 0,
+            selectedIndex: 0    // ✓ right
         ),
         ParentReflectionQuizQuestion(
             id: UUID(uuidString: "11111111-0000-0000-0000-000000000002")!,
@@ -354,7 +366,8 @@ private extension ParentReflectionFixtureStore {
                 "Argue until you get more time",
                 "Wait quietly doing nothing"
             ],
-            correctIndex: 1
+            correctIndex: 1,
+            selectedIndex: 1    // ✓ right
         ),
         ParentReflectionQuizQuestion(
             id: UUID(uuidString: "11111111-0000-0000-0000-000000000003")!,
@@ -365,7 +378,8 @@ private extension ParentReflectionFixtureStore {
                 "Worried, because agreements matter",
                 "Happy you broke the rule"
             ],
-            correctIndex: 2
+            correctIndex: 2,
+            selectedIndex: 1    // ✗ wrong — picked "Nothing at all"
         ),
         ParentReflectionQuizQuestion(
             id: UUID(uuidString: "11111111-0000-0000-0000-000000000004")!,
@@ -376,7 +390,8 @@ private extension ParentReflectionFixtureStore {
                 "Complain",
                 "Change the password"
             ],
-            correctIndex: 1
+            correctIndex: 1,
+            selectedIndex: 1    // ✓ right
         ),
         ParentReflectionQuizQuestion(
             id: UUID(uuidString: "11111111-0000-0000-0000-000000000005")!,
@@ -387,7 +402,8 @@ private extension ParentReflectionFixtureStore {
                 "Hide from a parent",
                 "Start a new game"
             ],
-            correctIndex: 1
+            correctIndex: 1,
+            selectedIndex: 0    // ✗ wrong — picked "Just do it anyway"
         )
     ]
 

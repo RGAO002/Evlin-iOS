@@ -66,14 +66,20 @@ struct QuizQuestion: Codable, Equatable, Sendable {
     let options: [String]
 }
 
-/// Parent-only quiz question shape that carries the correct-answer
-/// index. Decoded from `GET /parent/reflection/{rid}` (see
+/// Parent-only quiz question shape that carries both the correct-
+/// answer index AND the option the kid actually selected. Decoded
+/// from `GET /parent/reflection/{rid}` (see
 /// `bigkid_parent.py :: get_reflection_for_parent`). Never served to
 /// the child surface.
+///
+/// `selectedIndex` is nil when the kid hasn't answered this question
+/// yet — the parent UI then renders only the correct-option highlight
+/// without any wrong-answer markings.
 struct QuizQuestionWithAnswer: Codable, Equatable, Sendable {
     let q: String
     let options: [String]
     let correctIndex: Int
+    let selectedIndex: Int?
 }
 
 /// Parent-only reflection shape that exposes correct-answer indices
