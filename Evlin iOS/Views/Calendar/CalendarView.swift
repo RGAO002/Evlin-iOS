@@ -375,6 +375,18 @@ struct CalendarView: View {
                                 : CGFloat(colIdx) * normalColW
                             let targetOpacity: Double = (!isAnyFocused || isFocused) ? 1.0 : 0.0
 
+                            // Pill width is the FOCUSED width when this
+                            // column is focused, otherwise the natural
+                            // 1/N slot — never 0. Animating a Button's
+                            // own frame to 0 caused SwiftUI to drop the
+                            // pill from the render path; when the column
+                            // animated back the buttons stayed invisible
+                            // ("events come back as empty columns" bug).
+                            // The collapse is now done purely by the
+                            // outer column frame + .clipped(), which
+                            // SwiftUI handles correctly.
+                            let pillWidth: CGFloat = isFocused ? totalW : normalColW
+
                             let colEvents = events.filter { $0.col == person.id }
 
                             ZStack(alignment: .topLeading) {
@@ -384,7 +396,7 @@ struct CalendarView: View {
                                     .frame(width: max(0, targetW), height: totalHeight)
 
                                 ForEach(colEvents) { ev in
-                                    columnEventPill(ev, color: person.color, columnWidth: max(0, targetW))
+                                    columnEventPill(ev, color: person.color, columnWidth: pillWidth)
                                         .offset(y: CalendarMockData.yFor(ev.start))
                                 }
                             }
