@@ -251,6 +251,7 @@ struct BigKidRootView: View {
         guard !req.stepsCompleted.contains(step) else { return }
         let merged = ReflectionRequest(
             id: req.id, reason: req.reason, displayReason: req.displayReason,
+            topicLabel: req.topicLabel,
             videoId: req.videoId, videoTitle: req.videoTitle,
             writingPrompt: req.writingPrompt, quiz: req.quiz,
             stepsCompleted: req.stepsCompleted + [step],

@@ -55,7 +55,7 @@ struct CardDispatcher: View {
                     essayText: essay,
                     mode: mode,
                     redoReason: context.reflectionRedoReason,
-                    resolved: false,
+                    status: .open,
                     onApprove: { note in
                         if let onReflectionApprove = handlers.onReflectionApprove {
                             await onReflectionApprove(note)

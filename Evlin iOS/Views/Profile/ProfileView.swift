@@ -272,8 +272,18 @@ struct ProfileView: View {
         .alert("Cancel reflection?", isPresented: $showCancelReflectionAlert) {
             Button("Keep reflection", role: .cancel) {}
             Button("Cancel reflection", role: .destructive) {
-                // Prototype: clear local fixture and snap back to overview.
-                // TODO: wire to backend reflection cancel endpoint when available.
+                // Fire-and-forget the backend cancel BEFORE we clear
+                // the local fixture. If we cleared first and skipped
+                // the network call, the next 8s poll would re-sync
+                // the still-active backend reflection right back in,
+                // making the cancel look like it "reverted" — which
+                // is the exact bug the parent reported.
+                let rid = reflectionStore.summary(for: child)?.id
+                if let rid {
+                    Task {
+                        try? await apiClient.cancelChildReflection(reflectionId: rid)
+                    }
+                }
                 reflectionStore.clear(childId: child.id)
                 withAnimation(.easeOut(duration: 0.22)) {
                     profileTab = .overview

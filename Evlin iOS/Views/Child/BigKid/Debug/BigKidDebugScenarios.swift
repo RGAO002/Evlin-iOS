@@ -87,6 +87,7 @@ enum BigKidDebugScenario: String, CaseIterable, Identifiable {
             )
             let withScore = ReflectionRequest(
                 id: base.id, reason: base.reason, displayReason: base.displayReason,
+                topicLabel: base.topicLabel,
                 videoId: base.videoId, videoTitle: base.videoTitle,
                 writingPrompt: base.writingPrompt, quiz: base.quiz,
                 stepsCompleted: base.stepsCompleted, quizScore: 5,

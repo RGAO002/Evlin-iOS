@@ -1353,7 +1353,12 @@ class ChatViewModel: ObservableObject {
     private func rebuildSurfacedReflectionSubmissionIndex() {
         surfacedReflectionSubmissionIDs = Set(
             messages.compactMap { msg in
-                guard let r = msg.reflectionSubmissionReview, !r.resolved else { return nil }
+                // Only `.open` entries should suppress re-surfacing.
+                // Once parent acts (approved or sent back) the card is
+                // resolved, but a NEW kid submission for the same rid
+                // is still worth re-surfacing — same predicate as
+                // before just expressed via the tri-state.
+                guard let r = msg.reflectionSubmissionReview, r.status == .open else { return nil }
                 return r.reflectionId
             }
         )
@@ -1464,7 +1469,7 @@ class ChatViewModel: ObservableObject {
             if let idx = messages.firstIndex(where: { $0.id == messageId }) {
                 var m = messages[idx]
                 if var r = m.reflectionSubmissionReview {
-                    r.resolved = true
+                    r.status = .approved
                     m.reflectionSubmissionReview = r
                     messages[idx] = m
                 }
@@ -1483,6 +1488,51 @@ class ChatViewModel: ObservableObject {
                 role: .agent,
                 content:
                     "I couldn’t approve the reflection right now — \(error.localizedDescription). Tap Approve to try again.",
+                timestamp: Date()
+            ))
+        }
+    }
+
+    /// "Write again" from `ReflectionSubmissionReviewCard` — same
+    /// backend endpoint as the Step-3 Request-Redo button. The chat
+    /// surface has no editor, so the kid always sees the default
+    /// `redoTakeAnotherLook` coaching string. On success the message
+    /// payload flips to `.sentBack` (red header pill); on failure we
+    /// surface an error so the parent can retry.
+    func requestRedoReflectionFromChat(
+        messageId: UUID,
+        reflectionId: UUID
+    ) async {
+        errorMessage = nil
+        let note = ReflectionParentNoteFallback.redoTakeAnotherLook
+        self.isThinking = true
+        defer { self.isThinking = false }
+        do {
+            try await apiClient.requestRedoChildReflection(
+                reflectionId: reflectionId,
+                redoNote: note
+            )
+            if let idx = messages.firstIndex(where: { $0.id == messageId }) {
+                var m = messages[idx]
+                if var r = m.reflectionSubmissionReview {
+                    r.status = .sentBack
+                    m.reflectionSubmissionReview = r
+                    messages[idx] = m
+                }
+            }
+            messages.append(ChatMessage(
+                role: .agent,
+                content:
+                    "Sent back to \(childName) — they'll rework the essay. Your note: “\(note)”",
+                timestamp: Date()
+            ))
+            NotificationCenter.default.post(name: .bigKidStateInvalidated, object: nil)
+        } catch {
+            errorMessage = error.localizedDescription
+            messages.append(ChatMessage(
+                role: .agent,
+                content:
+                    "I couldn’t send the reflection back right now — \(error.localizedDescription). Tap Write again to retry.",
                 timestamp: Date()
             ))
         }
@@ -1513,7 +1563,10 @@ class ChatViewModel: ObservableObject {
             reflectionId: req.id,
             writingPrompt: prompt,
             essayText: essay,
-            resolved: false
+            status: .open,
+            submittedAt: req.submittedAt,
+            topicLabel: req.topicLabel,
+            stepsCompleted: req.stepsCompleted
         )
         messages.append(msg)
     }

@@ -53,6 +53,12 @@ struct ParentReflectionSummary: Identifiable, Codable, Hashable {
     let childName: String
     var state: ParentReflectionState
     let reason: String
+    /// ≤3-word AI-summarised category chip (mirrors backend
+    /// `ReflectionRequest.topic_label`). Drives the chat-card subtitle
+    /// in place of `reason` so tight layouts don't have to wrap. Nil
+    /// for fixture-seeded summaries — callers should fall back to
+    /// `reason` (truncated) when this is missing.
+    var topicLabel: String?
     let assignedAt: String
     var submittedAt: String?
     var parentNote: String?
@@ -246,6 +252,7 @@ final class ParentReflectionFixtureStore {
             childName: child.name,
             state: mappedState,
             reason: request.displayReason ?? request.reason,
+            topicLabel: request.topicLabel,
             assignedAt: existing?.id == request.id ? existing?.assignedAt ?? Self.nowString() : Self.nowString(),
             submittedAt: request.submittedAt.map(Self.string(from:)),
             parentNote: request.parentNote,
@@ -324,6 +331,7 @@ final class ParentReflectionFixtureStore {
             childName: child.name,
             state: mappedState,
             reason: parentRequest.displayReason ?? parentRequest.reason,
+            topicLabel: parentRequest.topicLabel,
             assignedAt: existing?.id == parentRequest.id ? existing?.assignedAt ?? Self.nowString() : Self.nowString(),
             submittedAt: parentRequest.submittedAt.map(Self.string(from:)),
             parentNote: parentRequest.parentNote,
@@ -356,6 +364,7 @@ private extension ParentReflectionFixtureStore {
             childName: ChildProfile.liam.name,
             state: .assignedPending,
             reason: "Used hurtful words during a sibling disagreement.",
+            topicLabel: "Sibling Conflict",
             assignedAt: "2026-05-13T19:30:00Z",
             submittedAt: nil,
             parentNote: "Take a breath and think about how your words landed.",
@@ -379,6 +388,7 @@ private extension ParentReflectionFixtureStore {
             childName: ChildProfile.liam.name,
             state: .completedReady,
             reason: "Used hurtful words during a sibling disagreement.",
+            topicLabel: "Hurtful Words",
             assignedAt: "2026-05-13T19:30:00Z",
             submittedAt: completedSubmittedAt,
             parentNote: "Take a breath and think about how your words landed.",

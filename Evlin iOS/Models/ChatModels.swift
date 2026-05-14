@@ -1,22 +1,55 @@
 import Foundation
 
+/// Tri-state for the chat reflection-review card header pill.
+/// `.open` → kid submitted, parent hasn't acted (yellow chip).
+/// `.approved` → parent tapped "Good enough" (green check).
+/// `.sentBack` → parent tapped "Write again" (red chip).
+enum ReflectionReviewStatus: String, Codable, Equatable, Sendable {
+    case open
+    case approved
+    case sentBack
+}
+
 /// Inline reflection review surfaced in Chat (kid essay submitted → parent approves).
 /// Same lifecycle as `ParentBigKidDebugSheet.approveReflection` / `refreshKidState`.
 struct ReflectionSubmissionReviewPayload: Codable, Equatable, Sendable {
     let reflectionId: UUID
     let writingPrompt: String
     let essayText: String
-    var resolved: Bool
+    var status: ReflectionReviewStatus
+    /// Backend `submitted_at` — drives the card subtitle "just now /
+    /// 5m ago / 2h ago" relative-time prefix.
+    var submittedAt: Date?
+    /// AI-summarised ≤3-word category chip from the backend
+    /// `ReflectionRequest.topicLabel`. Drives the card subtitle's
+    /// post-`·` text. nil → caller falls back to nothing or to a
+    /// truncated reason.
+    var topicLabel: String?
+    /// Mirrors `ReflectionRequest.stepsCompleted`. Drives the three
+    /// step pills (video / quiz / essay) under the header.
+    var stepsCompleted: [BigKidReflectionStep]
 
-    init(reflectionId: UUID, writingPrompt: String, essayText: String, resolved: Bool = false) {
+    init(
+        reflectionId: UUID,
+        writingPrompt: String,
+        essayText: String,
+        status: ReflectionReviewStatus = .open,
+        submittedAt: Date? = nil,
+        topicLabel: String? = nil,
+        stepsCompleted: [BigKidReflectionStep] = []
+    ) {
         self.reflectionId = reflectionId
         self.writingPrompt = writingPrompt
         self.essayText = essayText
-        self.resolved = resolved
+        self.status = status
+        self.submittedAt = submittedAt
+        self.topicLabel = topicLabel
+        self.stepsCompleted = stepsCompleted
     }
 
     enum CodingKeys: String, CodingKey {
-        case reflectionId, writingPrompt, essayText, resolved
+        case reflectionId, writingPrompt, essayText, status, resolved
+        case submittedAt, topicLabel, stepsCompleted
     }
 
     init(from decoder: Decoder) throws {
@@ -24,7 +57,19 @@ struct ReflectionSubmissionReviewPayload: Codable, Equatable, Sendable {
         reflectionId = try c.decode(UUID.self, forKey: .reflectionId)
         writingPrompt = try c.decode(String.self, forKey: .writingPrompt)
         essayText = try c.decode(String.self, forKey: .essayText)
-        resolved = try c.decodeIfPresent(Bool.self, forKey: .resolved) ?? false
+        // Prefer the new tri-state field; fall back to legacy `resolved`
+        // (true → .approved, false → .open) so any persisted history
+        // payloads from before the tri-state migration still decode.
+        if let s = try c.decodeIfPresent(ReflectionReviewStatus.self, forKey: .status) {
+            status = s
+        } else if try c.decodeIfPresent(Bool.self, forKey: .resolved) == true {
+            status = .approved
+        } else {
+            status = .open
+        }
+        submittedAt = try c.decodeIfPresent(Date.self, forKey: .submittedAt)
+        topicLabel = try c.decodeIfPresent(String.self, forKey: .topicLabel)
+        stepsCompleted = try c.decodeIfPresent([BigKidReflectionStep].self, forKey: .stepsCompleted) ?? []
     }
 
     func encode(to encoder: Encoder) throws {
@@ -32,7 +77,10 @@ struct ReflectionSubmissionReviewPayload: Codable, Equatable, Sendable {
         try c.encode(reflectionId, forKey: .reflectionId)
         try c.encode(writingPrompt, forKey: .writingPrompt)
         try c.encode(essayText, forKey: .essayText)
-        try c.encode(resolved, forKey: .resolved)
+        try c.encode(status, forKey: .status)
+        try c.encodeIfPresent(submittedAt, forKey: .submittedAt)
+        try c.encodeIfPresent(topicLabel, forKey: .topicLabel)
+        try c.encode(stepsCompleted, forKey: .stepsCompleted)
     }
 }
 

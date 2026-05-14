@@ -10,7 +10,9 @@ enum ReflectionReviewMode: Equatable {
 /// Visual structure mirrors `frontend_for_app_evlin/Evlin_Parent_view/
 /// screen-evlin.jsx :: ReflectionCard`:
 ///  - Green header strip with avatar initial + "{name} wrote a reflection"
-///    + small success pill ("Reviewed" / tone text).
+///    + tri-state status pill (yellow Open / green Completed / red Sent back).
+///  - Subtitle line "just now · {topic}" below the title.
+///  - Three step pills (video / quiz / essay) marking the kid's progress.
 ///  - "Evlin asked" prompt section in the project's neutral surface.
 ///  - "{name}'s words" section with a 3px navy left border.
 ///  - "Evlin's takeaway" section over the project's secondary container.
@@ -22,22 +24,25 @@ struct ReflectionSubmissionReviewCard: View {
     let childName: String
     let writingPrompt: String
     let essayText: String
-    /// Subtitle anchor — e.g. `"Just now"`, `"2 min ago"`. Optional;
-    /// when nil the trigger renders alone.
-    var submittedAt: String? = nil
-    /// Reflection trigger / reason — e.g. `"After Roblox lockout"`.
-    /// Optional; when nil and `submittedAt` is also nil, the subtitle
-    /// is suppressed entirely (no placeholder text).
-    var trigger: String? = nil
-    /// Short status tone shown in the header pill — e.g. `"open"`,
-    /// `"ready"`. Falls back to `mode`-appropriate copy when nil.
-    var tone: String? = nil
+    /// Backend submission timestamp. The card renders a relative-time
+    /// prefix ("Just now / 5m ago / 2h ago") in its subtitle when set.
+    var submittedAt: Date? = nil
+    /// AI-summarised ≤3-word topic chip (e.g. "Sibling Conflict").
+    /// Shown after the "·" in the subtitle. nil suppresses both halves.
+    var topicLabel: String? = nil
+    /// Kid's progress through the 3 reflection steps. Drives the
+    /// video/quiz/essay pill row under the header. Empty array hides
+    /// the row.
+    var stepsCompleted: [BigKidReflectionStep] = []
     /// Optional takeaway line. When nil a coached default is derived
     /// from the essay content.
     var takeaway: String? = nil
     var mode: ReflectionReviewMode = .approve
     var redoReason: String?
-    var resolved: Bool
+    /// Tri-state review status. Drives the header pill's color and
+    /// label, and which body content ("Message for kid" editor +
+    /// actions row vs the resolved-note line) is shown.
+    var status: ReflectionReviewStatus
     var onApprove: (_ parentNoteTrimmed: String) async -> Void
     var onRedo: (() async -> Void)?
 
@@ -51,11 +56,16 @@ struct ReflectionSubmissionReviewCard: View {
         return "\u{201C}\(body)\u{201D}"
     }
 
+    private var resolved: Bool { status != .open }
+
     var body: some View {
         VStack(spacing: 0) {
             header
 
             VStack(alignment: .leading, spacing: 12) {
+                if !stepsCompleted.isEmpty {
+                    stepPillsRow
+                }
                 promptSection
                 wordsSection
                 takeawaySection
@@ -127,36 +137,101 @@ struct ReflectionSubmissionReviewCard: View {
 
     @ViewBuilder
     private var tonePill: some View {
-        if resolved {
-            // After the parent approves, the header shows plain
-            // "Completed" text — no pill background — per design.
-            HStack(spacing: 4) {
-                Image(systemName: "checkmark.seal.fill")
-                    .font(.system(size: 11, weight: .heavy))
-                Text("Completed")
-                    .font(.custom("Inter", size: 11).weight(.heavy))
-                    .tracking(0.4)
-            }
-            .foregroundStyle(Color.evSecondary)
-        } else {
-            HStack(spacing: 4) {
-                Image(systemName: "square.and.pencil")
-                    .font(.system(size: 10, weight: .heavy))
-                Text(toneLabel)
-                    .font(.custom("Inter", size: 10).weight(.heavy))
-                    .tracking(0.6)
-                    .textCase(.uppercase)
-            }
-            .foregroundStyle(Color.evSecondary)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(
-                Capsule().fill(Color.evSecondaryContainer.opacity(0.5))
+        let cfg = pillConfig(for: status)
+        HStack(spacing: 4) {
+            Image(systemName: cfg.icon)
+                .font(.system(size: 10, weight: .heavy))
+            Text(cfg.label)
+                .font(.custom("Inter", size: 10).weight(.heavy))
+                .tracking(0.6)
+                .textCase(.uppercase)
+        }
+        .foregroundStyle(cfg.foreground)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(Capsule().fill(cfg.background))
+        .overlay(Capsule().stroke(cfg.stroke, lineWidth: 1))
+    }
+
+    private struct PillConfig {
+        let icon: String
+        let label: String
+        let foreground: Color
+        let background: Color
+        let stroke: Color
+    }
+
+    private func pillConfig(for status: ReflectionReviewStatus) -> PillConfig {
+        switch status {
+        case .open:
+            // Yellow chip — kid submitted, parent hasn't decided yet.
+            // Slightly warmer amber so it reads as "needs attention"
+            // without crossing into error / red territory.
+            let amber = Color(red: 0.78, green: 0.45, blue: 0.06)
+            return PillConfig(
+                icon: "square.and.pencil",
+                label: "Open",
+                foreground: amber,
+                background: Color(red: 1.0, green: 0.94, blue: 0.79),
+                stroke: amber.opacity(0.35)
             )
-            .overlay(
-                Capsule().stroke(Color.evSecondary.opacity(0.35), lineWidth: 1)
+        case .approved:
+            // Green chip — parent tapped "Good enough".
+            return PillConfig(
+                icon: "checkmark.seal.fill",
+                label: "Completed",
+                foreground: Color.evSecondary,
+                background: Color.evSecondaryContainer.opacity(0.6),
+                stroke: Color.evSecondary.opacity(0.35)
+            )
+        case .sentBack:
+            // Red chip — parent tapped "Write again".
+            let red = Color(red: 0.72, green: 0.20, blue: 0.20)
+            return PillConfig(
+                icon: "arrow.uturn.backward.circle.fill",
+                label: "Sent Back",
+                foreground: red,
+                background: Color(red: 1.0, green: 0.91, blue: 0.91),
+                stroke: red.opacity(0.35)
             )
         }
+    }
+
+    // MARK: - Step pills (video / quiz / essay)
+
+    private var stepPillsRow: some View {
+        HStack(spacing: 6) {
+            stepPill(label: "Video", step: .video)
+            stepPill(label: "Quiz", step: .quiz)
+            stepPill(label: "Essay", step: .writing)
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func stepPill(label: String, step: BigKidReflectionStep) -> some View {
+        let done = stepsCompleted.contains(step)
+        return HStack(spacing: 4) {
+            Image(systemName: done ? "checkmark.circle.fill" : "circle")
+                .font(.system(size: 10, weight: .bold))
+            Text(label)
+                .font(.custom("Inter", size: 10).weight(.heavy))
+                .tracking(0.4)
+        }
+        .foregroundStyle(done ? Color.evSecondary : Color.evOnSurfaceVariant)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(
+            Capsule().fill(
+                done ? Color.evSecondaryContainer.opacity(0.55)
+                     : Color.evSurfaceContainerLow
+            )
+        )
+        .overlay(
+            Capsule().stroke(
+                done ? Color.evSecondary.opacity(0.25) : Color.evOutlineVariant,
+                lineWidth: 1
+            )
+        )
     }
 
     // MARK: - Body sections
@@ -275,12 +350,27 @@ struct ReflectionSubmissionReviewCard: View {
         }
     }
 
+    @ViewBuilder
     private var resolvedNote: some View {
-        Text(quotedNoteShownToChildAfterApproval)
-            .font(.custom("Inter", size: 12.5))
-            .italic()
-            .foregroundStyle(Color.evSecondary)
-            .padding(.top, 2)
+        switch status {
+        case .approved:
+            Text(quotedNoteShownToChildAfterApproval)
+                .font(.custom("Inter", size: 12.5))
+                .italic()
+                .foregroundStyle(Color.evSecondary)
+                .padding(.top, 2)
+        case .sentBack:
+            Text("Sent back to \(childName) — they'll see your note on the rework screen.")
+                .font(.custom("Inter", size: 12.5))
+                .italic()
+                .foregroundStyle(Color(red: 0.72, green: 0.20, blue: 0.20))
+                .padding(.top, 2)
+        case .open:
+            // Defensive — should never render in .open since callers
+            // gate this view behind `resolved`. Empty branch keeps the
+            // switch exhaustive.
+            EmptyView()
+        }
     }
 
     private var actionRow: some View {
@@ -376,23 +466,36 @@ struct ReflectionSubmissionReviewCard: View {
     }
 
     private var headerSubtitle: String? {
-        let parts = [submittedAt, trigger].compactMap { value -> String? in
-            guard let value, !value.trimmingCharacters(in: .whitespaces).isEmpty else {
-                return nil
-            }
-            return value
-        }
+        let parts: [String] = [relativeTimeString, topicLabelString].compactMap { $0 }
         guard !parts.isEmpty else { return nil }
         return parts.joined(separator: " · ")
     }
 
-    private var toneLabel: String {
-        if let tone, !tone.isEmpty { return tone }
-        if resolved { return "Reviewed" }
-        switch mode {
-        case .approve: return "Open"
-        case .redo: return "Review"
-        }
+    /// "Just now" / "5m ago" / "2h ago" / "Yesterday" — humanised
+    /// relative time used in the subtitle's left half. nil when no
+    /// `submittedAt` was provided (older payloads / fixtures).
+    private var relativeTimeString: String? {
+        guard let submittedAt else { return nil }
+        let delta = Date().timeIntervalSince(submittedAt)
+        if delta < 60 { return "Just now" }
+        let minutes = Int(delta / 60)
+        if minutes < 60 { return "\(minutes)m ago" }
+        let hours = Int(delta / 3600)
+        if hours < 24 { return "\(hours)h ago" }
+        let days = Int(delta / 86_400)
+        if days == 1 { return "Yesterday" }
+        if days < 7 { return "\(days)d ago" }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM d"
+        return formatter.string(from: submittedAt)
+    }
+
+    /// Topic chip text for the subtitle's right half. Empty / whitespace
+    /// inputs are suppressed so the `·` separator doesn't render alone.
+    private var topicLabelString: String? {
+        guard let topicLabel else { return nil }
+        let trimmed = topicLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     private var essayDisplay: String {
@@ -424,18 +527,42 @@ struct ReflectionSubmissionReviewCard: View {
 
 #Preview("Reflection Review Card") {
     ScrollView {
-        ReflectionSubmissionReviewCard(
-            childName: "Liam",
-            writingPrompt: "What was happening just before you felt upset, and what did your body feel like?",
-            essayText: "I was almost done with a build and the timer cut me off. My chest got hot and I wanted to throw my iPad. I wish I had saved sooner so I didn't lose progress.",
-            submittedAt: "Just now",
-            trigger: "After Roblox lockout",
-            tone: "Open",
-            takeaway: "Liam is connecting the trigger to a body cue.",
-            resolved: false,
-            onApprove: { _ in },
-            onRedo: {}
-        )
+        VStack(spacing: 16) {
+            ReflectionSubmissionReviewCard(
+                childName: "Liam",
+                writingPrompt: "What was happening just before you felt upset, and what did your body feel like?",
+                essayText: "I was almost done with a build and the timer cut me off. My chest got hot and I wanted to throw my iPad.",
+                submittedAt: Date().addingTimeInterval(-90),
+                topicLabel: "Screen Time Limit",
+                stepsCompleted: [.video, .quiz, .writing],
+                takeaway: "Liam is connecting the trigger to a body cue.",
+                status: .open,
+                onApprove: { _ in },
+                onRedo: {}
+            )
+            ReflectionSubmissionReviewCard(
+                childName: "Liam",
+                writingPrompt: "What happened, how did it affect someone else?",
+                essayText: "I called Maya a baby and she cried. I should have walked away.",
+                submittedAt: Date().addingTimeInterval(-3600),
+                topicLabel: "Sibling Conflict",
+                stepsCompleted: [.video, .quiz, .writing],
+                status: .approved,
+                onApprove: { _ in },
+                onRedo: {}
+            )
+            ReflectionSubmissionReviewCard(
+                childName: "Liam",
+                writingPrompt: "What happened, how did it affect someone else?",
+                essayText: "idk just felt mad",
+                submittedAt: Date().addingTimeInterval(-86_400),
+                topicLabel: "Hurtful Words",
+                stepsCompleted: [.video, .quiz, .writing],
+                status: .sentBack,
+                onApprove: { _ in },
+                onRedo: {}
+            )
+        }
         .padding()
     }
     .background(Color.evSurfaceContainerLow)

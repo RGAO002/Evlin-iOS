@@ -89,6 +89,12 @@ struct ReflectionRequestForParent: Codable, Equatable, Sendable, Identifiable {
     let id: UUID
     let reason: String
     let displayReason: String?
+    /// AI-summarised ≤3-word category chip ("Sibling Conflict",
+    /// "Screen Time Limit"). Drives the chat-card subtitle so a long
+    /// `reason` doesn't crowd the header. Nil for older records or
+    /// fixture-seeded reflections — iOS falls back to truncating
+    /// `displayReason` (and then `reason`) when this is missing.
+    let topicLabel: String?
     let videoId: String
     let videoTitle: String
     let writingPrompt: String
@@ -116,6 +122,9 @@ struct ReflectionRequest: Codable, Equatable, Sendable, Identifiable {
     /// incident. Also drives the Rick Roll reflection step headline via
     /// `ReflectionVideoDisplay` when `video_title` from the API is generic.
     let displayReason: String?
+    /// AI-summarised ≤3-word category chip used by the parent chat
+    /// card. See `ReflectionRequestForParent.topicLabel` doc.
+    let topicLabel: String?
     let videoId: String
     let videoTitle: String
     let writingPrompt: String
@@ -281,6 +290,7 @@ extension ReflectionRequest {
             id: UUID(),
             reason: "stayed up past bedtime",
             displayReason: "You stayed up past your bedtime on your tablet.",
+            topicLabel: "Late Bedtime",
             videoId: "dQw4w9WgXcQ",
             // Stub JSON field — headline comes from Gemini `videoLessonTitle` via API (`ReflectionVideoDisplay` handles stale placeholders).
             videoTitle: "A clip about calming down together (fixture)",

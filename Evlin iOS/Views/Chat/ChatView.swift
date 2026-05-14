@@ -111,7 +111,10 @@ struct ChatView: View {
                                         childName: viewModel.childName,
                                         writingPrompt: reflection.writingPrompt,
                                         essayText: reflection.essayText,
-                                        resolved: reflection.resolved,
+                                        submittedAt: reflection.submittedAt,
+                                        topicLabel: reflection.topicLabel,
+                                        stepsCompleted: reflection.stepsCompleted,
+                                        status: reflection.status,
                                         onApprove: { note in
                                             await viewModel.approveReflectionSubmissionFromChat(
                                                 messageId: message.id,
@@ -131,17 +134,21 @@ struct ChatView: View {
                                             }
                                         },
                                         onRedo: {
-                                            // Prototype: "Write again"
-                                            // sends the kid back to the
-                                            // writing step. Flip the
-                                            // fixture summary to pending
-                                            // so Home/Profile show the
-                                            // assigned state again.
-                                            // TODO: wire to backend
-                                            // reflection redo endpoint
-                                            // when available.
+                                            // "Write again" routes through the SAME
+                                            // backend path as the Step-3 "Request
+                                            // redo" button — POST request-redo with
+                                            // the default coaching string as the
+                                            // note. Chat has no editor (per design),
+                                            // so the fallback IS the message.
+                                            await viewModel.requestRedoReflectionFromChat(
+                                                messageId: message.id,
+                                                reflectionId: reflection.reflectionId
+                                            )
                                             if let childId = matchedChildId {
-                                                reflectionStore.resetToPending(childId: childId)
+                                                reflectionStore.applyParentRedoLocally(
+                                                    childId: childId,
+                                                    redoNote: ReflectionParentNoteFallback.redoTakeAnotherLook
+                                                )
                                             }
                                         }
                                     )

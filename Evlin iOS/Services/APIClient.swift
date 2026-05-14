@@ -294,6 +294,24 @@ class APIClient: ObservableObject {
             throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
         }
     }
+
+    /// Parent cancels an active reflection — wipes the request on the
+    /// backend so the next kid-state poll returns no reflection. Used
+    /// by the Profile reflection sub-tab's "Cancel reflection" alert.
+    /// Idempotent — server returns 204 even if the rid is already gone.
+    func cancelChildReflection(reflectionId: UUID) async throws {
+        let trimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let url = URL(string: "\(trimmed)/parent/reflection/\(reflectionId.uuidString)")
+        else { throw URLError(.badURL) }
+        var req = URLRequest(url: url)
+        req.httpMethod = "DELETE"
+        req.timeoutInterval = 22
+        let (_, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+    }
 }
 
 // MARK: - Error
