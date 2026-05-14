@@ -22,6 +22,7 @@ struct ReflectionStepDetailView: View {
     var onBack: (() -> Void)? = nil
 
     @Environment(ParentReflectionFixtureStore.self) private var reflectionStore
+    @EnvironmentObject private var apiClient: APIClient
     @State private var activeAlert: WritingActionAlert?
 
     private var summary: ParentReflectionSummary? {
@@ -134,10 +135,53 @@ struct ReflectionStepDetailView: View {
             WritingStepBody(
                 step: step,
                 summary: summary,
-                onApprove: { activeAlert = .approved(summary.childName) },
-                onRedo: { activeAlert = .redoRequested(summary.childName) }
+                onApprove: { trimmedNote in
+                    let note = trimmedNote ?? ReflectionParentNoteFallback.thanksHonest
+                    Task { await handleApprove(reflectionId: summary.id, childId: summary.childId, note: note) }
+                },
+                onRedo: { trimmedNote in
+                    let note = trimmedNote ?? ReflectionParentNoteFallback.redoTakeAnotherLook
+                    Task { await handleRedo(reflectionId: summary.id, childId: summary.childId, note: note) }
+                }
             )
         }
+    }
+
+    /// Approve a submitted reflection from Step 3. Optimistically
+    /// clears the parent-side store entry (so Home/Profile drop the
+    /// reflection card) and fires the backend approve POST as a
+    /// best-effort. Surfaces a confirmation alert either way.
+    @MainActor
+    private func handleApprove(reflectionId: UUID, childId: String, note: String) async {
+        reflectionStore.clear(childId: childId)
+        do {
+            try await apiClient.approveChildReflectionSubmission(
+                reflectionId: reflectionId, parentNote: note
+            )
+        } catch {
+            // Best-effort — fixture/DEBUG mode + offline both
+            // intentionally fail here. Local clear has already
+            // surfaced the right UX.
+        }
+        activeAlert = .approved(summary?.childName ?? "your child")
+    }
+
+    /// Request a redo from Step 3. Optimistically flips the local
+    /// summary back to `.assignedPending` with the parent note so
+    /// the Home/Profile surfaces and the kid mirror update right
+    /// away. Backend POST runs best-effort; subsequent polls will
+    /// reconcile with the server state.
+    @MainActor
+    private func handleRedo(reflectionId: UUID, childId: String, note: String) async {
+        reflectionStore.applyParentRedoLocally(childId: childId, redoNote: note)
+        do {
+            try await apiClient.requestRedoChildReflection(
+                reflectionId: reflectionId, redoNote: note
+            )
+        } catch {
+            // Best-effort — see handleApprove note.
+        }
+        activeAlert = .redoRequested(summary?.childName ?? "your child")
     }
 
     private var missingState: some View {
@@ -536,8 +580,14 @@ private struct QuestionGrading {
 private struct WritingStepBody: View {
     let step: ParentReflectionStepArtifact
     let summary: ParentReflectionSummary
-    let onApprove: () -> Void
-    let onRedo: () -> Void
+    /// Both callbacks receive the trimmed parent message (`nil` when
+    /// the input is blank). The caller substitutes defaults
+    /// (`ReflectionParentNoteFallback`) so the kid surface always
+    /// sees a non-empty string from the parent.
+    let onApprove: (String?) -> Void
+    let onRedo: (String?) -> Void
+
+    @State private var parentMessage: String = ""
 
     private var essay: String? {
         let trimmed = summary.essayText?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -548,11 +598,17 @@ private struct WritingStepBody: View {
         summary.state == .completedReady && essay != nil
     }
 
+    private var trimmedMessage: String? {
+        let t = parentMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+        return t.isEmpty ? nil : t
+    }
+
     var body: some View {
-        // Reference HTML lines 1156-1210: padded section. NO outer
-        // card. Optional review-state pill, prompt card, reflection
-        // text card, stats row, then either Approve/Request-redo
-        // buttons or a done-state strip.
+        // Reference HTML lines 1156-1210, plus the new optional
+        // message editor above the action row. The editor only shows
+        // when the parent can actually act (reflection submitted and
+        // essay present); otherwise we skip it to avoid clutter on
+        // pending/empty previews.
         VStack(alignment: .leading, spacing: 0) {
             promptCard
                 .padding(.bottom, 14)
@@ -563,11 +619,63 @@ private struct WritingStepBody: View {
             statsRow
                 .padding(.bottom, 18)
 
+            if canReview {
+                messageEditor
+                    .padding(.bottom, 14)
+            }
+
             actionRow
         }
         .padding(.horizontal, 20)
         .padding(.top, 16)
         .padding(.bottom, 16)
+    }
+
+    private var messageEditor: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Text("Message for \(summary.childName)")
+                    .font(.custom("Inter", size: 11).weight(.heavy))
+                    .tracking(1.0)
+                    .textCase(.uppercase)
+                    .foregroundStyle(Color.evOnSurfaceVariant)
+                Text("Optional")
+                    .font(.custom("Inter", size: 10).weight(.semibold))
+                    .foregroundStyle(Color.evOutline)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(
+                        Capsule().fill(Color.evSurfaceContainerHigh)
+                    )
+            }
+
+            // Plain background TextEditor wrapped in our own outline
+            // so it matches the design's input rhythm rather than
+            // SwiftUI's default white-card-on-grey-bg look.
+            ZStack(alignment: .topLeading) {
+                if parentMessage.isEmpty {
+                    Text("Add a note for \(summary.childName)…")
+                        .font(.custom("Inter", size: 13))
+                        .foregroundStyle(Color.evOutline)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                }
+                TextEditor(text: $parentMessage)
+                    .font(.custom("Inter", size: 13))
+                    .scrollContentBackground(.hidden)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
+                    .frame(minHeight: 72)
+            }
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(Color.white)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(Color.evOutlineVariant, lineWidth: 1)
+            )
+        }
     }
 
     private var promptCard: some View {
@@ -630,7 +738,7 @@ private struct WritingStepBody: View {
     private var actionRow: some View {
         if canReview {
             HStack(spacing: 10) {
-                Button(action: onApprove) {
+                Button { onApprove(trimmedMessage) } label: {
                     Text("Approve")
                         .font(.custom("Manrope", size: 14).weight(.heavy))
                         .foregroundStyle(.white)
@@ -643,7 +751,7 @@ private struct WritingStepBody: View {
                 }
                 .buttonStyle(.plain)
 
-                Button(action: onRedo) {
+                Button { onRedo(trimmedMessage) } label: {
                     Text("Request redo")
                         .font(.custom("Manrope", size: 14).weight(.heavy))
                         .foregroundStyle(Color.evOnSurface)

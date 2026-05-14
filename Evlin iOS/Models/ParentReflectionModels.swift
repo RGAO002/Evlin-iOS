@@ -60,6 +60,15 @@ struct ParentReflectionSummary: Identifiable, Codable, Hashable {
     var essayText: String?
     var takeaway: String?
     var steps: [ParentReflectionStepArtifact]
+    /// Parent's "Request redo" feedback (mirrors backend
+    /// `parent_redo_note`). Non-nil ⇒ the current submission is a
+    /// rework — drives the "Liam has reworked the reflection essay"
+    /// notification copy instead of the first-time "completed" copy.
+    var parentRedoNote: String? = nil
+    /// Backend timestamp of the kid's most recent nudge tap. iOS
+    /// uses this to detect new nudges versus locally-acknowledged
+    /// ones (see `ParentReflectionFixtureStore.acknowledgedNudgeAt`).
+    var lastNudgeAt: Date? = nil
 }
 
 @Observable
@@ -75,6 +84,13 @@ final class ParentReflectionFixtureStore {
     private(set) var revision: Int = 0
 
     private var summariesByChildId: [String: ParentReflectionSummary]
+
+    /// Per-child "last nudge timestamp we've already shown a
+    /// notification for". Set when the parent taps the nudge entry
+    /// in the notifications panel; used by ContentView's
+    /// `homeNotifications` to decide whether the current
+    /// `summary.lastNudgeAt` warrants a fresh entry.
+    private var acknowledgedNudgeAtByChildId: [String: Date] = [:]
 
     init() {
         self.summariesByChildId = Self.initialSummariesByChildId()
@@ -138,6 +154,62 @@ final class ParentReflectionFixtureStore {
         simulateAssignment(childId: childId)
     }
 
+    /// Notification-side helpers.
+    ///
+    /// `pendingNudgeAt(childId:)` returns a non-nil Date when there's
+    /// an unacknowledged nudge (server timestamp later than what the
+    /// parent has already seen). ContentView's `homeNotifications`
+    /// uses this to inject the "{Name} nudged you" entry.
+    func pendingNudgeAt(childId: String) -> Date? {
+        guard let summary = summariesByChildId[childId],
+              let serverNudge = summary.lastNudgeAt else {
+            return nil
+        }
+        if let acknowledged = acknowledgedNudgeAtByChildId[childId],
+           acknowledged >= serverNudge {
+            return nil
+        }
+        return serverNudge
+    }
+
+    /// Called when the parent taps the nudge notification — clears
+    /// the "unacknowledged nudge" state so the notification stops
+    /// re-appearing until the kid taps nudge again.
+    func acknowledgeNudge(childId: String) {
+        guard let summary = summariesByChildId[childId],
+              let serverNudge = summary.lastNudgeAt else { return }
+        acknowledgedNudgeAtByChildId[childId] = serverNudge
+        revision &+= 1
+    }
+
+    /// DEBUG-only helper used by the Profile ⋯ menu to simulate the
+    /// kid tapping "Give them a nudge" without going through the
+    /// backend. Bumps `lastNudgeAt` so the parent-side notification
+    /// pipeline fires the same way it would in production.
+    func simulateNudge(childId: String) {
+        guard var summary = summariesByChildId[childId] else { return }
+        summary.lastNudgeAt = Date()
+        summariesByChildId[childId] = summary
+        revision &+= 1
+    }
+
+    /// DEBUG-only helper that mimics the parent-side "Request redo"
+    /// action — flips the summary back to `.assignedPending`, clears
+    /// the kid's essay, leaves the quiz answers in place (kid won't
+    /// redo quiz), and records the redo note. Real production path
+    /// goes through `POST /parent/reflection/{rid}/request-redo` and
+    /// reflects back via the next poll.
+    func applyParentRedoLocally(childId: String, redoNote: String) {
+        guard var summary = summariesByChildId[childId] else { return }
+        summary.state = .assignedPending
+        summary.essayText = nil
+        summary.submittedAt = nil
+        summary.takeaway = nil
+        summary.parentRedoNote = redoNote
+        summariesByChildId[childId] = summary
+        revision &+= 1
+    }
+
     func syncBackendReflection(for child: ChildProfile, request: ReflectionRequest?) {
         guard let request else {
             summariesByChildId[child.id] = nil
@@ -169,7 +241,9 @@ final class ParentReflectionFixtureStore {
             prompt: request.writingPrompt,
             essayText: request.essayText,
             takeaway: Self.takeaway(for: request),
-            steps: Self.steps(for: request)
+            steps: Self.steps(for: request),
+            parentRedoNote: request.parentRedoNote,
+            lastNudgeAt: request.lastNudgeAt
         )
         revision &+= 1
     }
@@ -245,7 +319,9 @@ final class ParentReflectionFixtureStore {
             prompt: parentRequest.writingPrompt,
             essayText: parentRequest.essayText,
             takeaway: takeaway,
-            steps: mappedSteps
+            steps: mappedSteps,
+            parentRedoNote: parentRequest.parentRedoNote,
+            lastNudgeAt: parentRequest.lastNudgeAt
         )
         revision &+= 1
     }

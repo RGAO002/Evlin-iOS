@@ -110,6 +110,11 @@ struct ProfileView: View {
                         Label("Simulate reflection complete", systemImage: "checkmark.seal")
                     }
                     Button {
+                        reflectionStore.simulateNudge(childId: child.id)
+                    } label: {
+                        Label("Simulate kid nudge", systemImage: "hand.point.up.left.fill")
+                    }
+                    Button {
                         reflectionStore.clear(childId: child.id)
                     } label: {
                         Label("Clear reflection state", systemImage: "xmark.circle")

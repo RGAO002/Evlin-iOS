@@ -100,7 +100,8 @@ private func _previewRequest() -> ReflectionRequest {
         stepsCompleted: base.stepsCompleted, quizScore: 5, essayText: "ok",
         status: .approved,
         parentNote: "Thanks for being honest. Proud of you.",
-        submittedAt: Date(), approvedAt: Date()
+        submittedAt: Date(), approvedAt: Date(),
+        parentRedoNote: nil, lastNudgeAt: nil
     )
 }
 

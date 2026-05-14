@@ -65,30 +65,69 @@ enum HomeMockData {
         let childId: String
         let childName: String
         let reflectionId: UUID
+        /// True when the kid is resubmitting after the parent sent
+        /// the reflection back ("Liam has reworked..."); false on
+        /// the first-time submission ("Liam completed reflection").
+        let isRework: Bool
+    }
+
+    /// One nudge descriptor per child whose latest "Give them a
+    /// nudge" tap on the kid side hasn't been seen by the parent
+    /// yet. ContentView feeds these so the parent gets an extra
+    /// notification distinct from the completion entry.
+    struct ReflectionNudge {
+        let childId: String
+        let childName: String
+        let reflectionId: UUID
     }
 
     static func notifications(
-        completedReflections: [ReflectionCompletion]
+        completedReflections: [ReflectionCompletion] = [],
+        pendingNudges: [ReflectionNudge] = []
     ) -> [HomeNotification] {
-        guard !completedReflections.isEmpty else { return notifications }
-        // Stable IDs in the 9000+ range so they don't collide with the
-        // baseline mock entries (1-8). One slot per child.
-        let reflectionNotifications: [HomeNotification] = completedReflections
+        guard !completedReflections.isEmpty || !pendingNudges.isEmpty else {
+            return notifications
+        }
+        // Stable IDs split across the 9000s (completions) and 9100s
+        // (nudges) so they don't collide with the baseline mock
+        // entries (1-8) or each other. One slot per child per kind.
+        let completionEntries: [HomeNotification] = completedReflections
             .enumerated()
             .map { idx, c in
                 HomeNotification(
                     id: 9000 + idx,
                     childId: c.childId,
                     iconSystemName: "text.book.closed.fill",
-                    title: "\(c.childName) completed reflection",
-                    body: "\(c.childName) finished their reflection and it's ready for your review.",
+                    title: c.isRework
+                        ? "\(c.childName) has reworked the reflection essay"
+                        : "\(c.childName) completed reflection",
+                    body: c.isRework
+                        ? "\(c.childName) revised their reflection — ready for your review again."
+                        : "\(c.childName) finished their reflection and it's ready for your review.",
                     time: "Just now",
                     unread: true,
                     kind: "reflection",
                     reflectionId: c.reflectionId
                 )
             }
-        return reflectionNotifications + notifications
+        let nudgeEntries: [HomeNotification] = pendingNudges
+            .enumerated()
+            .map { idx, n in
+                HomeNotification(
+                    id: 9100 + idx,
+                    childId: n.childId,
+                    iconSystemName: "hand.point.up.left.fill",
+                    title: "\(n.childName) nudged you — Please review the reflection",
+                    body: "\(n.childName) is waiting on your review.",
+                    time: "Just now",
+                    unread: true,
+                    kind: "reflection",
+                    reflectionId: n.reflectionId
+                )
+            }
+        // Nudge entries first (more urgent / time-sensitive), then
+        // completion entries, then the baseline mock noise.
+        return nudgeEntries + completionEntries + notifications
     }
 
     /// Back-compat shim — older single-child call sites kept working
@@ -102,7 +141,8 @@ enum HomeMockData {
             ReflectionCompletion(
                 childId: "liam",
                 childName: "Liam",
-                reflectionId: reflectionId
+                reflectionId: reflectionId,
+                isRework: false
             )
         ])
     }

@@ -99,7 +99,8 @@ struct ParentRootView: View {
                         .appNavigationDestination(
                             path: $profilePath,
                             selectedTab: $selectedTab,
-                            notifications: homeNotifications
+                            notifications: homeNotifications,
+                            reflectionStore: reflectionStore
                         )
                     }
                 case .calendar:
@@ -118,7 +119,8 @@ struct ParentRootView: View {
                         .appNavigationDestination(
                             path: $insightsPath,
                             selectedTab: $selectedTab,
-                            notifications: homeNotifications
+                            notifications: homeNotifications,
+                            reflectionStore: reflectionStore
                         )
                     }
                 }
@@ -158,22 +160,38 @@ struct ParentRootView: View {
     }
 
     private var homeNotifications: [HomeNotification] {
-        // Walk every child, pick up reflections that the parent-side
-        // store has flipped to `.completedReady`. In the current
-        // prototype only Liam can be paired with a real backend, so
-        // this will return at most one entry — but the shape supports
-        // multiple children once pairing generalises beyond Liam.
+        // Walk every child, build two notification streams:
+        //   1. Completion (or rework) entries when the kid has
+        //      finished a reflection and parent hasn't acted yet.
+        //   2. Nudge entries when the kid tapped "Give them a nudge"
+        //      after our previously-acknowledged timestamp.
         let completions: [HomeMockData.ReflectionCompletion] = ChildProfile.all.compactMap { child in
-            guard let rid = reflectionStore.completedReflectionId(childId: child.id) else {
+            guard let rid = reflectionStore.completedReflectionId(childId: child.id),
+                  let summary = reflectionStore.summary(childId: child.id) else {
                 return nil
             }
             return HomeMockData.ReflectionCompletion(
                 childId: child.id,
                 childName: child.name,
-                reflectionId: rid
+                reflectionId: rid,
+                isRework: summary.parentRedoNote != nil
             )
         }
-        return HomeMockData.notifications(completedReflections: completions)
+        let nudges: [HomeMockData.ReflectionNudge] = ChildProfile.all.compactMap { child in
+            guard reflectionStore.pendingNudgeAt(childId: child.id) != nil,
+                  let summary = reflectionStore.summary(childId: child.id) else {
+                return nil
+            }
+            return HomeMockData.ReflectionNudge(
+                childId: child.id,
+                childName: child.name,
+                reflectionId: summary.id
+            )
+        }
+        return HomeMockData.notifications(
+            completedReflections: completions,
+            pendingNudges: nudges
+        )
     }
 
     private var pairedBackendChildID: UUID? {
@@ -237,7 +255,8 @@ extension View {
     func appNavigationDestination(
         path: Binding<NavigationPath>,
         selectedTab: Binding<EvlinTab>,
-        notifications: [HomeNotification] = HomeMockData.notifications
+        notifications: [HomeNotification] = HomeMockData.notifications,
+        reflectionStore: ParentReflectionFixtureStore? = nil
     ) -> some View {
         self.navigationDestination(for: AppRoute.self) { route in
             switch route {
@@ -299,6 +318,15 @@ extension View {
                     },
                     onOpenReflection: { childId, reflectionId in
                         guard let child = ChildProfile.all.first(where: { $0.id == childId }) else { return }
+                        // Tapping either the completion OR the nudge
+                        // notification clears the unacknowledged
+                        // nudge state — once the parent is looking
+                        // at the reflection, the nudge has served
+                        // its purpose. Completion entries persist
+                        // until the parent approves/redoes the
+                        // reflection (cleared via reflectionStore in
+                        // the Step-3 action handlers).
+                        reflectionStore?.acknowledgeNudge(childId: childId)
                         // Deep-link into the child's Profile with the
                         // reflection sub-tab pre-toggled (Step 1/2/3
                         // listing visible inline under the reflection

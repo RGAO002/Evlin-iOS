@@ -102,17 +102,35 @@ struct BigKidHomeReflectionView: View {
         )
     }
 
+    /// Non-nil ⇒ the parent has sent the reflection back. Drives the
+    /// rework variant of the State A headline / body / CTA.
+    private var redoNote: String? {
+        let trimmed = state.reflectionRequest?.parentRedoNote?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let trimmed, !trimmed.isEmpty { return trimmed }
+        return nil
+    }
+
     private var headline: String {
         switch subState {
-        case .a: return "Finish Reflection to unlock phone"
-        case .b: return "You finished — nice work."
+        case .a:
+            return redoNote != nil
+                ? "Rework your essay"
+                : "Finish Reflection to unlock phone"
+        case .b:
+            return "You finished — nice work."
         }
     }
 
     private var bodyText: String {
         switch subState {
-        case .a: return "Your screen time is paused until you complete a quick reflection."
-        case .b: return "Your parent will take a look soon. Once they're happy with it, you'll get your screen time back."
+        case .a:
+            if let redoNote {
+                return "Your parent sent it back: \u{201C}\(redoNote)\u{201D}"
+            }
+            return "Your screen time is paused until you complete a quick reflection."
+        case .b:
+            return "Your parent will take a look soon. Once they're happy with it, you'll get your screen time back."
         }
     }
 
@@ -120,7 +138,10 @@ struct BigKidHomeReflectionView: View {
     private var ctaButton: some View {
         switch subState {
         case .a:
-            startButton(title: "Start Reflection", action: onStartReflection)
+            startButton(
+                title: redoNote != nil ? "Rework Essay" : "Start Reflection",
+                action: onStartReflection
+            )
         case .b:
             nudgeButton
         }

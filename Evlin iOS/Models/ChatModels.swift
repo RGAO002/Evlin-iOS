@@ -36,10 +36,16 @@ struct ReflectionSubmissionReviewPayload: Codable, Equatable, Sendable {
     }
 }
 
-/// When the parent approves a submitted reflection via Chat but leaves the note field empty,
-/// we still POST this `parent_note` so the child always sees something warm on-device.
+/// When the parent approves a submitted reflection via Chat (or the
+/// new Step-3 message input) but leaves the note field empty, we
+/// still POST these defaults so the child always sees something
+/// constructive on-device.
 enum ReflectionParentNoteFallback {
     static let thanksHonest = "Thanks for being honest."
+    /// Default coaching message sent when the parent taps "Request
+    /// redo" without typing anything. Firm-but-warm, asks the kid to
+    /// actually reflect rather than just re-submit the same essay.
+    static let redoTakeAnotherLook = "Take another look — try to write a bit more honestly about what happened and how you felt."
 }
 
 extension Notification.Name {

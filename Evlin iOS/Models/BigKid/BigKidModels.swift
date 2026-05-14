@@ -100,6 +100,13 @@ struct ReflectionRequestForParent: Codable, Equatable, Sendable, Identifiable {
     let parentNote: String?
     let submittedAt: Date?
     let approvedAt: Date?
+    /// Mirrors the kid-side `ReflectionRequest.parentRedoNote`. Non-nil
+    /// ⇒ parent already sent this reflection back at least once.
+    let parentRedoNote: String?
+    /// Mirrors `ReflectionRequest.lastNudgeAt`. iOS keeps a local
+    /// "last acknowledged nudge" per child and injects a fresh nudge
+    /// notification when this advances past it.
+    let lastNudgeAt: Date?
 }
 
 struct ReflectionRequest: Codable, Equatable, Sendable, Identifiable {
@@ -120,6 +127,14 @@ struct ReflectionRequest: Codable, Equatable, Sendable, Identifiable {
     let parentNote: String?
     let submittedAt: Date?
     let approvedAt: Date?
+    /// Parent's "Request redo" feedback. Non-nil ⇒ parent has sent
+    /// this reflection back at least once. Kid-side: surfaces under
+    /// the lock screen + drives the "Rework Essay" CTA. Parent-side:
+    /// drives the "reworked" notification copy on resubmission.
+    let parentRedoNote: String?
+    /// Timestamp of the kid's most recent "Give them a nudge" tap.
+    /// Drives the parent's nudge-notification injection.
+    let lastNudgeAt: Date?
 }
 
 struct ChildStateResponse: Codable, Equatable, Sendable {
@@ -272,7 +287,8 @@ extension ReflectionRequest {
             writingPrompt: "What were you feeling when time ran out, and what could you do differently tomorrow?",
             quiz: ReflectionRequest.defaultFixtureQuiz,
             stepsCompleted: stepsCompleted, quizScore: nil, essayText: nil,
-            status: status, parentNote: nil, submittedAt: nil, approvedAt: nil
+            status: status, parentNote: nil, submittedAt: nil, approvedAt: nil,
+            parentRedoNote: nil, lastNudgeAt: nil
         )
     }
 }

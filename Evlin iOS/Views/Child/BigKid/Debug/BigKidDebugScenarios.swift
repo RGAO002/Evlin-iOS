@@ -93,7 +93,8 @@ enum BigKidDebugScenario: String, CaseIterable, Identifiable {
                 essayText: "I felt tired and grumpy. Next time I'll go to bed when asked.",
                 status: .approved,
                 parentNote: "Thanks for being honest. Proud of you.",
-                submittedAt: Date(), approvedAt: Date()
+                submittedAt: Date(), approvedAt: Date(),
+                parentRedoNote: nil, lastNudgeAt: nil
             )
             return .fixture(reflection: withScore)
 

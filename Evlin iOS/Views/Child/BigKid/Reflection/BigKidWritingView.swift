@@ -2,6 +2,10 @@ import SwiftUI
 
 struct BigKidWritingView: View {
     let prompt: String
+    /// Non-nil ⇒ kid is reworking the essay because their previous
+    /// submission was sent back. Renders above the Evlin-asks prompt
+    /// card as a short coaching line in quotes from the parent.
+    var parentRedoNote: String? = nil
     var onSubmit: (String) async -> Void
 
     @State private var text: String = ""
@@ -23,6 +27,10 @@ struct BigKidWritingView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             stepLabel.padding(.bottom, 16)
+            if let trimmed = parentRedoNote?
+                .trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty {
+                redoCallout(trimmed).padding(.bottom, 14)
+            }
             promptCard.padding(.bottom, 16)
             editor
             countersRow.padding(.top, 10).padding(.bottom, 12)
@@ -33,6 +41,28 @@ struct BigKidWritingView: View {
         .padding(.top, 20).padding(.bottom, 30)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(EvlinKidColors.surface.ignoresSafeArea())
+    }
+
+    private func redoCallout(_ note: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("YOUR PARENT SENT IT BACK")
+                .font(.system(size: 11, weight: .heavy))
+                .tracking(0.9)
+                .foregroundStyle(EvlinKidColors.ink3)
+            Text("\u{201C}\(note)\u{201D}")
+                .font(.system(size: 14, weight: .semibold))
+                .italic()
+                .foregroundStyle(EvlinKidColors.ink)
+                .lineSpacing(3)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(EvlinKidColors.surface2, in: RoundedRectangle(cornerRadius: 14))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14)
+                .stroke(EvlinKidColors.line, lineWidth: 1)
+        )
     }
 
     private var stepLabel: some View {

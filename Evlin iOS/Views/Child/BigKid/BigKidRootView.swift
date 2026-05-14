@@ -57,7 +57,20 @@ struct BigKidRootView: View {
                 NavigationStack(path: $reflectionPath) {
                     BigKidHomeReflectionView(
                         subState: .a,
-                        onStartReflection: { reflectionPath.append(ReflectionNav.locked) },
+                        onStartReflection: {
+                            // Rework path skips the locked step-picker
+                            // and drops the kid straight onto Step 3
+                            // (writing). Video + quiz are still in
+                            // `stepsCompleted` from the original
+                            // attempt, so the kid doesn't redo them.
+                            let isRework = state.reflectionRequest?
+                                .parentRedoNote?
+                                .trimmingCharacters(in: .whitespacesAndNewlines)
+                                .isEmpty == false
+                            reflectionPath.append(
+                                isRework ? ReflectionNav.writing : ReflectionNav.locked
+                            )
+                        },
                         onTaskTap: { _ in },
                         onNudgeParent: {},
                         onRefresh: { await poller.refreshNow() }
@@ -243,7 +256,8 @@ struct BigKidRootView: View {
             stepsCompleted: req.stepsCompleted + [step],
             quizScore: req.quizScore, essayText: req.essayText,
             status: req.status, parentNote: req.parentNote,
-            submittedAt: req.submittedAt, approvedAt: req.approvedAt
+            submittedAt: req.submittedAt, approvedAt: req.approvedAt,
+            parentRedoNote: req.parentRedoNote, lastNudgeAt: req.lastNudgeAt
         )
         state.reflectionRequest = merged
     }
@@ -317,7 +331,10 @@ struct BigKidRootView: View {
             }
         case .writing:
             if let r = state.reflectionRequest {
-                BigKidWritingView(prompt: r.writingPrompt) { text in
+                BigKidWritingView(
+                    prompt: r.writingPrompt,
+                    parentRedoNote: r.parentRedoNote
+                ) { text in
                     applyLocalStepCompletion(.writing)
                     _ = try? await client.reflectionEssay(rid: r.id, text: text)
                     await poller.refreshNow()

@@ -253,6 +253,29 @@ class APIClient: ObservableObject {
         return try JSONDecoder.bigKid.decode(ReflectionRequestForParent.self, from: data)
     }
 
+    /// Parent sends the reflection back for a rework. Mirrors
+    /// `POST /parent/reflection/{rid}/request-redo`. The kid lock
+    /// screen will surface `redoNote` (in quotes) and flip the entry
+    /// CTA from "Start reflection" to "Rework Essay" once the next
+    /// kid-state poll lands.
+    func requestRedoChildReflection(reflectionId: UUID, redoNote: String?) async throws {
+        let trimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let url = URL(string: "\(trimmed)/parent/reflection/\(reflectionId.uuidString)/request-redo") else {
+            throw URLError(.badURL)
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 22
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let body: [String: Any] = ["redo_note": redoNote as Any]
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (_, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+    }
+
     func approveChildReflectionSubmission(reflectionId: UUID, parentNote: String?) async throws {
         let trimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty,
