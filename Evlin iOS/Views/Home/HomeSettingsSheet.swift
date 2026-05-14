@@ -592,6 +592,10 @@ struct HomeSettingsSheet: View {
             .onChange(of: screenTimeManager.selectedApps) { _, _ in
                 screenTimeManager.saveSelection()
             }
+            .onChange(of: smartMode.isOn) { _, _ in
+                guard let famID = UUID(uuidString: familyID) else { return }
+                Task { await smartMode.push(familyId: famID, apiClient: apiClient) }
+            }
             .onAppear {
                 serverURL = apiClient.baseURL
                 screenTimeManager.refreshAuthorizationStatus()
@@ -599,6 +603,7 @@ struct HomeSettingsSheet: View {
                 // segmented control reflects truth, not the @State default.
                 if let famID = UUID(uuidString: familyID) {
                     Task {
+                        await smartMode.sync(familyId: famID, apiClient: apiClient)
                         if let m = try? await apiClient.getProtectionMode(familyID: famID) {
                             await MainActor.run {
                                 protectionMode = m
