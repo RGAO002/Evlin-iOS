@@ -44,7 +44,12 @@ struct ReflectionSubmissionReviewCard: View {
     /// actions row vs the resolved-note line) is shown.
     var status: ReflectionReviewStatus
     var onApprove: (_ parentNoteTrimmed: String) async -> Void
-    var onRedo: (() async -> Void)?
+    /// Receives the SAME trimmed parent-note string as `onApprove` —
+    /// the call site is expected to substitute the
+    /// `ReflectionParentNoteFallback.redoTakeAnotherLook` default when
+    /// the trimmed string is empty, so the kid always sees a coached
+    /// message on the rework screen.
+    var onRedo: ((_ parentNoteTrimmed: String) async -> Void)?
 
     @State private var busy = false
     @State private var parentNote: String = ""
@@ -417,8 +422,9 @@ struct ReflectionSubmissionReviewCard: View {
         Button {
             Task {
                 busy = true
+                let trimmed = parentNote.trimmingCharacters(in: .whitespacesAndNewlines)
                 if let onRedo {
-                    await onRedo()
+                    await onRedo(trimmed)
                 } else {
                     // Cosmetic delay so the button shows the busy state
                     // briefly even when there's no real handler.
@@ -538,7 +544,7 @@ struct ReflectionSubmissionReviewCard: View {
                 takeaway: "Liam is connecting the trigger to a body cue.",
                 status: .open,
                 onApprove: { _ in },
-                onRedo: {}
+                onRedo: { _ in }
             )
             ReflectionSubmissionReviewCard(
                 childName: "Liam",
@@ -549,7 +555,7 @@ struct ReflectionSubmissionReviewCard: View {
                 stepsCompleted: [.video, .quiz, .writing],
                 status: .approved,
                 onApprove: { _ in },
-                onRedo: {}
+                onRedo: { _ in }
             )
             ReflectionSubmissionReviewCard(
                 childName: "Liam",
@@ -560,7 +566,7 @@ struct ReflectionSubmissionReviewCard: View {
                 stepsCompleted: [.video, .quiz, .writing],
                 status: .sentBack,
                 onApprove: { _ in },
-                onRedo: {}
+                onRedo: { _ in }
             )
         }
         .padding()

@@ -1494,17 +1494,22 @@ class ChatViewModel: ObservableObject {
     }
 
     /// "Write again" from `ReflectionSubmissionReviewCard` — same
-    /// backend endpoint as the Step-3 Request-Redo button. The chat
-    /// surface has no editor, so the kid always sees the default
-    /// `redoTakeAnotherLook` coaching string. On success the message
-    /// payload flips to `.sentBack` (red header pill); on failure we
-    /// surface an error so the parent can retry.
+    /// backend endpoint as the Step-3 Request-Redo button. If the
+    /// parent typed something in the "Message for {child}" editor,
+    /// that text goes to the kid verbatim; only when it's empty do
+    /// we substitute the default `redoTakeAnotherLook` coaching
+    /// string. On success the message payload flips to `.sentBack`
+    /// (red header pill); on failure we surface an error so the
+    /// parent can retry.
     func requestRedoReflectionFromChat(
         messageId: UUID,
-        reflectionId: UUID
+        reflectionId: UUID,
+        parentNoteTrimmed: String
     ) async {
         errorMessage = nil
-        let note = ReflectionParentNoteFallback.redoTakeAnotherLook
+        let note = parentNoteTrimmed.isEmpty
+            ? ReflectionParentNoteFallback.redoTakeAnotherLook
+            : parentNoteTrimmed
         self.isThinking = true
         defer { self.isThinking = false }
         do {

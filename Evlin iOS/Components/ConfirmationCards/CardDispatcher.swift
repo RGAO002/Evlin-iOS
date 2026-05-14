@@ -61,7 +61,12 @@ struct CardDispatcher: View {
                             await onReflectionApprove(note)
                         }
                     },
-                    onRedo: {
+                    onRedo: { _ in
+                        // Legacy ConfirmationCard redo handler doesn't
+                        // surface the parent's note (it pre-dates the
+                        // tri-state card). Future: thread the typed
+                        // note through `handlers.onReflectionRedo` so
+                        // this card can match the chat-side behaviour.
                         if let onReflectionRedo = handlers.onReflectionRedo {
                             await onReflectionRedo()
                         }

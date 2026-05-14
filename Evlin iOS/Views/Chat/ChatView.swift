@@ -133,21 +133,26 @@ struct ChatView: View {
                                                 reflectionStore.clear(childId: childId)
                                             }
                                         },
-                                        onRedo: {
+                                        onRedo: { typedNote in
                                             // "Write again" routes through the SAME
                                             // backend path as the Step-3 "Request
-                                            // redo" button — POST request-redo with
-                                            // the default coaching string as the
-                                            // note. Chat has no editor (per design),
-                                            // so the fallback IS the message.
+                                            // redo" button. The card forwards the
+                                            // parent's typed message (already
+                                            // trimmed); the VM substitutes the
+                                            // default coaching string only when
+                                            // it's empty.
+                                            let effectiveNote = typedNote.isEmpty
+                                                ? ReflectionParentNoteFallback.redoTakeAnotherLook
+                                                : typedNote
                                             await viewModel.requestRedoReflectionFromChat(
                                                 messageId: message.id,
-                                                reflectionId: reflection.reflectionId
+                                                reflectionId: reflection.reflectionId,
+                                                parentNoteTrimmed: typedNote
                                             )
                                             if let childId = matchedChildId {
                                                 reflectionStore.applyParentRedoLocally(
                                                     childId: childId,
-                                                    redoNote: ReflectionParentNoteFallback.redoTakeAnotherLook
+                                                    redoNote: effectiveNote
                                                 )
                                             }
                                         }
