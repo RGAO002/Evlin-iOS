@@ -318,21 +318,14 @@ extension View {
                     },
                     onOpenReflection: { childId, reflectionId in
                         guard let child = ChildProfile.all.first(where: { $0.id == childId }) else { return }
-                        // Tapping either the completion OR the nudge
-                        // notification clears the unacknowledged
-                        // nudge state — once the parent is looking
-                        // at the reflection, the nudge has served
-                        // its purpose. Completion entries persist
-                        // until the parent approves/redoes the
-                        // reflection (cleared via reflectionStore in
-                        // the Step-3 action handlers).
-                        reflectionStore?.acknowledgeNudge(childId: childId)
-                        // Deep-link into the child's Profile with the
-                        // reflection sub-tab pre-toggled (Step 1/2/3
-                        // listing visible inline under the reflection
-                        // header card). Replaces the older standalone
-                        // ReflectionArtifactView push so the parent
-                        // lands inside the regular Profile context.
+                        // Just deep-link — do NOT auto-ack the nudge
+                        // here. The parent might be peeking without
+                        // deciding yet. Both the completion and the
+                        // nudge notifications persist until the parent
+                        // actually approves or requests a redo on
+                        // Step 3 (handlers there clear the summary /
+                        // call applyParentRedoLocally, which in turn
+                        // wipes the lastNudgeAt + ack state).
                         path.wrappedValue.append(
                             AppRoute.profileReflection(child, reflectionId: reflectionId)
                         )

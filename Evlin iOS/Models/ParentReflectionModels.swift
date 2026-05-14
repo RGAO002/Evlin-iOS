@@ -147,6 +147,11 @@ final class ParentReflectionFixtureStore {
 
     func clear(childId: String) {
         summariesByChildId[childId] = nil
+        // Wipe the nudge-ack marker too — otherwise a future nudge
+        // arriving at the exact same timestamp (unlikely, but
+        // possible across simulator restarts / fixture resets) would
+        // be auto-suppressed by a stale acknowledgement.
+        acknowledgedNudgeAtByChildId[childId] = nil
         revision &+= 1
     }
 
@@ -206,7 +211,13 @@ final class ParentReflectionFixtureStore {
         summary.submittedAt = nil
         summary.takeaway = nil
         summary.parentRedoNote = redoNote
+        // Redo cycle starts fresh — any old nudge from the previous
+        // submission no longer applies, and the ack marker would
+        // otherwise still match `lastNudgeAt` and silently suppress
+        // a real new nudge.
+        summary.lastNudgeAt = nil
         summariesByChildId[childId] = summary
+        acknowledgedNudgeAtByChildId[childId] = nil
         revision &+= 1
     }
 
