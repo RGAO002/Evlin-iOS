@@ -215,7 +215,13 @@ struct ProfileView: View {
                 }
                 .padding(.horizontal, 20)
                 .padding(.top, 16)
-                .padding(.bottom, 40)
+                // FAB is 56pt + 24pt bottom padding ≈ 80pt of permanent
+                // overlap at the bottom-trailing. Reserve ~120pt of
+                // scroll-content footroom so the last row (Active
+                // Rules → Morning Chores edit icon, when expanded)
+                // can scroll above the FAB instead of sitting under
+                // it. 40pt was leaving the trailing pencil hidden.
+                .padding(.bottom, 120)
             }
         }
 
