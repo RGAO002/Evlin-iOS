@@ -178,7 +178,15 @@ struct CalendarView: View {
             }
             .onAppear { scrollToFirstEvent(proxy) }
             .onChange(of: selectedDate) { _, _ in scrollToFirstEvent(proxy) }
-            .onChange(of: focusPerson) { _, _ in scrollToFirstEvent(proxy) }
+            // Only auto-scroll when ENTERING focus (someone got selected).
+            // Exiting focus — old == non-nil, new == nil — should keep the
+            // current scroll position so the parent doesn't get yanked to
+            // a different y-offset just because they tapped the return
+            // button.
+            .onChange(of: focusPerson) { old, new in
+                guard new != nil, new != old else { return }
+                scrollToFirstEvent(proxy)
+            }
         }
     }
 
