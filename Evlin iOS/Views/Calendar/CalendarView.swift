@@ -363,29 +363,28 @@ struct CalendarView: View {
                         //     (expands outward to both edges)
                         //   • another focused → width=0 + opacity 0
                         //     (collapses in place, fades away)
+                        // Column-width animation strategy: NEVER shrink
+                        // a column to 0 width. SwiftUI silently drops
+                        // descendants from the active render path when
+                        // their ancestor frame goes to 0, and when the
+                        // frame animates back the descendants don't get
+                        // re-evaluated (Liam/Maya/Emma columns stayed
+                        // empty after exiting focus). Instead:
+                        //   • Focused column → x=0, width=totalW
+                        //     (slides + expands outward to both edges)
+                        //   • Every other column → stays at its natural
+                        //     x = colIdx·normalColW, width = normalColW
+                        //     (no layout change, just opacity 0)
+                        //   • Opacity does the visual hiding; opacity 0
+                        //     also disables hit testing so taps fall
+                        //     through to the focused column underneath.
                         ForEach(Array(CalendarMockData.people.enumerated()), id: \.element.id) { colIdx, person in
                             let isFocused = focusPerson == person.id
                             let isAnyFocused = focusPerson != nil
 
-                            let targetW: CGFloat = isAnyFocused
-                                ? (isFocused ? totalW : 0)
-                                : normalColW
-                            let targetX: CGFloat = (isAnyFocused && isFocused)
-                                ? 0
-                                : CGFloat(colIdx) * normalColW
+                            let targetW: CGFloat = isFocused ? totalW : normalColW
+                            let targetX: CGFloat = isFocused ? 0 : CGFloat(colIdx) * normalColW
                             let targetOpacity: Double = (!isAnyFocused || isFocused) ? 1.0 : 0.0
-
-                            // Pill width is the FOCUSED width when this
-                            // column is focused, otherwise the natural
-                            // 1/N slot — never 0. Animating a Button's
-                            // own frame to 0 caused SwiftUI to drop the
-                            // pill from the render path; when the column
-                            // animated back the buttons stayed invisible
-                            // ("events come back as empty columns" bug).
-                            // The collapse is now done purely by the
-                            // outer column frame + .clipped(), which
-                            // SwiftUI handles correctly.
-                            let pillWidth: CGFloat = isFocused ? totalW : normalColW
 
                             let colEvents = events.filter { $0.col == person.id }
 
@@ -393,17 +392,22 @@ struct CalendarView: View {
                                 Rectangle()
                                     .fill(Color.clear)
                                     .contentShape(Rectangle())
-                                    .frame(width: max(0, targetW), height: totalHeight)
+                                    .frame(width: targetW, height: totalHeight)
 
                                 ForEach(colEvents) { ev in
-                                    columnEventPill(ev, color: person.color, columnWidth: pillWidth)
+                                    columnEventPill(ev, color: person.color, columnWidth: targetW)
                                         .offset(y: CalendarMockData.yFor(ev.start))
                                 }
                             }
-                            .frame(width: max(0, targetW), height: totalHeight, alignment: .topLeading)
+                            .frame(width: targetW, height: totalHeight, alignment: .topLeading)
                             .opacity(targetOpacity)
                             .offset(x: targetX)
-                            .clipped()
+                            // The focused column needs to draw OVER the
+                            // others (which still occupy their normal
+                            // slots underneath). zIndex 1 when focused
+                            // keeps the expanded column on top during
+                            // the slide-and-grow animation.
+                            .zIndex(isFocused ? 1 : 0)
                         }
                     }
                     .frame(height: totalHeight)
