@@ -59,23 +59,4 @@ final class SmartModeStore: ObservableObject {
         UserDefaults.standard.set(UUID().uuidString, forKey: Self.conversationIdKey)
     }
 
-    /// Read the backend source of truth when Settings opens.
-    func sync(familyId: UUID, apiClient: APIClient) async {
-        do {
-            let remote = try await apiClient.getSmartMode(familyID: familyId)
-            isOn = remote
-        } catch {
-            // Keep the local value so Settings remains usable offline.
-        }
-    }
-
-    /// Push the toggle state to backend whenever it changes.
-    func push(familyId: UUID, apiClient: APIClient) async {
-        do {
-            try await apiClient.setSmartMode(familyID: familyId, isOn: isOn)
-        } catch {
-            // Do not revert the toggle on transient local backend failures.
-            // The next Settings open will sync from backend truth.
-        }
-    }
 }

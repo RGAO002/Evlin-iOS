@@ -215,37 +215,6 @@ class APIClient: ObservableObject {
         }
     }
 
-    // MARK: - Family Smart Mode
-
-    struct SmartModeResponse: Codable {
-        let family_id: String
-        let smart_mode: Bool
-    }
-
-    func getSmartMode(familyID: UUID) async throws -> Bool {
-        let url = URL(string: "\(baseURL)/family/\(familyID.uuidString)/smart-mode")!
-        var req = URLRequest(url: url)
-        req.timeoutInterval = 15
-        let (data, resp) = try await URLSession.shared.data(for: req)
-        guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
-            throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
-        }
-        return try JSONDecoder().decode(SmartModeResponse.self, from: data).smart_mode
-    }
-
-    func setSmartMode(familyID: UUID, isOn: Bool) async throws {
-        let url = URL(string: "\(baseURL)/family/\(familyID.uuidString)/smart-mode")!
-        var req = URLRequest(url: url)
-        req.httpMethod = "PUT"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.timeoutInterval = 15
-        req.httpBody = try JSONSerialization.data(withJSONObject: ["smart_mode": isOn])
-        let (_, resp) = try await URLSession.shared.data(for: req)
-        guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
-            throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
-        }
-    }
-
     // MARK: - BigKid parent reads (same endpoints as `ParentBigKidDebugSheet`)
 
     func fetchChildStateForParentReview(childDeviceId: UUID) async throws -> ChildStateResponse {

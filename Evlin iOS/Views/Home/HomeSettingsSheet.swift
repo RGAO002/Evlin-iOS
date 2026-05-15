@@ -32,16 +32,9 @@ struct HomeSettingsSheet: View {
     @State private var protectionMode: String = "std"
     @State private var protectionModeStatus: String = ""
 
-    /// Strategy-agent T11.13 — Smart Mode toggle (iOS-side gate for the
-    /// thinking/QuestionCard pipeline). When ON the agent can think and ask
-    /// follow-up questions; when OFF only simple commands are accepted.
-    @StateObject private var smartMode = SmartModeStore()
-
     var body: some View {
         NavigationStack {
             Form {
-                SmartModeToggle().environmentObject(smartMode)
-
                 Section("Children") {
                     ForEach(children) { c in
                         Button { editing = c } label: {
@@ -592,10 +585,6 @@ struct HomeSettingsSheet: View {
             .onChange(of: screenTimeManager.selectedApps) { _, _ in
                 screenTimeManager.saveSelection()
             }
-            .onChange(of: smartMode.isOn) { _, _ in
-                guard let famID = UUID(uuidString: familyID) else { return }
-                Task { await smartMode.push(familyId: famID, apiClient: apiClient) }
-            }
             .onAppear {
                 serverURL = apiClient.baseURL
                 screenTimeManager.refreshAuthorizationStatus()
@@ -603,7 +592,6 @@ struct HomeSettingsSheet: View {
                 // segmented control reflects truth, not the @State default.
                 if let famID = UUID(uuidString: familyID) {
                     Task {
-                        await smartMode.sync(familyId: famID, apiClient: apiClient)
                         if let m = try? await apiClient.getProtectionMode(familyID: famID) {
                             await MainActor.run {
                                 protectionMode = m
