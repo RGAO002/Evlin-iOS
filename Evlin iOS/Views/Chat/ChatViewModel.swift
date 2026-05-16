@@ -322,7 +322,7 @@ class ChatViewModel: ObservableObject {
                 // Fetch both the decoded ChatResponse AND the raw HTTP body so that
                 // tryHandlePlanArchCard (plan-arch dual-path) can inspect card_payload
                 // without requiring APIClient changes.
-                let (resp, rawData) = try await self.sendChatMessageWithRawData(
+                let (resp, rawData, turnID) = try await self.sendChatMessageWithRawData(
                     message: userMessage,
                     childName: self.childName,
                     history: history,
@@ -340,11 +340,11 @@ class ChatViewModel: ObservableObject {
                 // (AGENT_PLAN_ARCH=1), surface it via the new renderer path and skip
                 // the legacy proposal/action handling. Backwards-compatible: when
                 // AGENT_PLAN_ARCH=0, card_payload is absent, and this returns false.
-                if await MainActor.run(body: { self.tryHandlePlanArchCard(from: rawData, message: resp.message) }) {
+                if await MainActor.run(body: { self.tryHandlePlanArchCard(from: rawData, message: resp.message, debugTurnID: turnID) }) {
                     await MainActor.run { self.isThinking = false }
                     return
                 }
-                await MainActor.run { self.processResponse(resp, userMessage: userMessage) }
+                await MainActor.run { self.processResponse(resp, userMessage: userMessage, debugTurnID: turnID) }
             } catch {
                 await MainActor.run {
                     let detail: String
@@ -362,12 +362,14 @@ class ChatViewModel: ObservableObject {
     }
 
     @MainActor
-    private func processResponse(_ resp: APIClient.ChatResponse, userMessage: String) {
+    private func processResponse(_ resp: APIClient.ChatResponse, userMessage: String, debugTurnID: String? = nil) {
+        let bubbleDebugTurnID = Self.bubbleDebugTurnID(debugTurnID)
+
         // 1. Card rendering
         if let act = resp.action, let cardIDStr = act.card_id, let cardID = CardID(rawValue: cardIDStr) {
             messages.append(ChatMessage(
                 role: .agent, content: resp.message, timestamp: Date(),
-                reasoning: resp.reasoning, action: nil
+                reasoning: resp.reasoning, action: nil, debugTurnID: bubbleDebugTurnID
             ))
             renderCard(cardID: cardID, action: act)
             isThinking = false
@@ -382,7 +384,8 @@ class ChatViewModel: ObservableObject {
             appendPlanPatchExecutedMessage(
                 message: resp.message,
                 reasoning: resp.reasoning,
-                queuedCommands: queuedCommands
+                queuedCommands: queuedCommands,
+                debugTurnID: bubbleDebugTurnID
             )
             isThinking = false
             return
@@ -397,7 +400,7 @@ class ChatViewModel: ObservableObject {
         if let act = resp.action, let cmdID = act.command_id {
             var msg = ChatMessage(
                 role: .agent, content: resp.message, timestamp: Date(),
-                reasoning: resp.reasoning, action: nil
+                reasoning: resp.reasoning, action: nil, debugTurnID: bubbleDebugTurnID
             )
             msg.commandID = cmdID
             msg.receiptState = .pending
@@ -432,7 +435,7 @@ class ChatViewModel: ObservableObject {
             }
             var msg = ChatMessage(
                 role: .agent, content: resp.message, timestamp: Date(),
-                reasoning: resp.reasoning, action: nil
+                reasoning: resp.reasoning, action: nil, debugTurnID: bubbleDebugTurnID
             )
             msg.proposals = resp.proposals
             msg.receipts = resp.receipts
@@ -444,7 +447,7 @@ class ChatViewModel: ObservableObject {
         // 3. Plain text (conversational reply, or confirmation_required without card_id)
         var msg = ChatMessage(
             role: .agent, content: resp.message, timestamp: Date(),
-            reasoning: resp.reasoning, action: nil
+            reasoning: resp.reasoning, action: nil, debugTurnID: bubbleDebugTurnID
         )
         // Restore safety-card heuristic that was lost in d86772c refactor.
         // When the parent asks "is X safe", "where is X", or "X's location",
@@ -1651,7 +1654,7 @@ class ChatViewModel: ObservableObject {
         history: [[String: String]],
         forceConfirmations: [String],
         skipFastpath: Bool = false
-    ) async throws -> (APIClient.ChatResponse, Data) {
+    ) async throws -> (APIClient.ChatResponse, Data, String?) {
         let familyID = UserDefaults.standard.string(forKey: "evlin.familyID")
         let bigKidChildID = UserDefaults.standard.string(forKey: "evlin.childDeviceID")
 
@@ -1683,7 +1686,8 @@ class ChatViewModel: ObservableObject {
 
                 if lastStatus == 200 {
                     let decoded = try JSONDecoder().decode(APIClient.ChatResponse.self, from: data)
-                    return (decoded, data)
+                    let turnID = http?.value(forHTTPHeaderField: "X-Brain-Turn-Id")
+                    return (decoded, data, turnID)
                 }
                 if (lastStatus == 500 || lastStatus == 503), attempt < 2 {
                     try? await Task.sleep(nanoseconds: UInt64(800_000_000 * (attempt + 1)))
@@ -1712,7 +1716,7 @@ class ChatViewModel: ObservableObject {
     /// ALSO appends a chat bubble with the card's title (+ body) so the
     /// parent sees a normal agent reply in the message list while the
     /// PlanArchCardView renders below for interaction.
-    func tryHandlePlanArchCard(from data: Data, message: String? = nil) -> Bool {
+    func tryHandlePlanArchCard(from data: Data, message: String? = nil, debugTurnID: String? = nil) -> Bool {
         let cards = PlanArchCardPayload.decodeAllFromChatResponseData(data)
         guard !cards.isEmpty else { return false }
 
@@ -1727,9 +1731,22 @@ class ChatViewModel: ObservableObject {
         // redundant chatter above it.
         let trimmedMessage = (message ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmedMessage.isEmpty {
-            self.messages.append(ChatMessage(role: .agent, content: trimmedMessage, timestamp: Date()))
+            self.messages.append(ChatMessage(
+                role: .agent,
+                content: trimmedMessage,
+                timestamp: Date(),
+                debugTurnID: Self.bubbleDebugTurnID(debugTurnID)
+            ))
         }
         return true
+    }
+
+    private static func bubbleDebugTurnID(_ debugTurnID: String?) -> String? {
+        #if DEBUG
+        return debugTurnID
+        #else
+        return nil
+        #endif
     }
 
     /// Plan-arch card option tapped. Switches on payload.source to route:
@@ -1845,10 +1862,11 @@ class ChatViewModel: ObservableObject {
     private func appendPlanPatchExecutedMessage(
         message: String,
         reasoning: String?,
-        queuedCommands: [PlanPatchQueuedCommand]
+        queuedCommands: [PlanPatchQueuedCommand],
+        debugTurnID: String? = nil
     ) {
         guard !queuedCommands.isEmpty else {
-            messages.append(ChatMessage(role: .agent, content: message, timestamp: Date(), reasoning: reasoning))
+            messages.append(ChatMessage(role: .agent, content: message, timestamp: Date(), reasoning: reasoning, debugTurnID: debugTurnID))
             return
         }
 
@@ -1860,7 +1878,8 @@ class ChatViewModel: ObservableObject {
                 role: .agent,
                 content: content,
                 timestamp: Date(),
-                reasoning: index == 0 ? reasoning : nil
+                reasoning: index == 0 ? reasoning : nil,
+                debugTurnID: debugTurnID
             )
             msg.commandID = command.commandID
             msg.receiptState = .pending

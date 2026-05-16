@@ -47,7 +47,12 @@ struct ChatView: View {
 
                                 // Chat bubble (skip for strategy-only messages with empty content)
                                 if !message.content.isEmpty {
-                                    ChatBubble(content: message.content, role: message.role, timestamp: message.timestamp)
+                                    ChatBubble(
+                                        content: message.content,
+                                        role: message.role,
+                                        timestamp: message.timestamp,
+                                        debugTurnID: message.debugTurnID
+                                    )
                                 }
 
                                 // Safety status card + follow-up

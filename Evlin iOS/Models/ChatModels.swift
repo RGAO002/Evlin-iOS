@@ -116,6 +116,7 @@ struct ChatMessage: Identifiable, Codable {
     let content: String
     let timestamp: Date
     var reasoning: String?
+    var debugTurnID: String? = nil
 
     // Card data (persisted)
     var lockMinutes: Int?
@@ -154,12 +155,20 @@ struct ChatMessage: Identifiable, Codable {
 
     var isStrategyArtifact: Bool { strategyTitle != nil }
 
-    init(role: ChatRole, content: String, timestamp: Date = Date(), reasoning: String? = nil, action: ChatAction? = nil) {
+    init(
+        role: ChatRole,
+        content: String,
+        timestamp: Date = Date(),
+        reasoning: String? = nil,
+        action: ChatAction? = nil,
+        debugTurnID: String? = nil
+    ) {
         self.id = UUID()
         self.role = role
         self.content = content
         self.timestamp = timestamp
         self.reasoning = reasoning
+        self.debugTurnID = debugTurnID
     }
 }
 

@@ -9,6 +9,14 @@ struct ChatBubble: View {
     let content: String
     let role: ChatRole
     let timestamp: Date
+    let debugTurnID: String?
+
+    init(content: String, role: ChatRole, timestamp: Date, debugTurnID: String? = nil) {
+        self.content = content
+        self.role = role
+        self.timestamp = timestamp
+        self.debugTurnID = debugTurnID
+    }
 
     var body: some View {
         HStack {
@@ -27,9 +35,19 @@ struct ChatBubble: View {
                     .padding(.vertical, Spacing.lg + 2)
                     .background(bubbleBackground)
 
-                Text(timestamp, style: .time)
-                    .evTimestampStyle()
-                    .padding(.horizontal, 4)
+                HStack(spacing: 6) {
+                    Text(timestamp, style: .time)
+                        .evTimestampStyle()
+
+                    #if DEBUG
+                    if let debugTurnID, debugTurnID.hasPrefix("turn:") {
+                        Text(String(debugTurnID.suffix(8)))
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.secondary)
+                    }
+                    #endif
+                }
+                .padding(.horizontal, 4)
             }
 
             if role == .agent { Spacer(minLength: 40) }
