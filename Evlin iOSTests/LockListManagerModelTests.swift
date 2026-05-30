@@ -1,33 +1,54 @@
-import FamilyControls
-import XCTest
 @testable import Evlin_iOS
+import XCTest
 
-@MainActor
 final class LockListManagerModelTests: XCTestCase {
-    override func setUp() {
-        super.setUp()
-        LocalAliasStore.shared.removeAllAliases()
-    }
-
-    override func tearDown() {
-        LocalAliasStore.shared.removeAllAliases()
-        super.tearDown()
-    }
-
     func test_reloadReadsSavedListsFromLocalAliasStore() {
-        LocalAliasStore.shared.saveList(FamilyActivitySelection(), named: "Games")
+        let store = FakeLockListStore(
+            apps: [],
+            lists: ["Games"]
+        )
 
-        let model = LockListManagerModel()
-        model.reload()
+        let snapshot = LockListManagerSnapshot.make(from: store)
 
-        XCTAssertTrue(model.lists.contains("games") || model.lists.contains("Games"))
+        XCTAssertEqual(snapshot.lists, ["Games"])
+    }
+
+    func test_reloadReadsAppAliasesFromStore() {
+        let store = FakeLockListStore(
+            apps: [
+                (label: "Instagram", keys: ["instagram", "com.burbn.instagram"], bundleID: "com.burbn.instagram")
+            ],
+            lists: []
+        )
+
+        let snapshot = LockListManagerSnapshot.make(from: store)
+
+        XCTAssertEqual(snapshot.apps, [
+            LockListAppEntry(
+                label: "Instagram",
+                keys: ["instagram", "com.burbn.instagram"],
+                bundleID: "com.burbn.instagram"
+            )
+        ])
     }
 
     func test_reloadShowsEmptyStateWhenNoLocalEntriesExist() {
-        let model = LockListManagerModel()
-        model.reload()
+        let snapshot = LockListManagerSnapshot.make(from: FakeLockListStore(apps: [], lists: []))
 
-        XCTAssertTrue(model.apps.isEmpty)
-        XCTAssertTrue(model.lists.isEmpty)
+        XCTAssertTrue(snapshot.apps.isEmpty)
+        XCTAssertTrue(snapshot.lists.isEmpty)
+    }
+}
+
+private struct FakeLockListStore: LockListStoreReading {
+    let apps: [(label: String, keys: [String], bundleID: String?)]
+    let lists: [String]
+
+    func groupedApplicationAliases() -> [(label: String, keys: [String], bundleID: String?)] {
+        apps
+    }
+
+    func allListNames() -> [String] {
+        lists
     }
 }

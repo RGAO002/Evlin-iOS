@@ -11,21 +11,50 @@ struct LockListAppEntry: Identifiable, Equatable {
     }
 }
 
-@MainActor
-final class LockListManagerModel: ObservableObject {
-    @Published private(set) var apps: [LockListAppEntry] = []
-    @Published private(set) var lists: [String] = []
+protocol LockListStoreReading {
+    func groupedApplicationAliases() -> [(label: String, keys: [String], bundleID: String?)]
+    func allListNames() -> [String]
+}
 
-    func reload() {
-        apps = LocalAliasStore.shared.groupedApplicationAliases().map { entry in
+extension LocalAliasStore: LockListStoreReading {}
+
+struct LockListManagerSnapshot: Equatable {
+    let apps: [LockListAppEntry]
+    let lists: [String]
+
+    static func make(from store: any LockListStoreReading) -> LockListManagerSnapshot {
+        let apps = store.groupedApplicationAliases().map { entry in
             LockListAppEntry(
                 label: entry.label,
                 keys: entry.keys,
                 bundleID: entry.bundleID
             )
         }
-        lists = LocalAliasStore.shared.allListNames()
+        let lists = store.allListNames()
             .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+        return LockListManagerSnapshot(apps: apps, lists: lists)
+    }
+}
+
+@MainActor
+final class LockListManagerModel: ObservableObject {
+    @Published private(set) var apps: [LockListAppEntry] = []
+    @Published private(set) var lists: [String] = []
+
+    private let store: any LockListStoreReading
+
+    init() {
+        self.store = LocalAliasStore.shared
+    }
+
+    init(store: any LockListStoreReading) {
+        self.store = store
+    }
+
+    func reload() {
+        let snapshot = LockListManagerSnapshot.make(from: store)
+        apps = snapshot.apps
+        lists = snapshot.lists
     }
 }
 
