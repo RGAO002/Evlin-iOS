@@ -22,6 +22,10 @@ struct HomeSettingsSheet: View {
 
     @State private var serverURL: String = ""
     @State private var isPickerPresented = false
+    @State private var showPINGate = false
+    @State private var showAddApp = false
+    @State private var showAddList = false
+    @State private var pendingGatedAction: GatedAction?
 
     @AppStorage("evlin.protectionMode") private var savedProtectionMode: String = "std"
 
@@ -31,6 +35,11 @@ struct HomeSettingsSheet: View {
     /// Family protection mode mirror — synced from backend on appear, PUT-back when the segmented control changes.
     @State private var protectionMode: String = "std"
     @State private var protectionModeStatus: String = ""
+
+    private enum GatedAction {
+        case addApp
+        case addList
+    }
 
     var body: some View {
         NavigationStack {
@@ -226,6 +235,20 @@ struct HomeSettingsSheet: View {
                                 .font(.caption)
                                 .foregroundStyle(Color.evOutline)
                         }
+                    }
+
+                    Button {
+                        pendingGatedAction = .addApp
+                        showPINGate = true
+                    } label: {
+                        Label("Add app", systemImage: "plus.app")
+                    }
+
+                    Button {
+                        pendingGatedAction = .addList
+                        showPINGate = true
+                    } label: {
+                        Label("Add list", systemImage: "rectangle.stack.badge.plus")
                     }
 
                     Text("Tip: tap a category row's header (e.g. \"Games\") to lock the whole group, or tap individual apps to lock just those.")
@@ -613,6 +636,58 @@ struct HomeSettingsSheet: View {
                 ChildEditSheet(child: nil) { newChild in
                     children.append(newChild)
                     adding = false
+                }
+            }
+            .sheet(isPresented: $showPINGate) {
+                EvlinPINGateView(
+                    store: .shared,
+                    onUnlocked: {
+                        showPINGate = false
+                        switch pendingGatedAction {
+                        case .addApp:
+                            showAddApp = true
+                        case .addList:
+                            showAddList = true
+                        case .none:
+                            break
+                        }
+                        pendingGatedAction = nil
+                    },
+                    onCancel: {
+                        showPINGate = false
+                        pendingGatedAction = nil
+                    }
+                )
+            }
+            .sheet(isPresented: $showAddApp) {
+                if let childID = UUID(uuidString: childDeviceID) {
+                    NavigationStack {
+                        AddAppFlowView(childDeviceID: childID) {
+                            showAddApp = false
+                        }
+                        .environmentObject(apiClient)
+                    }
+                } else {
+                    Text("Pair this device first (missing child device ID).")
+                        .padding()
+                }
+            }
+            .sheet(isPresented: $showAddList) {
+                if let familyID = UUID(uuidString: familyID),
+                   let childID = UUID(uuidString: childDeviceID) {
+                    NavigationStack {
+                        SavedListPickerView(
+                            familyID: familyID,
+                            owningDeviceID: childID,
+                            mode: "child_device"
+                        ) { _ in
+                            showAddList = false
+                        }
+                        .environmentObject(apiClient)
+                    }
+                } else {
+                    Text("Pair this device first (missing family / child device ID).")
+                        .padding()
                 }
             }
         }
