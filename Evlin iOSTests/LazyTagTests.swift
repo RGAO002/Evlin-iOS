@@ -44,6 +44,37 @@ final class LazyTagPersistenceTests: XCTestCase {
     }
 }
 
+final class LazyTagUniversalFallbackTests: XCTestCase {
+    /// Contract: a lazy-tag for an app can only bind a real ApplicationToken.
+    /// Unit tests cannot mint FamilyControls tokens, so this pins the guard
+    /// that prevents bad picker output from creating a false app binding.
+    func test_appKind_requiresApplicationToken() {
+        let result = LazyTagPersistence.persistAlias(
+            token: 7 as Any,
+            kind: .app,
+            target: "Bilibili"
+        )
+        switch result {
+        case .failure(let error): XCTAssertEqual(error, .wrongTokenType)
+        case .success: XCTFail("expected wrongTokenType")
+        }
+    }
+
+    /// Blank names must never be persisted as aliases; otherwise future
+    /// natural-language locks could resolve to an invisible bad binding.
+    func test_emptyTarget_isRejected_soCatalogNeverBindsBlankName() {
+        let result = LazyTagPersistence.persistAlias(
+            token: "x" as Any,
+            kind: .app,
+            target: " "
+        )
+        switch result {
+        case .failure(let error): XCTAssertEqual(error, .emptyTarget)
+        case .success: XCTFail("expected emptyTarget")
+        }
+    }
+}
+
 final class ExtractAliasTargetTests: XCTestCase {
     private func proposal(tool: String, args: [String: Any]) -> ProposalDTO {
         let typed = args.mapValues { AnyCodable($0) }
