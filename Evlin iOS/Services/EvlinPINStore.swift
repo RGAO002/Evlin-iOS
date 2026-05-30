@@ -35,7 +35,7 @@ nonisolated final class EvlinPINStore {
         let digits = pin.trimmingCharacters(in: .whitespaces)
         guard digits.count >= Self.minLength,
               digits.count <= Self.maxLength,
-              digits.allSatisfy(\.isNumber) else {
+              Self.isASCIIDigits(digits) else {
             throw PINError.invalidLength
         }
 
@@ -71,8 +71,16 @@ nonisolated final class EvlinPINStore {
     }
 
     /// Test-only hook used to confirm independent salts produce different blobs.
+    #if DEBUG
     func debugStoredBlob() -> Data? {
         readBlob()
+    }
+    #endif
+
+    private static func isASCIIDigits(_ value: String) -> Bool {
+        value.unicodeScalars.allSatisfy { scalar in
+            scalar.value >= 48 && scalar.value <= 57
+        }
     }
 
     private static func hash(salt: Data, pin: String) -> Data {

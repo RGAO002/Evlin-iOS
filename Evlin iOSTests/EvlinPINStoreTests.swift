@@ -49,6 +49,15 @@ final class EvlinPINStoreTests: XCTestCase {
         }
     }
 
+    func test_setPIN_rejectsNonASCIIDigits() {
+        XCTAssertThrowsError(try store.setPIN("１２３４")) { error in
+            XCTAssertEqual(error as? EvlinPINStore.PINError, .invalidLength)
+        }
+        XCTAssertThrowsError(try store.setPIN("١٢٣٤")) { error in
+            XCTAssertEqual(error as? EvlinPINStore.PINError, .invalidLength)
+        }
+    }
+
     func test_setPIN_overwritesPreviousPIN() throws {
         try store.setPIN("1234")
         try store.setPIN("5678")
