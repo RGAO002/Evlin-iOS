@@ -89,6 +89,22 @@ struct SavedListPickerView: View {
                 description: nil,
                 mode: mode
             ))
+
+            // Also cache the full selection shape on the backend so the list can
+            // be locked as a unit later. This is best-effort; the kid device's
+            // LocalAliasStore remains the execution source of truth.
+            if let blob = try? AppCatalogBlobEncoder.base64(selection) {
+                _ = try? await apiClient.uploadCatalogList(
+                    deviceID: owningDeviceID,
+                    sourceDeviceID: owningDeviceID,
+                    listName: trimmed,
+                    aliases: [trimmed],
+                    selectionBlobBase64: blob,
+                    appCount: selection.applicationTokens.count
+                        + selection.categoryTokens.count
+                        + selection.webDomainTokens.count
+                )
+            }
             onSaved(trimmed)
         } catch {
             saveError = "Saved locally, but backend sync failed: \(error.localizedDescription)"
