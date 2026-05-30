@@ -10,12 +10,17 @@ enum ReflectionNav: Hashable {
 /// Top-level view for big-kid mode. Picks one of the eleven screens based on
 /// the current `BigKidState` per spec §5.
 struct BigKidRootView: View {
+    @EnvironmentObject private var apiClient: APIClient
     @State private var state: BigKidState
     @StateObject private var client: BigKidAPIClient
     @StateObject private var poller: BigKidStatePoller
     @Environment(\.scenePhase) private var scenePhase
+    @AppStorage("evlin.familyID") private var familyID: String = ""
+
+    private let childDeviceID: UUID
 
     init(baseURL: URL, childId: UUID) {
+        self.childDeviceID = childId
         let client = BigKidAPIClient(baseURL: baseURL, childId: childId)
         // Always start empty — `BigKidStatePoller` paints the real snapshot ASAP.
         // DEBUG `.fixture()` here caused a visible flicker (default tasks swapped for server tasks).
@@ -43,6 +48,8 @@ struct BigKidRootView: View {
     @State private var taskNav: BigKidTask?
     @State private var bypassNav: BigKidTask?
     @State private var reflectionPath = NavigationPath()
+    @State private var showLockListGate = false
+    @State private var showLockListManager = false
 
     #if DEBUG
     @State private var debugScenario: BigKidDebugScenario = .live
@@ -145,6 +152,23 @@ struct BigKidRootView: View {
                 Task { await poller.refreshNow() }
             }
         }
+        .overlay(alignment: .topLeading) {
+            Button {
+                showLockListGate = true
+            } label: {
+                Label("Apps", systemImage: "lock.rectangle.stack")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(EvlinKidColors.ink)
+                    .padding(.horizontal, 12)
+                    .frame(height: 32)
+                    .background(.white.opacity(0.92), in: Capsule())
+                    .overlay(Capsule().stroke(EvlinKidColors.line, lineWidth: 1))
+                    .shadow(color: .black.opacity(0.12), radius: 12, y: 4)
+            }
+            .accessibilityLabel("Manage lock list")
+            .padding(.top, 8)
+            .padding(.leading, 12)
+        }
         #if DEBUG
         .overlay(alignment: .bottom) {
             if let err = poller.lastError {
@@ -236,6 +260,41 @@ struct BigKidRootView: View {
                     await poller.refreshNow()
                 }
             )
+        }
+        .sheet(isPresented: $showLockListGate) {
+            EvlinPINGateView(
+                store: .shared,
+                onUnlocked: {
+                    showLockListGate = false
+                    showLockListManager = true
+                },
+                onCancel: {
+                    showLockListGate = false
+                }
+            )
+        }
+        .sheet(isPresented: $showLockListManager) {
+            if let familyUUID = UUID(uuidString: familyID) {
+                NavigationStack {
+                    LockListManagerView(
+                        familyID: familyUUID,
+                        childDeviceID: childDeviceID
+                    )
+                    .environmentObject(apiClient)
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Pair this device first")
+                        .font(.headline)
+                    Text("Evlin needs a family id before it can sync the lock list.")
+                        .foregroundStyle(.secondary)
+                    Button("Close") {
+                        showLockListManager = false
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+                .padding()
+            }
         }
     }
 
@@ -353,5 +412,6 @@ struct BigKidRootView: View {
         baseURL: URL(string: "http://localhost:8000/api/v1")!,
         childId: UUID(uuidString: "11111111-1111-1111-1111-111111111111")!
     )
+    .environmentObject(APIClient(baseURL: "http://localhost:8000/api/v1"))
 }
 #endif
