@@ -25,6 +25,8 @@ struct HomeSettingsSheet: View {
     @State private var showPINGate = false
     @State private var showAddApp = false
     @State private var showAddList = false
+    @State private var showLockListGate = false
+    @State private var showLockListManager = false
     @State private var pendingGatedAction: GatedAction?
 
     @AppStorage("evlin.protectionMode") private var savedProtectionMode: String = "std"
@@ -235,6 +237,12 @@ struct HomeSettingsSheet: View {
                                 .font(.caption)
                                 .foregroundStyle(Color.evOutline)
                         }
+                    }
+
+                    Button {
+                        showLockListGate = true
+                    } label: {
+                        Label("Manage lock list", systemImage: "lock.rectangle.stack")
                     }
 
                     Button {
@@ -658,6 +666,33 @@ struct HomeSettingsSheet: View {
                         pendingGatedAction = nil
                     }
                 )
+            }
+            .sheet(isPresented: $showLockListGate) {
+                EvlinPINGateView(
+                    store: .shared,
+                    onUnlocked: {
+                        showLockListGate = false
+                        showLockListManager = true
+                    },
+                    onCancel: {
+                        showLockListGate = false
+                    }
+                )
+            }
+            .sheet(isPresented: $showLockListManager) {
+                if let familyID = UUID(uuidString: familyID),
+                   let childID = UUID(uuidString: childDeviceID) {
+                    NavigationStack {
+                        LockListManagerView(
+                            familyID: familyID,
+                            childDeviceID: childID
+                        )
+                        .environmentObject(apiClient)
+                    }
+                } else {
+                    Text("Pair this device first (missing family / child device ID).")
+                        .padding()
+                }
             }
             .sheet(isPresented: $showAddApp) {
                 if let childID = UUID(uuidString: childDeviceID) {
