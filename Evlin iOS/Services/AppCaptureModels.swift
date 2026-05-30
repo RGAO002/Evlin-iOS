@@ -85,3 +85,77 @@ enum AppCatalogBlobEncoder {
         return data.base64EncodedString()
     }
 }
+
+/// App Store/catalog match chosen by the parent while labeling one opaque
+/// FamilyControls app token.
+struct CatalogSearchResult: Equatable, Identifiable, Sendable {
+    let canonicalName: String
+    let bundleID: String?
+    let aliases: [String]
+
+    var id: String {
+        bundleID ?? canonicalName.lowercased()
+    }
+}
+
+/// State for one pending app token returned by an Add App capture.
+///
+/// The FamilyActivityPicker can return multiple app tokens, categories, and web
+/// domains. Add App only promotes one app-token row after the parent binds it to
+/// a catalog entry and explicitly confirms the visual `Label(token)` match.
+struct PendingAppRow: Identifiable, Equatable, Sendable {
+    let id: UUID
+    let tokenBase64: String
+    let tokenAvailable: Bool
+    private(set) var boundEntry: CatalogSearchResult?
+    private(set) var confirmed: Bool
+
+    init(rowID: UUID = UUID(), tokenBase64: String, tokenAvailable: Bool = true) {
+        self.id = rowID
+        self.tokenBase64 = tokenBase64
+        self.tokenAvailable = tokenAvailable
+        self.boundEntry = nil
+        self.confirmed = false
+    }
+
+    var isLockableApp: Bool {
+        tokenAvailable && confirmed && boundEntry != nil
+    }
+
+    mutating func bind(_ entry: CatalogSearchResult) {
+        boundEntry = entry
+        confirmed = false
+    }
+
+    mutating func confirm() {
+        guard boundEntry != nil else { return }
+        confirmed = true
+    }
+
+    func makeUploadApp(sourceDeviceID: UUID?) -> ChildAppCatalogUploadApp? {
+        guard isLockableApp, let entry = boundEntry else { return nil }
+        return ChildAppCatalogUploadApp(
+            aliasKey: id,
+            displayName: entry.canonicalName,
+            tokenKind: "app",
+            bundleID: entry.bundleID,
+            aliases: Self.aliases(for: entry),
+            tokenAvailable: tokenAvailable,
+            tokenDataBase64: tokenBase64,
+            sourceDeviceID: sourceDeviceID
+        )
+    }
+
+    private static func aliases(for entry: CatalogSearchResult) -> [String] {
+        var seen = Set<String>()
+        var out: [String] = []
+        for raw in [entry.canonicalName, entry.bundleID].compactMap({ $0 }) + entry.aliases {
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            let key = trimmed.lowercased()
+            guard seen.insert(key).inserted else { continue }
+            out.append(trimmed)
+        }
+        return out
+    }
+}

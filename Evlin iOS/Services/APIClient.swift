@@ -398,6 +398,120 @@ struct AckStatusResponse: Decodable, Sendable {
     let pendingConfirmation: AckPendingConfirmation?
 }
 
+// MARK: - Child app catalog capture APIs
+
+struct ChildAppCatalogUploadApp: Codable, Sendable, Equatable {
+    let aliasKey: UUID?
+    let displayName: String
+    let tokenKind: String
+    let bundleID: String?
+    let aliases: [String]
+    let tokenAvailable: Bool
+    let tokenDataBase64: String?
+    let sourceDeviceID: UUID?
+
+    init(
+        aliasKey: UUID? = nil,
+        displayName: String,
+        tokenKind: String = "app",
+        bundleID: String? = nil,
+        aliases: [String] = [],
+        tokenAvailable: Bool = true,
+        tokenDataBase64: String? = nil,
+        sourceDeviceID: UUID? = nil
+    ) {
+        self.aliasKey = aliasKey
+        self.displayName = displayName
+        self.tokenKind = tokenKind
+        self.bundleID = bundleID
+        self.aliases = aliases
+        self.tokenAvailable = tokenAvailable
+        self.tokenDataBase64 = tokenDataBase64
+        self.sourceDeviceID = sourceDeviceID
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case aliasKey = "alias_key"
+        case displayName = "display_name"
+        case tokenKind = "token_kind"
+        case bundleID = "bundle_id"
+        case aliases
+        case tokenAvailable = "token_available"
+        case tokenDataBase64 = "token_data_base64"
+        case sourceDeviceID = "source_device_id"
+    }
+}
+
+struct ChildAppCatalogEntryResponse: Codable, Sendable, Equatable {
+    let id: UUID
+    let displayName: String
+    let tokenKind: String
+    let bundleID: String?
+    let aliases: [String]
+    let tokenAvailable: Bool
+    let tokenDataBase64: String?
+    let updatedAt: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case displayName = "display_name"
+        case tokenKind = "token_kind"
+        case bundleID = "bundle_id"
+        case aliases
+        case tokenAvailable = "token_available"
+        case tokenDataBase64 = "token_data_base64"
+        case updatedAt = "updated_at"
+    }
+}
+
+struct ChildAppCatalogUploadResponse: Codable, Sendable, Equatable {
+    let childDeviceID: UUID
+    let count: Int
+    let apps: [ChildAppCatalogEntryResponse]
+
+    enum CodingKeys: String, CodingKey {
+        case childDeviceID = "child_device_id"
+        case count
+        case apps
+    }
+}
+
+struct CatalogSearchResultDTO: Codable, Sendable, Equatable {
+    let canonicalName: String
+    let bundleID: String?
+    let aliases: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case canonicalName = "canonical_name"
+        case bundleID = "bundle_id"
+        case aliases
+    }
+
+    var result: CatalogSearchResult {
+        CatalogSearchResult(canonicalName: canonicalName, bundleID: bundleID, aliases: aliases)
+    }
+}
+
+struct CatalogSearchResponseDTO: Codable, Sendable, Equatable {
+    let results: [CatalogSearchResultDTO]
+}
+
+struct CatalogListUploadResponse: Codable, Sendable, Equatable {
+    let aliasKey: UUID
+    let childDeviceID: UUID
+    let listName: String
+    let aliases: [String]
+    let appCount: Int
+
+    enum CodingKeys: String, CodingKey {
+        case aliasKey = "alias_key"
+        case childDeviceID = "child_device_id"
+        case listName = "list_name"
+        case aliases
+        case appCount = "app_count"
+    }
+}
+
 extension APIClient {
     /// Child polls for queued commands.
     func pollCommands(deviceID: UUID) async throws -> [PollCommandDTO] {
@@ -449,6 +563,95 @@ extension APIClient {
         comps.queryItems = [URLQueryItem(name: "command_id", value: commandID.uuidString)]
         let (data, _) = try await URLSession.shared.data(from: comps.url!)
         return try JSONDecoder().decode(AckStatusResponse.self, from: data)
+    }
+
+    @discardableResult
+    func uploadChildAppCatalog(
+        deviceID: UUID,
+        apps: [ChildAppCatalogUploadApp]
+    ) async throws -> ChildAppCatalogUploadResponse {
+        let url = URL(string: "\(baseURL)/child/app-catalog")!
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 22
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        struct Body: Codable {
+            let deviceID: UUID
+            let apps: [ChildAppCatalogUploadApp]
+
+            enum CodingKeys: String, CodingKey {
+                case deviceID = "device_id"
+                case apps
+            }
+        }
+        req.httpBody = try JSONEncoder().encode(Body(deviceID: deviceID, apps: apps))
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+        return try JSONDecoder().decode(ChildAppCatalogUploadResponse.self, from: data)
+    }
+
+    func catalogSearch(q: String) async throws -> [CatalogSearchResultDTO] {
+        var comps = URLComponents(string: "\(baseURL)/catalog/search")!
+        comps.queryItems = [URLQueryItem(name: "q", value: q)]
+        let (data, resp) = try await URLSession.shared.data(from: comps.url!)
+        guard let http = resp as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+        return try JSONDecoder().decode(CatalogSearchResponseDTO.self, from: data).results
+    }
+
+    @discardableResult
+    func uploadCatalogList(
+        deviceID: UUID,
+        aliasKey: UUID? = nil,
+        sourceDeviceID: UUID? = nil,
+        listName: String,
+        aliases: [String],
+        selectionBlobBase64: String,
+        appCount: Int
+    ) async throws -> CatalogListUploadResponse {
+        let url = URL(string: "\(baseURL)/child/catalog-list")!
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 22
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        struct Body: Codable {
+            let deviceID: UUID
+            let aliasKey: UUID?
+            let sourceDeviceID: UUID?
+            let listName: String
+            let aliases: [String]
+            let selectionBlobBase64: String
+            let appCount: Int
+
+            enum CodingKeys: String, CodingKey {
+                case deviceID = "device_id"
+                case aliasKey = "alias_key"
+                case sourceDeviceID = "source_device_id"
+                case listName = "list_name"
+                case aliases
+                case selectionBlobBase64 = "selection_blob_base64"
+                case appCount = "app_count"
+            }
+        }
+        req.httpBody = try JSONEncoder().encode(
+            Body(
+                deviceID: deviceID,
+                aliasKey: aliasKey,
+                sourceDeviceID: sourceDeviceID,
+                listName: listName,
+                aliases: aliases,
+                selectionBlobBase64: selectionBlobBase64,
+                appCount: appCount
+            )
+        )
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+        return try JSONDecoder().decode(CatalogListUploadResponse.self, from: data)
     }
 
     // MARK: - Saved list metadata
