@@ -278,6 +278,12 @@ struct HomeSettingsSheet: View {
                     }
 
                     NavigationLink {
+                        LockActivityReviewScreen()
+                    } label: {
+                        Label("Lock activity review", systemImage: "clock.arrow.circlepath")
+                    }
+
+                    NavigationLink {
                         TokenScreenshotImportView()
                     } label: {
                         Label("Auto-tag via screenshots", systemImage: "camera.viewfinder")

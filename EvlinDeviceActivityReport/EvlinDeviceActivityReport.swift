@@ -14,11 +14,15 @@ struct EvlinDeviceActivityReportExtension: DeviceActivityReportExtension {
         MetadataProbeReport { configuration in
             MetadataProbeReportView(configuration: configuration)
         }
+        LockActivityReviewReport { configuration in
+            LockActivityReviewView(configuration: configuration)
+        }
     }
 }
 
 extension DeviceActivityReport.Context {
     static let evlinMetadataProbe = Self("evlin.metadataProbe")
+    static let evlinLockReview = Self("evlin.lockReview")
 }
 
 struct MetadataProbeConfiguration: Codable {
@@ -397,5 +401,118 @@ struct MetadataProbeReportView: View {
         if hours > 0 { return "\(hours)h \(minutes)m" }
         if minutes > 0 { return "\(minutes)m \(seconds)s" }
         return "\(seconds)s"
+    }
+}
+
+struct LockReviewConfiguration: Codable {
+    struct Row: Codable, Identifiable {
+        var id: String { "\(bundleID)|\(displayName)" }
+        let displayName: String
+        let bundleID: String
+        let usageSeconds: TimeInterval
+    }
+
+    var generatedAt: Date = .now
+    var rows: [Row] = []
+    var lockedBundleCount: Int = 0
+}
+
+struct LockActivityReviewReport: DeviceActivityReportScene {
+    let context: DeviceActivityReport.Context = .evlinLockReview
+    let content: (LockReviewConfiguration) -> LockActivityReviewView
+
+    func makeConfiguration(
+        representing data: DeviceActivityResults<DeviceActivityData>
+    ) async -> LockReviewConfiguration {
+        let windows: [LockWindowRecord] = {
+            guard let data = UserDefaults(suiteName: "group.com.evlin.ios")?
+                .data(forKey: LockWindowStore.key)
+            else {
+                return []
+            }
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            return (try? decoder.decode([LockWindowRecord].self, from: data)) ?? []
+        }()
+        let lockedBundles = Set(LockReviewFilterHelper.lockedBundleIDs(from: windows))
+
+        var byBundle: [String: LockReviewConfiguration.Row] = [:]
+        for await activityData in data {
+            for await segment in activityData.activitySegments {
+                for await categoryActivity in segment.categories {
+                    for await appActivity in categoryActivity.applications {
+                        let app = appActivity.application
+                        let bundleID = app.bundleIdentifier ?? ""
+                        guard !bundleID.isEmpty, lockedBundles.contains(bundleID) else {
+                            continue
+                        }
+
+                        let displayName = app.localizedDisplayName ?? bundleID
+                        let duration = appActivity.totalActivityDuration
+                        if let existing = byBundle[bundleID] {
+                            byBundle[bundleID] = .init(
+                                displayName: existing.displayName,
+                                bundleID: bundleID,
+                                usageSeconds: existing.usageSeconds + duration
+                            )
+                        } else {
+                            byBundle[bundleID] = .init(
+                                displayName: displayName,
+                                bundleID: bundleID,
+                                usageSeconds: duration
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        var configuration = LockReviewConfiguration()
+        configuration.lockedBundleCount = lockedBundles.count
+        configuration.rows = byBundle.values.sorted { lhs, rhs in
+            if lhs.usageSeconds == rhs.usageSeconds {
+                return lhs.displayName.localizedCaseInsensitiveCompare(rhs.displayName) == .orderedAscending
+            }
+            return lhs.usageSeconds > rhs.usageSeconds
+        }
+        return configuration
+    }
+}
+
+struct LockActivityReviewView: View {
+    let configuration: LockReviewConfiguration
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Lock activity review")
+                .font(.headline)
+            Text("Best-effort review. Missing usage data is not proof the app went unused.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
+            if configuration.rows.isEmpty {
+                Text("No usage recorded for locked apps in this window. Screen Time aggregation can lag — this is not proof the apps went unused.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            ForEach(configuration.rows) { row in
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(row.displayName)
+                        .font(.subheadline.weight(.medium))
+                    Text("\(Int(row.usageSeconds.rounded()))s recently (best-effort)")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    if row.usageSeconds > 0 {
+                        Text("This app may not have been blocked — try refreshing Screen Time control / re-binding the app.")
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                    }
+                }
+                .padding(.vertical, 3)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

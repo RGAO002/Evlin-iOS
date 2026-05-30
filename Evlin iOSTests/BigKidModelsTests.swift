@@ -79,6 +79,7 @@ final class BigKidModelsTests: XCTestCase {
             id: UUID(),
             reason: "called sister mean names",
             displayReason: "You used words that hurt your sister's feelings.",
+            topicLabel: nil,
             videoId: ReflectionVideoDisplay.rickRollVideoId,
             videoTitle: "Why rest time matters for your brain",
             writingPrompt: "—",
@@ -89,7 +90,9 @@ final class BigKidModelsTests: XCTestCase {
             status: .pending,
             parentNote: nil,
             submittedAt: nil,
-            approvedAt: nil
+            approvedAt: nil,
+            parentRedoNote: nil,
+            lastNudgeAt: nil
         )
         let title = ReflectionVideoDisplay.cardTitle(for: r)
         XCTAssertFalse(title.lowercased().contains("brain"))
@@ -101,6 +104,7 @@ final class BigKidModelsTests: XCTestCase {
             id: UUID(),
             reason: "yelled at dad",
             displayReason: "You raised your voice at dinner.",
+            topicLabel: nil,
             videoId: ReflectionVideoDisplay.rickRollVideoId,
             videoTitle: "Cooling down when frustration shows up.",
             writingPrompt: "—",
@@ -111,7 +115,9 @@ final class BigKidModelsTests: XCTestCase {
             status: .pending,
             parentNote: nil,
             submittedAt: nil,
-            approvedAt: nil
+            approvedAt: nil,
+            parentRedoNote: nil,
+            lastNudgeAt: nil
         )
         XCTAssertEqual(
             ReflectionVideoDisplay.cardTitle(for: r),
@@ -124,6 +130,7 @@ final class BigKidModelsTests: XCTestCase {
             id: UUID(),
             reason: "x",
             displayReason: "You did something.",
+            topicLabel: nil,
             videoId: "abc123notrick",
             videoTitle: "Authentic server title",
             writingPrompt: "—",
@@ -134,7 +141,9 @@ final class BigKidModelsTests: XCTestCase {
             status: .pending,
             parentNote: nil,
             submittedAt: nil,
-            approvedAt: nil
+            approvedAt: nil,
+            parentRedoNote: nil,
+            lastNudgeAt: nil
         )
         XCTAssertEqual(ReflectionVideoDisplay.cardTitle(for: r), "Authentic server title")
     }

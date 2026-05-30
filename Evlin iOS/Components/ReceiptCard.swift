@@ -35,11 +35,28 @@ struct ReceiptCard: View {
             if let line = effectiveStateLine {
                 Text(line).font(.caption).foregroundStyle(.secondary)
             }
+            if showsHonestReceiptFooter {
+                Text(EvlinReceiptCopy.appliedOnKidDevice)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(.systemGray6))
         .cornerRadius(12)
+    }
+
+    /// Only successful lock-type receipts get the honest "applied on Kid's
+    /// iPhone" footer. Failures and pending receipts render their own copy.
+    private var showsHonestReceiptFooter: Bool {
+        switch state {
+        case .confirmedExact(let verb, _, _),
+             .confirmedFallback(let verb, _, _, _):
+            return verb == .shield || verb == .block
+        default:
+            return false
+        }
     }
 
     @ViewBuilder

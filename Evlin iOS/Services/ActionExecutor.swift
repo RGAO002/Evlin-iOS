@@ -74,6 +74,17 @@ final class ActionExecutor: @unchecked Sendable {
                         )
                     }
                 }
+                // Audit-only window log (best-effort, off the hot path). A
+                // write failure here must never affect the lock or receipt.
+                LockWindowStore.append(LockWindowRecord(
+                    recordKey: record.recordKey,
+                    displayName: record.displayName,
+                    bundleID: record.appTokens.isEmpty ? nil
+                        : (cmd.target.bundleID ?? LocalAliasStore.shared
+                            .primaryBundleID(forDisplayOrHint: record.displayName)),
+                    issuedAt: record.issuedAt,
+                    expiresAt: record.expiresAt
+                ))
                 let eff = await currentEffectiveState(forShieldRecord: record, cmd: cmd)
                 return buildConfirmReceipt(verb: .shield, cmd: cmd, record: record, effectiveState: eff)
             case .noOpShorterThanExisting, .noOpAlreadyPermanent:
@@ -102,6 +113,9 @@ final class ActionExecutor: @unchecked Sendable {
         }
     }
 
+    // Honest-receipt contract: parent ReceiptCard appends
+    // EvlinReceiptCopy.appliedOnKidDevice under the AckResult this builds.
+    // This builder must never encode an "Apple confirmed" style claim.
     private func buildConfirmReceipt(
         verb: AckVerb,
         cmd: LockCommand,
