@@ -19,6 +19,8 @@ import SwiftUI
 import FamilyControls
 import ManagedSettings
 import PhotosUI
+import ReplayKit
+import CoreImage
 @preconcurrency import Vision
 
 struct TokenScreenshotImportView: View {
@@ -43,10 +45,20 @@ struct TokenScreenshotImportView: View {
     @State private var rawOCRLines: [String] = []
     @State private var diagnosticVisible: Bool = false
 
-    /// Pixel size of each capsule row when rendered. Tightening helps fit more
-    /// per screen — fewer screenshots — at the cost of OCR confidence.
-    private let rowFontSize: CGFloat = 16
-    private let rowVerticalPadding: CGFloat = 6
+    /// Font size of each chip's text. Smaller = more chips per screen = fewer
+    /// screenshots, but below ~8pt Vision starts SILENTLY dropping names (a
+    /// dropped name = a token with no mapping). Tunable live so you can find the
+    /// smallest size that still OCRs cleanly on this device.
+    @State private var chipFontSize: Double = 9
+    /// Horizontal/vertical gap between chips. Too tight = Vision merges adjacent
+    /// names into garbage; too loose = wasted space. Tunable live.
+    @State private var chipSpacing: Double = 7
+
+    /// Full-screen clean capture mode: shows ONLY the chips (no instructions,
+    /// nav bar, controls, or diagnostics) so the system screenshot contains no
+    /// stray text the parser could mistake for an "idx." marker. This is the fix
+    /// for OCR picking up the numbered instructions / footer chrome.
+    @State private var captureMode = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -56,6 +68,7 @@ struct TokenScreenshotImportView: View {
         }
         .navigationTitle("Auto-tag (screenshot)")
         .navigationBarTitleDisplayMode(.inline)
+        .fullScreenCover(isPresented: $captureMode) { captureScreen }
         .onAppear { snapshotOrdering() }
         .onReceive(NotificationCenter.default.publisher(
             for: UIApplication.userDidTakeScreenshotNotification
@@ -76,7 +89,7 @@ struct TokenScreenshotImportView: View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Auto-tag via system screenshots")
                 .font(.headline)
-            Text("1. Scroll through the list below.\n2. Take iOS screenshots (Volume + Power) covering every row.\n3. Tap **Import screenshots** to OCR them.")
+            Text("Tap **Open clean capture screen**, screenshot the chips there (Volume+Power or Back Tap), tap Done, then **Import screenshots**. Capture mode hides all text except the app chips so OCR can't pick up stray markers. Tune Font/Gap to pack more per screen.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             HStack {
@@ -96,44 +109,88 @@ struct TokenScreenshotImportView: View {
 
     private var list: some View {
         ScrollView {
-            LazyVStack(spacing: 4) {
+            // Flowing layout: chips packed left-to-right, wrapping when full —
+            // many per visual row instead of one row each. White background so
+            // the system screenshot has clean high-contrast pixels for OCR.
+            FlowLayout(spacing: chipSpacing) {
                 ForEach(Array(orderedApps.enumerated()), id: \.offset) { idx, tok in
-                    capsule(idx: idx, token: tok)
-                        .padding(.horizontal, 12)
+                    compactChip(idx: idx, token: tok)
                 }
             }
-            .padding(.vertical, 8)
+            .padding(8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.white)
         }
     }
 
-    private func capsule(idx: Int, token: ApplicationToken) -> some View {
-        // Tight layout: idx + icon + name visually packed so Vision merges
-        // them into ONE text observation. Wide gaps cause Vision to fragment
-        // — empirically `[2]` ended up on its own line, name on next.
-        // Format `idx.` (period) is OCR-safer than `[idx]` (Vision often eats
-        // brackets) but the parser is format-agnostic anyway via state machine.
-        HStack(spacing: 6) {
+    private func compactChip(idx: Int, token: ApplicationToken) -> some View {
+        // `idx.` is the correlation anchor (maps OCR text → token). NO icon
+        // (.titleOnly) — the icon wastes width and is useless for OCR. Each chip
+        // is its own natural-width unit so long names don't truncate; FlowLayout
+        // wraps them. Small gap inside so Vision reads "idx." + name together.
+        HStack(spacing: 1) {
             Text("\(idx).")
-                .font(.system(size: rowFontSize, weight: .heavy, design: .monospaced))
+                .font(.system(size: chipFontSize, weight: .heavy, design: .monospaced))
                 .foregroundStyle(.black)
             Label(token)
-                .labelStyle(.titleAndIcon)
-                .font(.system(size: rowFontSize, weight: .semibold))
+                .labelStyle(.titleOnly)
+                .font(.system(size: chipFontSize, weight: .semibold))
                 .foregroundStyle(.black)
-            Spacer()
+                .lineLimit(1)
+                .fixedSize()
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, rowVerticalPadding)
-        .background(Color.white)
-        .clipShape(RoundedRectangle(cornerRadius: 6))
-        .overlay(
-            RoundedRectangle(cornerRadius: 6)
-                .stroke(Color.black.opacity(0.08), lineWidth: 0.5)
-        )
+    }
+
+    /// Clean full-screen capture surface: ONLY chips on white. No numbered
+    /// instructions, no nav bar, no footer/steppers, no diagnostic echo — so a
+    /// system screenshot here contains nothing the parser can mistake for a
+    /// marker. The only chrome is a "Done" button (no digits → parser-safe).
+    private var captureScreen: some View {
+        ZStack(alignment: .topTrailing) {
+            Color.white.ignoresSafeArea()
+            ScrollView {
+                FlowLayout(spacing: chipSpacing) {
+                    ForEach(Array(orderedApps.enumerated()), id: \.offset) { idx, tok in
+                        compactChip(idx: idx, token: tok)
+                    }
+                }
+                .padding(.horizontal, 6)
+                .padding(.top, 8)
+                .padding(.bottom, 40)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            Button("Done") { captureMode = false }
+                .font(.caption2.weight(.semibold))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(.ultraThinMaterial, in: Capsule())
+                .padding(8)
+        }
     }
 
     private var controls: some View {
         VStack(spacing: 8) {
+            // Live density tuning. Smaller font + tighter gap = fewer
+            // screenshots, but watch the diagnostic: if names start dropping or
+            // garbling after Import, you've gone past this device's OCR floor.
+            HStack(spacing: 16) {
+                Stepper("Font \(Int(chipFontSize))pt", value: $chipFontSize, in: 5...18, step: 1)
+                    .font(.caption)
+                Stepper("Gap \(Int(chipSpacing))", value: $chipSpacing, in: 2...16, step: 1)
+                    .font(.caption)
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 6)
+
+            Button {
+                captureMode = true
+            } label: {
+                Label("Open clean capture screen → screenshot there", systemImage: "rectangle.dashed")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .padding(.horizontal, 12)
+
             if processing {
                 ProgressView("Running OCR…")
                     .padding(.vertical, 6)
@@ -298,51 +355,43 @@ struct TokenScreenshotImportView: View {
     ///      longer real word (e.g. `"G Google"` → `"Google"`, `"in LinkedIn"`
     ///      → `"LinkedIn"`).
     private func parsePairs(from lines: [String]) -> [(Int, String)] {
-        // Match leading digits with any wrapping punctuation: `[12]`, `(12)`,
-        // `12.`, `12:`, `12)`, `12]`, or just `12 Foo`. Capture digits + tail.
-        let leadDigits = try? NSRegularExpression(
-            pattern: #"^[\[\(\{\s]*(\d{1,3})[\]\)\}\.\:\;,\s]*(.*)$"#
-        )
+        // Stream parser. Join all OCR lines, then find every "<digits><delim>"
+        // marker. A chip renders as "idx.name"; in dense flow mode Vision often
+        // packs several chips into ONE observation ("1.Insta 2.TikTok 3.Roblox"),
+        // and in sparse mode it may fragment one chip across lines. Joining +
+        // scanning for markers handles BOTH: each marker's name = the text
+        // between it and the next marker. Requiring a delimiter right after the
+        // digits avoids matching digits embedded in a name (e.g. "1Password").
+        let text = lines.joined(separator: " ")
+        // Delimiter restricted to "." / ")" / "]" — chips render "idx." so "."
+        // is the real one; ")" "]" tolerate OCR misreads. Deliberately NOT ":"
+        // (the status-bar clock "9:41" would otherwise register as marker 9) and
+        // NOT bare whitespace (battery "47" etc.).
+        guard let re = try? NSRegularExpression(pattern: #"(\d{1,3})\s*[.)\]]"#) else {
+            return []
+        }
+        let ns = text as NSString
+        let markers = re.matches(in: text, range: NSRange(location: 0, length: ns.length))
 
         var out: [(Int, String)] = []
         var seen = Set<Int>()
-        var currentIdx: Int? = nil
-        var currentParts: [String] = []
-
-        func flush() {
-            defer { currentIdx = nil; currentParts = [] }
-            guard let idx = currentIdx, !seen.contains(idx) else { return }
-            let combined = currentParts.joined(separator: " ")
+        for (i, m) in markers.enumerated() {
+            guard let idx = Int(ns.substring(with: m.range(at: 1))),
+                  idx >= 0, idx < orderedApps.count, !seen.contains(idx) else { continue }
+            let nameStart = m.range.location + m.range.length
+            let nameEnd = (i + 1 < markers.count) ? markers[i + 1].range.location : ns.length
+            guard nameEnd > nameStart else { continue }
+            var name = ns.substring(with: NSRange(location: nameStart, length: nameEnd - nameStart))
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            let cleaned = stripLeadingIconGlyph(combined)
-            guard !cleaned.isEmpty else { return }
-            seen.insert(idx)
-            out.append((idx, cleaned))
-        }
-
-        for raw in lines {
-            let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !line.isEmpty else { continue }
-
-            let range = NSRange(line.startIndex..., in: line)
-            if let re = leadDigits,
-               let m = re.firstMatch(in: line, range: range),
-               m.numberOfRanges == 3,
-               let idxR = Range(m.range(at: 1), in: line),
-               let restR = Range(m.range(at: 2), in: line),
-               let idx = Int(line[idxR]),
-               idx < orderedApps.count {
-                flush()
-                currentIdx = idx
-                let rest = String(line[restR]).trimmingCharacters(in: .whitespaces)
-                if !rest.isEmpty { currentParts.append(rest) }
-            } else if currentIdx != nil {
-                currentParts.append(line)
+            name = stripLeadingIconGlyph(name)
+            // Guard against OCR merging trailing chrome into the last name.
+            if name.count > 40 {
+                name = String(name.prefix(40)).trimmingCharacters(in: .whitespacesAndNewlines)
             }
-            // else: header / footer / unrelated chrome — ignore.
+            guard !name.isEmpty else { continue }
+            seen.insert(idx)
+            out.append((idx, name))
         }
-        flush()
-
         return out.sorted { $0.0 < $1.0 }
     }
 
@@ -358,7 +407,14 @@ struct TokenScreenshotImportView: View {
     }
 
     private func ocrLines(in image: UIImage) async -> [String] {
-        guard let cg = image.cgImage else { return [] }
+        // Two levers that lower the readable-font floor without changing layout:
+        //   1. Upscale the screenshot ~2x before OCR — Vision's recognizer does
+        //      measurably better on larger glyphs, recovering misreads like
+        //      "iTunes" → "¡Tunes" that happen at tiny sizes.
+        //   2. minimumTextHeight ≈ 0 so Vision doesn't SKIP small text outright
+        //      (its default threshold drops text below ~1/32 of image height).
+        let prepared = upscaledForOCR(image)
+        guard let cg = prepared.cgImage else { return [] }
         return await withCheckedContinuation { (cont: CheckedContinuation<[String], Never>) in
             let req = VNRecognizeTextRequest { request, _ in
                 let lines = (request.results as? [VNRecognizedTextObservation])?
@@ -368,6 +424,7 @@ struct TokenScreenshotImportView: View {
             req.recognitionLevel = .accurate
             req.usesLanguageCorrection = false
             req.recognitionLanguages = ["en-US", "zh-Hans", "zh-Hant"]
+            req.minimumTextHeight = 0.005
             DispatchQueue.global(qos: .userInitiated).async {
                 let handler = VNImageRequestHandler(cgImage: cg, options: [:])
                 do {
@@ -376,6 +433,25 @@ struct TokenScreenshotImportView: View {
                     cont.resume(returning: [])
                 }
             }
+        }
+    }
+
+    /// Upscale a screenshot ~2x (high interpolation, capped for memory) before
+    /// OCR. No new real detail, but Vision recognizes larger glyphs better, which
+    /// lifts accuracy on very small fonts.
+    private func upscaledForOCR(_ image: UIImage) -> UIImage {
+        guard let cg = image.cgImage else { return image }
+        let srcW = CGFloat(cg.width)
+        let srcH = CGFloat(cg.height)
+        let factor = min(2.0, 4096.0 / max(srcW, srcH))
+        guard factor > 1.05 else { return image }
+        let size = CGSize(width: srcW * factor, height: srcH * factor)
+        let fmt = UIGraphicsImageRendererFormat()
+        fmt.scale = 1
+        fmt.opaque = true
+        return UIGraphicsImageRenderer(size: size, format: fmt).image { ctx in
+            ctx.cgContext.interpolationQuality = .high
+            image.draw(in: CGRect(origin: .zero, size: size))
         }
     }
 }

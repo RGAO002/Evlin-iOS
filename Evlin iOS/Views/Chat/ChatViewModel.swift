@@ -176,6 +176,10 @@ class ChatViewModel: ObservableObject {
         guard let url = URL(string: "\(apiClient.baseURL)/parent/chat/answer-question") else {
             return
         }
+        // The answered question is no longer actionable. Clear it immediately;
+        // the response may replace it with a proposal card.
+        pendingPlanArchCard = nil
+        pendingPlanArchCardQueue = []
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -185,12 +189,25 @@ class ChatViewModel: ObservableObject {
         do {
             let (data, _) = try await URLSession.shared.data(for: req)
             let response = try JSONDecoder().decode(APIClient.ChatResponse.self, from: data)
-            await MainActor.run {
-                self.processResponse(response, userMessage: "")
-            }
+            self.handleAnswerQuestionResponse(response, rawData: data)
         } catch {
             print("answer-question failed: \(error)")
         }
+    }
+
+    /// `/parent/chat/answer-question` returns the same response envelope as
+    /// `/parent/chat`, including plan-arch cards in raw `card_payload(s)`.
+    /// Keep that card parsing path identical so follow-up answers can produce
+    /// reflection/task/phone confirmation cards.
+    func handleAnswerQuestionResponse(_ response: APIClient.ChatResponse, rawData: Data) {
+        lastResponseViaFastpath = response.viaFastpath ?? false
+        pendingPlanArchCard = nil
+        pendingPlanArchCardQueue = []
+        if tryHandlePlanArchCard(from: rawData, message: response.message) {
+            isThinking = false
+            return
+        }
+        processResponse(response, userMessage: "")
     }
 
     /// Strategy-agent T11.11 — POST 👍/👎 feedback for an assistant turn.

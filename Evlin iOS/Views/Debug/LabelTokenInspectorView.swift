@@ -74,6 +74,19 @@ struct LabelTokenInspectorView: View {
     @State private var drawHierarchyResult: String = ""
     @State private var drawHierarchyImage: UIImage? = nil
 
+    /// Stage 9: SELF-CONTAINED drawHierarchy probe. The flaw in Stage 8 is that
+    /// it captures the whole window but renders no Label itself, so the naked
+    /// Label(token) rows (a different section) are usually scrolled off-screen
+    /// at capture time → the framebuffer grab contains no app name → false
+    /// "blank". Stage 9 renders Label(firstApp) RIGHT NEXT TO the button (always
+    /// on screen), measures its global frame, captures the composited window,
+    /// crops to that frame, OCRs the crop, and shows the crop so the result is
+    /// unambiguous: name visible in crop → framebuffer path works (OCR/3rd-party
+    /// OCR viable); name area blank/redacted → compositor strips it (dead end).
+    @State private var stage9Result: String = ""
+    @State private var stage9Image: UIImage? = nil
+    @State private var stage9LabelFrame: CGRect = .zero
+
     private var apps: [ApplicationToken] {
         Array(screenTimeManager.selectedApps.applicationTokens)
     }
@@ -197,6 +210,73 @@ struct LabelTokenInspectorView: View {
                             .scaledToFit()
                             .frame(maxHeight: 200)
                             .clipShape(RoundedRectangle(cornerRadius: 6))
+                    }
+                }
+            }
+
+            // Stage 9: SELF-CONTAINED drawHierarchy probe — renders the Label
+            // right here so it's guaranteed on-screen, then captures + crops + OCRs.
+            if let firstApp = apps.first {
+                Section("Self-contained drawHierarchy probe (Stage 9)") {
+                    Text("Stage 8 captures the window but renders no Label, so the name is usually scrolled away → false blank. This renders Label(token) for the first selected app RIGHT BELOW (always on screen), captures the composited window, crops to this label, OCRs it, and shows the crop. Name visible in crop → framebuffer capture works (OCR / 3rd-party OCR viable). Name area blank/redacted → compositor strips it (dead end).")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    // The label we will try to capture. White bg + black text for
+                    // clean OCR. GeometryReader records its global frame so the
+                    // probe can crop the window capture down to exactly this view.
+                    Label(firstApp)
+                        .labelStyle(.titleAndIcon)
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(.black)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color.white)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .overlay(
+                            GeometryReader { geo in
+                                Color.clear
+                                    .onAppear { stage9LabelFrame = geo.frame(in: .global) }
+                                    .onChange(of: geo.frame(in: .global)) { _, newFrame in
+                                        stage9LabelFrame = newFrame
+                                    }
+                            }
+                        )
+
+                    Button {
+                        runSelfContainedDrawHierarchyProbe()
+                    } label: {
+                        Label("Capture THIS label → crop → OCR", systemImage: "viewfinder.rectangular")
+                    }
+                    .buttonStyle(.borderedProminent)
+
+                    if !stage9Result.isEmpty {
+                        Text(stage9Result)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(
+                                stage9Result.hasPrefix("PASS") ? .green
+                                    : (stage9Result.hasPrefix("STRIPPED") ? .red : .orange)
+                            )
+                            .padding(8)
+                            .background(Color(.systemGray6))
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                    }
+
+                    if let img = stage9Image {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Captured crop — eyeball this:")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                            Image(uiImage: img)
+                                .resizable()
+                                .scaledToFit()
+                                .frame(maxHeight: 120)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 4)
+                                        .stroke(Color.orange, lineWidth: 1)
+                                )
+                        }
                     }
                 }
             }
@@ -905,6 +985,89 @@ struct LabelTokenInspectorView: View {
                 : "PASS: OCR found \(lines.count) text lines\n\(partsJoined.prefix(500))"
         } else {
             drawHierarchyResult = "UNKNOWN: \(image.size.width)x\(image.size.height) image, 0 OCR lines. Check snapshot image below — if Label(token) is visually present but OCR found nothing, text rendering may be in a protected layer."
+        }
+    }
+
+    // MARK: - Stage 9: self-contained drawHierarchy probe
+
+    /// Captures the composited window (framebuffer path, like a screenshot),
+    /// crops to the Label(token) rendered in this same section (guaranteed
+    /// on-screen via stage9LabelFrame), and OCRs the crop. Removes Stage 8's
+    /// flaw where the label was usually scrolled out of the captured frame.
+    @MainActor
+    private func runSelfContainedDrawHierarchyProbe() {
+        stage9Result = ""
+        stage9Image = nil
+
+        guard stage9LabelFrame != .zero,
+              stage9LabelFrame.width > 1, stage9LabelFrame.height > 1 else {
+            stage9Result = "FAIL: label frame not measured (\(stage9LabelFrame)). Scroll so the white label above is fully visible, then retry."
+            return
+        }
+
+        guard let scene = UIApplication.shared.connectedScenes
+            .compactMap({ $0 as? UIWindowScene })
+            .first(where: { $0.activationState == .foregroundActive })
+            ?? UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first,
+              let window = scene.windows.first(where: { $0.isKeyWindow }) ?? scene.windows.first
+        else {
+            stage9Result = "FAIL: no key window"
+            return
+        }
+
+        // Composited-framebuffer capture of the whole window.
+        let scale = window.screen.scale
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = scale
+        format.opaque = true
+        let renderer = UIGraphicsImageRenderer(bounds: window.bounds, format: format)
+        let full = renderer.image { _ in
+            window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+        }
+
+        guard let fullCG = full.cgImage else {
+            stage9Result = "FAIL: no CGImage from window capture"
+            return
+        }
+
+        // Crop to the label's global frame (points → pixels). Clamp to image bounds.
+        let imgW = CGFloat(fullCG.width)
+        let imgH = CGFloat(fullCG.height)
+        var cropRect = CGRect(
+            x: stage9LabelFrame.origin.x * scale,
+            y: stage9LabelFrame.origin.y * scale,
+            width: stage9LabelFrame.width * scale,
+            height: stage9LabelFrame.height * scale
+        ).integral
+        cropRect = cropRect.intersection(CGRect(x: 0, y: 0, width: imgW, height: imgH))
+
+        guard !cropRect.isNull, cropRect.width > 1, cropRect.height > 1,
+              let cropCG = fullCG.cropping(to: cropRect) else {
+            stage9Image = full
+            stage9Result = "FAIL: crop out of bounds (frame \(stage9LabelFrame), img \(Int(imgW))x\(Int(imgH))). Showing full capture instead."
+            return
+        }
+
+        stage9Image = UIImage(cgImage: cropCG, scale: scale, orientation: .up)
+
+        // OCR the cropped region only.
+        let req = VNRecognizeTextRequest()
+        req.recognitionLevel = .accurate
+        req.usesLanguageCorrection = false
+        let handler = VNImageRequestHandler(cgImage: cropCG, options: [:])
+        do {
+            try handler.perform([req])
+        } catch {
+            stage9Result = "FAIL: OCR error \(error.localizedDescription) — eyeball the crop below anyway."
+            return
+        }
+        let lines = (req.results as? [VNRecognizedTextObservation])?
+            .compactMap { $0.topCandidates(1).first?.string } ?? []
+
+        if lines.isEmpty {
+            stage9Result = "STRIPPED?: captured the crop but OCR found 0 text. EYEBALL the crop below — if you SEE the app name, OCR just missed it (a 3rd-party OCR may help). If the name area is blank/redacted, the compositor strips Label(token) → dead end (same as the DAR screenshot mask)."
+        } else {
+            stage9Result = "PASS: OCR read the rendered Label(token): \"\(lines.joined(separator: " | ").prefix(200))\". Framebuffer capture is NOT stripped here → render+OCR (incl. 3rd-party) is viable for name recovery."
         }
     }
 }

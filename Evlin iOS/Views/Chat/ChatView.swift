@@ -4,8 +4,10 @@ struct ChatView: View {
     @EnvironmentObject var apiClient: APIClient
     @Environment(ParentReflectionFixtureStore.self) private var reflectionStore
     @StateObject private var viewModel = ChatViewModel()
+    @State private var keyboardOverlapHeight: CGFloat = 0
     var isPreview = false
     var activeChild: ChildProfile? = nil
+    private let bottomAnchorID = "chat-bottom-anchor"
 
     /// Map `viewModel.childName` back to a `ChildProfile.id` so we can
     /// clear / reset the parent-side reflection fixture store when the
@@ -18,7 +20,41 @@ struct ChatView: View {
 
 
     var body: some View {
-        VStack(spacing: 0) {
+        GeometryReader { geometry in
+            content
+                .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillChangeFrameNotification)) { notification in
+                    let update = keyboardUpdate(from: notification, viewFrame: geometry.frame(in: .global))
+                    let timing = Self.keyboardLiftTiming(
+                        keyboardOverlap: update.overlap,
+                        tabInset: EvlinTabBar.visibleHeight,
+                        duration: update.duration
+                    )
+                    withAnimation(
+                        Self.keyboardAnimation(duration: timing.activeDuration, curveRawValue: update.curveRawValue)
+                            .delay(timing.delay)
+                    ) {
+                        keyboardOverlapHeight = update.overlap
+                    }
+                }
+                .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { notification in
+                    let update = keyboardUpdate(from: notification, viewFrame: geometry.frame(in: .global))
+                    let timing = Self.keyboardDropTiming(
+                        currentKeyboardOverlap: keyboardOverlapHeight,
+                        tabInset: EvlinTabBar.visibleHeight,
+                        duration: update.duration
+                    )
+                    withAnimation(
+                        Self.keyboardAnimation(duration: timing.activeDuration, curveRawValue: update.curveRawValue)
+                            .delay(timing.delay)
+                    ) {
+                        keyboardOverlapHeight = 0
+                    }
+                }
+        }
+    }
+
+    private var content: some View {
+        ZStack(alignment: .bottom) {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: Spacing.xxxl) {
@@ -244,44 +280,34 @@ struct ChatView: View {
                                 .transition(.opacity.combined(with: .scale))
                             }
                         }
+
+                        Color.clear
+                            .frame(height: 1)
+                            .id(bottomAnchorID)
                     }
                     .padding(.horizontal, Spacing.xl)
                     .padding(.top, Spacing.md)
-                    .padding(.bottom, 160)
+                    .padding(.bottom, Self.messageListBottomPadding())
                 }
                 .onAppear {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                        if let last = viewModel.messages.last {
-                            proxy.scrollTo(last.id, anchor: .bottom)
-                        }
+                        proxy.scrollTo(bottomAnchorID, anchor: .bottom)
                     }
                 }
                 .onChange(of: viewModel.messages.count) { _, _ in
-                    if let last = viewModel.messages.last {
-                        withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
-                    }
+                    withAnimation { proxy.scrollTo(bottomAnchorID, anchor: .bottom) }
+                }
+                .onChange(of: viewModel.pendingPlanArchCard?.planToken) { _, _ in
+                    withAnimation { proxy.scrollTo(bottomAnchorID, anchor: .bottom) }
+                }
+                .onChange(of: viewModel.currentCard?.0.rawValue) { _, _ in
+                    withAnimation { proxy.scrollTo(bottomAnchorID, anchor: .bottom) }
                 }
             }
 
-            // Quick prompts + Input bar
-            VStack(spacing: Spacing.lg) {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: Spacing.md) {
-                        ForEach(viewModel.quickPrompts, id: \.text) { prompt in
-                            QuickPromptChip(icon: prompt.icon, text: prompt.text) {
-                                viewModel.sendQuickPrompt(prompt)
-                            }
-                        }
-                    }
-                    .padding(.horizontal, Spacing.xl)
-                }
-
-                ChatInputBar(text: $viewModel.inputText) {
-                    viewModel.sendMessage()
-                }
-            }
-            .padding(.top, Spacing.md)
-            .background(Color.evSurfaceContainer)
+            composerPanel
+                .background(Color.evSurfaceContainer)
+                .padding(.bottom, Self.composerBottomInset(keyboardOverlap: keyboardOverlapHeight))
         }
         .background(Color.evSurfaceContainerLow)
         .onAppear {
@@ -316,6 +342,105 @@ struct ChatView: View {
                 }
             )
         }
+    }
+
+    private var composerPanel: some View {
+        // Quick prompts + Input bar. This panel's background must wrap only
+        // the visible controls; bottom lift is applied outside this view so it
+        // cannot create a blank white spacer below the input.
+        VStack(spacing: Spacing.lg) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: Spacing.md) {
+                    ForEach(viewModel.quickPrompts, id: \.text) { prompt in
+                        QuickPromptChip(icon: prompt.icon, text: prompt.text) {
+                            viewModel.sendQuickPrompt(prompt)
+                        }
+                    }
+                }
+                .padding(.horizontal, Spacing.xl)
+            }
+
+            ChatInputBar(text: $viewModel.inputText) {
+                viewModel.sendMessage()
+            }
+        }
+        .padding(.top, Spacing.md)
+    }
+
+    static func composerBottomInset(
+        keyboardOverlap: CGFloat,
+        tabInset: CGFloat = EvlinTabBar.visibleHeight
+    ) -> CGFloat {
+        max(tabInset, keyboardOverlap)
+    }
+
+    static func messageListBottomPadding(
+        composerPanelHeight: CGFloat = 148,
+        tabInset: CGFloat = EvlinTabBar.visibleHeight,
+        extraClearance: CGFloat = 28
+    ) -> CGFloat {
+        composerPanelHeight + tabInset + extraClearance
+    }
+
+    static func keyboardOverlap(keyboardFrameEnd: CGRect, viewFrame: CGRect) -> CGFloat {
+        max(0, viewFrame.maxY - keyboardFrameEnd.minY)
+    }
+
+    static func keyboardLiftDelay(keyboardOverlap: CGFloat, tabInset: CGFloat, duration: Double) -> Double {
+        keyboardLiftTiming(keyboardOverlap: keyboardOverlap, tabInset: tabInset, duration: duration).delay
+    }
+
+    static func keyboardLiftTiming(
+        keyboardOverlap: CGFloat,
+        tabInset: CGFloat,
+        duration: Double
+    ) -> (delay: Double, activeDuration: Double) {
+        guard keyboardOverlap > tabInset, duration > 0 else { return (delay: 0, activeDuration: 0.01) }
+        let delay = duration * Double(tabInset / keyboardOverlap)
+        return (delay: delay, activeDuration: max(0.01, duration - delay))
+    }
+
+    static func keyboardDropTiming(
+        currentKeyboardOverlap: CGFloat,
+        tabInset: CGFloat,
+        duration: Double
+    ) -> (delay: Double, activeDuration: Double) {
+        guard currentKeyboardOverlap > tabInset, duration > 0 else { return (delay: 0, activeDuration: 0.01) }
+        let activeDuration = duration * Double((currentKeyboardOverlap - tabInset) / currentKeyboardOverlap)
+        return (delay: 0, activeDuration: max(0.01, activeDuration))
+    }
+
+    static func keyboardAnimation(duration: Double, curveRawValue: UInt) -> Animation {
+        let effectiveDuration = max(duration, 0.01)
+        switch UIView.AnimationCurve(rawValue: Int(curveRawValue)) {
+        case .easeIn:
+            return .easeIn(duration: effectiveDuration)
+        case .easeOut:
+            return .easeOut(duration: effectiveDuration)
+        case .linear:
+            return .linear(duration: effectiveDuration)
+        default:
+            return .easeInOut(duration: effectiveDuration)
+        }
+    }
+
+    private func keyboardUpdate(from notification: Notification, viewFrame: CGRect) -> (overlap: CGFloat, duration: Double, curveRawValue: UInt) {
+        let frame = notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect ?? .zero
+        let duration = notification.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double ?? 0.25
+        let rawCurve = notification.userInfo?[UIResponder.keyboardAnimationCurveUserInfoKey]
+        let curveRawValue: UInt
+        if let rawCurve = rawCurve as? UInt {
+            curveRawValue = rawCurve
+        } else if let rawCurve = rawCurve as? Int {
+            curveRawValue = UInt(rawCurve)
+        } else {
+            curveRawValue = UInt(UIView.AnimationCurve.easeInOut.rawValue)
+        }
+        return (
+            overlap: Self.keyboardOverlap(keyboardFrameEnd: frame, viewFrame: viewFrame),
+            duration: duration,
+            curveRawValue: curveRawValue
+        )
     }
 
     // MARK: - Editorial Header

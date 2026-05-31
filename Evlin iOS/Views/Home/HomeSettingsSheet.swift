@@ -241,6 +241,12 @@ struct HomeSettingsSheet: View {
                     }
 
                     NavigationLink {
+                        ShieldHarvestProbeView()
+                    } label: {
+                        Label("ShieldConfig harvest (E1)", systemImage: "lock.doc")
+                    }
+
+                    NavigationLink {
                         DeviceActivityReportMetadataProbeView()
                     } label: {
                         Label("DeviceActivityReport metadata test", systemImage: "chart.bar.doc.horizontal")
@@ -274,6 +280,24 @@ struct HomeSettingsSheet: View {
                         AliasE2ETestView()
                     } label: {
                         Label("Alias E2E test (start here)", systemImage: "checkmark.seal")
+                    }
+
+                    NavigationLink {
+                        QrSpikeDebugView()
+                    } label: {
+                        Label("QR-over-pixel DAR spike", systemImage: "qrcode.viewfinder")
+                    }
+
+                    NavigationLink {
+                        ChildAppCatalogDebugView()
+                    } label: {
+                        Label("Child app catalog cross-device test", systemImage: "iphone.gen3.radiowaves.left.and.right")
+                    }
+
+                    NavigationLink {
+                        ChildPickerSpikeView()
+                    } label: {
+                        Label(".child parent picker spike", systemImage: "person.2.badge.gearshape")
                     }
 
                     if appCount > 0 || catCount > 0 {

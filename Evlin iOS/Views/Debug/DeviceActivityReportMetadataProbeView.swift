@@ -1,6 +1,8 @@
 import DeviceActivity
 import FamilyControls
 import SwiftUI
+import UIKit
+import Security
 
 struct DeviceActivityReportMetadataProbeView: View {
     enum ReportScope: String, CaseIterable, Identifiable {
@@ -15,6 +17,8 @@ struct DeviceActivityReportMetadataProbeView: View {
     @EnvironmentObject private var screenTimeManager: ScreenTimeManager
     @State private var refreshID = UUID()
     @State private var scope: ReportScope = .allActivityNoUsers
+    @State private var pasteboardProbeResult: String = ""
+    @State private var keychainProbeResult: String = ""
 
     private var interval: DateInterval {
         let end = Date()
@@ -107,6 +111,50 @@ struct DeviceActivityReportMetadataProbeView: View {
                 } label: {
                     Label("Refresh report", systemImage: "arrow.clockwise")
                 }
+
+                // DAR-export probe (PASTEBOARD channel). The report extension
+                // writes "EVLIN_DAR_PB apps=N first=<bundleID> ..." to the general
+                // pasteboard when it renders below. If this read shows that marker
+                // — especially a real bundleID — the pasteboard crosses the DAR
+                // sandbox and we have an export channel for the one datum nothing
+                // else gives us. Order: let the report render first, THEN read.
+                Button {
+                    let s = UIPasteboard.general.string ?? ""
+                    if s.contains("EVLIN_DAR_PB") {
+                        pasteboardProbeResult = "✅ CROSSED — \(s)"
+                    } else if s.isEmpty {
+                        pasteboardProbeResult = "✗ pasteboard empty (render the report below first, then read)"
+                    } else {
+                        pasteboardProbeResult = "✗ no DAR marker. Pasteboard holds: \(s.prefix(120))"
+                    }
+                } label: {
+                    Label("Read pasteboard (DAR export probe)", systemImage: "doc.on.clipboard")
+                }
+
+                if !pasteboardProbeResult.isEmpty {
+                    Text(pasteboardProbeResult)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(pasteboardProbeResult.hasPrefix("✅") ? .green : .orange)
+                        .textSelection(.enabled)
+                }
+
+                // DAR-export probe (KEYCHAIN channel). The report extension writes
+                // the marker to a shared keychain access group. If this read
+                // returns it, securityd crossed the DAR sandbox. Also check the
+                // "KC:SecItemAdd=N" suffix in the report's write-status below —
+                // 0 means the DAR write itself succeeded (and proves DAR ran).
+                Button {
+                    keychainProbeResult = readKeychainProbe()
+                } label: {
+                    Label("Read keychain (DAR export probe)", systemImage: "key.fill")
+                }
+
+                if !keychainProbeResult.isEmpty {
+                    Text(keychainProbeResult)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(keychainProbeResult.hasPrefix("✅") ? .green : .orange)
+                        .textSelection(.enabled)
+                }
             } header: {
                 Text("How to read this")
             }
@@ -125,6 +173,24 @@ struct DeviceActivityReportMetadataProbeView: View {
         .onAppear {
             screenTimeManager.refreshAuthorizationStatus()
         }
+    }
+
+    private func readKeychainProbe() -> String {
+        let group = "D9FM36P37F.com.evlin.darbridge"
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrAccount as String: "evlin.dar.export",
+            kSecAttrAccessGroup as String: group,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        var out: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &out)
+        if status == errSecSuccess, let data = out as? Data,
+           let s = String(data: data, encoding: .utf8) {
+            return "✅ CROSSED — \(s)"
+        }
+        return "✗ SecItemCopyMatching=\(status) (no item / blocked). Render the report below first, then read."
     }
 }
 

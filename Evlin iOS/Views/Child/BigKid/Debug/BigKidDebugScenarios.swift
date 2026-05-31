@@ -131,6 +131,7 @@ enum BigKidDebugScenario: String, CaseIterable, Identifiable {
 struct BigKidDebugScenarioMenu: View {
     @Binding var current: BigKidDebugScenario
     let onSelect: (BigKidDebugScenario) -> Void
+    var onCatalog: (() -> Void)? = nil
     /// Optional handler for the "Reset tasks" action button. Hits the
     /// backend's `/parent/_debug/reset/{child_id}` endpoint and refreshes
     /// the poller so the kid sees fresh fixture tasks again.
@@ -148,6 +149,12 @@ struct BigKidDebugScenarioMenu: View {
                     } else {
                         Text(s.label)
                     }
+                }
+            }
+            if let onCatalog {
+                Divider()
+                Button { onCatalog() } label: {
+                    Label("Child app catalog", systemImage: "iphone.gen3.radiowaves.left.and.right")
                 }
             }
             if let onReset {

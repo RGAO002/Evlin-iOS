@@ -32,6 +32,11 @@ enum EvlinTab: String, CaseIterable, Hashable {
 }
 
 struct EvlinTabBar: View {
+    static let barHeight: CGFloat = 72
+    static let bottomOffset: CGFloat = -20 
+    static let visibleHeight: CGFloat = barHeight + bottomOffset
+    static let indicatorTopInset: CGFloat = 0
+
     @Binding var selectedTab: EvlinTab
 
     var body: some View {
@@ -41,7 +46,7 @@ struct EvlinTabBar: View {
             }
         }
         .padding(.horizontal, 4)
-        .frame(height: 76)
+        .frame(height: Self.barHeight)
         .background(
             Color.evSurfaceContainerLowest.opacity(0.92)
                 .background(.ultraThinMaterial)
@@ -77,9 +82,9 @@ struct EvlinTabBar: View {
                     .tracking(0.4)
                     .foregroundStyle(isActive ? Color.evPrimary : Color.evOnSurfaceVariant)
             }
-            .frame(maxWidth: .infinity)
-            .padding(.top, 0)   // indicator hugs the tab bar's top edge
-            .padding(.bottom, 10)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .padding(.top, Self.indicatorTopInset)
+            .padding(.bottom, 6)
             .opacity(isActive ? 1.0 : 0.55)
             .contentShape(Rectangle())
         }

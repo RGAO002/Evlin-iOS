@@ -6,11 +6,9 @@
 //  backend tool (gated on AGENT_PLAN_ARCH_TASK=true).
 //
 //  Mapping (spec §task-cards):
-//   task.confirm_destructive  → .A1 (DangerConfirmCard) — delete / cancel a task
-//   task.confirm_approve      → .A1 (DangerConfirmCard) — body summarises submission;
-//                               polished evidence-review card (photo URLs + note) is post-2C
-//   task.confirm_redo         → .A1 (DangerConfirmCard) — body summarises submission;
-//                               polished evidence-review card is post-2C
+//   task.confirm_destructive  → nil (PlanArchCardView renders backend copy/options)
+//   task.confirm_approve      → nil (PlanArchCardView renders backend copy/options)
+//   task.confirm_redo         → nil (PlanArchCardView renders backend copy/options)
 //   task.confirm_unusual_assign → .A3 (BulkActionCard) — unusual params, list of reasons
 //   unknown task.* kind       → nil (fallback to PlanArchCardView)
 //
@@ -22,33 +20,21 @@ enum TaskCardAdapter {
         switch payload.kind {
 
         case "task.confirm_destructive":
-            // TF7: Delete or cancel an existing task. High-danger destructive confirm.
-            let summary = stringFromDetail(payload, "title") ?? payload.title
-            return CardRenderModel(
-                cardID: .A1,
-                context: makeContext(target: summary, childName: childName)
-            )
+            // Do not route through .A1: that template is phone-specific and
+            // renders "Block <target>?". The backend payload already carries
+            // the correct task title/body/buttons, so let PlanArchCardView
+            // render it directly.
+            return nil
 
         case "task.confirm_approve":
-            // TF9: Parent reviews submitted task and approves.
-            // Polished evidence card (photo URLs + note) is post-2C work.
-            // For now .A1 lets the parent tap Approve/Cancel; body already
-            // summarises submission courtesy of the backend builder.
-            let summary = stringFromDetail(payload, "title") ?? payload.title
-            return CardRenderModel(
-                cardID: .A1,
-                context: makeContext(target: summary, childName: childName)
-            )
+            // See task.confirm_destructive. Reusing .A1 would turn a task
+            // approve into phone-block copy.
+            return nil
 
         case "task.confirm_redo":
-            // TF11: Send submitted task back for redo.
-            // Same rationale as confirm_approve — .A1 with basic body until
-            // polished evidence-review card lands post-2C.
-            let summary = stringFromDetail(payload, "title") ?? payload.title
-            return CardRenderModel(
-                cardID: .A1,
-                context: makeContext(target: summary, childName: childName)
-            )
+            // See task.confirm_destructive. The backend payload says
+            // "Request task redo?"; .A1 would incorrectly say "Block ...?".
+            return nil
 
         case "task.confirm_unusual_assign":
             // TF4: Unusual assign params (5am due / "until done" / bulk).

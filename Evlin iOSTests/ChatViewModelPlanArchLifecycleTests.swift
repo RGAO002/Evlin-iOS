@@ -177,4 +177,56 @@ final class ChatViewModelPlanArchLifecycleTests: XCTestCase {
         XCTAssertNil(vm.pendingPlanArchCard)
         XCTAssertTrue(vm.messages.contains(where: { $0.content == "Cancelled." }))
     }
+
+    func testAnswerQuestionResponseSurfacesReturnedPlanArchCard() throws {
+        let vm = ChatViewModel()
+        let oldQuestion = makePayload(kind: "question.free_text", source: "plan", planToken: "")
+        vm.pendingPlanArchCardQueue = [oldQuestion]
+        vm.pendingPlanArchCard = oldQuestion
+
+        let responseJSON: [String: Any] = [
+            "message": "Let's have Liam complete a reflection.",
+            "card_payloads": [[
+                "type": "block_intent_confirm",
+                "kind": "reflection.assign_confirm",
+                "source": "plan",
+                "title": "Assign reflection",
+                "body": "Respectful language",
+                "plan_token": "reflection_tok",
+                "step_index": 0,
+                "detail": [:],
+                "options": [],
+                "danger": "medium",
+            ]],
+        ]
+        let rawData = try JSONSerialization.data(withJSONObject: responseJSON)
+        let response = try JSONDecoder().decode(APIClient.ChatResponse.self, from: rawData)
+
+        vm.handleAnswerQuestionResponse(response, rawData: rawData)
+
+        XCTAssertEqual(vm.pendingPlanArchCard?.kind, "reflection.assign_confirm")
+        XCTAssertEqual(vm.pendingPlanArchCard?.planToken, "reflection_tok")
+        XCTAssertEqual(vm.messages.last?.content, "Let's have Liam complete a reflection.")
+        XCTAssertFalse(vm.isThinking)
+    }
+
+    func testAnswerQuestionResponseClearsQuestionWhenNoCardReturned() throws {
+        let vm = ChatViewModel()
+        let oldQuestion = makePayload(kind: "question.free_text", source: "plan", planToken: "")
+        vm.pendingPlanArchCardQueue = [oldQuestion]
+        vm.pendingPlanArchCard = oldQuestion
+
+        let responseJSON: [String: Any] = [
+            "message": "Thanks, I understand.",
+        ]
+        let rawData = try JSONSerialization.data(withJSONObject: responseJSON)
+        let response = try JSONDecoder().decode(APIClient.ChatResponse.self, from: rawData)
+
+        vm.handleAnswerQuestionResponse(response, rawData: rawData)
+
+        XCTAssertNil(vm.pendingPlanArchCard)
+        XCTAssertTrue(vm.pendingPlanArchCardQueue.isEmpty)
+        XCTAssertEqual(vm.messages.last?.content, "Thanks, I understand.")
+        XCTAssertFalse(vm.isThinking)
+    }
 }

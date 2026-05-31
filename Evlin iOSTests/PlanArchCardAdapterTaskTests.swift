@@ -5,9 +5,9 @@
 //  Phase 2C: Tests for TaskCardAdapter — 4 task.* kinds + unknown fallback.
 //
 //  Mapping under test:
-//   task.confirm_destructive    → .A1
-//   task.confirm_approve        → .A1 (basic body; polished evidence card is post-2C)
-//   task.confirm_redo           → .A1 (same rationale as confirm_approve)
+//   task.confirm_destructive    → nil (backend payload renderer)
+//   task.confirm_approve        → nil (backend payload renderer)
+//   task.confirm_redo           → nil (backend payload renderer)
 //   task.confirm_unusual_assign → .A3
 //   task.unknown_future_kind    → nil (graceful fallback to PlanArchCardView)
 //
@@ -37,20 +37,19 @@ final class PlanArchCardAdapterTaskTests: XCTestCase {
         return try! JSONDecoder().decode(PlanArchCardPayload.self, from: data)
     }
 
-    // MARK: - task.confirm_destructive → .A1
+    // MARK: - task.confirm_destructive → backend payload renderer
 
-    func testConfirmDestructiveMapsToA1() {
+    func testConfirmDestructiveUsesBackendPayloadFallback() {
         let card = payload(kind: "task.confirm_destructive",
                            detail: ["title": "Clean room", "intent": "delete"])
         let model = TaskCardAdapter.adapt(card, childName: "Liam")
-        XCTAssertNotNil(model, "task.confirm_destructive must produce a CardRenderModel")
-        XCTAssertEqual(model?.cardID, .A1,
-                       "task.confirm_destructive → .A1 (DangerConfirmCard)")
+        XCTAssertNil(model,
+                     "task.confirm_destructive must not reuse phone A1 block template")
     }
 
-    // MARK: - task.confirm_approve → .A1 (basic; polished evidence card is post-2C)
+    // MARK: - task.confirm_approve → backend payload renderer
 
-    func testConfirmApproveMapsToA1() {
+    func testConfirmApproveUsesBackendPayloadFallback() {
         let card = payload(kind: "task.confirm_approve",
                            detail: [
                                "title": "Math homework",
@@ -58,25 +57,21 @@ final class PlanArchCardAdapterTaskTests: XCTestCase {
                                "submitted_at": "2026-05-08T10:00:00Z",
                            ])
         let model = TaskCardAdapter.adapt(card, childName: "Liam")
-        XCTAssertNotNil(model,
-                        "task.confirm_approve returns .A1 for Phase 2C (polished evidence card is post-2C)")
-        XCTAssertEqual(model?.cardID, .A1,
-                       "task.confirm_approve → .A1 (basic body summarises submission)")
+        XCTAssertNil(model,
+                     "task.confirm_approve must not reuse phone A1 block template")
     }
 
-    // MARK: - task.confirm_redo → .A1 (same rationale as confirm_approve)
+    // MARK: - task.confirm_redo → backend payload renderer
 
-    func testConfirmRedoMapsToA1() {
+    func testConfirmRedoUsesBackendPayloadFallback() {
         let card = payload(kind: "task.confirm_redo",
                            detail: [
                                "title": "Read chapter 5",
                                "redo_reason": "Summary was too short",
                            ])
         let model = TaskCardAdapter.adapt(card, childName: "Liam")
-        XCTAssertNotNil(model,
-                        "task.confirm_redo returns .A1 for Phase 2C (polished evidence card is post-2C)")
-        XCTAssertEqual(model?.cardID, .A1,
-                       "task.confirm_redo → .A1 (basic body summarises submission)")
+        XCTAssertNil(model,
+                     "task.confirm_redo must not reuse phone A1 block template")
     }
 
     // MARK: - task.confirm_unusual_assign → .A3

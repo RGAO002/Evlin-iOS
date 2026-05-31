@@ -29,11 +29,16 @@ private extension DeviceActivityReport.Context {
 }
 
 struct AliasE2ETestView: View {
+    @EnvironmentObject private var apiClient: APIClient
+    @AppStorage("evlin.childDeviceID") private var childDeviceID: String = ""
     @State private var hydration = LocalAliasStore.ReportHydrationResult.noSnapshot
+    @State private var catalogExtraction = LocalAliasStore.ReportCatalogExtractionResult.noSnapshot
     @State private var fileInfo: (bytes: Int, modifiedAt: Date?) = (0, nil)
     @State private var userDefaultsBytes: Int = 0
     @State private var heartbeat: Date? = nil
     @State private var encodeStatus: String = ""
+    @State private var uploadStatus: String = ""
+    @State private var uploadWorking = false
     @State private var lookupQuery: String = "YouTube"
     @State private var lookupResult: String = ""
     @State private var pollTick: Int = 0
@@ -66,12 +71,23 @@ struct AliasE2ETestView: View {
                         .font(.caption.bold())
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, 12)
-                    DeviceActivityReport(.evlinMetadataProbe, filter: allActivityFilter)
-                        .id(refreshID)
-                        .frame(minHeight: 360)
-                        .background(Color(.systemGray6))
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                    Text("First row inside the report must show APP GROUP WRITE STATUS. If apps are listed but write status is failed/not visible, the DAR metadata exists but the bridge to the main app is broken.")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
                         .padding(.horizontal, 12)
+                    diagBox {
+                        diagRow("Write status", encodeStatus.isEmpty ? "<empty>" : encodeStatus,
+                                color: encodeStatus.hasPrefix("ok") ? .green : (encodeStatus.isEmpty ? .red : .orange))
+                        diagRow("Snapshot apps", "\(hydration.snapshotApps)",
+                                color: hydration.snapshotApps > 0 ? .green : .red)
+                        diagRow("Uploadable entries", "\(catalogExtraction.entries.count)",
+                                color: catalogExtraction.entries.isEmpty ? .red : .green)
+                    }
+                    Text("Report viewport below is independently scrollable. If the report is clipped, scroll inside the gray card.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 12)
+                    reportViewport
                 }
 
                 // 2. Two-channel diagnostics.
@@ -148,7 +164,48 @@ struct AliasE2ETestView: View {
                     .padding(.horizontal, 12)
                 }
 
-                // 5. Manual force-refresh — bumps the report's id so SwiftUI
+                // 5. Upload the DAR snapshot as the child app catalog. This is
+                //    the X3 minimal proof path: no parent token rendering, just
+                //    kid-harvested metadata + token bytes → backend → kid shield.
+                Section {
+                    Text("DAR SNAPSHOT → BACKEND CATALOG")
+                        .font(.caption.bold())
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 12)
+
+                    diagBox {
+                        diagRow("Child device id", childDeviceID.isEmpty ? "(missing)" : childDeviceID,
+                                color: childDeviceID.isEmpty ? .red : .secondary)
+                        diagRow("Uploadable entries", "\(catalogExtraction.entries.count)",
+                                color: catalogExtraction.entries.isEmpty ? .red : .green)
+                        diagRow("Extraction status", catalogExtraction.status,
+                                color: catalogExtraction.status == "ok" ? .green : .orange)
+                        if let first = catalogExtraction.entries.first {
+                            diagRow("First entry", "\(first.displayName) · \(first.tokenKind) · \(first.tokenDataHash)")
+                        }
+                    }
+
+                    Button {
+                        Task { await uploadSnapshotCatalog() }
+                    } label: {
+                        Label(uploadWorking ? "Uploading snapshot…" : "Upload DAR snapshot catalog",
+                              systemImage: "square.and.arrow.up")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(uploadWorking || UUID(uuidString: childDeviceID) == nil || catalogExtraction.entries.isEmpty)
+                    .padding(.horizontal, 12)
+
+                    if !uploadStatus.isEmpty {
+                        Text(uploadStatus)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(uploadStatus.hasPrefix("Uploaded") ? Color.green : Color.orange)
+                            .textSelection(.enabled)
+                            .padding(.horizontal, 12)
+                    }
+                }
+
+                // 6. Manual force-refresh — bumps the report's id so SwiftUI
                 //    rebuilds it and Apple re-instantiates the extension.
                 Section {
                     Button {
@@ -181,6 +238,23 @@ struct AliasE2ETestView: View {
 
     // MARK: - Polling
 
+    private var reportViewport: some View {
+        ScrollView([.vertical, .horizontal], showsIndicators: true) {
+            DeviceActivityReport(.evlinMetadataProbe, filter: allActivityFilter)
+                .id(refreshID)
+                .frame(width: 720, height: 1_500, alignment: .topLeading)
+                .background(Color(.systemGray6))
+        }
+        .frame(maxWidth: .infinity, minHeight: 540, maxHeight: 620)
+        .background(Color(.systemGray6))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color(.separator), lineWidth: 0.5)
+        )
+        .padding(.horizontal, 12)
+    }
+
     private func refreshAllChannels() {
         let store = LocalAliasStore.shared
         let groupDefaults = UserDefaults(suiteName: "group.com.evlin.ios")
@@ -193,6 +267,7 @@ struct AliasE2ETestView: View {
         // Hydrate every poll — idempotent + cheap. Reads file channel first,
         // falls back to UserDefaults inside hydrateFromReportDetailed.
         hydration = store.hydrateFromReportDetailed()
+        catalogExtraction = store.catalogEntriesFromReportSnapshot()
     }
 
     // MARK: - Lookup
@@ -211,6 +286,38 @@ struct AliasE2ETestView: View {
             return
         }
         lookupResult = "✗ No alias for \"\(q)\". Either Apple hasn't seen kid use it, or hydration didn't run."
+    }
+
+    private func uploadSnapshotCatalog() async {
+        guard let child = UUID(uuidString: childDeviceID) else {
+            uploadStatus = "Missing child device id."
+            return
+        }
+        let extraction = LocalAliasStore.shared.catalogEntriesFromReportSnapshot()
+        guard !extraction.entries.isEmpty else {
+            uploadStatus = "No uploadable DAR snapshot entries. Open a few apps on the kid phone, wait a few minutes, then force re-run the report."
+            return
+        }
+
+        let apps = extraction.entries.map { entry in
+            ChildAppCatalogUploadApp(
+                displayName: entry.displayName,
+                tokenKind: entry.tokenKind,
+                bundleID: entry.bundleID,
+                aliases: entry.aliases + ["dar-token-\(entry.tokenDataHash)"],
+                tokenAvailable: true,
+                tokenDataBase64: entry.tokenData.base64EncodedString()
+            )
+        }
+
+        uploadWorking = true
+        defer { uploadWorking = false }
+        do {
+            let response = try await apiClient.uploadChildAppCatalog(deviceID: child, apps: apps)
+            uploadStatus = "Uploaded \(response.count) DAR catalog entries. First: \(response.apps.first?.displayName ?? "none"). Refresh the parent catalog page next."
+        } catch {
+            uploadStatus = "Upload failed: \(error.localizedDescription)"
+        }
     }
 
     // MARK: - View helpers

@@ -167,7 +167,10 @@ final class ActionExecutor: @unchecked Sendable {
 
         switch tier {
         case .exactApp:
-            let resolved = try resolveExactApp(from: cmd.target, requireActiveToken: true)
+            let resolved = try resolveExactApp(
+                from: cmd.target,
+                requireActiveToken: !cmd.target.catalogVerified
+            )
             appTokens = [resolved.token]
             targetKey = resolved.targetKey
             displayName = cmd.target.targetDisplay
@@ -198,12 +201,21 @@ final class ActionExecutor: @unchecked Sendable {
             }
             displayName = cmd.target.listName ?? "saved list"
         case .category:
-            guard let hint = cmd.target.categoryHint,
-                  let tok = LocalAliasStore.shared.categoryToken(forName: hint)
-            else {
-                throw ExecuteError.categoryNotConfigured(cmd.target.categoryHint ?? "unknown")
+            let tok: ActivityCategoryToken
+            if let encoded = cmd.target.catalogCategoryTokenDataBase64,
+               let data = Data(base64Encoded: encoded),
+               let decoded = Self.decodeCategoryToken(from: data) {
+                tok = decoded
+            } else {
+                guard let hint = cmd.target.categoryHint,
+                      let local = LocalAliasStore.shared.categoryToken(forName: hint)
+                else {
+                    throw ExecuteError.categoryNotConfigured(cmd.target.categoryHint ?? "unknown")
+                }
+                tok = local
             }
             categoryTokens = [tok]
+            let hint = cmd.target.categoryHint ?? cmd.target.targetDisplay ?? "category"
             targetKey = hint.lowercased()
             displayName = hint.capitalized
         case .all:
@@ -376,6 +388,19 @@ final class ActionExecutor: @unchecked Sendable {
         from target: CommandTarget,
         requireActiveToken: Bool = false
     ) throws -> ExactAppResolution {
+        if let encoded = target.catalogTokenDataBase64,
+           let data = Data(base64Encoded: encoded),
+           let token = Self.decodeApplicationToken(from: data) {
+            let key = (
+                target.bundleID
+                ?? target.targetDisplay
+                ?? target.originalRequest
+            )
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            return ExactAppResolution(token: token, targetKey: key.isEmpty ? "catalog-token-\(token.hashValue)" : key)
+        }
+
         let store = LocalAliasStore.shared
         let activeTokens = ScreenTimeManager.shared.selectedApps.applicationTokens
         func lookup(_ key: String) -> ApplicationToken? {
@@ -403,6 +428,20 @@ final class ActionExecutor: @unchecked Sendable {
             return ExactAppResolution(token: tok, targetKey: key)
         }
         throw ExecuteError.applicationNotConfigured(resolveExactAppFailureReference(from: target))
+    }
+
+    private static func decodeApplicationToken(from data: Data) -> ApplicationToken? {
+        if let token = try? JSONDecoder().decode(ApplicationToken.self, from: data) {
+            return token
+        }
+        return try? PropertyListDecoder().decode(ApplicationToken.self, from: data)
+    }
+
+    private static func decodeCategoryToken(from data: Data) -> ActivityCategoryToken? {
+        if let token = try? JSONDecoder().decode(ActivityCategoryToken.self, from: data) {
+            return token
+        }
+        return try? PropertyListDecoder().decode(ActivityCategoryToken.self, from: data)
     }
 
     private func removeExplicit(tier: ShieldTier, targetKey: String) async -> AckResult {

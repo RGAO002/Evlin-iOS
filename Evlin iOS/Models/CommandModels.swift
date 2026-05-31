@@ -28,6 +28,13 @@ struct CommandTarget: Codable, Sendable {
     // ActiveLockStore.addShield then skips the merge rule for this (tier, targetKey).
     // See spec §5.2 B1 flow and plan Phase 6/9 changes.
     var forceDowngrade: Bool = false
+
+    // Debug cross-device catalog POC: backend selected this target from the
+    // kid device's own uploaded app catalog. Execution may use LocalAliasStore
+    // even if the token is not in the current parent-style Managed Apps picker.
+    var catalogVerified: Bool = false
+    var catalogTokenDataBase64: String? = nil
+    var catalogCategoryTokenDataBase64: String? = nil
 }
 
 struct LockCommand: Codable, Sendable, Identifiable {

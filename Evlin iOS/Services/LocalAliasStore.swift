@@ -1,6 +1,7 @@
 import Foundation
 import FamilyControls
 import ManagedSettings
+import CryptoKit
 
 /// Local-device persistence for category tokens and saved-list selections.
 /// Backed by App Group UserDefaults — shared with DeviceActivityMonitor extension.
@@ -186,6 +187,48 @@ final class LocalAliasStore: @unchecked Sendable {
         )
     }
 
+    struct ReportCatalogEntry {
+        let displayName: String
+        let tokenKind: String
+        let bundleID: String?
+        let aliases: [String]
+        let tokenData: Data
+        let tokenDataHash: String
+    }
+
+    struct ReportCatalogExtractionResult {
+        let entries: [ReportCatalogEntry]
+        let status: String
+        let snapshotBytes: Int
+        let snapshotApps: Int
+        let snapshotCategories: Int
+        let appDecodeFailures: Int
+        let categoryDecodeFailures: Int
+        let skippedEmptyApps: Int
+
+        static let noDefaults = ReportCatalogExtractionResult(
+            entries: [],
+            status: "App Group defaults unavailable",
+            snapshotBytes: 0,
+            snapshotApps: 0,
+            snapshotCategories: 0,
+            appDecodeFailures: 0,
+            categoryDecodeFailures: 0,
+            skippedEmptyApps: 0
+        )
+
+        static let noSnapshot = ReportCatalogExtractionResult(
+            entries: [],
+            status: "No evlin.aliasSnapshot data",
+            snapshotBytes: 0,
+            snapshotApps: 0,
+            snapshotCategories: 0,
+            appDecodeFailures: 0,
+            categoryDecodeFailures: 0,
+            skippedEmptyApps: 0
+        )
+    }
+
     /// Read the DeviceActivityReport extension's snapshot from App Group and
     /// flow it into our token aliases. This is the bridge that lets chat
     /// resolve "Instagram" → ApplicationToken without picker / lazy-tag.
@@ -265,6 +308,89 @@ final class LocalAliasStore: @unchecked Sendable {
             appsSaved: appsSaved,
             categoriesSaved: catsSaved,
             generatedAt: snapshot.generatedAt,
+            status: "ok",
+            snapshotBytes: data.count,
+            snapshotApps: snapshot.applications.count,
+            snapshotCategories: snapshot.categories.count,
+            appDecodeFailures: appDecodeFailures,
+            categoryDecodeFailures: categoryDecodeFailures,
+            skippedEmptyApps: skippedEmptyApps
+        )
+    }
+
+    /// Extract DAR-written app/category token blobs as backend catalog upload
+    /// entries. This intentionally uses the raw snapshot token bytes so the
+    /// backend can queue the same bytes back to the kid phone for shield apply.
+    func catalogEntriesFromReportSnapshot() -> ReportCatalogExtractionResult {
+        guard defaults != nil else { return .noDefaults }
+        let fileData = readAliasSnapshotFile()
+        let userDefaultsData = defaults?.data(forKey: "evlin.aliasSnapshot")
+        guard let data = fileData ?? userDefaultsData else { return .noSnapshot }
+        guard let snapshot = _decodeTokenAny(AliasSnapshot.self, from: data) else {
+            return ReportCatalogExtractionResult(
+                entries: [],
+                status: "Snapshot decode failed (tried JSON + plist)",
+                snapshotBytes: data.count,
+                snapshotApps: 0,
+                snapshotCategories: 0,
+                appDecodeFailures: 0,
+                categoryDecodeFailures: 0,
+                skippedEmptyApps: 0
+            )
+        }
+
+        var entries: [ReportCatalogEntry] = []
+        var appDecodeFailures = 0
+        var categoryDecodeFailures = 0
+        var skippedEmptyApps = 0
+
+        for app in snapshot.applications {
+            guard _decodeTokenAny(ApplicationToken.self, from: app.tokenData) != nil else {
+                appDecodeFailures += 1
+                continue
+            }
+            let cleanName = app.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+            let cleanBundle = app.bundleIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !cleanName.isEmpty || !cleanBundle.isEmpty else {
+                skippedEmptyApps += 1
+                continue
+            }
+
+            let display = cleanName.isEmpty ? cleanBundle : cleanName
+            var aliases = [display]
+            if !cleanBundle.isEmpty { aliases.append(cleanBundle) }
+            if !app.parentCategoryName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                aliases.append(app.parentCategoryName)
+            }
+            entries.append(ReportCatalogEntry(
+                displayName: display,
+                tokenKind: "app",
+                bundleID: cleanBundle.isEmpty ? nil : cleanBundle,
+                aliases: Self.uniqueNonEmptyAliases(aliases),
+                tokenData: app.tokenData,
+                tokenDataHash: Self.stableHashPrefix(app.tokenData)
+            ))
+        }
+
+        for category in snapshot.categories {
+            guard _decodeTokenAny(ActivityCategoryToken.self, from: category.tokenData) != nil else {
+                categoryDecodeFailures += 1
+                continue
+            }
+            let cleanName = category.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !cleanName.isEmpty else { continue }
+            entries.append(ReportCatalogEntry(
+                displayName: cleanName,
+                tokenKind: "category",
+                bundleID: nil,
+                aliases: Self.uniqueNonEmptyAliases([cleanName]),
+                tokenData: category.tokenData,
+                tokenDataHash: Self.stableHashPrefix(category.tokenData)
+            ))
+        }
+
+        return ReportCatalogExtractionResult(
+            entries: entries,
             status: "ok",
             snapshotBytes: data.count,
             snapshotApps: snapshot.applications.count,
@@ -456,6 +582,24 @@ final class LocalAliasStore: @unchecked Sendable {
 
     private func persistDisplayToBundleDict(_ dict: [String: String]) {
         defaults?.set(dict, forKey: applicationDisplayToBundleKey)
+    }
+
+    private static func uniqueNonEmptyAliases(_ aliases: [String]) -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        for alias in aliases {
+            let clean = alias.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !clean.isEmpty else { continue }
+            let key = clean.lowercased()
+            guard seen.insert(key).inserted else { continue }
+            result.append(clean)
+        }
+        return result
+    }
+
+    private static func stableHashPrefix(_ data: Data) -> String {
+        let digest = SHA256.hash(data: data)
+        return digest.prefix(8).map { String(format: "%02x", $0) }.joined()
     }
 }
 

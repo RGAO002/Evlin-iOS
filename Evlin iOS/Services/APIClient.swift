@@ -24,27 +24,74 @@ class APIClient: ObservableObject {
         // Any other railway service we previously pointed parents at.
     ]
 
-    init(baseURL: String = "") {
-        var saved = UserDefaults.standard.string(forKey: "serverURL") ?? ""
-        if Self.legacyHostFragments.contains(where: { saved.contains($0) }) {
-            saved = Self.defaultURL
-            UserDefaults.standard.set(saved, forKey: "serverURL")
-        }
-        // Previously this code rejected any saved URL containing "192.168"
-        // or "localhost", forcing dev builds back to the Render default every
-        // launch — annoying when iterating against a local backend. Trust
-        // whatever the user explicitly saved. The DEBUG-only picker in
-        // HomeSettingsSheet still gives one-tap revert to production.
-        let useSaved = !saved.isEmpty
-        let raw = baseURL.isEmpty
-            ? (useSaved ? saved : Self.defaultURL)
-            : baseURL
-        // Guard against missing scheme (user typed raw host in Settings)
+    static func effectiveInitialBaseURL(
+        saved: String,
+        explicitBaseURL: String = "",
+        isDebugBuild: Bool
+    ) -> String {
+        let migratedSaved = legacyHostFragments.contains(where: { saved.contains($0) })
+            ? defaultURL
+            : saved
+        let normalizedSaved = (
+            !isDebugBuild && isLocalDevelopmentURL(migratedSaved)
+        ) ? defaultURL : migratedSaved
+
+        let raw = explicitBaseURL.isEmpty
+            ? (normalizedSaved.isEmpty ? defaultURL : normalizedSaved)
+            : explicitBaseURL
+
         if raw.hasPrefix("http://") || raw.hasPrefix("https://") {
-            self.baseURL = raw
-        } else {
-            self.baseURL = "https://" + raw
+            return raw
         }
+        return "https://" + raw
+    }
+
+    static func shouldPersistInitialBaseURLMigration(
+        saved: String,
+        effective: String,
+        isDebugBuild: Bool
+    ) -> Bool {
+        legacyHostFragments.contains(where: { saved.contains($0) })
+            || (!isDebugBuild && isLocalDevelopmentURL(saved) && effective == defaultURL)
+    }
+
+    static func effectiveSavedBaseURL(
+        _ url: String,
+        isDebugBuild: Bool
+    ) -> String {
+        effectiveInitialBaseURL(saved: url, isDebugBuild: isDebugBuild)
+    }
+
+    private static func isLocalDevelopmentURL(_ value: String) -> Bool {
+        let lowercased = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        return lowercased.contains("localhost")
+            || lowercased.contains("127.0.0.1")
+            || lowercased.contains("192.168.")
+            || lowercased.contains("10.0.")
+    }
+
+    init(baseURL: String = "") {
+        let saved = UserDefaults.standard.string(forKey: "serverURL") ?? ""
+        #if DEBUG
+        let isDebugBuild = true
+        #else
+        let isDebugBuild = false
+        #endif
+        let effective = Self.effectiveInitialBaseURL(
+            saved: saved,
+            explicitBaseURL: baseURL,
+            isDebugBuild: isDebugBuild
+        )
+        if baseURL.isEmpty,
+           Self.shouldPersistInitialBaseURLMigration(
+               saved: saved,
+               effective: effective,
+               isDebugBuild: isDebugBuild
+           ) {
+            UserDefaults.standard.set(effective, forKey: "serverURL")
+        }
+        self.baseURL = effective
     }
 
     // MARK: - Parent Chat
@@ -180,8 +227,14 @@ class APIClient: ObservableObject {
     }
 
     func saveServerURL(_ url: String) {
-        baseURL = url
-        UserDefaults.standard.set(url, forKey: "serverURL")
+        #if DEBUG
+        let isDebugBuild = true
+        #else
+        let isDebugBuild = false
+        #endif
+        let effective = Self.effectiveSavedBaseURL(url, isDebugBuild: isDebugBuild)
+        baseURL = effective
+        UserDefaults.standard.set(effective, forKey: "serverURL")
     }
 
     // MARK: - Family protection mode (DEBUG runtime toggle)
@@ -339,6 +392,9 @@ struct PollTargetDTO: Decodable {
     let target_display: String?
     let target_child_id: String?         // new: which child device (multi-child)
     let force_downgrade: Bool?           // new: parent-confirmed B1 downgrade
+    let catalog_verified: Bool?          // debug POC: target came from this child device's uploaded catalog
+    let catalog_token_data_base64: String? // debug POC: encoded kid-picker ApplicationToken
+    let catalog_category_token_data_base64: String? // debug POC: encoded kid-picker ActivityCategoryToken
 
     private enum CodingKeys: String, CodingKey {
         case bundle_id
@@ -352,6 +408,9 @@ struct PollTargetDTO: Decodable {
         case target_display
         case target_child_id
         case force_downgrade
+        case catalog_verified
+        case catalog_token_data_base64
+        case catalog_category_token_data_base64
     }
 
     init(from decoder: Decoder) throws {
@@ -368,6 +427,9 @@ struct PollTargetDTO: Decodable {
         target_display = try c.decodeIfPresent(String.self, forKey: .target_display)
         target_child_id = try c.decodeIfPresent(String.self, forKey: .target_child_id)
         force_downgrade = try c.decodeIfPresent(Bool.self, forKey: .force_downgrade)
+        catalog_verified = try c.decodeIfPresent(Bool.self, forKey: .catalog_verified)
+        catalog_token_data_base64 = try c.decodeIfPresent(String.self, forKey: .catalog_token_data_base64)
+        catalog_category_token_data_base64 = try c.decodeIfPresent(String.self, forKey: .catalog_category_token_data_base64)
     }
 }
 
@@ -396,6 +458,82 @@ struct AckStatusResponse: Decodable, Sendable {
     let origRequest: String?
     let effectiveState: AckEffectiveState?
     let pendingConfirmation: AckPendingConfirmation?
+}
+
+struct ChildAppCatalogUploadApp: Codable, Sendable {
+    let displayName: String
+    let tokenKind: String
+    let bundleID: String?
+    let aliases: [String]
+    let tokenAvailable: Bool
+    let tokenDataBase64: String?
+
+    enum CodingKeys: String, CodingKey {
+        case displayName = "display_name"
+        case tokenKind = "token_kind"
+        case bundleID = "bundle_id"
+        case aliases
+        case tokenAvailable = "token_available"
+        case tokenDataBase64 = "token_data_base64"
+    }
+}
+
+struct ChildAppCatalogEntryDTO: Codable, Identifiable, Sendable {
+    let id: UUID
+    let displayName: String
+    let tokenKind: String
+    let bundleID: String?
+    let aliases: [String]
+    let tokenAvailable: Bool
+    let tokenDataBase64: String?
+    let updatedAt: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case displayName = "display_name"
+        case tokenKind = "token_kind"
+        case bundleID = "bundle_id"
+        case aliases
+        case tokenAvailable = "token_available"
+        case tokenDataBase64 = "token_data_base64"
+        case updatedAt = "updated_at"
+    }
+}
+
+struct ChildAppCatalogListResponse: Codable, Sendable {
+    let childDeviceID: UUID
+    let apps: [ChildAppCatalogEntryDTO]
+
+    enum CodingKeys: String, CodingKey {
+        case childDeviceID = "child_device_id"
+        case apps
+    }
+}
+
+struct ChildAppCatalogUploadResponse: Codable, Sendable {
+    let childDeviceID: UUID
+    let count: Int
+    let apps: [ChildAppCatalogEntryDTO]
+
+    enum CodingKeys: String, CodingKey {
+        case childDeviceID = "child_device_id"
+        case count
+        case apps
+    }
+}
+
+struct ChildAppCatalogLockResponse: Codable, Sendable {
+    let commandID: UUID
+    let targetDisplay: String
+    let bundleID: String?
+    let durationMinutes: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case commandID = "command_id"
+        case targetDisplay = "target_display"
+        case bundleID = "bundle_id"
+        case durationMinutes = "duration_minutes"
+    }
 }
 
 extension APIClient {
@@ -449,6 +587,75 @@ extension APIClient {
         comps.queryItems = [URLQueryItem(name: "command_id", value: commandID.uuidString)]
         let (data, _) = try await URLSession.shared.data(from: comps.url!)
         return try JSONDecoder().decode(AckStatusResponse.self, from: data)
+    }
+
+    // MARK: - Child app catalog debug POC
+
+    @discardableResult
+    func uploadChildAppCatalog(
+        deviceID: UUID,
+        apps: [ChildAppCatalogUploadApp]
+    ) async throws -> ChildAppCatalogUploadResponse {
+        let url = URL(string: "\(baseURL)/child/app-catalog")!
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        struct Body: Codable {
+            let deviceID: UUID
+            let apps: [ChildAppCatalogUploadApp]
+
+            enum CodingKeys: String, CodingKey {
+                case deviceID = "device_id"
+                case apps
+            }
+        }
+        req.httpBody = try JSONEncoder().encode(Body(deviceID: deviceID, apps: apps))
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+        return try JSONDecoder().decode(ChildAppCatalogUploadResponse.self, from: data)
+    }
+
+    func fetchChildAppCatalog(
+        childDeviceID: UUID
+    ) async throws -> ChildAppCatalogListResponse {
+        var comps = URLComponents(string: "\(baseURL)/parent/child-app-catalog")!
+        comps.queryItems = [
+            URLQueryItem(name: "child_device_id", value: childDeviceID.uuidString)
+        ]
+        let (data, resp) = try await URLSession.shared.data(from: comps.url!)
+        guard let http = resp as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+        return try JSONDecoder().decode(ChildAppCatalogListResponse.self, from: data)
+    }
+
+    @discardableResult
+    func lockChildCatalogApp(
+        familyID: UUID,
+        childDeviceID: UUID,
+        appID: UUID,
+        durationMinutes: Int?
+    ) async throws -> ChildAppCatalogLockResponse {
+        let url = URL(string: "\(baseURL)/parent/child-app-catalog/lock")!
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        var body: [String: Any] = [
+            "family_id": familyID.uuidString,
+            "child_device_id": childDeviceID.uuidString,
+            "app_id": appID.uuidString,
+        ]
+        if let durationMinutes {
+            body["duration_minutes"] = durationMinutes
+        }
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+        return try JSONDecoder().decode(ChildAppCatalogLockResponse.self, from: data)
     }
 
     // MARK: - Saved list metadata

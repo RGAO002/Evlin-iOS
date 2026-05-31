@@ -46,6 +46,7 @@ struct BigKidRootView: View {
 
     #if DEBUG
     @State private var debugScenario: BigKidDebugScenario = .live
+    @State private var showCatalogDebug: Bool = false
     #endif
 
     var body: some View {
@@ -171,6 +172,7 @@ struct BigKidRootView: View {
             BigKidDebugScenarioMenu(
                 current: $debugScenario,
                 onSelect: { selected in applyDebugScenario(selected) },
+                onCatalog: { showCatalogDebug = true },
                 onReset: {
                     Task {
                         do { try await client.debugResetState() } catch {
@@ -237,6 +239,11 @@ struct BigKidRootView: View {
                 }
             )
         }
+        #if DEBUG
+        .sheet(isPresented: $showCatalogDebug) {
+            NavigationStack { ChildAppCatalogDebugView() }
+        }
+        #endif
     }
 
     /// Optimistically mark a reflection sub-step as completed in the local

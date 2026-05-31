@@ -1,8 +1,11 @@
 import DeviceActivity
 import ExtensionFoundation
 import ExtensionKit
+import Foundation
 import ManagedSettings
 import SwiftUI
+import UIKit
+import Security
 
 @main
 struct EvlinDeviceActivityReportExtension: DeviceActivityReportExtension {
@@ -14,11 +17,232 @@ struct EvlinDeviceActivityReportExtension: DeviceActivityReportExtension {
         MetadataProbeReport { configuration in
             MetadataProbeReportView(configuration: configuration)
         }
+        QrSpikeReport { payload in
+            QrSpikeReportView(payload: payload)
+        }
     }
 }
 
 extension DeviceActivityReport.Context {
     static let evlinMetadataProbe = Self("evlin.metadataProbe")
+    static let evlinQrSpike = Self("evlin.qrSpike")
+}
+
+struct QrSpikeReport: DeviceActivityReportScene {
+    let context: DeviceActivityReport.Context = .evlinQrSpike
+    let content: (String) -> QrSpikeReportView
+
+    func makeConfiguration(
+        representing data: DeviceActivityResults<DeviceActivityData>
+    ) async -> String {
+        // Channel spike v2: render one real app token into a user-mediated QR.
+        // The host app cannot read DAR pixels directly, but the user can take a
+        // system screenshot and import it back into the host for decoding.
+        var segmentCount = 0
+        var categoryCount = 0
+        var appCount = 0
+        var appNames: [String] = []
+        var candidates: [QrSpikeCandidate] = []
+        for await activityData in data {
+            for await segment in activityData.activitySegments {
+                segmentCount += 1
+                for await categoryActivity in segment.categories {
+                    categoryCount += 1
+                    for await appActivity in categoryActivity.applications {
+                        appCount += 1
+                        let app = appActivity.application
+                        let displayName = app.localizedDisplayName ?? "Unknown app"
+                        let bundleID = app.bundleIdentifier ?? ""
+                        if appNames.count < 8 {
+                            appNames.append("\(displayName)|\(bundleID)|token=\(app.token == nil ? "nil" : "yes")")
+                        }
+                        guard let token = app.token,
+                              let tokenData = try? PropertyListEncoder().encode(token) else {
+                            continue
+                        }
+                        candidates.append(
+                            QrSpikeCandidate(
+                                displayName: displayName,
+                                bundleID: bundleID,
+                                duration: appActivity.totalActivityDuration,
+                                tokenData: tokenData
+                            )
+                        )
+                    }
+                }
+            }
+        }
+        if let selected = QrSpikeCandidate.selectBest(from: candidates) {
+            let payload = QrSpikeTokenPayload(
+                kind: "evlin_app_token_v1",
+                displayName: selected.displayName,
+                bundleID: selected.bundleID,
+                tokenB64: selected.tokenData.base64EncodedString()
+            )
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            if let data = try? encoder.encode(payload),
+               let json = String(data: data, encoding: .utf8) {
+                return json
+            }
+        }
+        return QrSpikeNoTokenDiagnostic(
+            segmentCount: segmentCount,
+            categoryCount: categoryCount,
+            appCount: appCount,
+            candidateCount: candidates.count,
+            apps: appNames
+        ).encoded()
+    }
+}
+
+private struct QrSpikeNoTokenDiagnostic: Codable {
+    let kind = "evlin_qr_spike_no_token"
+    let segmentCount: Int
+    let categoryCount: Int
+    let appCount: Int
+    let candidateCount: Int
+    let apps: [String]
+
+    func encoded() -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        guard let data = try? encoder.encode(self),
+              let json = String(data: data, encoding: .utf8) else {
+            return "NO_APP_TOKEN_IN_REPORT"
+        }
+        return json
+    }
+}
+
+private struct QrSpikeCandidate {
+    let displayName: String
+    let bundleID: String
+    let duration: TimeInterval
+    let tokenData: Data
+
+    static func selectBest(from candidates: [QrSpikeCandidate]) -> QrSpikeCandidate? {
+        candidates.max { lhs, rhs in
+            if lhs.score != rhs.score {
+                return lhs.score < rhs.score
+            }
+            if lhs.duration != rhs.duration {
+                return lhs.duration < rhs.duration
+            }
+            return lhs.displayName.localizedCaseInsensitiveCompare(rhs.displayName) == .orderedDescending
+        }
+    }
+
+    private var score: Int {
+        let name = displayName.lowercased()
+        let bundle = bundleID.lowercased()
+        var value = Int(min(duration, 1_200) / 10)
+
+        // This is debug-sample selection only. It is not product routing.
+        if bundle.hasPrefix("com.evlin.") || bundle == "com.evlin.evlin-ios" || name == "evlin" {
+            value -= 1_000
+        }
+        if bundle.hasPrefix("com.apple.") {
+            value -= 500
+        }
+        if bundle.isEmpty || name == "unknown app" {
+            value -= 200
+        }
+        if !bundle.hasPrefix("com.apple.") && !bundle.hasPrefix("com.evlin.") && !bundle.isEmpty {
+            value += 300
+        }
+
+        let priorityNeedles: [(String, Int)] = [
+            ("instagram", 1_000),
+            ("burbn", 1_000),
+            ("tiktok", 950),
+            ("musically", 950),
+            ("youtube", 900),
+            ("roblox", 850),
+            ("snapchat", 800),
+            ("facebook", 750),
+            ("discord", 700),
+            ("netflix", 650),
+            ("spotify", 600),
+            ("chrome", 550)
+        ]
+        for (needle, bonus) in priorityNeedles where name.contains(needle) || bundle.contains(needle) {
+            value += bonus
+            break
+        }
+        return value
+    }
+}
+
+struct QrSpikeTokenPayload: Codable {
+    let kind: String
+    let displayName: String
+    let bundleID: String
+    let tokenB64: String
+}
+
+struct QrSpikeReportView: View {
+    let payload: String
+
+    var body: some View {
+        VStack(spacing: 8) {
+            if let qr = makeQRCode() {
+                qrCodeCanvas(qr)
+                    .frame(width: 300, height: 300)
+            } else {
+                Text("QR_GEN_FAILED")
+                    .font(.caption.monospaced().bold())
+            }
+            Text(payloadSummary)
+                .font(.caption2.monospaced())
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+        }
+        .background(Color.white)
+        .accessibilityLabel("QR code for \(payloadSummary)")
+    }
+
+    private var payloadSummary: String {
+        if let data = payload.data(using: .utf8),
+           let parsed = try? JSONDecoder().decode(QrSpikeTokenPayload.self, from: data) {
+            return "\(parsed.displayName) \(parsed.bundleID) token=\(parsed.tokenB64.count)b64"
+        }
+        return payload
+    }
+
+    private func makeQRCode() -> QRCode? {
+        guard let data = payload.data(using: .utf8) else { return nil }
+        return try? QRCode.encode(binary: Array(data), ecl: .medium)
+    }
+
+    private func qrCodeCanvas(_ qr: QRCode) -> some View {
+        let quietZone = 4
+        let moduleCount = qr.size + quietZone * 2
+
+        return Canvas { context, size in
+            let cell = min(size.width, size.height) / CGFloat(moduleCount)
+            let originX = (size.width - cell * CGFloat(moduleCount)) / 2
+            let originY = (size.height - cell * CGFloat(moduleCount)) / 2
+
+            context.fill(
+                Path(CGRect(x: originX, y: originY, width: cell * CGFloat(moduleCount), height: cell * CGFloat(moduleCount))),
+                with: .color(.white)
+            )
+
+            for y in 0..<qr.size {
+                for x in 0..<qr.size where qr.getModule(x: x, y: y) {
+                    let rect = CGRect(
+                        x: originX + CGFloat(x + quietZone) * cell,
+                        y: originY + CGFloat(y + quietZone) * cell,
+                        width: cell,
+                        height: cell
+                    )
+                    context.fill(Path(rect), with: .color(.black))
+                }
+            }
+        }
+        .background(Color.white)
+    }
 }
 
 struct MetadataProbeConfiguration: Codable {
@@ -184,7 +408,45 @@ struct MetadataProbeReport: DeviceActivityReportScene {
         // button later if Apple tightens.
         configuration.aliasSnapshotWriteStatus = writeAliasSnapshot(configuration)
 
+        // DAR-export probes. App Group file/UserDefaults are blocked from the
+        // DAR sandbox; try other cross-process mechanisms that may not be on
+        // Apple's block list. Marker INCLUDES a real bundleID (resolves only
+        // inside DAR) so a successful read proves we carried the one datum
+        // nothing else gives us.
+        let firstBundle = configuration.applications.first?.bundleIdentifier ?? "none"
+        let marker = "EVLIN_DAR_PB apps=\(configuration.applications.count)"
+            + " first=\(firstBundle)"
+            + " at=\(ISO8601DateFormatter().string(from: configuration.generatedAt))"
+        // (1) Pasteboard channel (pasteboardd) — tested empty (blocked).
+        UIPasteboard.general.string = marker
+        // (2) Keychain channel (securityd) — different mechanism than file I/O.
+        // The returned OSStatus ALSO proves this code ran (rules out "DAR never
+        // executed" when the main-app read finds nothing).
+        let kcStatus = writeKeychainProbe(marker)
+        configuration.aliasSnapshotWriteStatus += " | KC:\(kcStatus)"
+
         return configuration
+    }
+
+    /// DAR-export probe via the keychain (shared access group). securityd is a
+    /// separate mechanism from the file/UserDefaults paths the DAR sandbox is
+    /// known to block, so it may slip through. Returns the OSStatus from
+    /// SecItemAdd so the report view can show whether the write itself succeeded
+    /// inside the extension (errSecSuccess == 0).
+    private func writeKeychainProbe(_ marker: String) -> String {
+        let group = "D9FM36P37F.com.evlin.darbridge"
+        let account = "evlin.dar.export"
+        let base: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrAccount as String: account,
+            kSecAttrAccessGroup as String: group,
+        ]
+        SecItemDelete(base as CFDictionary)
+        var add = base
+        add[kSecValueData as String] = Data(marker.utf8)
+        add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
+        let status = SecItemAdd(add as CFDictionary, nil)
+        return "SecItemAdd=\(status)"
     }
 
     /// Persist a slim alias-only snapshot main app uses to hydrate
@@ -303,22 +565,33 @@ struct MetadataProbeReportView: View {
             // this is empty / "not attempted" / "failed", App Group write from
             // the report-extension process is broken and lazy-tag is the only
             // bridge.
-            Text("Write status: \(configuration.aliasSnapshotWriteStatus)")
-                .font(.caption.monospaced().bold())
-                .foregroundStyle(
-                    configuration.aliasSnapshotWriteStatus.hasPrefix("ok")
-                        ? Color.green
-                        : (configuration.aliasSnapshotWriteStatus.contains("failed") ? Color.red : Color.orange)
-                )
-                .padding(8)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color(.systemGray6))
-                .clipShape(RoundedRectangle(cornerRadius: 6))
+            VStack(alignment: .leading, spacing: 4) {
+                Text("APP GROUP WRITE STATUS")
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(.secondary)
+                Text(configuration.aliasSnapshotWriteStatus)
+                    .font(.caption.monospaced().bold())
+                    .textSelection(.enabled)
+                    .foregroundStyle(
+                        configuration.aliasSnapshotWriteStatus.hasPrefix("ok")
+                            ? Color.green
+                            : (configuration.aliasSnapshotWriteStatus.contains("failed") ? Color.red : Color.orange)
+                    )
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color(.systemYellow).opacity(0.18))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(Color.orange.opacity(0.35), lineWidth: 1)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 8))
 
             Text("DeviceActivityReport Extension Result")
                 .font(.headline)
 
             Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 4) {
+                row("Write", configuration.aliasSnapshotWriteStatus)
                 row("Generated", configuration.generatedAt.formatted(date: .omitted, time: .standard))
                 row("Segments", "\(configuration.segmentCount)")
                 row("Categories", "\(configuration.categoryCount)")
@@ -339,6 +612,10 @@ struct MetadataProbeReportView: View {
             if !configuration.categories.isEmpty {
                 Text("Categories")
                     .font(.subheadline.weight(.semibold))
+                probeLine(
+                    title: "APP GROUP WRITE STATUS",
+                    subtitle: configuration.aliasSnapshotWriteStatus
+                )
                 ForEach(configuration.categories.prefix(20)) { category in
                     probeLine(
                         title: category.displayName.isEmpty ? "<nil category name>" : category.displayName,
@@ -350,6 +627,10 @@ struct MetadataProbeReportView: View {
             if !configuration.applications.isEmpty {
                 Text("Applications")
                     .font(.subheadline.weight(.semibold))
+                probeLine(
+                    title: "APP GROUP WRITE STATUS",
+                    subtitle: configuration.aliasSnapshotWriteStatus
+                )
                 ForEach(configuration.applications.prefix(40)) { app in
                     probeLine(
                         title: app.displayName.isEmpty ? "<nil app name>" : app.displayName,

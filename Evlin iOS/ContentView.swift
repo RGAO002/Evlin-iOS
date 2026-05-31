@@ -75,6 +75,8 @@ struct ContentView: View {
 }
 
 struct ParentRootView: View {
+    static let nonChatContentBottomInset = EvlinTabBar.visibleHeight
+
     @State private var selectedTab: EvlinTab = .home
     @State private var profilePath = NavigationPath()
     @State private var insightsPath = NavigationPath()
@@ -85,7 +87,10 @@ struct ParentRootView: View {
     @EnvironmentObject private var apiClient: APIClient
 
     var body: some View {
-        VStack(spacing: 0) {
+        // Keep the app shell itself out of keyboard avoidance so the tab bar
+        // stays pinned to the physical screen bottom. ChatView handles keyboard
+        // lift locally for its input composer only.
+        ZStack(alignment: .bottom) {
             ZStack {
                 switch selectedTab {
                 case .home:
@@ -126,9 +131,13 @@ struct ParentRootView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding(.bottom, selectedTab == .chat ? 0 : Self.nonChatContentBottomInset)
 
             EvlinTabBar(selectedTab: $selectedTab)
+                .ignoresSafeArea(.keyboard, edges: .bottom)
+                .padding(.bottom, EvlinTabBar.bottomOffset)
         }
+        .ignoresSafeArea(.keyboard, edges: .bottom)
         .overlay(alignment: .top) {
             if let b = banner {
                 NotificationBanner(

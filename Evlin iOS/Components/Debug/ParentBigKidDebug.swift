@@ -63,6 +63,7 @@ private struct ParentBigKidDebugSheet: View {
                 section_trigger
                 section_reflectionApprove
                 section_taskReview
+                section_appCatalog
                 section_status
             }
             .navigationTitle("BigKid debug")
@@ -204,6 +205,20 @@ private struct ParentBigKidDebugSheet: View {
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .textSelection(.enabled)
+        }
+    }
+
+    private var section_appCatalog: some View {
+        Section {
+            NavigationLink {
+                ChildAppCatalogDebugView()
+            } label: {
+                Label("Open child app catalog picker", systemImage: "iphone.gen3.radiowaves.left.and.right")
+            }
+        } header: {
+            Text("4. Cross-device app lock")
+        } footer: {
+            Text("After the kid phone uploads its catalog, open this on the parent phone to pick an app and queue an exact-app lock.")
         }
     }
 
