@@ -75,12 +75,16 @@ struct CustomTokenPickerView: View {
         UUID(uuidString: familyIDString)
     }
 
-    private var sections: [LazyTagCatalogSection] {
-        LazyTagCatalogModel.sections(from: targets, searchText: searchText)
+    private var presentation: LazyTagCatalogPresentation {
+        LazyTagCatalogModel.presentation(
+            targets: targets,
+            searchText: searchText,
+            unresolvedName: request.target
+        )
     }
 
     private var canSave: Bool {
-        selectedTarget != nil && !isSaving
+        selectedTarget != nil && !presentation.isInformOnly && !isSaving
     }
 
     var body: some View {
@@ -170,10 +174,12 @@ struct CustomTokenPickerView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if familyID == nil || childDeviceID == nil {
             emptyState(message: "No family or child device is selected. Pair or select a child before saving chat aliases.")
+        } else if errorMessage == nil, let informMessage = presentation.informMessage {
+            informOnlyState(message: informMessage)
         } else {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 16) {
-                    ForEach(sections, id: \.type) { section in
+                    ForEach(presentation.sections, id: \.type) { section in
                         catalogSection(section)
                     }
                 }
@@ -311,6 +317,20 @@ struct CustomTokenPickerView: View {
                 .foregroundStyle(Color.evOutline)
             Text(message)
                 .font(.custom("Inter", size: 13))
+                .foregroundStyle(Color.evOnSurfaceVariant)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 24)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func informOnlyState(message: String) -> some View {
+        VStack(spacing: 14) {
+            Image(systemName: "info.circle.fill")
+                .font(.system(size: 38))
+                .foregroundStyle(Color.evPrimary)
+            Text(message)
+                .font(.custom("Inter", size: 14).weight(.semibold))
                 .foregroundStyle(Color.evOnSurfaceVariant)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 24)

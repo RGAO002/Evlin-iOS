@@ -100,6 +100,15 @@ struct LazyTagCatalogSection: Sendable, Equatable {
     let targets: [LazyTagCatalogTarget]
 }
 
+struct LazyTagCatalogPresentation: Sendable, Equatable {
+    let sections: [LazyTagCatalogSection]
+    let informMessage: String?
+
+    var isInformOnly: Bool {
+        informMessage != nil
+    }
+}
+
 enum LazyTagCatalogModel {
     static func sections(
         from targets: [LazyTagCatalogTarget],
@@ -117,5 +126,22 @@ enum LazyTagCatalogModel {
                     }
             )
         }
+    }
+
+    static func presentation(
+        targets: [LazyTagCatalogTarget],
+        searchText: String,
+        unresolvedName: String
+    ) -> LazyTagCatalogPresentation {
+        let sections = sections(from: targets, searchText: searchText)
+        let hasCandidates = sections.contains { !$0.targets.isEmpty }
+        return LazyTagCatalogPresentation(
+            sections: sections,
+            informMessage: hasCandidates ? nil : informMessage(for: unresolvedName)
+        )
+    }
+
+    private static func informMessage(for unresolvedName: String) -> String {
+        "\(unresolvedName) isn’t in your kid’s list yet. To lock it, add it on their phone, or try `block \(unresolvedName)`."
     }
 }

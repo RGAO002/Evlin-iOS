@@ -48,6 +48,37 @@ final class LazyTagCatalogModelTests: XCTestCase {
 
         XCTAssertEqual(target.supportingText, "Current + future apps Apple classifies as Games")
     }
+
+    func test_filteredCatalogWithNoCandidatesShowsInformOnlyCopyInsteadOfPickableRows() {
+        let presentation = LazyTagCatalogModel.presentation(
+            targets: [
+                .init(aliasKey: appID, type: .app, displayName: "Instagram", aliases: ["ig"]),
+                .init(aliasKey: categoryID, type: .category, displayName: "Games", aliases: ["gaming"]),
+                .init(aliasKey: listID, type: .list, displayName: "Entertainment", aliases: ["weekend"])
+            ],
+            searchText: "抖音",
+            unresolvedName: "抖音"
+        )
+
+        XCTAssertTrue(presentation.isInformOnly)
+        XCTAssertEqual(
+            presentation.informMessage,
+            "抖音 isn’t in your kid’s list yet. To lock it, add it on their phone, or try `block 抖音`."
+        )
+        XCTAssertEqual(presentation.sections.map(\.type), [.app, .category, .list])
+        XCTAssertTrue(presentation.sections.allSatisfy { $0.targets.isEmpty })
+    }
+
+    func test_nonEmptyCatalogIsPickableNotInformOnly() {
+        let presentation = LazyTagCatalogModel.presentation(
+            targets: [.init(aliasKey: appID, type: .app, displayName: "Instagram", aliases: ["ig"])],
+            searchText: "",
+            unresolvedName: "ig"
+        )
+
+        XCTAssertFalse(presentation.isInformOnly)
+        XCTAssertNil(presentation.informMessage)
+    }
 }
 
 final class LazyTagPersistenceTests: XCTestCase {
