@@ -203,7 +203,14 @@ struct AddAppFlowView: View {
         )
 
         do {
-            _ = try await apiClient.uploadChildAppCatalog(deviceID: childDeviceID, apps: [app])
+            let response = try await apiClient.uploadChildAppCatalog(deviceID: childDeviceID, apps: [app])
+            let backendAliasKey = response.apps.first?.id ?? app.aliasKey
+            LocalAliasStore.shared.saveApplicationAliases(
+                token: token,
+                displayName: app.displayName,
+                bundleIdentifier: app.bundleID,
+                catalogAliasKey: backendAliasKey
+            )
             onSaved()
         } catch {
             errorText = "Saved locally, backend sync failed: \(error.localizedDescription)"

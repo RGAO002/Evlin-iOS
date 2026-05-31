@@ -11,16 +11,24 @@ final class LocalAliasStore: @unchecked Sendable {
     private let categoryKey = "evlin.categoryTokens"
     private let listKey = "evlin.savedListTokens"
     private let applicationTokenKey = "evlin.applicationTokens"
+    private let catalogAliasKeyIndexKey = "evlin.catalogAliasKeyIndex"
     /// Lowercased display name → lowercased bundle id (for exact-app `targetKey` + queries).
     private let applicationDisplayToBundleKey = "evlin.applicationDisplayToBundle"
 
     // MARK: - Categories
 
-    func saveCategoryToken(_ token: ActivityCategoryToken, forName name: String) {
+    func saveCategoryToken(_ token: ActivityCategoryToken, forName name: String, catalogAliasKey: UUID? = nil) {
         var dict = loadCategoryDict()
         if let data = _encodeTokenJSON(token) {
             dict[name.lowercased()] = data
             persistCategoryDict(dict)
+            if let catalogAliasKey {
+                saveCatalogAliasKey(
+                    catalogAliasKey,
+                    targetType: .category,
+                    encodedTokenKey: data.base64EncodedString()
+                )
+            }
         }
     }
 
@@ -33,7 +41,12 @@ final class LocalAliasStore: @unchecked Sendable {
     // MARK: - Applications (Managed Apps → token lookup)
 
     /// Persists the same `ApplicationToken` under bundle id and/or display name keys.
-    func saveApplicationAliases(token: ApplicationToken, displayName: String?, bundleIdentifier: String?) {
+    func saveApplicationAliases(
+        token: ApplicationToken,
+        displayName: String?,
+        bundleIdentifier: String?,
+        catalogAliasKey: UUID? = nil
+    ) {
         guard let data = _encodeTokenJSON(token) else { return }
         var tokMap = loadApplicationTokenDict()
         if let bid = bundleIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines), !bid.isEmpty {
@@ -50,6 +63,13 @@ final class LocalAliasStore: @unchecked Sendable {
             }
         }
         persistApplicationTokenDict(tokMap)
+        if let catalogAliasKey {
+            saveCatalogAliasKey(
+                catalogAliasKey,
+                targetType: .app,
+                encodedTokenKey: data.base64EncodedString()
+            )
+        }
     }
 
     /// Case-insensitive: bundle id, **or** display name / free-text hint from the parent command.
@@ -402,6 +422,7 @@ final class LocalAliasStore: @unchecked Sendable {
         defaults?.removeObject(forKey: applicationDisplayToBundleKey)
         defaults?.removeObject(forKey: categoryKey)
         defaults?.removeObject(forKey: listKey)
+        defaults?.removeObject(forKey: catalogAliasKeyIndexKey)
     }
 
     // MARK: - Saved Lists
@@ -424,7 +445,66 @@ final class LocalAliasStore: @unchecked Sendable {
         Array(loadListDict().keys)
     }
 
+    // MARK: - Backend catalog member mapping
+
+    /// Persist the backend `alias_key` corresponding to a locally-held opaque
+    /// FamilyControls token. Saved lists use this to upload explicit member
+    /// sets without ever exposing raw token bytes to the parent device.
+    func saveCatalogAliasKey(
+        _ aliasKey: UUID,
+        targetType: CatalogListMemberTargetType,
+        encodedTokenKey: String
+    ) {
+        let key = encodedTokenKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else { return }
+        var dict = loadCatalogAliasKeyIndex()
+        let record = CatalogAliasKeyRecord(targetType: targetType, aliasKey: aliasKey)
+        guard let data = try? JSONEncoder().encode(record) else { return }
+        dict[key] = data
+        persistCatalogAliasKeyIndex(dict)
+    }
+
+    func catalogListMembers(
+        applicationTokenKeys: [String],
+        categoryTokenKeys: [String]
+    ) -> [CatalogListMemberUpload] {
+        let index = loadCatalogAliasKeyIndex()
+        var seen = Set<UUID>()
+        var members: [CatalogListMemberUpload] = []
+
+        func appendIfKnown(_ tokenKey: String, expectedType: CatalogListMemberTargetType) {
+            let key = tokenKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !key.isEmpty,
+                  let data = index[key],
+                  let record = try? JSONDecoder().decode(CatalogAliasKeyRecord.self, from: data),
+                  record.targetType == expectedType,
+                  seen.insert(record.aliasKey).inserted
+            else { return }
+            members.append(CatalogListMemberUpload(targetType: expectedType, aliasKey: record.aliasKey))
+        }
+
+        for tokenKey in applicationTokenKeys {
+            appendIfKnown(tokenKey, expectedType: .app)
+        }
+        for tokenKey in categoryTokenKeys {
+            appendIfKnown(tokenKey, expectedType: .category)
+        }
+        return members
+    }
+
+    func catalogListMembers(for selection: FamilyActivitySelection) -> [CatalogListMemberUpload] {
+        catalogListMembers(
+            applicationTokenKeys: selection.applicationTokens.compactMap(encodedTokenKey),
+            categoryTokenKeys: selection.categoryTokens.compactMap(encodedTokenKey)
+        )
+    }
+
     // MARK: - Private
+
+    private struct CatalogAliasKeyRecord: Codable {
+        let targetType: CatalogListMemberTargetType
+        let aliasKey: UUID
+    }
 
     private func loadCategoryDict() -> [String: Data] {
         (defaults?.dictionary(forKey: categoryKey) as? [String: Data]) ?? [:]
@@ -450,12 +530,24 @@ final class LocalAliasStore: @unchecked Sendable {
         defaults?.set(dict, forKey: applicationTokenKey)
     }
 
+    private func loadCatalogAliasKeyIndex() -> [String: Data] {
+        (defaults?.dictionary(forKey: catalogAliasKeyIndexKey) as? [String: Data]) ?? [:]
+    }
+
+    private func persistCatalogAliasKeyIndex(_ dict: [String: Data]) {
+        defaults?.set(dict, forKey: catalogAliasKeyIndexKey)
+    }
+
     private func loadDisplayToBundleDict() -> [String: String] {
         (defaults?.dictionary(forKey: applicationDisplayToBundleKey) as? [String: String]) ?? [:]
     }
 
     private func persistDisplayToBundleDict(_ dict: [String: String]) {
         defaults?.set(dict, forKey: applicationDisplayToBundleKey)
+    }
+
+    private func encodedTokenKey<T: Encodable>(_ token: T) -> String? {
+        _encodeTokenJSON(token)?.base64EncodedString()
     }
 }
 

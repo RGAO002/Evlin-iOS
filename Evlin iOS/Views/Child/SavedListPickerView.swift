@@ -12,7 +12,7 @@ struct SavedListPickerView: View {
     let mode: String   // "child_device" or "parent_device"
     let onSaved: (String) -> Void
 
-    @State private var selection = FamilyActivitySelection()
+    @State private var selection = FamilyActivitySelection(includeEntireCategory: true)
     @State private var name: String = ""
     @State private var showPicker = false
     @State private var saving = false
@@ -94,6 +94,7 @@ struct SavedListPickerView: View {
             // be locked as a unit later. This is best-effort; the kid device's
             // LocalAliasStore remains the execution source of truth.
             if let blob = try? AppCatalogBlobEncoder.base64(selection) {
+                let members = LocalAliasStore.shared.catalogListMembers(for: selection)
                 _ = try? await apiClient.uploadCatalogList(
                     deviceID: owningDeviceID,
                     sourceDeviceID: owningDeviceID,
@@ -102,7 +103,8 @@ struct SavedListPickerView: View {
                     selectionBlobBase64: blob,
                     appCount: selection.applicationTokens.count
                         + selection.categoryTokens.count
-                        + selection.webDomainTokens.count
+                        + selection.webDomainTokens.count,
+                    members: members.isEmpty ? nil : members
                 )
             }
             onSaved(trimmed)
