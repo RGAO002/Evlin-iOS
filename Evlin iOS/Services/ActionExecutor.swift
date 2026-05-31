@@ -13,6 +13,14 @@ enum CatalogCommandTokenData {
         decodedData(from: target.catalogCategoryTokenDataBase64)
     }
 
+    static func decodedApplicationDatas(from target: CommandTarget) -> [Data] {
+        target.catalogApplicationTokenDataBase64s.compactMap(decodedData)
+    }
+
+    static func decodedCategoryDatas(from target: CommandTarget) -> [Data] {
+        target.catalogCategoryTokenDataBase64s.compactMap(decodedData)
+    }
+
     static func decodedApplicationToken(from target: CommandTarget) -> ApplicationToken? {
         decodedApplicationData(from: target).flatMap {
             decodeToken(ApplicationToken.self, from: $0)
@@ -25,11 +33,43 @@ enum CatalogCommandTokenData {
         }
     }
 
+    static func decodedApplicationTokenSet(from target: CommandTarget) throws -> Set<ApplicationToken>? {
+        let payloads = cleanedPayloads(target.catalogApplicationTokenDataBase64s)
+        guard !payloads.isEmpty else { return nil }
+        var tokens = Set<ApplicationToken>()
+        for payload in payloads {
+            guard let data = decodedData(from: payload),
+                  let token = decodeToken(ApplicationToken.self, from: data)
+            else { throw ExecuteError.malformed }
+            tokens.insert(token)
+        }
+        return tokens
+    }
+
+    static func decodedCategoryTokenSet(from target: CommandTarget) throws -> Set<ActivityCategoryToken>? {
+        let payloads = cleanedPayloads(target.catalogCategoryTokenDataBase64s)
+        guard !payloads.isEmpty else { return nil }
+        var tokens = Set<ActivityCategoryToken>()
+        for payload in payloads {
+            guard let data = decodedData(from: payload),
+                  let token = decodeToken(ActivityCategoryToken.self, from: data)
+            else { throw ExecuteError.malformed }
+            tokens.insert(token)
+        }
+        return tokens
+    }
+
     private static func decodedData(from base64: String?) -> Data? {
         guard let trimmed = base64?.trimmingCharacters(in: .whitespacesAndNewlines),
               !trimmed.isEmpty
         else { return nil }
         return Data(base64Encoded: trimmed)
+    }
+
+    private static func cleanedPayloads(_ base64s: [String]) -> [String] {
+        base64s
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
     }
 
     private static func decodeToken<T: Decodable>(_ type: T.Type, from data: Data) -> T? {
@@ -227,26 +267,34 @@ final class ActionExecutor: @unchecked Sendable {
                 ?? cmd.target.categoryHint
                 ?? "App"
         case .savedList:
-            let sel: FamilyActivitySelection
-            // iOS 26 PropertyListEncoder crashes on FamilyControls tokens; try JSON first,
-            // fall back to plist for legacy server payloads. See LocalAliasStore._decodeTokenAny.
-            if let blob = blob,
-               let decoded = (try? JSONDecoder().decode(FamilyActivitySelection.self, from: blob))
-                          ?? (try? PropertyListDecoder().decode(FamilyActivitySelection.self, from: blob)) {
-                sel = decoded
-            } else if let name = cmd.target.listName,
-                      let local = LocalAliasStore.shared.savedList(named: name) {
-                sel = local
-            } else {
-                throw ExecuteError.listNotFound(cmd.target.listName ?? "(unnamed)")
-            }
-            appTokens = sel.applicationTokens
-            categoryTokens = sel.categoryTokens
-            webDomainTokens = sel.webDomainTokens
             if let id = cmd.target.listID {
                 targetKey = id.uuidString
             } else {
                 throw ExecuteError.malformed
+            }
+            if let catalogApps = try CatalogCommandTokenData.decodedApplicationTokenSet(from: cmd.target) {
+                appTokens = catalogApps
+            }
+            if let catalogCategories = try CatalogCommandTokenData.decodedCategoryTokenSet(from: cmd.target) {
+                categoryTokens = catalogCategories
+            }
+            if appTokens.isEmpty && categoryTokens.isEmpty {
+                let sel: FamilyActivitySelection
+                // iOS 26 PropertyListEncoder crashes on FamilyControls tokens; try JSON first,
+                // fall back to plist for legacy server payloads. See LocalAliasStore._decodeTokenAny.
+                if let blob = blob,
+                   let decoded = (try? JSONDecoder().decode(FamilyActivitySelection.self, from: blob))
+                              ?? (try? PropertyListDecoder().decode(FamilyActivitySelection.self, from: blob)) {
+                    sel = decoded
+                } else if let name = cmd.target.listName,
+                          let local = LocalAliasStore.shared.savedList(named: name) {
+                    sel = local
+                } else {
+                    throw ExecuteError.listNotFound(cmd.target.listName ?? "(unnamed)")
+                }
+                appTokens = sel.applicationTokens
+                categoryTokens = sel.categoryTokens
+                webDomainTokens = sel.webDomainTokens
             }
             displayName = cmd.target.listName ?? "saved list"
         case .category:

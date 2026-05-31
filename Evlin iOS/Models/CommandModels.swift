@@ -33,6 +33,8 @@ struct CommandTarget: Codable, Sendable {
     // local-alias and pending-blob fallbacks while allowing direct token execute.
     var catalogTokenDataBase64: String? = nil
     var catalogCategoryTokenDataBase64: String? = nil
+    var catalogApplicationTokenDataBase64s: [String] = []
+    var catalogCategoryTokenDataBase64s: [String] = []
 }
 
 struct LockCommand: Codable, Sendable, Identifiable {

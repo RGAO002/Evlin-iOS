@@ -75,7 +75,9 @@ final class CommandPoller {
             hasPendingBlob: poll.target.has_pending_blob ?? false,
             forceDowngrade: poll.target.force_downgrade ?? false,
             catalogTokenDataBase64: poll.target.catalog_token_data_base64,
-            catalogCategoryTokenDataBase64: poll.target.catalog_category_token_data_base64
+            catalogCategoryTokenDataBase64: poll.target.catalog_category_token_data_base64,
+            catalogApplicationTokenDataBase64s: poll.target.applications ?? [],
+            catalogCategoryTokenDataBase64s: poll.target.applicationCategories ?? []
         )
         let action: CommandAction = CommandAction(rawValue: poll.action) ?? .shield
 

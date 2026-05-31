@@ -341,6 +341,8 @@ struct PollTargetDTO: Decodable {
     let force_downgrade: Bool?           // new: parent-confirmed B1 downgrade
     let catalog_token_data_base64: String?
     let catalog_category_token_data_base64: String?
+    let applications: [String]?
+    let applicationCategories: [String]?
 
     private enum CodingKeys: String, CodingKey {
         case bundle_id
@@ -354,6 +356,10 @@ struct PollTargetDTO: Decodable {
         case target_display
         case target_child_id
         case force_downgrade
+        case scope
+        case applications
+        case applicationCategories
+        case application_categories
         case canonicalCatalogTokenDataBase64 = "catalog_token_data_base64"
         case canonicalCatalogCategoryTokenDataBase64 = "catalog_category_token_data_base64"
         case legacyTokenDataBase64 = "token_data_base64"
@@ -384,6 +390,10 @@ struct PollTargetDTO: Decodable {
             try c.decodeIfPresent(String.self, forKey: .canonicalCatalogCategoryTokenDataBase64)
                 ?? c.decodeIfPresent(String.self, forKey: .legacyCategoryTokenDataBase64)
                 ?? c.decodeIfPresent(String.self, forKey: .camelCatalogCategoryTokenDataBase64)
+        applications = try c.decodeIfPresent([String].self, forKey: .applications)
+        applicationCategories =
+            try c.decodeIfPresent([String].self, forKey: .applicationCategories)
+                ?? c.decodeIfPresent([String].self, forKey: .application_categories)
     }
 }
 

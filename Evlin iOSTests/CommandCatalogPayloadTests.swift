@@ -108,6 +108,48 @@ final class CommandCatalogPayloadTests: XCTestCase {
         XCTAssertEqual(CatalogCommandTokenData.decodedApplicationData(from: command.target), Data("LEGACY_APP_TOKEN".utf8))
     }
 
+    func test_commandPollerMapsSavedListTokenSetPayloadIntoCommandTarget() throws {
+        let appOne = Data("APP_ONE".utf8).base64EncodedString()
+        let appTwo = Data("APP_TWO".utf8).base64EncodedString()
+        let games = Data("CATEGORY_GAMES".utf8).base64EncodedString()
+        let poll = try decodePollCommand("""
+        {
+          "command_id": "77777777-7777-7777-7777-777777777777",
+          "action": "shield",
+          "tier": "savedList",
+          "target": {
+            "list_name": "Entertainment",
+            "list_id": "88888888-8888-8888-8888-888888888888",
+            "target_all": false,
+            "target_display": "Entertainment",
+            "original_request": "lock entertainment",
+            "has_pending_blob": false,
+            "scope": "whole_target",
+            "applications": ["\(appOne)", "\(appTwo)"],
+            "applicationCategories": ["\(games)"]
+          },
+          "duration_minutes": 60,
+          "issued_at": "2026-05-31T12:15:00Z"
+        }
+        """)
+
+        let command = CommandPoller.lockCommand(from: poll)
+
+        XCTAssertEqual(command.tier, .savedList)
+        XCTAssertEqual(command.target.listName, "Entertainment")
+        XCTAssertEqual(command.target.listID, UUID(uuidString: "88888888-8888-8888-8888-888888888888"))
+        XCTAssertFalse(command.target.hasPendingBlob)
+        XCTAssertEqual(command.target.catalogApplicationTokenDataBase64s, [appOne, appTwo])
+        XCTAssertEqual(command.target.catalogCategoryTokenDataBase64s, [games])
+        XCTAssertEqual(CatalogCommandTokenData.decodedApplicationDatas(from: command.target), [
+            Data("APP_ONE".utf8),
+            Data("APP_TWO".utf8),
+        ])
+        XCTAssertEqual(CatalogCommandTokenData.decodedCategoryDatas(from: command.target), [
+            Data("CATEGORY_GAMES".utf8),
+        ])
+    }
+
     func test_pollCommandDTO_decodesCanonicalExactAppCatalogTokenPayload() throws {
         let tokenBlob = Data("APP_TOKEN".utf8).base64EncodedString()
         let data = """
@@ -199,6 +241,35 @@ final class CommandCatalogPayloadTests: XCTestCase {
 
         XCTAssertEqual(command.target.catalog_token_data_base64, tokenBlob)
         XCTAssertTrue(command.target.has_pending_blob ?? false)
+    }
+
+    func test_pollCommandDTO_decodesSavedListTokenSetPayload() throws {
+        let appBlob = Data("APP_ONE".utf8).base64EncodedString()
+        let categoryBlob = Data("CATEGORY_GAMES".utf8).base64EncodedString()
+        let data = """
+        {
+          "command_id": "77777777-7777-7777-7777-777777777777",
+          "action": "shield",
+          "tier": "savedList",
+          "target": {
+            "list_name": "Entertainment",
+            "list_id": "88888888-8888-8888-8888-888888888888",
+            "target_display": "Entertainment",
+            "original_request": "lock entertainment",
+            "has_pending_blob": false,
+            "scope": "whole_target",
+            "applications": ["\(appBlob)"],
+            "applicationCategories": ["\(categoryBlob)"]
+          },
+          "duration_minutes": 60,
+          "issued_at": "2026-05-31T12:15:00Z"
+        }
+        """.data(using: .utf8)!
+
+        let command = try JSONDecoder().decode(PollCommandDTO.self, from: data)
+
+        XCTAssertEqual(command.target.applications, [appBlob])
+        XCTAssertEqual(command.target.applicationCategories, [categoryBlob])
     }
 
     func test_catalogCommandTokenData_decodesExecutorApplicationAndCategoryBytes() {
