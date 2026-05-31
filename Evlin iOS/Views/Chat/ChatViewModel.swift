@@ -792,6 +792,10 @@ class ChatViewModel: ObservableObject {
         dispatchChat(userMessage: phrase, forceConfirmations: [])
     }
 
+    func requestUnlock(_ target: String) {
+        resendWithPhrase("unlock \(target)")
+    }
+
     // MARK: - Ack-status polling (P1-1 fix)
 
     /// Polls /parent/ack-status for a queued command and mutates the agent

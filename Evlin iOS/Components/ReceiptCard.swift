@@ -19,6 +19,45 @@ enum ReceiptState: Sendable, Equatable, Codable {
     case failedOther(reason: String)
 }
 
+struct ReceiptCardActions: Sendable, Equatable {
+    let unlockTarget: String
+    let unlockButtonTitle: String
+    let keepButtonTitle: String
+}
+
+enum ReceiptCardActionModel {
+    static func actions(
+        for state: ReceiptState,
+        effectiveState: AckEffectiveState?
+    ) -> ReceiptCardActions? {
+        guard case .confirmedExact(let verb, _, _) = state,
+              verb == .unshield || verb == .unblock,
+              let effectiveState,
+              !effectiveState.shieldsCovering.isEmpty
+        else { return nil }
+
+        let strongest = strongestCover(in: effectiveState.shieldsCovering)
+        return ReceiptCardActions(
+            unlockTarget: strongest.displayName,
+            unlockButtonTitle: "Unlock \(strongest.displayName)",
+            keepButtonTitle: "Keep locked"
+        )
+    }
+
+    private static func strongestCover(
+        in covers: [AckEffectiveState.ShieldCover]
+    ) -> AckEffectiveState.ShieldCover {
+        let iso = ISO8601DateFormatter()
+        return covers.sorted { a, b in
+            let aDate = a.expiresAtISO.flatMap { iso.date(from: $0) }
+            let bDate = b.expiresAtISO.flatMap { iso.date(from: $0) }
+            if aDate == nil && bDate != nil { return true }
+            if aDate != nil && bDate == nil { return false }
+            return (aDate ?? .distantPast) > (bDate ?? .distantPast)
+        }[0]
+    }
+}
+
 /// Two-line receipt: primary mutation + optional effective-state disclosure.
 /// See spec §8.
 ///
@@ -28,12 +67,29 @@ enum ReceiptState: Sendable, Equatable, Codable {
 struct ReceiptCard: View {
     let state: ReceiptState
     let effectiveState: AckEffectiveState?
+    var onRequestUnlock: ((String) -> Void)? = nil
+
+    @State private var hidesActions = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             primaryLine
             if let line = effectiveStateLine {
                 Text(line).font(.caption).foregroundStyle(.secondary)
+            }
+            if let actions = actionModel, !hidesActions {
+                HStack(spacing: 8) {
+                    Button(actions.unlockButtonTitle) {
+                        onRequestUnlock?(actions.unlockTarget)
+                        hidesActions = true
+                    }
+                    .buttonStyle(.borderedProminent)
+                    Button(actions.keepButtonTitle) {
+                        hidesActions = true
+                    }
+                    .buttonStyle(.bordered)
+                }
+                .padding(.top, 4)
             }
             if showsHonestReceiptFooter {
                 Text(EvlinReceiptCopy.appliedOnKidDevice)
@@ -45,6 +101,11 @@ struct ReceiptCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(.systemGray6))
         .cornerRadius(12)
+    }
+
+    private var actionModel: ReceiptCardActions? {
+        guard onRequestUnlock != nil else { return nil }
+        return ReceiptCardActionModel.actions(for: state, effectiveState: effectiveState)
     }
 
     /// Only successful lock-type receipts get the honest "applied on Kid's

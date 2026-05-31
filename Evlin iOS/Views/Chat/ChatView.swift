@@ -77,7 +77,13 @@ struct ChatView: View {
                                 // to success/failure + honest effective-state line
                                 // when the child acks. See plan Phase 8.
                                 if message.role == .agent, let receipt = message.receiptState {
-                                    ReceiptCard(state: receipt, effectiveState: message.receiptEffectiveState)
+                                    ReceiptCard(
+                                        state: receipt,
+                                        effectiveState: message.receiptEffectiveState,
+                                        onRequestUnlock: { target in
+                                            viewModel.requestUnlock(target)
+                                        }
+                                    )
                                 }
 
                                 // Agent envelope (Phase E) — staged proposals
