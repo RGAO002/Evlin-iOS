@@ -92,6 +92,19 @@ struct CatalogSearchResult: Equatable, Identifiable, Sendable {
     let canonicalName: String
     let bundleID: String?
     let aliases: [String]
+    let artworkURL: URL?
+
+    init(
+        canonicalName: String,
+        bundleID: String?,
+        aliases: [String],
+        artworkURL: URL? = nil
+    ) {
+        self.canonicalName = canonicalName
+        self.bundleID = bundleID
+        self.aliases = aliases
+        self.artworkURL = artworkURL
+    }
 
     var id: String {
         bundleID ?? canonicalName.lowercased()

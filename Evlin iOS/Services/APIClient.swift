@@ -506,15 +506,22 @@ struct CatalogSearchResultDTO: Codable, Sendable, Equatable {
     let canonicalName: String
     let bundleID: String?
     let aliases: [String]
+    let artworkURL: URL?
 
     enum CodingKeys: String, CodingKey {
         case canonicalName = "canonical_name"
         case bundleID = "bundle_id"
         case aliases
+        case artworkURL = "artwork_url"
     }
 
     var result: CatalogSearchResult {
-        CatalogSearchResult(canonicalName: canonicalName, bundleID: bundleID, aliases: aliases)
+        CatalogSearchResult(
+            canonicalName: canonicalName,
+            bundleID: bundleID,
+            aliases: aliases,
+            artworkURL: artworkURL
+        )
     }
 }
 
@@ -535,6 +542,43 @@ struct CatalogListUploadResponse: Codable, Sendable, Equatable {
         case listName = "list_name"
         case aliases
         case appCount = "app_count"
+    }
+}
+
+enum CatalogListMemberTargetType: String, Codable, Sendable, Equatable {
+    case app
+    case category
+}
+
+struct CatalogListMemberUpload: Codable, Sendable, Equatable {
+    let targetType: CatalogListMemberTargetType
+    let aliasKey: UUID
+
+    enum CodingKeys: String, CodingKey {
+        case targetType = "target_type"
+        case aliasKey = "alias_key"
+    }
+}
+
+struct CatalogListUploadRequestBody: Codable, Sendable, Equatable {
+    let deviceID: UUID
+    let aliasKey: UUID?
+    let sourceDeviceID: UUID?
+    let listName: String
+    let aliases: [String]
+    let selectionBlobBase64: String
+    let appCount: Int
+    let members: [CatalogListMemberUpload]?
+
+    enum CodingKeys: String, CodingKey {
+        case deviceID = "device_id"
+        case aliasKey = "alias_key"
+        case sourceDeviceID = "source_device_id"
+        case listName = "list_name"
+        case aliases
+        case selectionBlobBase64 = "selection_blob_base64"
+        case appCount = "app_count"
+        case members
     }
 }
 
@@ -823,41 +867,24 @@ extension APIClient {
         listName: String,
         aliases: [String],
         selectionBlobBase64: String,
-        appCount: Int
+        appCount: Int,
+        members: [CatalogListMemberUpload]? = nil
     ) async throws -> CatalogListUploadResponse {
         let url = URL(string: "\(baseURL)/child/catalog-list")!
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.timeoutInterval = 22
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        struct Body: Codable {
-            let deviceID: UUID
-            let aliasKey: UUID?
-            let sourceDeviceID: UUID?
-            let listName: String
-            let aliases: [String]
-            let selectionBlobBase64: String
-            let appCount: Int
-
-            enum CodingKeys: String, CodingKey {
-                case deviceID = "device_id"
-                case aliasKey = "alias_key"
-                case sourceDeviceID = "source_device_id"
-                case listName = "list_name"
-                case aliases
-                case selectionBlobBase64 = "selection_blob_base64"
-                case appCount = "app_count"
-            }
-        }
         req.httpBody = try JSONEncoder().encode(
-            Body(
+            CatalogListUploadRequestBody(
                 deviceID: deviceID,
                 aliasKey: aliasKey,
                 sourceDeviceID: sourceDeviceID,
                 listName: listName,
                 aliases: aliases,
                 selectionBlobBase64: selectionBlobBase64,
-                appCount: appCount
+                appCount: appCount,
+                members: members
             )
         )
         let (data, resp) = try await URLSession.shared.data(for: req)

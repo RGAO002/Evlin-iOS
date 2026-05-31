@@ -9,7 +9,8 @@ final class APIClientCatalogDTOTests: XCTestCase {
             {
               "canonical_name": "Instagram",
               "bundle_id": "com.burbn.instagram",
-              "aliases": ["Instagram", "IG", "insta"]
+              "aliases": ["Instagram", "IG", "insta"],
+              "artwork_url": "https://is1-ssl.mzstatic.com/image/thumb/ig.png"
             }
           ]
         }
@@ -19,7 +20,40 @@ final class APIClientCatalogDTOTests: XCTestCase {
         XCTAssertEqual(response.results.count, 1)
         XCTAssertEqual(response.results[0].canonicalName, "Instagram")
         XCTAssertEqual(response.results[0].bundleID, "com.burbn.instagram")
+        XCTAssertEqual(response.results[0].artworkURL, URL(string: "https://is1-ssl.mzstatic.com/image/thumb/ig.png"))
+        XCTAssertEqual(response.results[0].result.artworkURL, URL(string: "https://is1-ssl.mzstatic.com/image/thumb/ig.png"))
         XCTAssertEqual(response.results[0].result.aliases, ["Instagram", "IG", "insta"])
+    }
+
+    func test_catalogListUploadBodyEncodesExplicitMembers() throws {
+        let deviceID = UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!
+        let appID = UUID(uuidString: "11111111-1111-1111-1111-111111111111")!
+        let categoryID = UUID(uuidString: "22222222-2222-2222-2222-222222222222")!
+        let body = CatalogListUploadRequestBody(
+            deviceID: deviceID,
+            aliasKey: nil,
+            sourceDeviceID: deviceID,
+            listName: "Entertainment",
+            aliases: ["fun"],
+            selectionBlobBase64: "U0VMRUNUSU9O",
+            appCount: 0,
+            members: [
+                .init(targetType: .app, aliasKey: appID),
+                .init(targetType: .category, aliasKey: categoryID),
+            ]
+        )
+
+        let data = try JSONEncoder().encode(body)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let members = try XCTUnwrap(json["members"] as? [[String: Any]])
+
+        XCTAssertEqual(json["device_id"] as? String, deviceID.uuidString)
+        XCTAssertEqual(json["list_name"] as? String, "Entertainment")
+        XCTAssertEqual(members.count, 2)
+        XCTAssertEqual(members[0]["target_type"] as? String, "app")
+        XCTAssertEqual(members[0]["alias_key"] as? String, appID.uuidString)
+        XCTAssertEqual(members[1]["target_type"] as? String, "category")
+        XCTAssertEqual(members[1]["alias_key"] as? String, categoryID.uuidString)
     }
 
     func test_childAppCatalogUploadAppEncodesSnakeCaseWithSourceDevice() throws {

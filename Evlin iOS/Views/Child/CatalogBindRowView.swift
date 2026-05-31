@@ -223,14 +223,7 @@ private struct CatalogCandidateRow: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            RoundedRectangle(cornerRadius: compact ? 8 : 10, style: .continuous)
-                .fill(iconFill)
-                .frame(width: compact ? 30 : 34, height: compact ? 30 : 34)
-                .overlay {
-                    Text(String(result.canonicalName.prefix(1)).uppercased())
-                        .font(.caption.weight(.black))
-                        .foregroundStyle(.white)
-                }
+            CatalogArtworkView(result: result, size: compact ? 30 : 34)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(result.canonicalName)
@@ -262,6 +255,42 @@ private struct CatalogCandidateRow: View {
         }
         .padding(compact ? 0 : 10)
         .background(compact ? Color.clear : Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+}
+
+private struct CatalogArtworkView: View {
+    let result: CatalogSearchResult
+    let size: CGFloat
+
+    var body: some View {
+        Group {
+            if let url = result.artworkURL {
+                AsyncImage(url: url) { phase in
+                    switch phase {
+                    case .success(let image):
+                        image
+                            .resizable()
+                            .scaledToFill()
+                    default:
+                        fallbackIcon
+                    }
+                }
+            } else {
+                fallbackIcon
+            }
+        }
+        .frame(width: size, height: size)
+        .clipShape(RoundedRectangle(cornerRadius: size <= 30 ? 8 : 10, style: .continuous))
+    }
+
+    private var fallbackIcon: some View {
+        RoundedRectangle(cornerRadius: size <= 30 ? 8 : 10, style: .continuous)
+            .fill(iconFill)
+            .overlay {
+                Text(String(result.canonicalName.prefix(1)).uppercased())
+                    .font(.caption.weight(.black))
+                    .foregroundStyle(.white)
+            }
     }
 
     private var iconFill: LinearGradient {
