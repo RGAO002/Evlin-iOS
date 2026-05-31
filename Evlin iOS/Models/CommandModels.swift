@@ -28,6 +28,11 @@ struct CommandTarget: Codable, Sendable {
     // ActiveLockStore.addShield then skips the merge rule for this (tier, targetKey).
     // See spec §5.2 B1 flow and plan Phase 6/9 changes.
     var forceDowngrade: Bool = false
+
+    // Canonical backend catalog-lock payloads. These preserve the existing
+    // local-alias and pending-blob fallbacks while allowing direct token execute.
+    var catalogTokenDataBase64: String? = nil
+    var catalogCategoryTokenDataBase64: String? = nil
 }
 
 struct LockCommand: Codable, Sendable, Identifiable {

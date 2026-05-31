@@ -73,7 +73,9 @@ final class CommandPoller {
             targetDisplay: poll.target.target_display,
             targetChildID: poll.target.target_child_id.flatMap(UUID.init(uuidString:)),
             hasPendingBlob: poll.target.has_pending_blob ?? false,
-            forceDowngrade: poll.target.force_downgrade ?? false
+            forceDowngrade: poll.target.force_downgrade ?? false,
+            catalogTokenDataBase64: poll.target.catalog_token_data_base64,
+            catalogCategoryTokenDataBase64: poll.target.catalog_category_token_data_base64
         )
         let action: CommandAction = CommandAction(rawValue: poll.action) ?? .shield
 

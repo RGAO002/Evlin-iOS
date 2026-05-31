@@ -339,6 +339,8 @@ struct PollTargetDTO: Decodable {
     let target_display: String?
     let target_child_id: String?         // new: which child device (multi-child)
     let force_downgrade: Bool?           // new: parent-confirmed B1 downgrade
+    let catalog_token_data_base64: String?
+    let catalog_category_token_data_base64: String?
 
     private enum CodingKeys: String, CodingKey {
         case bundle_id
@@ -352,6 +354,12 @@ struct PollTargetDTO: Decodable {
         case target_display
         case target_child_id
         case force_downgrade
+        case canonicalCatalogTokenDataBase64 = "catalog_token_data_base64"
+        case canonicalCatalogCategoryTokenDataBase64 = "catalog_category_token_data_base64"
+        case legacyTokenDataBase64 = "token_data_base64"
+        case legacyCategoryTokenDataBase64 = "category_token_data_base64"
+        case camelCatalogTokenDataBase64 = "catalogTokenDataBase64"
+        case camelCatalogCategoryTokenDataBase64 = "catalogCategoryTokenDataBase64"
     }
 
     init(from decoder: Decoder) throws {
@@ -368,6 +376,14 @@ struct PollTargetDTO: Decodable {
         target_display = try c.decodeIfPresent(String.self, forKey: .target_display)
         target_child_id = try c.decodeIfPresent(String.self, forKey: .target_child_id)
         force_downgrade = try c.decodeIfPresent(Bool.self, forKey: .force_downgrade)
+        catalog_token_data_base64 =
+            try c.decodeIfPresent(String.self, forKey: .canonicalCatalogTokenDataBase64)
+                ?? c.decodeIfPresent(String.self, forKey: .legacyTokenDataBase64)
+                ?? c.decodeIfPresent(String.self, forKey: .camelCatalogTokenDataBase64)
+        catalog_category_token_data_base64 =
+            try c.decodeIfPresent(String.self, forKey: .canonicalCatalogCategoryTokenDataBase64)
+                ?? c.decodeIfPresent(String.self, forKey: .legacyCategoryTokenDataBase64)
+                ?? c.decodeIfPresent(String.self, forKey: .camelCatalogCategoryTokenDataBase64)
     }
 }
 

@@ -4,6 +4,42 @@ import ManagedSettings
 import DeviceActivity
 import CryptoKit
 
+enum CatalogCommandTokenData {
+    static func decodedApplicationData(from target: CommandTarget) -> Data? {
+        decodedData(from: target.catalogTokenDataBase64)
+    }
+
+    static func decodedCategoryData(from target: CommandTarget) -> Data? {
+        decodedData(from: target.catalogCategoryTokenDataBase64)
+    }
+
+    static func decodedApplicationToken(from target: CommandTarget) -> ApplicationToken? {
+        decodedApplicationData(from: target).flatMap {
+            decodeToken(ApplicationToken.self, from: $0)
+        }
+    }
+
+    static func decodedCategoryToken(from target: CommandTarget) -> ActivityCategoryToken? {
+        decodedCategoryData(from: target).flatMap {
+            decodeToken(ActivityCategoryToken.self, from: $0)
+        }
+    }
+
+    private static func decodedData(from base64: String?) -> Data? {
+        guard let trimmed = base64?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty
+        else { return nil }
+        return Data(base64Encoded: trimmed)
+    }
+
+    private static func decodeToken<T: Decodable>(_ type: T.Type, from data: Data) -> T? {
+        let json = JSONDecoder()
+        json.dateDecodingStrategy = .iso8601
+        if let token = try? json.decode(type, from: data) { return token }
+        return try? PropertyListDecoder().decode(type, from: data)
+    }
+}
+
 /// Translates LockCommand into ActiveLockStore mutations.
 /// See spec §6 for dispatcher logic and §3.4 for merge rules.
 final class ActionExecutor: @unchecked Sendable {
@@ -127,7 +163,7 @@ final class ActionExecutor: @unchecked Sendable {
             return .confirmedFallback(
                 verb: verb,
                 displayName: record.displayName,
-                category: cmd.target.categoryHint ?? "unknown",
+                category: categoryLookupName(from: cmd.target) ?? "unknown",
                 origRequest: cmd.target.originalRequest,
                 effectiveState: effectiveState
             )
@@ -141,6 +177,8 @@ final class ActionExecutor: @unchecked Sendable {
         if cmd.tier == .exactApp, let resolved = try? resolveExactApp(from: cmd.target) {
             let bundleForQuery = canonicalBundleID(for: cmd.target)
             query = AppQuery(bundleID: bundleForQuery, token: resolved.token, categoryHint: nil)
+        } else if cmd.tier == .category {
+            query = AppQuery(categoryHint: categoryLookupName(from: cmd.target)?.lowercased())
         } else if let bid = cmd.target.bundleID {
             query = AppQuery(bundleID: bid, categoryHint: cmd.target.categoryHint?.lowercased())
         } else {
@@ -212,14 +250,20 @@ final class ActionExecutor: @unchecked Sendable {
             }
             displayName = cmd.target.listName ?? "saved list"
         case .category:
-            guard let hint = cmd.target.categoryHint,
-                  let tok = LocalAliasStore.shared.categoryToken(forName: hint)
-            else {
-                throw ExecuteError.categoryNotConfigured(cmd.target.categoryHint ?? "unknown")
+            guard let hint = categoryLookupName(from: cmd.target) else {
+                throw ExecuteError.categoryNotConfigured("unknown")
+            }
+            let tok: ActivityCategoryToken
+            if let decoded = CatalogCommandTokenData.decodedCategoryToken(from: cmd.target) {
+                tok = decoded
+            } else if let local = LocalAliasStore.shared.categoryToken(forName: hint) {
+                tok = local
+            } else {
+                throw ExecuteError.categoryNotConfigured(hint)
             }
             categoryTokens = [tok]
             targetKey = hint.lowercased()
-            displayName = hint.capitalized
+            displayName = cmd.target.targetDisplay ?? hint.capitalized
         case .all:
             targetKey = "all"
             appliesToAll = true
@@ -390,6 +434,10 @@ final class ActionExecutor: @unchecked Sendable {
         from target: CommandTarget,
         requireActiveToken: Bool = false
     ) throws -> ExactAppResolution {
+        if let token = CatalogCommandTokenData.decodedApplicationToken(from: target) {
+            return ExactAppResolution(token: token, targetKey: exactAppTargetKey(from: target))
+        }
+
         let store = LocalAliasStore.shared
         let activeTokens = ScreenTimeManager.shared.selectedApps.applicationTokens
         func lookup(_ key: String) -> ApplicationToken? {
@@ -417,6 +465,27 @@ final class ActionExecutor: @unchecked Sendable {
             return ExactAppResolution(token: tok, targetKey: key)
         }
         throw ExecuteError.applicationNotConfigured(resolveExactAppFailureReference(from: target))
+    }
+
+    private func exactAppTargetKey(from target: CommandTarget) -> String {
+        if let raw = target.bundleID?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty {
+            return raw.lowercased()
+        }
+        for raw in [target.targetDisplay, target.categoryHint, target.originalRequest] {
+            if let clean = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !clean.isEmpty {
+                return clean.lowercased()
+            }
+        }
+        return "app"
+    }
+
+    private func categoryLookupName(from target: CommandTarget) -> String? {
+        for raw in [target.categoryHint, target.targetDisplay, target.originalRequest] {
+            if let clean = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !clean.isEmpty {
+                return clean
+            }
+        }
+        return nil
     }
 
     private func removeExplicit(tier: ShieldTier, targetKey: String) async -> AckResult {
