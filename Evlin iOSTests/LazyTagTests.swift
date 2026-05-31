@@ -59,6 +59,26 @@ final class LazyTagPersistenceTests: XCTestCase {
         }
     }
 
+    func test_persistCatalogAlias_rejectsMissingFamilyBeforeNetwork() async {
+        let target = LazyTagCatalogTarget(
+            aliasKey: UUID(uuidString: "DDDDDDDD-DDDD-DDDD-DDDD-DDDDDDDDDDDD")!,
+            type: .app,
+            displayName: "TikTok"
+        )
+
+        let result = await LazyTagPersistence.persistCatalogAlias(
+            target: target,
+            requestedAlias: "抖音",
+            familyID: nil,
+            childDeviceID: UUID()
+        )
+
+        switch result {
+        case .failure(let err): XCTAssertEqual(err, .missingFamily)
+        case .success: XCTFail("expected missingFamily failure")
+        }
+    }
+
     func test_persistCatalogAlias_rejectsMissingChildDeviceBeforeNetwork() async {
         let target = LazyTagCatalogTarget(
             aliasKey: UUID(uuidString: "DDDDDDDD-DDDD-DDDD-DDDD-DDDDDDDDDDDD")!,
@@ -69,6 +89,7 @@ final class LazyTagPersistenceTests: XCTestCase {
         let result = await LazyTagPersistence.persistCatalogAlias(
             target: target,
             requestedAlias: "抖音",
+            familyID: UUID(),
             childDeviceID: nil
         )
 

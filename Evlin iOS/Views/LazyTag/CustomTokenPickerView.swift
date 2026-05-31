@@ -43,6 +43,7 @@ struct CustomTokenPickerView: View {
     let onCancel: () -> Void
 
     @Environment(\.dismiss) private var dismiss
+    @AppStorage("evlin.familyID") private var familyIDString: String = ""
     @AppStorage("evlin.childDeviceID") private var childDeviceIDString: String = ""
 
     @State private var targets: [LazyTagCatalogTarget] = []
@@ -68,6 +69,10 @@ struct CustomTokenPickerView: View {
 
     private var childDeviceID: UUID? {
         UUID(uuidString: childDeviceIDString)
+    }
+
+    private var familyID: UUID? {
+        UUID(uuidString: familyIDString)
     }
 
     private var sections: [LazyTagCatalogSection] {
@@ -163,8 +168,8 @@ struct CustomTokenPickerView: View {
             ProgressView("Loading catalog...")
                 .font(.custom("Inter", size: 13))
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if childDeviceID == nil {
-            emptyState(message: "No child device is selected. Pair or select a child before saving chat aliases.")
+        } else if familyID == nil || childDeviceID == nil {
+            emptyState(message: "No family or child device is selected. Pair or select a child before saving chat aliases.")
         } else {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 16) {
@@ -379,6 +384,7 @@ struct CustomTokenPickerView: View {
             let result = await LazyTagPersistence.persistCatalogAlias(
                 target: selectedTarget,
                 requestedAlias: request.target,
+                familyID: familyID,
                 childDeviceID: childDeviceID,
                 apiClient: apiClient
             )
@@ -390,6 +396,8 @@ struct CustomTokenPickerView: View {
                     dismiss()
                 case .failure(.emptyTarget):
                     errorMessage = "Alias is empty."
+                case .failure(.missingFamily):
+                    errorMessage = "No family is selected."
                 case .failure(.missingChildDevice):
                     errorMessage = "No child device is selected."
                 case .failure:

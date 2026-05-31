@@ -67,65 +67,113 @@ final class APIClientCatalogDTOTests: XCTestCase {
         XCTAssertEqual(response.appCount, 3)
     }
 
-    func test_lazyTagCatalogTargetsResponseDecodesThreeTargetTypes() throws {
+    func test_lazyTagParentCatalogProjectionDecodesThreeTargetTypesWithoutDuplicatingCategories() throws {
         let appID = UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!
         let categoryID = UUID(uuidString: "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB")!
         let listID = UUID(uuidString: "CCCCCCCC-CCCC-CCCC-CCCC-CCCCCCCCCCCC")!
+        let childDeviceID = UUID(uuidString: "EEEEEEEE-EEEE-EEEE-EEEE-EEEEEEEEEEEE")!
         let data = """
         {
-          "targets": [
+          "child_device_id": "\(childDeviceID.uuidString)",
+          "apps": [
             {
               "alias_key": "\(appID.uuidString)",
               "target_type": "app",
               "display_name": "Instagram",
+              "binding_kind": "verified",
               "aliases": ["ig"],
               "bundle_id": "com.burbn.instagram",
-              "artwork_url": "https://example.com/ig.png",
-              "is_manual": false
+              "token_available": true,
+              "status": "active"
             },
             {
               "alias_key": "\(categoryID.uuidString)",
               "target_type": "category",
               "display_name": "Games",
-              "aliases": ["gaming"]
-            },
+              "binding_kind": "manual",
+              "bundle_id": null,
+              "aliases": ["gaming"],
+              "token_available": true,
+              "status": "active"
+            }
+          ],
+          "categories": [
+            {
+              "alias_key": "\(categoryID.uuidString)",
+              "target_type": "category",
+              "display_name": "Games",
+              "binding_kind": "manual",
+              "bundle_id": null,
+              "aliases": ["gaming"],
+              "token_available": true,
+              "status": "active"
+            }
+          ],
+          "lists": [
             {
               "alias_key": "\(listID.uuidString)",
               "target_type": "list",
-              "display_name": "Entertainment",
+              "list_name": "Entertainment",
               "aliases": ["fun"],
-              "member_count": 3
+              "app_count": 3,
+              "status": "active"
             }
           ]
         }
         """.data(using: .utf8)!
 
-        let response = try JSONDecoder().decode(LazyTagCatalogTargetsResponse.self, from: data)
+        let response = try JSONDecoder().decode(ParentLazyTagCatalogResponse.self, from: data)
+        let targets = response.lazyTagTargets
 
-        XCTAssertEqual(response.targets.map(\.type), [.app, .category, .list])
-        XCTAssertEqual(response.targets[0].artworkURL, URL(string: "https://example.com/ig.png"))
-        XCTAssertEqual(response.targets[1].supportingText, "Current + future apps Apple classifies as Games")
-        XCTAssertEqual(response.targets[2].memberCount, 3)
+        XCTAssertEqual(response.childDeviceID, childDeviceID)
+        XCTAssertEqual(targets.map(\.type), [.app, .category, .list])
+        XCTAssertEqual(targets[0].displayName, "Instagram")
+        XCTAssertEqual(targets[0].bundleID, "com.burbn.instagram")
+        XCTAssertFalse(targets[0].isManual)
+        XCTAssertEqual(targets[1].displayName, "Games")
+        XCTAssertEqual(targets[1].supportingText, "Current + future apps Apple classifies as Games")
+        XCTAssertEqual(targets[2].displayName, "Entertainment")
+        XCTAssertEqual(targets[2].memberCount, 3)
     }
 
-    func test_lazyTagAliasResponseDecodesUpdatedTarget() throws {
+    func test_lazyTagAliasResponseDecodesDirectBackendResponse() throws {
         let aliasKey = UUID(uuidString: "DDDDDDDD-DDDD-DDDD-DDDD-DDDDDDDDDDDD")!
         let data = """
         {
-          "target": {
-            "alias_key": "\(aliasKey.uuidString)",
-            "target_type": "app",
-            "display_name": "TikTok",
-            "aliases": ["TikTok", "抖音"],
-            "is_manual": true
-          }
+          "alias_key": "\(aliasKey.uuidString)",
+          "target_type": "app",
+          "display_name": "TikTok",
+          "aliases": ["TikTok", "抖音"],
+          "status": "active",
+          "bundle_id": "com.zhiliaoapp.musically",
+          "token_available": true
         }
         """.data(using: .utf8)!
 
-        let response = try JSONDecoder().decode(LazyTagAliasResponse.self, from: data)
+        let response = try JSONDecoder().decode(LazyTagAliasTargetResponse.self, from: data)
+        let target = response.lazyTagTarget
 
-        XCTAssertEqual(response.target.aliasKey, aliasKey)
-        XCTAssertEqual(response.target.aliases, ["TikTok", "抖音"])
-        XCTAssertTrue(response.target.isManual)
+        XCTAssertEqual(target.aliasKey, aliasKey)
+        XCTAssertEqual(target.aliases, ["TikTok", "抖音"])
+        XCTAssertEqual(target.bundleID, "com.zhiliaoapp.musically")
+        XCTAssertFalse(target.isManual)
+    }
+
+    func test_lazyTagAliasMutationRequestEncodesBackendContract() throws {
+        let familyID = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
+        let childDeviceID = UUID(uuidString: "66666666-7777-8888-9999-AAAAAAAAAAAA")!
+        let body = LazyTagAliasMutationRequest(
+            familyID: familyID,
+            childDeviceID: childDeviceID,
+            targetType: .category,
+            alias: "gaming"
+        )
+
+        let data = try JSONEncoder().encode(body)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(json["family_id"] as? String, familyID.uuidString)
+        XCTAssertEqual(json["child_device_id"] as? String, childDeviceID.uuidString)
+        XCTAssertEqual(json["target_type"] as? String, "category")
+        XCTAssertEqual(json["alias"] as? String, "gaming")
     }
 }

@@ -538,12 +538,150 @@ struct CatalogListUploadResponse: Codable, Sendable, Equatable {
     }
 }
 
-struct LazyTagCatalogTargetsResponse: Codable, Sendable, Equatable {
-    let targets: [LazyTagCatalogTarget]
+struct ParentLazyTagCatalogResponse: Codable, Sendable, Equatable {
+    let childDeviceID: UUID
+    let apps: [ParentLazyTagAppProjection]
+    let categories: [ParentLazyTagAppProjection]
+    let lists: [ParentLazyTagListProjection]
+
+    enum CodingKeys: String, CodingKey {
+        case childDeviceID = "child_device_id"
+        case apps
+        case categories
+        case lists
+    }
+
+    var lazyTagTargets: [LazyTagCatalogTarget] {
+        var seen = Set<UUID>()
+        func appendUnique(_ target: LazyTagCatalogTarget, into out: inout [LazyTagCatalogTarget]) {
+            guard seen.insert(target.aliasKey).inserted else { return }
+            out.append(target)
+        }
+
+        var out: [LazyTagCatalogTarget] = []
+        for row in apps where row.targetType == .app {
+            appendUnique(row.lazyTagTarget, into: &out)
+        }
+        for row in categories where row.targetType == .category {
+            appendUnique(row.lazyTagTarget, into: &out)
+        }
+        for row in lists {
+            appendUnique(row.lazyTagTarget, into: &out)
+        }
+        return out
+    }
 }
 
-struct LazyTagAliasResponse: Codable, Sendable, Equatable {
-    let target: LazyTagCatalogTarget
+struct ParentLazyTagAppProjection: Codable, Sendable, Equatable {
+    let aliasKey: UUID
+    let targetType: LazyTagCatalogTargetType
+    let displayName: String
+    let bindingKind: String
+    let bundleID: String?
+    let aliases: [String]
+    let tokenAvailable: Bool
+    let status: String
+    let artworkURL: URL?
+
+    enum CodingKeys: String, CodingKey {
+        case aliasKey = "alias_key"
+        case targetType = "target_type"
+        case displayName = "display_name"
+        case bindingKind = "binding_kind"
+        case bundleID = "bundle_id"
+        case aliases
+        case tokenAvailable = "token_available"
+        case status
+        case artworkURL = "artwork_url"
+    }
+
+    var lazyTagTarget: LazyTagCatalogTarget {
+        LazyTagCatalogTarget(
+            aliasKey: aliasKey,
+            type: targetType,
+            displayName: displayName,
+            aliases: aliases,
+            bundleID: bundleID,
+            artworkURL: artworkURL,
+            isManual: bindingKind.caseInsensitiveCompare("manual") == .orderedSame
+        )
+    }
+}
+
+struct ParentLazyTagListProjection: Codable, Sendable, Equatable {
+    let aliasKey: UUID
+    let targetType: LazyTagCatalogTargetType
+    let listName: String
+    let aliases: [String]
+    let appCount: Int
+    let status: String
+
+    enum CodingKeys: String, CodingKey {
+        case aliasKey = "alias_key"
+        case targetType = "target_type"
+        case listName = "list_name"
+        case aliases
+        case appCount = "app_count"
+        case status
+    }
+
+    var lazyTagTarget: LazyTagCatalogTarget {
+        LazyTagCatalogTarget(
+            aliasKey: aliasKey,
+            type: .list,
+            displayName: listName,
+            aliases: aliases,
+            memberCount: appCount
+        )
+    }
+}
+
+struct LazyTagAliasTargetResponse: Codable, Sendable, Equatable {
+    let aliasKey: UUID
+    let targetType: LazyTagCatalogTargetType
+    let displayName: String
+    let aliases: [String]
+    let status: String
+    let bundleID: String?
+    let tokenAvailable: Bool?
+    let appCount: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case aliasKey = "alias_key"
+        case targetType = "target_type"
+        case displayName = "display_name"
+        case aliases
+        case status
+        case bundleID = "bundle_id"
+        case tokenAvailable = "token_available"
+        case appCount = "app_count"
+    }
+
+    var lazyTagTarget: LazyTagCatalogTarget {
+        LazyTagCatalogTarget(
+            aliasKey: aliasKey,
+            type: targetType,
+            displayName: displayName,
+            aliases: aliases,
+            bundleID: bundleID,
+            isManual: targetType == .app && (bundleID?.isEmpty ?? true),
+            memberCount: appCount
+        )
+    }
+}
+
+struct LazyTagAliasMutationRequest: Codable, Sendable, Equatable {
+    let familyID: UUID
+    let childDeviceID: UUID
+    let targetType: LazyTagCatalogTargetType
+    let alias: String
+
+    enum CodingKeys: String, CodingKey {
+        case familyID = "family_id"
+        case childDeviceID = "child_device_id"
+        case targetType = "target_type"
+        case alias
+    }
 }
 
 extension APIClient {
@@ -640,36 +778,41 @@ extension APIClient {
         childDeviceID: UUID,
         query: String? = nil
     ) async throws -> [LazyTagCatalogTarget] {
-        var comps = URLComponents(string: "\(baseURL)/parent/child-app-catalog/\(childDeviceID.uuidString)/targets")!
+        var comps = URLComponents(string: "\(baseURL)/parent/child-app-catalog")!
+        comps.queryItems = [URLQueryItem(name: "child_device_id", value: childDeviceID.uuidString)]
         let trimmed = query?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !trimmed.isEmpty {
-            comps.queryItems = [URLQueryItem(name: "q", value: trimmed)]
-        }
         let (data, resp) = try await URLSession.shared.data(from: comps.url!)
         guard let http = resp as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
             throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
         }
-        return try JSONDecoder().decode(LazyTagCatalogTargetsResponse.self, from: data).targets
+        let targets = try JSONDecoder().decode(ParentLazyTagCatalogResponse.self, from: data).lazyTagTargets
+        guard !trimmed.isEmpty else { return targets }
+        return targets.filter { $0.matches(searchText: trimmed) }
     }
 
     @discardableResult
     func saveLazyTagAlias(
+        familyID: UUID,
         childDeviceID: UUID,
-        aliasKey: UUID,
+        target: LazyTagCatalogTarget,
         alias: String
     ) async throws -> LazyTagCatalogTarget {
-        let url = URL(string: "\(baseURL)/parent/child-app-catalog/\(childDeviceID.uuidString)/targets/\(aliasKey.uuidString)/aliases")!
+        let url = URL(string: "\(baseURL)/parent/child-app-catalog/\(target.aliasKey.uuidString)/aliases")!
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.timeoutInterval = 22
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        struct Body: Codable { let alias: String }
-        req.httpBody = try JSONEncoder().encode(Body(alias: alias))
+        req.httpBody = try JSONEncoder().encode(LazyTagAliasMutationRequest(
+            familyID: familyID,
+            childDeviceID: childDeviceID,
+            targetType: target.type,
+            alias: alias
+        ))
         let (data, resp) = try await URLSession.shared.data(for: req)
         guard let http = resp as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
             throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
         }
-        return try JSONDecoder().decode(LazyTagAliasResponse.self, from: data).target
+        return try JSONDecoder().decode(LazyTagAliasTargetResponse.self, from: data).lazyTagTarget
     }
 
     @discardableResult
