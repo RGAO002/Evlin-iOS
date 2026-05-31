@@ -12,11 +12,13 @@ struct CatalogBindRowView: View {
     let token: ApplicationToken
     @Binding var row: PendingAppRow
     let apiClient: APIClient
+    var isHighlighted: Bool = false
 
     @State private var query = ""
     @State private var results: [CatalogSearchResult] = []
     @State private var searching = false
     @State private var searchTask: Task<Void, Never>?
+    @State private var inlineError: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -25,6 +27,15 @@ struct CatalogBindRowView: View {
             } else {
                 namingBody
             }
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(isHighlighted ? Color.orange.opacity(0.12) : Color.clear)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(isHighlighted ? Color.orange.opacity(0.6) : Color.clear, lineWidth: 1)
         }
         .padding(.vertical, 6)
         .onDisappear {
@@ -37,9 +48,14 @@ struct CatalogBindRowView: View {
             HStack(spacing: 10) {
                 Label(token)
                     .labelStyle(.iconOnly)
+                    .font(.title2)
                 Text("Which app is this?")
                     .font(.subheadline.weight(.medium))
                 Spacer(minLength: 8)
+                Text("icon only")
+                    .font(.caption2.weight(.bold))
+                    .textCase(.uppercase)
+                    .foregroundStyle(.secondary)
             }
 
             Text("Evlin can show the icon but can't read the name. Match it to the App Store so a parent can lock it by name later.")
@@ -59,22 +75,35 @@ struct CatalogBindRowView: View {
                     .controlSize(.small)
             }
 
+            if let inlineError {
+                InlineCaptureError(message: inlineError)
+            }
+
             ForEach(results) { result in
                 Button {
                     row.bind(result)
                     query = result.canonicalName
                     results = []
+                    inlineError = nil
                 } label: {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(result.canonicalName)
-                        if let bundleID = result.bundleID {
-                            Text(bundleID)
-                                .font(.caption2.monospaced())
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    CatalogCandidateRow(result: result)
                 }
+                .buttonStyle(.plain)
+            }
+
+            if query.trimmingCharacters(in: .whitespacesAndNewlines).count >= 2,
+               searching == false,
+               results.isEmpty {
+                Button("No App Store match - save manually") {
+                    let manualName = query.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard manualName.isEmpty == false else {
+                        inlineError = "Type a name before saving manually."
+                        return
+                    }
+                    row.bind(CatalogSearchResult(canonicalName: manualName, bundleID: nil, aliases: []))
+                    inlineError = nil
+                }
+                .font(.caption.weight(.semibold))
             }
         }
     }
@@ -82,52 +111,77 @@ struct CatalogBindRowView: View {
     @ViewBuilder
     private func confirmationBody(_ entry: CatalogSearchResult) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 10) {
-                Label(token)
-                    .labelStyle(.titleAndIcon)
-                    .lineLimit(1)
-                Spacer(minLength: 8)
-                if row.isLockableApp {
-                    Image(systemName: "checkmark.seal.fill")
-                        .foregroundStyle(.green)
-                }
-            }
+            Text(row.isLockableApp ? "\(entry.canonicalName) is lockable" : "Do these match?")
+                .font(.headline)
 
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Catalog match: \(entry.canonicalName)\(entry.bundleID.map { " · \($0)" } ?? "")")
-                    .font(.caption)
+            Text(row.isLockableApp ? "This app can now be locked by name." : "Confirm the app iOS shows is the one you picked from the App Store.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 14) {
+                VStack(spacing: 8) {
+                    Text("iOS shows")
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(.secondary)
+                    Label(token)
+                        .labelStyle(.titleAndIcon)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                }
+                .frame(maxWidth: .infinity)
+
+                Text("=?")
+                    .font(.title3.weight(.black))
                     .foregroundStyle(.secondary)
 
-                if row.confirmed {
-                    HStack {
-                        Text("Confirmed")
-                            .font(.caption)
-                            .foregroundStyle(.green)
-                        Button("Rebind") {
-                            rebind()
-                        }
-                        .font(.caption)
-                    }
-                } else {
-                    Text("Do these match? The app above should be \(entry.canonicalName).")
-                        .font(.caption)
-                    HStack {
-                        Button("Yes, they match") {
-                            row.confirm()
-                        }
-                        .buttonStyle(.borderedProminent)
+                VStack(spacing: 8) {
+                    Text("You picked")
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(.secondary)
+                    CatalogCandidateRow(result: entry, compact: true)
+                }
+                .frame(maxWidth: .infinity)
+            }
+            .padding(12)
+            .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
 
-                        Button("No, rebind") {
-                            rebind()
-                        }
-                        .buttonStyle(.bordered)
+            if let inlineError {
+                InlineCaptureError(message: inlineError)
+            }
+
+            if row.confirmed {
+                HStack(spacing: 8) {
+                    Image(systemName: "checkmark.seal.fill")
+                        .foregroundStyle(.green)
+                    Text("Ready")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.green)
+                    Spacer(minLength: 8)
+                    Button("Rebind") {
+                        rebind()
                     }
+                    .font(.caption)
+                }
+            } else {
+                HStack {
+                    Button("Yes, these match") {
+                        row.confirm()
+                        inlineError = nil
+                    }
+                    .buttonStyle(.borderedProminent)
+
+                    Button("Pick a different app") {
+                        inlineError = "Nothing was saved. Pick a different App Store match for this token."
+                        rebind(keepError: true)
+                    }
+                    .buttonStyle(.bordered)
                 }
             }
         }
     }
 
-    private func rebind() {
+    private func rebind(keepError: Bool = false) {
+        let currentError = inlineError
         row = PendingAppRow(
             rowID: row.id,
             tokenBase64: row.tokenBase64,
@@ -135,6 +189,7 @@ struct CatalogBindRowView: View {
         )
         query = ""
         results = []
+        inlineError = keepError ? currentError : nil
     }
 
     private func scheduleSearch(_ text: String) {
@@ -159,5 +214,77 @@ struct CatalogBindRowView: View {
                 searching = false
             }
         }
+    }
+}
+
+private struct CatalogCandidateRow: View {
+    let result: CatalogSearchResult
+    var compact = false
+
+    var body: some View {
+        HStack(spacing: 10) {
+            RoundedRectangle(cornerRadius: compact ? 8 : 10, style: .continuous)
+                .fill(iconFill)
+                .frame(width: compact ? 30 : 34, height: compact ? 30 : 34)
+                .overlay {
+                    Text(String(result.canonicalName.prefix(1)).uppercased())
+                        .font(.caption.weight(.black))
+                        .foregroundStyle(.white)
+                }
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(result.canonicalName)
+                    .font(compact ? .caption.weight(.semibold) : .subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
+                if let bundleID = result.bundleID {
+                    Text(bundleID)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                } else {
+                    Text("Manual")
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Spacer(minLength: 0)
+
+            if result.bundleID != nil {
+                Text("match")
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(.green)
+            } else {
+                Text("Manual")
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(compact ? 0 : 10)
+        .background(compact ? Color.clear : Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    private var iconFill: LinearGradient {
+        LinearGradient(
+            colors: result.bundleID == nil ? [.gray.opacity(0.7), .gray] : [.orange, .pink, .purple],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+    }
+}
+
+private struct InlineCaptureError: View {
+    let message: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+            Text(message)
+                .font(.caption.weight(.semibold))
+            Spacer(minLength: 0)
+        }
+        .padding(10)
+        .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 }

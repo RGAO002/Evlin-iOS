@@ -16,6 +16,8 @@ struct AddAppFlowView: View {
     @State private var pendingRow: PendingAppRow?
     @State private var uploading = false
     @State private var errorText: String?
+    @State private var saveBanner: String?
+    @State private var highlightedRows = Set<UUID>()
 
     private var counts: SelectionCounts {
         SelectionCounts(selection)
@@ -46,6 +48,10 @@ struct AddAppFlowView: View {
                         .font(.caption)
                         .foregroundStyle(.red)
                 }
+
+                if let saveBanner {
+                    AddAppSaveValidationBanner(message: saveBanner)
+                }
             } header: {
                 Text("Add one app")
             } footer: {
@@ -53,30 +59,37 @@ struct AddAppFlowView: View {
             }
 
             if validation.isValid, let token = singleToken {
-                Section("Which app is this?") {
+                Section {
                     CatalogBindRowView(
                         token: token,
                         row: bindingForRow(),
-                        apiClient: apiClient
+                        apiClient: apiClient,
+                        isHighlighted: pendingRow.map { highlightedRows.contains($0.id) } ?? false
                     )
+                } header: {
+                    Text("Which app is this?")
+                } footer: {
+                    Text("Match the iOS token to the App Store, confirm the visual match, then save. Evlin never guesses or drops an unlabeled app.")
                 }
-
+            } else if counts.applicationTokens > 0 || counts.categoryTokens > 0 || counts.webDomainTokens > 0 {
                 Section {
-                    Button {
-                        Task {
-                            await upload(token: token)
-                        }
-                    } label: {
-                        if uploading {
-                            ProgressView()
-                                .frame(maxWidth: .infinity)
-                        } else {
-                            Text("Save app")
-                                .frame(maxWidth: .infinity)
-                        }
+                    Button("Save app") {
+                        attemptSave()
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(uploading || !(pendingRow?.isLockableApp ?? false))
+                    .frame(maxWidth: .infinity)
+                }
+            }
+
+            if validation.isValid {
+                Section {
+                    Button {
+                        attemptSave()
+                    } label: {
+                        saveButtonLabel
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(uploading)
 
                     if let errorText {
                         Text(errorText)
@@ -88,7 +101,24 @@ struct AddAppFlowView: View {
         }
         .navigationTitle("Add App")
         .onChange(of: selection) { _, newValue in
+            saveBanner = nil
+            errorText = nil
+            highlightedRows = []
             rebuildPendingRow(from: newValue)
+        }
+    }
+
+    @ViewBuilder
+    private var saveButtonLabel: some View {
+        if uploading {
+            ProgressView()
+                .frame(maxWidth: .infinity)
+        } else if pendingRow?.isLockableApp == true {
+            Text("Save lockable app")
+                .frame(maxWidth: .infinity)
+        } else {
+            Text("Save app")
+                .frame(maxWidth: .infinity)
         }
     }
 
@@ -119,17 +149,52 @@ struct AddAppFlowView: View {
         )
     }
 
+    private func attemptSave() {
+        guard validation.isValid else {
+            saveBanner = validation.reason?.rawValue ?? "Fix the selection before saving."
+            highlightedRows = []
+            return
+        }
+
+        guard let token = singleToken else {
+            saveBanner = "Pick an app first"
+            highlightedRows = []
+            return
+        }
+
+        Task {
+            await upload(token: token)
+        }
+    }
+
     @MainActor
     private func upload(token: ApplicationToken) async {
         guard let row = pendingRow,
               let app = row.makeUploadApp(sourceDeviceID: childDeviceID)
         else {
-            errorText = "Confirm the app name first."
+            var model = CaptureSheetModel(rows: pendingRow.map { [$0] } ?? [])
+            model.attemptSave()
+            saveBanner = model.errorBanner ?? "Confirm the app name first."
+            highlightedRows = Set(model.highlightedRows.compactMap { index in
+                model.rows.indices.contains(index) ? model.rows[index].id : nil
+            })
+            return
+        }
+
+        var model = CaptureSheetModel(rows: [row])
+        model.attemptSave()
+        guard model.isPresented == false else {
+            saveBanner = model.errorBanner
+            highlightedRows = Set(model.highlightedRows.compactMap { index in
+                model.rows.indices.contains(index) ? model.rows[index].id : nil
+            })
             return
         }
 
         uploading = true
         defer { uploading = false }
+        saveBanner = nil
+        highlightedRows = []
 
         LocalAliasStore.shared.saveApplicationAliases(
             token: token,
@@ -143,6 +208,27 @@ struct AddAppFlowView: View {
         } catch {
             errorText = "Saved locally, backend sync failed: \(error.localizedDescription)"
             onSaved()
+        }
+    }
+}
+
+private struct AddAppSaveValidationBanner: View {
+    let message: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "exclamationmark.circle.fill")
+                .foregroundStyle(.orange)
+            Text(message)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.primary)
+            Spacer(minLength: 0)
+        }
+        .padding(12)
+        .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Color.orange.opacity(0.35), lineWidth: 1)
         }
     }
 }

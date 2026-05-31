@@ -98,6 +98,54 @@ struct CatalogSearchResult: Equatable, Identifiable, Sendable {
     }
 }
 
+/// Save-attempt state for capture sheets. Invalid rows are surfaced in place;
+/// they are never filtered out to create a misleading partial save.
+struct CaptureSheetModel: Equatable, Sendable {
+    var rows: [PendingAppRow]
+    var isPresented: Bool
+    private(set) var errorBanner: String?
+    private(set) var highlightedRows: [Int]
+    private(set) var savedRows: [PendingAppRow]
+
+    init(rows: [PendingAppRow], isPresented: Bool = true) {
+        self.rows = rows
+        self.isPresented = isPresented
+        self.errorBanner = nil
+        self.highlightedRows = []
+        self.savedRows = []
+    }
+
+    mutating func attemptSave() {
+        let invalidRows = rows.enumerated()
+            .compactMap { index, row in row.isLockableApp ? nil : index }
+
+        guard rows.isEmpty == false else {
+            isPresented = true
+            errorBanner = "Pick an app first"
+            highlightedRows = []
+            savedRows = []
+            return
+        }
+
+        guard invalidRows.isEmpty else {
+            isPresented = true
+            errorBanner = Self.unlabeledMessage(count: invalidRows.count)
+            highlightedRows = invalidRows
+            savedRows = []
+            return
+        }
+
+        isPresented = false
+        errorBanner = nil
+        highlightedRows = []
+        savedRows = rows
+    }
+
+    private static func unlabeledMessage(count: Int) -> String {
+        count == 1 ? "1 app still needs a name" : "\(count) apps still need names"
+    }
+}
+
 /// State for one pending app token returned by an Add App capture.
 ///
 /// The FamilyActivityPicker can return multiple app tokens, categories, and web
