@@ -59,7 +59,10 @@ struct BigKidRootView: View {
         Group {
             switch BigKidRouter.route(state) {
             case .home:
-                BigKidHomeView { task in taskNav = task }
+                BigKidHomeView(
+                    onTaskTap: { task in taskNav = task },
+                    onManageApps: { showLockListGate = true }
+                )
             case .homeReflectionA:
                 NavigationStack(path: $reflectionPath) {
                     BigKidHomeReflectionView(
@@ -151,23 +154,6 @@ struct BigKidRootView: View {
             if new == .active {
                 Task { await poller.refreshNow() }
             }
-        }
-        .overlay(alignment: .topLeading) {
-            Button {
-                showLockListGate = true
-            } label: {
-                Label("Apps", systemImage: "lock.rectangle.stack")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(EvlinKidColors.ink)
-                    .padding(.horizontal, 12)
-                    .frame(height: 32)
-                    .background(.white.opacity(0.92), in: Capsule())
-                    .overlay(Capsule().stroke(EvlinKidColors.line, lineWidth: 1))
-                    .shadow(color: .black.opacity(0.12), radius: 12, y: 4)
-            }
-            .accessibilityLabel("Manage lock list")
-            .padding(.top, 8)
-            .padding(.leading, 12)
         }
         #if DEBUG
         .overlay(alignment: .bottom) {
