@@ -538,6 +538,14 @@ struct CatalogListUploadResponse: Codable, Sendable, Equatable {
     }
 }
 
+struct LazyTagCatalogTargetsResponse: Codable, Sendable, Equatable {
+    let targets: [LazyTagCatalogTarget]
+}
+
+struct LazyTagAliasResponse: Codable, Sendable, Equatable {
+    let target: LazyTagCatalogTarget
+}
+
 extension APIClient {
     /// Child polls for queued commands.
     func pollCommands(deviceID: UUID) async throws -> [PollCommandDTO] {
@@ -626,6 +634,42 @@ extension APIClient {
             throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
         }
         return try JSONDecoder().decode(CatalogSearchResponseDTO.self, from: data).results
+    }
+
+    func fetchLazyTagCatalogTargets(
+        childDeviceID: UUID,
+        query: String? = nil
+    ) async throws -> [LazyTagCatalogTarget] {
+        var comps = URLComponents(string: "\(baseURL)/parent/child-app-catalog/\(childDeviceID.uuidString)/targets")!
+        let trimmed = query?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !trimmed.isEmpty {
+            comps.queryItems = [URLQueryItem(name: "q", value: trimmed)]
+        }
+        let (data, resp) = try await URLSession.shared.data(from: comps.url!)
+        guard let http = resp as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+        return try JSONDecoder().decode(LazyTagCatalogTargetsResponse.self, from: data).targets
+    }
+
+    @discardableResult
+    func saveLazyTagAlias(
+        childDeviceID: UUID,
+        aliasKey: UUID,
+        alias: String
+    ) async throws -> LazyTagCatalogTarget {
+        let url = URL(string: "\(baseURL)/parent/child-app-catalog/\(childDeviceID.uuidString)/targets/\(aliasKey.uuidString)/aliases")!
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 22
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        struct Body: Codable { let alias: String }
+        req.httpBody = try JSONEncoder().encode(Body(alias: alias))
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+        return try JSONDecoder().decode(LazyTagAliasResponse.self, from: data).target
     }
 
     @discardableResult

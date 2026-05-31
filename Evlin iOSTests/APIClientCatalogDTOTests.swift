@@ -66,4 +66,66 @@ final class APIClientCatalogDTOTests: XCTestCase {
         XCTAssertEqual(response.aliases, ["Games", "gaming"])
         XCTAssertEqual(response.appCount, 3)
     }
+
+    func test_lazyTagCatalogTargetsResponseDecodesThreeTargetTypes() throws {
+        let appID = UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!
+        let categoryID = UUID(uuidString: "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB")!
+        let listID = UUID(uuidString: "CCCCCCCC-CCCC-CCCC-CCCC-CCCCCCCCCCCC")!
+        let data = """
+        {
+          "targets": [
+            {
+              "alias_key": "\(appID.uuidString)",
+              "target_type": "app",
+              "display_name": "Instagram",
+              "aliases": ["ig"],
+              "bundle_id": "com.burbn.instagram",
+              "artwork_url": "https://example.com/ig.png",
+              "is_manual": false
+            },
+            {
+              "alias_key": "\(categoryID.uuidString)",
+              "target_type": "category",
+              "display_name": "Games",
+              "aliases": ["gaming"]
+            },
+            {
+              "alias_key": "\(listID.uuidString)",
+              "target_type": "list",
+              "display_name": "Entertainment",
+              "aliases": ["fun"],
+              "member_count": 3
+            }
+          ]
+        }
+        """.data(using: .utf8)!
+
+        let response = try JSONDecoder().decode(LazyTagCatalogTargetsResponse.self, from: data)
+
+        XCTAssertEqual(response.targets.map(\.type), [.app, .category, .list])
+        XCTAssertEqual(response.targets[0].artworkURL, URL(string: "https://example.com/ig.png"))
+        XCTAssertEqual(response.targets[1].supportingText, "Current + future apps Apple classifies as Games")
+        XCTAssertEqual(response.targets[2].memberCount, 3)
+    }
+
+    func test_lazyTagAliasResponseDecodesUpdatedTarget() throws {
+        let aliasKey = UUID(uuidString: "DDDDDDDD-DDDD-DDDD-DDDD-DDDDDDDDDDDD")!
+        let data = """
+        {
+          "target": {
+            "alias_key": "\(aliasKey.uuidString)",
+            "target_type": "app",
+            "display_name": "TikTok",
+            "aliases": ["TikTok", "抖音"],
+            "is_manual": true
+          }
+        }
+        """.data(using: .utf8)!
+
+        let response = try JSONDecoder().decode(LazyTagAliasResponse.self, from: data)
+
+        XCTAssertEqual(response.target.aliasKey, aliasKey)
+        XCTAssertEqual(response.target.aliases, ["TikTok", "抖音"])
+        XCTAssertTrue(response.target.isManual)
+    }
 }

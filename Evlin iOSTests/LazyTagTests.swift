@@ -2,7 +2,82 @@
 import XCTest
 @testable import Evlin_iOS
 
+final class LazyTagCatalogModelTests: XCTestCase {
+    private let appID = UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!
+    private let categoryID = UUID(uuidString: "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB")!
+    private let listID = UUID(uuidString: "CCCCCCCC-CCCC-CCCC-CCCC-CCCCCCCCCCCC")!
+
+    func test_sectionsAlwaysAppearInAppCategoryListOrder() {
+        let targets: [LazyTagCatalogTarget] = [
+            .init(aliasKey: listID, type: .list, displayName: "Entertainment", aliases: ["fun"], memberCount: 3),
+            .init(aliasKey: appID, type: .app, displayName: "Instagram", aliases: ["ig"], bundleID: "com.burbn.instagram", artworkURL: URL(string: "https://example.com/ig.png"), isManual: false),
+            .init(aliasKey: categoryID, type: .category, displayName: "Games", aliases: ["gaming"])
+        ]
+
+        let sections = LazyTagCatalogModel.sections(from: targets, searchText: "")
+
+        XCTAssertEqual(sections.map(\.type), [.app, .category, .list])
+        XCTAssertEqual(sections.map(\.title), ["App", "Category", "List"])
+        XCTAssertEqual(sections[0].targets.map(\.displayName), ["Instagram"])
+        XCTAssertEqual(sections[1].targets.map(\.displayName), ["Games"])
+        XCTAssertEqual(sections[2].targets.map(\.displayName), ["Entertainment"])
+    }
+
+    func test_sectionSearchMatchesDisplayNameAndAliasesWithoutDroppingSections() {
+        let targets: [LazyTagCatalogTarget] = [
+            .init(aliasKey: appID, type: .app, displayName: "Instagram", aliases: ["ig"]),
+            .init(aliasKey: categoryID, type: .category, displayName: "Games", aliases: ["gaming"]),
+            .init(aliasKey: listID, type: .list, displayName: "Entertainment", aliases: ["weekend"])
+        ]
+
+        let sections = LazyTagCatalogModel.sections(from: targets, searchText: "ig")
+
+        XCTAssertEqual(sections.map(\.type), [.app, .category, .list])
+        XCTAssertEqual(sections[0].targets.map(\.displayName), ["Instagram"])
+        XCTAssertEqual(sections[1].targets, [])
+        XCTAssertEqual(sections[2].targets, [])
+    }
+
+    func test_categorySubtitleUsesBroadCoverageCopy() {
+        let target = LazyTagCatalogTarget(
+            aliasKey: categoryID,
+            type: .category,
+            displayName: "Games",
+            aliases: []
+        )
+
+        XCTAssertEqual(target.supportingText, "Current + future apps Apple classifies as Games")
+    }
+}
+
 final class LazyTagPersistenceTests: XCTestCase {
+    func test_normalizedAlias_trimsAliasBeforeBackendSave() {
+        let result = LazyTagPersistence.normalizedAlias("  抖音  ")
+        switch result {
+        case .success(let alias): XCTAssertEqual(alias, "抖音")
+        case .failure: XCTFail("expected trimmed alias")
+        }
+    }
+
+    func test_persistCatalogAlias_rejectsMissingChildDeviceBeforeNetwork() async {
+        let target = LazyTagCatalogTarget(
+            aliasKey: UUID(uuidString: "DDDDDDDD-DDDD-DDDD-DDDD-DDDDDDDDDDDD")!,
+            type: .app,
+            displayName: "TikTok"
+        )
+
+        let result = await LazyTagPersistence.persistCatalogAlias(
+            target: target,
+            requestedAlias: "抖音",
+            childDeviceID: nil
+        )
+
+        switch result {
+        case .failure(let err): XCTAssertEqual(err, .missingChildDevice)
+        case .success: XCTFail("expected missingChildDevice failure")
+        }
+    }
+
     /// Passing a non-token Any (e.g. String) for `.app` mode must produce
     /// `.wrongTokenType`. We can't mint real ApplicationToken in tests
     /// (FamilyControls auth is unavailable), so we test only the
