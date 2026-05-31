@@ -298,7 +298,7 @@ struct HomeSettingsSheet: View {
                     NavigationLink {
                         AliasManagementView()
                     } label: {
-                        Label("Saved tags (chat aliases)", systemImage: "tag.fill")
+                        Label("Manage aliases", systemImage: "tag.fill")
                     }
 
                     NavigationLink {

@@ -860,6 +860,65 @@ extension APIClient {
     }
 
     @discardableResult
+    func removeLazyTagAlias(
+        familyID: UUID,
+        childDeviceID: UUID,
+        target: LazyTagCatalogTarget,
+        alias: String
+    ) async throws -> LazyTagCatalogTarget {
+        var comps = URLComponents(
+            string: "\(baseURL)/parent/child-app-catalog/\(target.aliasKey.uuidString)/aliases/\(Self.pathComponent(alias))"
+        )!
+        comps.queryItems = [
+            URLQueryItem(name: "family_id", value: familyID.uuidString),
+            URLQueryItem(name: "child_device_id", value: childDeviceID.uuidString),
+            URLQueryItem(name: "target_type", value: target.type.rawValue),
+        ]
+        var req = URLRequest(url: comps.url!)
+        req.httpMethod = "DELETE"
+        req.timeoutInterval = 22
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+        return try JSONDecoder().decode(LazyTagAliasTargetResponse.self, from: data).lazyTagTarget
+    }
+
+    @discardableResult
+    func renameLazyTagAlias(
+        familyID: UUID,
+        childDeviceID: UUID,
+        target: LazyTagCatalogTarget,
+        oldAlias: String,
+        newAlias: String
+    ) async throws -> LazyTagCatalogTarget {
+        let url = URL(
+            string: "\(baseURL)/parent/child-app-catalog/\(target.aliasKey.uuidString)/aliases/\(Self.pathComponent(oldAlias))"
+        )!
+        var req = URLRequest(url: url)
+        req.httpMethod = "PATCH"
+        req.timeoutInterval = 22
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONEncoder().encode(LazyTagAliasMutationRequest(
+            familyID: familyID,
+            childDeviceID: childDeviceID,
+            targetType: target.type,
+            alias: newAlias
+        ))
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+        return try JSONDecoder().decode(LazyTagAliasTargetResponse.self, from: data).lazyTagTarget
+    }
+
+    private static func pathComponent(_ value: String) -> String {
+        var allowed = CharacterSet.urlPathAllowed
+        allowed.remove(charactersIn: "/?#[]@!$&'()*+,;=")
+        return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
+    }
+
+    @discardableResult
     func uploadCatalogList(
         deviceID: UUID,
         aliasKey: UUID? = nil,
