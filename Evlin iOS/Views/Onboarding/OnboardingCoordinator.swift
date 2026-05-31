@@ -284,7 +284,9 @@ struct OnboardingCoordinator: View {
                 DeletionProtectionStep { step = .childCategoryDefaults }
 
             case .childCategoryDefaults:
-                CategoryDefaultsStep {
+                CategoryDefaultsStep(
+                    childDeviceID: childDeviceID ?? OnboardingDemoPlaceholders.childDeviceUUID
+                ) {
                     // Max-mode children skip the first-list step (parent builds lists)
                     step = protectionMode == "std" ? .childFirstSavedList : .childReady
                 }

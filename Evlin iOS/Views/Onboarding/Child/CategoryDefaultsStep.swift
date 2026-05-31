@@ -1,9 +1,13 @@
 import SwiftUI
 import FamilyControls
+import ManagedSettings
 
 /// Maps semantic Chat categories ("games", "social", "entertainment") to the
 /// opaque ActivityCategoryTokens produced by FamilyActivityPicker.
 struct CategoryDefaultsStep: View {
+    @EnvironmentObject private var apiClient: APIClient
+
+    let childDeviceID: UUID
     let onContinue: () -> Void
 
     @State private var selections: [String: FamilyActivitySelection] = [:]
@@ -14,6 +18,7 @@ struct CategoryDefaultsStep: View {
     @State private var pickerSelection = FamilyActivitySelection(includeEntireCategory: true)
     @State private var activeCategory: SemanticCategory?
     @State private var showPicker = false
+    @State private var isSaving = false
 
     private let categories: [SemanticCategory] = [
         .init(key: "games", title: "Games", example: "Roblox, Minecraft, Fortnite", required: true),
@@ -74,10 +79,11 @@ struct CategoryDefaultsStep: View {
             Spacer()
 
             Button {
-                saveCategories()
-                onContinue()
+                Task {
+                    await saveCategoriesAndContinue()
+                }
             } label: {
-                Text("Continue")
+                Text(isSaving ? "Saving..." : "Continue")
                     .font(.evLabelLarge)
                     .frame(maxWidth: .infinity)
             }
@@ -87,7 +93,7 @@ struct CategoryDefaultsStep: View {
                 RoundedRectangle(cornerRadius: CornerRadius.md)
                     .fill(canContinue ? Color.evPrimary : Color.evOutline)
             )
-            .disabled(!canContinue)
+            .disabled(!canContinue || isSaving)
         }
         .padding(Spacing.xl)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -159,11 +165,79 @@ struct CategoryDefaultsStep: View {
         selections[category.key] = pickerSelection
     }
 
-    private func saveCategories() {
+    @MainActor
+    private func saveCategoriesAndContinue() async {
+        guard !isSaving else { return }
+        isSaving = true
+        defer {
+            isSaving = false
+            onContinue()
+        }
+
+        let captured = captureCategoryRows()
+        guard !captured.uploads.isEmpty else { return }
+
+        do {
+            let response = try await apiClient.uploadChildAppCatalog(
+                deviceID: childDeviceID,
+                apps: captured.uploads.map(\.upload)
+            )
+            let responseIDs = Set(response.apps.map(\.id))
+            for item in captured.uploads {
+                let catalogAliasKey = responseIDs.contains(item.row.id)
+                    ? item.row.id
+                    : response.apps.first(where: { $0.displayName == item.row.displayName && $0.tokenKind == "category" })?.id
+                LocalAliasStore.shared.saveCategoryToken(
+                    item.token,
+                    forName: item.semanticKey,
+                    catalogAliasKey: catalogAliasKey ?? item.row.id
+                )
+                LocalAliasStore.shared.saveCategoryToken(
+                    item.token,
+                    forName: item.row.displayName,
+                    catalogAliasKey: catalogAliasKey ?? item.row.id
+                )
+            }
+        } catch {
+            #if DEBUG
+            print("[CategoryDefaultsStep] category catalog upload failed: \(error)")
+            #endif
+        }
+    }
+
+    private func captureCategoryRows() -> (uploads: [CapturedCategoryUpload], localOnlyCount: Int) {
+        var uploads: [CapturedCategoryUpload] = []
+        var localOnlyCount = 0
+
         for category in categories {
             guard let token = selections[category.key]?.categoryTokens.first else { continue }
             LocalAliasStore.shared.saveCategoryToken(token, forName: category.key)
+            LocalAliasStore.shared.saveCategoryToken(token, forName: category.title)
+
+            do {
+                let tokenBase64 = try AppCatalogBlobEncoder.base64(token)
+                let row = PendingCategoryRow(
+                    semanticKey: category.key,
+                    displayName: category.title,
+                    tokenBase64: tokenBase64
+                )
+                uploads.append(
+                    CapturedCategoryUpload(
+                        semanticKey: category.key,
+                        token: token,
+                        row: row,
+                        upload: row.makeUploadCategory(sourceDeviceID: childDeviceID)
+                    )
+                )
+            } catch {
+                localOnlyCount += 1
+                #if DEBUG
+                print("[CategoryDefaultsStep] category token encode failed for \(category.key): \(error)")
+                #endif
+            }
         }
+
+        return (uploads, localOnlyCount)
     }
 }
 
@@ -174,4 +248,11 @@ private struct SemanticCategory: Identifiable, Equatable {
     let required: Bool
 
     var id: String { key }
+}
+
+private struct CapturedCategoryUpload {
+    let semanticKey: String
+    let token: ActivityCategoryToken
+    let row: PendingCategoryRow
+    let upload: ChildAppCatalogUploadApp
 }

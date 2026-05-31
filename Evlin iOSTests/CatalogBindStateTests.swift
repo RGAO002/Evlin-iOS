@@ -86,4 +86,25 @@ final class CatalogBindStateTests: XCTestCase {
         XCTAssertNil(app.bundleID)
         XCTAssertEqual(app.aliases, ["Unknown App"])
     }
+
+    func test_makeUploadCategoryCarriesBroadCoverageTokenFields() {
+        let rowID = UUID()
+        let sourceDeviceID = UUID()
+        let row = PendingCategoryRow(
+            rowID: rowID,
+            semanticKey: "games",
+            displayName: "Games",
+            tokenBase64: "Q0FURUdPUlk="
+        )
+
+        let category = row.makeUploadCategory(sourceDeviceID: sourceDeviceID)
+
+        XCTAssertEqual(category.aliasKey, rowID)
+        XCTAssertEqual(category.displayName, "Games")
+        XCTAssertEqual(category.tokenKind, "category")
+        XCTAssertNil(category.bundleID)
+        XCTAssertEqual(category.tokenDataBase64, "Q0FURUdPUlk=")
+        XCTAssertEqual(category.sourceDeviceID, sourceDeviceID)
+        XCTAssertEqual(category.aliases, ["Games", "games"])
+    }
 }

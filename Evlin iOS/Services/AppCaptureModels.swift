@@ -220,3 +220,47 @@ struct PendingAppRow: Identifiable, Equatable, Sendable {
         return out
     }
 }
+
+/// State for one broad-coverage Apple Screen Time category token.
+///
+/// Categories intentionally have no bundle id or app artwork: they are resolved
+/// only by category name/alias and cover current plus future apps in that
+/// Apple category.
+struct PendingCategoryRow: Identifiable, Equatable, Sendable {
+    let id: UUID
+    let semanticKey: String
+    let displayName: String
+    let tokenBase64: String
+
+    init(rowID: UUID = UUID(), semanticKey: String, displayName: String, tokenBase64: String) {
+        self.id = rowID
+        self.semanticKey = semanticKey
+        self.displayName = displayName
+        self.tokenBase64 = tokenBase64
+    }
+
+    func makeUploadCategory(sourceDeviceID: UUID?) -> ChildAppCatalogUploadApp {
+        ChildAppCatalogUploadApp(
+            aliasKey: id,
+            displayName: displayName,
+            tokenKind: "category",
+            bundleID: nil,
+            aliases: Self.aliases(displayName: displayName, semanticKey: semanticKey),
+            tokenAvailable: true,
+            tokenDataBase64: tokenBase64,
+            sourceDeviceID: sourceDeviceID
+        )
+    }
+
+    private static func aliases(displayName: String, semanticKey: String) -> [String] {
+        var seen = Set<String>()
+        var out: [String] = []
+        for raw in [displayName, semanticKey] {
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            guard seen.insert(trimmed).inserted else { continue }
+            out.append(trimmed)
+        }
+        return out
+    }
+}
