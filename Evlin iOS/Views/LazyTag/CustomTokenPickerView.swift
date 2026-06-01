@@ -109,7 +109,7 @@ struct CustomTokenPickerView: View {
                 footer
             }
             .background(Color.evSurface.ignoresSafeArea())
-            .navigationTitle("Resolve alias")
+            .navigationTitle("Add to lock list")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -160,7 +160,7 @@ struct CustomTokenPickerView: View {
                     .font(.custom("Manrope", size: 21).weight(.bold))
                     .foregroundStyle(Color.evOnSurface)
                     .fixedSize(horizontal: false, vertical: true)
-                Text("I don’t recognize that yet. What saved app, category, or list should it map to?")
+                Text("It isn’t in your kid’s lock list yet. Pick a captured app, category, or list below to point it at — or add it on the kid’s device first.")
                     .font(.custom("Inter", size: 13))
                     .foregroundStyle(Color.evOnSurfaceVariant)
                     .fixedSize(horizontal: false, vertical: true)

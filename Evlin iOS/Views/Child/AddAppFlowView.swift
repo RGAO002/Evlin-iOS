@@ -424,8 +424,12 @@ struct AddAppFlowView: View {
             }
             onSaved()
         } catch {
-            errorText = "Saved locally, backend sync failed: \(error.localizedDescription)"
-            onSaved()
+            // Do NOT call onSaved() here — dismissing would hide the failure and
+            // let a local-only save look like a real one. The app/category is saved
+            // to LocalAliasStore but is NOT in the backend catalog, so the parent's
+            // chat/lazy-tag can't see or lock it until this upload succeeds. Keep the
+            // sheet open with a visible error so the user can retry.
+            errorText = "Couldn't sync to Evlin: \(error.localizedDescription). Saved on this device only — it won't be lockable from parent chat until the sync succeeds. Check the connection and try Save again."
         }
     }
 }

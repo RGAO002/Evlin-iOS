@@ -86,12 +86,15 @@ struct LockListManagerView: View {
     @StateObject private var model = LockListManagerModel()
     @State private var showAddApp = false
     @State private var showAddList = false
+    @State private var syncing = false
+    @State private var syncBanner: String?
 
     var body: some View {
         ScrollView {
             VStack(spacing: 18) {
                 header
                 addActions
+                syncRow
 
                 section(
                     title: "Apps",
@@ -184,6 +187,95 @@ struct LockListManagerView: View {
         }
         .padding(16)
         .lockListCard()
+    }
+
+    // MARK: - Sync to backend
+
+    /// Apps/categories captured on this device live in `LocalAliasStore`, but the
+    /// parent's chat / lazy-tag picker resolve against the BACKEND catalog. Anything
+    /// that got into the local store without uploading (e.g. report-hydrated apps, or
+    /// an Add-App whose upload failed) is invisible to the parent. This pushes the
+    /// local app/category tokens up so they become lockable by name from parent chat.
+    @ViewBuilder
+    private var syncRow: some View {
+        VStack(spacing: 8) {
+            Button {
+                Task { await syncToBackend() }
+            } label: {
+                HStack(spacing: 8) {
+                    if syncing {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                            .font(.system(size: 14, weight: .semibold))
+                    }
+                    Text(syncing ? "Syncing…" : "Sync these to Evlin")
+                        .font(.subheadline.weight(.semibold))
+                }
+                .foregroundStyle(Color.evOnSurface)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+                .background(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(Color.evOutlineVariant, lineWidth: 1)
+                )
+            }
+            .buttonStyle(.plain)
+            .disabled(syncing || (model.apps.isEmpty && model.categories.isEmpty))
+
+            if let syncBanner {
+                Text(syncBanner)
+                    .font(.caption)
+                    .foregroundStyle(Color.evOnSurfaceVariant)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+
+    private func syncToBackend() async {
+        syncing = true
+        defer { syncing = false }
+        var uploads: [ChildAppCatalogUploadApp] = []
+        for app in model.apps {
+            guard let key = app.keys.first,
+                  let token = LocalAliasStore.shared.applicationToken(forLookupKey: key),
+                  let blob = try? AppCatalogBlobEncoder.base64(token), !blob.isEmpty
+            else { continue }
+            uploads.append(ChildAppCatalogUploadApp(
+                displayName: app.label,
+                tokenKind: "app",
+                bundleID: app.bundleID,
+                aliases: app.keys,
+                tokenAvailable: true,
+                tokenDataBase64: blob,
+                sourceDeviceID: childDeviceID
+            ))
+        }
+        for category in model.categories {
+            guard let token = LocalAliasStore.shared.categoryToken(forName: category.name),
+                  let blob = try? AppCatalogBlobEncoder.base64(token), !blob.isEmpty
+            else { continue }
+            uploads.append(ChildAppCatalogUploadApp(
+                displayName: category.displayName,
+                tokenKind: "category",
+                bundleID: nil,
+                aliases: [category.name],
+                tokenAvailable: true,
+                tokenDataBase64: blob,
+                sourceDeviceID: childDeviceID
+            ))
+        }
+        guard !uploads.isEmpty else {
+            syncBanner = "Nothing with a usable token to sync yet."
+            return
+        }
+        do {
+            let response = try await apiClient.uploadChildAppCatalog(deviceID: childDeviceID, apps: uploads)
+            syncBanner = "Synced \(response.apps.count) item(s) to Evlin — now lockable by name from parent chat."
+            model.reload()
+        } catch {
+            syncBanner = "Sync failed: \(error.localizedDescription). Check the connection and try again."
+        }
     }
 
     // MARK: - Add actions
