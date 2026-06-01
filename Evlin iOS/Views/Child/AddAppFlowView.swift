@@ -393,8 +393,54 @@ struct AddAppFlowView: View {
             }
         }
 
+        // SNAPSHOT SEMANTICS: the backend upload deletes any catalog row NOT present
+        // in this request (test_child_catalog_reupload_deletes_referenced_stale_app_and_members).
+        // The capture above only covers the newly-picked apps, so sending just those
+        // would WIPE every previously-added app. The new captures were just saved to
+        // LocalAliasStore in the loops above, so rebuild the COMPLETE local catalog
+        // and upload that as the full snapshot.
+        var fullUpload: [ChildAppCatalogUploadApp] = []
+        for entry in LocalAliasStore.shared.groupedApplicationAliases() {
+            guard let key = entry.keys.first,
+                  let token = LocalAliasStore.shared.applicationToken(forLookupKey: key),
+                  let blob = try? AppCatalogBlobEncoder.base64(token), !blob.isEmpty
+            else { continue }
+            fullUpload.append(ChildAppCatalogUploadApp(
+                aliasKey: nil,
+                displayName: entry.label,
+                tokenKind: "app",
+                bundleID: entry.bundleID,
+                aliases: entry.keys,
+                tokenAvailable: true,
+                tokenDataBase64: blob,
+                sourceDeviceID: childDeviceID
+            ))
+        }
+        for name in LocalAliasStore.shared.allCategoryNames() {
+            guard let token = LocalAliasStore.shared.categoryToken(forName: name),
+                  let blob = try? AppCatalogBlobEncoder.base64(token), !blob.isEmpty
+            else { continue }
+            fullUpload.append(ChildAppCatalogUploadApp(
+                aliasKey: nil,
+                displayName: NameWithIcon.displayName(name),
+                tokenKind: "category",
+                bundleID: nil,
+                aliases: [name],
+                tokenAvailable: true,
+                tokenDataBase64: blob,
+                sourceDeviceID: childDeviceID
+            ))
+        }
+        // Never upload an empty snapshot — that would delete the whole catalog.
+        // We know the capture is non-empty (guarded above), so the local set should
+        // contain it; bail safely if token re-encode unexpectedly produced nothing.
+        guard !fullUpload.isEmpty else {
+            saveBanner = "Couldn’t read the saved app tokens. Nothing was changed on Evlin — try Save again."
+            return
+        }
+
         do {
-            let response = try await apiClient.uploadChildAppCatalog(deviceID: childDeviceID, apps: apps + categories)
+            let response = try await apiClient.uploadChildAppCatalog(deviceID: childDeviceID, apps: fullUpload)
             // The backend assigns its own alias_key. Map each response row back by
             // (displayName, bundleID, kind) so LocalAliasStore stores the REAL key
             // (nil if not found — never a bogus local id).
