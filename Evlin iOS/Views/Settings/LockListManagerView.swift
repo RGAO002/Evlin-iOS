@@ -88,6 +88,7 @@ struct LockListManagerView: View {
     @State private var showAddList = false
     @State private var syncing = false
     @State private var syncBanner: String?
+    @State private var didAutoSync = false
 
     var body: some View {
         ScrollView {
@@ -136,7 +137,15 @@ struct LockListManagerView: View {
         .background(Color.evSurface.ignoresSafeArea())
         .navigationTitle("Manage lock list")
         .navigationBarTitleDisplayMode(.inline)
-        .onAppear { model.reload() }
+        .onAppear {
+            model.reload()
+            // Auto-push anything that's local-only up to the backend catalog so the
+            // parent can lock it by name. Idempotent upsert; runs once per appearance.
+            if !didAutoSync {
+                didAutoSync = true
+                Task { await syncToBackend() }
+            }
+        }
         .sheet(isPresented: $showAddApp) {
             NavigationStack {
                 AddAppFlowView(childDeviceID: childDeviceID) {
@@ -196,39 +205,30 @@ struct LockListManagerView: View {
     /// that got into the local store without uploading (e.g. report-hydrated apps, or
     /// an Add-App whose upload failed) is invisible to the parent. This pushes the
     /// local app/category tokens up so they become lockable by name from parent chat.
+    /// Status only — sync is automatic (see `.onAppear`). Shows a spinner while
+    /// syncing and a warning only if it FAILED; silent on success.
     @ViewBuilder
     private var syncRow: some View {
-        VStack(spacing: 8) {
-            Button {
-                Task { await syncToBackend() }
-            } label: {
-                HStack(spacing: 8) {
-                    if syncing {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        Image(systemName: "arrow.triangle.2.circlepath")
-                            .font(.system(size: 14, weight: .semibold))
-                    }
-                    Text(syncing ? "Syncing…" : "Sync these to Evlin")
-                        .font(.subheadline.weight(.semibold))
-                }
-                .foregroundStyle(Color.evOnSurface)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 12)
-                .background(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .stroke(Color.evOutlineVariant, lineWidth: 1)
-                )
+        if syncing {
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("Syncing to Evlin…")
+                    .font(.caption)
+                    .foregroundStyle(Color.evOnSurfaceVariant)
+                Spacer(minLength: 0)
             }
-            .buttonStyle(.plain)
-            .disabled(syncing || (model.apps.isEmpty && model.categories.isEmpty))
-
-            if let syncBanner {
+            .padding(.horizontal, 4)
+        } else if let syncBanner {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(Color.evTertiary)
                 Text(syncBanner)
                     .font(.caption)
                     .foregroundStyle(Color.evOnSurfaceVariant)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                Spacer(minLength: 0)
             }
+            .padding(.horizontal, 4)
         }
     }
 
@@ -265,16 +265,13 @@ struct LockListManagerView: View {
                 sourceDeviceID: childDeviceID
             ))
         }
-        guard !uploads.isEmpty else {
-            syncBanner = "Nothing with a usable token to sync yet."
-            return
-        }
+        guard !uploads.isEmpty else { return }   // nothing local-only to push; stay silent
         do {
-            let response = try await apiClient.uploadChildAppCatalog(deviceID: childDeviceID, apps: uploads)
-            syncBanner = "Synced \(response.apps.count) item(s) to Evlin — now lockable by name from parent chat."
+            _ = try await apiClient.uploadChildAppCatalog(deviceID: childDeviceID, apps: uploads)
+            syncBanner = nil   // success is silent — the apps just become lockable in parent chat
             model.reload()
         } catch {
-            syncBanner = "Sync failed: \(error.localizedDescription). Check the connection and try again."
+            syncBanner = "Couldn’t sync your apps to Evlin (\(error.localizedDescription)). They’re saved on this device but won’t be lockable from parent chat until this succeeds."
         }
     }
 
