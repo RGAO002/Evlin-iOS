@@ -57,7 +57,7 @@ final class CommandPoller {
         }
     }
 
-    private func execute(poll: PollCommandDTO, api: APIClient) async {
+    static func lockCommand(from poll: PollCommandDTO) -> LockCommand {
         // tier maps to new ShieldTier set; backend emits "exactApp"|"savedList"|"category"|"all"
         let tier = poll.tier.flatMap(ShieldTier.init(rawValue:))
         let trimmedHint = poll.target.category_hint?
@@ -74,14 +74,15 @@ final class CommandPoller {
             targetChildID: poll.target.target_child_id.flatMap(UUID.init(uuidString:)),
             hasPendingBlob: poll.target.has_pending_blob ?? false,
             forceDowngrade: poll.target.force_downgrade ?? false,
-            catalogVerified: poll.target.catalog_verified ?? false,
             catalogTokenDataBase64: poll.target.catalog_token_data_base64,
-            catalogCategoryTokenDataBase64: poll.target.catalog_category_token_data_base64
+            catalogCategoryTokenDataBase64: poll.target.catalog_category_token_data_base64,
+            catalogApplicationTokenDataBase64s: poll.target.applications ?? [],
+            catalogCategoryTokenDataBase64s: poll.target.applicationCategories ?? []
         )
         let action: CommandAction = CommandAction(rawValue: poll.action) ?? .shield
 
         let issued = ISO8601DateFormatter().date(from: poll.issued_at) ?? Date()
-        let cmd = LockCommand(
+        return LockCommand(
             id: poll.command_id,
             action: action,
             tier: tier,
@@ -89,9 +90,13 @@ final class CommandPoller {
             durationMinutes: poll.duration_minutes,
             issuedAt: issued
         )
+    }
+
+    private func execute(poll: PollCommandDTO, api: APIClient) async {
+        let cmd = Self.lockCommand(from: poll)
 
         var blob: Data? = nil
-        if target.hasPendingBlob {
+        if cmd.target.hasPendingBlob {
             blob = try? await api.fetchPendingBlob(commandID: cmd.id)
         }
 

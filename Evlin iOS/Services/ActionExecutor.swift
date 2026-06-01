@@ -4,6 +4,82 @@ import ManagedSettings
 import DeviceActivity
 import CryptoKit
 
+enum CatalogCommandTokenData {
+    static func decodedApplicationData(from target: CommandTarget) -> Data? {
+        decodedData(from: target.catalogTokenDataBase64)
+    }
+
+    static func decodedCategoryData(from target: CommandTarget) -> Data? {
+        decodedData(from: target.catalogCategoryTokenDataBase64)
+    }
+
+    static func decodedApplicationDatas(from target: CommandTarget) -> [Data] {
+        target.catalogApplicationTokenDataBase64s.compactMap(decodedData)
+    }
+
+    static func decodedCategoryDatas(from target: CommandTarget) -> [Data] {
+        target.catalogCategoryTokenDataBase64s.compactMap(decodedData)
+    }
+
+    static func decodedApplicationToken(from target: CommandTarget) -> ApplicationToken? {
+        decodedApplicationData(from: target).flatMap {
+            decodeToken(ApplicationToken.self, from: $0)
+        }
+    }
+
+    static func decodedCategoryToken(from target: CommandTarget) -> ActivityCategoryToken? {
+        decodedCategoryData(from: target).flatMap {
+            decodeToken(ActivityCategoryToken.self, from: $0)
+        }
+    }
+
+    static func decodedApplicationTokenSet(from target: CommandTarget) throws -> Set<ApplicationToken>? {
+        let payloads = cleanedPayloads(target.catalogApplicationTokenDataBase64s)
+        guard !payloads.isEmpty else { return nil }
+        var tokens = Set<ApplicationToken>()
+        for payload in payloads {
+            guard let data = decodedData(from: payload),
+                  let token = decodeToken(ApplicationToken.self, from: data)
+            else { throw ExecuteError.malformed }
+            tokens.insert(token)
+        }
+        return tokens
+    }
+
+    static func decodedCategoryTokenSet(from target: CommandTarget) throws -> Set<ActivityCategoryToken>? {
+        let payloads = cleanedPayloads(target.catalogCategoryTokenDataBase64s)
+        guard !payloads.isEmpty else { return nil }
+        var tokens = Set<ActivityCategoryToken>()
+        for payload in payloads {
+            guard let data = decodedData(from: payload),
+                  let token = decodeToken(ActivityCategoryToken.self, from: data)
+            else { throw ExecuteError.malformed }
+            tokens.insert(token)
+        }
+        return tokens
+    }
+
+    private static func decodedData(from base64: String?) -> Data? {
+        guard let trimmed = base64?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty
+        else { return nil }
+        return Data(base64Encoded: trimmed)
+    }
+
+    private static func cleanedPayloads(_ base64s: [String]) -> [String] {
+        base64s
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
+    private static func decodeToken<T: Decodable>(_ type: T.Type, from data: Data) -> T? {
+        let json = JSONDecoder()
+        json.dateDecodingStrategy = .iso8601
+        if let token = try? json.decode(type, from: data) { return token }
+        return try? PropertyListDecoder().decode(type, from: data)
+    }
+}
+
 /// Translates LockCommand into ActiveLockStore mutations.
 /// See spec §6 for dispatcher logic and §3.4 for merge rules.
 final class ActionExecutor: @unchecked Sendable {
@@ -40,6 +116,40 @@ final class ActionExecutor: @unchecked Sendable {
         }
     }
 
+    /// Direct receipt-action unlock path. This intentionally bypasses chat/AI
+    /// re-dispatch: the receipt already identified the still-covering shield.
+    func executeReceiptUnlock(_ target: ReceiptUnlockTarget) async -> AckResult {
+        let requestedName = target.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !requestedName.isEmpty else {
+            return .failed(.malformed)
+        }
+
+        let current = await ActiveLockStore.shared.allCurrent().shields
+        let matches = current.filter { record in
+            record.displayName.caseInsensitiveCompare(requestedName) == .orderedSame
+                && (target.tier == nil || record.tier == target.tier)
+        }
+
+        guard let record = strongestShield(in: matches) else {
+            return .failed(.nothingToUnlock)
+        }
+        guard let removed = await ActiveLockStore.shared.removeShield(recordKey: record.recordKey) else {
+            return .failed(.nothingToUnlock)
+        }
+        cancelScheduled(recordKey: record.recordKey)
+
+        let effective = effectiveStateFrom(
+            removed.stillCovered,
+            isBlocked: removed.blockedAfter,
+            possibleSavedList: false
+        )
+        return .confirmedExact(
+            verb: .unshield,
+            displayName: removed.record.displayName,
+            effectiveState: effective
+        )
+    }
+
     // MARK: - Shield
 
     private func executeShield(cmd: LockCommand, blob: Data?) async -> AckResult {
@@ -74,6 +184,17 @@ final class ActionExecutor: @unchecked Sendable {
                         )
                     }
                 }
+                // Audit-only window log (best-effort, off the hot path). A
+                // write failure here must never affect the lock or receipt.
+                LockWindowStore.append(LockWindowRecord(
+                    recordKey: record.recordKey,
+                    displayName: record.displayName,
+                    bundleID: record.appTokens.isEmpty ? nil
+                        : (cmd.target.bundleID ?? LocalAliasStore.shared
+                            .primaryBundleID(forDisplayOrHint: record.displayName)),
+                    issuedAt: record.issuedAt,
+                    expiresAt: record.expiresAt
+                ))
                 let eff = await currentEffectiveState(forShieldRecord: record, cmd: cmd)
                 return buildConfirmReceipt(verb: .shield, cmd: cmd, record: record, effectiveState: eff)
             case .noOpShorterThanExisting, .noOpAlreadyPermanent:
@@ -102,6 +223,9 @@ final class ActionExecutor: @unchecked Sendable {
         }
     }
 
+    // Honest-receipt contract: parent ReceiptCard appends
+    // EvlinReceiptCopy.appliedOnKidDevice under the AckResult this builds.
+    // This builder must never encode an "Apple confirmed" style claim.
     private func buildConfirmReceipt(
         verb: AckVerb,
         cmd: LockCommand,
@@ -113,7 +237,7 @@ final class ActionExecutor: @unchecked Sendable {
             return .confirmedFallback(
                 verb: verb,
                 displayName: record.displayName,
-                category: cmd.target.categoryHint ?? "unknown",
+                category: categoryLookupName(from: cmd.target) ?? "unknown",
                 origRequest: cmd.target.originalRequest,
                 effectiveState: effectiveState
             )
@@ -127,6 +251,8 @@ final class ActionExecutor: @unchecked Sendable {
         if cmd.tier == .exactApp, let resolved = try? resolveExactApp(from: cmd.target) {
             let bundleForQuery = canonicalBundleID(for: cmd.target)
             query = AppQuery(bundleID: bundleForQuery, token: resolved.token, categoryHint: nil)
+        } else if cmd.tier == .category {
+            query = AppQuery(categoryHint: categoryLookupName(from: cmd.target)?.lowercased())
         } else if let bid = cmd.target.bundleID {
             query = AppQuery(bundleID: bid, categoryHint: cmd.target.categoryHint?.lowercased())
         } else {
@@ -156,6 +282,14 @@ final class ActionExecutor: @unchecked Sendable {
         )
     }
 
+    private func strongestShield(in records: [ShieldRecord]) -> ShieldRecord? {
+        records.sorted { a, b in
+            if a.expiresAt == nil && b.expiresAt != nil { return true }
+            if a.expiresAt != nil && b.expiresAt == nil { return false }
+            return (a.expiresAt ?? .distantPast) > (b.expiresAt ?? .distantPast)
+        }.first
+    }
+
     private func buildShieldRecord(from cmd: LockCommand, blob: Data?) throws -> ShieldRecord {
         let tier = cmd.tier ?? .category
         let targetKey: String
@@ -167,10 +301,7 @@ final class ActionExecutor: @unchecked Sendable {
 
         switch tier {
         case .exactApp:
-            let resolved = try resolveExactApp(
-                from: cmd.target,
-                requireActiveToken: !cmd.target.catalogVerified
-            )
+            let resolved = try resolveExactApp(from: cmd.target, requireActiveToken: true)
             appTokens = [resolved.token]
             targetKey = resolved.targetKey
             displayName = cmd.target.targetDisplay
@@ -178,46 +309,51 @@ final class ActionExecutor: @unchecked Sendable {
                 ?? cmd.target.categoryHint
                 ?? "App"
         case .savedList:
-            let sel: FamilyActivitySelection
-            // iOS 26 PropertyListEncoder crashes on FamilyControls tokens; try JSON first,
-            // fall back to plist for legacy server payloads. See LocalAliasStore._decodeTokenAny.
-            if let blob = blob,
-               let decoded = (try? JSONDecoder().decode(FamilyActivitySelection.self, from: blob))
-                          ?? (try? PropertyListDecoder().decode(FamilyActivitySelection.self, from: blob)) {
-                sel = decoded
-            } else if let name = cmd.target.listName,
-                      let local = LocalAliasStore.shared.savedList(named: name) {
-                sel = local
-            } else {
-                throw ExecuteError.listNotFound(cmd.target.listName ?? "(unnamed)")
-            }
-            appTokens = sel.applicationTokens
-            categoryTokens = sel.categoryTokens
-            webDomainTokens = sel.webDomainTokens
             if let id = cmd.target.listID {
                 targetKey = id.uuidString
             } else {
                 throw ExecuteError.malformed
             }
+            if let catalogApps = try CatalogCommandTokenData.decodedApplicationTokenSet(from: cmd.target) {
+                appTokens = catalogApps
+            }
+            if let catalogCategories = try CatalogCommandTokenData.decodedCategoryTokenSet(from: cmd.target) {
+                categoryTokens = catalogCategories
+            }
+            if appTokens.isEmpty && categoryTokens.isEmpty {
+                let sel: FamilyActivitySelection
+                // iOS 26 PropertyListEncoder crashes on FamilyControls tokens; try JSON first,
+                // fall back to plist for legacy server payloads. See LocalAliasStore._decodeTokenAny.
+                if let blob = blob,
+                   let decoded = (try? JSONDecoder().decode(FamilyActivitySelection.self, from: blob))
+                              ?? (try? PropertyListDecoder().decode(FamilyActivitySelection.self, from: blob)) {
+                    sel = decoded
+                } else if let name = cmd.target.listName,
+                          let local = LocalAliasStore.shared.savedList(named: name) {
+                    sel = local
+                } else {
+                    throw ExecuteError.listNotFound(cmd.target.listName ?? "(unnamed)")
+                }
+                appTokens = sel.applicationTokens
+                categoryTokens = sel.categoryTokens
+                webDomainTokens = sel.webDomainTokens
+            }
             displayName = cmd.target.listName ?? "saved list"
         case .category:
+            guard let hint = categoryLookupName(from: cmd.target) else {
+                throw ExecuteError.categoryNotConfigured("unknown")
+            }
             let tok: ActivityCategoryToken
-            if let encoded = cmd.target.catalogCategoryTokenDataBase64,
-               let data = Data(base64Encoded: encoded),
-               let decoded = Self.decodeCategoryToken(from: data) {
+            if let decoded = CatalogCommandTokenData.decodedCategoryToken(from: cmd.target) {
                 tok = decoded
-            } else {
-                guard let hint = cmd.target.categoryHint,
-                      let local = LocalAliasStore.shared.categoryToken(forName: hint)
-                else {
-                    throw ExecuteError.categoryNotConfigured(cmd.target.categoryHint ?? "unknown")
-                }
+            } else if let local = LocalAliasStore.shared.categoryToken(forName: hint) {
                 tok = local
+            } else {
+                throw ExecuteError.categoryNotConfigured(hint)
             }
             categoryTokens = [tok]
-            let hint = cmd.target.categoryHint ?? cmd.target.targetDisplay ?? "category"
             targetKey = hint.lowercased()
-            displayName = hint.capitalized
+            displayName = cmd.target.targetDisplay ?? hint.capitalized
         case .all:
             targetKey = "all"
             appliesToAll = true
@@ -388,17 +524,8 @@ final class ActionExecutor: @unchecked Sendable {
         from target: CommandTarget,
         requireActiveToken: Bool = false
     ) throws -> ExactAppResolution {
-        if let encoded = target.catalogTokenDataBase64,
-           let data = Data(base64Encoded: encoded),
-           let token = Self.decodeApplicationToken(from: data) {
-            let key = (
-                target.bundleID
-                ?? target.targetDisplay
-                ?? target.originalRequest
-            )
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-            return ExactAppResolution(token: token, targetKey: key.isEmpty ? "catalog-token-\(token.hashValue)" : key)
+        if let token = CatalogCommandTokenData.decodedApplicationToken(from: target) {
+            return ExactAppResolution(token: token, targetKey: exactAppTargetKey(from: target))
         }
 
         let store = LocalAliasStore.shared
@@ -430,18 +557,25 @@ final class ActionExecutor: @unchecked Sendable {
         throw ExecuteError.applicationNotConfigured(resolveExactAppFailureReference(from: target))
     }
 
-    private static func decodeApplicationToken(from data: Data) -> ApplicationToken? {
-        if let token = try? JSONDecoder().decode(ApplicationToken.self, from: data) {
-            return token
+    private func exactAppTargetKey(from target: CommandTarget) -> String {
+        if let raw = target.bundleID?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty {
+            return raw.lowercased()
         }
-        return try? PropertyListDecoder().decode(ApplicationToken.self, from: data)
+        for raw in [target.targetDisplay, target.categoryHint, target.originalRequest] {
+            if let clean = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !clean.isEmpty {
+                return clean.lowercased()
+            }
+        }
+        return "app"
     }
 
-    private static func decodeCategoryToken(from data: Data) -> ActivityCategoryToken? {
-        if let token = try? JSONDecoder().decode(ActivityCategoryToken.self, from: data) {
-            return token
+    private func categoryLookupName(from target: CommandTarget) -> String? {
+        for raw in [target.categoryHint, target.targetDisplay, target.originalRequest] {
+            if let clean = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !clean.isEmpty {
+                return clean
+            }
         }
-        return try? PropertyListDecoder().decode(ActivityCategoryToken.self, from: data)
+        return nil
     }
 
     private func removeExplicit(tier: ShieldTier, targetKey: String) async -> AckResult {

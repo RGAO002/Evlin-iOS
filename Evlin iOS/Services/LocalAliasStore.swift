@@ -1,7 +1,28 @@
 import Foundation
 import FamilyControls
 import ManagedSettings
-import CryptoKit
+
+struct LocalCatalogAppTarget: Identifiable, Equatable, Sendable {
+    let aliasKey: UUID
+    let label: String
+    let lookupKeys: [String]
+    let bundleID: String?
+
+    var id: UUID { aliasKey }
+}
+
+struct LocalCatalogCategoryTarget: Identifiable, Equatable, Sendable {
+    let aliasKey: UUID
+    let name: String
+
+    var id: UUID { aliasKey }
+
+    var displayName: String {
+        name.split(separator: " ")
+            .map { $0.prefix(1).uppercased() + $0.dropFirst() }
+            .joined(separator: " ")
+    }
+}
 
 /// Local-device persistence for category tokens and saved-list selections.
 /// Backed by App Group UserDefaults — shared with DeviceActivityMonitor extension.
@@ -12,16 +33,24 @@ final class LocalAliasStore: @unchecked Sendable {
     private let categoryKey = "evlin.categoryTokens"
     private let listKey = "evlin.savedListTokens"
     private let applicationTokenKey = "evlin.applicationTokens"
+    private let catalogAliasKeyIndexKey = "evlin.catalogAliasKeyIndex"
     /// Lowercased display name → lowercased bundle id (for exact-app `targetKey` + queries).
     private let applicationDisplayToBundleKey = "evlin.applicationDisplayToBundle"
 
     // MARK: - Categories
 
-    func saveCategoryToken(_ token: ActivityCategoryToken, forName name: String) {
+    func saveCategoryToken(_ token: ActivityCategoryToken, forName name: String, catalogAliasKey: UUID? = nil) {
         var dict = loadCategoryDict()
         if let data = _encodeTokenJSON(token) {
             dict[name.lowercased()] = data
             persistCategoryDict(dict)
+            if let catalogAliasKey {
+                saveCatalogAliasKey(
+                    catalogAliasKey,
+                    targetType: .category,
+                    encodedTokenKey: data.base64EncodedString()
+                )
+            }
         }
     }
 
@@ -34,7 +63,12 @@ final class LocalAliasStore: @unchecked Sendable {
     // MARK: - Applications (Managed Apps → token lookup)
 
     /// Persists the same `ApplicationToken` under bundle id and/or display name keys.
-    func saveApplicationAliases(token: ApplicationToken, displayName: String?, bundleIdentifier: String?) {
+    func saveApplicationAliases(
+        token: ApplicationToken,
+        displayName: String?,
+        bundleIdentifier: String?,
+        catalogAliasKey: UUID? = nil
+    ) {
         guard let data = _encodeTokenJSON(token) else { return }
         var tokMap = loadApplicationTokenDict()
         if let bid = bundleIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines), !bid.isEmpty {
@@ -51,6 +85,13 @@ final class LocalAliasStore: @unchecked Sendable {
             }
         }
         persistApplicationTokenDict(tokMap)
+        if let catalogAliasKey {
+            saveCatalogAliasKey(
+                catalogAliasKey,
+                targetType: .app,
+                encodedTokenKey: data.base64EncodedString()
+            )
+        }
     }
 
     /// Case-insensitive: bundle id, **or** display name / free-text hint from the parent command.
@@ -187,48 +228,6 @@ final class LocalAliasStore: @unchecked Sendable {
         )
     }
 
-    struct ReportCatalogEntry {
-        let displayName: String
-        let tokenKind: String
-        let bundleID: String?
-        let aliases: [String]
-        let tokenData: Data
-        let tokenDataHash: String
-    }
-
-    struct ReportCatalogExtractionResult {
-        let entries: [ReportCatalogEntry]
-        let status: String
-        let snapshotBytes: Int
-        let snapshotApps: Int
-        let snapshotCategories: Int
-        let appDecodeFailures: Int
-        let categoryDecodeFailures: Int
-        let skippedEmptyApps: Int
-
-        static let noDefaults = ReportCatalogExtractionResult(
-            entries: [],
-            status: "App Group defaults unavailable",
-            snapshotBytes: 0,
-            snapshotApps: 0,
-            snapshotCategories: 0,
-            appDecodeFailures: 0,
-            categoryDecodeFailures: 0,
-            skippedEmptyApps: 0
-        )
-
-        static let noSnapshot = ReportCatalogExtractionResult(
-            entries: [],
-            status: "No evlin.aliasSnapshot data",
-            snapshotBytes: 0,
-            snapshotApps: 0,
-            snapshotCategories: 0,
-            appDecodeFailures: 0,
-            categoryDecodeFailures: 0,
-            skippedEmptyApps: 0
-        )
-    }
-
     /// Read the DeviceActivityReport extension's snapshot from App Group and
     /// flow it into our token aliases. This is the bridge that lets chat
     /// resolve "Instagram" → ApplicationToken without picker / lazy-tag.
@@ -318,89 +317,6 @@ final class LocalAliasStore: @unchecked Sendable {
         )
     }
 
-    /// Extract DAR-written app/category token blobs as backend catalog upload
-    /// entries. This intentionally uses the raw snapshot token bytes so the
-    /// backend can queue the same bytes back to the kid phone for shield apply.
-    func catalogEntriesFromReportSnapshot() -> ReportCatalogExtractionResult {
-        guard defaults != nil else { return .noDefaults }
-        let fileData = readAliasSnapshotFile()
-        let userDefaultsData = defaults?.data(forKey: "evlin.aliasSnapshot")
-        guard let data = fileData ?? userDefaultsData else { return .noSnapshot }
-        guard let snapshot = _decodeTokenAny(AliasSnapshot.self, from: data) else {
-            return ReportCatalogExtractionResult(
-                entries: [],
-                status: "Snapshot decode failed (tried JSON + plist)",
-                snapshotBytes: data.count,
-                snapshotApps: 0,
-                snapshotCategories: 0,
-                appDecodeFailures: 0,
-                categoryDecodeFailures: 0,
-                skippedEmptyApps: 0
-            )
-        }
-
-        var entries: [ReportCatalogEntry] = []
-        var appDecodeFailures = 0
-        var categoryDecodeFailures = 0
-        var skippedEmptyApps = 0
-
-        for app in snapshot.applications {
-            guard _decodeTokenAny(ApplicationToken.self, from: app.tokenData) != nil else {
-                appDecodeFailures += 1
-                continue
-            }
-            let cleanName = app.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
-            let cleanBundle = app.bundleIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !cleanName.isEmpty || !cleanBundle.isEmpty else {
-                skippedEmptyApps += 1
-                continue
-            }
-
-            let display = cleanName.isEmpty ? cleanBundle : cleanName
-            var aliases = [display]
-            if !cleanBundle.isEmpty { aliases.append(cleanBundle) }
-            if !app.parentCategoryName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                aliases.append(app.parentCategoryName)
-            }
-            entries.append(ReportCatalogEntry(
-                displayName: display,
-                tokenKind: "app",
-                bundleID: cleanBundle.isEmpty ? nil : cleanBundle,
-                aliases: Self.uniqueNonEmptyAliases(aliases),
-                tokenData: app.tokenData,
-                tokenDataHash: Self.stableHashPrefix(app.tokenData)
-            ))
-        }
-
-        for category in snapshot.categories {
-            guard _decodeTokenAny(ActivityCategoryToken.self, from: category.tokenData) != nil else {
-                categoryDecodeFailures += 1
-                continue
-            }
-            let cleanName = category.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !cleanName.isEmpty else { continue }
-            entries.append(ReportCatalogEntry(
-                displayName: cleanName,
-                tokenKind: "category",
-                bundleID: nil,
-                aliases: Self.uniqueNonEmptyAliases([cleanName]),
-                tokenData: category.tokenData,
-                tokenDataHash: Self.stableHashPrefix(category.tokenData)
-            ))
-        }
-
-        return ReportCatalogExtractionResult(
-            entries: entries,
-            status: "ok",
-            snapshotBytes: data.count,
-            snapshotApps: snapshot.applications.count,
-            snapshotCategories: snapshot.categories.count,
-            appDecodeFailures: appDecodeFailures,
-            categoryDecodeFailures: categoryDecodeFailures,
-            skippedEmptyApps: skippedEmptyApps
-        )
-    }
-
     // MARK: - Management (list + delete)
 
     /// All saved category lookup keys (lowercased), sorted.
@@ -450,6 +366,56 @@ final class LocalAliasStore: @unchecked Sendable {
             return (label, keys.sorted(), bundle)
         }
         .sorted { $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending }
+    }
+
+    /// Backend-backed app targets available for composing a saved list. These
+    /// are stricter than `groupedApplicationAliases()` because they only include
+    /// rows whose opaque token has a backend alias_key.
+    func catalogAppTargets() -> [LocalCatalogAppTarget] {
+        let dict = loadApplicationTokenDict()
+        let bMap = loadDisplayToBundleDict()
+        let index = loadCatalogAliasKeyIndex()
+        var groups: [Data: [String]] = [:]
+        for (key, data) in dict {
+            groups[data, default: []].append(key)
+        }
+
+        return groups.compactMap { data, keys -> LocalCatalogAppTarget? in
+            let encodedToken = data.base64EncodedString()
+            guard let indexData = index[encodedToken],
+                  let record = try? JSONDecoder().decode(CatalogAliasKeyRecord.self, from: indexData),
+                  record.targetType == .app
+            else { return nil }
+
+            let bundleSet = Set(bMap.values)
+            let display = keys
+                .filter { !bundleSet.contains($0) && !$0.contains(".") }
+                .sorted()
+                .first
+            let bundle = keys.first(where: { bundleSet.contains($0) || $0.contains(".") })
+            let label = display ?? bundle ?? keys.sorted().first ?? "App"
+            return LocalCatalogAppTarget(
+                aliasKey: record.aliasKey,
+                label: label,
+                lookupKeys: keys.sorted(),
+                bundleID: bundle
+            )
+        }
+        .sorted { $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending }
+    }
+
+    /// Backend-backed category targets available for composing a saved list.
+    func catalogCategoryTargets() -> [LocalCatalogCategoryTarget] {
+        let index = loadCatalogAliasKeyIndex()
+        return loadCategoryDict().compactMap { name, data -> LocalCatalogCategoryTarget? in
+            let encodedToken = data.base64EncodedString()
+            guard let indexData = index[encodedToken],
+                  let record = try? JSONDecoder().decode(CatalogAliasKeyRecord.self, from: indexData),
+                  record.targetType == .category
+            else { return nil }
+            return LocalCatalogCategoryTarget(aliasKey: record.aliasKey, name: name)
+        }
+        .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
     }
 
     /// Remove a category alias by lookup name (case-insensitive).
@@ -528,6 +494,7 @@ final class LocalAliasStore: @unchecked Sendable {
         defaults?.removeObject(forKey: applicationDisplayToBundleKey)
         defaults?.removeObject(forKey: categoryKey)
         defaults?.removeObject(forKey: listKey)
+        defaults?.removeObject(forKey: catalogAliasKeyIndexKey)
     }
 
     // MARK: - Saved Lists
@@ -550,7 +517,66 @@ final class LocalAliasStore: @unchecked Sendable {
         Array(loadListDict().keys)
     }
 
+    // MARK: - Backend catalog member mapping
+
+    /// Persist the backend `alias_key` corresponding to a locally-held opaque
+    /// FamilyControls token. Saved lists use this to upload explicit member
+    /// sets without ever exposing raw token bytes to the parent device.
+    func saveCatalogAliasKey(
+        _ aliasKey: UUID,
+        targetType: CatalogListMemberTargetType,
+        encodedTokenKey: String
+    ) {
+        let key = encodedTokenKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else { return }
+        var dict = loadCatalogAliasKeyIndex()
+        let record = CatalogAliasKeyRecord(targetType: targetType, aliasKey: aliasKey)
+        guard let data = try? JSONEncoder().encode(record) else { return }
+        dict[key] = data
+        persistCatalogAliasKeyIndex(dict)
+    }
+
+    func catalogListMembers(
+        applicationTokenKeys: [String],
+        categoryTokenKeys: [String]
+    ) -> [CatalogListMemberUpload] {
+        let index = loadCatalogAliasKeyIndex()
+        var seen = Set<UUID>()
+        var members: [CatalogListMemberUpload] = []
+
+        func appendIfKnown(_ tokenKey: String, expectedType: CatalogListMemberTargetType) {
+            let key = tokenKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !key.isEmpty,
+                  let data = index[key],
+                  let record = try? JSONDecoder().decode(CatalogAliasKeyRecord.self, from: data),
+                  record.targetType == expectedType,
+                  seen.insert(record.aliasKey).inserted
+            else { return }
+            members.append(CatalogListMemberUpload(targetType: expectedType, aliasKey: record.aliasKey))
+        }
+
+        for tokenKey in applicationTokenKeys {
+            appendIfKnown(tokenKey, expectedType: .app)
+        }
+        for tokenKey in categoryTokenKeys {
+            appendIfKnown(tokenKey, expectedType: .category)
+        }
+        return members
+    }
+
+    func catalogListMembers(for selection: FamilyActivitySelection) -> [CatalogListMemberUpload] {
+        catalogListMembers(
+            applicationTokenKeys: selection.applicationTokens.compactMap(encodedTokenKey),
+            categoryTokenKeys: selection.categoryTokens.compactMap(encodedTokenKey)
+        )
+    }
+
     // MARK: - Private
+
+    private struct CatalogAliasKeyRecord: Codable {
+        let targetType: CatalogListMemberTargetType
+        let aliasKey: UUID
+    }
 
     private func loadCategoryDict() -> [String: Data] {
         (defaults?.dictionary(forKey: categoryKey) as? [String: Data]) ?? [:]
@@ -576,6 +602,14 @@ final class LocalAliasStore: @unchecked Sendable {
         defaults?.set(dict, forKey: applicationTokenKey)
     }
 
+    private func loadCatalogAliasKeyIndex() -> [String: Data] {
+        (defaults?.dictionary(forKey: catalogAliasKeyIndexKey) as? [String: Data]) ?? [:]
+    }
+
+    private func persistCatalogAliasKeyIndex(_ dict: [String: Data]) {
+        defaults?.set(dict, forKey: catalogAliasKeyIndexKey)
+    }
+
     private func loadDisplayToBundleDict() -> [String: String] {
         (defaults?.dictionary(forKey: applicationDisplayToBundleKey) as? [String: String]) ?? [:]
     }
@@ -584,22 +618,8 @@ final class LocalAliasStore: @unchecked Sendable {
         defaults?.set(dict, forKey: applicationDisplayToBundleKey)
     }
 
-    private static func uniqueNonEmptyAliases(_ aliases: [String]) -> [String] {
-        var seen = Set<String>()
-        var result: [String] = []
-        for alias in aliases {
-            let clean = alias.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !clean.isEmpty else { continue }
-            let key = clean.lowercased()
-            guard seen.insert(key).inserted else { continue }
-            result.append(clean)
-        }
-        return result
-    }
-
-    private static func stableHashPrefix(_ data: Data) -> String {
-        let digest = SHA256.hash(data: data)
-        return digest.prefix(8).map { String(format: "%02x", $0) }.joined()
+    private func encodedTokenKey<T: Encodable>(_ token: T) -> String? {
+        _encodeTokenJSON(token)?.base64EncodedString()
     }
 }
 

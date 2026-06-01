@@ -29,12 +29,12 @@ struct CommandTarget: Codable, Sendable {
     // See spec §5.2 B1 flow and plan Phase 6/9 changes.
     var forceDowngrade: Bool = false
 
-    // Debug cross-device catalog POC: backend selected this target from the
-    // kid device's own uploaded app catalog. Execution may use LocalAliasStore
-    // even if the token is not in the current parent-style Managed Apps picker.
-    var catalogVerified: Bool = false
+    // Canonical backend catalog-lock payloads. These preserve the existing
+    // local-alias and pending-blob fallbacks while allowing direct token execute.
     var catalogTokenDataBase64: String? = nil
     var catalogCategoryTokenDataBase64: String? = nil
+    var catalogApplicationTokenDataBase64s: [String] = []
+    var catalogCategoryTokenDataBase64s: [String] = []
 }
 
 struct LockCommand: Codable, Sendable, Identifiable {

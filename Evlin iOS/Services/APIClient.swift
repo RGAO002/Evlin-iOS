@@ -24,74 +24,27 @@ class APIClient: ObservableObject {
         // Any other railway service we previously pointed parents at.
     ]
 
-    static func effectiveInitialBaseURL(
-        saved: String,
-        explicitBaseURL: String = "",
-        isDebugBuild: Bool
-    ) -> String {
-        let migratedSaved = legacyHostFragments.contains(where: { saved.contains($0) })
-            ? defaultURL
-            : saved
-        let normalizedSaved = (
-            !isDebugBuild && isLocalDevelopmentURL(migratedSaved)
-        ) ? defaultURL : migratedSaved
-
-        let raw = explicitBaseURL.isEmpty
-            ? (normalizedSaved.isEmpty ? defaultURL : normalizedSaved)
-            : explicitBaseURL
-
-        if raw.hasPrefix("http://") || raw.hasPrefix("https://") {
-            return raw
-        }
-        return "https://" + raw
-    }
-
-    static func shouldPersistInitialBaseURLMigration(
-        saved: String,
-        effective: String,
-        isDebugBuild: Bool
-    ) -> Bool {
-        legacyHostFragments.contains(where: { saved.contains($0) })
-            || (!isDebugBuild && isLocalDevelopmentURL(saved) && effective == defaultURL)
-    }
-
-    static func effectiveSavedBaseURL(
-        _ url: String,
-        isDebugBuild: Bool
-    ) -> String {
-        effectiveInitialBaseURL(saved: url, isDebugBuild: isDebugBuild)
-    }
-
-    private static func isLocalDevelopmentURL(_ value: String) -> Bool {
-        let lowercased = value.trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-        return lowercased.contains("localhost")
-            || lowercased.contains("127.0.0.1")
-            || lowercased.contains("192.168.")
-            || lowercased.contains("10.0.")
-    }
-
     init(baseURL: String = "") {
-        let saved = UserDefaults.standard.string(forKey: "serverURL") ?? ""
-        #if DEBUG
-        let isDebugBuild = true
-        #else
-        let isDebugBuild = false
-        #endif
-        let effective = Self.effectiveInitialBaseURL(
-            saved: saved,
-            explicitBaseURL: baseURL,
-            isDebugBuild: isDebugBuild
-        )
-        if baseURL.isEmpty,
-           Self.shouldPersistInitialBaseURLMigration(
-               saved: saved,
-               effective: effective,
-               isDebugBuild: isDebugBuild
-           ) {
-            UserDefaults.standard.set(effective, forKey: "serverURL")
+        var saved = UserDefaults.standard.string(forKey: "serverURL") ?? ""
+        if Self.legacyHostFragments.contains(where: { saved.contains($0) }) {
+            saved = Self.defaultURL
+            UserDefaults.standard.set(saved, forKey: "serverURL")
         }
-        self.baseURL = effective
+        // Previously this code rejected any saved URL containing "192.168"
+        // or "localhost", forcing dev builds back to the Render default every
+        // launch — annoying when iterating against a local backend. Trust
+        // whatever the user explicitly saved. The DEBUG-only picker in
+        // HomeSettingsSheet still gives one-tap revert to production.
+        let useSaved = !saved.isEmpty
+        let raw = baseURL.isEmpty
+            ? (useSaved ? saved : Self.defaultURL)
+            : baseURL
+        // Guard against missing scheme (user typed raw host in Settings)
+        if raw.hasPrefix("http://") || raw.hasPrefix("https://") {
+            self.baseURL = raw
+        } else {
+            self.baseURL = "https://" + raw
+        }
     }
 
     // MARK: - Parent Chat
@@ -227,14 +180,8 @@ class APIClient: ObservableObject {
     }
 
     func saveServerURL(_ url: String) {
-        #if DEBUG
-        let isDebugBuild = true
-        #else
-        let isDebugBuild = false
-        #endif
-        let effective = Self.effectiveSavedBaseURL(url, isDebugBuild: isDebugBuild)
-        baseURL = effective
-        UserDefaults.standard.set(effective, forKey: "serverURL")
+        baseURL = url
+        UserDefaults.standard.set(url, forKey: "serverURL")
     }
 
     // MARK: - Family protection mode (DEBUG runtime toggle)
@@ -392,9 +339,10 @@ struct PollTargetDTO: Decodable {
     let target_display: String?
     let target_child_id: String?         // new: which child device (multi-child)
     let force_downgrade: Bool?           // new: parent-confirmed B1 downgrade
-    let catalog_verified: Bool?          // debug POC: target came from this child device's uploaded catalog
-    let catalog_token_data_base64: String? // debug POC: encoded kid-picker ApplicationToken
-    let catalog_category_token_data_base64: String? // debug POC: encoded kid-picker ActivityCategoryToken
+    let catalog_token_data_base64: String?
+    let catalog_category_token_data_base64: String?
+    let applications: [String]?
+    let applicationCategories: [String]?
 
     private enum CodingKeys: String, CodingKey {
         case bundle_id
@@ -408,9 +356,16 @@ struct PollTargetDTO: Decodable {
         case target_display
         case target_child_id
         case force_downgrade
-        case catalog_verified
-        case catalog_token_data_base64
-        case catalog_category_token_data_base64
+        case scope
+        case applications
+        case applicationCategories
+        case application_categories
+        case canonicalCatalogTokenDataBase64 = "catalog_token_data_base64"
+        case canonicalCatalogCategoryTokenDataBase64 = "catalog_category_token_data_base64"
+        case legacyTokenDataBase64 = "token_data_base64"
+        case legacyCategoryTokenDataBase64 = "category_token_data_base64"
+        case camelCatalogTokenDataBase64 = "catalogTokenDataBase64"
+        case camelCatalogCategoryTokenDataBase64 = "catalogCategoryTokenDataBase64"
     }
 
     init(from decoder: Decoder) throws {
@@ -427,9 +382,18 @@ struct PollTargetDTO: Decodable {
         target_display = try c.decodeIfPresent(String.self, forKey: .target_display)
         target_child_id = try c.decodeIfPresent(String.self, forKey: .target_child_id)
         force_downgrade = try c.decodeIfPresent(Bool.self, forKey: .force_downgrade)
-        catalog_verified = try c.decodeIfPresent(Bool.self, forKey: .catalog_verified)
-        catalog_token_data_base64 = try c.decodeIfPresent(String.self, forKey: .catalog_token_data_base64)
-        catalog_category_token_data_base64 = try c.decodeIfPresent(String.self, forKey: .catalog_category_token_data_base64)
+        catalog_token_data_base64 =
+            try c.decodeIfPresent(String.self, forKey: .canonicalCatalogTokenDataBase64)
+                ?? c.decodeIfPresent(String.self, forKey: .legacyTokenDataBase64)
+                ?? c.decodeIfPresent(String.self, forKey: .camelCatalogTokenDataBase64)
+        catalog_category_token_data_base64 =
+            try c.decodeIfPresent(String.self, forKey: .canonicalCatalogCategoryTokenDataBase64)
+                ?? c.decodeIfPresent(String.self, forKey: .legacyCategoryTokenDataBase64)
+                ?? c.decodeIfPresent(String.self, forKey: .camelCatalogCategoryTokenDataBase64)
+        applications = try c.decodeIfPresent([String].self, forKey: .applications)
+        applicationCategories =
+            try c.decodeIfPresent([String].self, forKey: .applicationCategories)
+                ?? c.decodeIfPresent([String].self, forKey: .application_categories)
     }
 }
 
@@ -460,25 +424,51 @@ struct AckStatusResponse: Decodable, Sendable {
     let pendingConfirmation: AckPendingConfirmation?
 }
 
-struct ChildAppCatalogUploadApp: Codable, Sendable {
+// MARK: - Child app catalog capture APIs
+
+struct ChildAppCatalogUploadApp: Codable, Sendable, Equatable {
+    let aliasKey: UUID?
     let displayName: String
     let tokenKind: String
     let bundleID: String?
     let aliases: [String]
     let tokenAvailable: Bool
     let tokenDataBase64: String?
+    let sourceDeviceID: UUID?
+
+    init(
+        aliasKey: UUID? = nil,
+        displayName: String,
+        tokenKind: String = "app",
+        bundleID: String? = nil,
+        aliases: [String] = [],
+        tokenAvailable: Bool = true,
+        tokenDataBase64: String? = nil,
+        sourceDeviceID: UUID? = nil
+    ) {
+        self.aliasKey = aliasKey
+        self.displayName = displayName
+        self.tokenKind = tokenKind
+        self.bundleID = bundleID
+        self.aliases = aliases
+        self.tokenAvailable = tokenAvailable
+        self.tokenDataBase64 = tokenDataBase64
+        self.sourceDeviceID = sourceDeviceID
+    }
 
     enum CodingKeys: String, CodingKey {
+        case aliasKey = "alias_key"
         case displayName = "display_name"
         case tokenKind = "token_kind"
         case bundleID = "bundle_id"
         case aliases
         case tokenAvailable = "token_available"
         case tokenDataBase64 = "token_data_base64"
+        case sourceDeviceID = "source_device_id"
     }
 }
 
-struct ChildAppCatalogEntryDTO: Codable, Identifiable, Sendable {
+struct ChildAppCatalogEntryResponse: Codable, Sendable, Equatable {
     let id: UUID
     let displayName: String
     let tokenKind: String
@@ -500,20 +490,10 @@ struct ChildAppCatalogEntryDTO: Codable, Identifiable, Sendable {
     }
 }
 
-struct ChildAppCatalogListResponse: Codable, Sendable {
-    let childDeviceID: UUID
-    let apps: [ChildAppCatalogEntryDTO]
-
-    enum CodingKeys: String, CodingKey {
-        case childDeviceID = "child_device_id"
-        case apps
-    }
-}
-
-struct ChildAppCatalogUploadResponse: Codable, Sendable {
+struct ChildAppCatalogUploadResponse: Codable, Sendable, Equatable {
     let childDeviceID: UUID
     let count: Int
-    let apps: [ChildAppCatalogEntryDTO]
+    let apps: [ChildAppCatalogEntryResponse]
 
     enum CodingKeys: String, CodingKey {
         case childDeviceID = "child_device_id"
@@ -522,17 +502,229 @@ struct ChildAppCatalogUploadResponse: Codable, Sendable {
     }
 }
 
-struct ChildAppCatalogLockResponse: Codable, Sendable {
-    let commandID: UUID
-    let targetDisplay: String
+struct CatalogSearchResultDTO: Codable, Sendable, Equatable {
+    let canonicalName: String
     let bundleID: String?
-    let durationMinutes: Int?
+    let aliases: [String]
+    let artworkURL: URL?
 
     enum CodingKeys: String, CodingKey {
-        case commandID = "command_id"
-        case targetDisplay = "target_display"
+        case canonicalName = "canonical_name"
         case bundleID = "bundle_id"
-        case durationMinutes = "duration_minutes"
+        case aliases
+        case artworkURL = "artwork_url"
+    }
+
+    var result: CatalogSearchResult {
+        CatalogSearchResult(
+            canonicalName: canonicalName,
+            bundleID: bundleID,
+            aliases: aliases,
+            artworkURL: artworkURL
+        )
+    }
+}
+
+struct CatalogSearchResponseDTO: Codable, Sendable, Equatable {
+    let results: [CatalogSearchResultDTO]
+}
+
+struct CatalogListUploadResponse: Codable, Sendable, Equatable {
+    let aliasKey: UUID
+    let childDeviceID: UUID
+    let listName: String
+    let aliases: [String]
+    let appCount: Int
+
+    enum CodingKeys: String, CodingKey {
+        case aliasKey = "alias_key"
+        case childDeviceID = "child_device_id"
+        case listName = "list_name"
+        case aliases
+        case appCount = "app_count"
+    }
+}
+
+enum CatalogListMemberTargetType: String, Codable, Sendable, Equatable {
+    case app
+    case category
+}
+
+struct CatalogListMemberUpload: Codable, Sendable, Equatable {
+    let targetType: CatalogListMemberTargetType
+    let aliasKey: UUID
+
+    enum CodingKeys: String, CodingKey {
+        case targetType = "target_type"
+        case aliasKey = "alias_key"
+    }
+}
+
+struct CatalogListUploadRequestBody: Codable, Sendable, Equatable {
+    let deviceID: UUID
+    let aliasKey: UUID?
+    let sourceDeviceID: UUID?
+    let listName: String
+    let aliases: [String]
+    let selectionBlobBase64: String?
+    let appCount: Int
+    let members: [CatalogListMemberUpload]?
+
+    enum CodingKeys: String, CodingKey {
+        case deviceID = "device_id"
+        case aliasKey = "alias_key"
+        case sourceDeviceID = "source_device_id"
+        case listName = "list_name"
+        case aliases
+        case selectionBlobBase64 = "selection_blob_base64"
+        case appCount = "app_count"
+        case members
+    }
+}
+
+struct ParentLazyTagCatalogResponse: Codable, Sendable, Equatable {
+    let childDeviceID: UUID
+    let apps: [ParentLazyTagAppProjection]
+    let categories: [ParentLazyTagAppProjection]
+    let lists: [ParentLazyTagListProjection]
+
+    enum CodingKeys: String, CodingKey {
+        case childDeviceID = "child_device_id"
+        case apps
+        case categories
+        case lists
+    }
+
+    var lazyTagTargets: [LazyTagCatalogTarget] {
+        var seen = Set<UUID>()
+        func appendUnique(_ target: LazyTagCatalogTarget, into out: inout [LazyTagCatalogTarget]) {
+            guard seen.insert(target.aliasKey).inserted else { return }
+            out.append(target)
+        }
+
+        var out: [LazyTagCatalogTarget] = []
+        for row in apps where row.targetType == .app {
+            appendUnique(row.lazyTagTarget, into: &out)
+        }
+        for row in categories where row.targetType == .category {
+            appendUnique(row.lazyTagTarget, into: &out)
+        }
+        for row in lists {
+            appendUnique(row.lazyTagTarget, into: &out)
+        }
+        return out
+    }
+}
+
+struct ParentLazyTagAppProjection: Codable, Sendable, Equatable {
+    let aliasKey: UUID
+    let targetType: LazyTagCatalogTargetType
+    let displayName: String
+    let bindingKind: String
+    let bundleID: String?
+    let aliases: [String]
+    let tokenAvailable: Bool
+    let status: String
+    let artworkURL: URL?
+
+    enum CodingKeys: String, CodingKey {
+        case aliasKey = "alias_key"
+        case targetType = "target_type"
+        case displayName = "display_name"
+        case bindingKind = "binding_kind"
+        case bundleID = "bundle_id"
+        case aliases
+        case tokenAvailable = "token_available"
+        case status
+        case artworkURL = "artwork_url"
+    }
+
+    var lazyTagTarget: LazyTagCatalogTarget {
+        LazyTagCatalogTarget(
+            aliasKey: aliasKey,
+            type: targetType,
+            displayName: displayName,
+            aliases: aliases,
+            bundleID: bundleID,
+            artworkURL: artworkURL,
+            isManual: bindingKind.caseInsensitiveCompare("manual") == .orderedSame
+        )
+    }
+}
+
+struct ParentLazyTagListProjection: Codable, Sendable, Equatable {
+    let aliasKey: UUID
+    let targetType: LazyTagCatalogTargetType
+    let listName: String
+    let aliases: [String]
+    let appCount: Int
+    let status: String
+
+    enum CodingKeys: String, CodingKey {
+        case aliasKey = "alias_key"
+        case targetType = "target_type"
+        case listName = "list_name"
+        case aliases
+        case appCount = "app_count"
+        case status
+    }
+
+    var lazyTagTarget: LazyTagCatalogTarget {
+        LazyTagCatalogTarget(
+            aliasKey: aliasKey,
+            type: .list,
+            displayName: listName,
+            aliases: aliases,
+            memberCount: appCount
+        )
+    }
+}
+
+struct LazyTagAliasTargetResponse: Codable, Sendable, Equatable {
+    let aliasKey: UUID
+    let targetType: LazyTagCatalogTargetType
+    let displayName: String
+    let aliases: [String]
+    let status: String
+    let bundleID: String?
+    let tokenAvailable: Bool?
+    let appCount: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case aliasKey = "alias_key"
+        case targetType = "target_type"
+        case displayName = "display_name"
+        case aliases
+        case status
+        case bundleID = "bundle_id"
+        case tokenAvailable = "token_available"
+        case appCount = "app_count"
+    }
+
+    var lazyTagTarget: LazyTagCatalogTarget {
+        LazyTagCatalogTarget(
+            aliasKey: aliasKey,
+            type: targetType,
+            displayName: displayName,
+            aliases: aliases,
+            bundleID: bundleID,
+            isManual: targetType == .app && (bundleID?.isEmpty ?? true),
+            memberCount: appCount
+        )
+    }
+}
+
+struct LazyTagAliasMutationRequest: Codable, Sendable, Equatable {
+    let familyID: UUID
+    let childDeviceID: UUID
+    let targetType: LazyTagCatalogTargetType
+    let alias: String
+
+    enum CodingKeys: String, CodingKey {
+        case familyID = "family_id"
+        case childDeviceID = "child_device_id"
+        case targetType = "target_type"
+        case alias
     }
 }
 
@@ -589,8 +781,6 @@ extension APIClient {
         return try JSONDecoder().decode(AckStatusResponse.self, from: data)
     }
 
-    // MARK: - Child app catalog debug POC
-
     @discardableResult
     func uploadChildAppCatalog(
         deviceID: UUID,
@@ -599,6 +789,7 @@ extension APIClient {
         let url = URL(string: "\(baseURL)/child/app-catalog")!
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
+        req.timeoutInterval = 22
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         struct Body: Codable {
             let deviceID: UUID
@@ -617,45 +808,149 @@ extension APIClient {
         return try JSONDecoder().decode(ChildAppCatalogUploadResponse.self, from: data)
     }
 
-    func fetchChildAppCatalog(
-        childDeviceID: UUID
-    ) async throws -> ChildAppCatalogListResponse {
-        var comps = URLComponents(string: "\(baseURL)/parent/child-app-catalog")!
-        comps.queryItems = [
-            URLQueryItem(name: "child_device_id", value: childDeviceID.uuidString)
-        ]
+    func catalogSearch(q: String) async throws -> [CatalogSearchResultDTO] {
+        var comps = URLComponents(string: "\(baseURL)/catalog/search")!
+        comps.queryItems = [URLQueryItem(name: "q", value: q)]
         let (data, resp) = try await URLSession.shared.data(from: comps.url!)
         guard let http = resp as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
             throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
         }
-        return try JSONDecoder().decode(ChildAppCatalogListResponse.self, from: data)
+        return try JSONDecoder().decode(CatalogSearchResponseDTO.self, from: data).results
+    }
+
+    func fetchLazyTagCatalogTargets(
+        childDeviceID: UUID,
+        query: String? = nil
+    ) async throws -> [LazyTagCatalogTarget] {
+        var comps = URLComponents(string: "\(baseURL)/parent/child-app-catalog")!
+        comps.queryItems = [URLQueryItem(name: "child_device_id", value: childDeviceID.uuidString)]
+        let trimmed = query?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let (data, resp) = try await URLSession.shared.data(from: comps.url!)
+        guard let http = resp as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+        let targets = try JSONDecoder().decode(ParentLazyTagCatalogResponse.self, from: data).lazyTagTargets
+        guard !trimmed.isEmpty else { return targets }
+        return targets.filter { $0.matches(searchText: trimmed) }
     }
 
     @discardableResult
-    func lockChildCatalogApp(
+    func saveLazyTagAlias(
         familyID: UUID,
         childDeviceID: UUID,
-        appID: UUID,
-        durationMinutes: Int?
-    ) async throws -> ChildAppCatalogLockResponse {
-        let url = URL(string: "\(baseURL)/parent/child-app-catalog/lock")!
+        target: LazyTagCatalogTarget,
+        alias: String
+    ) async throws -> LazyTagCatalogTarget {
+        let url = URL(string: "\(baseURL)/parent/child-app-catalog/\(target.aliasKey.uuidString)/aliases")!
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
+        req.timeoutInterval = 22
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        var body: [String: Any] = [
-            "family_id": familyID.uuidString,
-            "child_device_id": childDeviceID.uuidString,
-            "app_id": appID.uuidString,
-        ]
-        if let durationMinutes {
-            body["duration_minutes"] = durationMinutes
-        }
-        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+        req.httpBody = try JSONEncoder().encode(LazyTagAliasMutationRequest(
+            familyID: familyID,
+            childDeviceID: childDeviceID,
+            targetType: target.type,
+            alias: alias
+        ))
         let (data, resp) = try await URLSession.shared.data(for: req)
         guard let http = resp as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
             throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
         }
-        return try JSONDecoder().decode(ChildAppCatalogLockResponse.self, from: data)
+        return try JSONDecoder().decode(LazyTagAliasTargetResponse.self, from: data).lazyTagTarget
+    }
+
+    @discardableResult
+    func removeLazyTagAlias(
+        familyID: UUID,
+        childDeviceID: UUID,
+        target: LazyTagCatalogTarget,
+        alias: String
+    ) async throws -> LazyTagCatalogTarget {
+        var comps = URLComponents(
+            string: "\(baseURL)/parent/child-app-catalog/\(target.aliasKey.uuidString)/aliases/\(Self.pathComponent(alias))"
+        )!
+        comps.queryItems = [
+            URLQueryItem(name: "family_id", value: familyID.uuidString),
+            URLQueryItem(name: "child_device_id", value: childDeviceID.uuidString),
+            URLQueryItem(name: "target_type", value: target.type.rawValue),
+        ]
+        var req = URLRequest(url: comps.url!)
+        req.httpMethod = "DELETE"
+        req.timeoutInterval = 22
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+        return try JSONDecoder().decode(LazyTagAliasTargetResponse.self, from: data).lazyTagTarget
+    }
+
+    @discardableResult
+    func renameLazyTagAlias(
+        familyID: UUID,
+        childDeviceID: UUID,
+        target: LazyTagCatalogTarget,
+        oldAlias: String,
+        newAlias: String
+    ) async throws -> LazyTagCatalogTarget {
+        let url = URL(
+            string: "\(baseURL)/parent/child-app-catalog/\(target.aliasKey.uuidString)/aliases/\(Self.pathComponent(oldAlias))"
+        )!
+        var req = URLRequest(url: url)
+        req.httpMethod = "PATCH"
+        req.timeoutInterval = 22
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONEncoder().encode(LazyTagAliasMutationRequest(
+            familyID: familyID,
+            childDeviceID: childDeviceID,
+            targetType: target.type,
+            alias: newAlias
+        ))
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+        return try JSONDecoder().decode(LazyTagAliasTargetResponse.self, from: data).lazyTagTarget
+    }
+
+    private static func pathComponent(_ value: String) -> String {
+        var allowed = CharacterSet.urlPathAllowed
+        allowed.remove(charactersIn: "/?#[]@!$&'()*+,;=")
+        return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
+    }
+
+    @discardableResult
+    func uploadCatalogList(
+        deviceID: UUID,
+        aliasKey: UUID? = nil,
+        sourceDeviceID: UUID? = nil,
+        listName: String,
+        aliases: [String],
+        selectionBlobBase64: String? = nil,
+        appCount: Int,
+        members: [CatalogListMemberUpload]? = nil
+    ) async throws -> CatalogListUploadResponse {
+        let url = URL(string: "\(baseURL)/child/catalog-list")!
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 22
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONEncoder().encode(
+            CatalogListUploadRequestBody(
+                deviceID: deviceID,
+                aliasKey: aliasKey,
+                sourceDeviceID: sourceDeviceID,
+                listName: listName,
+                aliases: aliases,
+                selectionBlobBase64: selectionBlobBase64,
+                appCount: appCount,
+                members: members
+            )
+        )
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+        return try JSONDecoder().decode(CatalogListUploadResponse.self, from: data)
     }
 
     // MARK: - Saved list metadata

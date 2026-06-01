@@ -19,6 +19,64 @@ enum ReceiptState: Sendable, Equatable, Codable {
     case failedOther(reason: String)
 }
 
+struct ReceiptCardActions: Sendable, Equatable {
+    let unlockTarget: ReceiptUnlockTarget
+    let unlockButtonTitle: String
+    let keepButtonTitle: String
+}
+
+struct ReceiptUnlockTarget: Sendable, Equatable {
+    let displayName: String
+    let tier: ShieldTier?
+}
+
+enum ReceiptCardActionModel {
+    static func actions(
+        for state: ReceiptState,
+        effectiveState: AckEffectiveState?
+    ) -> ReceiptCardActions? {
+        guard case .confirmedExact(let verb, _, _) = state,
+              verb == .unshield || verb == .unblock,
+              let effectiveState,
+              !effectiveState.shieldsCovering.isEmpty
+        else { return nil }
+
+        let strongest = strongestCover(in: effectiveState.shieldsCovering)
+        return ReceiptCardActions(
+            unlockTarget: ReceiptUnlockTarget(
+                displayName: strongest.displayName,
+                tier: shieldTier(from: strongest.tier)
+            ),
+            unlockButtonTitle: "Unlock \(strongest.displayName)",
+            keepButtonTitle: "Keep locked"
+        )
+    }
+
+    private static func strongestCover(
+        in covers: [AckEffectiveState.ShieldCover]
+    ) -> AckEffectiveState.ShieldCover {
+        let iso = ISO8601DateFormatter()
+        return covers.sorted { a, b in
+            let aDate = a.expiresAtISO.flatMap { iso.date(from: $0) }
+            let bDate = b.expiresAtISO.flatMap { iso.date(from: $0) }
+            if aDate == nil && bDate != nil { return true }
+            if aDate != nil && bDate == nil { return false }
+            return (aDate ?? .distantPast) > (bDate ?? .distantPast)
+        }[0]
+    }
+
+    private static func shieldTier(from raw: String) -> ShieldTier? {
+        if let tier = ShieldTier(rawValue: raw) {
+            return tier
+        }
+        // Historical ack payloads used "specific" for single-app shields.
+        if raw == "specific" {
+            return .exactApp
+        }
+        return nil
+    }
+}
+
 /// Two-line receipt: primary mutation + optional effective-state disclosure.
 /// See spec §8.
 ///
@@ -28,18 +86,92 @@ enum ReceiptState: Sendable, Equatable, Codable {
 struct ReceiptCard: View {
     let state: ReceiptState
     let effectiveState: AckEffectiveState?
+    var onRequestUnlock: ((ReceiptUnlockTarget) -> Void)? = nil
+
+    @State private var hidesActions = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 10) {
             primaryLine
             if let line = effectiveStateLine {
-                Text(line).font(.caption).foregroundStyle(.secondary)
+                Text(line)
+                    .font(.caption)
+                    .foregroundStyle(Color.evOnSurfaceVariant)
+            }
+            if let actions = actionModel, !hidesActions {
+                actionButtons(actions)
+            }
+            if showsHonestReceiptFooter {
+                HStack(spacing: 6) {
+                    Image(systemName: "iphone.gen3")
+                        .font(.system(size: 11, weight: .semibold))
+                    Text(EvlinReceiptCopy.appliedOnKidDevice)
+                        .font(.caption2.weight(.medium))
+                }
+                .foregroundStyle(Color.evOnSurfaceVariant)
+                .padding(.top, 2)
             }
         }
-        .padding(12)
+        .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(.systemGray6))
-        .cornerRadius(12)
+        .receiptSentinelCard()
+    }
+
+    private var actionModel: ReceiptCardActions? {
+        guard onRequestUnlock != nil else { return nil }
+        return ReceiptCardActionModel.actions(for: state, effectiveState: effectiveState)
+    }
+
+    /// Only successful lock-type receipts get the honest "applied on Kid's
+    /// iPhone" footer. Failures and pending receipts render their own copy.
+    private var showsHonestReceiptFooter: Bool {
+        switch state {
+        case .confirmedExact(let verb, _, _),
+             .confirmedFallback(let verb, _, _, _):
+            return verb == .shield || verb == .block
+        default:
+            return false
+        }
+    }
+
+    private func actionButtons(_ actions: ReceiptCardActions) -> some View {
+        HStack(spacing: 10) {
+            Button {
+                onRequestUnlock?(actions.unlockTarget)
+                hidesActions = true
+            } label: {
+                Label(actions.unlockButtonTitle, systemImage: "lock.open.fill")
+                    .font(.caption.weight(.bold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .foregroundStyle(.white)
+                    .background(
+                        RoundedRectangle(cornerRadius: 13, style: .continuous)
+                            .fill(Color.evPrimary)
+                    )
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                hidesActions = true
+            } label: {
+                Text(actions.keepButtonTitle)
+                    .font(.caption.weight(.bold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .foregroundStyle(Color.evOnSurfaceVariant)
+                    .background(
+                        RoundedRectangle(cornerRadius: 13, style: .continuous)
+                            .fill(Color.evSurfaceContainerLowest)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 13, style: .continuous)
+                            .stroke(Color.evOutlineVariant, lineWidth: 1)
+                    )
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.top, 2)
     }
 
     @ViewBuilder
@@ -196,5 +328,20 @@ struct ReceiptCard: View {
         case .unshield:    return "\(category.capitalized) unshielded (fallback)"
         default:           return "\(category.capitalized) updated (fallback)"
         }
+    }
+}
+
+private extension View {
+    func receiptSentinelCard() -> some View {
+        self
+            .background(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(Color.evSurfaceContainerLowest)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(Color.evOutlineVariant, lineWidth: 1)
+            )
+            .evShadow(.premium)
     }
 }
