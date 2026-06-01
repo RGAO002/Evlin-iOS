@@ -301,7 +301,12 @@ final class ActionExecutor: @unchecked Sendable {
 
         switch tier {
         case .exactApp:
-            let resolved = try resolveExactApp(from: cmd.target, requireActiveToken: true)
+            // Catalog-captured apps live in LocalAliasStore but are not necessarily in
+            // the legacy active Managed Apps selection. Don't require the token to be
+            // "active": if the kid holds a real captured token for this app, shield it.
+            // (When the command carries a catalog token, resolveExactApp uses it
+            // directly and this flag is moot.)
+            let resolved = try resolveExactApp(from: cmd.target, requireActiveToken: false)
             appTokens = [resolved.token]
             targetKey = resolved.targetKey
             displayName = cmd.target.targetDisplay

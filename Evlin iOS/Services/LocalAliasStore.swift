@@ -111,7 +111,11 @@ final class LocalAliasStore: @unchecked Sendable {
     ) -> ApplicationToken? {
         guard let token = applicationToken(forLookupKey: key) else { return nil }
         guard activeTokens.contains(token) else {
-            markStale(forLookupKey: key)
+            // Treat as a miss (so chat can fall back to lazy-tagging) but DO NOT
+            // delete the saved alias. A catalog-captured app is legitimately absent
+            // from the legacy Managed Apps selection, and one failed lock lookup must
+            // not wipe the kid's just-captured app. (Was: markStale(forLookupKey: key),
+            // which deleted it — the cause of "saved app disappears after a lock try".)
             return nil
         }
         return token
