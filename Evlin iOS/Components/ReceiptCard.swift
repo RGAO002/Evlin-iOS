@@ -72,35 +72,30 @@ struct ReceiptCard: View {
     @State private var hidesActions = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 10) {
             primaryLine
             if let line = effectiveStateLine {
-                Text(line).font(.caption).foregroundStyle(.secondary)
+                Text(line)
+                    .font(.caption)
+                    .foregroundStyle(Color.evOnSurfaceVariant)
             }
             if let actions = actionModel, !hidesActions {
-                HStack(spacing: 8) {
-                    Button(actions.unlockButtonTitle) {
-                        onRequestUnlock?(actions.unlockTarget)
-                        hidesActions = true
-                    }
-                    .buttonStyle(.borderedProminent)
-                    Button(actions.keepButtonTitle) {
-                        hidesActions = true
-                    }
-                    .buttonStyle(.bordered)
-                }
-                .padding(.top, 4)
+                actionButtons(actions)
             }
             if showsHonestReceiptFooter {
-                Text(EvlinReceiptCopy.appliedOnKidDevice)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                HStack(spacing: 6) {
+                    Image(systemName: "iphone.gen3")
+                        .font(.system(size: 11, weight: .semibold))
+                    Text(EvlinReceiptCopy.appliedOnKidDevice)
+                        .font(.caption2.weight(.medium))
+                }
+                .foregroundStyle(Color.evOnSurfaceVariant)
+                .padding(.top, 2)
             }
         }
-        .padding(12)
+        .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(.systemGray6))
-        .cornerRadius(12)
+        .receiptSentinelCard()
     }
 
     private var actionModel: ReceiptCardActions? {
@@ -118,6 +113,46 @@ struct ReceiptCard: View {
         default:
             return false
         }
+    }
+
+    private func actionButtons(_ actions: ReceiptCardActions) -> some View {
+        HStack(spacing: 10) {
+            Button {
+                onRequestUnlock?(actions.unlockTarget)
+                hidesActions = true
+            } label: {
+                Label(actions.unlockButtonTitle, systemImage: "lock.open.fill")
+                    .font(.caption.weight(.bold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .foregroundStyle(.white)
+                    .background(
+                        RoundedRectangle(cornerRadius: 13, style: .continuous)
+                            .fill(Color.evPrimary)
+                    )
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                hidesActions = true
+            } label: {
+                Text(actions.keepButtonTitle)
+                    .font(.caption.weight(.bold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .foregroundStyle(Color.evOnSurfaceVariant)
+                    .background(
+                        RoundedRectangle(cornerRadius: 13, style: .continuous)
+                            .fill(Color.evSurfaceContainerLowest)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 13, style: .continuous)
+                            .stroke(Color.evOutlineVariant, lineWidth: 1)
+                    )
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.top, 2)
     }
 
     @ViewBuilder
@@ -274,5 +309,20 @@ struct ReceiptCard: View {
         case .unshield:    return "\(category.capitalized) unshielded (fallback)"
         default:           return "\(category.capitalized) updated (fallback)"
         }
+    }
+}
+
+private extension View {
+    func receiptSentinelCard() -> some View {
+        self
+            .background(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(Color.evSurfaceContainerLowest)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(Color.evOutlineVariant, lineWidth: 1)
+            )
+            .evShadow(.premium)
     }
 }

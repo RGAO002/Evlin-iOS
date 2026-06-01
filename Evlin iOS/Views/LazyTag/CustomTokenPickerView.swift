@@ -90,11 +90,17 @@ struct CustomTokenPickerView: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                header
-                Divider()
-                searchBar
-                Divider()
-                listBody
+                ScrollView {
+                    VStack(spacing: 16) {
+                        parentChatBadge
+                        header
+                        searchBar
+                        listBody
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+                    .padding(.bottom, 18)
+                }
                 if let errorMessage {
                     Divider()
                     errorBanner(errorMessage)
@@ -102,7 +108,8 @@ struct CustomTokenPickerView: View {
                 Divider()
                 footer
             }
-            .navigationTitle("Tag target")
+            .background(Color.evSurface.ignoresSafeArea())
+            .navigationTitle("Resolve alias")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -125,22 +132,55 @@ struct CustomTokenPickerView: View {
         }
     }
 
+    private var parentChatBadge: some View {
+        Text("Parent · AI chat")
+            .font(.custom("Inter", size: 10).weight(.heavy))
+            .tracking(1.1)
+            .textCase(.uppercase)
+            .foregroundStyle(Color.evPrimary)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 5)
+            .background(Capsule().fill(Color.evPrimaryContainer))
+            .frame(maxWidth: .infinity)
+    }
+
     private var header: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            Text("Which catalog target is")
-                .font(.custom("Inter", size: 13))
-                .foregroundStyle(Color.evOnSurfaceVariant)
-            Text("\"\(request.target)\"?")
-                .font(.custom("Manrope", size: 24).weight(.bold))
-                .foregroundStyle(Color.evOnSurface)
-            Text("Choose an app, category, or custom list. Evlin will save \"\(request.target)\" as an alias on that backend catalog target.")
-                .font(.custom("Inter", size: 12))
-                .foregroundStyle(Color.evOutline)
-                .fixedSize(horizontal: false, vertical: true)
+        HStack(alignment: .top, spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Color.evTertiary)
+                Image(systemName: "tag.fill")
+                    .font(.system(size: 20, weight: .bold))
+                    .foregroundStyle(.white)
+            }
+            .frame(width: 46, height: 46)
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text("First time seeing \"\(request.target)\"")
+                    .font(.custom("Manrope", size: 21).weight(.bold))
+                    .foregroundStyle(Color.evOnSurface)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("I don’t recognize that yet. What saved app, category, or list should it map to?")
+                    .font(.custom("Inter", size: 13))
+                    .foregroundStyle(Color.evOnSurfaceVariant)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("Evlin will save \"\(request.target)\" as an alias on the backend catalog target you choose.")
+                    .font(.custom("Inter", size: 11))
+                    .foregroundStyle(Color.evOutline)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.evSurfaceContainerLow)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color.evTertiaryContainer)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(Color.evTertiary.opacity(0.35), lineWidth: 1)
+        )
     }
 
     private var searchBar: some View {
@@ -161,9 +201,16 @@ struct CustomTokenPickerView: View {
                 .buttonStyle(.plain)
             }
         }
-        .padding(.vertical, 8)
+        .padding(.vertical, 11)
         .padding(.horizontal, 12)
-        .background(Color.evSurfaceContainerLow)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color.evSurfaceContainerLowest)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Color.evOutlineVariant, lineWidth: 1)
+        )
     }
 
     @ViewBuilder
@@ -177,14 +224,10 @@ struct CustomTokenPickerView: View {
         } else if errorMessage == nil, let informMessage = presentation.informMessage {
             informOnlyState(message: informMessage)
         } else {
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 16) {
-                    ForEach(presentation.sections, id: \.type) { section in
-                        catalogSection(section)
-                    }
+            LazyVStack(alignment: .leading, spacing: 18) {
+                ForEach(presentation.sections, id: \.type) { section in
+                    catalogSection(section)
                 }
-                .padding(.vertical, 12)
-                .padding(.horizontal, 12)
             }
         }
     }
@@ -192,9 +235,9 @@ struct CustomTokenPickerView: View {
     private func catalogSection(_ section: LazyTagCatalogSection) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                Text(section.title)
-                    .font(.custom("Inter", size: 11).weight(.heavy))
-                    .tracking(1.2)
+                Text(displayTitle(for: section.type))
+                    .font(.custom("Inter", size: 12).weight(.heavy))
+                    .tracking(0.8)
                     .textCase(.uppercase)
                     .foregroundStyle(Color.evOnSurfaceVariant)
                 Text("\(section.targets.count)")
@@ -209,16 +252,22 @@ struct CustomTokenPickerView: View {
             if section.targets.isEmpty {
                 Text(emptyCopy(for: section.type))
                     .font(.custom("Inter", size: 12))
-                    .foregroundStyle(Color.evOutline)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 10)
+                    .foregroundStyle(Color.evOnSurfaceVariant)
+                    .padding(14)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color.evSurfaceContainerLow)
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .sentinelCatalogCard(cornerRadius: 16)
             } else {
-                ForEach(section.targets) { target in
-                    targetRow(target)
+                VStack(spacing: 0) {
+                    ForEach(Array(section.targets.enumerated()), id: \.element.id) { index, target in
+                        if index > 0 {
+                            Divider()
+                                .overlay(Color.evOutlineVariant)
+                                .padding(.leading, 58)
+                        }
+                        targetRow(target)
+                    }
                 }
+                .sentinelCatalogCard(cornerRadius: 18)
             }
         }
     }
@@ -251,18 +300,17 @@ struct CustomTokenPickerView: View {
                     Text(target.supportingText)
                         .font(.custom("Inter", size: 11))
                         .foregroundStyle(Color.evOutline)
-                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer()
+                Image(systemName: isSelected ? "checkmark" : "chevron.right")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(isSelected ? Color.evPrimary : Color.evOutline)
             }
             .padding(.horizontal, 14)
-            .padding(.vertical, 12)
-            .background(isSelected ? Color.evPrimary.opacity(0.08) : Color.evSurface)
-            .clipShape(RoundedRectangle(cornerRadius: 14))
-            .overlay(
-                RoundedRectangle(cornerRadius: 14)
-                    .stroke(isSelected ? Color.evPrimary : Color.evOutline.opacity(0.15), lineWidth: 1)
-            )
+            .padding(.vertical, 13)
+            .background(isSelected ? Color.evPrimary.opacity(0.08) : Color.clear)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }
@@ -321,7 +369,9 @@ struct CustomTokenPickerView: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 24)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.vertical, 38)
+        .frame(maxWidth: .infinity)
+        .sentinelCatalogCard(cornerRadius: 18)
     }
 
     private func informOnlyState(message: String) -> some View {
@@ -335,7 +385,9 @@ struct CustomTokenPickerView: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 24)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.vertical, 38)
+        .frame(maxWidth: .infinity)
+        .sentinelCatalogCard(cornerRadius: 18)
     }
 
     private func errorBanner(_ message: String) -> some View {
@@ -356,7 +408,7 @@ struct CustomTokenPickerView: View {
             Text("Do not see it here?")
                 .font(.custom("Inter", size: 12).weight(.semibold))
                 .foregroundStyle(Color.evOnSurfaceVariant)
-            Text("Add or capture the target on the kid device first. Parent chat only saves metadata aliases to existing catalog targets.")
+            Text("Add or capture the target on the kid device first, or try `block \(request.target)`. Parent chat only saves metadata aliases to existing catalog targets.")
                 .font(.custom("Inter", size: 11))
                 .foregroundStyle(Color.evOutline)
                 .fixedSize(horizontal: false, vertical: true)
@@ -366,14 +418,22 @@ struct CustomTokenPickerView: View {
         .background(Color.evSurfaceContainerLow)
     }
 
+    private func displayTitle(for type: LazyTagCatalogTargetType) -> String {
+        switch type {
+        case .app: return "Apps"
+        case .category: return "Categories"
+        case .list: return "Lists"
+        }
+    }
+
     private func emptyCopy(for type: LazyTagCatalogTargetType) -> String {
         switch type {
         case .app:
-            return "No matching catalog apps."
+            return "No matching apps."
         case .category:
-            return "No matching categories. Categories cover current and future apps Apple classifies there."
+            return "No matching categories. Categories cover current + future apps Apple classifies there."
         case .list:
-            return "No matching custom lists."
+            return "No matching lists."
         }
     }
 
@@ -425,5 +485,20 @@ struct CustomTokenPickerView: View {
                 }
             }
         }
+    }
+}
+
+private extension View {
+    func sentinelCatalogCard(cornerRadius: CGFloat) -> some View {
+        self
+            .background(
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(Color.evSurfaceContainerLowest)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .stroke(Color.evOutlineVariant, lineWidth: 1)
+            )
+            .evShadow(.premium)
     }
 }
