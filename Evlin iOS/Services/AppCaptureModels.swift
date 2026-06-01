@@ -196,7 +196,12 @@ struct PendingAppRow: Identifiable, Equatable, Sendable {
     func makeUploadApp(sourceDeviceID: UUID?) -> ChildAppCatalogUploadApp? {
         guard isLockableApp, let entry = boundEntry else { return nil }
         return ChildAppCatalogUploadApp(
-            aliasKey: id,
+            // A fresh capture has no backend alias_key yet. The backend treats a
+            // non-nil alias_key as "update this existing row" and returns 404 for
+            // an id it doesn't recognize (test_upload_with_unknown_alias_key_returns_404).
+            // `id` is a LOCAL-only handle, never a backend key — send nil so the
+            // backend matches/creates by natural key (display + bundle).
+            aliasKey: nil,
             displayName: entry.canonicalName,
             tokenKind: "app",
             bundleID: entry.bundleID,
@@ -241,7 +246,10 @@ struct PendingCategoryRow: Identifiable, Equatable, Sendable {
 
     func makeUploadCategory(sourceDeviceID: UUID?) -> ChildAppCatalogUploadApp {
         ChildAppCatalogUploadApp(
-            aliasKey: id,
+            // See makeUploadApp: `id` is a local-only handle; never send it as a
+            // backend alias_key (the backend 404s on unknown ids). nil = create/
+            // match by natural key.
+            aliasKey: nil,
             displayName: displayName,
             tokenKind: "category",
             bundleID: nil,

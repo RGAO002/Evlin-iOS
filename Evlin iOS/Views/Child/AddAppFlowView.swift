@@ -355,8 +355,18 @@ struct AddAppFlowView: View {
             return
         }
 
-        let apps = model.savedRows.compactMap { $0.makeUploadApp(sourceDeviceID: childDeviceID) }
-        let categories = pendingCategoryRows.map { $0.makeUploadCategory(sourceDeviceID: childDeviceID) }
+        // Pair each pending row with its upload payload so we can correlate the
+        // backend response without relying on the wire alias_key (which is now nil
+        // for fresh captures — see makeUploadApp/makeUploadCategory).
+        let appPairs: [(row: PendingAppRow, upload: ChildAppCatalogUploadApp)] =
+            model.savedRows.compactMap { row in
+                guard let upload = row.makeUploadApp(sourceDeviceID: childDeviceID) else { return nil }
+                return (row, upload)
+            }
+        let categoryPairs: [(row: PendingCategoryRow, upload: ChildAppCatalogUploadApp)] =
+            pendingCategoryRows.map { ($0, $0.makeUploadCategory(sourceDeviceID: childDeviceID)) }
+        let apps = appPairs.map(\.upload)
+        let categories = categoryPairs.map(\.upload)
         guard !apps.isEmpty || !categories.isEmpty else {
             saveBanner = "Pick at least one app or category first."
             return
@@ -367,58 +377,56 @@ struct AddAppFlowView: View {
         saveBanner = nil
         highlightedRows = []
 
-        for app in apps {
-            guard let row = pendingRows.first(where: { $0.id == app.aliasKey }),
-                  let token = appTokensByRowID[row.id]
-            else { continue }
+        for (row, upload) in appPairs {
+            guard let token = appTokensByRowID[row.id] else { continue }
             LocalAliasStore.shared.saveApplicationAliases(
                 token: token,
-                displayName: app.displayName,
-                bundleIdentifier: app.bundleID
+                displayName: upload.displayName,
+                bundleIdentifier: upload.bundleID
             )
         }
-        for category in categories {
-            guard let row = pendingCategoryRows.first(where: { $0.id == category.aliasKey }),
-                  let token = categoryTokensByRowID[row.id]
-            else { continue }
-            LocalAliasStore.shared.saveCategoryToken(token, forName: category.displayName)
-            if let semantic = category.aliases.last {
+        for (row, upload) in categoryPairs {
+            guard let token = categoryTokensByRowID[row.id] else { continue }
+            LocalAliasStore.shared.saveCategoryToken(token, forName: upload.displayName)
+            if let semantic = upload.aliases.last {
                 LocalAliasStore.shared.saveCategoryToken(token, forName: semantic)
             }
         }
 
         do {
             let response = try await apiClient.uploadChildAppCatalog(deviceID: childDeviceID, apps: apps + categories)
-            let responseByID = Dictionary(uniqueKeysWithValues: response.apps.map { ($0.id, $0) })
-            for app in apps {
-                guard let localAliasKey = app.aliasKey,
-                      let row = pendingRows.first(where: { $0.id == localAliasKey }),
-                      let token = appTokensByRowID[row.id]
-                else { continue }
-                let backendAliasKey = responseByID[localAliasKey]?.id ?? localAliasKey
+            // The backend assigns its own alias_key. Map each response row back by
+            // (displayName, bundleID, kind) so LocalAliasStore stores the REAL key
+            // (nil if not found — never a bogus local id).
+            func backendAliasKey(displayName: String, bundleID: String?, isCategory: Bool) -> UUID? {
+                response.apps.first {
+                    $0.displayName == displayName
+                        && $0.bundleID == bundleID
+                        && ($0.tokenKind.lowercased() == "category") == isCategory
+                }?.id
+            }
+            for (row, upload) in appPairs {
+                guard let token = appTokensByRowID[row.id] else { continue }
                 LocalAliasStore.shared.saveApplicationAliases(
                     token: token,
-                    displayName: app.displayName,
-                    bundleIdentifier: app.bundleID,
-                    catalogAliasKey: backendAliasKey
+                    displayName: upload.displayName,
+                    bundleIdentifier: upload.bundleID,
+                    catalogAliasKey: backendAliasKey(displayName: upload.displayName, bundleID: upload.bundleID, isCategory: false)
                 )
             }
-            for category in categories {
-                guard let localAliasKey = category.aliasKey,
-                      let row = pendingCategoryRows.first(where: { $0.id == localAliasKey }),
-                      let token = categoryTokensByRowID[row.id]
-                else { continue }
-                let backendAliasKey = responseByID[localAliasKey]?.id ?? localAliasKey
+            for (row, upload) in categoryPairs {
+                guard let token = categoryTokensByRowID[row.id] else { continue }
+                let key = backendAliasKey(displayName: upload.displayName, bundleID: nil, isCategory: true)
                 LocalAliasStore.shared.saveCategoryToken(
                     token,
-                    forName: category.displayName,
-                    catalogAliasKey: backendAliasKey
+                    forName: upload.displayName,
+                    catalogAliasKey: key
                 )
-                for alias in category.aliases {
+                for alias in upload.aliases {
                     LocalAliasStore.shared.saveCategoryToken(
                         token,
                         forName: alias,
-                        catalogAliasKey: backendAliasKey
+                        catalogAliasKey: key
                     )
                 }
             }
