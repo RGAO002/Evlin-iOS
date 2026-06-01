@@ -133,8 +133,6 @@
 		};
 		B6F164532F999B35008E858C /* Evlin iOSTests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			exceptions = (
-			);
 			path = "Evlin iOSTests";
 			sourceTree = "<group>";
 		};
