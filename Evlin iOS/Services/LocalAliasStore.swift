@@ -517,6 +517,13 @@ final class LocalAliasStore: @unchecked Sendable {
         Array(loadListDict().keys)
     }
 
+    /// Remove a single saved list by name (case-insensitive).
+    func removeList(named name: String) {
+        var dict = loadListDict()
+        dict.removeValue(forKey: name.lowercased())
+        persistListDict(dict)
+    }
+
     // MARK: - Backend catalog member mapping
 
     /// Persist the backend `alias_key` corresponding to a locally-held opaque

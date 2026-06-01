@@ -89,6 +89,7 @@ struct LockListManagerView: View {
     @State private var syncing = false
     @State private var syncBanner: String?
     @State private var didAutoSync = false
+    @State private var showClearAllConfirm = false
 
     var body: some View {
         ScrollView {
@@ -137,6 +138,25 @@ struct LockListManagerView: View {
         .background(Color.evSurface.ignoresSafeArea())
         .navigationTitle("Manage lock list")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            if !model.apps.isEmpty || !model.categories.isEmpty || !model.lists.isEmpty {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button(role: .destructive) {
+                        showClearAllConfirm = true
+                    } label: {
+                        Text("Clear All").foregroundStyle(Color.evError)
+                    }
+                }
+            }
+        }
+        .confirmationDialog(
+            "Remove every app, category and list from this device’s lock list? This also clears them from Evlin. Nothing currently locked is affected.",
+            isPresented: $showClearAllConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Clear everything", role: .destructive) { clearAll() }
+            Button("Cancel", role: .cancel) {}
+        }
         .onAppear {
             model.reload()
             // Auto-push anything that's local-only up to the backend catalog so the
@@ -379,6 +399,7 @@ struct LockListManagerView: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
+            deleteButton { deleteApp(app) }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 13)
@@ -389,6 +410,7 @@ struct LockListManagerView: View {
             NameWithIcon(name: list, kind: .savedList, titleFont: .body)
                 .foregroundStyle(Color.evOnSurface)
             Spacer(minLength: 0)
+            deleteButton { deleteList(list) }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 13)
@@ -411,9 +433,59 @@ struct LockListManagerView: View {
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
                 .background(Capsule().fill(Color.evPrimary.opacity(0.08)))
+            deleteButton { deleteCategory(category) }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 13)
+    }
+
+    private func deleteButton(_ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: "trash")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(Color.evError)
+                .frame(width: 30, height: 30)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Remove from lock list")
+    }
+
+    // MARK: - Delete / clear
+
+    private func deleteApp(_ app: LockListAppEntry) {
+        LocalAliasStore.shared.removeApplicationAliases(keys: app.keys)
+        model.reload()
+        Task { await syncToBackend() }
+    }
+
+    private func deleteCategory(_ category: LockListCategoryEntry) {
+        LocalAliasStore.shared.removeCategory(named: category.name)
+        model.reload()
+        Task { await syncToBackend() }
+    }
+
+    private func deleteList(_ list: String) {
+        LocalAliasStore.shared.removeList(named: list)
+        model.reload()
+        Task { await syncToBackend() }
+    }
+
+    private func clearAll() {
+        LocalAliasStore.shared.removeAllAliases()
+        model.reload()
+        // Push an EMPTY snapshot so the backend drops everything too (snapshot
+        // semantics). syncToBackend() bails on an empty local set, so clear the
+        // backend explicitly here.
+        Task {
+            syncing = true
+            defer { syncing = false }
+            do {
+                _ = try await apiClient.uploadChildAppCatalog(deviceID: childDeviceID, apps: [])
+                syncBanner = nil
+            } catch {
+                syncBanner = "Cleared on this device, but couldn’t clear Evlin (\(error.localizedDescription))."
+            }
+        }
     }
 }
 
