@@ -11,8 +11,21 @@ struct LockListAppEntry: Identifiable, Equatable {
     }
 }
 
+struct LockListCategoryEntry: Identifiable, Equatable {
+    let name: String
+
+    var id: String { name.lowercased() }
+
+    var displayName: String {
+        name.split(separator: " ")
+            .map { $0.prefix(1).uppercased() + $0.dropFirst() }
+            .joined(separator: " ")
+    }
+}
+
 protocol LockListStoreReading {
     func groupedApplicationAliases() -> [(label: String, keys: [String], bundleID: String?)]
+    func allCategoryNames() -> [String]
     func allListNames() -> [String]
 }
 
@@ -20,6 +33,7 @@ extension LocalAliasStore: LockListStoreReading {}
 
 struct LockListManagerSnapshot: Equatable {
     let apps: [LockListAppEntry]
+    let categories: [LockListCategoryEntry]
     let lists: [String]
 
     static func make(from store: any LockListStoreReading) -> LockListManagerSnapshot {
@@ -30,15 +44,19 @@ struct LockListManagerSnapshot: Equatable {
                 bundleID: entry.bundleID
             )
         }
+        let categories = store.allCategoryNames()
+            .map(LockListCategoryEntry.init(name:))
+            .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
         let lists = store.allListNames()
             .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
-        return LockListManagerSnapshot(apps: apps, lists: lists)
+        return LockListManagerSnapshot(apps: apps, categories: categories, lists: lists)
     }
 }
 
 @MainActor
 final class LockListManagerModel: ObservableObject {
     @Published private(set) var apps: [LockListAppEntry] = []
+    @Published private(set) var categories: [LockListCategoryEntry] = []
     @Published private(set) var lists: [String] = []
 
     private let store: any LockListStoreReading
@@ -54,6 +72,7 @@ final class LockListManagerModel: ObservableObject {
     func reload() {
         let snapshot = LockListManagerSnapshot.make(from: store)
         apps = snapshot.apps
+        categories = snapshot.categories
         lists = snapshot.lists
     }
 }
@@ -82,6 +101,17 @@ struct LockListManagerView: View {
                     ForEach(Array(model.apps.enumerated()), id: \.element.id) { index, app in
                         if index > 0 { rowDivider }
                         appRow(app)
+                    }
+                }
+
+                section(
+                    title: "Categories",
+                    count: model.categories.count,
+                    emptyText: "No broad categories saved yet. Use Add list to capture a category."
+                ) {
+                    ForEach(Array(model.categories.enumerated()), id: \.element.id) { index, category in
+                        if index > 0 { rowDivider }
+                        categoryRow(category)
                     }
                 }
 
@@ -270,6 +300,28 @@ struct LockListManagerView: View {
             NameWithIcon(name: list, kind: .savedList, titleFont: .body)
                 .foregroundStyle(Color.evOnSurface)
             Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 13)
+    }
+
+    private func categoryRow(_ category: LockListCategoryEntry) -> some View {
+        HStack(spacing: 12) {
+            NameWithIcon(name: category.displayName, kind: .category, titleFont: .body)
+                .foregroundStyle(Color.evOnSurface)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Current + future apps Apple classifies here")
+                    .font(.caption2)
+                    .foregroundStyle(Color.evOnSurfaceVariant)
+                    .lineLimit(2)
+            }
+            Spacer(minLength: 0)
+            Text("broad")
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(Color.evPrimary)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Capsule().fill(Color.evPrimary.opacity(0.08)))
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 13)
