@@ -1,10 +1,9 @@
 import SwiftUI
-import FamilyControls
 
-/// Launches FamilyActivityPicker, lets the user name the selection, writes to
-/// LocalAliasStore, and POSTs metadata to the backend.
-///
-/// Callers: Child onboarding step, and later, the "Add list" action in Settings.
+/// Builds a custom lock list from app/category targets that have already been
+/// captured on the kid device. This deliberately does not open
+/// FamilyActivityPicker; picker capture creates token-backed targets, and this
+/// screen only composes those targets into a backend member-set list.
 struct SavedListPickerView: View {
     @EnvironmentObject var apiClient: APIClient
     let familyID: UUID
@@ -12,9 +11,11 @@ struct SavedListPickerView: View {
     let mode: String   // "child_device" or "parent_device"
     let onSaved: (String) -> Void
 
-    @State private var selection = FamilyActivitySelection(includeEntireCategory: true)
     @State private var name: String = ""
-    @State private var showPicker = false
+    @State private var availableApps: [LocalCatalogAppTarget] = []
+    @State private var availableCategories: [LocalCatalogCategoryTarget] = []
+    @State private var selectedAppIDs: Set<UUID> = []
+    @State private var selectedCategoryIDs: Set<UUID> = []
     @State private var saving = false
     @State private var saveError: String?
 
@@ -22,12 +23,12 @@ struct SavedListPickerView: View {
         name.trimmingCharacters(in: .whitespaces)
     }
 
-    private var hasLockableSelection: Bool {
-        selection.applicationTokens.isEmpty == false || selection.categoryTokens.isEmpty == false
+    private var selectedMemberCount: Int {
+        selectedAppIDs.count + selectedCategoryIDs.count
     }
 
     private var canSave: Bool {
-        trimmedName.isEmpty == false && hasLockableSelection && saving == false
+        trimmedName.isEmpty == false && selectedMemberCount > 0 && saving == false
     }
 
     var body: some View {
@@ -35,8 +36,40 @@ struct SavedListPickerView: View {
             VStack(spacing: 18) {
                 headerCard
                 nameCard
-                pickerCard
-                selectionSummaryCard
+                memberSection(
+                    title: "Apps",
+                    count: availableApps.count,
+                    emptyText: "No named apps yet. Use Add app first."
+                ) {
+                    ForEach(availableApps) { app in
+                        selectableRow(
+                            id: app.id,
+                            isSelected: selectedAppIDs.contains(app.id),
+                            kind: .app,
+                            title: app.label,
+                            subtitle: app.bundleID ?? app.lookupKeys.first ?? "Token-backed app"
+                        ) {
+                            toggle(app.id, in: &selectedAppIDs)
+                        }
+                    }
+                }
+                memberSection(
+                    title: "Categories",
+                    count: availableCategories.count,
+                    emptyText: "No categories yet. Capture a category with Add app."
+                ) {
+                    ForEach(availableCategories) { category in
+                        selectableRow(
+                            id: category.id,
+                            isSelected: selectedCategoryIDs.contains(category.id),
+                            kind: .category,
+                            title: category.displayName,
+                            subtitle: "Broad coverage: current + future apps Apple classifies here"
+                        ) {
+                            toggle(category.id, in: &selectedCategoryIDs)
+                        }
+                    }
+                }
                 saveCard
             }
             .padding(.horizontal, 16)
@@ -44,8 +77,9 @@ struct SavedListPickerView: View {
             .padding(.bottom, 36)
         }
         .background(Color.evSurface.ignoresSafeArea())
-        .navigationTitle("Add List")
+        .navigationTitle("Create list")
         .navigationBarTitleDisplayMode(.inline)
+        .onAppear(perform: reloadTargets)
     }
 
     private var headerCard: some View {
@@ -60,10 +94,10 @@ struct SavedListPickerView: View {
             .frame(width: 46, height: 46)
 
             VStack(alignment: .leading, spacing: 4) {
-                Text("New list")
+                Text("Create a list")
                     .font(.headline)
                     .foregroundStyle(Color.evOnSurface)
-                Text("Add List can include apps and Apple categories. Evlin saves the whole selection as one named lock target.")
+                Text("Group apps and broad Apple categories you already added. Lists do not re-open the system picker.")
                     .font(.subheadline)
                     .foregroundStyle(Color.evOnSurfaceVariant)
                     .fixedSize(horizontal: false, vertical: true)
@@ -82,10 +116,10 @@ struct SavedListPickerView: View {
                 .textCase(.uppercase)
                 .foregroundStyle(Color.evOnSurfaceVariant)
 
-            TextField("e.g. Games", text: $name)
+            TextField("e.g. Entertainment", text: $name)
                 .font(.body)
                 .autocorrectionDisabled()
-                .textInputAutocapitalization(.never)
+                .textInputAutocapitalization(.words)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 11)
                 .background(Color.evSurfaceContainerLowest, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -98,80 +132,83 @@ struct SavedListPickerView: View {
         .savedListCard()
     }
 
-    private var pickerCard: some View {
-        Button {
-            showPicker = true
-        } label: {
-            HStack(spacing: 12) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(Color.evSecondaryContainer)
-                    Image(systemName: "square.grid.2x2.fill")
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundStyle(Color.evSecondary)
-                }
-                .frame(width: 42, height: 42)
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Open App Picker")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(Color.evOnSurface)
-                    Text("Choose individual apps, broad Apple categories, or both.")
-                        .font(.caption)
-                        .foregroundStyle(Color.evOnSurfaceVariant)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
-                Spacer(minLength: 8)
-
-                Image(systemName: "chevron.right")
-                    .font(.caption.weight(.bold))
-                    .foregroundStyle(Color.evOutline)
-            }
-            .padding(16)
-            .savedListCard()
-        }
-        .buttonStyle(.plain)
-        .familyActivityPicker(isPresented: $showPicker, selection: $selection)
-    }
-
-    private var selectionSummaryCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
+    private func memberSection<Content: View>(
+        title: String,
+        count: Int,
+        emptyText: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
-                Text("Selection")
+                Text(title)
                     .font(.caption.weight(.semibold))
                     .tracking(0.6)
                     .textCase(.uppercase)
                     .foregroundStyle(Color.evOnSurfaceVariant)
-                Text(selectionSummary)
+                Text("\(count)")
                     .font(.caption2.weight(.bold))
                     .foregroundStyle(Color.evOnSurfaceVariant)
                     .padding(.horizontal, 7)
                     .padding(.vertical, 2)
                     .background(Capsule().fill(Color.evSurfaceContainerHigh))
-                Spacer(minLength: 0)
+                Spacer()
             }
+            .padding(.horizontal, 16)
+            .padding(.top, 14)
+            .padding(.bottom, 6)
 
-            Text("Apple categories are broad coverage. They include matching apps installed now and matching apps added later.")
-                .font(.subheadline)
-                .foregroundStyle(Color.evOnSurfaceVariant)
-                .fixedSize(horizontal: false, vertical: true)
-
-            if hasLockableSelection == false {
-                Text("Pick at least one app or category before saving.")
-                    .font(.caption.weight(.semibold))
+            if count == 0 {
+                Text(emptyText)
+                    .font(.subheadline)
                     .foregroundStyle(Color.evOnSurfaceVariant)
-                    .padding(10)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color.evSurfaceContainerLow, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 14)
+            } else {
+                content()
             }
         }
-        .padding(16)
         .savedListCard()
+    }
+
+    private func selectableRow(
+        id: UUID,
+        isSelected: Bool,
+        kind: NameIconKind,
+        title: String,
+        subtitle: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(isSelected ? Color.evSecondary : Color.evOutline)
+                    .frame(width: 26)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    NameWithIcon(name: title, kind: kind, titleFont: .subheadline.weight(.semibold))
+                        .foregroundStyle(Color.evOnSurface)
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundStyle(Color.evOnSurfaceVariant)
+                        .lineLimit(2)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .background(isSelected ? Color.evSecondaryContainer.opacity(0.36) : Color.clear)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     private var saveCard: some View {
         VStack(alignment: .leading, spacing: 10) {
+            Text("\(selectedMemberCount) selected")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(Color.evOnSurfaceVariant)
+
             if let err = saveError {
                 Text(err)
                     .font(.caption)
@@ -205,21 +242,35 @@ struct SavedListPickerView: View {
         .savedListCard()
     }
 
-    private var selectionSummary: String {
-        "\(selection.applicationTokens.count) apps · \(selection.categoryTokens.count) categories · \(selection.webDomainTokens.count) websites"
+    private func reloadTargets() {
+        availableApps = LocalAliasStore.shared.catalogAppTargets()
+        availableCategories = LocalAliasStore.shared.catalogCategoryTargets()
+    }
+
+    private func toggle(_ id: UUID, in set: inout Set<UUID>) {
+        if set.contains(id) {
+            set.remove(id)
+        } else {
+            set.insert(id)
+        }
     }
 
     private func save() async {
         let trimmed = trimmedName
         guard !trimmed.isEmpty else { return }
+        let selectedAppMembers = availableApps
+            .filter { selectedAppIDs.contains($0.id) }
+            .map { CatalogListMemberUpload(targetType: .app, aliasKey: $0.aliasKey) }
+        let selectedCategoryMembers = availableCategories
+            .filter { selectedCategoryIDs.contains($0.id) }
+            .map { CatalogListMemberUpload(targetType: .category, aliasKey: $0.aliasKey) }
+        let members = selectedAppMembers + selectedCategoryMembers
+        guard !members.isEmpty else { return }
+
         saving = true
         defer { saving = false }
+        saveError = nil
 
-        // 1. Write tokens locally (the source of truth for lookups)
-        LocalAliasStore.shared.saveList(selection, named: trimmed)
-        ManagedSelectionAliasSync.syncAll(from: selection)
-
-        // 2. POST metadata to backend (so parent UI knows the list name exists)
         do {
             _ = try await apiClient.upsertSavedListMeta(.init(
                 familyID: familyID,
@@ -228,29 +279,18 @@ struct SavedListPickerView: View {
                 description: nil,
                 mode: mode
             ))
-
-            // Also cache the full selection shape on the backend so the list can
-            // be locked as a unit later. This is best-effort; the kid device's
-            // LocalAliasStore remains the execution source of truth.
-            if let blob = try? AppCatalogBlobEncoder.base64(selection) {
-                let members = LocalAliasStore.shared.catalogListMembers(for: selection)
-                _ = try? await apiClient.uploadCatalogList(
-                    deviceID: owningDeviceID,
-                    sourceDeviceID: owningDeviceID,
-                    listName: trimmed,
-                    aliases: [trimmed],
-                    selectionBlobBase64: blob,
-                    appCount: selection.applicationTokens.count
-                        + selection.categoryTokens.count
-                        + selection.webDomainTokens.count,
-                    members: members.isEmpty ? nil : members
-                )
-            }
+            _ = try await apiClient.uploadCatalogList(
+                deviceID: owningDeviceID,
+                sourceDeviceID: owningDeviceID,
+                listName: trimmed,
+                aliases: [trimmed],
+                selectionBlobBase64: nil,
+                appCount: members.count,
+                members: members
+            )
             onSaved(trimmed)
         } catch {
-            saveError = "Saved locally, but backend sync failed: \(error.localizedDescription)"
-            // Still consider it saved — local is source of truth for execution
-            onSaved(trimmed)
+            saveError = "Could not save list: \(error.localizedDescription)"
         }
     }
 }

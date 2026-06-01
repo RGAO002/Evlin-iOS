@@ -162,8 +162,8 @@ struct CaptureSheetModel: Equatable, Sendable {
 /// State for one pending app token returned by an Add App capture.
 ///
 /// The FamilyActivityPicker can return multiple app tokens, categories, and web
-/// domains. Add App only promotes one app-token row after the parent binds it to
-/// a catalog entry and explicitly confirms the visual `Label(token)` match.
+/// domains. Add App promotes every app-token row only after the parent binds it
+/// to a catalog entry and explicitly confirms the visual `Label(token)` match.
 struct PendingAppRow: Identifiable, Equatable, Sendable {
     let id: UUID
     let tokenBase64: String

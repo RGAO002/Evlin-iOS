@@ -792,8 +792,61 @@ class ChatViewModel: ObservableObject {
         dispatchChat(userMessage: phrase, forceConfirmations: [])
     }
 
-    func requestUnlock(_ target: String) {
-        resendWithPhrase("unlock \(target)")
+    func requestUnlock(_ target: ReceiptUnlockTarget) {
+        Task { [weak self] in
+            let result = await ActionExecutor.shared.executeReceiptUnlock(target)
+            await MainActor.run {
+                self?.appendReceiptUnlockResult(result, requestedTarget: target)
+            }
+        }
+    }
+
+    @MainActor
+    private func appendReceiptUnlockResult(_ result: AckResult, requestedTarget: ReceiptUnlockTarget) {
+        var message = ChatMessage(
+            role: .agent,
+            content: "Unlock \(requestedTarget.displayName)",
+            timestamp: Date()
+        )
+
+        switch result {
+        case .confirmedExact(let verb, let displayName, let effectiveState):
+            message.receiptState = .confirmedExact(verb: verb, displayName: displayName, unlocksAt: nil)
+            message.receiptEffectiveState = effectiveState
+        case .confirmedFallback(let verb, let displayName, let category, let origRequest, let effectiveState):
+            message.receiptState = .confirmedFallback(
+                verb: verb,
+                displayName: displayName,
+                category: category,
+                origRequest: origRequest
+            )
+            message.receiptEffectiveState = effectiveState
+        case .pendingConfirmation:
+            message.receiptState = .failedOther(reason: "This unlock needs confirmation.")
+        case .failed(let failure):
+            message.receiptState = receiptState(for: failure)
+        }
+
+        messages.append(message)
+    }
+
+    private func receiptState(for failure: AckFailure) -> ReceiptState {
+        switch failure {
+        case .notAuthorized:
+            return .failedPermission
+        case .listNotFound(let listName):
+            return .failedListNotFound(listName: listName)
+        case .categoryNotConfigured(let category):
+            return .failedCategoryNotConfigured(category: category)
+        case .applicationNotConfigured(let reference):
+            return .failedAppNotConfigured(appReference: reference)
+        case .nothingToUnlock:
+            return .failedOther(reason: "Nothing matched to unlock.")
+        case .malformed:
+            return .failedOther(reason: "The command wasn't well-formed.")
+        case .execution(let message):
+            return .failedOther(reason: message)
+        }
     }
 
     // MARK: - Ack-status polling (P1-1 fix)

@@ -566,7 +566,7 @@ struct CatalogListUploadRequestBody: Codable, Sendable, Equatable {
     let sourceDeviceID: UUID?
     let listName: String
     let aliases: [String]
-    let selectionBlobBase64: String
+    let selectionBlobBase64: String?
     let appCount: Int
     let members: [CatalogListMemberUpload]?
 
@@ -925,7 +925,7 @@ extension APIClient {
         sourceDeviceID: UUID? = nil,
         listName: String,
         aliases: [String],
-        selectionBlobBase64: String,
+        selectionBlobBase64: String? = nil,
         appCount: Int,
         members: [CatalogListMemberUpload]? = nil
     ) async throws -> CatalogListUploadResponse {

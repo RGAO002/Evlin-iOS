@@ -20,9 +20,14 @@ enum ReceiptState: Sendable, Equatable, Codable {
 }
 
 struct ReceiptCardActions: Sendable, Equatable {
-    let unlockTarget: String
+    let unlockTarget: ReceiptUnlockTarget
     let unlockButtonTitle: String
     let keepButtonTitle: String
+}
+
+struct ReceiptUnlockTarget: Sendable, Equatable {
+    let displayName: String
+    let tier: ShieldTier?
 }
 
 enum ReceiptCardActionModel {
@@ -38,7 +43,10 @@ enum ReceiptCardActionModel {
 
         let strongest = strongestCover(in: effectiveState.shieldsCovering)
         return ReceiptCardActions(
-            unlockTarget: strongest.displayName,
+            unlockTarget: ReceiptUnlockTarget(
+                displayName: strongest.displayName,
+                tier: shieldTier(from: strongest.tier)
+            ),
             unlockButtonTitle: "Unlock \(strongest.displayName)",
             keepButtonTitle: "Keep locked"
         )
@@ -56,6 +64,17 @@ enum ReceiptCardActionModel {
             return (aDate ?? .distantPast) > (bDate ?? .distantPast)
         }[0]
     }
+
+    private static func shieldTier(from raw: String) -> ShieldTier? {
+        if let tier = ShieldTier(rawValue: raw) {
+            return tier
+        }
+        // Historical ack payloads used "specific" for single-app shields.
+        if raw == "specific" {
+            return .exactApp
+        }
+        return nil
+    }
 }
 
 /// Two-line receipt: primary mutation + optional effective-state disclosure.
@@ -67,7 +86,7 @@ enum ReceiptCardActionModel {
 struct ReceiptCard: View {
     let state: ReceiptState
     let effectiveState: AckEffectiveState?
-    var onRequestUnlock: ((String) -> Void)? = nil
+    var onRequestUnlock: ((ReceiptUnlockTarget) -> Void)? = nil
 
     @State private var hidesActions = false
 

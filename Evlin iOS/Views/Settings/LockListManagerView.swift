@@ -107,7 +107,7 @@ struct LockListManagerView: View {
                 section(
                     title: "Categories",
                     count: model.categories.count,
-                    emptyText: "No broad categories saved yet. Use Add list to capture a category."
+                    emptyText: "No broad categories saved yet. Use Add app to capture a category."
                 ) {
                     ForEach(Array(model.categories.enumerated()), id: \.element.id) { index, category in
                         if index > 0 { rowDivider }
@@ -118,7 +118,7 @@ struct LockListManagerView: View {
                 section(
                     title: "Saved lists",
                     count: model.lists.count,
-                    emptyText: "No saved lists yet. Group a few apps with “Add list”."
+                    emptyText: "No saved lists yet. Group added apps and categories with “Create list”."
                 ) {
                     ForEach(Array(model.lists.enumerated()), id: \.element) { index, list in
                         if index > 0 { rowDivider }
@@ -197,7 +197,7 @@ struct LockListManagerView: View {
             ) { showAddApp = true }
 
             addButton(
-                title: "Add list",
+                title: "Create list",
                 systemImage: "rectangle.stack.badge.plus",
                 tint: Color.evSecondary
             ) { showAddList = true }

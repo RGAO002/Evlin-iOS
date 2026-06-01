@@ -2,9 +2,9 @@ import SwiftUI
 import FamilyControls
 import ManagedSettings
 
-/// Add App captures exactly one application token, binds it to a canonical
-/// catalog app, requires a visual `Label(token)` confirmation, then uploads one
-/// app catalog record scoped to this child device.
+/// Add App captures one or more application tokens plus broad categories. Each
+/// app row must be named and explicitly confirmed before saving; category rows
+/// use Apple's picker label and broad-coverage semantics.
 struct AddAppFlowView: View {
     let childDeviceID: UUID
     let onSaved: () -> Void
@@ -13,7 +13,10 @@ struct AddAppFlowView: View {
 
     @State private var selection = FamilyActivitySelection()
     @State private var showPicker = false
-    @State private var pendingRow: PendingAppRow?
+    @State private var pendingRows: [PendingAppRow] = []
+    @State private var appTokensByRowID: [UUID: ApplicationToken] = [:]
+    @State private var pendingCategoryRows: [PendingCategoryRow] = []
+    @State private var categoryTokensByRowID: [UUID: ActivityCategoryToken] = [:]
     @State private var uploading = false
     @State private var errorText: String?
     @State private var saveBanner: String?
@@ -23,16 +26,14 @@ struct AddAppFlowView: View {
         SelectionCounts(selection)
     }
 
-    private var validation: CaptureValidation {
-        CapturePathValidator.validate(.app, counts)
-    }
-
-    private var singleToken: ApplicationToken? {
-        selection.applicationTokens.first
-    }
-
     private var hasSelection: Bool {
         counts.applicationTokens > 0 || counts.categoryTokens > 0 || counts.webDomainTokens > 0
+    }
+
+    private var canAttemptSave: Bool {
+        uploading == false
+            && counts.webDomainTokens == 0
+            && (pendingRows.isEmpty == false || pendingCategoryRows.isEmpty == false)
     }
 
     var body: some View {
@@ -41,12 +42,16 @@ struct AddAppFlowView: View {
                 headerCard
                 pickerCard
 
-                if hasSelection, !validation.isValid, let reason = validation.reason {
-                    AddAppSaveValidationBanner(message: reason.rawValue)
+                if counts.webDomainTokens > 0 {
+                    AddAppSaveValidationBanner(message: "Websites are not supported here. Remove website selections before saving.")
                 }
 
-                if validation.isValid, let token = singleToken {
-                    bindCard(token)
+                if !pendingRows.isEmpty {
+                    appsBindCard
+                }
+
+                if !pendingCategoryRows.isEmpty {
+                    categoriesCard
                 }
 
                 if hasSelection || saveBanner != nil || errorText != nil {
@@ -80,10 +85,10 @@ struct AddAppFlowView: View {
             .frame(width: 46, height: 46)
 
             VStack(alignment: .leading, spacing: 4) {
-                Text("Add one app")
+                Text("Add apps")
                     .font(.headline)
                     .foregroundStyle(Color.evOnSurface)
-                Text("Add App captures exactly one app token from this device. Use Add List when you want several apps or Apple categories together.")
+                Text("Pick apps and Apple categories from this device. Apps must be named before saving; categories cover current and future matching apps.")
                     .font(.subheadline)
                     .foregroundStyle(Color.evOnSurfaceVariant)
                     .fixedSize(horizontal: false, vertical: true)
@@ -113,7 +118,7 @@ struct AddAppFlowView: View {
                         Text("Pick app")
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(Color.evOnSurface)
-                        Text("Apple's picker can select more than one item. Evlin checks the count before saving.")
+                        Text("You can choose multiple apps and broad categories in one pass.")
                             .font(.caption)
                             .foregroundStyle(Color.evOnSurfaceVariant)
                             .fixedSize(horizontal: false, vertical: true)
@@ -145,22 +150,61 @@ struct AddAppFlowView: View {
         .addAppCard()
     }
 
-    private func bindCard(_ token: ApplicationToken) -> some View {
+    private var appsBindCard: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Which app is this?")
                 .font(.headline)
                 .foregroundStyle(Color.evOnSurface)
-            Text("The token and icon come from iOS. The app name and bundle ID come from the catalog match. Confirm they match before saving.")
+            Text("The token and icon come from iOS. The app name and bundle ID come from the catalog match. Confirm every app before saving.")
                 .font(.subheadline)
                 .foregroundStyle(Color.evOnSurfaceVariant)
                 .fixedSize(horizontal: false, vertical: true)
 
-            CatalogBindRowView(
-                token: token,
-                row: bindingForRow(),
-                apiClient: apiClient,
-                isHighlighted: pendingRow.map { highlightedRows.contains($0.id) } ?? false
-            )
+            ForEach(pendingRows) { row in
+                if let token = appTokensByRowID[row.id] {
+                    CatalogBindRowView(
+                        token: token,
+                        row: binding(for: row),
+                        apiClient: apiClient,
+                        isHighlighted: highlightedRows.contains(row.id)
+                    )
+                }
+            }
+        }
+        .padding(16)
+        .addAppCard()
+    }
+
+    private var categoriesCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Broad categories")
+                .font(.headline)
+                .foregroundStyle(Color.evOnSurface)
+            Text("Apple categories cover matching apps installed now and matching apps added later.")
+                .font(.subheadline)
+                .foregroundStyle(Color.evOnSurfaceVariant)
+                .fixedSize(horizontal: false, vertical: true)
+
+            ForEach(pendingCategoryRows) { row in
+                HStack(spacing: 12) {
+                    NameWithIcon(name: row.semanticKey, kind: .category, titleFont: .subheadline.weight(.semibold))
+                        .foregroundStyle(Color.evOnSurface)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(row.displayName)
+                            .font(.caption)
+                            .foregroundStyle(Color.evOnSurfaceVariant)
+                        Text("broad")
+                            .font(.caption2.weight(.bold))
+                            .foregroundStyle(Color.evPrimary)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Capsule().fill(Color.evPrimary.opacity(0.08)))
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(12)
+                .background(Color.evSurfaceContainerLow, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            }
         }
         .padding(16)
         .addAppCard()
@@ -179,14 +223,14 @@ struct AddAppFlowView: View {
             }
             .buttonStyle(.plain)
             .font(.subheadline.weight(.semibold))
-            .foregroundStyle(validation.isValid ? Color.white : Color.evOutline)
+            .foregroundStyle(canAttemptSave ? Color.white : Color.evOutline)
             .padding(.vertical, 14)
             .frame(maxWidth: .infinity)
             .background(
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(validation.isValid ? Color.evPrimary : Color.evSurfaceContainerHighest)
+                    .fill(canAttemptSave ? Color.evPrimary : Color.evSurfaceContainerHighest)
             )
-            .disabled(uploading || !validation.isValid)
+            .disabled(!canAttemptSave)
 
             if let errorText {
                 Text(errorText)
@@ -208,11 +252,14 @@ struct AddAppFlowView: View {
         if uploading {
             ProgressView()
                 .frame(maxWidth: .infinity)
-        } else if pendingRow?.isLockableApp == true {
-            Text("Save lockable app")
+        } else if pendingRows.allSatisfy(\.isLockableApp), pendingRows.isEmpty == false {
+            Text(pendingCategoryRows.isEmpty ? "Save apps" : "Save apps and categories")
                 .frame(maxWidth: .infinity)
-        } else if validation.isValid {
-            Text("Confirm match before saving")
+        } else if pendingRows.isEmpty, pendingCategoryRows.isEmpty == false {
+            Text("Save categories")
+                .frame(maxWidth: .infinity)
+        } else if pendingRows.isEmpty == false {
+            Text("Name every app before saving")
                 .frame(maxWidth: .infinity)
         } else {
             Text("Save app")
@@ -220,66 +267,85 @@ struct AddAppFlowView: View {
         }
     }
 
-    private func bindingForRow() -> Binding<PendingAppRow> {
+    private func binding(for row: PendingAppRow) -> Binding<PendingAppRow> {
         Binding(
             get: {
-                pendingRow ?? PendingAppRow(
-                    rowID: UUID(),
-                    tokenBase64: "",
-                    tokenAvailable: false
-                )
+                pendingRows.first(where: { $0.id == row.id }) ?? row
             },
-            set: { pendingRow = $0 }
+            set: { newValue in
+                if let index = pendingRows.firstIndex(where: { $0.id == row.id }) {
+                    pendingRows[index] = newValue
+                }
+            }
         )
     }
 
     private func rebuildPendingRow(from newValue: FamilyActivitySelection) {
-        let newValidation = CapturePathValidator.validate(.app, SelectionCounts(newValue))
-        guard newValidation.isValid, let token = newValue.applicationTokens.first else {
-            pendingRow = nil
-            return
+        let existingByBlob = Dictionary(uniqueKeysWithValues: pendingRows.map { ($0.tokenBase64, $0) })
+        let appPairs = newValue.applicationTokens.compactMap { token -> (ApplicationToken, String)? in
+            guard let blob = try? AppCatalogBlobEncoder.base64(token), !blob.isEmpty else { return nil }
+            return (token, blob)
         }
-        let blob = (try? AppCatalogBlobEncoder.base64(token)) ?? ""
-        pendingRow = PendingAppRow(
-            rowID: UUID(),
-            tokenBase64: blob,
-            tokenAvailable: !blob.isEmpty
-        )
+        .sorted { $0.1 < $1.1 }
+
+        pendingRows = appPairs.map { _, blob in
+            existingByBlob[blob] ?? PendingAppRow(
+                rowID: UUID(),
+                tokenBase64: blob,
+                tokenAvailable: true
+            )
+        }
+        appTokensByRowID = Dictionary(uniqueKeysWithValues: zip(pendingRows, appPairs).map { row, pair in
+            (row.id, pair.0)
+        })
+
+        let existingCategories = Dictionary(uniqueKeysWithValues: pendingCategoryRows.map { ($0.tokenBase64, $0) })
+        let categoryPairs = newValue.categories.compactMap { category -> (ActivityCategoryToken, String, String, String)? in
+            guard let token = category.token,
+                  let blob = try? AppCatalogBlobEncoder.base64(token),
+                  !blob.isEmpty
+            else { return nil }
+            let pickerName = category.localizedDisplayName?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let semantic = SemanticCategoryAliasSync.semanticAliasKey(forPickerLabel: pickerName)
+                ?? pickerName?.lowercased()
+                ?? "category"
+            let display = pickerName?.isEmpty == false ? pickerName! : NameWithIcon.displayName(semantic)
+            return (token, blob, semantic, display)
+        }
+        .sorted { $0.2 < $1.2 }
+        pendingCategoryRows = categoryPairs.map { _, blob, semantic, display in
+            existingCategories[blob] ?? PendingCategoryRow(
+                rowID: UUID(),
+                semanticKey: semantic,
+                displayName: display,
+                tokenBase64: blob
+            )
+        }
+        categoryTokensByRowID = Dictionary(uniqueKeysWithValues: zip(pendingCategoryRows, categoryPairs).map { row, pair in
+            (row.id, pair.0)
+        })
     }
 
     private func attemptSave() {
-        guard validation.isValid else {
-            saveBanner = validation.reason?.rawValue ?? "Fix the selection before saving."
+        guard hasSelection else {
+            saveBanner = "Pick at least one app or category first."
             highlightedRows = []
             return
         }
-
-        guard let token = singleToken else {
-            saveBanner = "Pick an app first"
+        guard counts.webDomainTokens == 0 else {
+            saveBanner = "Websites are not supported here. Remove website selections before saving."
             highlightedRows = []
             return
         }
 
         Task {
-            await upload(token: token)
+            await upload()
         }
     }
 
     @MainActor
-    private func upload(token: ApplicationToken) async {
-        guard let row = pendingRow,
-              let app = row.makeUploadApp(sourceDeviceID: childDeviceID)
-        else {
-            var model = CaptureSheetModel(rows: pendingRow.map { [$0] } ?? [])
-            model.attemptSave()
-            saveBanner = model.errorBanner ?? "Confirm the app name first."
-            highlightedRows = Set(model.highlightedRows.compactMap { index in
-                model.rows.indices.contains(index) ? model.rows[index].id : nil
-            })
-            return
-        }
-
-        var model = CaptureSheetModel(rows: [row])
+    private func upload() async {
+        var model = CaptureSheetModel(rows: pendingRows)
         model.attemptSave()
         guard model.isPresented == false else {
             saveBanner = model.errorBanner
@@ -289,26 +355,73 @@ struct AddAppFlowView: View {
             return
         }
 
+        let apps = model.savedRows.compactMap { $0.makeUploadApp(sourceDeviceID: childDeviceID) }
+        let categories = pendingCategoryRows.map { $0.makeUploadCategory(sourceDeviceID: childDeviceID) }
+        guard !apps.isEmpty || !categories.isEmpty else {
+            saveBanner = "Pick at least one app or category first."
+            return
+        }
+
         uploading = true
         defer { uploading = false }
         saveBanner = nil
         highlightedRows = []
 
-        LocalAliasStore.shared.saveApplicationAliases(
-            token: token,
-            displayName: app.displayName,
-            bundleIdentifier: app.bundleID
-        )
-
-        do {
-            let response = try await apiClient.uploadChildAppCatalog(deviceID: childDeviceID, apps: [app])
-            let backendAliasKey = response.apps.first?.id ?? app.aliasKey
+        for app in apps {
+            guard let row = pendingRows.first(where: { $0.id == app.aliasKey }),
+                  let token = appTokensByRowID[row.id]
+            else { continue }
             LocalAliasStore.shared.saveApplicationAliases(
                 token: token,
                 displayName: app.displayName,
-                bundleIdentifier: app.bundleID,
-                catalogAliasKey: backendAliasKey
+                bundleIdentifier: app.bundleID
             )
+        }
+        for category in categories {
+            guard let row = pendingCategoryRows.first(where: { $0.id == category.aliasKey }),
+                  let token = categoryTokensByRowID[row.id]
+            else { continue }
+            LocalAliasStore.shared.saveCategoryToken(token, forName: category.displayName)
+            if let semantic = category.aliases.last {
+                LocalAliasStore.shared.saveCategoryToken(token, forName: semantic)
+            }
+        }
+
+        do {
+            let response = try await apiClient.uploadChildAppCatalog(deviceID: childDeviceID, apps: apps + categories)
+            let responseByID = Dictionary(uniqueKeysWithValues: response.apps.map { ($0.id, $0) })
+            for app in apps {
+                guard let localAliasKey = app.aliasKey,
+                      let row = pendingRows.first(where: { $0.id == localAliasKey }),
+                      let token = appTokensByRowID[row.id]
+                else { continue }
+                let backendAliasKey = responseByID[localAliasKey]?.id ?? localAliasKey
+                LocalAliasStore.shared.saveApplicationAliases(
+                    token: token,
+                    displayName: app.displayName,
+                    bundleIdentifier: app.bundleID,
+                    catalogAliasKey: backendAliasKey
+                )
+            }
+            for category in categories {
+                guard let localAliasKey = category.aliasKey,
+                      let row = pendingCategoryRows.first(where: { $0.id == localAliasKey }),
+                      let token = categoryTokensByRowID[row.id]
+                else { continue }
+                let backendAliasKey = responseByID[localAliasKey]?.id ?? localAliasKey
+                LocalAliasStore.shared.saveCategoryToken(
+                    token,
+                    forName: category.displayName,
+                    catalogAliasKey: backendAliasKey
+                )
+                for alias in category.aliases {
+                    LocalAliasStore.shared.saveCategoryToken(
+                        token,
+                        forName: alias,
+                        catalogAliasKey: backendAliasKey
+                    )
+                }
+            }
             onSaved()
         } catch {
             errorText = "Saved locally, backend sync failed: \(error.localizedDescription)"

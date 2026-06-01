@@ -56,6 +56,27 @@ final class APIClientCatalogDTOTests: XCTestCase {
         XCTAssertEqual(members[1]["alias_key"] as? String, categoryID.uuidString)
     }
 
+    func test_catalogListUploadBodyAllowsMemberOnlyPayloadWithoutSelectionBlob() throws {
+        let deviceID = UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!
+        let appID = UUID(uuidString: "11111111-1111-1111-1111-111111111111")!
+        let body = CatalogListUploadRequestBody(
+            deviceID: deviceID,
+            aliasKey: nil,
+            sourceDeviceID: deviceID,
+            listName: "Entertainment",
+            aliases: ["fun"],
+            selectionBlobBase64: nil,
+            appCount: 1,
+            members: [.init(targetType: .app, aliasKey: appID)]
+        )
+
+        let data = try JSONEncoder().encode(body)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+
+        XCTAssertNil(json["selection_blob_base64"])
+        XCTAssertEqual((json["members"] as? [[String: Any]])?.count, 1)
+    }
+
     func test_childAppCatalogUploadAppEncodesSnakeCaseWithSourceDevice() throws {
         let aliasKey = UUID(uuidString: "11111111-1111-1111-1111-111111111111")!
         let sourceDeviceID = UUID(uuidString: "22222222-2222-2222-2222-222222222222")!

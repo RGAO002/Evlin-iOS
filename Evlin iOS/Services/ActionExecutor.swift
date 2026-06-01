@@ -116,6 +116,40 @@ final class ActionExecutor: @unchecked Sendable {
         }
     }
 
+    /// Direct receipt-action unlock path. This intentionally bypasses chat/AI
+    /// re-dispatch: the receipt already identified the still-covering shield.
+    func executeReceiptUnlock(_ target: ReceiptUnlockTarget) async -> AckResult {
+        let requestedName = target.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !requestedName.isEmpty else {
+            return .failed(.malformed)
+        }
+
+        let current = await ActiveLockStore.shared.allCurrent().shields
+        let matches = current.filter { record in
+            record.displayName.caseInsensitiveCompare(requestedName) == .orderedSame
+                && (target.tier == nil || record.tier == target.tier)
+        }
+
+        guard let record = strongestShield(in: matches) else {
+            return .failed(.nothingToUnlock)
+        }
+        guard let removed = await ActiveLockStore.shared.removeShield(recordKey: record.recordKey) else {
+            return .failed(.nothingToUnlock)
+        }
+        cancelScheduled(recordKey: record.recordKey)
+
+        let effective = effectiveStateFrom(
+            removed.stillCovered,
+            isBlocked: removed.blockedAfter,
+            possibleSavedList: false
+        )
+        return .confirmedExact(
+            verb: .unshield,
+            displayName: removed.record.displayName,
+            effectiveState: effective
+        )
+    }
+
     // MARK: - Shield
 
     private func executeShield(cmd: LockCommand, blob: Data?) async -> AckResult {
@@ -246,6 +280,14 @@ final class ActionExecutor: @unchecked Sendable {
             },
             possibleSavedListCoverage: possibleSavedList
         )
+    }
+
+    private func strongestShield(in records: [ShieldRecord]) -> ShieldRecord? {
+        records.sorted { a, b in
+            if a.expiresAt == nil && b.expiresAt != nil { return true }
+            if a.expiresAt != nil && b.expiresAt == nil { return false }
+            return (a.expiresAt ?? .distantPast) > (b.expiresAt ?? .distantPast)
+        }.first
     }
 
     private func buildShieldRecord(from cmd: LockCommand, blob: Data?) throws -> ShieldRecord {

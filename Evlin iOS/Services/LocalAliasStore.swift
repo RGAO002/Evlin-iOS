@@ -2,6 +2,28 @@ import Foundation
 import FamilyControls
 import ManagedSettings
 
+struct LocalCatalogAppTarget: Identifiable, Equatable, Sendable {
+    let aliasKey: UUID
+    let label: String
+    let lookupKeys: [String]
+    let bundleID: String?
+
+    var id: UUID { aliasKey }
+}
+
+struct LocalCatalogCategoryTarget: Identifiable, Equatable, Sendable {
+    let aliasKey: UUID
+    let name: String
+
+    var id: UUID { aliasKey }
+
+    var displayName: String {
+        name.split(separator: " ")
+            .map { $0.prefix(1).uppercased() + $0.dropFirst() }
+            .joined(separator: " ")
+    }
+}
+
 /// Local-device persistence for category tokens and saved-list selections.
 /// Backed by App Group UserDefaults — shared with DeviceActivityMonitor extension.
 final class LocalAliasStore: @unchecked Sendable {
@@ -344,6 +366,56 @@ final class LocalAliasStore: @unchecked Sendable {
             return (label, keys.sorted(), bundle)
         }
         .sorted { $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending }
+    }
+
+    /// Backend-backed app targets available for composing a saved list. These
+    /// are stricter than `groupedApplicationAliases()` because they only include
+    /// rows whose opaque token has a backend alias_key.
+    func catalogAppTargets() -> [LocalCatalogAppTarget] {
+        let dict = loadApplicationTokenDict()
+        let bMap = loadDisplayToBundleDict()
+        let index = loadCatalogAliasKeyIndex()
+        var groups: [Data: [String]] = [:]
+        for (key, data) in dict {
+            groups[data, default: []].append(key)
+        }
+
+        return groups.compactMap { data, keys -> LocalCatalogAppTarget? in
+            let encodedToken = data.base64EncodedString()
+            guard let indexData = index[encodedToken],
+                  let record = try? JSONDecoder().decode(CatalogAliasKeyRecord.self, from: indexData),
+                  record.targetType == .app
+            else { return nil }
+
+            let bundleSet = Set(bMap.values)
+            let display = keys
+                .filter { !bundleSet.contains($0) && !$0.contains(".") }
+                .sorted()
+                .first
+            let bundle = keys.first(where: { bundleSet.contains($0) || $0.contains(".") })
+            let label = display ?? bundle ?? keys.sorted().first ?? "App"
+            return LocalCatalogAppTarget(
+                aliasKey: record.aliasKey,
+                label: label,
+                lookupKeys: keys.sorted(),
+                bundleID: bundle
+            )
+        }
+        .sorted { $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending }
+    }
+
+    /// Backend-backed category targets available for composing a saved list.
+    func catalogCategoryTargets() -> [LocalCatalogCategoryTarget] {
+        let index = loadCatalogAliasKeyIndex()
+        return loadCategoryDict().compactMap { name, data -> LocalCatalogCategoryTarget? in
+            let encodedToken = data.base64EncodedString()
+            guard let indexData = index[encodedToken],
+                  let record = try? JSONDecoder().decode(CatalogAliasKeyRecord.self, from: indexData),
+                  record.targetType == .category
+            else { return nil }
+            return LocalCatalogCategoryTarget(aliasKey: record.aliasKey, name: name)
+        }
+        .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
     }
 
     /// Remove a category alias by lookup name (case-insensitive).

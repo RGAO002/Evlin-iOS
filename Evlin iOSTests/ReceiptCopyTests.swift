@@ -33,7 +33,8 @@ final class ReceiptCopyTests: XCTestCase {
             effectiveState: state
         )
 
-        XCTAssertEqual(actions?.unlockTarget, "Games")
+        XCTAssertEqual(actions?.unlockTarget.displayName, "Games")
+        XCTAssertEqual(actions?.unlockTarget.tier, .category)
         XCTAssertEqual(actions?.unlockButtonTitle, "Unlock Games")
         XCTAssertEqual(actions?.keepButtonTitle, "Keep locked")
     }
