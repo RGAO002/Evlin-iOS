@@ -5,7 +5,7 @@
 //  Task 11 — deterministic app-control cards.
 //
 //  The backend's parent-chat seam (app/api/routes/parent_chat.py
-//  `_app_control_card_response`) emits six long-string card ids alongside a
+//  `_app_control_card_response`) emits long-string card ids alongside a
 //  `card_payload` dict whose shape mirrors AppControlCardPayload
 //  (app/schemas/card_payload.py). These are SEPARATE from the Brain/verb-table
 //  cards (U1/A1/B1/D1/D4/…): the long ids are not valid PlanArchCardType raw
@@ -81,7 +81,7 @@ struct AppControlCardModel: Sendable, Equatable {
     let bundleID: String?
 
     /// Parse from the chat-response `card_payload` dict (already deserialised to
-    /// `[String: Any]`). Returns nil when `card_id` isn't one of the six
+    /// `[String: Any]`). Returns nil when `card_id` isn't one of the
     /// app-control ids — the caller then leaves the Brain/verb-table path
     /// untouched.
     static func parse(cardID: String, payload: [String: Any]) -> AppControlCardModel? {

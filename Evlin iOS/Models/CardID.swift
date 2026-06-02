@@ -50,7 +50,7 @@ enum CardID: String, Codable, Sendable {
 }
 
 extension CardID {
-    /// True for the six deterministic app-control card ids (Task 11). These take
+    /// True for the deterministic app-control card ids (Task 11). These take
     /// the AppControlCard render path, not the Brain/verb-table CardDispatcher
     /// path.
     var isAppControlCard: Bool {
