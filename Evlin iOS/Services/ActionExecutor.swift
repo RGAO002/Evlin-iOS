@@ -80,18 +80,51 @@ enum CatalogCommandTokenData {
     }
 }
 
+protocol DeviceActivityScheduling {
+    func startMonitoring(_ name: DeviceActivityName, during schedule: DeviceActivitySchedule) throws
+    func stopMonitoring(_ activities: [DeviceActivityName])
+    func stopMonitoring()
+}
+
+struct DeviceActivityCenterScheduler: DeviceActivityScheduling {
+    private let center = DeviceActivityCenter()
+
+    func startMonitoring(_ name: DeviceActivityName, during schedule: DeviceActivitySchedule) throws {
+        try center.startMonitoring(name, during: schedule)
+    }
+
+    func stopMonitoring(_ activities: [DeviceActivityName]) {
+        center.stopMonitoring(activities)
+    }
+
+    func stopMonitoring() {
+        center.stopMonitoring()
+    }
+}
+
 /// Translates LockCommand into ActiveLockStore mutations.
 /// See spec §6 for dispatcher logic and §3.4 for merge rules.
 final class ActionExecutor: @unchecked Sendable {
     static let shared = ActionExecutor()
 
-    private let activityCenter = DeviceActivityCenter()
+    private let activityScheduler: DeviceActivityScheduling
+    private let authorizationStatusProvider: () -> AuthorizationStatus
 
     /// iOS DeviceActivitySchedule hard minimum.
     static let minScheduleMinutes: Int = 15
 
+    init(
+        activityScheduler: DeviceActivityScheduling = DeviceActivityCenterScheduler(),
+        authorizationStatusProvider: @escaping () -> AuthorizationStatus = {
+            AuthorizationCenter.shared.authorizationStatus
+        }
+    ) {
+        self.activityScheduler = activityScheduler
+        self.authorizationStatusProvider = authorizationStatusProvider
+    }
+
     func execute(_ cmd: LockCommand, blob: Data? = nil) async -> AckResult {
-        guard AuthorizationCenter.shared.authorizationStatus == .approved else {
+        guard authorizationStatusProvider() == .approved else {
             return .failed(.notAuthorized)
         }
 
@@ -456,7 +489,7 @@ final class ActionExecutor: @unchecked Sendable {
         let endComp = calendar.dateComponents([.hour, .minute, .second], from: clampedEnd)
         let schedule = DeviceActivitySchedule(intervalStart: startComp, intervalEnd: endComp, repeats: false)
         let name = DeviceActivityName(deviceActivityNameForBlock(bundleID: bundleID))
-        try activityCenter.startMonitoring(name, during: schedule)
+        try activityScheduler.startMonitoring(name, during: schedule)
     }
 
     private func deviceActivityNameForBlock(bundleID: String) -> String {
@@ -723,16 +756,16 @@ final class ActionExecutor: @unchecked Sendable {
         let endComp = calendar.dateComponents([.hour, .minute, .second], from: clampedEnd)
         let schedule = DeviceActivitySchedule(intervalStart: startComp, intervalEnd: endComp, repeats: false)
         let name = DeviceActivityName(deviceActivityNameFor(recordKey: recordKey))
-        try activityCenter.startMonitoring(name, during: schedule)
+        try activityScheduler.startMonitoring(name, during: schedule)
     }
 
     private func cancelScheduled(recordKey: String) {
         let name = DeviceActivityName(deviceActivityNameFor(recordKey: recordKey))
-        activityCenter.stopMonitoring([name])
+        activityScheduler.stopMonitoring([name])
     }
 
     private func cancelAllScheduled() {
-        activityCenter.stopMonitoring()
+        activityScheduler.stopMonitoring()
     }
 
     private func deviceActivityNameFor(recordKey: String) -> String {
