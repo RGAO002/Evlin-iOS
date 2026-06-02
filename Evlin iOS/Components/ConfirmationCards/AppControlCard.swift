@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Renders the six deterministic app-control cards (Task 11) in the Informed
+/// Renders the deterministic app-control cards (Task 11) in the Informed
 /// Sentinel style. These are SEPARATE from the Brain/verb-table confirmation
 /// cards (DangerConfirmCard / AmbiguityCard / …): those build from the legacy
 /// `CardPayload`; this one renders the parsed `AppControlCardModel` straight
@@ -8,8 +8,9 @@ import SwiftUI
 ///
 /// Two interaction shapes:
 ///  - Option cards (single_app_shield_advice, shield_token_missing,
-///    app_not_found_terminal, category_rename_required) render `options` as
-///    full-width buttons → `onOption`.
+///    app_not_found_terminal, category_rename_required, cannot_block_category,
+///    category_shield_offer, catalog_app_inactive, bundle_id_required) render
+///    `options` as full-width buttons → `onOption`.
 ///  - Disambiguation cards (app_store_disambiguation, child_disambiguation)
 ///    render `candidates` as selectable rows → `onCandidate`.
 struct AppControlCard: View {
@@ -183,12 +184,21 @@ struct AppControlCard: View {
         case .appNotFoundTerminal:    return "magnifyingglass"
         case .childDisambiguation:    return "person.2.fill"
         case .categoryRenameRequired: return "pencil.and.list.clipboard"
+        // Category block cards: the "cannot block" variant warns that a shield
+        // is the only available lever; the "shield offer" variant proposes it.
+        case .cannotBlockCategory:    return "nosign"
+        case .categoryShieldOffer:    return "shield.lefthalf.filled"
+        // Catalog/bundle cards point the parent at re-capturing the app, so an
+        // informational badge fits.
+        case .catalogAppInactive:     return "app.badge.checkmark"
+        case .bundleIDRequired:       return "questionmark.app.dashed"
         }
     }
 
     private var iconBackground: Color {
         switch model.kind {
-        case .appNotFoundTerminal, .shieldTokenMissing, .categoryRenameRequired:
+        case .appNotFoundTerminal, .shieldTokenMissing, .categoryRenameRequired,
+             .cannotBlockCategory, .bundleIDRequired, .catalogAppInactive:
             return Color.evTertiaryContainer
         default:
             return Color.evPrimaryContainer
@@ -197,7 +207,8 @@ struct AppControlCard: View {
 
     private var iconForeground: Color {
         switch model.kind {
-        case .appNotFoundTerminal, .shieldTokenMissing, .categoryRenameRequired:
+        case .appNotFoundTerminal, .shieldTokenMissing, .categoryRenameRequired,
+             .cannotBlockCategory, .bundleIDRequired, .catalogAppInactive:
             return Color.evOnTertiaryContainer
         default:
             return Color.evPrimary

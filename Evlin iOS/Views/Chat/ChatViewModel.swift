@@ -812,7 +812,9 @@ class ChatViewModel: ObservableObject {
             currentCard = nil
 
         case .singleAppShieldAdvice, .shieldTokenMissing, .appStoreDisambiguation,
-             .appNotFoundTerminal, .childDisambiguation, .categoryRenameRequired:
+             .appNotFoundTerminal, .childDisambiguation, .categoryRenameRequired,
+             .cannotBlockCategory, .categoryShieldOffer, .catalogAppInactive,
+             .bundleIDRequired:
             // Task 11 app-control cards are driven by currentAppControlCard +
             // handleAppControlOption / handleAppControlCandidate, NOT by the Brain
             // CardHandlers primary slot. This branch keeps the switch exhaustive;

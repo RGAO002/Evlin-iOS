@@ -35,7 +35,9 @@ enum CardPayloadBuilder {
             // adds ReflectionReviewCard. Use G1-style stub as defensive fallback.
             return g1(context, handlers)
         case .singleAppShieldAdvice, .shieldTokenMissing, .appStoreDisambiguation,
-             .appNotFoundTerminal, .childDisambiguation, .categoryRenameRequired:
+             .appNotFoundTerminal, .childDisambiguation, .categoryRenameRequired,
+             .cannotBlockCategory, .categoryShieldOffer, .catalogAppInactive,
+             .bundleIDRequired:
             // Task 11 app-control cards don't use CardPayload — they render via
             // AppControlCard from AppControlCardModel. Defensive empty stub so the
             // switch stays exhaustive; this builder is never called for them.

@@ -40,6 +40,13 @@ enum CardID: String, Codable, Sendable {
     case appNotFoundTerminal = "app_not_found_terminal"
     case childDisambiguation = "child_disambiguation"
     case categoryRenameRequired = "category_rename_required"
+    // Four additional app-control cards (backend commit 93a0b6a). Same render
+    // path as the six above — parsed by AppControlCardModel, rendered by
+    // AppControlCard, never through CardDispatcher/CardPayloadBuilder.
+    case cannotBlockCategory = "cannot_block_category"
+    case categoryShieldOffer = "category_shield_offer"
+    case catalogAppInactive = "catalog_app_inactive"
+    case bundleIDRequired = "bundle_id_required"
 }
 
 extension CardID {
@@ -49,7 +56,9 @@ extension CardID {
     var isAppControlCard: Bool {
         switch self {
         case .singleAppShieldAdvice, .shieldTokenMissing, .appStoreDisambiguation,
-             .appNotFoundTerminal, .childDisambiguation, .categoryRenameRequired:
+             .appNotFoundTerminal, .childDisambiguation, .categoryRenameRequired,
+             .cannotBlockCategory, .categoryShieldOffer, .catalogAppInactive,
+             .bundleIDRequired:
             return true
         default:
             return false

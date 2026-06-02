@@ -435,6 +435,154 @@ final class LazyTagCatalogModelTests: XCTestCase {
             AppControlAction.none
         )
     }
+
+    // MARK: - Four new app-control cards (backend commit 93a0b6a)
+
+    /// Mirror of the backend `cannot_block_category` / `category_shield_offer`
+    /// payload: a shield_anyway option carrying force_confirmations, then a
+    /// plain cancel option with none.
+    private func categoryShieldPayload(cardID: String) -> [String: Any] {
+        [
+            "card_id": cardID,
+            "type": cardID,
+            "title": "Shield the whole category?",
+            "body": "I can't hard-block a category, but I can shield it.",
+            "target_display": "Games",
+            "target_kind": "category",
+            "options": [
+                ["action": "shield_anyway", "label": "Shield anyway", "force_confirmations": ["shield_anyway"]],
+                ["action": "cancel", "label": "Cancel"],
+            ],
+            "candidates": [],
+        ]
+    }
+
+    /// Mirror of the backend `catalog_app_inactive` / `bundle_id_required`
+    /// payload: a single open_lazy_tag option, app target.
+    private func openLazyTagAppPayload(cardID: String) -> [String: Any] {
+        [
+            "card_id": cardID,
+            "type": cardID,
+            "title": "Re-capture this app",
+            "body": "I need the kid's phone to tag this app.",
+            "target_display": "Roblox",
+            "target_kind": "app",
+            "options": [["action": "open_lazy_tag", "label": "Open the picker"]],
+            "candidates": [],
+        ]
+    }
+
+    func test_appControlCard_parsesCannotBlockCategory() {
+        let model = AppControlCardModel.parse(
+            cardID: "cannot_block_category",
+            payload: categoryShieldPayload(cardID: "cannot_block_category")
+        )
+        XCTAssertNotNil(model)
+        XCTAssertEqual(model?.kind, .cannotBlockCategory)
+        XCTAssertEqual(model?.targetKind, "category")
+        XCTAssertEqual(model?.options.map(\.action), ["shield_anyway", "cancel"])
+        XCTAssertEqual(model?.options.first?.forceConfirmations, ["shield_anyway"])
+        XCTAssertEqual(model?.options.last?.forceConfirmations, [])
+    }
+
+    func test_appControlCard_parsesCategoryShieldOffer() {
+        let model = AppControlCardModel.parse(
+            cardID: "category_shield_offer",
+            payload: categoryShieldPayload(cardID: "category_shield_offer")
+        )
+        XCTAssertNotNil(model)
+        XCTAssertEqual(model?.kind, .categoryShieldOffer)
+        XCTAssertEqual(model?.targetKind, "category")
+        XCTAssertEqual(model?.options.map(\.action), ["shield_anyway", "cancel"])
+    }
+
+    func test_appControlCard_parsesCatalogAppInactive() {
+        let model = AppControlCardModel.parse(
+            cardID: "catalog_app_inactive",
+            payload: openLazyTagAppPayload(cardID: "catalog_app_inactive")
+        )
+        XCTAssertNotNil(model)
+        XCTAssertEqual(model?.kind, .catalogAppInactive)
+        XCTAssertEqual(model?.targetKind, "app")
+        XCTAssertEqual(model?.options.map(\.action), ["open_lazy_tag"])
+    }
+
+    func test_appControlCard_parsesBundleIDRequired() {
+        let model = AppControlCardModel.parse(
+            cardID: "bundle_id_required",
+            payload: openLazyTagAppPayload(cardID: "bundle_id_required")
+        )
+        XCTAssertNotNil(model)
+        XCTAssertEqual(model?.kind, .bundleIDRequired)
+        XCTAssertEqual(model?.targetKind, "app")
+        XCTAssertEqual(model?.options.map(\.action), ["open_lazy_tag"])
+    }
+
+    func test_appControlCard_fourNewIdsAreRecognised() {
+        let ids = [
+            "cannot_block_category", "category_shield_offer",
+            "catalog_app_inactive", "bundle_id_required",
+        ]
+        for id in ids {
+            XCTAssertNotNil(
+                AppControlCardKind(rawValue: id),
+                "Expected \(id) to be a recognised app-control card kind"
+            )
+        }
+    }
+
+    func test_appControlRouting_categoryShieldAnywayResendsForceConfirmation() {
+        let model = AppControlCardModel.parse(
+            cardID: "category_shield_offer",
+            payload: categoryShieldPayload(cardID: "category_shield_offer")
+        )!
+        let shield = model.options.first { $0.action == "shield_anyway" }!
+        XCTAssertEqual(
+            AppControlRouter.route(option: shield, card: model),
+            .resendForceConfirmations(["shield_anyway"])
+        )
+    }
+
+    func test_appControlRouting_cancelOptionIsNoOp() {
+        let model = AppControlCardModel.parse(
+            cardID: "cannot_block_category",
+            payload: categoryShieldPayload(cardID: "cannot_block_category")
+        )!
+        let cancel = model.options.first { $0.action == "cancel" }!
+        XCTAssertTrue(cancel.forceConfirmations.isEmpty)
+        XCTAssertEqual(
+            AppControlRouter.route(option: cancel, card: model),
+            AppControlAction.none
+        )
+    }
+
+    func test_appControlRouting_catalogAppInactiveOpenLazyTagUsesAppKind() {
+        let model = AppControlCardModel.parse(
+            cardID: "catalog_app_inactive",
+            payload: openLazyTagAppPayload(cardID: "catalog_app_inactive")
+        )!
+        XCTAssertEqual(
+            AppControlRouter.route(option: model.options[0], card: model),
+            .openLazyTag(target: "Roblox", kind: .app)
+        )
+    }
+
+    func test_appControlRouting_bundleIDRequiredOpenLazyTagUsesAppKind() {
+        let model = AppControlCardModel.parse(
+            cardID: "bundle_id_required",
+            payload: openLazyTagAppPayload(cardID: "bundle_id_required")
+        )!
+        XCTAssertEqual(
+            AppControlRouter.route(option: model.options[0], card: model),
+            .openLazyTag(target: "Roblox", kind: .app)
+        )
+    }
+
+    func test_appControlCard_parseReturnsNilForUnknownCardId() {
+        // HARD BOUNDARY: an unknown id (not one of the ten app-control ids)
+        // must NOT parse, so the Brain fall-through stays intact.
+        XCTAssertNil(AppControlCardModel.parse(cardID: "totally_made_up_card", payload: [:]))
+    }
 }
 
 final class LazyTagPersistenceTests: XCTestCase {

@@ -19,7 +19,7 @@
 
 import Foundation
 
-/// The six deterministic app-control card ids. Raw values match
+/// The deterministic app-control card ids. Raw values match
 /// `AppControlCardType` on the backend AND the `CardID` enum cases added for
 /// the chat render path.
 enum AppControlCardKind: String, Sendable, CaseIterable {
@@ -29,6 +29,12 @@ enum AppControlCardKind: String, Sendable, CaseIterable {
     case appNotFoundTerminal = "app_not_found_terminal"
     case childDisambiguation = "child_disambiguation"
     case categoryRenameRequired = "category_rename_required"
+    // Four additional app-control cards (backend commit 93a0b6a). Raw values
+    // match the backend `card_id`s and the matching `CardID` cases.
+    case cannotBlockCategory = "cannot_block_category"
+    case categoryShieldOffer = "category_shield_offer"
+    case catalogAppInactive = "catalog_app_inactive"
+    case bundleIDRequired = "bundle_id_required"
 }
 
 /// One tappable option on an app-control card. Mirrors backend
@@ -168,6 +174,10 @@ enum AppControlRouter {
             return .openLazyTag(target: card.targetDisplay, kind: aliasKind(for: card.targetKind))
         case "rename_list":
             return .renameList(target: card.targetDisplay)
+        case "cancel":
+            // Explicit Cancel option (cannot_block_category / category_shield_offer)
+            // is an intentional dismiss, not an unknown-action fall-through.
+            return .none
         default:
             return .none
         }
