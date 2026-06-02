@@ -75,6 +75,13 @@ struct CardDispatcher: View {
             } else {
                 EmptyView()
             }
+        case .singleAppShieldAdvice, .shieldTokenMissing, .appStoreDisambiguation,
+             .appNotFoundTerminal, .childDisambiguation, .categoryRenameRequired:
+            // Task 11 deterministic app-control cards never flow through
+            // CardDispatcher — they render via ChatViewModel.currentAppControlCard
+            // + AppControlCard. This case exists only to keep the switch
+            // exhaustive after adding the new CardID cases.
+            EmptyView()
         }
     }
 

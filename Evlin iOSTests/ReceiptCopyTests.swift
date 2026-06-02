@@ -37,6 +37,9 @@ final class ReceiptCopyTests: XCTestCase {
         XCTAssertEqual(actions?.unlockTarget.tier, .category)
         XCTAssertEqual(actions?.unlockButtonTitle, "Unlock Games")
         XCTAssertEqual(actions?.keepButtonTitle, "Keep locked")
+        // Task 11 — receipts also offer "Block instead" to escalate the
+        // still-covered target to a permanent block.
+        XCTAssertEqual(actions?.blockButtonTitle, "Block instead")
     }
 
     func test_receiptActionsDoNotOfferUnlockWhenNothingStillCoversTarget() {

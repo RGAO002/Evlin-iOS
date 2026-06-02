@@ -63,7 +63,7 @@ final class LazyTagCatalogModelTests: XCTestCase {
         XCTAssertTrue(presentation.isInformOnly)
         XCTAssertEqual(
             presentation.informMessage,
-            "抖音 isn’t in your kid’s list yet. To lock it, add it on their phone, or try `block 抖音`."
+            "抖音 isn’t in your kid’s list yet. Add it on their phone, or try block `抖音`."
         )
         XCTAssertEqual(presentation.sections.map(\.type), [.app, .category, .list])
         XCTAssertTrue(presentation.sections.allSatisfy { $0.targets.isEmpty })
@@ -242,6 +242,197 @@ final class LazyTagCatalogModelTests: XCTestCase {
                 appMemberCount: 3,
                 categoryMemberCount: 0
             )
+        )
+    }
+
+    // MARK: - Task 11: app-control card parse + option→action routing
+
+    /// Mirror of the backend `_app_control_card_response` payload for
+    /// single_app_shield_advice.
+    private func singleAppShieldAdvicePayload() -> [String: Any] {
+        [
+            "card_id": "single_app_shield_advice",
+            "type": "single_app_shield_advice",
+            "title": "Block is more reliable",
+            "body": "Shielding a single app like Instagram can be unreliable.",
+            "target_display": "Instagram",
+            "target_kind": "app",
+            "bundle_id": "com.burbn.instagram",
+            "options": [
+                ["action": "block_now", "label": "Block Instagram", "force_confirmations": ["block_now"]],
+                ["action": "shield_anyway", "label": "Shield anyway", "force_confirmations": ["shield_anyway"]],
+            ],
+            "candidates": [],
+        ]
+    }
+
+    func test_appControlCard_parsesSingleAppShieldAdvice() {
+        let model = AppControlCardModel.parse(
+            cardID: "single_app_shield_advice",
+            payload: singleAppShieldAdvicePayload()
+        )
+        XCTAssertNotNil(model)
+        XCTAssertEqual(model?.kind, .singleAppShieldAdvice)
+        XCTAssertEqual(model?.title, "Block is more reliable")
+        XCTAssertEqual(model?.targetDisplay, "Instagram")
+        XCTAssertEqual(model?.targetKind, "app")
+        XCTAssertEqual(model?.bundleID, "com.burbn.instagram")
+        XCTAssertEqual(model?.options.map(\.action), ["block_now", "shield_anyway"])
+    }
+
+    func test_appControlCard_parseReturnsNilForBrainCardId() {
+        // HARD BOUNDARY: a Brain/verb-table id must NOT parse as an app-control
+        // card, so the existing renderCard path keeps handling it.
+        XCTAssertNil(AppControlCardModel.parse(cardID: "U1", payload: [:]))
+        XCTAssertNil(AppControlCardModel.parse(cardID: "D4", payload: [:]))
+        XCTAssertNil(AppControlCardModel.parse(cardID: "B1", payload: [:]))
+    }
+
+    func test_appControlCard_allSixIdsAreRecognised() {
+        let ids = [
+            "single_app_shield_advice", "shield_token_missing",
+            "app_store_disambiguation", "app_not_found_terminal",
+            "child_disambiguation", "category_rename_required",
+        ]
+        for id in ids {
+            XCTAssertNotNil(
+                AppControlCardKind(rawValue: id),
+                "Expected \(id) to be a recognised app-control card kind"
+            )
+        }
+    }
+
+    func test_appControlRouting_blockNowResendsForceConfirmation() {
+        let model = AppControlCardModel.parse(
+            cardID: "single_app_shield_advice",
+            payload: singleAppShieldAdvicePayload()
+        )!
+        let blockOption = model.options.first { $0.action == "block_now" }!
+        XCTAssertEqual(
+            AppControlRouter.route(option: blockOption, card: model),
+            .resendForceConfirmations(["block_now"])
+        )
+    }
+
+    func test_appControlRouting_shieldAnywayResendsForceConfirmation() {
+        let model = AppControlCardModel.parse(
+            cardID: "single_app_shield_advice",
+            payload: singleAppShieldAdvicePayload()
+        )!
+        let shieldOption = model.options.first { $0.action == "shield_anyway" }!
+        XCTAssertEqual(
+            AppControlRouter.route(option: shieldOption, card: model),
+            .resendForceConfirmations(["shield_anyway"])
+        )
+    }
+
+    func test_appControlRouting_openLazyTagOpensPickerWithTarget() {
+        let payload: [String: Any] = [
+            "card_id": "shield_token_missing",
+            "type": "shield_token_missing",
+            "title": "Re-add this on the kid's phone",
+            "body": "I can't shield Roblox yet.",
+            "target_display": "Roblox",
+            "target_kind": "app",
+            "options": [["action": "open_lazy_tag", "label": "Pick the app to re-capture"]],
+        ]
+        let model = AppControlCardModel.parse(cardID: "shield_token_missing", payload: payload)!
+        let opt = model.options[0]
+        XCTAssertEqual(
+            AppControlRouter.route(option: opt, card: model),
+            .openLazyTag(target: "Roblox", kind: .app)
+        )
+    }
+
+    func test_appControlRouting_openLazyTagUsesCategoryKindWhenCategoryTarget() {
+        let payload: [String: Any] = [
+            "card_id": "app_not_found_terminal",
+            "type": "app_not_found_terminal",
+            "title": "I couldn't find that app",
+            "body": "No match.",
+            "target_display": "games",
+            "target_kind": "category",
+            "options": [["action": "open_lazy_tag", "label": "Add it on the kid's phone"]],
+        ]
+        let model = AppControlCardModel.parse(cardID: "app_not_found_terminal", payload: payload)!
+        XCTAssertEqual(
+            AppControlRouter.route(option: model.options[0], card: model),
+            .openLazyTag(target: "games", kind: .category)
+        )
+    }
+
+    func test_appControlRouting_renameListSurfacesRenameGuidance() {
+        let payload: [String: Any] = [
+            "card_id": "category_rename_required",
+            "type": "category_rename_required",
+            "title": "Rename this list first",
+            "body": "Your list name collides with a category.",
+            "target_display": "games",
+            "target_kind": "list",
+            "options": [["action": "rename_list", "label": "Rename list"]],
+        ]
+        let model = AppControlCardModel.parse(cardID: "category_rename_required", payload: payload)!
+        XCTAssertEqual(
+            AppControlRouter.route(option: model.options[0], card: model),
+            .renameList(target: "games")
+        )
+    }
+
+    func test_appControlRouting_childDisambiguationCandidateScopesToChild() {
+        let payload: [String: Any] = [
+            "card_id": "child_disambiguation",
+            "type": "child_disambiguation",
+            "title": "Which child?",
+            "body": "You have more than one kid device.",
+            "target_display": "Instagram",
+            "target_kind": "app",
+            "options": [],
+            "candidates": [
+                ["display": "Liam", "child_device_id": "11111111-1111-1111-1111-111111111111", "target_type": "app"],
+                ["display": "Maya", "child_device_id": "22222222-2222-2222-2222-222222222222", "target_type": "app"],
+            ],
+        ]
+        let model = AppControlCardModel.parse(cardID: "child_disambiguation", payload: payload)!
+        XCTAssertEqual(model.candidates.count, 2)
+        XCTAssertEqual(
+            AppControlRouter.route(candidate: model.candidates[0], card: model),
+            .resendPhrase("Liam's phone")
+        )
+    }
+
+    func test_appControlRouting_appStoreDisambiguationCandidateReplaysDisplay() {
+        let payload: [String: Any] = [
+            "card_id": "app_store_disambiguation",
+            "type": "app_store_disambiguation",
+            "title": "Which app do you mean?",
+            "body": "I found a few apps.",
+            "target_display": "messenger",
+            "target_kind": "app",
+            "options": [],
+            "candidates": [
+                ["display": "Facebook Messenger", "bundle_id": "com.facebook.Messenger", "target_type": "app"],
+                ["display": "Messenger Kids", "bundle_id": "com.facebook.MessengerKids", "target_type": "app"],
+            ],
+        ]
+        let model = AppControlCardModel.parse(cardID: "app_store_disambiguation", payload: payload)!
+        XCTAssertEqual(
+            AppControlRouter.route(candidate: model.candidates[1], card: model),
+            .resendPhrase("Messenger Kids")
+        )
+    }
+
+    func test_appControlRouting_unknownOptionActionIsNoOp() {
+        let payload: [String: Any] = [
+            "card_id": "app_not_found_terminal",
+            "type": "app_not_found_terminal",
+            "title": "x", "body": "y",
+            "target_display": "z", "target_kind": "app",
+            "options": [["action": "totally_unknown_verb", "label": "Huh"]],
+        ]
+        let model = AppControlCardModel.parse(cardID: "app_not_found_terminal", payload: payload)!
+        XCTAssertEqual(
+            AppControlRouter.route(option: model.options[0], card: model),
+            AppControlAction.none
         )
     }
 }

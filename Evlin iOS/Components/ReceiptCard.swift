@@ -23,6 +23,10 @@ struct ReceiptCardActions: Sendable, Equatable {
     let unlockTarget: ReceiptUnlockTarget
     let unlockButtonTitle: String
     let keepButtonTitle: String
+    /// Task 11 — "Block instead" escalates a still-covered target from a
+    /// (temporary) shield to a permanent bundle-id block via the existing block
+    /// route. Same display name as the unlock target.
+    let blockButtonTitle: String
 }
 
 struct ReceiptUnlockTarget: Sendable, Equatable {
@@ -48,7 +52,8 @@ enum ReceiptCardActionModel {
                 tier: shieldTier(from: strongest.tier)
             ),
             unlockButtonTitle: "Unlock \(strongest.displayName)",
-            keepButtonTitle: "Keep locked"
+            keepButtonTitle: "Keep locked",
+            blockButtonTitle: "Block instead"
         )
     }
 
@@ -87,6 +92,10 @@ struct ReceiptCard: View {
     let state: ReceiptState
     let effectiveState: AckEffectiveState?
     var onRequestUnlock: ((ReceiptUnlockTarget) -> Void)? = nil
+    /// Task 11 — "Block instead": escalate the still-covered target to a
+    /// permanent bundle-id block via the existing block route. Optional so
+    /// existing call sites / previews that don't wire it simply omit the button.
+    var onRequestBlock: ((ReceiptUnlockTarget) -> Void)? = nil
 
     @State private var hidesActions = false
 
@@ -135,41 +144,67 @@ struct ReceiptCard: View {
     }
 
     private func actionButtons(_ actions: ReceiptCardActions) -> some View {
-        HStack(spacing: 10) {
-            Button {
-                onRequestUnlock?(actions.unlockTarget)
-                hidesActions = true
-            } label: {
-                Label(actions.unlockButtonTitle, systemImage: "lock.open.fill")
-                    .font(.caption.weight(.bold))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
-                    .foregroundStyle(.white)
-                    .background(
-                        RoundedRectangle(cornerRadius: 13, style: .continuous)
-                            .fill(Color.evPrimary)
-                    )
-            }
-            .buttonStyle(.plain)
+        VStack(spacing: 8) {
+            HStack(spacing: 10) {
+                Button {
+                    onRequestUnlock?(actions.unlockTarget)
+                    hidesActions = true
+                } label: {
+                    Label(actions.unlockButtonTitle, systemImage: "lock.open.fill")
+                        .font(.caption.weight(.bold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                        .foregroundStyle(.white)
+                        .background(
+                            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                                .fill(Color.evPrimary)
+                        )
+                }
+                .buttonStyle(.plain)
 
-            Button {
-                hidesActions = true
-            } label: {
-                Text(actions.keepButtonTitle)
-                    .font(.caption.weight(.bold))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
-                    .foregroundStyle(Color.evOnSurfaceVariant)
-                    .background(
-                        RoundedRectangle(cornerRadius: 13, style: .continuous)
-                            .fill(Color.evSurfaceContainerLowest)
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 13, style: .continuous)
-                            .stroke(Color.evOutlineVariant, lineWidth: 1)
-                    )
+                Button {
+                    hidesActions = true
+                } label: {
+                    Text(actions.keepButtonTitle)
+                        .font(.caption.weight(.bold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                        .foregroundStyle(Color.evOnSurfaceVariant)
+                        .background(
+                            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                                .fill(Color.evSurfaceContainerLowest)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                                .stroke(Color.evOutlineVariant, lineWidth: 1)
+                        )
+                }
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
+
+            // Task 11 — "Block instead". Only shown when a block handler is
+            // wired. Escalates the still-covered target to a permanent block.
+            if onRequestBlock != nil {
+                Button {
+                    onRequestBlock?(actions.unlockTarget)
+                    hidesActions = true
+                } label: {
+                    Label(actions.blockButtonTitle, systemImage: "eye.slash.fill")
+                        .font(.caption.weight(.bold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                        .foregroundStyle(Color.evError)
+                        .background(
+                            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                                .fill(Color.evErrorContainer)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                                .stroke(Color.evError.opacity(0.35), lineWidth: 1)
+                        )
+                }
+                .buttonStyle(.plain)
+            }
         }
         .padding(.top, 2)
     }

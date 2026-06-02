@@ -25,4 +25,34 @@ enum CardID: String, Codable, Sendable {
     // Phase 2B placeholders (will be populated by reflection family work):
     case reflectionReview                // reflection.confirm_approve / event.* review
     case contentGenFailed                // reflection.content_generation_failed
+
+    // Task 11 — deterministic app-control cards (NOT Brain/verb-table cards).
+    // These long-string ids arrive from the parent-chat seam as
+    // `action.card_id == AppControlCardPayload.type.value`, alongside a typed
+    // `card_payload` dict. They are parsed by AppControlCardModel and rendered
+    // by AppControlCard via ChatViewModel.currentAppControlCard — NOT through
+    // CardDispatcher/CardPayloadBuilder. The cases below exist so
+    // CardID(rawValue:) recognises them (routing them off the Brain path) and
+    // so the exhaustive CardID switches still compile.
+    case singleAppShieldAdvice = "single_app_shield_advice"
+    case shieldTokenMissing = "shield_token_missing"
+    case appStoreDisambiguation = "app_store_disambiguation"
+    case appNotFoundTerminal = "app_not_found_terminal"
+    case childDisambiguation = "child_disambiguation"
+    case categoryRenameRequired = "category_rename_required"
+}
+
+extension CardID {
+    /// True for the six deterministic app-control card ids (Task 11). These take
+    /// the AppControlCard render path, not the Brain/verb-table CardDispatcher
+    /// path.
+    var isAppControlCard: Bool {
+        switch self {
+        case .singleAppShieldAdvice, .shieldTokenMissing, .appStoreDisambiguation,
+             .appNotFoundTerminal, .childDisambiguation, .categoryRenameRequired:
+            return true
+        default:
+            return false
+        }
+    }
 }

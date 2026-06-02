@@ -118,6 +118,9 @@ struct ChatView: View {
                                         effectiveState: message.receiptEffectiveState,
                                         onRequestUnlock: { target in
                                             viewModel.requestUnlock(target)
+                                        },
+                                        onRequestBlock: { target in
+                                            viewModel.requestBlock(target)
                                         }
                                     )
                                 }
@@ -236,6 +239,24 @@ struct ChatView: View {
                             .transition(.opacity.combined(with: .scale))
                         }
 
+                        // Task 11 — deterministic app-control card (single_app_shield_advice,
+                        // shield_token_missing, disambiguation, …). Rendered SEPARATELY from
+                        // the Brain card path above; buttons re-dispatch via force_confirmations
+                        // or open the lazy-tag picker / dictionary flows.
+                        if let appControlCard = viewModel.currentAppControlCard {
+                            VStack(spacing: Spacing.sm) {
+                                AppControlCard(
+                                    model: appControlCard,
+                                    onOption: { option in viewModel.handleAppControlOption(option) },
+                                    onCandidate: { candidate in viewModel.handleAppControlCandidate(candidate) },
+                                    onCancel: { viewModel.dismissAppControlCard() }
+                                )
+                                reinterpretButton
+                            }
+                            .padding(.top, Spacing.md)
+                            .transition(.opacity.combined(with: .scale))
+                        }
+
                         // Plan-arch card (AGENT_PLAN_ARCH=1) — typed CardPayload
                         // from the new orchestrator. Phase 2A dispatches through
                         // PlanArchCardAdapter → CardDispatcher (polished cards).
@@ -307,6 +328,9 @@ struct ChatView: View {
                     withAnimation { proxy.scrollTo(bottomAnchorID, anchor: .bottom) }
                 }
                 .onChange(of: viewModel.currentCard?.0.rawValue) { _, _ in
+                    withAnimation { proxy.scrollTo(bottomAnchorID, anchor: .bottom) }
+                }
+                .onChange(of: viewModel.currentAppControlCard?.kind) { _, _ in
                     withAnimation { proxy.scrollTo(bottomAnchorID, anchor: .bottom) }
                 }
             }

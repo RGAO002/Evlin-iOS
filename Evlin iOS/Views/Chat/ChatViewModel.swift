@@ -15,6 +15,14 @@ class ChatViewModel: ObservableObject {
     /// Set when backend returns `action.card_id`, cleared when user answers.
     @Published var currentCard: (CardID, CardContext, CardHandlers)?
 
+    /// Task 11 — currently-rendered deterministic app-control card, if any.
+    /// Set when the parent-chat seam returns one of the six app-control
+    /// `card_id`s (single_app_shield_advice, shield_token_missing, …) with a
+    /// typed `card_payload`. Rendered by AppControlCard in ChatView, SEPARATE
+    /// from the Brain/verb-table `currentCard` path. Cleared when the parent
+    /// taps an option/candidate or dismisses.
+    @Published var currentAppControlCard: AppControlCardModel?
+
     /// ProposalToken → kind for proposals whose alias didn't resolve at
     /// pre-flight. Drives ProposalCard's "Tag <target>" UI and the
     /// hard guard inside `confirmProposal(_:)`. Task 2.3 wires up the
@@ -207,6 +215,10 @@ class ChatViewModel: ObservableObject {
             isThinking = false
             return
         }
+        if tryHandleAppControlCard(from: rawData, response: response) {
+            isThinking = false
+            return
+        }
         processResponse(response, userMessage: "")
     }
 
@@ -238,6 +250,7 @@ class ChatViewModel: ObservableObject {
         pendingPlanArchCard = nil
         pendingPlanArchCardQueue = []
         currentCard = nil
+        currentAppControlCard = nil
 
         messages.append(ChatMessage(role: .parent, content: text, timestamp: Date()))
         inputText = ""
@@ -275,6 +288,7 @@ class ChatViewModel: ObservableObject {
         pendingPlanArchCard = nil
         pendingPlanArchCardQueue = []
         currentCard = nil
+        currentAppControlCard = nil
         isThinking = true
         errorMessage = nil
         lastUserMessageForCard = lastUser
@@ -358,6 +372,14 @@ class ChatViewModel: ObservableObject {
                 // the legacy proposal/action handling. Backwards-compatible: when
                 // AGENT_PLAN_ARCH=0, card_payload is absent, and this returns false.
                 if await MainActor.run(body: { self.tryHandlePlanArchCard(from: rawData, message: resp.message, debugTurnID: turnID) }) {
+                    await MainActor.run { self.isThinking = false }
+                    return
+                }
+                // Task 11 app-control cards: caught BEFORE processResponse so
+                // they take the AppControlCard render path instead of the Brain
+                // CardDispatcher path (their card_id resolves to a CardID but is
+                // intentionally a no-op in renderCard's Brain switches).
+                if await MainActor.run(body: { self.tryHandleAppControlCard(from: rawData, response: resp, debugTurnID: turnID) }) {
                     await MainActor.run { self.isThinking = false }
                     return
                 }
@@ -548,6 +570,134 @@ class ChatViewModel: ObservableObject {
         self.currentCard = (cardID, context, handlers)
     }
 
+    // MARK: - Task 11: deterministic app-control cards
+
+    /// Detect + render one of the six deterministic app-control cards from the
+    /// raw chat-response body. Returns true when handled (caller skips the
+    /// Brain `processResponse` path). Mirrors `tryHandlePlanArchCard`: reads the
+    /// top-level `card_payload` dict, parses it into an `AppControlCardModel`,
+    /// stashes it in `currentAppControlCard`, and appends a text bubble when the
+    /// backend supplied a non-empty message.
+    ///
+    /// Backwards-compatible: legacy responses and Brain cards have either no
+    /// `card_payload` or a `card_id` that isn't an app-control id, so this
+    /// returns false and the existing path runs untouched.
+    @MainActor
+    @discardableResult
+    func tryHandleAppControlCard(
+        from data: Data,
+        response: APIClient.ChatResponse,
+        debugTurnID: String? = nil
+    ) -> Bool {
+        guard let cardID = response.action?.card_id,
+              CardID(rawValue: cardID)?.isAppControlCard == true,
+              let payload = Self.appControlPayloadDict(from: data, cardID: cardID),
+              let model = AppControlCardModel.parse(cardID: cardID, payload: payload)
+        else { return false }
+
+        // Replace any prior Brain/plan-arch card surfaces — this card supersedes.
+        currentCard = nil
+        pendingPlanArchCard = nil
+        pendingPlanArchCardQueue = []
+        currentAppControlCard = model
+
+        // Append a text bubble only when the backend supplied a meaningful
+        // message distinct from the card body (avoids duplicating the card copy).
+        let trimmed = response.message.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty,
+           trimmed != model.body.trimmingCharacters(in: .whitespacesAndNewlines) {
+            messages.append(ChatMessage(
+                role: .agent,
+                content: trimmed,
+                timestamp: Date(),
+                debugTurnID: Self.bubbleDebugTurnID(debugTurnID)
+            ))
+        }
+        return true
+    }
+
+    /// Pull the app-control `card_payload` dict out of arbitrary chat-response
+    /// JSON Data. Prefers the singular `card_payload`; falls back to the first
+    /// entry of `card_payloads`. Only returns a dict whose `card_id` matches the
+    /// app-control id we resolved from `action.card_id`.
+    nonisolated static func appControlPayloadDict(from data: Data, cardID: String) -> [String: Any]? {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        func matches(_ dict: [String: Any]) -> Bool {
+            (dict["card_id"] as? String) == cardID
+        }
+        if let single = json["card_payload"] as? [String: Any], matches(single) {
+            return single
+        }
+        if let list = json["card_payloads"] as? [[String: Any]],
+           let first = list.first(where: matches) {
+            return first
+        }
+        return nil
+    }
+
+    /// Parent tapped an option on an app-control card. Route per the option's
+    /// deterministic action (force-confirmation resend / lazy-tag / rename).
+    @MainActor
+    func handleAppControlOption(_ option: AppControlCardOption) {
+        guard let card = currentAppControlCard else { return }
+        let action = AppControlRouter.route(option: option, card: card)
+        applyAppControlAction(action, card: card)
+    }
+
+    /// Parent tapped a disambiguation candidate row.
+    @MainActor
+    func handleAppControlCandidate(_ candidate: AppControlCandidate) {
+        guard let card = currentAppControlCard else { return }
+        let action = AppControlRouter.route(candidate: candidate, card: card)
+        applyAppControlAction(action, card: card)
+    }
+
+    /// Dismiss the app-control card without acting.
+    @MainActor
+    func dismissAppControlCard() {
+        currentAppControlCard = nil
+    }
+
+    @MainActor
+    private func applyAppControlAction(_ action: AppControlAction, card: AppControlCardModel) {
+        currentAppControlCard = nil
+        switch action {
+        case .resendForceConfirmations(let tokens):
+            // Re-dispatch the original parent message with the seam's tokens —
+            // identical mechanism to the Brain U1/A1/B1 resend.
+            let original = lastUserMessageForCard.isEmpty
+                ? (messages.reversed().first(where: { $0.role == .parent })?.content ?? "")
+                : lastUserMessageForCard
+            guard !original.isEmpty else { return }
+            isThinking = true
+            dispatchChat(userMessage: original, forceConfirmations: tokens)
+        case .resendPhrase(let phrase):
+            // Append a parent bubble for the disambiguated phrase, then dispatch.
+            resendWithPhrase(phrase)
+        case .openLazyTag(let target, let kind):
+            // Open the catalog-backed lazy-tag picker. Synthetic request token —
+            // there's no proposal/pendingAliasMiss behind an app-control card, so
+            // handleTagSelection's miss-sweep is a harmless no-op.
+            activeLazyTagRequest = LazyTagRequest(
+                proposalToken: "app-control:\(card.kind.rawValue)",
+                rowIndex: 0,
+                target: target,
+                kind: kind
+            )
+        case .renameList(let target):
+            // No chat endpoint renames a list — guide the parent to the kid
+            // device's Lock-setup, where list names live.
+            messages.append(ChatMessage(
+                role: .agent,
+                content: "“\(target)” clashes with a built-in category name. Rename that Saved List on the kid device (Settings → Evlin → Lock setup), then ask me again.",
+                timestamp: Date()
+            ))
+        case .none:
+            break
+        }
+    }
+
     // MARK: - U1 unlock-disambiguation
 
     enum U1Mode {
@@ -659,6 +809,14 @@ class ChatViewModel: ObservableObject {
 
         case .reflectionReview, .contentGenFailed:
             // Phase 2B placeholders — 2A backend never emits these.
+            currentCard = nil
+
+        case .singleAppShieldAdvice, .shieldTokenMissing, .appStoreDisambiguation,
+             .appNotFoundTerminal, .childDisambiguation, .categoryRenameRequired:
+            // Task 11 app-control cards are driven by currentAppControlCard +
+            // handleAppControlOption / handleAppControlCandidate, NOT by the Brain
+            // CardHandlers primary slot. This branch keeps the switch exhaustive;
+            // it should never fire.
             currentCard = nil
         }
     }
@@ -816,6 +974,17 @@ class ChatViewModel: ObservableObject {
                 self?.appendReceiptUnlockResult(result, requestedTarget: target)
             }
         }
+    }
+
+    /// Task 11 — "Block instead" on a receipt. Escalates the still-covered
+    /// target to a permanent bundle-id block by re-dispatching `block <X>`
+    /// through the existing chat pipeline (the same block route any "block X"
+    /// message takes). Produces a fresh receipt; creates NO new Brain card.
+    @MainActor
+    func requestBlock(_ target: ReceiptUnlockTarget) {
+        let name = target.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+        resendWithPhrase("block \(name)")
     }
 
     @MainActor

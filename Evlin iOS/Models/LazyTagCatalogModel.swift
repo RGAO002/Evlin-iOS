@@ -142,7 +142,9 @@ enum LazyTagCatalogModel {
     }
 
     private static func informMessage(for unresolvedName: String) -> String {
-        "\(unresolvedName) isn’t in your kid’s list yet. To lock it, add it on their phone, or try `block \(unresolvedName)`."
+        // Verbatim Task 11 empty-state copy (uses the actual unresolved phrase
+        // for X). Backticks wrap only the app phrase in the `block X` hint.
+        "\(unresolvedName) isn’t in your kid’s list yet. Add it on their phone, or try block `\(unresolvedName)`."
     }
 }
 
