@@ -231,4 +231,102 @@ final class APIClientCatalogDTOTests: XCTestCase {
         XCTAssertEqual(json["target_type"] as? String, "category")
         XCTAssertEqual(json["alias"] as? String, "gaming")
     }
+
+    // MARK: - Lock-setup catalog (Task 10)
+
+    func test_lockSetupCatalogDecodesThreeSectionsInOrder() throws {
+        let childID = UUID(uuidString: "99999999-8888-7777-6666-555555555555")!
+        let appID = UUID(uuidString: "11111111-1111-1111-1111-111111111111")!
+        let catID = UUID(uuidString: "22222222-2222-2222-2222-222222222222")!
+        let listID = UUID(uuidString: "33333333-3333-3333-3333-333333333333")!
+        let data = """
+        {
+          "child_device_id": "\(childID.uuidString)",
+          "sections": [
+            {
+              "type": "app",
+              "copy": "Installed apps your kid has shared.",
+              "targets": [
+                {
+                  "alias_key": "\(appID.uuidString)",
+                  "target_type": "app",
+                  "display_name": "Instagram",
+                  "binding_kind": "verified",
+                  "bundle_id": "com.burbn.instagram",
+                  "aliases": ["ig"],
+                  "token_available": true,
+                  "status": "active"
+                }
+              ]
+            },
+            {
+              "type": "category",
+              "copy": "Broad categories — current + future apps.",
+              "targets": [
+                {
+                  "alias_key": "\(catID.uuidString)",
+                  "target_type": "category",
+                  "display_name": "Games",
+                  "binding_kind": "manual",
+                  "bundle_id": null,
+                  "aliases": ["games"],
+                  "token_available": true,
+                  "status": "active"
+                }
+              ]
+            },
+            {
+              "type": "list",
+              "copy": "Saved lists your kid has shared.",
+              "targets": [
+                {
+                  "alias_key": "\(listID.uuidString)",
+                  "target_type": "list",
+                  "list_name": "After School",
+                  "aliases": ["fun"],
+                  "app_count": 3,
+                  "status": "active"
+                }
+              ]
+            }
+          ]
+        }
+        """.data(using: .utf8)!
+
+        let catalog = try JSONDecoder().decode(LockSetupCatalog.self, from: data)
+        XCTAssertEqual(catalog.childDeviceID, childID)
+        XCTAssertEqual(catalog.appTargets.map(\.displayName), ["Instagram"])
+        XCTAssertEqual(catalog.appTargets.first?.bundleID, "com.burbn.instagram")
+        XCTAssertEqual(catalog.appTargets.first?.isManual, false)
+        XCTAssertEqual(catalog.categoryTargets.map(\.displayName), ["Games"])
+        XCTAssertEqual(catalog.categoryTargets.first?.type, .category)
+        // List rows carry list_name + member count, not display_name/bundle.
+        XCTAssertEqual(catalog.listTargets.map(\.displayName), ["After School"])
+        XCTAssertEqual(catalog.listTargets.first?.memberCount, 3)
+        // allTargets flattens in app, category, list order.
+        XCTAssertEqual(catalog.allTargets.map(\.type), [.app, .category, .list])
+        XCTAssertEqual(catalog.categorySectionCopy, "Broad categories — current + future apps.")
+    }
+
+    func test_familyAppDTODecodesConfirmResponse() throws {
+        let id = UUID(uuidString: "44444444-4444-4444-4444-444444444444")!
+        let data = """
+        {
+          "id": "\(id.uuidString)",
+          "canonical_name": "Instagram",
+          "bundle_id": "com.burbn.instagram",
+          "artwork_url": "https://example.com/ig.png",
+          "aliases": ["ig", "insta"],
+          "confirmation_source": "catalog",
+          "confirmation_status": "confirmed"
+        }
+        """.data(using: .utf8)!
+
+        let dto = try JSONDecoder().decode(FamilyAppDTO.self, from: data)
+        XCTAssertEqual(dto.id, id)
+        XCTAssertEqual(dto.canonicalName, "Instagram")
+        XCTAssertEqual(dto.bundleID, "com.burbn.instagram")
+        XCTAssertEqual(dto.aliases, ["ig", "insta"])
+        XCTAssertTrue(dto.isConfirmed)
+    }
 }

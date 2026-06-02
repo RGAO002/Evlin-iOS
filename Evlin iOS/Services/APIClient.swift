@@ -728,6 +728,267 @@ struct LazyTagAliasMutationRequest: Codable, Sendable, Equatable {
     }
 }
 
+// MARK: - Lock-setup data flow (Task 10)
+//
+// The kid-side "Lock setup" surface and the parent picker share one catalog.
+// These DTOs and the six APIClient methods below map 1:1 onto REAL backend
+// routes (confirmed against app/api/routes/child_device.py + catalog.py):
+//
+//   fetchLockSetupCatalog     -> GET  /parent/lazy-tag-targets?child_device_id=
+//   uploadCapturedAppToken    -> POST /child/app-catalog        (token_kind=app)
+//   uploadCapturedCategoryToken -> POST /child/app-catalog      (token_kind=category)
+//   createControlList         -> POST /child/catalog-list       (alias_key omitted)
+//   updateControlList         -> POST /child/catalog-list       (alias_key set = upsert)
+//   confirmFamilyApp          -> POST /parent/app-dictionary/confirm
+//
+// NOTE (endpoint gap): the backend has no dedicated "update list" route. The
+// /child/catalog-list endpoint is an UPSERT keyed by alias_key (see
+// upload_child_catalog_list), so updateControlList reuses it with alias_key set
+// rather than inventing a PATCH route that does not exist.
+
+/// One target row in the Lock-setup / lazy-tag catalog (token-free, safe for any
+/// surface). Mirrors `LazyTagCatalogTarget` semantics; used by `LockSetupCatalog`.
+typealias LockSetupTarget = LazyTagCatalogTarget
+
+/// Three-section catalog returned by `GET /parent/lazy-tag-targets`. Sections
+/// arrive in fixed order (app, category, list) and each carries `copy` (human
+/// section text) plus token-free target rows.
+struct LockSetupCatalog: Decodable, Sendable, Equatable {
+    let childDeviceID: UUID
+    let appTargets: [LockSetupTarget]
+    let categoryTargets: [LockSetupTarget]
+    let listTargets: [LockSetupTarget]
+    let appSectionCopy: String?
+    let categorySectionCopy: String?
+    let listSectionCopy: String?
+
+    /// All targets flattened in section order — convenient for the parent picker
+    /// which renders one `LazyTagCatalogModel.sections(...)` feed.
+    var allTargets: [LockSetupTarget] {
+        appTargets + categoryTargets + listTargets
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case childDeviceID = "child_device_id"
+        case sections
+    }
+
+    // The section element is a tagged union on `type`. Each carries `copy` and a
+    // `targets` array whose row shape differs (app/category vs list), so decode
+    // each row leniently into a `LockSetupTarget`.
+    private struct SectionDTO: Decodable {
+        let type: LazyTagCatalogTargetType
+        let copy: String?
+        let targets: [RowDTO]
+    }
+
+    private struct RowDTO: Decodable {
+        let aliasKey: UUID
+        let targetType: LazyTagCatalogTargetType
+        let displayName: String
+        let aliases: [String]
+        let bundleID: String?
+        let bindingKind: String?
+        let appCount: Int?
+        let artworkURL: URL?
+
+        enum CodingKeys: String, CodingKey {
+            case aliasKey = "alias_key"
+            case targetType = "target_type"
+            case displayName = "display_name"
+            case listName = "list_name"
+            case aliases
+            case bundleID = "bundle_id"
+            case bindingKind = "binding_kind"
+            case appCount = "app_count"
+            case artworkURL = "artwork_url"
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            aliasKey = try c.decode(UUID.self, forKey: .aliasKey)
+            targetType = try c.decode(LazyTagCatalogTargetType.self, forKey: .targetType)
+            // App/category rows use display_name; list rows use list_name.
+            displayName = try c.decodeIfPresent(String.self, forKey: .displayName)
+                ?? c.decodeIfPresent(String.self, forKey: .listName)
+                ?? ""
+            aliases = try c.decodeIfPresent([String].self, forKey: .aliases) ?? []
+            bundleID = try c.decodeIfPresent(String.self, forKey: .bundleID)
+            bindingKind = try c.decodeIfPresent(String.self, forKey: .bindingKind)
+            appCount = try c.decodeIfPresent(Int.self, forKey: .appCount)
+            artworkURL = try c.decodeIfPresent(URL.self, forKey: .artworkURL)
+        }
+
+        var target: LockSetupTarget {
+            LockSetupTarget(
+                aliasKey: aliasKey,
+                type: targetType,
+                displayName: displayName,
+                aliases: aliases,
+                bundleID: bundleID,
+                artworkURL: artworkURL,
+                isManual: targetType == .app
+                    && (bindingKind?.caseInsensitiveCompare("manual") == .orderedSame
+                        || (bundleID?.isEmpty ?? true)),
+                memberCount: targetType == .list ? appCount : nil
+            )
+        }
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        childDeviceID = try c.decode(UUID.self, forKey: .childDeviceID)
+        let sections = try c.decodeIfPresent([SectionDTO].self, forKey: .sections) ?? []
+        func rows(_ type: LazyTagCatalogTargetType) -> [LockSetupTarget] {
+            sections.first { $0.type == type }?.targets.map(\.target) ?? []
+        }
+        func copy(_ type: LazyTagCatalogTargetType) -> String? {
+            sections.first { $0.type == type }?.copy
+        }
+        appTargets = rows(.app)
+        categoryTargets = rows(.category)
+        listTargets = rows(.list)
+        appSectionCopy = copy(.app)
+        categorySectionCopy = copy(.category)
+        listSectionCopy = copy(.list)
+    }
+}
+
+/// A captured app token ready to publish to the catalog. Either a verified
+/// (Family-Dictionary-confirmed) or manual (bundle-id) binding.
+struct CapturedAppToken: Sendable, Equatable {
+    let displayName: String
+    let bundleID: String?
+    let aliases: [String]
+    let tokenDataBase64: String?
+    /// "verified" once confirmed against the Family Dictionary, else "manual".
+    let bindingKind: String
+
+    init(
+        displayName: String,
+        bundleID: String?,
+        aliases: [String] = [],
+        tokenDataBase64: String?,
+        bindingKind: String = "manual"
+    ) {
+        self.displayName = displayName
+        self.bundleID = bundleID
+        self.aliases = aliases
+        self.tokenDataBase64 = tokenDataBase64
+        self.bindingKind = bindingKind
+    }
+}
+
+/// A captured Apple-category token ready to publish to the catalog.
+struct CapturedCategoryToken: Sendable, Equatable {
+    let displayName: String
+    /// Canonical semantic key (e.g. "games") plus any extra aliases.
+    let aliases: [String]
+    let tokenDataBase64: String?
+
+    init(displayName: String, aliases: [String] = [], tokenDataBase64: String?) {
+        self.displayName = displayName
+        self.aliases = aliases
+        self.tokenDataBase64 = tokenDataBase64
+    }
+}
+
+/// A saved control list — app + category members grouped under one name.
+struct ControlListInput: Sendable, Equatable {
+    /// Set on update (upsert); nil to create a fresh list.
+    let aliasKey: UUID?
+    let listName: String
+    let aliases: [String]
+    let members: [CatalogListMemberUpload]
+    /// Optional opaque selection bytes (legacy path). When members are present
+    /// the backend derives app_count from them and ignores this.
+    let selectionBlobBase64: String?
+
+    init(
+        aliasKey: UUID? = nil,
+        listName: String,
+        aliases: [String] = [],
+        members: [CatalogListMemberUpload],
+        selectionBlobBase64: String? = nil
+    ) {
+        self.aliasKey = aliasKey
+        self.listName = listName
+        self.aliases = aliases
+        self.members = members
+        self.selectionBlobBase64 = selectionBlobBase64
+    }
+}
+
+/// Result of a saved control-list upsert.
+struct ControlListDTO: Sendable, Equatable {
+    let aliasKey: UUID
+    let childDeviceID: UUID
+    let listName: String
+    let aliases: [String]
+    let appCount: Int
+
+    init(from response: CatalogListUploadResponse) {
+        aliasKey = response.aliasKey
+        childDeviceID = response.childDeviceID
+        listName = response.listName
+        aliases = response.aliases
+        appCount = response.appCount
+    }
+}
+
+/// Parent confirmation that an opaque app token is a specific real app, written
+/// to the Family App Dictionary (Task 3). Drives `appTargetIsSaveable`.
+struct FamilyAppConfirmation: Sendable, Equatable {
+    let familyID: UUID
+    let canonicalName: String
+    let bundleID: String
+    let artworkURL: URL?
+    let alias: String?
+    /// Provenance, e.g. "catalog", "manual", "parent".
+    let source: String
+
+    init(
+        familyID: UUID,
+        canonicalName: String,
+        bundleID: String,
+        artworkURL: URL? = nil,
+        alias: String? = nil,
+        source: String
+    ) {
+        self.familyID = familyID
+        self.canonicalName = canonicalName
+        self.bundleID = bundleID
+        self.artworkURL = artworkURL
+        self.alias = alias
+        self.source = source
+    }
+}
+
+/// A Family App Dictionary entry (response of `POST /parent/app-dictionary/confirm`).
+struct FamilyAppDTO: Codable, Sendable, Equatable {
+    let id: UUID
+    let canonicalName: String
+    let bundleID: String
+    let artworkURL: URL?
+    let aliases: [String]
+    let confirmationSource: String
+    let confirmationStatus: String
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case canonicalName = "canonical_name"
+        case bundleID = "bundle_id"
+        case artworkURL = "artwork_url"
+        case aliases
+        case confirmationSource = "confirmation_source"
+        case confirmationStatus = "confirmation_status"
+    }
+
+    var isConfirmed: Bool {
+        confirmationStatus.caseInsensitiveCompare("confirmed") == .orderedSame
+    }
+}
+
 extension APIClient {
     /// Child polls for queued commands.
     func pollCommands(deviceID: UUID) async throws -> [PollCommandDTO] {
@@ -967,6 +1228,177 @@ extension APIClient {
             throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
         }
         return try JSONDecoder().decode(CatalogListUploadResponse.self, from: data)
+    }
+
+    // MARK: - Lock setup (Task 10)
+
+    /// Fetch the three-section Lock-setup catalog (app/category/list) for a kid
+    /// device. Token-free — safe for the parent picker. Maps to
+    /// `GET /parent/lazy-tag-targets?child_device_id=`.
+    func fetchLockSetupCatalog(
+        familyID: UUID,
+        childDeviceID: UUID
+    ) async throws -> LockSetupCatalog {
+        // familyID is accepted for call-site symmetry with the other lock-setup
+        // methods and future scoping; the backend route keys off child_device_id.
+        var comps = URLComponents(string: "\(baseURL)/parent/lazy-tag-targets")!
+        comps.queryItems = [URLQueryItem(name: "child_device_id", value: childDeviceID.uuidString)]
+        let (data, resp) = try await URLSession.shared.data(from: comps.url!)
+        guard let http = resp as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+        return try JSONDecoder().decode(LockSetupCatalog.self, from: data)
+    }
+
+    /// Publish one captured app token to the catalog. Reuses the existing
+    /// `POST /child/app-catalog` upload (token_kind=app). Returns the saved
+    /// target with the backend-assigned alias_key.
+    ///
+    /// IMPORTANT (snapshot semantics): `/child/app-catalog` DELETES any catalog
+    /// row absent from the request body. Callers that manage a full local
+    /// catalog (e.g. the Lock-setup view) must send the COMPLETE snapshot via
+    /// `uploadChildAppCatalog`; this single-target helper is for flows that own
+    /// only one row. Prefer the existing capture/sync paths when a full snapshot
+    /// is required.
+    @discardableResult
+    func uploadCapturedAppToken(
+        _ app: CapturedAppToken,
+        deviceID: UUID
+    ) async throws -> LockSetupTarget {
+        let upload = ChildAppCatalogUploadApp(
+            displayName: app.displayName,
+            tokenKind: "app",
+            bundleID: app.bundleID,
+            aliases: app.aliases,
+            tokenAvailable: app.tokenDataBase64?.isEmpty == false,
+            tokenDataBase64: app.tokenDataBase64,
+            sourceDeviceID: deviceID
+        )
+        let response = try await uploadChildAppCatalog(deviceID: deviceID, apps: [upload])
+        let isManual = app.bindingKind.caseInsensitiveCompare("manual") == .orderedSame
+        let row = response.apps.first {
+            $0.displayName == app.displayName && ($0.tokenKind.lowercased() != "category")
+        } ?? response.apps.first
+        guard let row else { throw APIError.serverError(response.count == 0 ? 422 : 500) }
+        return LockSetupTarget(
+            aliasKey: row.id,
+            type: .app,
+            displayName: row.displayName,
+            aliases: row.aliases,
+            bundleID: row.bundleID,
+            isManual: isManual || (row.bundleID?.isEmpty ?? true)
+        )
+    }
+
+    /// Publish one captured Apple-category token to the catalog. Reuses
+    /// `POST /child/app-catalog` (token_kind=category). See the snapshot-
+    /// semantics caveat on `uploadCapturedAppToken`.
+    @discardableResult
+    func uploadCapturedCategoryToken(
+        _ category: CapturedCategoryToken,
+        deviceID: UUID
+    ) async throws -> LockSetupTarget {
+        let upload = ChildAppCatalogUploadApp(
+            displayName: category.displayName,
+            tokenKind: "category",
+            bundleID: nil,
+            aliases: category.aliases,
+            tokenAvailable: category.tokenDataBase64?.isEmpty == false,
+            tokenDataBase64: category.tokenDataBase64,
+            sourceDeviceID: deviceID
+        )
+        let response = try await uploadChildAppCatalog(deviceID: deviceID, apps: [upload])
+        let row = response.apps.first {
+            $0.displayName == category.displayName && $0.tokenKind.lowercased() == "category"
+        } ?? response.apps.first
+        guard let row else { throw APIError.serverError(response.count == 0 ? 422 : 500) }
+        return LockSetupTarget(
+            aliasKey: row.id,
+            type: .category,
+            displayName: row.displayName,
+            aliases: row.aliases,
+            bundleID: nil
+        )
+    }
+
+    /// Create a new saved control list (app + category members). Maps to
+    /// `POST /child/catalog-list` with alias_key omitted.
+    @discardableResult
+    func createControlList(
+        _ list: ControlListInput,
+        deviceID: UUID
+    ) async throws -> ControlListDTO {
+        let response = try await uploadCatalogList(
+            deviceID: deviceID,
+            aliasKey: nil,
+            sourceDeviceID: deviceID,
+            listName: list.listName,
+            aliases: list.aliases,
+            selectionBlobBase64: list.selectionBlobBase64,
+            appCount: list.members.count,
+            members: list.members
+        )
+        return ControlListDTO(from: response)
+    }
+
+    /// Update an existing saved control list. The backend has NO dedicated
+    /// list-update route — `POST /child/catalog-list` is an upsert keyed by
+    /// alias_key, so this sends alias_key to update in place. Requires
+    /// `list.aliasKey`; throws if absent (would otherwise create a duplicate).
+    @discardableResult
+    func updateControlList(
+        _ list: ControlListInput,
+        deviceID: UUID
+    ) async throws -> ControlListDTO {
+        guard let aliasKey = list.aliasKey else {
+            // Defensive: an "update" without an alias_key is a programmer error;
+            // do not silently create a second list.
+            throw APIError.serverError(400)
+        }
+        let response = try await uploadCatalogList(
+            deviceID: deviceID,
+            aliasKey: aliasKey,
+            sourceDeviceID: deviceID,
+            listName: list.listName,
+            aliases: list.aliases,
+            selectionBlobBase64: list.selectionBlobBase64,
+            appCount: list.members.count,
+            members: list.members
+        )
+        return ControlListDTO(from: response)
+    }
+
+    /// Confirm that an opaque app token is a specific real app, written to the
+    /// Family App Dictionary. Maps to `POST /parent/app-dictionary/confirm`.
+    /// A confirmed entry makes the matching app target saveable in Lock setup.
+    @discardableResult
+    func confirmFamilyApp(_ confirmation: FamilyAppConfirmation) async throws -> FamilyAppDTO {
+        let url = URL(string: "\(baseURL)/parent/app-dictionary/confirm")!
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 22
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        struct Body: Encodable {
+            let family_id: UUID
+            let canonical_name: String
+            let bundle_id: String
+            let artwork_url: URL?
+            let alias: String?
+            let source: String
+        }
+        req.httpBody = try JSONEncoder().encode(Body(
+            family_id: confirmation.familyID,
+            canonical_name: confirmation.canonicalName,
+            bundle_id: confirmation.bundleID,
+            artwork_url: confirmation.artworkURL,
+            alias: confirmation.alias,
+            source: confirmation.source
+        ))
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+        return try JSONDecoder().decode(FamilyAppDTO.self, from: data)
     }
 
     // MARK: - Saved list metadata

@@ -145,3 +145,113 @@ enum LazyTagCatalogModel {
         "\(unresolvedName) isn’t in your kid’s list yet. To lock it, add it on their phone, or try `block \(unresolvedName)`."
     }
 }
+
+// MARK: - Lock-setup save rules (Task 10, Step 3)
+
+/// Pure, UI-free save-rule logic for the kid-side "Lock setup" surface. These
+/// are split out of the view so they can be unit-tested in isolation
+/// (`LazyTagCatalogModelTests`). The four sections (Installed apps, Broad
+/// categories, Lists, Advanced shield tokens) each gate Save through one of
+/// these checks.
+enum LockSetupSaveRules {
+
+    /// Why a candidate list name is rejected. `.valid` means it may be saved.
+    enum ListNameValidation: Equatable {
+        case valid
+        case empty
+        /// Equals one of the canonical category keys (`games`, `social`, …).
+        /// A list named after a category would collide with category targets
+        /// when the parent locks "by name".
+        case reservedCategoryWord
+        /// Case-insensitively duplicates an existing list on this device.
+        case duplicate
+    }
+
+    /// Canonical category keys the backend / chat / `SemanticCategoryAliasSync`
+    /// emit. A saved list MUST NOT be named after one of these, or a parent's
+    /// "lock <name>" could ambiguously resolve to either the list or the broad
+    /// category. Kept in sync with `SemanticCategoryAliasSync.inferredSemanticKey`.
+    static let reservedCategoryWords: Set<String> = [
+        "games",
+        "social",
+        "entertainment",
+        "education",
+        "productivity",
+    ]
+
+    /// True when `name` (trimmed, lowercased) is a reserved category word.
+    static func isReservedCategoryWord(_ name: String) -> Bool {
+        reservedCategoryWords.contains(normalized(name))
+    }
+
+    /// Validate a candidate list name against emptiness, reserved category
+    /// words, and case-insensitive duplicates among `existingNames`.
+    static func validateListName(
+        _ name: String,
+        existingNames: [String]
+    ) -> ListNameValidation {
+        let clean = normalized(name)
+        guard !clean.isEmpty else { return .empty }
+        if reservedCategoryWords.contains(clean) { return .reservedCategoryWord }
+        if existingNames.contains(where: { normalized($0) == clean }) { return .duplicate }
+        return .valid
+    }
+
+    /// Convenience boolean wrapper around `validateListName`.
+    static func isValidListName(_ name: String, existingNames: [String]) -> Bool {
+        validateListName(name, existingNames: existingNames) == .valid
+    }
+
+    // MARK: App rows
+
+    /// An app row is "labeled" once it has a non-blank display name. Unlabeled
+    /// token rows must block Save until labeled or removed.
+    static func appRowIsLabeled(displayName: String) -> Bool {
+        !normalized(displayName).isEmpty
+    }
+
+    /// True if ANY app-token row is still unlabeled — Save is blocked while so.
+    static func hasUnlabeledAppRows(displayNames: [String]) -> Bool {
+        displayNames.contains { !appRowIsLabeled(displayName: $0) }
+    }
+
+    /// An app target is saveable only when it is labeled AND either confirmed
+    /// against the Family Dictionary (verified binding) OR given an explicit
+    /// manual bundle id. A bare token with no binding is not lockable by name.
+    static func appTargetIsSaveable(
+        displayName: String,
+        isFamilyDictionaryConfirmed: Bool,
+        manualBundleID: String?
+    ) -> Bool {
+        guard appRowIsLabeled(displayName: displayName) else { return false }
+        let hasManualBundle = !normalized(manualBundleID ?? "").isEmpty
+        return isFamilyDictionaryConfirmed || hasManualBundle
+    }
+
+    // MARK: Category rows
+
+    /// A category target is saveable only when its category token was captured.
+    static func categoryTargetIsSaveable(hasCategoryToken: Bool) -> Bool {
+        hasCategoryToken
+    }
+
+    // MARK: Lists
+
+    /// A list is saveable when its name validates and it has at least one
+    /// member (app and/or category members are both allowed).
+    static func listIsSaveable(
+        name: String,
+        existingNames: [String],
+        appMemberCount: Int,
+        categoryMemberCount: Int
+    ) -> Bool {
+        guard isValidListName(name, existingNames: existingNames) else { return false }
+        return (appMemberCount + categoryMemberCount) > 0
+    }
+
+    // MARK: Helpers
+
+    private static func normalized(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+}

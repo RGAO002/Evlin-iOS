@@ -242,7 +242,7 @@ struct HomeSettingsSheet: View {
                     Button {
                         showLockListGate = true
                     } label: {
-                        Label("Manage lock list", systemImage: "lock.rectangle.stack")
+                        Label("Lock setup", systemImage: "lock.rectangle.stack")
                     }
 
                     Button {

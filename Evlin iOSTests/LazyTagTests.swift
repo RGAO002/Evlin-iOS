@@ -79,6 +79,171 @@ final class LazyTagCatalogModelTests: XCTestCase {
         XCTAssertFalse(presentation.isInformOnly)
         XCTAssertNil(presentation.informMessage)
     }
+
+    // MARK: - Lock-setup save rules (Task 10, Step 3)
+
+    func test_reservedCategoryWords_includeCanonicalKeys() {
+        let reserved = LockSetupSaveRules.reservedCategoryWords
+        XCTAssertTrue(reserved.contains("games"))
+        XCTAssertTrue(reserved.contains("social"))
+        XCTAssertTrue(reserved.contains("entertainment"))
+        XCTAssertTrue(reserved.contains("education"))
+        XCTAssertTrue(reserved.contains("productivity"))
+    }
+
+    func test_isReservedCategoryWord_isCaseAndWhitespaceInsensitive() {
+        XCTAssertTrue(LockSetupSaveRules.isReservedCategoryWord("Games"))
+        XCTAssertTrue(LockSetupSaveRules.isReservedCategoryWord("  SOCIAL  "))
+        XCTAssertTrue(LockSetupSaveRules.isReservedCategoryWord("entertainment"))
+        XCTAssertFalse(LockSetupSaveRules.isReservedCategoryWord("Homework"))
+        XCTAssertFalse(LockSetupSaveRules.isReservedCategoryWord("after school"))
+    }
+
+    func test_validateListName_rejectsEmpty() {
+        XCTAssertEqual(LockSetupSaveRules.validateListName("", existingNames: []), .empty)
+        XCTAssertEqual(LockSetupSaveRules.validateListName("   ", existingNames: []), .empty)
+    }
+
+    func test_validateListName_rejectsReservedCategoryWord() {
+        XCTAssertEqual(
+            LockSetupSaveRules.validateListName("Games", existingNames: []),
+            .reservedCategoryWord
+        )
+        XCTAssertEqual(
+            LockSetupSaveRules.validateListName("  social  ", existingNames: []),
+            .reservedCategoryWord
+        )
+    }
+
+    func test_validateListName_rejectsDuplicateCaseInsensitively() {
+        XCTAssertEqual(
+            LockSetupSaveRules.validateListName("Homework", existingNames: ["homework"]),
+            .duplicate
+        )
+        XCTAssertEqual(
+            LockSetupSaveRules.validateListName("  Bedtime ", existingNames: ["BEDTIME"]),
+            .duplicate
+        )
+    }
+
+    func test_validateListName_acceptsCleanName() {
+        XCTAssertEqual(
+            LockSetupSaveRules.validateListName("After School", existingNames: ["homework"]),
+            .valid
+        )
+    }
+
+    func test_validateListName_isValidConvenienceMatchesValidCase() {
+        XCTAssertTrue(LockSetupSaveRules.isValidListName("After School", existingNames: []))
+        XCTAssertFalse(LockSetupSaveRules.isValidListName("games", existingNames: []))
+        XCTAssertFalse(LockSetupSaveRules.isValidListName("", existingNames: []))
+    }
+
+    func test_appRowIsLabeled_requiresNonEmptyDisplayName() {
+        XCTAssertFalse(LockSetupSaveRules.appRowIsLabeled(displayName: ""))
+        XCTAssertFalse(LockSetupSaveRules.appRowIsLabeled(displayName: "   "))
+        XCTAssertTrue(LockSetupSaveRules.appRowIsLabeled(displayName: "Instagram"))
+    }
+
+    func test_hasUnlabeledRows_detectsBlankNames() {
+        XCTAssertTrue(LockSetupSaveRules.hasUnlabeledAppRows(displayNames: ["Instagram", ""]))
+        XCTAssertTrue(LockSetupSaveRules.hasUnlabeledAppRows(displayNames: ["   "]))
+        XCTAssertFalse(LockSetupSaveRules.hasUnlabeledAppRows(displayNames: ["Instagram", "TikTok"]))
+        XCTAssertFalse(LockSetupSaveRules.hasUnlabeledAppRows(displayNames: []))
+    }
+
+    func test_appTargetIsSaveable_whenFamilyDictionaryConfirmed() {
+        XCTAssertTrue(
+            LockSetupSaveRules.appTargetIsSaveable(
+                displayName: "Instagram",
+                isFamilyDictionaryConfirmed: true,
+                manualBundleID: nil
+            )
+        )
+    }
+
+    func test_appTargetIsSaveable_whenExplicitManualBundleID() {
+        XCTAssertTrue(
+            LockSetupSaveRules.appTargetIsSaveable(
+                displayName: "Some App",
+                isFamilyDictionaryConfirmed: false,
+                manualBundleID: "com.example.app"
+            )
+        )
+    }
+
+    func test_appTargetNotSaveable_whenNeitherConfirmedNorManual() {
+        XCTAssertFalse(
+            LockSetupSaveRules.appTargetIsSaveable(
+                displayName: "Mystery App",
+                isFamilyDictionaryConfirmed: false,
+                manualBundleID: nil
+            )
+        )
+        XCTAssertFalse(
+            LockSetupSaveRules.appTargetIsSaveable(
+                displayName: "Mystery App",
+                isFamilyDictionaryConfirmed: false,
+                manualBundleID: "   "
+            )
+        )
+    }
+
+    func test_appTargetNotSaveable_whenUnlabeled() {
+        XCTAssertFalse(
+            LockSetupSaveRules.appTargetIsSaveable(
+                displayName: "",
+                isFamilyDictionaryConfirmed: true,
+                manualBundleID: "com.example.app"
+            )
+        )
+    }
+
+    func test_categoryTargetIsSaveable_requiresToken() {
+        XCTAssertTrue(LockSetupSaveRules.categoryTargetIsSaveable(hasCategoryToken: true))
+        XCTAssertFalse(LockSetupSaveRules.categoryTargetIsSaveable(hasCategoryToken: false))
+    }
+
+    func test_listIsSaveable_acceptsMixedAppAndCategoryMembers() {
+        XCTAssertTrue(
+            LockSetupSaveRules.listIsSaveable(
+                name: "After School",
+                existingNames: [],
+                appMemberCount: 2,
+                categoryMemberCount: 1
+            )
+        )
+        XCTAssertTrue(
+            LockSetupSaveRules.listIsSaveable(
+                name: "Just Categories",
+                existingNames: [],
+                appMemberCount: 0,
+                categoryMemberCount: 1
+            )
+        )
+    }
+
+    func test_listNotSaveable_whenNoMembers() {
+        XCTAssertFalse(
+            LockSetupSaveRules.listIsSaveable(
+                name: "Empty",
+                existingNames: [],
+                appMemberCount: 0,
+                categoryMemberCount: 0
+            )
+        )
+    }
+
+    func test_listNotSaveable_whenNameInvalid() {
+        XCTAssertFalse(
+            LockSetupSaveRules.listIsSaveable(
+                name: "games",
+                existingNames: [],
+                appMemberCount: 3,
+                categoryMemberCount: 0
+            )
+        )
+    }
 }
 
 final class LazyTagPersistenceTests: XCTestCase {

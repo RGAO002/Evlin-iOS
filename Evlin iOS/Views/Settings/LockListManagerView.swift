@@ -1,4 +1,5 @@
 import Combine
+import FamilyControls
 import SwiftUI
 
 struct LockListAppEntry: Identifiable, Equatable {
@@ -8,6 +9,28 @@ struct LockListAppEntry: Identifiable, Equatable {
 
     var id: String {
         ([label] + keys + [bundleID ?? ""]).joined(separator: "|")
+    }
+
+    /// "Verified" once the row carries a bundle id (catalog / Family-Dictionary
+    /// binding); "Manual" when it is a labeled token-only binding the parent
+    /// typed by hand. Drives the per-row badge in the Installed apps section.
+    var isVerified: Bool {
+        guard let bundleID else { return false }
+        return !bundleID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// A row is "labeled" when it has a human display name distinct from a bare
+    /// bundle id / token key. Unlabeled rows are surfaced in the Advanced shield
+    /// tokens section and block Save until labeled or removed.
+    var hasHumanLabel: Bool {
+        guard LockSetupSaveRules.appRowIsLabeled(displayName: label) else { return false }
+        let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        // A label that is just a bundle id (contains ".") or equals the row's
+        // own bundle id is not a human-friendly name.
+        if let bundleID, trimmed.caseInsensitiveCompare(bundleID) == .orderedSame {
+            return false
+        }
+        return !trimmed.contains(".")
     }
 }
 
@@ -32,30 +55,45 @@ protocol LockListStoreReading {
 extension LocalAliasStore: LockListStoreReading {}
 
 struct LockListManagerSnapshot: Equatable {
+    /// Apps with a usable human label (Installed apps section).
     let apps: [LockListAppEntry]
+    /// Token-only rows with no human label (Advanced shield tokens section).
+    let advancedTokens: [LockListAppEntry]
     let categories: [LockListCategoryEntry]
     let lists: [String]
 
     static func make(from store: any LockListStoreReading) -> LockListManagerSnapshot {
-        let apps = store.groupedApplicationAliases().map { entry in
+        let allApps = store.groupedApplicationAliases().map { entry in
             LockListAppEntry(
                 label: entry.label,
                 keys: entry.keys,
                 bundleID: entry.bundleID
             )
         }
+        let labeled = allApps
+            .filter { $0.hasHumanLabel }
+            .sorted { $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending }
+        let unlabeled = allApps
+            .filter { !$0.hasHumanLabel }
+            .sorted { $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending }
         let categories = store.allCategoryNames()
             .map(LockListCategoryEntry.init(name:))
             .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
         let lists = store.allListNames()
             .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
-        return LockListManagerSnapshot(apps: apps, categories: categories, lists: lists)
+        return LockListManagerSnapshot(
+            apps: labeled,
+            advancedTokens: unlabeled,
+            categories: categories,
+            lists: lists
+        )
     }
 }
 
 @MainActor
 final class LockListManagerModel: ObservableObject {
     @Published private(set) var apps: [LockListAppEntry] = []
+    @Published private(set) var advancedTokens: [LockListAppEntry] = []
     @Published private(set) var categories: [LockListCategoryEntry] = []
     @Published private(set) var lists: [String] = []
 
@@ -69,11 +107,22 @@ final class LockListManagerModel: ObservableObject {
         self.store = store
     }
 
+    /// Unlabeled token rows block Save (per spec). Surfaced so the view can warn.
+    var hasUnlabeledTokens: Bool { !advancedTokens.isEmpty }
+
     func reload() {
         let snapshot = LockListManagerSnapshot.make(from: store)
         apps = snapshot.apps
+        advancedTokens = snapshot.advancedTokens
         categories = snapshot.categories
         lists = snapshot.lists
+    }
+
+    /// Member count for a saved list — drives the "N targets" copy on list rows.
+    /// Reads the saved selection's app + category token counts from the store.
+    func listMemberCount(_ name: String) -> Int {
+        guard let selection = LocalAliasStore.shared.savedList(named: name) else { return 0 }
+        return selection.applicationTokens.count + selection.categoryTokens.count
     }
 }
 
@@ -91,6 +140,13 @@ struct LockListManagerView: View {
     @State private var didAutoSync = false
     @State private var showClearAllConfirm = false
 
+    private var hasAnything: Bool {
+        !model.apps.isEmpty
+            || !model.advancedTokens.isEmpty
+            || !model.categories.isEmpty
+            || !model.lists.isEmpty
+    }
+
     var body: some View {
         ScrollView {
             VStack(spacing: 18) {
@@ -98,10 +154,14 @@ struct LockListManagerView: View {
                 addActions
                 syncRow
 
+                if model.hasUnlabeledTokens {
+                    unlabeledWarningBanner
+                }
+
                 section(
-                    title: "Apps",
+                    title: "Installed apps",
                     count: model.apps.count,
-                    emptyText: "No apps saved yet. Tap “Add app” to capture one."
+                    emptyText: "No apps saved yet. Tap “Add app” to capture one from this device."
                 ) {
                     ForEach(Array(model.apps.enumerated()), id: \.element.id) { index, app in
                         if index > 0 { rowDivider }
@@ -110,9 +170,9 @@ struct LockListManagerView: View {
                 }
 
                 section(
-                    title: "Categories",
+                    title: "Broad categories",
                     count: model.categories.count,
-                    emptyText: "No broad categories saved yet. Use Add app to capture a category."
+                    emptyText: "No broad categories saved yet. Use “Add app” to capture an Apple category."
                 ) {
                     ForEach(Array(model.categories.enumerated()), id: \.element.id) { index, category in
                         if index > 0 { rowDivider }
@@ -121,13 +181,24 @@ struct LockListManagerView: View {
                 }
 
                 section(
-                    title: "Saved lists",
+                    title: "Lists",
                     count: model.lists.count,
-                    emptyText: "No saved lists yet. Group added apps and categories with “Create list”."
+                    emptyText: "No lists yet. Group added apps and categories with “Create list”."
                 ) {
                     ForEach(Array(model.lists.enumerated()), id: \.element) { index, list in
                         if index > 0 { rowDivider }
                         listRow(list)
+                    }
+                }
+
+                section(
+                    title: "Advanced shield tokens",
+                    count: model.advancedTokens.count,
+                    emptyText: "No raw shield tokens. Captured tokens appear here until you label them with a real app name."
+                ) {
+                    ForEach(Array(model.advancedTokens.enumerated()), id: \.element.id) { index, app in
+                        if index > 0 { rowDivider }
+                        advancedTokenRow(app)
                     }
                 }
             }
@@ -136,10 +207,10 @@ struct LockListManagerView: View {
             .padding(.bottom, 36)
         }
         .background(Color.evSurface.ignoresSafeArea())
-        .navigationTitle("Manage lock list")
+        .navigationTitle("Lock setup")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            if !model.apps.isEmpty || !model.categories.isEmpty || !model.lists.isEmpty {
+            if hasAnything {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button(role: .destructive) {
                         showClearAllConfirm = true
@@ -150,7 +221,7 @@ struct LockListManagerView: View {
             }
         }
         .confirmationDialog(
-            "Remove every app, category and list from this device’s lock list? This also clears them from Evlin. Nothing currently locked is affected.",
+            "Remove every app, category and list from this device’s lock setup? This also clears them from Evlin. Nothing currently locked is affected.",
             isPresented: $showClearAllConfirm,
             titleVisibility: .visible
         ) {
@@ -204,10 +275,10 @@ struct LockListManagerView: View {
             .frame(width: 46, height: 46)
 
             VStack(alignment: .leading, spacing: 4) {
-                Text("Lock list")
+                Text("Lock setup")
                     .font(.headline)
                     .foregroundStyle(Color.evOnSurface)
-                Text("The apps and saved lists Evlin can lock on this device. Editing here doesn’t change anything that’s locked right now.")
+                Text("The apps, categories and lists Evlin can lock on this device. Editing here doesn’t change anything that’s locked right now.")
                     .font(.subheadline)
                     .foregroundStyle(Color.evOnSurfaceVariant)
                     .fixedSize(horizontal: false, vertical: true)
@@ -216,6 +287,32 @@ struct LockListManagerView: View {
         }
         .padding(16)
         .lockListCard()
+    }
+
+    // MARK: - Unlabeled-token warning
+
+    private var unlabeledWarningBanner: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.subheadline)
+                .foregroundStyle(Color.evTertiary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("\(model.advancedTokens.count) unlabeled shield token\(model.advancedTokens.count == 1 ? "" : "s")")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Color.evOnSurface)
+                Text("Label them with a real app name, or remove them, so the parent can lock them by name. See “Advanced shield tokens” below.")
+                    .font(.caption)
+                    .foregroundStyle(Color.evOnSurfaceVariant)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(12)
+        .background(Color.evTertiaryContainer, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Color.evTertiaryFixedDim.opacity(0.75), lineWidth: 1)
+        }
     }
 
     // MARK: - Sync to backend
@@ -256,7 +353,9 @@ struct LockListManagerView: View {
         syncing = true
         defer { syncing = false }
         var uploads: [ChildAppCatalogUploadApp] = []
-        for app in model.apps {
+        // Push BOTH labeled apps and unlabeled tokens — the backend keeps the
+        // token-bearing row either way; labeling later just renames it.
+        for app in (model.apps + model.advancedTokens) {
             guard let key = app.keys.first,
                   let token = LocalAliasStore.shared.applicationToken(forLookupKey: key),
                   let blob = try? AppCatalogBlobEncoder.base64(token), !blob.isEmpty
@@ -392,7 +491,8 @@ struct LockListManagerView: View {
             NameWithIcon(name: app.label, kind: .app, titleFont: .body)
                 .foregroundStyle(Color.evOnSurface)
             Spacer(minLength: 8)
-            if let bundleID = app.bundleID {
+            bindingBadge(verified: app.isVerified)
+            if let bundleID = app.bundleID, !bundleID.isEmpty {
                 Text(bundleID)
                     .font(.caption2.monospaced())
                     .foregroundStyle(Color.evOnSurfaceVariant)
@@ -405,10 +505,40 @@ struct LockListManagerView: View {
         .padding(.vertical, 13)
     }
 
-    private func listRow(_ list: String) -> some View {
+    /// Raw token rows that have no human label yet. Block Save (warned above)
+    /// until the parent labels or removes them.
+    private func advancedTokenRow(_ app: LockListAppEntry) -> some View {
         HStack(spacing: 12) {
+            NameWithIcon(name: app.label, kind: .app, titleFont: .body)
+                .foregroundStyle(Color.evOnSurface)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Unlabeled shield token")
+                    .font(.caption2)
+                    .foregroundStyle(Color.evOnSurfaceVariant)
+            }
+            Spacer(minLength: 0)
+            Text("needs label")
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(Color.evTertiary)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Capsule().fill(Color.evTertiary.opacity(0.12)))
+            deleteButton { deleteApp(app) }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 13)
+    }
+
+    private func listRow(_ list: String) -> some View {
+        let memberCount = model.listMemberCount(list)
+        return HStack(spacing: 12) {
             NameWithIcon(name: list, kind: .savedList, titleFont: .body)
                 .foregroundStyle(Color.evOnSurface)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("\(memberCount) member\(memberCount == 1 ? "" : "s")")
+                    .font(.caption2)
+                    .foregroundStyle(Color.evOnSurfaceVariant)
+            }
             Spacer(minLength: 0)
             deleteButton { deleteList(list) }
         }
@@ -421,7 +551,7 @@ struct LockListManagerView: View {
             NameWithIcon(name: category.displayName, kind: .category, titleFont: .body)
                 .foregroundStyle(Color.evOnSurface)
             VStack(alignment: .leading, spacing: 2) {
-                Text("Current + future apps Apple classifies here")
+                Text("Current + future apps Apple classifies as \(category.displayName)")
                     .font(.caption2)
                     .foregroundStyle(Color.evOnSurfaceVariant)
                     .lineLimit(2)
@@ -439,6 +569,23 @@ struct LockListManagerView: View {
         .padding(.vertical, 13)
     }
 
+    /// Verified (catalog/Family-Dictionary) vs Manual (typed) binding badge.
+    private func bindingBadge(verified: Bool) -> some View {
+        let title = verified ? "Verified" : "Manual"
+        let tint = verified ? Color.evPrimary : Color.evOnSurfaceVariant
+        return HStack(spacing: 3) {
+            Image(systemName: verified ? "checkmark.seal.fill" : "pencil")
+                .font(.system(size: 9, weight: .bold))
+            Text(title)
+                .font(.caption2.weight(.bold))
+        }
+        .foregroundStyle(tint)
+        .padding(.horizontal, 7)
+        .padding(.vertical, 3)
+        .background(Capsule().fill(tint.opacity(0.10)))
+        .accessibilityLabel(verified ? "Verified binding" : "Manual binding")
+    }
+
     private func deleteButton(_ action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: "trash")
@@ -447,7 +594,7 @@ struct LockListManagerView: View {
                 .frame(width: 30, height: 30)
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Remove from lock list")
+        .accessibilityLabel("Remove from lock setup")
     }
 
     // MARK: - Delete / clear
