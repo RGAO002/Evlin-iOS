@@ -738,6 +738,22 @@ extension APIClient {
         return try JSONDecoder().decode([PollCommandDTO].self, from: data)
     }
 
+    /// Child uploads its APNs device token so the backend can send a
+    /// `content-available:1` silent push when a command is queued (Phase 5
+    /// L2 delivery). Idempotent on the backend — safe to call on every
+    /// `didRegisterForRemoteNotificationsWithDeviceToken`.
+    func registerAPNsToken(deviceID: UUID, token: String) async throws {
+        let url = URL(string: "\(baseURL)/child/register-apns")!
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONEncoder().encode(["device_id": deviceID.uuidString, "apns_token": token])
+        let (_, resp) = try await URLSession.shared.data(for: req)
+        guard (resp as? HTTPURLResponse)?.statusCode == 200 else {
+            throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+    }
+
     /// Child posts an ack for a command.
     func ack(commandID: UUID, status: String, detail: [String: Any]? = nil) async throws {
         let url = URL(string: "\(baseURL)/child/ack")!

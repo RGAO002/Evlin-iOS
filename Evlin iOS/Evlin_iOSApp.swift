@@ -1,8 +1,15 @@
 import SwiftUI
 import FamilyControls
+import UIKit
 
 @main
 struct Evlin_iOSApp: App {
+    /// Bridges UIKit's app-delegate callbacks into our SwiftUI lifecycle —
+    /// specifically APNs registration and silent (`content-available:1`)
+    /// remote-push delivery, which have no SwiftUI-native equivalent. See
+    /// `AppDelegate` below.
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+
     @StateObject private var apiClient = APIClient()
     @StateObject private var screenTimeManager = ScreenTimeManager.shared
 
@@ -91,5 +98,82 @@ struct Evlin_iOSApp: App {
             return
         }
         CommandPoller.shared.start(deviceID: deviceID, apiClient: apiClient)
+    }
+}
+
+/// UIKit app-delegate bridge for APNs.
+///
+/// SwiftUI's `App`/`ScenePhase` has no hook for remote-notification
+/// registration or silent-push delivery, so we attach a minimal
+/// `UIApplicationDelegate` via `@UIApplicationDelegateAdaptor`. Its only job
+/// is the L2 silent-push path (Phase 5):
+///   1. Register for remote notifications at launch.
+///   2. On success, hex-encode the device token and upload it to
+///      `POST /child/register-apns` for the current child device.
+///   3. On a background `content-available:1` push, run a one-shot
+///      `CommandPoller` poll so queued shield/block commands apply even when
+///      the app isn't foregrounded.
+///
+/// Note: real APNs on a physical device additionally needs the Push
+/// Notifications capability (the `aps-environment` entitlement) + a
+/// provisioning profile. That's a device-signing step; the code and the
+/// `UIBackgroundModes: remote-notification` Info.plist key compile and run on
+/// the simulator without it.
+final class AppDelegate: NSObject, UIApplicationDelegate {
+    /// Dedicated client for token upload. Reads the same persisted `serverURL`
+    /// as the app's `@StateObject` client, so it targets the same backend.
+    private let apiClient = APIClient()
+
+    func application(
+        _ application: UIApplication,
+        didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
+    ) -> Bool {
+        // Ask iOS for an APNs token. The result arrives asynchronously in
+        // didRegister.../didFailToRegister... below. Safe to call every
+        // launch; iOS coalesces and returns the cached token quickly.
+        UIApplication.shared.registerForRemoteNotifications()
+        return true
+    }
+
+    func application(
+        _ application: UIApplication,
+        didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data
+    ) {
+        let token = deviceToken.map { String(format: "%02x", $0) }.joined()
+        guard
+            let raw = UserDefaults.standard.string(forKey: CommandPoller.childDeviceIDDefaultsKey),
+            let deviceID = UUID(uuidString: raw)
+        else {
+            // Not paired as a child device yet — nothing to register. The
+            // token will be re-uploaded on the next launch after pairing.
+            return
+        }
+        Task {
+            do {
+                try await apiClient.registerAPNsToken(deviceID: deviceID, token: token)
+            } catch {
+                print("[AppDelegate] APNs token upload failed: \(error)")
+            }
+        }
+    }
+
+    func application(
+        _ application: UIApplication,
+        didFailToRegisterForRemoteNotificationsWithError error: Error
+    ) {
+        // Expected on the simulator (no real APNs) and when the Push
+        // Notifications capability/provisioning isn't configured. Log only.
+        print("[AppDelegate] APNs registration failed: \(error)")
+    }
+
+    func application(
+        _ application: UIApplication,
+        didReceiveRemoteNotification userInfo: [AnyHashable: Any],
+        fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void
+    ) {
+        Task { @MainActor in
+            await CommandPoller.shared.pollOnceForCurrentDevice()
+            completionHandler(.newData)
+        }
     }
 }

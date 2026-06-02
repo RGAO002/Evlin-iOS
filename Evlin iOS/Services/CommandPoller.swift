@@ -16,6 +16,33 @@ final class CommandPoller {
     private var currentDeviceID: UUID?
     private var currentAPIClient: APIClient?
 
+    /// UserDefaults key the whole app uses for the paired child device id.
+    /// Same store `@AppStorage("evlin.childDeviceID")` writes to (see
+    /// `Evlin_iOSApp.startPollerIfPaired` and `APIClient.sendChatMessage`).
+    static let childDeviceIDDefaultsKey = "evlin.childDeviceID"
+
+    // MARK: - Injectable seams (test-only hooks; production uses the defaults)
+
+    /// Resolves the current child device id. Production reads
+    /// `evlin.childDeviceID` from `UserDefaults.standard`; tests can swap this
+    /// to drive `pollOnceForCurrentDevice()` hermetically (no shared defaults).
+    var childDeviceIDProvider: () -> UUID? = {
+        UserDefaults.standard.string(forKey: CommandPoller.childDeviceIDDefaultsKey)
+            .flatMap(UUID.init(uuidString:))
+    }
+
+    /// Supplies the API client used by `pollOnceForCurrentDevice()` when the
+    /// poller hasn't been started with one (the common silent-push case: the
+    /// app may be woken in the background before the foreground poller ran).
+    /// Production builds a default `APIClient()`.
+    var oneShotAPIClientFactory: () -> APIClient = { APIClient() }
+
+    /// Test seam: when set, `pollOnceForCurrentDevice()` invokes this with the
+    /// resolved (deviceID, apiClient) INSTEAD of the real `pollOnce()` network
+    /// path, so a unit test can assert the wiring without hitting the network.
+    /// Nil in production → the real `pollOnce()` runs.
+    var oneShotPollOverride: ((UUID, APIClient) async -> Void)?
+
     /// Start polling for the given child device ID. Safe to call repeatedly.
     func start(deviceID: UUID, apiClient: APIClient) {
         stop()
@@ -55,6 +82,37 @@ final class CommandPoller {
         } catch {
             print("[CommandPoller] poll error: \(error)")
         }
+    }
+
+    /// One-shot poll for the current child device WITHOUT starting the timer.
+    ///
+    /// This is the silent-push entry point (Phase 5 L2 delivery): when the
+    /// backend sends a `content-available:1` push, the app delegate's
+    /// background remote-notification handler calls this to fetch + apply any
+    /// queued commands while the app is not foregrounded. Unlike `start()`,
+    /// it does not schedule a repeating `Timer` — it fires exactly once and
+    /// returns, which is what `application(_:didReceiveRemoteNotification:…)`
+    /// needs before calling its completion handler.
+    ///
+    /// Device id comes from `evlin.childDeviceID` (the same source the
+    /// foreground poller uses). If no child is paired, this is a safe no-op.
+    /// It reuses the existing `pollOnce()` fetch+apply+ack path; if the
+    /// foreground poller is already running with a client, that client is
+    /// reused, otherwise a default `APIClient` is constructed.
+    func pollOnceForCurrentDevice() async {
+        guard let deviceID = childDeviceIDProvider() else { return }
+        let api = currentAPIClient ?? oneShotAPIClientFactory()
+
+        if let override = oneShotPollOverride {
+            await override(deviceID, api)
+            return
+        }
+
+        // Point the shared poll state at this device/client and run the
+        // existing one-shot path. We do NOT touch the timer here.
+        currentDeviceID = deviceID
+        currentAPIClient = api
+        await pollOnce()
     }
 
     static func lockCommand(from poll: PollCommandDTO) -> LockCommand {
