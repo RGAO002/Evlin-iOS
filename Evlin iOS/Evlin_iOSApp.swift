@@ -120,6 +120,12 @@ struct Evlin_iOSApp: App {
 /// `UIBackgroundModes: remote-notification` Info.plist key compile and run on
 /// the simulator without it.
 final class AppDelegate: NSObject, UIApplicationDelegate {
+    /// UserDefaults key for the most-recent hex-encoded APNs device token.
+    /// Cached unconditionally on `didRegister...` so a token that arrives
+    /// before pairing isn't lost — `uploadCachedAPNsTokenIfPossible()` (and
+    /// the pairing hook in ContentView) replay it once `childDeviceID` exists.
+    static let apnsDeviceTokenDefaultsKey = "evlin.apnsDeviceToken"
+
     /// Dedicated client for token upload. Reads the same persisted `serverURL`
     /// as the app's `@StateObject` client, so it targets the same backend.
     private let apiClient = APIClient()
@@ -140,21 +146,57 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data
     ) {
         let token = deviceToken.map { String(format: "%02x", $0) }.joined()
-        guard
-            let raw = UserDefaults.standard.string(forKey: CommandPoller.childDeviceIDDefaultsKey),
-            let deviceID = UUID(uuidString: raw)
-        else {
-            // Not paired as a child device yet — nothing to register. The
-            // token will be re-uploaded on the next launch after pairing.
+        // ALWAYS cache the token first. APNs can deliver the token before the
+        // device has paired as a child (no `childDeviceID` yet); caching means
+        // the pairing hook (ContentView.onChange(of: pairedChildID)) can upload
+        // it the moment pairing completes — no relaunch required.
+        UserDefaults.standard.set(token, forKey: Self.apnsDeviceTokenDefaultsKey)
+        AppDelegate.uploadCachedAPNsTokenIfPossible(using: apiClient)
+    }
+
+    /// Upload the cached APNs token for the current child device, but only if
+    /// BOTH a cached token and a paired `childDeviceID` exist. Idempotent —
+    /// `registerAPNsToken` is safe to call repeatedly (POST upsert), so this is
+    /// fine to invoke on every `didRegister...` and on every pairing change.
+    ///
+    /// The pure decision (are both present and valid?) lives in
+    /// `shouldUploadAPNsToken(cachedToken:childDeviceID:)` so it's unit-testable
+    /// without UIKit, mirroring how `AppControlRouter` isolates routing logic.
+    static func uploadCachedAPNsTokenIfPossible(using apiClient: APIClient) {
+        let cached = UserDefaults.standard.string(forKey: apnsDeviceTokenDefaultsKey)
+        let childID = UserDefaults.standard.string(forKey: CommandPoller.childDeviceIDDefaultsKey)
+        guard let upload = shouldUploadAPNsToken(cachedToken: cached, childDeviceID: childID) else {
             return
         }
         Task {
             do {
-                try await apiClient.registerAPNsToken(deviceID: deviceID, token: token)
+                try await apiClient.registerAPNsToken(deviceID: upload.deviceID, token: upload.token)
             } catch {
                 print("[AppDelegate] APNs token upload failed: \(error)")
             }
         }
+    }
+
+    /// Pure decision: should the cached APNs token be uploaded, and with what
+    /// args? Returns the `(deviceID, token)` to upload only when BOTH a
+    /// non-empty token and a parseable `childDeviceID` UUID are present; nil
+    /// otherwise (not paired yet, or no token cached). Extracted as a pure
+    /// function — no UIKit, no UserDefaults — so it's unit-testable in
+    /// isolation, mirroring how `AppControlRouter` isolates routing logic.
+    static func shouldUploadAPNsToken(
+        cachedToken: String?,
+        childDeviceID: String?
+    ) -> (deviceID: UUID, token: String)? {
+        guard
+            let token = cachedToken,
+            !token.isEmpty,
+            let raw = childDeviceID,
+            !raw.isEmpty,
+            let deviceID = UUID(uuidString: raw)
+        else {
+            return nil
+        }
+        return (deviceID: deviceID, token: token)
     }
 
     func application(
