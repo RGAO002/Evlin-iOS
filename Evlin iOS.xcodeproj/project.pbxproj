@@ -518,7 +518,7 @@
 				CLANG_ENABLE_OBJC_WEAK = NO;
 				CODE_SIGN_ENTITLEMENTS = EvlinShieldConfig/EvlinShieldConfig.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 5;
 				DEVELOPMENT_TEAM = D9FM36P37F;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = EvlinShieldConfig/Info.plist;
@@ -545,7 +545,7 @@
 				CLANG_ENABLE_OBJC_WEAK = NO;
 				CODE_SIGN_ENTITLEMENTS = EvlinShieldConfig/EvlinShieldConfig.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 5;
 				DEVELOPMENT_TEAM = D9FM36P37F;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = EvlinShieldConfig/Info.plist;
