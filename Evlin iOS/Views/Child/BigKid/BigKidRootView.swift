@@ -84,7 +84,7 @@ struct BigKidRootView: View {
                             )
                         },
                         onTaskTap: { _ in },
-                        onNudgeParent: {},
+                        onNudgeParent: { nudgeParent() },
                         onRefresh: { await poller.refreshNow() }
                     )
                     .navigationDestination(for: ReflectionNav.self) { dest in
@@ -97,21 +97,7 @@ struct BigKidRootView: View {
                         subState: .b,
                         onStartReflection: {},
                         onTaskTap: { task in taskNav = task },
-                        onNudgeParent: {
-                            Task {
-                                guard let rid = state.reflectionRequest?.id else { return }
-                                // Optimistic local cooldown — flip the button
-                                // into "Just sent — try again in m:ss" the
-                                // moment it's pressed. Server's authoritative
-                                // endsAt overwrites if the response lands.
-                                state.notifyParentCooldownEndsAt =
-                                    Date().addingTimeInterval(5 * 60)
-                                if let outcome = try? await client.reflectionNudge(rid: rid) {
-                                    state.notifyParentCooldownEndsAt = outcome.endsAt
-                                }
-                                await poller.refreshNow()
-                            }
-                        },
+                        onNudgeParent: { nudgeParent() },
                         onRefresh: { await poller.refreshNow() }
                     )
                     .navigationDestination(for: ReflectionNav.self) { dest in
@@ -299,6 +285,21 @@ struct BigKidRootView: View {
     /// scenario mode, whether the poller is even running). The next live
     /// `state` snapshot from the poller will overwrite this with the
     /// authoritative server value.
+    /// Ping the parent for the current reflection. Shared by the locked
+    /// state-A "I'm stuck" affordance and the state-B "nudge to approve"
+    /// button. Optimistically arms the 5-min cooldown for instant feedback;
+    /// the server's authoritative endsAt overwrites when the response lands.
+    private func nudgeParent() {
+        Task {
+            guard let rid = state.reflectionRequest?.id else { return }
+            state.notifyParentCooldownEndsAt = Date().addingTimeInterval(5 * 60)
+            if let outcome = try? await client.reflectionNudge(rid: rid) {
+                state.notifyParentCooldownEndsAt = outcome.endsAt
+            }
+            await poller.refreshNow()
+        }
+    }
+
     private func applyLocalStepCompletion(_ step: BigKidReflectionStep) {
         guard let req = state.reflectionRequest else { return }
         guard !req.stepsCompleted.contains(step) else { return }

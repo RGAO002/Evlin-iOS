@@ -143,9 +143,7 @@ struct BigKidHomeReflectionView: View {
                     title: redoNote != nil ? "Rework Essay" : "Start Reflection",
                     action: onStartReflection
                 )
-                Button("Tell your parent you're stuck", action: onNudgeParent)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                stuckButton
             }
         case .b:
             nudgeButton
@@ -167,6 +165,23 @@ struct BigKidHomeReflectionView: View {
             .background(EvlinKidColors.Reflection.buttonBg, in: RoundedRectangle(cornerRadius: 14))
         }
         .buttonStyle(.plain)
+    }
+
+    /// State-A "I'm stuck" affordance. While all apps are shielded the kid
+    /// can't text/call, so this pings the parent (same nudge mechanism as
+    /// State B). Flips to a confirmation once the cooldown is armed, so the
+    /// tap has visible feedback instead of looking dead.
+    @ViewBuilder
+    private var stuckButton: some View {
+        if let endsAt = state.notifyParentCooldownEndsAt, endsAt > Date() {
+            Text("Sent — your parent has been notified")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+        } else {
+            Button("Tell your parent you're stuck", action: onNudgeParent)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+        }
     }
 
     @ViewBuilder
