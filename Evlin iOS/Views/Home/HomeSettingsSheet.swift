@@ -458,6 +458,25 @@ struct HomeSettingsSheet: View {
                         .foregroundStyle(.secondary)
                 }
 
+                // Diagnostic: did the reflection-lockdown DAM auto-removal fail to
+                // schedule? The ReflectionLockApplier records the error here instead
+                // of swallowing it — a failed schedule means no OS timer, so the
+                // lock could outlive its lease.
+                Section {
+                    let failure = UserDefaults(suiteName: "group.com.evlin.ios")?
+                        .string(forKey: "evlin.reflectionLockScheduleFailure") ?? "none"
+                    Text(failure)
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(failure == "none" ? Color.evOnSurface : Color.red)
+                        .textSelection(.enabled)
+                } header: {
+                    Text("Reflection lock schedule")
+                } footer: {
+                    Text("'none' is healthy. A line here means the reflection lock's auto-removal failed to schedule — copy it and tell us.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+
                 // Diagnostic: did the DeviceActivityMonitor extension actually
                 // fire when the interval ended? Written by the extension itself
                 // (see EvlinDeviceActivityMonitor). If the schedule says ok but

@@ -24,6 +24,12 @@ final class BigKidStatePoller: ObservableObject {
     private var task: Task<Void, Never>?
     private var invalidationObserver: NSObjectProtocol?
 
+    /// Reflection Lockdown glue. Runs after each state apply: reconciles the
+    /// dedicated reflection ShieldRecord against the snapshot, schedules its
+    /// DAM auto-removal, and records (never swallows) a schedule failure.
+    private let reflectionLockApplier = ReflectionLockApplier(
+        scheduler: LockScheduler(activityScheduler: DeviceActivityCenterScheduler()))
+
     /// Polling cadence. 20s is short enough that a kid sees a reflection
     /// landing within "a few seconds" without explicit triggering, while
     /// still being polite to the backend. The notification path covers
@@ -80,6 +86,10 @@ final class BigKidStatePoller: ObservableObject {
         do {
             let snapshot = try await client.fetchState()
             state.apply(snapshot)
+            if let raw = UserDefaults.standard.string(forKey: CommandPoller.childDeviceIDDefaultsKey),
+               let childID = UUID(uuidString: raw) {
+                await reflectionLockApplier.reconcile(snapshot: snapshot, childID: childID)
+            }
             lastFetchedAt = Date()
             lastError = nil
         } catch {

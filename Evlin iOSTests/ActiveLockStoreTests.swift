@@ -225,7 +225,45 @@ final class ActiveLockStoreTests: XCTestCase {
         XCTAssertEqual(after[0].bundleID, live.bundleID)
     }
 
+    // MARK: - Reflection lock coexistence (dedicated-key design)
+
+    func test_reflection_all_record_coexists_and_removes_independently_of_parent_all() async {
+        let store = ActiveLockStore()
+        let parentAll = Self.makeAllRecord(recordKey: "all", minutes: nil)               // permanent parent all-lock
+        let rid = UUID()
+        let reflectionAll = Self.makeAllRecord(recordKey: "all:reflection:\(rid)", minutes: 20)
+        _ = await store.addShield(parentAll)
+        _ = await store.addShield(reflectionAll)
+        let bothCount = await store.allCurrent().shields.count
+        XCTAssertEqual(bothCount, 2)   // both coexist
+        _ = await store.removeShield(recordKey: "all:reflection:\(rid)")
+        let remaining = await store.allCurrent().shields
+        XCTAssertEqual(remaining.count, 1)
+        XCTAssertEqual(remaining[0].recordKey, "all")               // parent all-lock survives
+    }
+
     // MARK: - Helpers
+
+    private static func makeAllRecord(
+        recordKey: String,
+        minutes: Int?
+    ) -> ShieldRecord {
+        ShieldRecord(
+            recordKey: recordKey,
+            tier: .all,
+            targetKey: "all",
+            displayName: "All",
+            lastCommandID: UUID(),
+            appTokens: [],
+            categoryTokens: [],
+            webDomainTokens: [],
+            appliesToAll: true,
+            issuedAt: Date(),
+            expiresAt: minutes.map { Date().addingTimeInterval(TimeInterval($0 * 60)) },
+            originalRequest: "test",
+            targetChildID: UUID()
+        )
+    }
 
     private static func makeTimedShield(
         displayName: String,
