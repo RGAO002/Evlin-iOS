@@ -138,10 +138,15 @@ struct BigKidHomeReflectionView: View {
     private var ctaButton: some View {
         switch subState {
         case .a:
-            startButton(
-                title: redoNote != nil ? "Rework Essay" : "Start Reflection",
-                action: onStartReflection
-            )
+            VStack(spacing: 12) {
+                startButton(
+                    title: redoNote != nil ? "Rework Essay" : "Start Reflection",
+                    action: onStartReflection
+                )
+                Button("Tell your parent you're stuck", action: onNudgeParent)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
         case .b:
             nudgeButton
         }
