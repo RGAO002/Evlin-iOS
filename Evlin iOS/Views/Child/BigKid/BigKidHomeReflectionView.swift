@@ -277,7 +277,8 @@ private struct CooldownLabel: View {
         tasks: [.fixture(status: .todo)],
         reflectionRequest: .fixture(status: .submitted, stepsCompleted: [.video, .quiz, .writing]),
         notifyParentCooldownEndsAt: Date().addingTimeInterval(3 * 60 + 14),
-        dailyCompleteAcknowledged: false, screenTimeFinishedAcknowledged: false
+        dailyCompleteAcknowledged: false, screenTimeFinishedAcknowledged: false,
+        lastResolvedReflection: nil
     )
     return BigKidHomeReflectionView(
         subState: .b,

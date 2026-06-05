@@ -68,7 +68,8 @@ final class BigKidModelsTests: XCTestCase {
             reflectionRequest: nil,
             notifyParentCooldownEndsAt: nil,
             dailyCompleteAcknowledged: false,
-            screenTimeFinishedAcknowledged: false
+            screenTimeFinishedAcknowledged: false,
+            lastResolvedReflection: nil
         )
         let state = BigKidState(snapshot: snapshot)
         XCTAssertTrue(state.allTasksDone)
@@ -92,7 +93,8 @@ final class BigKidModelsTests: XCTestCase {
             submittedAt: nil,
             approvedAt: nil,
             parentRedoNote: nil,
-            lastNudgeAt: nil
+            lastNudgeAt: nil,
+            reflectionLockCapExpiresAt: nil
         )
         let title = ReflectionVideoDisplay.cardTitle(for: r)
         XCTAssertFalse(title.lowercased().contains("brain"))
@@ -117,7 +119,8 @@ final class BigKidModelsTests: XCTestCase {
             submittedAt: nil,
             approvedAt: nil,
             parentRedoNote: nil,
-            lastNudgeAt: nil
+            lastNudgeAt: nil,
+            reflectionLockCapExpiresAt: nil
         )
         XCTAssertEqual(
             ReflectionVideoDisplay.cardTitle(for: r),
@@ -143,8 +146,31 @@ final class BigKidModelsTests: XCTestCase {
             submittedAt: nil,
             approvedAt: nil,
             parentRedoNote: nil,
-            lastNudgeAt: nil
+            lastNudgeAt: nil,
+            reflectionLockCapExpiresAt: nil
         )
         XCTAssertEqual(ReflectionVideoDisplay.cardTitle(for: r), "Authentic server title")
+    }
+
+    func testDecodesReflectionLockCapAndLastResolved() throws {
+        let json = """
+        { "child_name":"Liam","minutes_left":0,"minutes_max":120,"tasks":[],
+          "reflection_request": null,
+          "notify_parent_cooldown_ends_at": null,
+          "daily_complete_acknowledged": false,
+          "screen_time_finished_acknowledged": false,
+          "last_resolved_reflection": { "rid": "11111111-1111-1111-1111-111111111111", "resolution": "cancelled" }
+        }
+        """.data(using: .utf8)!
+        let resp = try JSONDecoder.bigKid.decode(ChildStateResponse.self, from: json)
+        XCTAssertEqual(resp.lastResolvedReflection?.resolution, .cancelled)
+        XCTAssertEqual(resp.lastResolvedReflection?.rid,
+                       UUID(uuidString: "11111111-1111-1111-1111-111111111111"))
+    }
+
+    func testReflectionRequestBackwardCompatNoCapField() throws {
+        // Older snapshot without the cap field must still decode (nil).
+        let req = ReflectionRequest.fixture()
+        XCTAssertNil(req.reflectionLockCapExpiresAt)
     }
 }

@@ -115,6 +115,12 @@ struct ReflectionRequestForParent: Codable, Equatable, Sendable, Identifiable {
     let lastNudgeAt: Date?
 }
 
+struct ResolvedReflection: Codable, Equatable, Sendable {
+    let rid: UUID
+    let resolution: Resolution
+    enum Resolution: String, Codable, Equatable, Sendable { case approved, cancelled }
+}
+
 struct ReflectionRequest: Codable, Equatable, Sendable, Identifiable {
     let id: UUID
     let reason: String
@@ -144,6 +150,9 @@ struct ReflectionRequest: Codable, Equatable, Sendable, Identifiable {
     /// Timestamp of the kid's most recent "Give them a nudge" tap.
     /// Drives the parent's nudge-notification injection.
     let lastNudgeAt: Date?
+    /// Reflection Lockdown hard-cap (= trigger + 2h), server-set. nil on older
+    /// snapshots → reconciler falls back to a device-local cap.
+    let reflectionLockCapExpiresAt: Date?
 }
 
 struct ChildStateResponse: Codable, Equatable, Sendable {
@@ -155,6 +164,7 @@ struct ChildStateResponse: Codable, Equatable, Sendable {
     let notifyParentCooldownEndsAt: Date?
     let dailyCompleteAcknowledged: Bool
     let screenTimeFinishedAcknowledged: Bool
+    let lastResolvedReflection: ResolvedReflection?
 }
 
 // MARK: - Decoder configuration
@@ -298,7 +308,7 @@ extension ReflectionRequest {
             quiz: ReflectionRequest.defaultFixtureQuiz,
             stepsCompleted: stepsCompleted, quizScore: nil, essayText: nil,
             status: status, parentNote: nil, submittedAt: nil, approvedAt: nil,
-            parentRedoNote: nil, lastNudgeAt: nil
+            parentRedoNote: nil, lastNudgeAt: nil, reflectionLockCapExpiresAt: nil
         )
     }
 }
@@ -349,7 +359,8 @@ extension ChildStateResponse {
             tasks: tasks, reflectionRequest: reflection,
             notifyParentCooldownEndsAt: nil,
             dailyCompleteAcknowledged: dailyAck,
-            screenTimeFinishedAcknowledged: timeAck
+            screenTimeFinishedAcknowledged: timeAck,
+            lastResolvedReflection: nil
         )
     }
 }

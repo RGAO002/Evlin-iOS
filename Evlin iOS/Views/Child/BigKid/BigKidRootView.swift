@@ -29,7 +29,8 @@ struct BigKidRootView: View {
             tasks: [], reflectionRequest: nil,
             notifyParentCooldownEndsAt: nil,
             dailyCompleteAcknowledged: false,
-            screenTimeFinishedAcknowledged: false
+            screenTimeFinishedAcknowledged: false,
+            lastResolvedReflection: nil
         ))
         let poller = BigKidStatePoller(client: client, state: initialState)
         _client = StateObject(wrappedValue: client)
@@ -310,7 +311,8 @@ struct BigKidRootView: View {
             quizScore: req.quizScore, essayText: req.essayText,
             status: req.status, parentNote: req.parentNote,
             submittedAt: req.submittedAt, approvedAt: req.approvedAt,
-            parentRedoNote: req.parentRedoNote, lastNudgeAt: req.lastNudgeAt
+            parentRedoNote: req.parentRedoNote, lastNudgeAt: req.lastNudgeAt,
+            reflectionLockCapExpiresAt: req.reflectionLockCapExpiresAt
         )
         state.reflectionRequest = merged
     }

@@ -102,7 +102,8 @@ private func _previewRequest() -> ReflectionRequest {
         status: .approved,
         parentNote: "Thanks for being honest. Proud of you.",
         submittedAt: Date(), approvedAt: Date(),
-        parentRedoNote: nil, lastNudgeAt: nil
+        parentRedoNote: nil, lastNudgeAt: nil,
+        reflectionLockCapExpiresAt: nil
     )
 }
 
