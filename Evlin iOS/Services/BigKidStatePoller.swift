@@ -19,6 +19,11 @@ final class BigKidStatePoller: ObservableObject {
     @Published var lastError: String?
     @Published var lastFetchedAt: Date?
 
+    /// Plan 8 (§15.3): set once the kid's family was deleted (terminal
+    /// `410 family_removed`). After this the loop stops and the poller is inert
+    /// — a deleted family must never keep polling or re-arm a lock.
+    @Published private(set) var familyRemoved = false
+
     private let client: BigKidAPIClient
     private let state: BigKidState
     private var task: Task<Void, Never>?
@@ -76,8 +81,9 @@ final class BigKidStatePoller: ObservableObject {
     }
 
     private func runLoop() async {
-        while !Task.isCancelled {
+        while !Task.isCancelled && !familyRemoved {
             await fetchOnce()
+            if familyRemoved { break }
             try? await Task.sleep(nanoseconds: Self.pollIntervalNanoseconds)
         }
     }
@@ -93,6 +99,18 @@ final class BigKidStatePoller: ObservableObject {
             lastFetchedAt = Date()
             lastError = nil
         } catch {
+            // Plan 8 (§15.3): a terminal `410 family_removed` means this kid's
+            // family was deleted. FAIL OPEN — release every Evlin shield/block,
+            // clear the reflection sticky + reset pairing — then stop the loop so
+            // a deleted family can never brick the kid in a permanent lock.
+            if FamilyGoneDetector.isFamilyGone(error: error) {
+                print("[BigKidStatePoller] family_removed → failing open")
+                familyRemoved = true
+                await FamilyGoneDetector.failOpen()
+                lastError = nil
+                stop()
+                return
+            }
             print("[BigKidStatePoller] fetchState failed: \(error)")
             lastError = Self.userFacingMessage(for: error)
         }

@@ -153,6 +153,14 @@ struct ReflectionRequest: Codable, Equatable, Sendable, Identifiable {
     /// Reflection Lockdown hard-cap (= trigger + 2h), server-set. nil on older
     /// snapshots → reconciler falls back to a device-local cap.
     let reflectionLockCapExpiresAt: Date?
+    /// §8.1 honest payoff (Plan 7): set ONCE when the kid device first applies
+    /// the all-apps reflection lock and posts it via
+    /// `POST /child/reflection/{rid}/lock-applied`. The parent first-actions
+    /// payoff poll reads this off `/parent/state/{child_id}` as the truthful
+    /// "kid applied the lock" signal. nil until the kid confirms application.
+    /// Decodes from the backend `lock_applied_at` (snake→camel via
+    /// `JSONDecoder.bigKid`).
+    let lockAppliedAt: Date?
 }
 
 struct ChildStateResponse: Codable, Equatable, Sendable {
@@ -308,7 +316,8 @@ extension ReflectionRequest {
             quiz: ReflectionRequest.defaultFixtureQuiz,
             stepsCompleted: stepsCompleted, quizScore: nil, essayText: nil,
             status: status, parentNote: nil, submittedAt: nil, approvedAt: nil,
-            parentRedoNote: nil, lastNudgeAt: nil, reflectionLockCapExpiresAt: nil
+            parentRedoNote: nil, lastNudgeAt: nil, reflectionLockCapExpiresAt: nil,
+            lockAppliedAt: nil
         )
     }
 }

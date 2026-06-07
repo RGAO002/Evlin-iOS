@@ -133,6 +133,17 @@ final class CommandPoller {
                 await execute(poll: poll, api: api)
             }
         } catch {
+            // Plan 8 (§15.3): a terminal `410 family_removed` from the kid
+            // command read-path means this device's family was deleted. FAIL
+            // OPEN — release every Evlin shield/block, clear the reflection
+            // sticky + reset pairing — then stop the poller so a deleted family
+            // can never brick the kid by leaving stale locks applied.
+            if FamilyGoneDetector.isFamilyGone(error: error) {
+                print("[CommandPoller] family_removed → failing open")
+                await FamilyGoneDetector.failOpen()
+                stop()
+                return
+            }
             print("[CommandPoller] poll error: \(error)")
             SentrySDK.capture(error: error)
         }

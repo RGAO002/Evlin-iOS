@@ -45,6 +45,8 @@ enum OnboardingStep: Equatable {
     case parentSignIn            // mockup 3: "Create your parent account"
     case parentProfile           // mockup 4: "Tell us about you"
     case parentNewOrJoin         // mockup 5: "New family — or join an existing one"
+    case parentCoParentJoin      // Plan 5: co-parent "waiting for owner approval" poll
+    case parentBackInInstantly   // Plan 8: returning-parent / approved-co-parent recovery
     case parentPairScan          // mockup 6: "Scan the kid's code" (QR + 6-digit fallback)
     case parentConnected         // mockup 7: "Connected" (parent side)
     case parentWaitingForKid     // polls /family/pairing-status kid_onboarding_phase
@@ -125,6 +127,20 @@ struct OnboardingCoordinator: View {
     @State private var childBirthYear: Int? = nil
     @State private var childGender: String? = nil
     @State private var childPairingCode: String = ""
+
+    // MARK: - Onboarding v2 threaded state (co-parent join — Plan 5)
+    //
+    // The invite code the co-parent consumed (uppercased) + whether the consume
+    // returned `pending_approval`. Used by the join + recovery branches.
+    @State private var coParentInviteCode: String = ""
+
+    /// Plan 8 — true when the signed-in account ALREADY has a family bound
+    /// (returning parent on a new device, or an already-bound co-parent). Read
+    /// off the AuthService session (needs_family == false → familyID != nil).
+    /// Drives the `parentSignIn` recovery branch.
+    private var parentHasExistingFamily: Bool {
+        auth?.account?.familyID != nil
+    }
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -452,7 +468,15 @@ struct OnboardingCoordinator: View {
             case .parentSignIn:
                 ParentSignInStep(
                     auth: auth,
-                    onSignedIn: { step = .parentProfile },
+                    // Plan 8 — returning-parent recovery: if the signed-in
+                    // account ALREADY has a family (needs_family == false /
+                    // familyID != nil), skip the new-family chain and go
+                    // straight to the recovery landing (register this device +
+                    // load the family). A brand-new account (no family yet)
+                    // continues into profile → new-or-join as before.
+                    onSignedIn: {
+                        step = parentHasExistingFamily ? .parentBackInInstantly : .parentProfile
+                    },
                     onBack: { step = .modeSelect }
                 )
 
@@ -467,11 +491,33 @@ struct OnboardingCoordinator: View {
                 ParentNewOrJoinStep(
                     apiClient: apiClient,
                     // "Start a new family" → pair (the kid creates the family;
-                    // the parent pairs). "Join existing" consumes a co-parent
-                    // invite when supplied, then also lands on pair.
+                    // the parent pairs). "Join existing" (Plan 5) consumes the
+                    // co-parent invite HERE and routes to the waiting-for-owner
+                    // approval poll — it does NOT pair a kid.
                     onStartNew: { step = .parentPairScan },
-                    onJoined: { step = .parentPairScan },
+                    onJoinCode: { code in await joinCoParentFamily(code) },
                     onBack: { step = .parentProfile }
+                )
+
+            // Plan 5 — co-parent consumed an invite and is awaiting owner
+            // approval. Poll /family/me until account.family_id binds, then go
+            // to the recovery landing (register device + load family). Never
+            // pairs a kid.
+            case .parentCoParentJoin:
+                ParentCoParentJoinStep(
+                    apiClient: apiClient,
+                    onApproved: { step = .parentBackInInstantly },
+                    onBack: { step = .parentNewOrJoin }
+                )
+
+            // Plan 8 — returning-parent recovery / approved co-parent landing.
+            // Register this device + load FamilyStore, then finish onboarding.
+            case .parentBackInInstantly:
+                ParentBackInInstantlyStep(
+                    apiClient: apiClient,
+                    recover: { await recoverExistingFamily() },
+                    onDone: { finishParentOnboarding() },
+                    onBack: { step = .parentNewOrJoin }
                 )
 
             case .parentPairScan:
@@ -505,7 +551,14 @@ struct OnboardingCoordinator: View {
                 )
 
             case .parentFirstActions:
+                // Plan 7 — the live first-actions test. Threads the real child
+                // DEVICE id + familyID + kid name so the "Send block" button
+                // fires a real lock and polls for the honest lock-applied ack.
                 ParentFirstActionsStep(
+                    apiClient: apiClient,
+                    familyID: familyID,
+                    childDeviceID: childDeviceID ?? pairedChildDeviceID,
+                    kidName: kidName,
                     onContinue: { step = .parentItWorks },
                     onBack: { step = .parentSetPasscode }
                 )
@@ -670,6 +723,100 @@ struct OnboardingCoordinator: View {
         } catch {
             return "Network error. Check your connection and tap Retry."
         }
+    }
+
+    /// Plan 5 — the co-parent join path. POSTs the entered invite code to
+    /// /family/invite/consume (authed) and routes on the result. With owner-
+    /// approval ON the backend returns `pending_approval` and does NOT bind
+    /// account.family_id — so we advance to the waiting-for-owner poll
+    /// (`parentCoParentJoin`), which finishes via `parentBackInInstantly`. If a
+    /// future approval-OFF build returns `joined`, we go straight to recovery.
+    /// Returns `nil` on a clean handoff or a human-readable error to show inline.
+    /// This NEVER pairs a kid (a co-parent joins the existing family).
+    @MainActor
+    private func joinCoParentFamily(_ code: String) async -> String? {
+        coParentInviteCode = code
+        do {
+            let result = try await apiClient.consumeCoParentInvite(code: code)
+            if result.status == "pending_approval" {
+                familyID = result.family_id   // not yet bound on the account, but useful
+                step = .parentCoParentJoin
+            } else {
+                // approval OFF fallback — already bound; recover immediately.
+                familyID = result.family_id
+                step = .parentBackInInstantly
+            }
+            return nil
+        } catch let APIError.serverError(status) {
+            switch status {
+            case 404: return "That invite code isn't valid or has expired. Check it and try again."
+            case 409: return "This account already belongs to a family."
+            case 429: return "Too many attempts. Try again in a minute."
+            default:  return "Couldn't join (error \(status)). Try again."
+            }
+        } catch {
+            return "Network error. Check your connection and try again."
+        }
+    }
+
+    /// Plan 8 — returning-parent / approved-co-parent recovery. Registers THIS
+    /// device as a parent device on the already-existing family via
+    /// POST /family/device/register (authed, idempotent on X-Device-Id), loads
+    /// the FamilyStore, persists the same UserDefaults keys the rest of the app
+    /// reads, and resolves a family display name for the welcome-back copy.
+    /// Returns the family name (or nil). Does NOT create a new family or pair a kid.
+    @MainActor
+    private func recoverExistingFamily() async -> String? {
+        // Register this device against the bound family (idempotent upsert).
+        let registered = await registerParentDevice()
+        if let r = registered {
+            familyID = r.family_id
+            parentDeviceID = r.device_id
+            UserDefaults.standard.set(r.family_id.uuidString, forKey: "evlin.familyID")
+            UserDefaults.standard.set(r.device_id.uuidString, forKey: "evlin.parentDeviceID")
+        } else if let fid = auth?.account?.familyID {
+            // Device-register failed (e.g. transient) — still persist the family
+            // id from the session so Home can load.
+            familyID = fid
+            UserDefaults.standard.set(fid.uuidString, forKey: "evlin.familyID")
+        }
+        appMode = "parent"
+
+        // Load the family aggregate so Home renders immediately.
+        await familyStore.load()
+        return familyStore.family?.display_name
+    }
+
+    /// POST /family/device/register (authed) — register this device as a parent
+    /// device on the account's bound family. Returns the response on success,
+    /// nil on any failure (recovery degrades gracefully).
+    @MainActor
+    private func registerParentDevice() async -> DeviceRegisterResponseDTO? {
+        try? await apiClient.registerParentDevice(
+            deviceID: Self.persistentDeviceID(),
+            label: UIDevice.current.name
+        )
+    }
+
+    /// A stable per-install device id for X-Device-Id (so device-register is a
+    /// true idempotent upsert across launches). Reuses any previously-persisted
+    /// parent device id, else mints + persists a fresh UUID.
+    private static func persistentDeviceID() -> UUID {
+        let key = "evlin.parentDeviceID"
+        if let raw = UserDefaults.standard.string(forKey: key), let id = UUID(uuidString: raw) {
+            return id
+        }
+        let fresh = UUID()
+        UserDefaults.standard.set(fresh.uuidString, forKey: key)
+        return fresh
+    }
+
+    /// Finish the parent onboarding flow (recovery / co-parent landing path).
+    /// Mirrors what `DoneStep` does internally for the new-family path.
+    @MainActor
+    private func finishParentOnboarding() {
+        appMode = "parent"
+        onboardingComplete = true
     }
 
     /// Best-effort kid display name from the loaded FamilyStore: the child whose

@@ -43,6 +43,11 @@ final class ReflectionLockApplier {
             let rec = ReflectionLockRecordFactory.make(rid: rid, expiresAt: expiresAt, childID: childID)
             _ = await store.addShield(rec, force: true)   // force so re-arm overwrites, no confirm prompt
             scheduleOrDiagnose(rec, rid: rid)
+            // §8.1 (Plan 7): first-sight honest payoff — tell the backend the kid
+            // device APPLIED the all-apps reflection lock so the parent's
+            // first-actions poll sees `lock_applied_at`. Best-effort, idempotent
+            // server-side; never blocks the lock.
+            postLockAppliedBestEffort(childID: childID, rid: rid)
         case .release(let rid):
             _ = await store.removeShield(recordKey: "all:reflection:\(rid.uuidString)")
             let name = ReflectionLockRecordFactory
@@ -55,8 +60,30 @@ final class ReflectionLockApplier {
             let rec = ReflectionLockRecordFactory.make(rid: applyRID, expiresAt: expiresAt, childID: childID)
             _ = await store.addShield(rec, force: true)
             scheduleOrDiagnose(rec, rid: applyRID)
+            postLockAppliedBestEffort(childID: childID, rid: applyRID)
         }
         saveSticky(next)
+    }
+
+    /// §8.1 first-sight hook (Plan 7): fire-and-forget POST
+    /// /child/reflection/{rid}/lock-applied so the parent's onboarding payoff
+    /// poll reads the honest `lock_applied_at`. Guards against re-posting the
+    /// same rid more than once per process via a small App-Group marker, so the
+    /// 20s poll loop's repeated `.apply`/re-arm reconciles stay quiet. Best-
+    /// effort: any failure is swallowed (the lock already applied locally).
+    private func postLockAppliedBestEffort(childID: UUID, rid: UUID) {
+        let markerKey = "evlin.reflectionLockApplied.\(rid.uuidString)"
+        if defaults?.bool(forKey: markerKey) == true { return }
+        Task {
+            do {
+                try await APIClient().postReflectionLockApplied(
+                    childDeviceID: childID, reflectionID: rid)
+                defaults?.set(true, forKey: markerKey)
+            } catch {
+                // Non-fatal: the lock is applied locally regardless; the parent
+                // payoff just won't flip until a later reconcile re-posts.
+            }
+        }
     }
 
     /// Schedule the DAM auto-removal; on failure DO NOT swallow — record a diagnostic

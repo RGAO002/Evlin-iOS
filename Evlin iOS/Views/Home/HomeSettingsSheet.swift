@@ -400,6 +400,14 @@ struct HomeSettingsSheet: View {
                     } label: {
                         Label("Manage aliases", systemImage: "tag.fill")
                     }
+
+                    // Plan 5 — owner mints/approves/revokes co-parent invites.
+                    NavigationLink {
+                        OwnerInviteApprovalView()
+                            .environmentObject(apiClient)
+                    } label: {
+                        Label("Co-parents", systemImage: "person.2.badge.gearshape")
+                    }
                 }
 
                 #if DEBUG

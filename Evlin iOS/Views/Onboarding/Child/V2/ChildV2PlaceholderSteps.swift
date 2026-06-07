@@ -227,7 +227,7 @@ private struct OnboardingV2AddRow: View {
 
 /// A small back ("‹ Back") affordance, rendered under the primary CTA so each
 /// screen keeps a way to step back through the v2 chain.
-private struct OnboardingV2BackLink: View {
+private struct ChildOnboardingV2BackLink: View {
     let action: () -> Void
     var body: some View {
         Button(action: action) {
@@ -386,7 +386,7 @@ struct ChildProfileStep: View {
                 OnboardingV2PrimaryButton("Continue", role: .child, action: onContinue)
                     .disabled(!canContinue)
                     .opacity(canContinue ? 1 : 0.5)
-                if let onBack { OnboardingV2BackLink(action: onBack) }
+                if let onBack { ChildOnboardingV2BackLink(action: onBack) }
             }
         )
     }
@@ -485,7 +485,7 @@ struct ChildShowCodeStep: View {
                 }
             },
             footer: {
-                if let onBack { OnboardingV2BackLink(action: onBack) }
+                if let onBack { ChildOnboardingV2BackLink(action: onBack) }
             }
         )
         .task { await start() }
@@ -553,7 +553,7 @@ struct ChildConnectedStep: View {
             },
             footer: {
                 OnboardingV2PrimaryButton("Continue", role: .child, action: onContinue)
-                if let onBack { OnboardingV2BackLink(action: onBack) }
+                if let onBack { ChildOnboardingV2BackLink(action: onBack) }
             }
         )
     }
@@ -606,7 +606,7 @@ struct ChildConsentDisclosureStep: View {
             },
             footer: {
                 OnboardingV2PrimaryButton("I understand — continue", role: .child, action: onContinue)
-                if let onBack { OnboardingV2BackLink(action: onBack) }
+                if let onBack { ChildOnboardingV2BackLink(action: onBack) }
             }
         )
     }
@@ -664,7 +664,7 @@ struct ChildAllowNotificationsStep: View {
             footer: {
                 // The CTAs live inside the system-sheet preview above; keep only
                 // the back affordance pinned in the footer row.
-                if let onBack { OnboardingV2BackLink(action: onBack) }
+                if let onBack { ChildOnboardingV2BackLink(action: onBack) }
             }
         )
     }
@@ -731,7 +731,7 @@ struct ChildLockableHubStep: View {
             },
             footer: {
                 OnboardingV2SecondaryButton("Skip for now", action: onContinue)
-                if let onBack { OnboardingV2BackLink(action: onBack) }
+                if let onBack { ChildOnboardingV2BackLink(action: onBack) }
             }
         )
     }

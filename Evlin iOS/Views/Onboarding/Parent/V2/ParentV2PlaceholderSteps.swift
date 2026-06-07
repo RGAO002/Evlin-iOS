@@ -299,7 +299,12 @@ struct ParentProfileStep: View {
 struct ParentNewOrJoinStep: View {
     let apiClient: APIClient
     let onStartNew: () -> Void
-    let onJoined: () -> Void
+    /// Plan 5: hands the entered co-parent invite code UP to the coordinator,
+    /// which owns the POST /family/invite/consume + the pending-approval routing
+    /// (→ parentCoParentJoin). Returns `nil` on a clean handoff or an inline
+    /// error string to show. Empty code is rejected here (a co-parent join
+    /// requires a code; an empty "join" no longer silently lands on pairing).
+    let onJoinCode: (String) async -> String?
     var onBack: (() -> Void)? = nil
 
     @State private var startNew = true
@@ -363,22 +368,14 @@ struct ParentNewOrJoinStep: View {
     private func join() async {
         let code = inviteCode.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !code.isEmpty else {
-            // No code supplied — the join path still lands on pairing so the
-            // parent isn't stranded (consume is optional here).
-            onJoined()
+            errorText = "Enter the invite code your co-parent shared with you."
             return
         }
         busy = true; errorText = nil
         defer { busy = false }
-        do {
-            _ = try await apiClient.consumeCoParentInvite(code: code)
-            onJoined()
-        } catch let APIError.serverError(status) {
-            errorText = status == 404
-                ? "That invite code isn't valid. Check it and try again."
-                : "Couldn't join (error \(status))."
-        } catch {
-            errorText = "Network error. Try again."
+        // The coordinator owns the consume + pending-approval routing (Plan 5).
+        if let err = await onJoinCode(code.uppercased()) {
+            errorText = err
         }
     }
 }
@@ -593,10 +590,36 @@ struct ParentSetPasscodeV2Step: View {
 // MARK: - 10 · First actions (the payoff test)
 
 /// Mockup M[15].parent — "Send your first block": a chat exchange (parent asks,
-/// Evlin confirms) + an APP→BLOCK explainer card. The live end-to-end test.
+/// Evlin confirms) + an APP→BLOCK explainer card. The LIVE end-to-end test
+/// (Plan 7, §8): tapping "Send block" fires a REAL all-apps reflection lock on
+/// the kid DEVICE (with the §14.1 short cap so it can never brick the kid for
+/// 2h), then polls /parent/state/{child} for the honest `lock_applied_at` ack —
+/// the kid's phone confirming it actually applied the lock — before advancing
+/// to the "It works" payoff. Visuals unchanged; the button now does the real call.
 struct ParentFirstActionsStep: View {
+    /// Live backend client + the threaded child DEVICE id (§1.1) the lock keys
+    /// on. `familyID` is currently unused by the reflection trigger (it is
+    /// state-derived/kid-scoped) but threaded for forward-compat with the
+    /// catalog app-block path. `kidName` drives the honest copy.
+    let apiClient: APIClient
+    let familyID: UUID?
+    let childDeviceID: UUID?
+    let kidName: String
     let onContinue: () -> Void
     var onBack: (() -> Void)? = nil
+
+    @State private var phase: FirstActionPhase = .idle
+    @State private var reflectionID: UUID?
+    @State private var pollTask: Task<Void, Never>?
+
+    /// ≤30s payoff budget — short enough to keep onboarding snappy, long enough
+    /// for a healthy kid device's 20s state poll to apply + post lock-applied.
+    private static let payoffBudgetSeconds = 30
+
+    private var kid: String {
+        let t = kidName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return t.isEmpty ? "Liam" : t
+    }
 
     var body: some View {
         OnboardingV2ScreenContainer(
@@ -605,20 +628,20 @@ struct ParentFirstActionsStep: View {
             stepIndex: 10,
             stepTotal: parentTotal,
             title: "Send your first block",
-            subtitle: "Let's make sure it actually goes through. Tell Evlin in plain words:",
+            subtitle: FirstActionsLogic.payoffSubtitle(phase: phase, kidName: kid),
             dotsCount: parentTotal,
             dotsCurrent: 9,
             content: {
                 VStack(alignment: .leading, spacing: Spacing.lg) {
                     VStack(alignment: .leading, spacing: OnboardingV2Theme.Metrics.ctaRowSpacing) {
-                        OnboardingV2ChatBubble(.me, text: "Block TikTok for 5 minutes")
+                        OnboardingV2ChatBubble(.me, text: "Block distracting apps for a few minutes")
                         OnboardingV2ChatBubble(
                             .evlin,
                             attributed: {
-                                var s = AttributedString("Blocking TikTok for 5 min.")
+                                var s = AttributedString("Sending a quick test lock.")
                                 s.font = OnboardingV2Theme.Typography.bodyStrong
                                 var t = AttributedString(
-                                    "\nIt'll be hidden by name on Liam's phone — watch their screen to confirm it landed.")
+                                    "\nIt'll lock \(kid)'s apps briefly — watch their screen to confirm it landed.")
                                 t.font = OnboardingV2Theme.Typography.body
                                 return s + t
                             }()
@@ -627,19 +650,125 @@ struct ParentFirstActionsStep: View {
 
                     OnboardingV2Card {
                         HStack(alignment: .top, spacing: OnboardingV2Theme.Metrics.ctaRowSpacing) {
-                            OnboardingV2Badge("APP→BLOCK", style: .success)
-                            Text("Single app → block (bundle-id). Say \u{201C}block Games\u{201D} instead → that shields the whole category.")
+                            OnboardingV2Badge(badgeText, style: phase == .landed ? .success : .new)
+                            Text(cardText)
+                                .onboardingV2BodyXS()
+                        }
+                    }
+
+                    if phase == .waitingForKid || phase == .sending {
+                        HStack(spacing: Spacing.md) {
+                            ProgressView().controlSize(.small)
+                            Text(phase == .sending ? "Sending…" : "Waiting for \(kid)'s phone…")
                                 .onboardingV2BodyXS()
                         }
                     }
                 }
             },
             footer: {
-                OnboardingV2PrimaryButton("Send block", systemImage: "paperplane.fill",
-                                          role: .parent, action: onContinue)
+                switch phase {
+                case .landed:
+                    OnboardingV2PrimaryButton("It works — continue", role: .parent, action: onContinue)
+                case .timedOut, .failed:
+                    OnboardingV2PrimaryButton("Try again", systemImage: "paperplane.fill",
+                                              role: .parent) { Task { await sendBlock() } }
+                    OnboardingV2SecondaryButton("Skip for now", action: onContinue)
+                default:
+                    OnboardingV2PrimaryButton(
+                        phase == .idle ? "Send block" : "Sending…",
+                        systemImage: "paperplane.fill",
+                        role: .parent
+                    ) { Task { await sendBlock() } }
+                    .disabled(phase == .sending || phase == .waitingForKid)
+                }
                 if let onBack { OnboardingV2BackLink(action: onBack) }
             }
         )
+        .onDisappear { cancelTestLock() }
+    }
+
+    private var badgeText: String {
+        switch phase {
+        case .landed:   return "APPLIED ✓"
+        case .timedOut: return "QUEUED"
+        case .failed:   return "FAILED"
+        default:        return "TEST LOCK"
+        }
+    }
+
+    private var cardText: String {
+        switch phase {
+        case .landed:
+            return "\(kid)'s phone applied the lock and reported back. This is exactly how a real block works."
+        case .timedOut:
+            return "The lock is queued and will apply the next time \(kid)'s phone checks in (every ~20s). It auto-releases shortly so it can't get stuck."
+        case .failed:
+            return "Couldn't reach the backend to send the test lock. Check your connection and try again."
+        default:
+            return "This sends a REAL short lock to \(kid)'s phone. It auto-releases in a few minutes, so a missed exit can never strand them."
+        }
+    }
+
+    /// Fire the real test lock + poll for the honest payoff (§8 / §14.1).
+    @MainActor
+    private func sendBlock() async {
+        guard let childDeviceID else {
+            // No paired kid device threaded — can't run the live test; let the
+            // parent move on rather than stranding them.
+            onContinue()
+            return
+        }
+        phase = .sending
+        do {
+            // Trigger the all-apps reflection lock with the §14.1 short cap. The
+            // kid device applies it on its next /child/state poll and posts
+            // /child/reflection/{rid}/lock-applied; the backend stamps
+            // lock_applied_at, which we poll for below.
+            let rid = try await apiClient.triggerOnboardingReflection(
+                childDeviceID: childDeviceID,
+                reason: "First-actions test lock",
+                onboardingCapSeconds: 180
+            )
+            reflectionID = rid
+            phase = .waitingForKid
+            startPayoffPoll(childDeviceID: childDeviceID)
+        } catch {
+            phase = .failed
+        }
+    }
+
+    /// Poll /parent/state/{child} until the kid's phone reports it APPLIED the
+    /// lock (`reflectionRequest.lockAppliedAt != nil`) or the ≤30s budget runs
+    /// out (→ honest "queued" copy, never a fake checkmark).
+    private func startPayoffPoll(childDeviceID: UUID) {
+        pollTask?.cancel()
+        let rid = reflectionID
+        pollTask = Task { @MainActor in
+            var waited = 0
+            while !Task.isCancelled && waited < Self.payoffBudgetSeconds {
+                if let state = try? await apiClient.fetchParentChildState(childDeviceID: childDeviceID),
+                   let req = state.reflectionRequest,
+                   (rid == nil || req.id == rid),
+                   req.lockAppliedAt != nil {
+                    phase = .landed
+                    return
+                }
+                try? await Task.sleep(nanoseconds: 3_000_000_000) // 3s
+                waited += 3
+            }
+            if !Task.isCancelled { phase = .timedOut }
+        }
+    }
+
+    /// §14.1 safety: cancel the in-flight test reflection if the parent leaves
+    /// the screen before it pays off, so a half-finished test never lingers.
+    /// (The short cap is the backstop; this is the immediate cleanup.)
+    private func cancelTestLock() {
+        pollTask?.cancel()
+        pollTask = nil
+        if let rid = reflectionID, phase != .landed {
+            Task { try? await apiClient.cancelChildReflection(reflectionId: rid) }
+        }
     }
 }
 
@@ -707,7 +836,9 @@ private extension Text {
 }
 
 /// "Back" ghost link reused as the last footer row (the mockup nav `‹ Back`).
-private struct OnboardingV2BackLink: View {
+/// Internal (not file-private) so the co-parent/recovery + first-actions v2
+/// screens in sibling files can reuse the same chrome.
+struct OnboardingV2BackLink: View {
     let action: () -> Void
     var body: some View {
         Button(action: action) {
@@ -935,7 +1066,8 @@ private struct OnboardingV2ChoiceCard: View {
 }
 
 /// `.check` — the filled success disc with a white ✓ (sized for headers + rows).
-private struct OnboardingV2SuccessCheck: View {
+/// Internal so sibling v2 step files (co-parent/recovery, first-actions) reuse it.
+struct OnboardingV2SuccessCheck: View {
     var role: OnboardingV2Role = .parent
     let size: CGFloat
 
@@ -954,7 +1086,8 @@ private struct OnboardingV2SuccessCheck: View {
 }
 
 /// `waiting()` — spinner + "Waiting for <name>…" + sub-line.
-private struct OnboardingV2WaitingSpinner: View {
+/// Internal so sibling v2 step files (co-parent/recovery) reuse it.
+struct OnboardingV2WaitingSpinner: View {
     let name: String
     let subtitle: String
 

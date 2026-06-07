@@ -1196,11 +1196,18 @@ struct AvatarUploadResponseDTO: Codable, Sendable, Equatable {
 
 extension APIClient {
     /// Child polls for queued commands.
+    ///
+    /// Plan 8 (§15.3): a terminal `410 family_removed` (the kid's family was
+    /// deleted) is surfaced as `APIError.serverError(410)` so the CommandPoller
+    /// can FAIL OPEN. All other non-200s stay a quiet `[]` (indistinguishable
+    /// from "no commands"), preserving the prior best-effort behavior.
     func pollCommands(deviceID: UUID) async throws -> [PollCommandDTO] {
         var comps = URLComponents(string: "\(baseURL)/child/commands")!
         comps.queryItems = [URLQueryItem(name: "device_id", value: deviceID.uuidString)]
         let (data, response) = try await URLSession.shared.data(from: comps.url!)
-        guard (response as? HTTPURLResponse)?.statusCode == 200 else { return [] }
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        if status == 410 { throw APIError.serverError(410) }
+        guard status == 200 else { return [] }
         return try JSONDecoder().decode([PollCommandDTO].self, from: data)
     }
 

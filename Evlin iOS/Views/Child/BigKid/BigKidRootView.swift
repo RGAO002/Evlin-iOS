@@ -313,7 +313,8 @@ struct BigKidRootView: View {
             status: req.status, parentNote: req.parentNote,
             submittedAt: req.submittedAt, approvedAt: req.approvedAt,
             parentRedoNote: req.parentRedoNote, lastNudgeAt: req.lastNudgeAt,
-            reflectionLockCapExpiresAt: req.reflectionLockCapExpiresAt
+            reflectionLockCapExpiresAt: req.reflectionLockCapExpiresAt,
+            lockAppliedAt: req.lockAppliedAt
         )
         state.reflectionRequest = merged
     }
