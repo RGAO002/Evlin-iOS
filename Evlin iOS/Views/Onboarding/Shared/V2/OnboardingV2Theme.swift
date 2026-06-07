@@ -496,7 +496,7 @@ struct OnboardingV2ScreenContainer<Content: View, Footer: View>: View {
     /// Dark screen (`.iphone.dark`) — e.g. the "TikTok is blocked" kid screen.
     var dark: Bool = false
     /// Draw the iPhone bezel + ring. False → bare screen body only.
-    var showsDeviceFrame: Bool = true
+    var showsDeviceFrame: Bool = false
     /// Optional dots-progress nav under the footer.
     var dotsCount: Int? = nil
     var dotsCurrent: Int? = nil
@@ -511,7 +511,7 @@ struct OnboardingV2ScreenContainer<Content: View, Footer: View>: View {
          title: String,
          subtitle: String? = nil,
          dark: Bool = false,
-         showsDeviceFrame: Bool = true,
+         showsDeviceFrame: Bool = false,
          dotsCount: Int? = nil,
          dotsCurrent: Int? = nil,
          @ViewBuilder content: @escaping () -> Content,
