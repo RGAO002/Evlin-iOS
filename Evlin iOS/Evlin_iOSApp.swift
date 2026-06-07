@@ -1,6 +1,7 @@
 import SwiftUI
 import FamilyControls
 import UIKit
+import Sentry
 
 @main
 struct Evlin_iOSApp: App {
@@ -54,7 +55,10 @@ struct Evlin_iOSApp: App {
                 .onChange(of: scenePhase) { _, phase in
                     switch phase {
                     case .active: startPollerIfPaired()
-                    case .background, .inactive: CommandPoller.shared.stop()
+                    case .background:
+                        startBackgroundPollerIfPaired()
+                    case .inactive:
+                        break
                     @unknown default: break
                     }
                 }
@@ -86,8 +90,7 @@ struct Evlin_iOSApp: App {
     /// Tradeoff: commands queued while parent is in P mode wait until
     /// the user toggles to K mode. That's the behavior we want — it
     /// mirrors the real 2-device flow ("kid device picks up when it
-    /// next polls"). On scenePhase != .active we stop too so a
-    /// backgrounded kid device doesn't keep polling.
+    /// next polls").
     private func startPollerIfPaired() {
         guard let raw = UserDefaults.standard.string(forKey: "evlin.childDeviceID"),
               let deviceID = UUID(uuidString: raw)
@@ -98,6 +101,22 @@ struct Evlin_iOSApp: App {
             return
         }
         CommandPoller.shared.start(deviceID: deviceID, apiClient: apiClient)
+    }
+
+    /// When the kid device backgrounds Evlin, keep polling briefly using iOS's
+    /// background-task grace window. This does not survive user force-quit, but
+    /// it does cover ordinary background / screen-lock transitions without
+    /// requiring the kid to reopen Evlin immediately.
+    private func startBackgroundPollerIfPaired() {
+        guard UserDefaults.standard.string(forKey: CommandPoller.childDeviceIDDefaultsKey)
+                .flatMap(UUID.init(uuidString:)) != nil
+        else { return }
+        let appMode = UserDefaults.standard.string(forKey: "appMode") ?? ""
+        guard appMode == "child" else {
+            CommandPoller.shared.stop()
+            return
+        }
+        CommandPoller.shared.startBackgroundGracePolling()
     }
 }
 
@@ -134,6 +153,22 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
+        // Error monitoring (Sentry). No-op unless SENTRY_DSN is set in Info.plist;
+        // COPPA-safe (no default PII, user dropped before send).
+        let sentryDSN = (Bundle.main.object(forInfoDictionaryKey: "SENTRY_DSN") as? String) ?? ""
+        if !sentryDSN.isEmpty {
+            SentrySDK.start { options in
+                options.dsn = sentryDSN
+                options.environment = (Bundle.main.object(forInfoDictionaryKey: "SENTRY_ENVIRONMENT") as? String) ?? "development"
+                options.sendDefaultPii = false
+                options.tracesSampleRate = 0.1
+                options.beforeSend = { event in
+                    event.user = nil
+                    return event
+                }
+            }
+        }
+
         // Ask iOS for an APNs token. The result arrives asynchronously in
         // didRegister.../didFailToRegister... below. Safe to call every
         // launch; iOS coalesces and returns the cached token quickly.
@@ -173,6 +208,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
                 try await apiClient.registerAPNsToken(deviceID: upload.deviceID, token: upload.token)
             } catch {
                 print("[AppDelegate] APNs token upload failed: \(error)")
+                SentrySDK.capture(error: error)
             }
         }
     }

@@ -105,4 +105,38 @@ extension PlanArchCardAdapterPhoneTests {
                            "wrong CardID for \(c.kind)")
         }
     }
+
+    func testUnlockPickerPreservesUnblockVerbAndExpiry() throws {
+        let detail: [String: Any] = [
+            "shields": [[
+                "kind": "app",
+                "display_name": "Facebook",
+                "expires_at_iso": "2026-06-04T18:41:00Z",
+                "stale": false,
+            ]]
+        ]
+        let body: [String: Any] = [
+            "type": "unlock_picker",
+            "title": "Unblock Facebook?",
+            "plan_token": "x",
+            "step_index": 0,
+            "kind": "phone.unlock_picker",
+            "source": "plan",
+            "detail": detail,
+            "options": [[
+                "label": "Facebook",
+                "patch": ["target": ["kind": "app", "name": "Facebook"]],
+            ]],
+            "danger": "low",
+        ]
+        let data = try JSONSerialization.data(withJSONObject: body)
+        let card = try JSONDecoder().decode(PlanArchCardPayload.self, from: data)
+
+        let model = PlanArchCardAdapter.adapt(card, childName: "Liam")
+
+        XCTAssertEqual(model?.cardID, .U1)
+        XCTAssertEqual(model?.context.u1Verb, "unblock")
+        XCTAssertEqual(model?.context.u1ShieldList.first?.displayName, "Facebook")
+        XCTAssertEqual(model?.context.u1ShieldList.first?.expiresAtISO, "2026-06-04T18:41:00Z")
+    }
 }

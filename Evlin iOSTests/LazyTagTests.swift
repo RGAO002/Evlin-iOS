@@ -361,6 +361,26 @@ final class LazyTagCatalogModelTests: XCTestCase {
         )
     }
 
+    func test_appControlRouting_appNotFoundSearchOptionOpensAppSearch() {
+        let payload: [String: Any] = [
+            "card_id": "app_not_found_terminal",
+            "type": "app_not_found_terminal",
+            "title": "I couldn't find that app",
+            "body": "No match.",
+            "target_display": "be real",
+            "target_kind": "app",
+            "options": [
+                ["action": "open_app_search", "label": "Search App Store"],
+                ["action": "open_lazy_tag", "label": "Add it on the kid's phone"],
+            ],
+        ]
+        let model = AppControlCardModel.parse(cardID: "app_not_found_terminal", payload: payload)!
+        XCTAssertEqual(
+            AppControlRouter.route(option: model.options[0], card: model),
+            .openAppSearch(query: "be real")
+        )
+    }
+
     func test_appControlRouting_renameListSurfacesRenameGuidance() {
         let payload: [String: Any] = [
             "card_id": "category_rename_required",
@@ -410,14 +430,71 @@ final class LazyTagCatalogModelTests: XCTestCase {
             "target_kind": "app",
             "options": [],
             "candidates": [
-                ["display": "Facebook Messenger", "bundle_id": "com.facebook.Messenger", "target_type": "app"],
+                [
+                    "display": "Facebook Messenger",
+                    "bundle_id": "com.facebook.Messenger",
+                    "artwork_url": "https://example.com/messenger.png",
+                    "target_type": "app",
+                ],
                 ["display": "Messenger Kids", "bundle_id": "com.facebook.MessengerKids", "target_type": "app"],
             ],
         ]
         let model = AppControlCardModel.parse(cardID: "app_store_disambiguation", payload: payload)!
+        XCTAssertEqual(model.candidates[0].artworkURL, URL(string: "https://example.com/messenger.png"))
+        XCTAssertEqual(
+            AppControlRouter.route(candidate: model.candidates[0], card: model),
+            .confirmAppAndResend(
+                candidateDisplay: "Facebook Messenger",
+                bundleID: "com.facebook.Messenger",
+                artworkURL: URL(string: "https://example.com/messenger.png")
+            )
+        )
         XCTAssertEqual(
             AppControlRouter.route(candidate: model.candidates[1], card: model),
-            .resendPhrase("Messenger Kids")
+            .confirmAppAndResend(
+                candidateDisplay: "Messenger Kids",
+                bundleID: "com.facebook.MessengerKids",
+                artworkURL: nil
+            )
+        )
+    }
+
+    func test_appControlRouting_openAppSearchOptionUsesOriginalTarget() {
+        let payload: [String: Any] = [
+            "card_id": "app_store_disambiguation",
+            "type": "app_store_disambiguation",
+            "title": "Which app do you mean?",
+            "body": "I found a few apps.",
+            "target_display": "fb",
+            "target_kind": "app",
+            "options": [["action": "open_app_search", "label": "Not in the list"]],
+            "candidates": [
+                ["display": "Facebook", "bundle_id": "com.facebook.Facebook", "target_type": "app"],
+            ],
+        ]
+        let model = AppControlCardModel.parse(cardID: "app_store_disambiguation", payload: payload)!
+        XCTAssertEqual(
+            AppControlRouter.route(option: model.options[0], card: model),
+            .openAppSearch(query: "fb")
+        )
+    }
+
+    func test_appControlRouting_appStoreDisambiguationPreservesOriginalCommand() {
+        XCTAssertEqual(
+            AppControlRouter.rewriteOriginalCommand(
+                "Lock cat quest for 15 mins",
+                replacing: "Cat Quest",
+                with: "Cat Quest III"
+            ),
+            "Lock Cat Quest III for 15 mins"
+        )
+        XCTAssertEqual(
+            AppControlRouter.rewriteOriginalCommand(
+                "lock ig",
+                replacing: "ig",
+                with: "Instagram"
+            ),
+            "lock Instagram"
         )
     }
 

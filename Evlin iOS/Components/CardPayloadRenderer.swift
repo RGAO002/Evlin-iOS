@@ -143,6 +143,7 @@ struct PlanArchCardView: View {
         let unlockOptions = card.options.filter { !$0.cancelsPlan && !$0.isUnlockEverything }
         let everythingOption = card.options.first(where: { $0.isUnlockEverything })
         let cancelOption = card.options.first(where: { $0.cancelsPlan })
+        let selectedLabel = isUnblockPicker ? "Unblock selected" : "Unlock selected"
 
         if unlockOptions.count <= 1 {
             ForEach(card.options) { opt in optionButton(opt) }
@@ -177,9 +178,9 @@ struct PlanArchCardView: View {
                 Button {
                     let selected = unlockOptions.filter { selectedUnlockOptionIDs.contains($0.id) }
                     guard !selected.isEmpty else { return }
-                    onOption(PlanArchCardOption.unlockSelected(selected))
+                    onOption(PlanArchCardOption.unlockSelected(selected, label: selectedLabel))
                 } label: {
-                    Text("Unlock selected")
+                    Text(selectedLabel)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 12)
                         .padding(.horizontal, 16)
@@ -220,8 +221,9 @@ struct PlanArchCardView: View {
     private func buttonStyle(for opt: PlanArchCardOption) -> OptionStyle {
         if opt.cancelsPlan { return .cancel }
         let lower = opt.label.lowercased()
-        // "Unlock everything", "Block X permanently", "Delete X" — destructive intent.
+        // "Unlock/Unblock everything", "Block X permanently", "Delete X" — destructive intent.
         if lower.contains("unlock everything")
+            || lower.contains("unblock everything")
             || lower.contains("permanently")
             || lower.starts(with: "block ")
             || lower.starts(with: "delete ")
@@ -247,6 +249,11 @@ struct PlanArchCardView: View {
         default: return .primary
         }
     }
+
+    private var isUnblockPicker: Bool {
+        card.title.localizedCaseInsensitiveContains("unblock")
+            || card.options.contains { $0.label.localizedCaseInsensitiveContains("unblock") }
+    }
 }
 
 private extension PlanArchCardOption {
@@ -256,12 +263,15 @@ private extension PlanArchCardOption {
         return kind == "all"
     }
 
-    static func unlockSelected(_ options: [PlanArchCardOption]) -> PlanArchCardOption {
+    static func unlockSelected(
+        _ options: [PlanArchCardOption],
+        label: String = "Unlock selected"
+    ) -> PlanArchCardOption {
         let targets = options.compactMap { opt -> [String: Any]? in
             opt.patch["target"]?.value as? [String: Any]
         }
         return PlanArchCardOption(
-            label: "Unlock selected",
+            label: label,
             patch: ["selected_targets": PlanArchAnyCodable(targets)]
         )
     }

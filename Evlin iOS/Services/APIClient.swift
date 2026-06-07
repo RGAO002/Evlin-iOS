@@ -687,6 +687,7 @@ struct LazyTagAliasTargetResponse: Codable, Sendable, Equatable {
     let aliases: [String]
     let status: String
     let bundleID: String?
+    let artworkURL: URL?
     let tokenAvailable: Bool?
     let appCount: Int?
 
@@ -697,6 +698,7 @@ struct LazyTagAliasTargetResponse: Codable, Sendable, Equatable {
         case aliases
         case status
         case bundleID = "bundle_id"
+        case artworkURL = "artwork_url"
         case tokenAvailable = "token_available"
         case appCount = "app_count"
     }
@@ -708,6 +710,7 @@ struct LazyTagAliasTargetResponse: Codable, Sendable, Equatable {
             displayName: displayName,
             aliases: aliases,
             bundleID: bundleID,
+            artworkURL: artworkURL,
             isManual: targetType == .app && (bundleID?.isEmpty ?? true),
             memberCount: appCount
         )
@@ -725,6 +728,77 @@ struct LazyTagAliasMutationRequest: Codable, Sendable, Equatable {
         case childDeviceID = "child_device_id"
         case targetType = "target_type"
         case alias
+    }
+}
+
+struct ParentChildDeviceSummaryDTO: Codable, Sendable, Equatable, Identifiable {
+    let childDeviceID: UUID
+    let displayName: String
+    let lastHeartbeat: String?
+    let childAuthGranted: Bool
+    let buildNumber: Int?
+    let catalogAppCount: Int
+    let catalogCategoryCount: Int
+    let catalogListCount: Int
+    let catalogPreview: [String]
+
+    var id: UUID { childDeviceID }
+    var shortID: String { String(childDeviceID.uuidString.prefix(8)).lowercased() }
+
+    var catalogSummary: String {
+        let appWord = catalogAppCount == 1 ? "app" : "apps"
+        let categoryWord = catalogCategoryCount == 1 ? "category" : "categories"
+        let listWord = catalogListCount == 1 ? "list" : "lists"
+        return "\(catalogAppCount) \(appWord) · \(catalogCategoryCount) \(categoryWord) · \(catalogListCount) \(listWord)"
+    }
+
+    var catalogPreviewText: String {
+        catalogPreview.isEmpty ? "No catalog entries yet" : catalogPreview.joined(separator: ", ")
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case childDeviceID = "child_device_id"
+        case displayName = "display_name"
+        case lastHeartbeat = "last_heartbeat"
+        case childAuthGranted = "child_auth_granted"
+        case buildNumber = "build_number"
+        case catalogAppCount = "catalog_app_count"
+        case catalogCategoryCount = "catalog_category_count"
+        case catalogListCount = "catalog_list_count"
+        case catalogPreview = "catalog_preview"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        childDeviceID = try container.decode(UUID.self, forKey: .childDeviceID)
+        displayName = try container.decode(String.self, forKey: .displayName)
+        lastHeartbeat = try container.decodeIfPresent(String.self, forKey: .lastHeartbeat)
+        childAuthGranted = try container.decodeIfPresent(Bool.self, forKey: .childAuthGranted) ?? false
+        buildNumber = try container.decodeIfPresent(Int.self, forKey: .buildNumber)
+        catalogAppCount = try container.decodeIfPresent(Int.self, forKey: .catalogAppCount) ?? 0
+        catalogCategoryCount = try container.decodeIfPresent(Int.self, forKey: .catalogCategoryCount) ?? 0
+        catalogListCount = try container.decodeIfPresent(Int.self, forKey: .catalogListCount) ?? 0
+        catalogPreview = try container.decodeIfPresent([String].self, forKey: .catalogPreview) ?? []
+    }
+}
+
+struct ParentChildDevicesResponseDTO: Codable, Sendable, Equatable {
+    let familyID: UUID
+    let children: [ParentChildDeviceSummaryDTO]
+
+    enum CodingKeys: String, CodingKey {
+        case familyID = "family_id"
+        case children
+    }
+}
+
+struct ParentChildDeviceResponseDTO: Codable, Sendable, Equatable {
+    let familyID: UUID
+    let child: ParentChildDeviceSummaryDTO
+
+    enum CodingKeys: String, CodingKey {
+        case familyID = "family_id"
+        case child
     }
 }
 
@@ -1095,20 +1169,46 @@ extension APIClient {
         return try JSONDecoder().decode(CatalogSearchResponseDTO.self, from: data).results
     }
 
-    func fetchLazyTagCatalogTargets(
-        childDeviceID: UUID,
-        query: String? = nil
-    ) async throws -> [LazyTagCatalogTarget] {
-        var comps = URLComponents(string: "\(baseURL)/parent/child-app-catalog")!
-        comps.queryItems = [URLQueryItem(name: "child_device_id", value: childDeviceID.uuidString)]
-        let trimmed = query?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    func fetchParentChildDevices(familyID: UUID) async throws -> [ParentChildDeviceSummaryDTO] {
+        var comps = URLComponents(string: "\(baseURL)/parent/child-devices")!
+        comps.queryItems = [URLQueryItem(name: "family_id", value: familyID.uuidString)]
         let (data, resp) = try await URLSession.shared.data(from: comps.url!)
         guard let http = resp as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
             throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
         }
-        let targets = try JSONDecoder().decode(ParentLazyTagCatalogResponse.self, from: data).lazyTagTargets
+        return try JSONDecoder().decode(ParentChildDevicesResponseDTO.self, from: data).children
+    }
+
+    func fetchParentChildDevice(childDeviceID: UUID) async throws -> ParentChildDeviceResponseDTO {
+        let (data, resp) = try await URLSession.shared.data(from: parentChildDeviceURL(childDeviceID: childDeviceID))
+        guard let http = resp as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+        return try JSONDecoder().decode(ParentChildDeviceResponseDTO.self, from: data)
+    }
+
+    func parentChildDeviceURL(childDeviceID: UUID) -> URL {
+        URL(string: "\(baseURL)/parent/child-devices/\(childDeviceID.uuidString)")!
+    }
+
+    func fetchLazyTagCatalogTargets(
+        childDeviceID: UUID,
+        query: String? = nil
+    ) async throws -> [LazyTagCatalogTarget] {
+        let trimmed = query?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let (data, resp) = try await URLSession.shared.data(from: lazyTagTargetsURL(childDeviceID: childDeviceID))
+        guard let http = resp as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+        let targets = try JSONDecoder().decode(LockSetupCatalog.self, from: data).allTargets
         guard !trimmed.isEmpty else { return targets }
         return targets.filter { $0.matches(searchText: trimmed) }
+    }
+
+    func lazyTagTargetsURL(childDeviceID: UUID) -> URL {
+        var comps = URLComponents(string: "\(baseURL)/parent/lazy-tag-targets")!
+        comps.queryItems = [URLQueryItem(name: "child_device_id", value: childDeviceID.uuidString)]
+        return comps.url!
     }
 
     @discardableResult

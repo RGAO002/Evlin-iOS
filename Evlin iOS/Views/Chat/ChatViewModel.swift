@@ -33,6 +33,10 @@ class ChatViewModel: ObservableObject {
     /// Non-nil when ChatView should present the lazy-tag sheet.
     @Published var activeLazyTagRequest: LazyTagRequest? = nil
 
+    /// Non-nil when an app-control card asks the parent to search App Store
+    /// because the visible candidate list did not contain the intended app.
+    @Published var activeAppStoreSearchRequest: AppStoreSearchRequest? = nil
+
     // MARK: - Plan-arch dual-path
 
     /// FIFO queue of cards the backend returned in this turn. Strategy-agent
@@ -403,6 +407,10 @@ class ChatViewModel: ObservableObject {
     @MainActor
     private func processResponse(_ resp: APIClient.ChatResponse, userMessage: String, debugTurnID: String? = nil) {
         let bubbleDebugTurnID = Self.bubbleDebugTurnID(debugTurnID)
+        // If a deterministic app-control card was just acted on, the follow-up
+        // response is usually a plain queued-command receipt. Do not leave the
+        // previous card visible after the backend accepted the choice.
+        currentAppControlCard = nil
 
         // 1. Card rendering
         if let act = resp.action, let cardIDStr = act.card_id, let cardID = CardID(rawValue: cardIDStr) {
@@ -675,6 +683,59 @@ class ChatViewModel: ObservableObject {
         case .resendPhrase(let phrase):
             // Append a parent bubble for the disambiguated phrase, then dispatch.
             resendWithPhrase(phrase)
+        case .confirmAppAndResend(let candidateDisplay, let bundleID, let artworkURL):
+            let original = lastUserMessageForCard.isEmpty
+                ? (messages.reversed().first(where: { $0.role == .parent })?.content ?? "")
+                : lastUserMessageForCard
+            let rewritten = AppControlRouter.rewriteOriginalCommand(
+                original,
+                replacing: card.targetDisplay,
+                with: candidateDisplay
+            )
+
+            guard let bundleID, !bundleID.isEmpty else {
+                // Without a bundle id there is nothing durable to confirm. Keep
+                // the verb/duration rewrite so we do not fall back to sending
+                // just the display name.
+                resendWithPhrase(rewritten)
+                return
+            }
+
+            guard let familyID = currentFamilyAndChildIDs().familyID else {
+                messages.append(ChatMessage(
+                    role: .agent,
+                    content: "I couldn't save that app choice because this phone is not paired to a family yet.",
+                    timestamp: Date()
+                ))
+                return
+            }
+
+            isThinking = true
+            Task { [weak self] in
+                guard let self else { return }
+                do {
+                    try await self.apiClient.confirmFamilyApp(FamilyAppConfirmation(
+                        familyID: familyID,
+                        canonicalName: candidateDisplay,
+                        bundleID: bundleID,
+                        artworkURL: artworkURL,
+                        alias: card.targetDisplay,
+                        source: "app_store_confirmed"
+                    ))
+                    await MainActor.run {
+                        self.resendWithPhrase(rewritten)
+                    }
+                } catch {
+                    await MainActor.run {
+                        self.isThinking = false
+                        self.messages.append(ChatMessage(
+                            role: .agent,
+                            content: "I couldn't save that app choice. Try again.",
+                            timestamp: Date()
+                        ))
+                    }
+                }
+            }
         case .openLazyTag(let target, let kind):
             // Open the catalog-backed lazy-tag picker. Synthetic request token —
             // there's no proposal/pendingAliasMiss behind an app-control card, so
@@ -684,6 +745,15 @@ class ChatViewModel: ObservableObject {
                 rowIndex: 0,
                 target: target,
                 kind: kind
+            )
+        case .openAppSearch(let query):
+            let original = lastUserMessageForCard.isEmpty
+                ? (messages.reversed().first(where: { $0.role == .parent })?.content ?? "")
+                : lastUserMessageForCard
+            activeAppStoreSearchRequest = AppStoreSearchRequest(
+                query: query,
+                targetDisplay: card.targetDisplay,
+                originalMessage: original
             )
         case .renameList(let target):
             // No chat endpoint renames a list — guide the parent to the kid
@@ -695,6 +765,68 @@ class ChatViewModel: ObservableObject {
             ))
         case .none:
             break
+        }
+    }
+
+    @MainActor
+    func cancelAppStoreSearch() {
+        activeAppStoreSearchRequest = nil
+    }
+
+    @MainActor
+    func handleAppStoreSearchSelection(
+        result: CatalogSearchResultDTO,
+        request: AppStoreSearchRequest
+    ) {
+        guard let bundleID = result.bundleID, !bundleID.isEmpty else {
+            messages.append(ChatMessage(
+                role: .agent,
+                content: "I couldn't use that result because it has no bundle id.",
+                timestamp: Date()
+            ))
+            return
+        }
+        guard let familyID = currentFamilyAndChildIDs().familyID else {
+            messages.append(ChatMessage(
+                role: .agent,
+                content: "I couldn't save that app choice because this phone is not paired to a family yet.",
+                timestamp: Date()
+            ))
+            return
+        }
+
+        activeAppStoreSearchRequest = nil
+        isThinking = true
+        let rewritten = AppControlRouter.rewriteOriginalCommand(
+            request.originalMessage,
+            replacing: request.targetDisplay,
+            with: result.canonicalName
+        )
+
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await self.apiClient.confirmFamilyApp(FamilyAppConfirmation(
+                    familyID: familyID,
+                    canonicalName: result.canonicalName,
+                    bundleID: bundleID,
+                    artworkURL: result.artworkURL,
+                    alias: request.targetDisplay,
+                    source: "app_store_confirmed"
+                ))
+                await MainActor.run {
+                    self.resendWithPhrase(rewritten)
+                }
+            } catch {
+                await MainActor.run {
+                    self.isThinking = false
+                    self.messages.append(ChatMessage(
+                        role: .agent,
+                        content: "I couldn't save that app choice. Try again.",
+                        timestamp: Date()
+                    ))
+                }
+            }
         }
     }
 
@@ -2219,8 +2351,12 @@ extension ChatViewModel {
                 return current.options[idx].patch["target"]?.value as? [String: Any]
             }
             guard !targets.isEmpty else { return }
+            let selectedLabel = current.title.localizedCaseInsensitiveContains("unblock")
+                || current.options.contains { $0.label.localizedCaseInsensitiveContains("unblock") }
+                ? "Unblock selected"
+                : "Unlock selected"
             let synthesised = PlanArchCardOption(
-                label: "Unlock selected",
+                label: selectedLabel,
                 patch: ["selected_targets": PlanArchAnyCodable(targets)]
             )
             self.handlePlanArchOption(synthesised)

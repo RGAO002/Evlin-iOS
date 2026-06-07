@@ -65,6 +65,36 @@ final class AliasManagerModelTests: XCTestCase {
         XCTAssertEqual(client.removedAliases, ["insta"])
         XCTAssertEqual(model.targets.first?.aliases, ["ig"])
     }
+
+    func test_renameAliasRoundTripThroughBackendAndUpdateTargetInPlace() async {
+        let original = LazyTagCatalogTarget(
+            aliasKey: appID,
+            type: .app,
+            displayName: "Instagram",
+            aliases: ["ig"],
+            bundleID: "com.burbn.instagram"
+        )
+        let client = FakeAliasManagerClient(targets: [original])
+        client.renameResult = LazyTagCatalogTarget(
+            aliasKey: appID,
+            type: .app,
+            displayName: "Instagram",
+            aliases: ["instagram"],
+            bundleID: "com.burbn.instagram"
+        )
+        let model = AliasManagerModel(
+            familyID: familyID,
+            childDeviceID: childDeviceID,
+            client: client
+        )
+        await model.load()
+
+        await model.renameAlias("ig", to: "instagram", for: original)
+
+        XCTAssertEqual(client.renamedAliases.map(\.oldAlias), ["ig"])
+        XCTAssertEqual(client.renamedAliases.map(\.newAlias), ["instagram"])
+        XCTAssertEqual(model.targets.first?.aliases, ["instagram"])
+    }
 }
 
 private final class FakeAliasManagerClient: AliasManagingClient {
@@ -72,8 +102,10 @@ private final class FakeAliasManagerClient: AliasManagingClient {
     var fetches: [UUID] = []
     var savedAliases: [String] = []
     var removedAliases: [String] = []
+    var renamedAliases: [(oldAlias: String, newAlias: String)] = []
     var saveResult: LazyTagCatalogTarget?
     var removeResult: LazyTagCatalogTarget?
+    var renameResult: LazyTagCatalogTarget?
 
     init(targets: [LazyTagCatalogTarget]) {
         self.targets = targets
@@ -105,5 +137,16 @@ private final class FakeAliasManagerClient: AliasManagingClient {
     ) async throws -> LazyTagCatalogTarget {
         removedAliases.append(alias)
         return removeResult ?? target
+    }
+
+    func renameLazyTagAlias(
+        familyID: UUID,
+        childDeviceID: UUID,
+        target: LazyTagCatalogTarget,
+        oldAlias: String,
+        newAlias: String
+    ) async throws -> LazyTagCatalogTarget {
+        renamedAliases.append((oldAlias: oldAlias, newAlias: newAlias))
+        return renameResult ?? target
     }
 }

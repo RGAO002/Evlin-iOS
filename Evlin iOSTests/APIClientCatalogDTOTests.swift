@@ -2,6 +2,112 @@ import XCTest
 @testable import Evlin_iOS
 
 final class APIClientCatalogDTOTests: XCTestCase {
+    func test_parentChildDevicesResponseDecodesSnakeCaseChildren() throws {
+        let familyID = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
+        let childID = UUID(uuidString: "66666666-7777-8888-9999-AAAAAAAAAAAA")!
+        let data = """
+        {
+          "family_id": "\(familyID.uuidString)",
+          "children": [
+            {
+              "child_device_id": "\(childID.uuidString)",
+              "display_name": "Liam's iPhone",
+              "last_heartbeat": "2026-06-05T12:00:00Z",
+              "child_auth_granted": true,
+              "build_number": 42,
+              "catalog_app_count": 2,
+              "catalog_category_count": 3,
+              "catalog_list_count": 1,
+              "catalog_preview": ["Instagram", "Cat Quest"]
+            }
+          ]
+        }
+        """.data(using: .utf8)!
+
+        let response = try JSONDecoder().decode(ParentChildDevicesResponseDTO.self, from: data)
+
+        XCTAssertEqual(response.familyID, familyID)
+        XCTAssertEqual(response.children.count, 1)
+        XCTAssertEqual(response.children[0].childDeviceID, childID)
+        XCTAssertEqual(response.children[0].displayName, "Liam's iPhone")
+        XCTAssertEqual(response.children[0].lastHeartbeat, "2026-06-05T12:00:00Z")
+        XCTAssertEqual(response.children[0].childAuthGranted, true)
+        XCTAssertEqual(response.children[0].buildNumber, 42)
+        XCTAssertEqual(response.children[0].catalogAppCount, 2)
+        XCTAssertEqual(response.children[0].catalogCategoryCount, 3)
+        XCTAssertEqual(response.children[0].catalogListCount, 1)
+        XCTAssertEqual(response.children[0].catalogSummary, "2 apps · 3 categories · 1 list")
+        XCTAssertEqual(response.children[0].catalogPreviewText, "Instagram, Cat Quest")
+    }
+
+    func test_parentChildDevicesResponseDefaultsCatalogDiagnosticsWhenServerIsOld() throws {
+        let familyID = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
+        let childID = UUID(uuidString: "66666666-7777-8888-9999-AAAAAAAAAAAA")!
+        let data = """
+        {
+          "family_id": "\(familyID.uuidString)",
+          "children": [
+            {
+              "child_device_id": "\(childID.uuidString)",
+              "display_name": "Liam's iPhone",
+              "last_heartbeat": null,
+              "child_auth_granted": false,
+              "build_number": null
+            }
+          ]
+        }
+        """.data(using: .utf8)!
+
+        let response = try JSONDecoder().decode(ParentChildDevicesResponseDTO.self, from: data)
+
+        XCTAssertEqual(response.children[0].catalogAppCount, 0)
+        XCTAssertEqual(response.children[0].catalogCategoryCount, 0)
+        XCTAssertEqual(response.children[0].catalogListCount, 0)
+        XCTAssertEqual(response.children[0].catalogPreview, [])
+        XCTAssertEqual(response.children[0].catalogPreviewText, "No catalog entries yet")
+    }
+
+    func test_lazyTagTargetsURLUsesThreeSectionFeedEndpoint() throws {
+        let childID = UUID(uuidString: "99999999-8888-7777-6666-555555555555")!
+        let client = APIClient(baseURL: "https://example.test/api/v1")
+
+        let url = client.lazyTagTargetsURL(childDeviceID: childID)
+
+        XCTAssertEqual(
+            url.absoluteString,
+            "https://example.test/api/v1/parent/lazy-tag-targets?child_device_id=\(childID.uuidString)"
+        )
+    }
+
+    func test_parentChildDeviceResponseDecodesSingleChildWithOwningFamily() throws {
+        let familyID = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
+        let childID = UUID(uuidString: "66666666-7777-8888-9999-AAAAAAAAAAAA")!
+        let data = """
+        {
+          "family_id": "\(familyID.uuidString)",
+          "child": {
+            "child_device_id": "\(childID.uuidString)",
+            "display_name": "Current Kid iPhone",
+            "last_heartbeat": null,
+            "child_auth_granted": true,
+            "build_number": 77,
+            "catalog_app_count": 3,
+            "catalog_category_count": 1,
+            "catalog_list_count": 2,
+            "catalog_preview": ["Cat Quest", "Instagram", "YouTube"]
+          }
+        }
+        """.data(using: .utf8)!
+
+        let response = try JSONDecoder().decode(ParentChildDeviceResponseDTO.self, from: data)
+
+        XCTAssertEqual(response.familyID, familyID)
+        XCTAssertEqual(response.child.childDeviceID, childID)
+        XCTAssertEqual(response.child.displayName, "Current Kid iPhone")
+        XCTAssertEqual(response.child.catalogSummary, "3 apps · 1 category · 2 lists")
+        XCTAssertEqual(response.child.catalogPreviewText, "Cat Quest, Instagram, YouTube")
+    }
+
     func test_catalogSearchResponseDecodesWrappedResults() throws {
         let data = """
         {
@@ -138,6 +244,7 @@ final class APIClientCatalogDTOTests: XCTestCase {
               "binding_kind": "verified",
               "aliases": ["ig"],
               "bundle_id": "com.burbn.instagram",
+              "artwork_url": "https://example.com/instagram.png",
               "token_available": true,
               "status": "active"
             },
@@ -184,6 +291,7 @@ final class APIClientCatalogDTOTests: XCTestCase {
         XCTAssertEqual(targets.map(\.type), [.app, .category, .list])
         XCTAssertEqual(targets[0].displayName, "Instagram")
         XCTAssertEqual(targets[0].bundleID, "com.burbn.instagram")
+        XCTAssertEqual(targets[0].artworkURL, URL(string: "https://example.com/instagram.png"))
         XCTAssertFalse(targets[0].isManual)
         XCTAssertEqual(targets[1].displayName, "Games")
         XCTAssertEqual(targets[1].supportingText, "Current + future apps Apple classifies as Games")
@@ -201,6 +309,7 @@ final class APIClientCatalogDTOTests: XCTestCase {
           "aliases": ["TikTok", "抖音"],
           "status": "active",
           "bundle_id": "com.zhiliaoapp.musically",
+          "artwork_url": "https://example.com/tiktok.png",
           "token_available": true
         }
         """.data(using: .utf8)!
@@ -211,6 +320,7 @@ final class APIClientCatalogDTOTests: XCTestCase {
         XCTAssertEqual(target.aliasKey, aliasKey)
         XCTAssertEqual(target.aliases, ["TikTok", "抖音"])
         XCTAssertEqual(target.bundleID, "com.zhiliaoapp.musically")
+        XCTAssertEqual(target.artworkURL, URL(string: "https://example.com/tiktok.png"))
         XCTAssertFalse(target.isManual)
     }
 

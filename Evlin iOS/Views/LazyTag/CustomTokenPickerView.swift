@@ -37,6 +37,233 @@ func customTokenPickerForCard(
     )
 }
 
+struct AppStoreSearchRequest: Identifiable, Sendable, Equatable {
+    let id = UUID()
+    let query: String
+    let targetDisplay: String
+    let originalMessage: String
+}
+
+struct AppStoreSearchPickerView: View {
+    let request: AppStoreSearchRequest
+    let onSelect: (CatalogSearchResultDTO, AppStoreSearchRequest) -> Void
+    let onCancel: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var query: String
+    @State private var results: [CatalogSearchResultDTO] = []
+    @State private var isLoading = false
+    @State private var errorMessage: String?
+
+    private let apiClient: APIClient
+
+    init(
+        request: AppStoreSearchRequest,
+        apiClient: APIClient = APIClient(),
+        onSelect: @escaping (CatalogSearchResultDTO, AppStoreSearchRequest) -> Void,
+        onCancel: @escaping () -> Void
+    ) {
+        self.request = request
+        self.apiClient = apiClient
+        self.onSelect = onSelect
+        self.onCancel = onCancel
+        _query = State(initialValue: request.query)
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        header
+                        searchBar
+                        resultList
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+                    .padding(.bottom, 18)
+                }
+                if let errorMessage {
+                    Divider()
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                        Text(errorMessage)
+                            .font(.custom("Inter", size: 12).weight(.semibold))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .foregroundStyle(Color.evError)
+                    .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.evError.opacity(0.08))
+                }
+            }
+            .background(Color.evSurface.ignoresSafeArea())
+            .navigationTitle("Search App Store")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        onCancel()
+                        dismiss()
+                    }
+                }
+            }
+            .task {
+                await runSearch()
+            }
+        }
+    }
+
+    private var header: some View {
+        HStack(alignment: .top, spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Color.evPrimaryContainer)
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 20, weight: .bold))
+                    .foregroundStyle(Color.evPrimary)
+            }
+            .frame(width: 46, height: 46)
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Not in the list?")
+                    .font(.custom("Manrope", size: 21).weight(.bold))
+                    .foregroundStyle(Color.evOnSurface)
+                Text("Search App Store, pick the real app, and Evlin will save \"\(request.targetDisplay)\" as an alias.")
+                    .font(.custom("Inter", size: 13))
+                    .foregroundStyle(Color.evOnSurfaceVariant)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(16)
+        .sentinelCatalogCard(cornerRadius: 18)
+    }
+
+    private var searchBar: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(Color.evOutline)
+            TextField("Search App Store", text: $query)
+                .font(.custom("Inter", size: 14))
+                .textInputAutocapitalization(.words)
+                .submitLabel(.search)
+                .onSubmit {
+                    Task { await runSearch() }
+                }
+            Button("Search") {
+                Task { await runSearch() }
+            }
+            .font(.custom("Inter", size: 12).weight(.bold))
+            .disabled(query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isLoading)
+        }
+        .padding(.vertical, 11)
+        .padding(.horizontal, 12)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color.evSurfaceContainerLowest)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Color.evOutlineVariant, lineWidth: 1)
+        )
+    }
+
+    @ViewBuilder
+    private var resultList: some View {
+        if isLoading {
+            ProgressView("Searching...")
+                .font(.custom("Inter", size: 13))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 32)
+        } else if results.isEmpty {
+            Text("No App Store matches. Try the full app name, or add it on the kid device first.")
+                .font(.custom("Inter", size: 13))
+                .foregroundStyle(Color.evOnSurfaceVariant)
+                .padding(16)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .sentinelCatalogCard(cornerRadius: 18)
+        } else {
+            VStack(spacing: 0) {
+                ForEach(Array(results.enumerated()), id: \.offset) { index, result in
+                    if index > 0 {
+                        Divider()
+                            .overlay(Color.evOutlineVariant)
+                            .padding(.leading, 58)
+                    }
+                    Button {
+                        onSelect(result, request)
+                        dismiss()
+                    } label: {
+                        HStack(spacing: 12) {
+                            appIcon(result)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(result.canonicalName)
+                                    .font(.custom("Inter", size: 15).weight(.semibold))
+                                    .foregroundStyle(Color.evOnSurface)
+                                Text(result.bundleID ?? "No bundle id")
+                                    .font(.custom("Inter", size: 11))
+                                    .foregroundStyle(Color.evOutline)
+                                    .lineLimit(1)
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 13, weight: .bold))
+                                .foregroundStyle(Color.evOutline)
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 13)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(result.bundleID == nil)
+                }
+            }
+            .sentinelCatalogCard(cornerRadius: 18)
+        }
+    }
+
+    @ViewBuilder
+    private func appIcon(_ result: CatalogSearchResultDTO) -> some View {
+        if let artworkURL = result.artworkURL {
+            AsyncImage(url: artworkURL) { phase in
+                switch phase {
+                case .success(let image):
+                    image.resizable().scaledToFill()
+                default:
+                    appPlaceholder(result.canonicalName)
+                }
+            }
+            .frame(width: 34, height: 34)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+        } else {
+            appPlaceholder(result.canonicalName)
+        }
+    }
+
+    private func appPlaceholder(_ name: String) -> some View {
+        Text(String(name.prefix(1)).uppercased())
+            .font(.custom("Inter", size: 14).weight(.heavy))
+            .frame(width: 34, height: 34)
+            .background(Color.evSurfaceContainer)
+            .foregroundStyle(Color.evOnSurfaceVariant)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    @MainActor
+    private func runSearch() async {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        isLoading = true
+        errorMessage = nil
+        do {
+            results = try await apiClient.catalogSearch(q: trimmed)
+        } catch {
+            results = []
+            errorMessage = "Could not search App Store. Check connection and try again."
+        }
+        isLoading = false
+    }
+}
+
 struct CustomTokenPickerView: View {
     let request: LazyTagRequest
     let onSelect: (Any, LazyTagRequest) -> Void

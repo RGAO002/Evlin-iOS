@@ -1,6 +1,7 @@
 import SwiftUI
 import FamilyControls
 import ManagedSettings
+import Sentry
 
 /// Maps semantic Chat categories ("games", "social", "entertainment") to the
 /// opaque ActivityCategoryTokens produced by FamilyActivityPicker.
@@ -202,6 +203,7 @@ struct CategoryDefaultsStep: View {
             #if DEBUG
             print("[CategoryDefaultsStep] category catalog upload failed: \(error)")
             #endif
+            SentrySDK.capture(error: error)
         }
     }
 

@@ -31,6 +31,9 @@ struct AppControlCard: View {
 
             if isDisambiguation {
                 candidateList
+                if !model.options.isEmpty {
+                    optionButtons
+                }
             } else {
                 optionButtons
             }
@@ -132,13 +135,10 @@ struct AppControlCard: View {
                     onCandidate(candidate)
                 } label: {
                     HStack(spacing: 12) {
-                        ZStack {
-                            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                                .fill(Color.evPrimaryContainer)
-                            Image(systemName: model.kind == .childDisambiguation ? "person.fill" : "app.fill")
-                                .font(.system(size: 14, weight: .bold))
-                                .foregroundStyle(Color.evPrimary)
-                        }
+                        CandidateIcon(
+                            url: candidate.artworkURL,
+                            systemName: model.kind == .childDisambiguation ? "person.fill" : "app.fill"
+                        )
                         .frame(width: 32, height: 32)
 
                         VStack(alignment: .leading, spacing: 2) {
@@ -213,5 +213,39 @@ struct AppControlCard: View {
         default:
             return Color.evPrimary
         }
+    }
+}
+
+private struct CandidateIcon: View {
+    let url: URL?
+    let systemName: String
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(Color.evPrimaryContainer)
+
+            if let url {
+                AsyncImage(url: url) { phase in
+                    switch phase {
+                    case .success(let image):
+                        image
+                            .resizable()
+                            .scaledToFill()
+                    default:
+                        fallback
+                    }
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+            } else {
+                fallback
+            }
+        }
+    }
+
+    private var fallback: some View {
+        Image(systemName: systemName)
+            .font(.system(size: 14, weight: .bold))
+            .foregroundStyle(Color.evPrimary)
     }
 }

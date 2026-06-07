@@ -28,6 +28,7 @@ struct CardDispatcher: View {
         case .U1:
             U1Card(
                 entries: context.u1ShieldList,
+                verb: context.u1Verb ?? "unlock",
                 onUnlockSelected: { indices in
                     handlers.onU1UnlockSelected?(indices)
                 },
@@ -110,10 +111,53 @@ struct CardContext {
     // For U1 unlock-disambiguation card:
     let u1Token: String?
     let u1ShieldList: [U1ShieldEntry]
-    var reflectionPrompt: String? = nil
-    var reflectionEssay: String? = nil
-    var reflectionReviewMode: ReflectionReviewMode? = nil
-    var reflectionRedoReason: String? = nil
+    let u1Verb: String?
+    var reflectionPrompt: String?
+    var reflectionEssay: String?
+    var reflectionReviewMode: ReflectionReviewMode?
+    var reflectionRedoReason: String?
+
+    init(
+        targetDisplay: String,
+        childName: String,
+        durationMinutes: Int?,
+        categoryGuess: String?,
+        listSuggestions: [String],
+        existingLists: [String],
+        blockItems: [String],
+        childDevices: [(id: UUID, label: String)],
+        mode: String,
+        existingRecordKey: String?,
+        requestedExpiryISO: String?,
+        existingMode: String?,
+        u1Token: String?,
+        u1ShieldList: [U1ShieldEntry],
+        u1Verb: String? = nil,
+        reflectionPrompt: String? = nil,
+        reflectionEssay: String? = nil,
+        reflectionReviewMode: ReflectionReviewMode? = nil,
+        reflectionRedoReason: String? = nil
+    ) {
+        self.targetDisplay = targetDisplay
+        self.childName = childName
+        self.durationMinutes = durationMinutes
+        self.categoryGuess = categoryGuess
+        self.listSuggestions = listSuggestions
+        self.existingLists = existingLists
+        self.blockItems = blockItems
+        self.childDevices = childDevices
+        self.mode = mode
+        self.existingRecordKey = existingRecordKey
+        self.requestedExpiryISO = requestedExpiryISO
+        self.existingMode = existingMode
+        self.u1Token = u1Token
+        self.u1ShieldList = u1ShieldList
+        self.u1Verb = u1Verb
+        self.reflectionPrompt = reflectionPrompt
+        self.reflectionEssay = reflectionEssay
+        self.reflectionReviewMode = reflectionReviewMode
+        self.reflectionRedoReason = reflectionRedoReason
+    }
 }
 
 extension CardContext {
@@ -125,7 +169,7 @@ extension CardContext {
             blockItems: [], childDevices: [],
             mode: "std",
             existingRecordKey: nil, requestedExpiryISO: nil, existingMode: nil,
-            u1Token: nil, u1ShieldList: []
+            u1Token: nil, u1ShieldList: [], u1Verb: nil
         )
     }
 }

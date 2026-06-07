@@ -372,6 +372,17 @@ struct ChatView: View {
                 }
             )
         }
+        .sheet(item: $viewModel.activeAppStoreSearchRequest) { req in
+            AppStoreSearchPickerView(
+                request: req,
+                onSelect: { result, request in
+                    viewModel.handleAppStoreSearchSelection(result: result, request: request)
+                },
+                onCancel: {
+                    viewModel.cancelAppStoreSearch()
+                }
+            )
+        }
     }
 
     private var composerPanel: some View {

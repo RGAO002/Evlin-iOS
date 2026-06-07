@@ -1,6 +1,8 @@
 import Foundation
 import FamilyControls
 import ManagedSettings
+import UIKit
+import Sentry
 
 /// Foreground command poller. Every 5s, fetches pending commands from the backend
 /// and dispatches them to ActionExecutor. Posts ack back on completion.
@@ -12,6 +14,8 @@ final class CommandPoller {
     static let shared = CommandPoller()
 
     private var timer: Timer?
+    private var backgroundPollTask: Task<Void, Never>?
+    private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
     private var isPolling = false
     private var currentDeviceID: UUID?
     private var currentAPIClient: APIClient?
@@ -43,6 +47,14 @@ final class CommandPoller {
     /// Nil in production → the real `pollOnce()` runs.
     var oneShotPollOverride: ((UUID, APIClient) async -> Void)?
 
+    /// How often to poll while iOS grants background execution after the app
+    /// leaves foreground. Tunable in tests.
+    var backgroundPollIntervalNanoseconds: UInt64 = 5_000_000_000
+
+    /// Max attempts during one background grace window. iOS can end the task
+    /// earlier; this cap only bounds our own loop.
+    var backgroundPollMaxAttempts: Int = 6
+
     /// Start polling for the given child device ID. Safe to call repeatedly.
     func start(deviceID: UUID, apiClient: APIClient) {
         stop()
@@ -60,8 +72,49 @@ final class CommandPoller {
     func stop() {
         timer?.invalidate()
         timer = nil
+        stopBackgroundGracePolling()
         currentDeviceID = nil
         currentAPIClient = nil
+    }
+
+    /// Pause the foreground timer and poll briefly while iOS allows background
+    /// execution.
+    ///
+    /// This covers the common case where the kid backgrounds Evlin or locks the
+    /// screen shortly before a parent sends a command. It is NOT a force-quit
+    /// solution; after the user swipes Evlin away, iOS will not give us normal
+    /// background execution until another system wake path exists.
+    func startBackgroundGracePolling() {
+        timer?.invalidate()
+        timer = nil
+        stopBackgroundGracePolling()
+
+        let taskID = UIApplication.shared.beginBackgroundTask(withName: "EvlinCommandPoll") {
+            Task { @MainActor in
+                CommandPoller.shared.stopBackgroundGracePolling()
+            }
+        }
+        backgroundTaskID = taskID
+
+        backgroundPollTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            for _ in 0..<max(1, self.backgroundPollMaxAttempts) {
+                if Task.isCancelled { break }
+                await self.pollOnceForCurrentDevice()
+                if Task.isCancelled { break }
+                try? await Task.sleep(nanoseconds: self.backgroundPollIntervalNanoseconds)
+            }
+            self.stopBackgroundGracePolling()
+        }
+    }
+
+    private func stopBackgroundGracePolling() {
+        backgroundPollTask?.cancel()
+        backgroundPollTask = nil
+        if backgroundTaskID != .invalid {
+            UIApplication.shared.endBackgroundTask(backgroundTaskID)
+            backgroundTaskID = .invalid
+        }
     }
 
     /// Fetch all pending commands and dispatch. Safe to call manually (e.g. on push wake).
@@ -81,6 +134,7 @@ final class CommandPoller {
             }
         } catch {
             print("[CommandPoller] poll error: \(error)")
+            SentrySDK.capture(error: error)
         }
     }
 

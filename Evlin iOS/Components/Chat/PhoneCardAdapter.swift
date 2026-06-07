@@ -46,11 +46,13 @@ enum PhoneCardAdapter {
 
         case "phone.unlock_picker":
             let shields = u1ShieldEntriesFromDetail(payload)
+            let verb = unlockPickerVerb(payload)
             return CardRenderModel(
                 cardID: .U1,
                 context: makeContext(
                     target: "", childName: childName,
-                    u1Token: payload.planToken, u1ShieldList: shields
+                    u1Token: payload.planToken, u1ShieldList: shields,
+                    u1Verb: verb
                 )
             )
 
@@ -152,7 +154,8 @@ enum PhoneCardAdapter {
         requestedExpiryISO: String? = nil,
         existingMode: String? = nil,
         u1Token: String? = nil,
-        u1ShieldList: [U1ShieldEntry] = []
+        u1ShieldList: [U1ShieldEntry] = [],
+        u1Verb: String? = nil
     ) -> CardContext {
         return CardContext(
             targetDisplay: target,
@@ -168,7 +171,8 @@ enum PhoneCardAdapter {
             requestedExpiryISO: requestedExpiryISO,
             existingMode: existingMode,
             u1Token: u1Token,
-            u1ShieldList: u1ShieldList
+            u1ShieldList: u1ShieldList,
+            u1Verb: u1Verb
         )
     }
 
@@ -228,5 +232,14 @@ enum PhoneCardAdapter {
             }
         }
         return []
+    }
+
+    private static func unlockPickerVerb(_ p: PlanArchCardPayload) -> String {
+        let title = p.title.lowercased()
+        let optionLabels = p.options.map { $0.label.lowercased() }
+        if title.contains("unblock") || optionLabels.contains(where: { $0.contains("unblock") }) {
+            return "unblock"
+        }
+        return "unlock"
     }
 }

@@ -20,6 +20,14 @@ protocol AliasManagingClient {
         target: LazyTagCatalogTarget,
         alias: String
     ) async throws -> LazyTagCatalogTarget
+
+    func renameLazyTagAlias(
+        familyID: UUID,
+        childDeviceID: UUID,
+        target: LazyTagCatalogTarget,
+        oldAlias: String,
+        newAlias: String
+    ) async throws -> LazyTagCatalogTarget
 }
 
 @MainActor
@@ -84,6 +92,22 @@ final class AliasManagerModel: ObservableObject {
                 childDeviceID: childDeviceID,
                 target: target,
                 alias: alias
+            )
+            replaceTarget(updated)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func renameAlias(_ oldAlias: String, to newAlias: String, for target: LazyTagCatalogTarget) async {
+        errorMessage = nil
+        do {
+            let updated = try await client.renameLazyTagAlias(
+                familyID: familyID,
+                childDeviceID: childDeviceID,
+                target: target,
+                oldAlias: oldAlias,
+                newAlias: newAlias
             )
             replaceTarget(updated)
         } catch {

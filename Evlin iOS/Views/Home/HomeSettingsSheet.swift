@@ -80,6 +80,8 @@ struct HomeSettingsSheet: View {
                     }
                 }
 
+                #if DEBUG
+                if false {
                 Section("Connection") {
                     #if DEBUG
                     // Dev-only quick-swap. Production builds (DEBUG not
@@ -165,6 +167,8 @@ struct HomeSettingsSheet: View {
                         idRow(title: "Child Device ID", value: childDeviceID)
                     }
                 }
+                }
+                #endif
 
                 Section("Screen Time") {
                     HStack {
@@ -212,6 +216,8 @@ struct HomeSettingsSheet: View {
                         }
                     }
 
+                    #if DEBUG
+                    if false {
                     let appCount = screenTimeManager.selectedApps.applicationTokens.count
                     let catCount = screenTimeManager.selectedApps.categoryTokens.count
 
@@ -374,8 +380,26 @@ struct HomeSettingsSheet: View {
                         Label("Nuclear Reset (lock state)", systemImage: "exclamationmark.triangle.fill")
                             .foregroundStyle(Color.evError)
                     }
+                    }
+                    #endif
                 }
 
+                Section("App Controls") {
+                    Button {
+                        showLockListGate = true
+                    } label: {
+                        Label("Lock setup", systemImage: "lock.rectangle.stack")
+                    }
+
+                    NavigationLink {
+                        AliasManagementView()
+                    } label: {
+                        Label("Manage aliases", systemImage: "tag.fill")
+                    }
+                }
+
+                #if DEBUG
+                if false {
                 Section("Camera & Photos") {
                     HStack(spacing: 12) {
                         Image(systemName: "camera.fill")
@@ -419,7 +443,11 @@ struct HomeSettingsSheet: View {
                         .font(.caption)
                         .foregroundStyle(Color.evOutline)
                 }
+                }
+                #endif
 
+                #if DEBUG
+                if false {
                 Section("Device Status") {
                     HStack {
                         Text("Lock State")
@@ -428,6 +456,8 @@ struct HomeSettingsSheet: View {
                             .foregroundStyle(screenTimeManager.isUnlocked ? Color.evSecondary : Color.evError)
                     }
                 }
+                }
+                #endif
 
                 Section("Chat") {
                     Button(role: .destructive) {
@@ -438,6 +468,8 @@ struct HomeSettingsSheet: View {
                     }
                 }
 
+                #if DEBUG
+                if false {
                 // Diagnostic: last DeviceActivitySchedule attempt. If a timed
                 // shield isn't auto-releasing, this surfaces the exact reason
                 // (auth missing, interval invalid, monitoring limit hit, etc.).
@@ -520,7 +552,11 @@ struct HomeSettingsSheet: View {
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }
+                }
+                #endif
 
+                #if DEBUG
+                if false {
                 Section("Mode") {
                     HStack {
                         Text("Current Mode")
@@ -573,12 +609,29 @@ struct HomeSettingsSheet: View {
                         Label("Reset Everything (Re-run Onboarding)", systemImage: "arrow.counterclockwise")
                     }
                 }
+                }
+                #endif
 
                 Section("About") {
                     LabeledContent("Version", value: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—")
                 }
 
                 #if DEBUG
+                Section("Debug") {
+                    NavigationLink {
+                        debugSettingsMenu
+                    } label: {
+                        Label("Diagnostics & experiments", systemImage: "ladybug")
+                    }
+
+                    Text("Developer-only tools. Hidden from TestFlight and release builds.")
+                        .font(.caption)
+                        .foregroundStyle(Color.evOnSurfaceVariant)
+                }
+                #endif
+
+                #if DEBUG
+                if false {
                 Section("Developer Tools") {
                     NavigationLink {
                         SpikeView()
@@ -590,8 +643,11 @@ struct HomeSettingsSheet: View {
                         .font(.caption)
                         .foregroundStyle(Color.evOnSurfaceVariant)
                 }
+                }
                 #endif
 
+                #if DEBUG
+                if false {
                 Section {
                     if let famID = UUID(uuidString: familyID) {
                         Picker("Protection Mode", selection: $protectionMode) {
@@ -637,6 +693,8 @@ struct HomeSettingsSheet: View {
                 } header: {
                     Text("Protection Mode")
                 }
+                }
+                #endif
 
             }
             .navigationTitle("Settings")
@@ -776,6 +834,370 @@ struct HomeSettingsSheet: View {
             }
         }
         .preferredColorScheme(.light)
+    }
+
+    @ViewBuilder
+    private var debugSettingsMenu: some View {
+        Form {
+            Section("Connection") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Backend Preset")
+                        .font(.custom("Inter", size: 11).weight(.bold))
+                        .tracking(1.2)
+                        .textCase(.uppercase)
+                        .foregroundStyle(Color.evOutline)
+                    Picker("Backend", selection: $serverURL) {
+                        Text("Local").tag(APIClient.localDevURL)
+                        Text("Production").tag(APIClient.defaultURL)
+                    }
+                    .pickerStyle(.segmented)
+                    .onChange(of: serverURL) { oldValue, newValue in
+                        let isPreset = newValue == APIClient.localDevURL
+                            || newValue == APIClient.defaultURL
+                        guard isPreset else { return }
+                        apiClient.saveServerURL(newValue)
+
+                        guard !oldValue.isEmpty, oldValue != newValue else { return }
+                        UserDefaults.standard.removeObject(forKey: "evlin.familyID")
+                        UserDefaults.standard.removeObject(forKey: "evlin.parentDeviceID")
+                        UserDefaults.standard.removeObject(forKey: "evlin.childDeviceID")
+                        UserDefaults.standard.set(false, forKey: "onboardingComplete")
+                        UserDefaults.standard.set("", forKey: "appMode")
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Server URL")
+                        .font(.custom("Inter", size: 11).weight(.bold))
+                        .tracking(1.2)
+                        .textCase(.uppercase)
+                        .foregroundStyle(Color.evOutline)
+                    TextField("http://192.168.1.x:8000/api/v1", text: $serverURL)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        .keyboardType(.URL)
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Child Name")
+                        .font(.custom("Inter", size: 11).weight(.bold))
+                        .tracking(1.2)
+                        .textCase(.uppercase)
+                        .foregroundStyle(Color.evOutline)
+                    TextField("Liam", text: $childName)
+                }
+
+                if !familyID.isEmpty {
+                    idRow(title: "Family ID", value: familyID)
+                }
+                if !parentDeviceID.isEmpty {
+                    idRow(title: "Parent Device ID", value: parentDeviceID)
+                }
+                if !childDeviceID.isEmpty {
+                    idRow(title: "Child Device ID", value: childDeviceID)
+                }
+            }
+
+            Section("Screen Time Debug") {
+                let appCount = screenTimeManager.selectedApps.applicationTokens.count
+                let catCount = screenTimeManager.selectedApps.categoryTokens.count
+
+                Button {
+                    isPickerPresented = true
+                } label: {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Managed Apps & Categories")
+                                .foregroundStyle(Color.evOnSurface)
+                            if appCount > 0 || catCount > 0 {
+                                Text("\(appCount) apps, \(catCount) categories")
+                                    .font(.caption)
+                                    .foregroundStyle(Color.evOutline)
+                            } else {
+                                Text("Nothing selected yet")
+                                    .font(.caption)
+                                    .foregroundStyle(Color.evOutline)
+                            }
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .font(.caption)
+                            .foregroundStyle(Color.evOutline)
+                    }
+                }
+
+                ManagedActivitySelectionDiagnostics(selection: screenTimeManager.selectedApps)
+
+                if appCount > 0 || catCount > 0 {
+                    Button {
+                        screenTimeManager.shieldApps()
+                    } label: {
+                        Label("Lock Selected Apps", systemImage: "lock.fill")
+                            .foregroundStyle(Color.evError)
+                    }
+                }
+
+                Button {
+                    screenTimeManager.clearAllShields()
+                } label: {
+                    Label("Unlock All Apps", systemImage: "lock.open.fill")
+                        .foregroundStyle(Color.evSecondary)
+                }
+
+                Button(role: .destructive) {
+                    Task { await nuclearReset() }
+                } label: {
+                    Label("Nuclear Reset (lock state)", systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(Color.evError)
+                }
+            }
+
+            Section("Camera & Photos") {
+                HStack(spacing: 12) {
+                    Image(systemName: "camera.fill")
+                        .foregroundStyle(Color.evOutline)
+                        .frame(width: 24)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Camera")
+                            .foregroundStyle(Color.evOnSurface)
+                        Text(cameraStatusText)
+                            .font(.caption)
+                            .foregroundStyle(Color.evOutline)
+                    }
+                    Spacer()
+                }
+                Group {
+                    if cameraIsAuthorized {
+                        Text("Ready for task evidence and profile photos.")
+                            .font(.caption)
+                            .foregroundStyle(Color.evSecondary)
+                    } else {
+                        Button(cameraPermissionActionTitle) {
+                            handleCameraPermissionTap()
+                        }
+                    }
+                }
+                .id(cameraPermissionFreshness)
+
+                Text("Camera is used when your child submits task photos or evidence.")
+                    .font(.caption)
+                    .foregroundStyle(Color.evOutline)
+
+                Button {
+                    if let url = URL(string: UIApplication.openSettingsURLString) {
+                        UIApplication.shared.open(url)
+                    }
+                } label: {
+                    Label("Open Evlin Settings", systemImage: "slider.horizontal.3")
+                }
+            }
+
+            Section("Mode") {
+                HStack {
+                    Text("Current Mode")
+                    Spacer()
+                    Text(appMode == "parent" ? "Parent" : "Child")
+                        .foregroundStyle(Color.evPrimary)
+                }
+
+                Button(role: .destructive) {
+                    appMode = "setup"
+                    onClose()
+                } label: {
+                    Label("Switch Device Mode", systemImage: "arrow.triangle.2.circlepath")
+                }
+
+                if appMode == "parent" {
+                    Button {
+                        EvlinDemoShortcuts.seedPlaceholderChildUUIDIfMissing()
+                        appMode = "child"
+                        onClose()
+                    } label: {
+                        Label("Switch to Child Mode", systemImage: "figure.child")
+                    }
+                } else if appMode == "child" {
+                    Button {
+                        appMode = "parent"
+                        onClose()
+                    } label: {
+                        Label("Switch to Parent Mode", systemImage: "person.fill")
+                    }
+                }
+
+                Button(role: .destructive) {
+                    screenTimeManager.clearAllShields()
+                    UserDefaults.standard.removeObject(forKey: "onboardingComplete")
+                    UserDefaults.standard.removeObject(forKey: "appMode")
+                    UserDefaults.standard.removeObject(forKey: "childId")
+                    UserDefaults.standard.removeObject(forKey: "childName")
+                    UserDefaults.standard.removeObject(forKey: "targetChildId")
+                    UserDefaults.standard.removeObject(forKey: "evlin.familyID")
+                    UserDefaults.standard.removeObject(forKey: "evlin.parentDeviceID")
+                    UserDefaults.standard.removeObject(forKey: "evlin.childDeviceID")
+                    UserDefaults.standard.removeObject(forKey: "evlin_chat_history")
+                    UserDefaults.standard.removeObject(forKey: "serverURL")
+                    EvlinDemoShortcuts.clearFlag()
+                    NotificationCenter.default.post(name: .evlinClearChat, object: nil)
+                    appMode = ""
+                    onClose()
+                } label: {
+                    Label("Reset Everything (Re-run Onboarding)", systemImage: "arrow.counterclockwise")
+                }
+            }
+
+            Section("Protection Mode") {
+                if let famID = UUID(uuidString: familyID) {
+                    Picker("Protection Mode", selection: $protectionMode) {
+                        Text("Standard (.individual)").tag("std")
+                        Text("Maximum (.child)").tag("max")
+                    }
+                    .pickerStyle(.segmented)
+                    .onChange(of: protectionMode) { old, new in
+                        Task {
+                            do {
+                                try await apiClient.setProtectionMode(familyID: famID, mode: new)
+                                await MainActor.run {
+                                    protectionModeStatus = "Set to \(new.uppercased())"
+                                    UserDefaults.standard.set(new, forKey: "evlin.protectionMode")
+                                }
+                            } catch {
+                                await MainActor.run {
+                                    protectionMode = old
+                                    UserDefaults.standard.set(old, forKey: "evlin.protectionMode")
+                                    protectionModeStatus = "Failed: \(error.localizedDescription)"
+                                }
+                            }
+                        }
+                    }
+                    if !protectionModeStatus.isEmpty {
+                        Text(protectionModeStatus)
+                            .font(.caption)
+                            .foregroundStyle(Color.evOnSurfaceVariant)
+                    }
+                } else {
+                    Text("Pair a device first — we need a family id to sync protection mode.")
+                        .font(.caption)
+                        .foregroundStyle(Color.evOnSurfaceVariant)
+                }
+            }
+
+            diagnosticsSections
+
+            Section("Spike Tests") {
+                NavigationLink {
+                    SpikeView()
+                } label: {
+                    Label("Diagnostics & Spike Tests", systemImage: "wrench.and.screwdriver")
+                }
+                NavigationLink {
+                    LabelTokenInspectorView()
+                } label: {
+                    Label("Label(token) snapshot test", systemImage: "rectangle.and.text.magnifyingglass")
+                }
+                NavigationLink {
+                    ShieldHarvestProbeView()
+                } label: {
+                    Label("ShieldConfig harvest (E1)", systemImage: "lock.doc")
+                }
+                NavigationLink {
+                    DeviceActivityReportMetadataProbeView()
+                } label: {
+                    Label("DeviceActivityReport metadata test", systemImage: "chart.bar.doc.horizontal")
+                }
+                NavigationLink {
+                    LockActivityReviewScreen()
+                } label: {
+                    Label("Lock activity review", systemImage: "clock.arrow.circlepath")
+                }
+                NavigationLink {
+                    TokenScreenshotImportView()
+                } label: {
+                    Label("Auto-tag via screenshots", systemImage: "camera.viewfinder")
+                }
+                NavigationLink {
+                    TokenPickerProbeView()
+                } label: {
+                    Label("Lazy-tag picker test", systemImage: "tag")
+                }
+                NavigationLink {
+                    AliasLibraryInspectorView()
+                } label: {
+                    Label("Alias library (after hydrate)", systemImage: "books.vertical")
+                }
+                NavigationLink {
+                    AliasE2ETestView()
+                } label: {
+                    Label("Alias E2E test (start here)", systemImage: "checkmark.seal")
+                }
+                NavigationLink {
+                    QrSpikeDebugView()
+                } label: {
+                    Label("QR-over-pixel DAR spike", systemImage: "qrcode.viewfinder")
+                }
+                NavigationLink {
+                    ChildAppCatalogDebugView()
+                } label: {
+                    Label("Child app catalog cross-device test", systemImage: "iphone.gen3.radiowaves.left.and.right")
+                }
+                NavigationLink {
+                    ChildPickerSpikeView()
+                } label: {
+                    Label(".child parent picker spike", systemImage: "person.2.badge.gearshape")
+                }
+            }
+        }
+        .navigationTitle("Debug")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    @ViewBuilder
+    private var diagnosticsSections: some View {
+        Section {
+            let lastResult = UserDefaults(suiteName: "group.com.evlin.ios")?
+                .string(forKey: "evlin.lastScheduleResult")
+                ?? "(no schedule attempted yet — set a timed lock first)"
+            Text(lastResult)
+                .font(.system(size: 12, design: .monospaced))
+                .foregroundStyle(lastResult.contains("FAILED") ? Color.red : Color.evOnSurface)
+                .textSelection(.enabled)
+        } header: {
+            Text("Last Auto-Unshield Schedule")
+        }
+
+        Section {
+            let failure = UserDefaults(suiteName: "group.com.evlin.ios")?
+                .string(forKey: "evlin.reflectionLockScheduleFailure") ?? "none"
+            Text(failure)
+                .font(.system(size: 12, design: .monospaced))
+                .foregroundStyle(failure == "none" ? Color.evOnSurface : Color.red)
+                .textSelection(.enabled)
+        } header: {
+            Text("Reflection lock schedule")
+        }
+
+        Section {
+            let lastFired = UserDefaults(suiteName: "group.com.evlin.ios")?
+                .string(forKey: "evlin.lastIntervalDidEnd")
+                ?? "(extension never fired since launch)"
+            Text(lastFired)
+                .font(.system(size: 12, design: .monospaced))
+                .foregroundStyle(lastFired.contains("shieldRemoved=false") ? Color.orange : Color.evOnSurface)
+                .textSelection(.enabled)
+        } header: {
+            Text("Last Extension Fire")
+        }
+
+        Section {
+            let lastRecompute = UserDefaults(suiteName: "group.com.evlin.ios")?
+                .string(forKey: "evlin.lastRecompute")
+                ?? "(no recompute since install)"
+            Text(lastRecompute)
+                .font(.system(size: 12, design: .monospaced))
+                .foregroundStyle(Color.evOnSurface)
+                .textSelection(.enabled)
+        } header: {
+            Text("Last Recompute")
+        }
     }
 
     private var cameraIsAuthorized: Bool {

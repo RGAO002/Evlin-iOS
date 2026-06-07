@@ -21,5 +21,9 @@
 		<string>fetch</string>
 		<string>remote-notification</string>
 	</array>
+	<key>SENTRY_DSN</key>
+	<string>https://a23e10f9fc3690c80dae5e8de5f36d25@o4511508522270720.ingest.us.sentry.io/4511508813709312</string>
+	<key>SENTRY_ENVIRONMENT</key>
+	<string>development</string>
 </dict>
 </plist>

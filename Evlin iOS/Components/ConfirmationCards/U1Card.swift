@@ -2,6 +2,7 @@ import SwiftUI
 
 struct U1Card: View {
     let entries: [U1ShieldEntry]
+    let verb: String
     let onUnlockSelected: ([Int]) -> Void
     let onUnlockEverything: () -> Void
     let onCancel: () -> Void
@@ -14,7 +15,7 @@ struct U1Card: View {
                 Image(systemName: "lock.open")
                     .font(.system(size: 18, weight: .semibold))
                     .foregroundStyle(Color.evPrimary)
-                Text("Unlock which one?")
+                Text(isUnblock ? "Unblock which one?" : "Unlock which one?")
                     .font(.system(size: 16, weight: .heavy))
                     .foregroundStyle(Color.evOnSurface)
             }
@@ -25,7 +26,7 @@ struct U1Card: View {
             }
             VStack(spacing: 8) {
                 Button(action: { onUnlockSelected(Array(selected).sorted()) }) {
-                    Text("Unlock selected")
+                    Text(isUnblock ? "Unblock selected" : "Unlock selected")
                         .font(.system(size: 15, weight: .heavy))
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 11)
@@ -44,7 +45,7 @@ struct U1Card: View {
                 // Hide the button when there's nothing to disambiguate.
                 if entries.count > 1 {
                     Button(action: onUnlockEverything) {
-                        Text("Unlock everything")
+                        Text(isUnblock ? "Unblock everything" : "Unlock everything")
                             .font(.system(size: 15, weight: .heavy))
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 11)
@@ -69,16 +70,12 @@ struct U1Card: View {
         )
     }
 
+    private var isUnblock: Bool {
+        verb.localizedCaseInsensitiveContains("unblock")
+    }
+
     @ViewBuilder
     private func rowView(entry: U1ShieldEntry) -> some View {
-        let kind: NameIconKind = {
-            switch entry.kind {
-            case "category": return .category
-            case "list": return .savedList
-            case "all": return .all
-            default: return .app
-            }
-        }()
         // Hard disable when an All Apps shield definitionally covers this
         // row — strike the text, dim the icons, ignore taps. The subtitle
         // explains why (see subtitle() below). Soft category-coverage is
@@ -93,9 +90,7 @@ struct U1Card: View {
                     .foregroundStyle(selected.contains(entry.index)
                                      ? Color.evPrimary : Color.evOutline)
                 VStack(alignment: .leading, spacing: 2) {
-                    NameWithIcon(name: entry.displayName, kind: kind,
-                                 titleFont: .system(size: 15, weight: .medium),
-                                 strikethrough: isHardCovered)
+                    shieldName(entry, isHardCovered: isHardCovered)
                     Text(subtitle(for: entry))
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
@@ -110,6 +105,37 @@ struct U1Card: View {
         }
         .buttonStyle(.plain)
         .disabled(isHardCovered)
+    }
+
+    @ViewBuilder
+    private func shieldName(_ entry: U1ShieldEntry, isHardCovered: Bool) -> some View {
+        // Category tokens are opaque and their Apple Label rendering is not
+        // reliable in the parent-side unlock picker. Use a deterministic glyph
+        // here so category rows never appear blank; token-backed Label rendering
+        // remains available in kid-side capture/management surfaces.
+        switch entry.kind {
+        case "category":
+            HStack(spacing: 8) {
+                Image(systemName: "square.grid.2x2.fill")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(Color.evOutline)
+                    .frame(width: 24, height: 24)
+                Text(NameWithIcon.displayName(entry.displayName))
+                    .font(.system(size: 15, weight: .medium))
+                    .strikethrough(isHardCovered, color: nil)
+            }
+        default:
+            let kind: NameIconKind = {
+                switch entry.kind {
+                case "list": return .savedList
+                case "all": return .all
+                default: return .app
+                }
+            }()
+            NameWithIcon(name: entry.displayName, kind: kind,
+                         titleFont: .system(size: 15, weight: .medium),
+                         strikethrough: isHardCovered)
+        }
     }
 
     private func toggle(_ idx: Int) {
@@ -185,6 +211,7 @@ struct U1Card: View {
                           expiresAtISO: "2026-05-07T16:19:00Z", stale: false,
                           coveredByAll: true, categoryWarnings: []),
         ],
+        verb: "unlock",
         onUnlockSelected: { print("selected: \($0)") },
         onUnlockEverything: { print("everything") },
         onCancel: { print("cancel") }
@@ -205,6 +232,7 @@ struct U1Card: View {
             U1ShieldEntry(index: 3, kind: "list", displayName: "Bedtime apps",
                           expiresAtISO: "2026-05-07T22:00:00Z", stale: true),
         ],
+        verb: "unlock",
         onUnlockSelected: { print("selected: \($0)") },
         onUnlockEverything: { print("everything") },
         onCancel: { print("cancel") }

@@ -56,6 +56,7 @@ struct AppControlCardOption: Sendable, Equatable, Identifiable {
 struct AppControlCandidate: Sendable, Equatable, Identifiable {
     let display: String
     let bundleID: String?
+    let artworkURL: URL?
     let targetType: String?
     let childDeviceID: String?
     let aliasKey: String?
@@ -111,6 +112,7 @@ struct AppControlCardModel: Sendable, Equatable {
             return AppControlCandidate(
                 display: display,
                 bundleID: dict["bundle_id"] as? String,
+                artworkURL: (dict["artwork_url"] as? String).flatMap(URL.init(string:)),
                 targetType: dict["target_type"] as? String,
                 childDeviceID: dict["child_device_id"] as? String,
                 aliasKey: dict["alias_key"] as? String
@@ -146,6 +148,12 @@ enum AppControlAction: Sendable, Equatable {
     /// Open the catalog-backed lazy-tag picker for this target. Used by
     /// open_lazy_tag (shield_token_missing / app_not_found_terminal).
     case openLazyTag(target: String, kind: AliasKind)
+    /// Open parent-side App Store search for the unresolved/disambiguated text.
+    /// Used by "Not in the list" on app-store disambiguation cards.
+    case openAppSearch(query: String)
+    /// Confirm an App Store / public-catalog candidate in the Family App
+    /// Dictionary, then resend the original command with the selected display.
+    case confirmAppAndResend(candidateDisplay: String, bundleID: String?, artworkURL: URL?)
     /// Surface guidance toward renaming the colliding list. Used by
     /// category_rename_required's rename_list (no chat endpoint exists).
     case renameList(target: String)
@@ -172,6 +180,8 @@ enum AppControlRouter {
             return .resendForceConfirmations(["shield_anyway"])
         case "open_lazy_tag":
             return .openLazyTag(target: card.targetDisplay, kind: aliasKind(for: card.targetKind))
+        case "open_app_search":
+            return .openAppSearch(query: card.targetDisplay)
         case "rename_list":
             return .renameList(target: card.targetDisplay)
         case "cancel":
@@ -192,11 +202,46 @@ enum AppControlRouter {
             // the Brain D4 child-name rewrite ("Liam's phone: …").
             return .resendPhrase("\(candidate.display)'s phone")
         case .appStoreDisambiguation:
-            // The candidate display is now the unambiguous app name.
-            return .resendPhrase(candidate.display)
+            // The candidate display is now the unambiguous app name. Confirm it
+            // first so the next turn resolves through the family dictionary
+            // instead of re-opening the same disambiguation / legacy lazy-tag path.
+            return .confirmAppAndResend(
+                candidateDisplay: candidate.display,
+                bundleID: candidate.bundleID,
+                artworkURL: candidate.artworkURL
+            )
         default:
             return .none
         }
+    }
+
+    /// Replaces the ambiguous target inside the original parent command while
+    /// preserving the verb and duration ("Lock cat quest for 15 min" ->
+    /// "Lock Cat Quest for 15 min"). This prevents app-store disambiguation taps
+    /// from replaying only the display name and falling into the legacy
+    /// "managed apps" lazy-tag path.
+    static func rewriteOriginalCommand(
+        _ original: String,
+        replacing targetDisplay: String,
+        with candidateDisplay: String
+    ) -> String {
+        let trimmedOriginal = original.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedCandidate = candidateDisplay.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedTarget = targetDisplay.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedOriginal.isEmpty, !trimmedCandidate.isEmpty else {
+            return trimmedCandidate
+        }
+        guard !trimmedTarget.isEmpty,
+              let range = trimmedOriginal.range(
+                of: trimmedTarget,
+                options: [.caseInsensitive, .diacriticInsensitive]
+              )
+        else {
+            return trimmedOriginal
+        }
+        var rewritten = trimmedOriginal
+        rewritten.replaceSubrange(range, with: trimmedCandidate)
+        return rewritten
     }
 
     static func aliasKind(for targetKind: String) -> AliasKind {
