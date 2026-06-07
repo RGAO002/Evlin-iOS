@@ -1,0 +1,138 @@
+import Foundation
+import Observation
+
+// NOTE (§15.7 PIN A / Task 11): the canonical `AuthAccountDTO` is declared ONCE,
+// in `APIClient.swift` (Task 10 had to introduce it there because its
+// `AuthResultDTO.account` + single-flight refresher consume it before this file
+// landed). It lives in the SAME module, so this file references that EXACT type
+// directly — declaring a second top-level `AuthAccountDTO` here would be an
+// "Invalid redeclaration" compile error. Do NOT redeclare it.
+
+/// Single source of truth for the parent's authenticated session. Holds the
+/// session state derived from the Keychain and exposes sign-in entry points
+/// that POST to the backend /auth/* routes. §6.1.
+@MainActor
+@Observable
+final class AuthService {
+    enum SessionState: Equatable {
+        case unknown          // not yet checked
+        case signedOut
+        case signedIn(AuthAccountDTO)
+    }
+
+    private(set) var state: SessionState = .unknown
+    private(set) var lastError: String?
+
+    /// The canonical authed account (§15.7), or nil when not signed in.
+    /// Feature code reads `auth.account?.familyID` / `.displayName` / `.needsFamily`.
+    var account: AuthAccountDTO? {
+        if case .signedIn(let acct) = state { return acct }
+        return nil
+    }
+
+    /// True when a session blob is present in the Keychain. Used by the Plan 6
+    /// DEBUG guard (§15.7). Presence-only check — does NOT validate the token.
+    var hasStoredSession: Bool {
+        KeychainStore.shared.load() != nil
+    }
+
+    private let api: APIClient
+
+    init(api: APIClient) {
+        self.api = api
+        // Listen for terminal refresh failure published by APIClient (§14.7).
+        NotificationCenter.default.addObserver(
+            forName: .evlinSessionSignedOut, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.state = .signedOut }
+        }
+    }
+
+    /// Restore session from the Keychain at launch. Does not hit the network;
+    /// the first authed call will refresh if the access token is stale.
+    /// Rebuilds the full AuthAccountDTO (familyID/displayName) from the blob.
+    func restore() {
+        if let stored = KeychainStore.shared.load(),
+           let acct = Self.accountDTO(from: stored) {
+            state = .signedIn(acct)
+        } else {
+            state = .signedOut
+        }
+    }
+
+    /// Rebuild the canonical (Codable) `AuthAccountDTO` from the persisted
+    /// Keychain blob — no network. Returns nil if `accountID` isn't a UUID.
+    /// (The blob stores the account's fields as strings; the DTO itself is the
+    /// one `Codable` type from §15.7 PIN A, here built via its memberwise init.)
+    private static func accountDTO(from stored: StoredTokens) -> AuthAccountDTO? {
+        guard let uid = UUID(uuidString: stored.accountID) else { return nil }
+        return AuthAccountDTO(
+            id: uid,
+            familyID: stored.familyID.flatMap(UUID.init(uuidString:)),
+            displayName: stored.displayName,
+            needsFamily: stored.needsFamily
+        )
+    }
+
+    /// POST /auth/google with the provider id_token (and optional full name).
+    func signInWithGoogle(idToken: String, fullName: String?) async {
+        await postAuth(path: "/auth/google", body: [
+            "id_token": idToken, "full_name": fullName as Any,
+        ])
+    }
+
+    /// POST /auth/apple with the identity token + authorization code.
+    func signInWithApple(identityToken: String, authorizationCode: String?,
+                         fullName: String?) async {
+        await postAuth(path: "/auth/apple", body: [
+            "identity_token": identityToken,
+            "authorization_code": authorizationCode as Any,
+            "full_name": fullName as Any,
+        ])
+    }
+
+    func signOutLocally() {
+        KeychainStore.shared.clear()
+        state = .signedOut
+    }
+
+    private func postAuth(path: String, body: [String: Any]) async {
+        lastError = nil
+        let url = URL(string: "\(api.baseURL)\(path)")!
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let cleaned = body.compactMapValues { value -> Any? in
+            if value is NSNull { return nil }
+            if let s = value as? String { return s }
+            return value
+        }
+        req.httpBody = try? JSONSerialization.data(withJSONObject: cleaned)
+        do {
+            let (data, resp) = try await URLSession.shared.data(for: req)
+            guard let http = resp as? HTTPURLResponse else {
+                lastError = "network_error"; return
+            }
+            guard http.statusCode == 200 else {
+                // 401 user-cancel / invalid token; surface a non-fatal error.
+                lastError = "auth_failed_\(http.statusCode)"; return
+            }
+            let result = try JSONDecoder().decode(AuthResultDTO.self, from: data)
+            // §15.7 PIN A: `result.account` IS the canonical Codable AuthAccountDTO
+            // (decoded directly, UUID-typed, `needsFamily` from INSIDE the account).
+            let acct = result.account
+            // Persist the WHOLE account (§15.7): familyID + displayName included.
+            try KeychainStore.shared.save(StoredTokens(
+                accessToken: result.access_token,
+                refreshToken: result.refresh_token,
+                accountID: acct.id.uuidString,
+                familyID: acct.familyID?.uuidString,
+                displayName: acct.displayName,
+                needsFamily: acct.needsFamily
+            ))
+            state = .signedIn(acct)
+        } catch {
+            lastError = "network_error"
+        }
+    }
+}
