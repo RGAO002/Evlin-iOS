@@ -29,6 +29,35 @@ enum OnboardingStep: Equatable {
     case childCategoryDefaults
     case childFirstSavedList        // Std only
     case childReady
+
+    // MARK: - Onboarding v2 (scaffold)
+    //
+    // New v2 screen sequence per design spec §7 (2026-06-06-onboarding-v2-design.md).
+    // These are the *primary* path going forward; the cases above are kept for
+    // compatibility (old flow + Max "Advanced" block reachable from Settings).
+    // Case spellings match spec §7 verbatim. Several existing cases are REUSED
+    // by the v2 chain rather than duplicated: `welcome`, `modeSelect`,
+    // `parentPairingCode`, `parentDone`, `childGrantPermission`,
+    // `childDeletionProtection`, `childReady`.
+
+    // v2 Parent flow (new cases)
+    case parentSignIn            // mockup 3: "Create your parent account"
+    case parentProfile           // mockup 4: "Tell us about you"
+    case parentNewOrJoin         // mockup 5: "New family — or join an existing one"
+    case parentPairScan          // mockup 6: "Scan the kid's code" (QR + 6-digit fallback)
+    case parentConnected         // mockup 7: "Connected" (parent side)
+    case parentWaitingForKid     // polls /family/pairing-status kid_onboarding_phase
+    case parentSetPasscode       // mockup 14: "Lock the Screen Time settings"
+    case parentFirstActions      // mockup 15: "Send your first block (test)"
+    case parentItWorks           // mockup 16: "It works — the test pays off"
+
+    // v2 Kid flow (new cases)
+    case childProfile            // mockup 3 (kid): "Set up your profile"
+    case childShowCode           // mockup 5/6 (kid): "Show this to your parent"
+    case childConnected          // mockup 7 (kid): "You're linked to your parent"
+    case childConsentDisclosure  // mockup 8: "What Evlin can see"
+    case childAllowNotifications // mockup 10: "Allow notifications"
+    case childLockableHub        // mockup 12: "Choose what Evlin can lock"
 }
 
 struct OnboardingCoordinator: View {
@@ -39,6 +68,12 @@ struct OnboardingCoordinator: View {
     @AppStorage("appMode") private var appMode: String = ""
 
     @State private var step: OnboardingStep = .welcome
+
+    // Onboarding v2 (scaffold): when true, `modeSelect` routes into the v2
+    // screen sequence (spec §7) instead of the legacy pairing-first flow.
+    // Defaults to true so the v2 chain is the DEFAULT next-path. The legacy
+    // path stays reachable by flipping this off (DEBUG ladybug menu).
+    @State private var useV2Flow: Bool = true
 
     // Shared state threaded between steps
     @State private var childName: String = ""
@@ -67,13 +102,37 @@ struct OnboardingCoordinator: View {
                     for: .evlinSingleDeviceJumpToParent,
                 )) { _ in
                     appMode = "parent"
-                    step = .parentPairingCode
+                    // v2 retargets the single-device jump to the parent pair
+                    // step (spec §7.4); v1 lands on the code-entry step.
+                    step = useV2Flow ? .parentPairScan : .parentPairingCode
                 }
                 #endif
 
             #if DEBUG
             // Debug escape hatch — always available during onboarding
             Menu {
+                // ── Onboarding v2 (scaffold) tap-through entries ──
+                // Jump straight into the FIRST v2 screen for each role so a
+                // human can tap "Continue" through the entire v2 sequence
+                // end-to-end without pairing. `useV2Flow` is already the
+                // default, so these just set the role + first step.
+                Button("▶︎ v2 PARENT flow (tap-through)") {
+                    useV2Flow = true
+                    appMode = "parent"
+                    step = .parentSignIn
+                }
+                Button("▶︎ v2 KID flow (tap-through)") {
+                    useV2Flow = true
+                    appMode = "child"
+                    step = .childProfile
+                }
+                Button("Use LEGACY v1 flow") {
+                    useV2Flow = false
+                    step = .welcome
+                }
+
+                Divider()
+
                 Button("Skip to Parent mode (test)") {
                     EvlinDemoShortcuts.enable()
                     EvlinDemoShortcuts.seedPlaceholderChildUUIDIfMissing()
@@ -95,6 +154,11 @@ struct OnboardingCoordinator: View {
                     EvlinDemoShortcuts.clearFlag()
                     UserDefaults.standard.removeObject(forKey: "onboardingComplete")
                     UserDefaults.standard.removeObject(forKey: "appMode")
+                    // v2 spec §7.4: also clear the v2 account/profile ids.
+                    for key in ["evlin.accountID", "evlin.parentProfileID", "evlin.childProfileID"] {
+                        UserDefaults.standard.removeObject(forKey: key)
+                    }
+                    useV2Flow = true
                     step = .welcome
                     childName = ""
                     familyID = nil
@@ -122,6 +186,21 @@ struct OnboardingCoordinator: View {
             case .modeSelect:
                 ModeSelectStep(
                     onSelect: { mode in
+                        // Onboarding v2 (scaffold) is the DEFAULT next-path.
+                        // Each role enters its v2 sequence (spec §7.1 / §7.2).
+                        if useV2Flow {
+                            switch mode {
+                            case .parent:
+                                appMode = "parent"
+                                step = .parentSignIn
+                            case .child:
+                                appMode = "child"
+                                step = .childProfile
+                            }
+                            return
+                        }
+
+                        // ---- Legacy v1 flow (kept reachable) ----
                         switch mode {
                         case .parent:
                             appMode = "parent"
@@ -202,11 +281,12 @@ struct OnboardingCoordinator: View {
                     parentDeviceID: $parentDeviceID,
                     pairingCode: $pairingCode
                 ) {
-                    // Pairing succeeded → next: parent picks protection mode.
-                    // The mode-specific (Max vs Std) flow branches inside
-                    // .parentProtectionLevel's onContinue, AFTER we've had
-                    // a chance to PUT /family/{id}/protection-mode.
-                    step = .parentProtectionLevel
+                    // v2: the 6-digit fallback rejoins the v2 chain at
+                    // parentConnected. v1: pairing succeeded → parent picks
+                    // protection mode (Max/Std branch inside
+                    // .parentProtectionLevel, after a chance to PUT
+                    // /family/{id}/protection-mode).
+                    step = useV2Flow ? .parentConnected : .parentProtectionLevel
                 }
 
             case .parentProtectionLevel:
@@ -273,15 +353,21 @@ struct OnboardingCoordinator: View {
                 }
 
             case .childGrantPermission:
+                // REUSED by v2 — v2 next is childAllowNotifications, v1 is
+                // childDeletionProtection.
                 GrantPermissionStep(
                     childDeviceID: childDeviceID ?? OnboardingDemoPlaceholders.childDeviceUUID,
                     protectionMode: protectionMode
                 ) {
-                    step = .childDeletionProtection
+                    step = useV2Flow ? .childAllowNotifications : .childDeletionProtection
                 }
 
             case .childDeletionProtection:
-                DeletionProtectionStep { step = .childCategoryDefaults }
+                // REUSED by v2 — v2 next is childLockableHub, v1 is
+                // childCategoryDefaults.
+                DeletionProtectionStep {
+                    step = useV2Flow ? .childLockableHub : .childCategoryDefaults
+                }
 
             case .childCategoryDefaults:
                 CategoryDefaultsStep(
@@ -306,6 +392,113 @@ struct OnboardingCoordinator: View {
                 ) {
                     // onboardingComplete flipped inside ChildReadyStep; appMode already set
                 }
+
+            // MARK: - Onboarding v2 (scaffold) — PARENT
+            //
+            // Tappable placeholders only. next/back drive the v2 parent chain
+            // (spec §7.1): signIn → profile → newOrJoin → pairScan → connected
+            // → waitingForKid → setPasscode → firstActions → itWorks → done.
+
+            case .parentSignIn:
+                ParentSignInStep(
+                    onContinue: { step = .parentProfile },
+                    onBack: { step = .modeSelect }
+                )
+
+            case .parentProfile:
+                ParentProfileStep(
+                    onContinue: { step = .parentNewOrJoin },
+                    onBack: { step = .parentSignIn }
+                )
+
+            case .parentNewOrJoin:
+                ParentNewOrJoinStep(
+                    onContinue: { step = .parentPairScan },
+                    onBack: { step = .parentProfile }
+                )
+
+            case .parentPairScan:
+                ParentPairScanStep(
+                    onContinue: { step = .parentConnected },
+                    // 6-digit fallback reuses the existing pairing-code step,
+                    // which (in v2) routes onward to parentConnected.
+                    onEnterCodeInstead: { step = .parentPairingCode },
+                    onBack: { step = .parentNewOrJoin }
+                )
+
+            case .parentConnected:
+                ParentConnectedStep(
+                    onContinue: { step = .parentWaitingForKid },
+                    onBack: { step = .parentPairScan }
+                )
+
+            case .parentWaitingForKid:
+                ParentWaitingForKidStep(
+                    onContinue: { step = .parentSetPasscode },
+                    onBack: { step = .parentConnected }
+                )
+
+            case .parentSetPasscode:
+                ParentSetPasscodeV2Step(
+                    onContinue: { step = .parentFirstActions },
+                    onBack: { step = .parentWaitingForKid }
+                )
+
+            case .parentFirstActions:
+                ParentFirstActionsStep(
+                    onContinue: { step = .parentItWorks },
+                    onBack: { step = .parentSetPasscode }
+                )
+
+            case .parentItWorks:
+                ParentItWorksStep(
+                    onContinue: { step = .parentDone },
+                    onBack: { step = .parentFirstActions }
+                )
+
+            // MARK: - Onboarding v2 (scaffold) — KID
+            //
+            // Tappable placeholders only. next/back drive the v2 kid chain
+            // (spec §7.2): childProfile → childShowCode → childConnected
+            // → childConsentDisclosure → childGrantPermission (reused)
+            // → childAllowNotifications → childDeletionProtection (reused)
+            // → childLockableHub → childReady (reused).
+
+            case .childProfile:
+                ChildProfileStep(
+                    onContinue: { step = .childShowCode },
+                    onBack: { step = .modeSelect }
+                )
+
+            case .childShowCode:
+                ChildShowCodeStep(
+                    onContinue: { step = .childConnected },
+                    onBack: { step = .childProfile }
+                )
+
+            case .childConnected:
+                ChildConnectedStep(
+                    onContinue: { step = .childConsentDisclosure },
+                    onBack: { step = .childShowCode }
+                )
+
+            case .childConsentDisclosure:
+                ChildConsentDisclosureStep(
+                    onContinue: { step = .childGrantPermission },
+                    onBack: { step = .childConnected }
+                )
+
+            case .childAllowNotifications:
+                ChildAllowNotificationsStep(
+                    onContinue: { step = .childDeletionProtection },
+                    onBack: { step = .childGrantPermission }
+                )
+
+            case .childLockableHub:
+                ChildLockableHubStep(
+                    onContinue: { step = .childReady },
+                    onBack: { step = .childDeletionProtection }
+                )
             }
         }
         .animation(.easeInOut(duration: 0.2), value: step)
