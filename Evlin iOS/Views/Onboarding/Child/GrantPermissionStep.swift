@@ -97,10 +97,11 @@ struct GrantPermissionStep: View {
             try await AuthorizationCenter.shared.requestAuthorization(for: memberType)
             granted = true
             status = "Authorization granted"
-            if protectionMode == "max" {
-                // Notify backend so parent's WaitForAuth step can proceed
-                await grantOnBackend()
-            }
+            // Notify the backend that this child device's Screen Time auth
+            // landed. In Max mode the parent's WaitForAuth poll gates on it; in
+            // Std (the v2 default) it's harmless + idempotent, and keeps the
+            // child_auth_granted flag truthful for the parent's child-device row.
+            await grantOnBackend()
         } catch {
             if protectionMode == "max" {
                 errorText = "Authorization failed — confirm this phone is signed in with the Child Apple ID, then try again."
@@ -112,14 +113,7 @@ struct GrantPermissionStep: View {
 
     private func grantOnBackend() async {
         do {
-            let url = URL(string: "\(apiClient.baseURL)/family/auth-status/grant")!
-            var req = URLRequest(url: url)
-            req.httpMethod = "POST"
-            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            req.httpBody = try JSONSerialization.data(withJSONObject: [
-                "child_device_id": childDeviceID.uuidString
-            ])
-            _ = try await URLSession.shared.data(for: req)
+            try await apiClient.grantChildAuthStatus(childDeviceID: childDeviceID)
         } catch {
             print("[GrantPermission] backend notify failed: \(error)")
         }

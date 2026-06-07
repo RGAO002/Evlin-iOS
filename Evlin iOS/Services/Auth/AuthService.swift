@@ -96,6 +96,22 @@ final class AuthService {
         state = .signedOut
     }
 
+    #if DEBUG
+    /// DEBUG-only password-less sign-in for the simulator. POSTs to
+    /// /auth/dev-signin {email, display_name}, which (when the backend is in
+    /// debug mode) returns the SAME session JSON as /auth/google. Feeds the
+    /// result through the SAME `postAuth` path so the Keychain + `state` are
+    /// populated identically to a real Apple/Google sign-in. The caller passes
+    /// a unique dev email (e.g. dev+<uuid>@evlin.test) so each run mints a
+    /// fresh family-less account that can then pair.
+    func signInWithDevEmail(email: String, displayName: String) async {
+        await postAuth(path: "/auth/dev-signin", body: [
+            "email": email,
+            "display_name": displayName,
+        ])
+    }
+    #endif
+
     private func postAuth(path: String, body: [String: Any]) async {
         lastError = nil
         let url = URL(string: "\(api.baseURL)\(path)")!

@@ -1140,6 +1140,44 @@ struct FamilyDTO: Codable, Sendable, Equatable {
     let parent_devices: [EnrolledDeviceDTO]
 }
 
+// MARK: - Pairing wire DTOs (onboarding v2)
+//
+// Decode POST /family/pair (PairResponse) + GET /family/pairing-status
+// (PairingStatusResponse) EXACTLY as app/api/routes/family.py emits them
+// (snake_case property names ARE the JSON keys — no CodingKeys needed).
+
+struct PairResponseDTO: Codable, Sendable, Equatable {
+    let family_id: UUID
+    let parent_device_id: UUID
+    let child_device_id: UUID
+    let protection_mode: String
+}
+
+struct PairingStatusDTO: Codable, Sendable, Equatable {
+    let code: String
+    let used: Bool
+    let parent_device_id: UUID?
+    let child_device_id: UUID?
+    let protection_mode: String
+}
+
+struct ConsumeInviteResponseDTO: Codable, Sendable, Equatable {
+    let family_id: UUID
+    let role: String
+    let status: String   // "joined" | "pending_approval"
+}
+
+// Decode POST /family/create (CreateFamilyResponse) EXACTLY as
+// app/api/routes/family.py emits it (snake_case property names ARE the JSON
+// keys). `code_expires_at` is intentionally OMITTED here: Swift's strict
+// ISO8601 decoder chokes on the backend's fractional-seconds timestamps and the
+// kid flow doesn't surface an expiry countdown (mirrors legacy EnterPairingCodeStep).
+struct CreateFamilyResponseDTO: Codable, Sendable, Equatable {
+    let family_id: UUID
+    let child_device_id: UUID
+    let pairing_code: String
+}
+
 // §15.8 R2 / PIN (B): GET /family/me — the pending co-parent poll path.
 struct PendingInviteDTO: Codable, Sendable, Equatable {
     let code: String
@@ -1728,6 +1766,120 @@ extension APIClient {
     func renameFamily(displayName: String) async throws -> FamilyDTO {
         let payload = try JSONEncoder().encode(["display_name": displayName])
         return try await authedJSON(path: "/family", method: "PUT", jsonBody: payload)
+    }
+
+    // MARK: - Pairing (onboarding v2 — parent PAIRS to the kid family)
+    //
+    // The KID device calls POST /family/create (mints code + child_device_id);
+    // the PARENT (authed) calls POST /family/pair with that code, which BINDS
+    // account.family_id (needs_family → false). Unlike the legacy
+    // PairingCodeStep (which posted an UNauthed request), the live backend now
+    // requires get_current_account on /family/pair — so this goes through the
+    // authed layer (Bearer + single-flight 401 refresh, §14.7). Wire shapes
+    // match app/api/routes/family.py PairRequest / PairResponse exactly.
+
+    /// POST /family/pair — parent submits the kid's 6-digit code to join the
+    /// family. On success the backend binds account.family_id and returns the
+    /// bound family + the kid's child_device_id. `protectionMode` is omitted at
+    /// onboarding-v2 pair time (the backend keeps the kid's placeholder; the
+    /// parent picks Std/Max later) — pass it only from a re-pair/Settings flow.
+    @discardableResult
+    func pairFamily(
+        code: String,
+        deviceLabel: String,
+        protectionMode: String? = nil
+    ) async throws -> PairResponseDTO {
+        var body: [String: Any] = [
+            "code": code,
+            "parent_device_label": deviceLabel,
+        ]
+        if let protectionMode { body["protection_mode"] = protectionMode }
+        let payload = try JSONSerialization.data(withJSONObject: body)
+        return try await authedJSON(path: "/family/pair", method: "POST", jsonBody: payload)
+    }
+
+    /// GET /family/pairing-status?code= — read the live state of a pairing
+    /// code. UNauthenticated on the backend (the kid polls it while showing the
+    /// code; the parent can also read it to confirm a code is still valid).
+    func fetchPairingStatus(code: String) async throws -> PairingStatusDTO {
+        var comps = URLComponents(string: "\(baseURL)/family/pairing-status")!
+        comps.queryItems = [URLQueryItem(name: "code", value: code)]
+        let (data, resp) = try await URLSession.shared.data(from: comps.url!)
+        guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+        return try JSONDecoder().decode(PairingStatusDTO.self, from: data)
+    }
+
+    /// POST /family/invite/consume — a parent joins an EXISTING family by
+    /// entering a co-parent invite code (distinct from the kid pairing code).
+    /// Authed (get_current_account). With owner-approval ON the backend returns
+    /// status "pending_approval" and does NOT yet bind account.family_id — the
+    /// owner approves before the family appears. Wire shape matches
+    /// app/api/routes/family.py ConsumeInviteRequest / ConsumeInviteResponse.
+    @discardableResult
+    func consumeCoParentInvite(code: String) async throws -> ConsumeInviteResponseDTO {
+        let payload = try JSONSerialization.data(withJSONObject: ["code": code])
+        return try await authedJSON(path: "/family/invite/consume", method: "POST", jsonBody: payload)
+    }
+
+    // MARK: - Pairing (onboarding v2 — KID creates the family)
+    //
+    // The KID device is UNAUTHENTICATED (no parent account on it), so these go
+    // over a bare URLSession — NOT the authed Bearer layer used by /family/pair.
+    // Wire shapes match app/api/routes/family.py CreateFamilyRequest /
+    // CreateFamilyResponse + GrantAuthRequest exactly. This replaces the inline
+    // raw-URLSession blocks the legacy EnterPairingCodeStep / GrantPermissionStep
+    // carried, centralizing them on APIClient (same endpoints, same payloads).
+
+    /// POST /family/create — the kid device mints a family + child device + a
+    /// 6-digit pairing code to show the parent. `protectionMode` is a placeholder
+    /// ("std") the parent overrides at /family/pair time. Device hardware fields
+    /// (§1.7) are reported from `DeviceInfoProvider`.
+    @discardableResult
+    func createFamily(
+        childDeviceLabel: String,
+        protectionMode: String = "std"
+    ) async throws -> CreateFamilyResponseDTO {
+        let url = URL(string: "\(baseURL)/family/create")!
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.timeoutInterval = 15
+        let info = DeviceInfoProvider.current()
+        let body: [String: Any] = [
+            "child_device_label": childDeviceLabel,
+            "protection_mode": protectionMode,
+            "device_model": info.device_model,
+            "device_model_id": info.device_model_id,
+            "platform": info.platform,
+            "os_version": info.os_version,
+        ]
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+        return try JSONDecoder().decode(CreateFamilyResponseDTO.self, from: data)
+    }
+
+    /// POST /family/auth-status/grant — the kid device reports that the on-device
+    /// Family Controls (Screen Time) authorization succeeded, so the parent's
+    /// Max-mode WaitForAuth poll can proceed. UNauthenticated (kid device); the
+    /// backend guards on child-device presence/ownership.
+    func grantChildAuthStatus(childDeviceID: UUID) async throws {
+        let url = URL(string: "\(baseURL)/family/auth-status/grant")!
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.timeoutInterval = 15
+        req.httpBody = try JSONSerialization.data(withJSONObject: [
+            "child_device_id": childDeviceID.uuidString,
+        ])
+        let (_, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
+        }
     }
 
     /// Multipart upload of a parent avatar photo. Returns the fresh signed URL.

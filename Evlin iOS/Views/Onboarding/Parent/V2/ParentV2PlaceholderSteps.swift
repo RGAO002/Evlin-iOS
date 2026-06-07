@@ -22,11 +22,23 @@ private let parentTotal = 12
 
 // MARK: - 3 · Sign in
 
-/// Mockup M[2].parent — "Create your parent account": Apple / Google / email
-/// sign-in buttons + "already have an account?" footnote.
+/// Mockup M[2].parent — "Create your parent account": Apple / Google sign-in
+/// buttons + a DEBUG-only dev sign-in for the simulator. Performs the real
+/// AuthService flows; on a signed-in session it calls `onSignedIn` to advance.
 struct ParentSignInStep: View {
-    let onContinue: () -> Void
+    /// Authed session built once in the coordinator (off the shared APIClient)
+    /// and threaded in. Optional only because the coordinator builds it lazily
+    /// in `.task`; the buttons guard on it.
+    let auth: AuthService?
+    let onSignedIn: () -> Void
     var onBack: (() -> Void)? = nil
+
+    @State private var busy = false
+    @State private var errorText: String?
+
+    // Held for the duration of an Apple/Google presentation.
+    @State private var appleCoordinator = AppleSignInCoordinator()
+    @State private var googleCoordinator = GoogleSignInCoordinator()
 
     var body: some View {
         OnboardingV2ScreenContainer(
@@ -45,10 +57,12 @@ struct ParentSignInStep: View {
                         "Sign in with Apple",
                         systemImage: "apple.logo",
                         fill: .black,
-                        action: onContinue
+                        action: { Task { await signInWithApple() } }
                     )
+                    .disabled(busy)
+
                     // Google — white fill, dark label, hairline border.
-                    Button(action: onContinue) {
+                    Button(action: { Task { await signInWithGoogle() } }) {
                         HStack(spacing: 8) {
                             Text("G").font(.system(size: 15, weight: .bold))
                             Text("Continue with Google")
@@ -70,10 +84,34 @@ struct ParentSignInStep: View {
                         )
                     }
                     .buttonStyle(.plain)
+                    .disabled(busy)
 
-                    OnboardingV2SecondaryButton("Continue with email",
-                                                systemImage: "envelope",
-                                                action: onContinue)
+                    #if DEBUG
+                    // DEBUG-only: lets the simulator authenticate without a real
+                    // Apple/Google id_token. POSTs /auth/dev-signin with a unique
+                    // dev email so each run mints a fresh family-less account.
+                    OnboardingV2SecondaryButton("Dev sign in (sim)",
+                                                systemImage: "ladybug",
+                                                action: { Task { await devSignIn() } })
+                        .disabled(busy)
+                    #endif
+
+                    if busy {
+                        HStack(spacing: Spacing.md) {
+                            ProgressView().controlSize(.small)
+                            Text("Signing in…").onboardingV2BodyXS()
+                        }
+                        .padding(.top, Spacing.sm)
+                    }
+
+                    if let errorText {
+                        Text(errorText)
+                            .font(OnboardingV2Theme.Typography.bodyXS)
+                            .foregroundStyle(OnboardingV2Theme.Palette.error)
+                            .multilineTextAlignment(.center)
+                            .frame(maxWidth: .infinity)
+                            .padding(.top, Spacing.sm)
+                    }
 
                     Text("Already have an account? Sign in to join your family.")
                         .onboardingV2BodyXS()
@@ -86,19 +124,98 @@ struct ParentSignInStep: View {
                 if let onBack { OnboardingV2BackLink(action: onBack) }
             }
         )
+        .onAppear {
+            // A returning parent whose Keychain session was restored is already
+            // signed in — skip straight ahead.
+            if auth?.account != nil { onSignedIn() }
+        }
+    }
+
+    @MainActor
+    private func signInWithApple() async {
+        guard let auth else { return }
+        busy = true; errorText = nil
+        defer { busy = false }
+        do {
+            let cred = try await appleCoordinator.signIn()
+            await auth.signInWithApple(
+                identityToken: cred.identityToken,
+                authorizationCode: cred.authorizationCode,
+                fullName: cred.fullName
+            )
+            finish(auth)
+        } catch AppleSignInCoordinator.AppleSignInError.cancelled {
+            // User-cancel is non-fatal: no error banner.
+        } catch {
+            errorText = "Apple sign-in failed. Try again."
+        }
+    }
+
+    @MainActor
+    private func signInWithGoogle() async {
+        guard let auth else { return }
+        busy = true; errorText = nil
+        defer { busy = false }
+        do {
+            let cred = try await googleCoordinator.signIn()
+            await auth.signInWithGoogle(idToken: cred.idToken, fullName: cred.fullName)
+            finish(auth)
+        } catch {
+            // GoogleSignIn surfaces cancel as an error too; only show a banner
+            // when no session resulted.
+            if auth.account == nil {
+                errorText = "Google sign-in isn't available. Use Apple or Dev sign in."
+            } else {
+                finish(auth)
+            }
+        }
+    }
+
+    #if DEBUG
+    @MainActor
+    private func devSignIn() async {
+        guard let auth else { return }
+        busy = true; errorText = nil
+        defer { busy = false }
+        let email = "dev+\(UUID().uuidString.prefix(8).lowercased())@evlin.test"
+        await auth.signInWithDevEmail(email: email, displayName: "Dev Parent")
+        finish(auth)
+    }
+    #endif
+
+    /// Advance only when AuthService actually has a session; otherwise surface
+    /// the last error it recorded.
+    @MainActor
+    private func finish(_ auth: AuthService) {
+        if auth.account != nil {
+            onSignedIn()
+        } else {
+            errorText = auth.lastError.map { "Sign-in failed (\($0))." }
+                ?? "Sign-in failed. Try again."
+        }
     }
 }
 
 // MARK: - 4 · Your profile
 
 /// Mockup M[3].parent — "Tell us about you": avatar + name / birthday fields +
-/// gender segmented control. On advance the mockup shows the "Profile saved"
-/// success state, which we surface inline before calling onContinue.
+/// gender segmented control. On save we PUT /me/profile (display_name) and, on
+/// success, surface the mockup's "Profile saved" state before advancing.
+///
+/// NOTE on shape: the live `UpdateParentProfileBody` (PUT /me/profile) carries
+/// `display_name` + avatar fields only — there is NO parent birth_year/gender on
+/// that DTO (those live on the CHILD profile). So the birthday/gender controls
+/// stay as visual placeholders; only the entered NAME is persisted.
 struct ParentProfileStep: View {
-    let onContinue: () -> Void
+    let apiClient: APIClient
+    let onSaved: () -> Void
     var onBack: (() -> Void)? = nil
 
+    @State private var name = "Morgan"
+    @State private var genderIndex = 0
     @State private var saved = false
+    @State private var busy = false
+    @State private var errorText: String?
 
     var body: some View {
         OnboardingV2ScreenContainer(
@@ -124,37 +241,71 @@ struct ParentProfileStep: View {
                         OnboardingV2AvatarPicker(emoji: "🙂", role: .parent)
                             .frame(maxWidth: .infinity)
 
-                        OnboardingV2LabeledField(label: "NAME", value: "Morgan", showsCursor: true)
+                        OnboardingV2EditableField(label: "NAME", text: $name)
                         OnboardingV2LabeledField(label: "BIRTHDAY", value: "March 14, 1989",
                                                  trailingSystemImage: "calendar")
 
                         VStack(alignment: .leading, spacing: 6) {
                             Text("GENDER").onboardingV2FieldLabel()
                             OnboardingV2Segmented(options: ["Female", "Male", "Other"],
-                                                  selectedIndex: 0)
+                                                  selectedIndex: genderIndex)
+                        }
+
+                        if let errorText {
+                            Text(errorText)
+                                .font(OnboardingV2Theme.Typography.bodyXS)
+                                .foregroundStyle(OnboardingV2Theme.Palette.error)
                         }
                     }
                 }
             },
             footer: {
-                OnboardingV2PrimaryButton("Continue", role: .parent) {
-                    if saved { onContinue() } else { withAnimation { saved = true } }
+                OnboardingV2PrimaryButton(busy ? "Saving…" : "Continue", role: .parent) {
+                    if saved { onSaved() } else { Task { await save() } }
                 }
+                .disabled(busy)
                 if let onBack { OnboardingV2BackLink(action: onBack) }
             }
         )
+    }
+
+    @MainActor
+    private func save() async {
+        busy = true; errorText = nil
+        defer { busy = false }
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let body = UpdateParentProfileBody(
+            display_name: trimmed.isEmpty ? nil : trimmed,
+            avatar_kind: nil,
+            avatar_value: nil,
+            avatar_color: nil
+        )
+        do {
+            _ = try await apiClient.updateParentProfile(body)
+            withAnimation { saved = true }
+        } catch {
+            errorText = "Couldn't save your profile. Tap Continue to retry."
+        }
     }
 }
 
 // MARK: - 5 · New or join
 
-/// Mockup M[4].parent — "Welcome, Morgan": two choice cards — start a new family
-/// (selected) vs join an existing one. The scaffold only routes the "new" path.
+/// Mockup M[4].parent — "Welcome": two choice cards — start a new family
+/// (the kid creates the family; the parent pairs next) vs join an existing one
+/// by entering a co-parent invite code. "Start a new family" just advances to
+/// pairing; "Join" POSTs /family/invite/consume with the entered code (if any),
+/// then also advances to pairing.
 struct ParentNewOrJoinStep: View {
-    let onContinue: () -> Void
+    let apiClient: APIClient
+    let onStartNew: () -> Void
+    let onJoined: () -> Void
     var onBack: (() -> Void)? = nil
 
     @State private var startNew = true
+    @State private var inviteCode = ""
+    @State private var busy = false
+    @State private var errorText: String?
 
     var body: some View {
         OnboardingV2ScreenContainer(
@@ -162,8 +313,8 @@ struct ParentNewOrJoinStep: View {
             phase: "2 · Accounts",
             stepIndex: 5,
             stepTotal: parentTotal,
-            title: "Welcome, Morgan",
-            subtitle: "Start fresh, or pick up where you left off.",
+            title: "Set up your family",
+            subtitle: "Start fresh, or join one a co-parent already made.",
             dotsCount: parentTotal,
             dotsCurrent: 4,
             content: {
@@ -178,29 +329,81 @@ struct ParentNewOrJoinStep: View {
 
                     OnboardingV2ChoiceCard(
                         emoji: "👨‍👩‍👧",
-                        title: "Join \u{201C}Smith Family\u{201D}",
-                        subtitle: "Liam · already set up — add this phone",
+                        title: "Join an existing family",
+                        subtitle: "Enter a co-parent invite code",
                         selected: !startNew,
                         role: .parent
                     ) { startNew = false }
+
+                    if !startNew {
+                        OnboardingV2EditableField(label: "INVITE CODE", text: $inviteCode)
+                    }
+
+                    if let errorText {
+                        Text(errorText)
+                            .font(OnboardingV2Theme.Typography.bodyXS)
+                            .foregroundStyle(OnboardingV2Theme.Palette.error)
+                    }
                 }
             },
             footer: {
-                OnboardingV2PrimaryButton("Start a new family", role: .parent, action: onContinue)
+                OnboardingV2PrimaryButton(
+                    startNew ? "Start a new family" : (busy ? "Joining…" : "Join family"),
+                    role: .parent
+                ) {
+                    if startNew { onStartNew() } else { Task { await join() } }
+                }
+                .disabled(busy)
                 if let onBack { OnboardingV2BackLink(action: onBack) }
             }
         )
+    }
+
+    @MainActor
+    private func join() async {
+        let code = inviteCode.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !code.isEmpty else {
+            // No code supplied — the join path still lands on pairing so the
+            // parent isn't stranded (consume is optional here).
+            onJoined()
+            return
+        }
+        busy = true; errorText = nil
+        defer { busy = false }
+        do {
+            _ = try await apiClient.consumeCoParentInvite(code: code)
+            onJoined()
+        } catch let APIError.serverError(status) {
+            errorText = status == 404
+                ? "That invite code isn't valid. Check it and try again."
+                : "Couldn't join (error \(status))."
+        } catch {
+            errorText = "Network error. Try again."
+        }
     }
 }
 
 // MARK: - 6 · Scan to pair
 
-/// Mockup M[5].parent — "Scan Liam's code": a camera scan frame (dark box,
-/// white corner reticle, sweeping green line) + a 6-digit-code fallback.
+/// Mockup M[5].parent — "Scan the kid's code": a camera scan frame (placeholder)
+/// + the REAL 6-digit-code entry. On submit it calls `onPaired(code)` which runs
+/// POST /family/pair in the coordinator; on success (observed via
+/// `pairedSucceeded`) it advances to "Connected". On a 4xx the returned error
+/// is shown inline.
 struct ParentPairScanStep: View {
-    let onContinue: () -> Void
+    /// Submits the typed code; returns `nil` on success or an error string. The
+    /// real /family/pair call lives in the coordinator.
+    let onPaired: (String) async -> String?
+    /// True once the coordinator recorded a successful pair (familyID bound).
+    let pairedSucceeded: Bool
+    /// Advance to the connected screen (called after a successful pair).
+    let onAdvance: () -> Void
     var onEnterCodeInstead: (() -> Void)? = nil
     var onBack: (() -> Void)? = nil
+
+    @State private var code = ""
+    @State private var busy = false
+    @State private var errorText: String?
 
     var body: some View {
         OnboardingV2ScreenContainer(
@@ -208,16 +411,42 @@ struct ParentPairScanStep: View {
             phase: "2 · Pair",
             stepIndex: 6,
             stepTotal: parentTotal,
-            title: "Scan Liam's code",
-            subtitle: "Point your camera at the QR on Liam's phone.",
+            title: "Scan the kid's code",
+            subtitle: "Point your camera at the QR on your kid's phone — or type the 6-digit code it shows.",
             dotsCount: parentTotal,
             dotsCurrent: 5,
             content: {
                 VStack(spacing: Spacing.lg) {
                     OnboardingV2ScanFrame()
                         .frame(maxWidth: .infinity)
-                    // Primary advance = scan ok (mock).
-                    OnboardingV2PrimaryButton("Simulate scan", role: .parent, action: onContinue)
+
+                    // The REAL path: type the kid's 6-digit code.
+                    OnboardingV2CodeField(code: $code)
+                        .onChange(of: code) { _, newValue in
+                            let digits = newValue.filter(\.isNumber)
+                            if digits != newValue { code = digits }
+                            if digits.count > 6 { code = String(digits.prefix(6)) }
+                            errorText = nil
+                            if code.count == 6 && !busy { Task { await submit() } }
+                        }
+
+                    if busy {
+                        HStack(spacing: Spacing.md) {
+                            ProgressView().controlSize(.small)
+                            Text("Pairing…").onboardingV2BodyXS()
+                        }
+                    }
+                    if let errorText {
+                        Text(errorText)
+                            .font(OnboardingV2Theme.Typography.bodyXS)
+                            .foregroundStyle(OnboardingV2Theme.Palette.error)
+                            .multilineTextAlignment(.center)
+                    }
+
+                    OnboardingV2PrimaryButton(busy ? "Pairing…" : "Pair", role: .parent) {
+                        Task { await submit() }
+                    }
+                    .disabled(busy || code.count != 6)
                 }
             },
             footer: {
@@ -228,16 +457,40 @@ struct ParentPairScanStep: View {
                 if let onBack { OnboardingV2BackLink(action: onBack) }
             }
         )
+        .onChange(of: pairedSucceeded) { _, ok in
+            if ok { onAdvance() }
+        }
+    }
+
+    @MainActor
+    private func submit() async {
+        guard !busy, code.count == 6 else { return }
+        busy = true; errorText = nil
+        defer { busy = false }
+        if let err = await onPaired(code) {
+            errorText = err
+        } else {
+            onAdvance()
+        }
     }
 }
 
 // MARK: - 7 · Connected (parent)
 
-/// Mockup M[6].parent — "Connected to Liam": big green check, then wait while
-/// the kid grants permissions.
+/// Mockup M[6].parent — "Connected to <kid>": big green check, then wait while
+/// the kid grants permissions. `kidName` comes from the pair response →
+/// FamilyStore resolution threaded through the coordinator.
 struct ParentConnectedStep: View {
+    let kidName: String
     let onContinue: () -> Void
     var onBack: (() -> Void)? = nil
+
+    /// Trimmed display name with a neutral fallback so the copy never reads
+    /// "Connected to ." before the FamilyStore projection lands.
+    private var name: String {
+        let trimmed = kidName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "your kid" : trimmed
+    }
 
     var body: some View {
         OnboardingV2ScreenContainer(
@@ -252,8 +505,8 @@ struct ParentConnectedStep: View {
             content: {
                 VStack(spacing: Spacing.xl) {
                     OnboardingV2SuccessCheck(role: .parent, size: 62)
-                    Text("Connected to Liam").onboardingV2TitleL()
-                    Text("Now Liam grants a few permissions on their phone. We'll wait.")
+                    Text("Connected to \(name)").onboardingV2TitleL()
+                    Text("Now \(name) grants a few permissions on their phone. We'll wait.")
                         .onboardingV2Body()
                         .multilineTextAlignment(.center)
                 }
@@ -516,6 +769,67 @@ private struct OnboardingV2LabeledField: View {
                     .stroke(OnboardingV2Theme.Palette.outlineVariant, lineWidth: 1)
             )
         }
+    }
+}
+
+/// Editable variant of `.field` — same surface-container row chrome as
+/// `OnboardingV2LabeledField`, but holds a live `TextField` binding so the
+/// parent's entered NAME / invite code is captured for the real save/join call.
+private struct OnboardingV2EditableField: View {
+    let label: String
+    @Binding var text: String
+    var placeholder: String = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(label).onboardingV2FieldLabel()
+            TextField(placeholder, text: $text)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(OnboardingV2Theme.Palette.onSurface)
+                .tint(OnboardingV2Theme.Palette.primary)
+                .autocorrectionDisabled()
+                .padding(.vertical, OnboardingV2Theme.Metrics.fieldPaddingVertical)
+                .padding(.horizontal, OnboardingV2Theme.Metrics.fieldPaddingHorizontal)
+                .background(
+                    RoundedRectangle(cornerRadius: OnboardingV2Theme.Metrics.fieldCornerRadius,
+                                     style: .continuous)
+                        .fill(OnboardingV2Theme.Palette.surfaceContainer)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: OnboardingV2Theme.Metrics.fieldCornerRadius,
+                                     style: .continuous)
+                        .stroke(OnboardingV2Theme.Palette.outlineVariant, lineWidth: 1)
+                )
+        }
+    }
+}
+
+/// The big monospaced 6-digit pairing-code entry (number pad). Mirrors the
+/// legacy PairingCodeStep field but themed for the v2 surface.
+private struct OnboardingV2CodeField: View {
+    @Binding var code: String
+
+    var body: some View {
+        TextField("------", text: $code)
+            .keyboardType(.numberPad)
+            .textContentType(.oneTimeCode)
+            .font(.system(size: 34, weight: .bold, design: .monospaced))
+            .multilineTextAlignment(.center)
+            .tracking(6)
+            .foregroundStyle(OnboardingV2Theme.Palette.onSurface)
+            .tint(OnboardingV2Theme.Palette.primary)
+            .padding(.vertical, Spacing.lg)
+            .frame(maxWidth: .infinity)
+            .background(
+                RoundedRectangle(cornerRadius: OnboardingV2Theme.Metrics.fieldCornerRadius,
+                                 style: .continuous)
+                    .fill(OnboardingV2Theme.Palette.surfaceContainer)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: OnboardingV2Theme.Metrics.fieldCornerRadius,
+                                 style: .continuous)
+                    .stroke(OnboardingV2Theme.Palette.outlineVariant, lineWidth: 1)
+            )
     }
 }
 

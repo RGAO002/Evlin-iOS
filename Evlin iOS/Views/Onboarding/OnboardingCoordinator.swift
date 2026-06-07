@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 enum OnboardingStep: Equatable {
     case welcome
@@ -64,10 +65,22 @@ struct OnboardingCoordinator: View {
 
     @EnvironmentObject var apiClient: APIClient
 
+    /// Parent Home single-source-of-truth, injected by Evlin_iOSApp via
+    /// `.environment(...)`. After a successful /family/pair we call
+    /// `familyStore.load()` so Home renders the freshly-bound family.
+    @Environment(FamilyStore.self) private var familyStore
+
     @AppStorage("onboardingComplete") private var onboardingComplete = false
     @AppStorage("appMode") private var appMode: String = ""
 
     @State private var step: OnboardingStep = .welcome
+
+    // Onboarding v2 — authed parent session. `AuthService` is `@MainActor
+    // @Observable` and is NOT injected app-wide (it has no environment owner
+    // yet), so the coordinator builds ONE off the shared `APIClient` and threads
+    // it into the v2 parent screens. `restore()` rehydrates any Keychain session
+    // (a returning parent who relaunches mid-onboarding stays signed in).
+    @State private var auth: AuthService? = nil
 
     // Onboarding v2 (scaffold): when true, `modeSelect` routes into the v2
     // screen sequence (spec §7) instead of the legacy pairing-first flow.
@@ -88,9 +101,43 @@ struct OnboardingCoordinator: View {
     @State private var parentDeviceID: UUID? = nil
     @State private var childDeviceID: UUID? = nil
 
+    // MARK: - Onboarding v2 threaded state (parent pairing)
+    //
+    // Populated by the v2 parent screens as the flow progresses, then read by
+    // later screens (parentConnected shows `kidName`). `kidName` is resolved
+    // from FamilyStore after the pair binds the family (the pair response
+    // itself carries only ids); `pairedChildDeviceID` is the child device the
+    // consumed code belonged to (also persisted to UserDefaults by the pair
+    // handler, mirroring legacy PairingCodeStep).
+    @State private var kidName: String = ""
+    @State private var pairedChildDeviceID: UUID? = nil
+
+    // MARK: - Onboarding v2 threaded state (KID create + profile)
+    //
+    // The KID device collects its profile LOCALLY (childProfileName /
+    // childBirthYear / childGender) on `childProfile`, then on `childShowCode`
+    // calls POST /family/create to mint the family + child device + 6-digit code
+    // (childPairingCode). The kid is unauthenticated, so there is no /me/profile
+    // to write to here — the captured profile is threaded forward and persisted
+    // to UserDefaults so the post-onboarding kid shell + any later child-create
+    // can read it (the parent, once paired, owns the real child profile write).
+    @State private var childProfileName: String = ""
+    @State private var childBirthYear: Int? = nil
+    @State private var childGender: String? = nil
+    @State private var childPairingCode: String = ""
+
     var body: some View {
         ZStack(alignment: .topTrailing) {
             stepBody
+                .task {
+                    // Build the authed parent session ONCE off the shared
+                    // APIClient and rehydrate any stored Keychain session.
+                    if auth == nil {
+                        let svc = AuthService(api: apiClient)
+                        svc.restore()
+                        auth = svc
+                    }
+                }
                 #if DEBUG
                 // Single-device "jump to parent" shortcut. EnterPairingCodeStep
                 // (child side) posts this when the dev taps the "switch to
@@ -393,41 +440,54 @@ struct OnboardingCoordinator: View {
                     // onboardingComplete flipped inside ChildReadyStep; appMode already set
                 }
 
-            // MARK: - Onboarding v2 (scaffold) — PARENT
+            // MARK: - Onboarding v2 — PARENT (live backend)
             //
-            // Tappable placeholders only. next/back drive the v2 parent chain
-            // (spec §7.1): signIn → profile → newOrJoin → pairScan → connected
-            // → waitingForKid → setPasscode → firstActions → itWorks → done.
+            // Each screen now performs its REAL action (auth / PUT /me/profile /
+            // POST /family/pair) with loading + error states; next/back still
+            // drive the v2 parent chain (spec §7.1): signIn → profile →
+            // newOrJoin → pairScan → connected → waitingForKid → setPasscode →
+            // firstActions → itWorks → done. State (session, familyID, kidName)
+            // is threaded through the @State fields above.
 
             case .parentSignIn:
                 ParentSignInStep(
-                    onContinue: { step = .parentProfile },
+                    auth: auth,
+                    onSignedIn: { step = .parentProfile },
                     onBack: { step = .modeSelect }
                 )
 
             case .parentProfile:
                 ParentProfileStep(
-                    onContinue: { step = .parentNewOrJoin },
+                    apiClient: apiClient,
+                    onSaved: { step = .parentNewOrJoin },
                     onBack: { step = .parentSignIn }
                 )
 
             case .parentNewOrJoin:
                 ParentNewOrJoinStep(
-                    onContinue: { step = .parentPairScan },
+                    apiClient: apiClient,
+                    // "Start a new family" → pair (the kid creates the family;
+                    // the parent pairs). "Join existing" consumes a co-parent
+                    // invite when supplied, then also lands on pair.
+                    onStartNew: { step = .parentPairScan },
+                    onJoined: { step = .parentPairScan },
                     onBack: { step = .parentProfile }
                 )
 
             case .parentPairScan:
                 ParentPairScanStep(
-                    onContinue: { step = .parentConnected },
-                    // 6-digit fallback reuses the existing pairing-code step,
-                    // which (in v2) routes onward to parentConnected.
+                    // Scan is a placeholder; the typed-code path is the real
+                    // one. Both submit POST /family/pair via onPaired(code:).
+                    onPaired: { code in await pairWithKidCode(code) },
+                    pairedSucceeded: pairedChildDeviceID != nil,
+                    onAdvance: { step = .parentConnected },
                     onEnterCodeInstead: { step = .parentPairingCode },
                     onBack: { step = .parentNewOrJoin }
                 )
 
             case .parentConnected:
                 ParentConnectedStep(
+                    kidName: kidName,
                     onContinue: { step = .parentWaitingForKid },
                     onBack: { step = .parentPairScan }
                 )
@@ -466,13 +526,23 @@ struct OnboardingCoordinator: View {
 
             case .childProfile:
                 ChildProfileStep(
+                    // Capture the kid's profile LOCALLY; the family doesn't exist
+                    // yet (created on the next screen). Threaded forward + persisted.
+                    name: $childProfileName,
+                    birthYear: $childBirthYear,
+                    gender: $childGender,
                     onContinue: { step = .childShowCode },
                     onBack: { step = .modeSelect }
                 )
 
             case .childShowCode:
                 ChildShowCodeStep(
-                    onContinue: { step = .childConnected },
+                    // On appear: POST /family/create → real 6-digit code +
+                    // child_device_id, threaded into state. Returns nil on
+                    // success or an error string for inline display.
+                    createFamily: { await createKidFamily() },
+                    pairingCode: childPairingCode,
+                    onConnected: { step = .childConnected },
                     onBack: { step = .childProfile }
                 )
 
@@ -502,6 +572,118 @@ struct OnboardingCoordinator: View {
             }
         }
         .animation(.easeInOut(duration: 0.2), value: step)
+    }
+
+    /// Submits the kid's 6-digit code to POST /family/pair (authed), threads the
+    /// bound familyID + kid name into the coordinator state, persists the same
+    /// UserDefaults keys the rest of the app reads (mirroring legacy
+    /// PairingCodeStep), and loads the FamilyStore so the connected screen +
+    /// Home see the freshly-bound family. Returns `nil` on success or a
+    /// human-readable error string on a 4xx/network failure (the calling screen
+    /// renders it inline). Advancing to parentConnected is the caller's job
+    /// (it observes `pairedChildDeviceID != nil`).
+    @MainActor
+    private func pairWithKidCode(_ code: String) async -> String? {
+        let trimmed = code.filter(\.isNumber)
+        guard trimmed.count == 6 else { return "Enter the 6-digit code." }
+        do {
+            let r = try await apiClient.pairFamily(
+                code: trimmed,
+                deviceLabel: UIDevice.current.name
+            )
+            // Thread state.
+            familyID = r.family_id
+            parentDeviceID = r.parent_device_id
+            pairedChildDeviceID = r.child_device_id
+            childDeviceID = r.child_device_id
+            pairingCode = trimmed
+            protectionMode = r.protection_mode
+
+            // Persist the same keys the rest of the app reads (chat queueing,
+            // BigKid panel, poller) — identical to legacy PairingCodeStep.
+            UserDefaults.standard.set(r.family_id.uuidString, forKey: "evlin.familyID")
+            UserDefaults.standard.set(r.parent_device_id.uuidString, forKey: "evlin.parentDeviceID")
+            UserDefaults.standard.set(r.child_device_id.uuidString, forKey: "evlin.childDeviceID")
+
+            // Refresh the family aggregate, then resolve the kid's display name
+            // for the connected screen. The pair response carries only ids, so
+            // the name comes from GET /me/profile (FamilyStore) — the child the
+            // consumed code belonged to. Fall back to "your kid" if the device
+            // isn't yet projected (e.g. before the kid finishes their profile).
+            await familyStore.load()
+            kidName = resolvedKidName(forChildDeviceID: r.child_device_id)
+            return nil
+        } catch let APIError.serverError(status) {
+            switch status {
+            case 404: return "That code wasn't found. Double-check the 6 digits."
+            case 400: return "That code has expired or was already used. Ask your kid for a fresh one."
+            case 409: return "This account is already in a different family."
+            default:  return "Couldn't pair (error \(status)). Try again."
+            }
+        } catch {
+            return "Network error. Check your connection and try again."
+        }
+    }
+
+    /// KID side: mints the family via POST /family/create, threads the bound
+    /// familyID + child_device_id + 6-digit pairing code into coordinator state,
+    /// and persists the same UserDefaults keys the post-onboarding kid shell
+    /// reads (`evlin.familyID` / `evlin.childDeviceID`) — identical to the legacy
+    /// EnterPairingCodeStep success path. The locally-captured kid profile
+    /// (name / birth-year / gender) is stashed too so the post-onboarding shell
+    /// (and any later parent-side child write) can recover it. Returns `nil` on
+    /// success or a human-readable error string for inline display. Idempotent
+    /// on the caller side: if a code is already threaded it short-circuits so a
+    /// re-appear (e.g. SwiftUI re-render) doesn't mint a second family.
+    @MainActor
+    private func createKidFamily() async -> String? {
+        if !childPairingCode.isEmpty { return nil }
+        do {
+            let r = try await apiClient.createFamily(
+                childDeviceLabel: UIDevice.current.name,
+                protectionMode: protectionMode
+            )
+            familyID = r.family_id
+            childDeviceID = r.child_device_id
+            childPairingCode = r.pairing_code
+
+            UserDefaults.standard.set(r.family_id.uuidString, forKey: "evlin.familyID")
+            UserDefaults.standard.set(r.child_device_id.uuidString, forKey: "evlin.childDeviceID")
+
+            // Stash the locally-captured profile so the post-onboarding kid shell
+            // can recover it (the parent owns the authoritative child write once
+            // paired). Trimmed name only; birth-year/gender when supplied.
+            let trimmedName = childProfileName.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedName.isEmpty {
+                childName = trimmedName
+                UserDefaults.standard.set(trimmedName, forKey: "evlin.childProfileName")
+            }
+            if let by = childBirthYear {
+                UserDefaults.standard.set(by, forKey: "evlin.childBirthYear")
+            }
+            if let g = childGender {
+                UserDefaults.standard.set(g, forKey: "evlin.childGender")
+            }
+            return nil
+        } catch let APIError.serverError(status) {
+            return "Couldn't create your family (error \(status)). Tap Retry."
+        } catch {
+            return "Network error. Check your connection and tap Retry."
+        }
+    }
+
+    /// Best-effort kid display name from the loaded FamilyStore: the child whose
+    /// device matches the paired `childDeviceID`, else the first child, else a
+    /// neutral fallback.
+    @MainActor
+    private func resolvedKidName(forChildDeviceID childDeviceID: UUID) -> String {
+        let idString = childDeviceID.uuidString
+        if let match = familyStore.children.first(where: { child in
+            child.devices.contains { $0.device_id.caseInsensitiveCompare(idString) == .orderedSame }
+        }) {
+            return match.display_name
+        }
+        return familyStore.children.first?.display_name ?? "your kid"
     }
 
     /// Sends a one-shot PUT `/family/{id}/protection-mode` after the parent

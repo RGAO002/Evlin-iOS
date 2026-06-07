@@ -1,4 +1,5 @@
 import SwiftUI
+import UserNotifications
 
 // Onboarding v2 — KID screens (real UI).
 //
@@ -69,6 +70,45 @@ private struct OnboardingV2Field<Trailing: View>: View {
 extension OnboardingV2Field where Trailing == EmptyView {
     init(value: String, showsCursor: Bool = false) {
         self.init(value: value, showsCursor: showsCursor, trailing: { EmptyView() })
+    }
+}
+
+/// `.field` chrome (surface-container box, 13px radius, 1px border) wrapping an
+/// arbitrary control — used by the birth-year menu row so the dropdown matches
+/// the static `.field` rows visually.
+private struct OnboardingV2ChildFieldBox<Content: View>: View {
+    @ViewBuilder var content: () -> Content
+    var body: some View {
+        content()
+            .padding(.vertical, OnboardingV2Theme.Metrics.fieldPaddingVertical)
+            .padding(.horizontal, OnboardingV2Theme.Metrics.fieldPaddingHorizontal)
+            .background(
+                RoundedRectangle(cornerRadius: OnboardingV2Theme.Metrics.fieldCornerRadius,
+                                 style: .continuous)
+                    .fill(OnboardingV2Theme.Palette.surfaceContainer)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: OnboardingV2Theme.Metrics.fieldCornerRadius,
+                                 style: .continuous)
+                    .stroke(OnboardingV2Theme.Palette.outlineVariant, lineWidth: 1)
+            )
+    }
+}
+
+/// Editable `.field` — same chrome as `OnboardingV2Field` but holds a live
+/// `TextField` binding so the kid's NAME is captured for /family/create.
+private struct OnboardingV2ChildTextField: View {
+    let placeholder: String
+    @Binding var text: String
+    var body: some View {
+        OnboardingV2ChildFieldBox {
+            TextField(placeholder, text: $text)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(OnboardingV2Theme.Palette.onSurface)
+                .tint(OnboardingV2Theme.Palette.primary)
+                .textInputAutocapitalization(.words)
+                .autocorrectionDisabled()
+        }
     }
 }
 
@@ -250,8 +290,30 @@ private struct OnboardingV2FauxQR: View {
 // MARK: - 3 · Profile (kid)  ·  mockup: "Set up your profile"
 
 struct ChildProfileStep: View {
+    /// Captured LOCALLY (the kid's family doesn't exist until the next screen).
+    /// Threaded into coordinator state, persisted, and read by the parent's
+    /// authoritative child write once paired.
+    @Binding var name: String
+    @Binding var birthYear: Int?
+    @Binding var gender: String?
     let onContinue: () -> Void
     var onBack: (() -> Void)? = nil
+
+    // Canonical gender keys persisted on the wire (CreateChildBody.gender). The
+    // segmented control shows the human label; the value stored is the key.
+    private let genderOptions: [(label: String, key: String)] =
+        [("Female", "female"), ("Male", "male"), ("Other", "other")]
+
+    /// Years offered for the wheel: a sensible kid range (4–17 y/o relative to
+    /// the current year). Newest first so the common case is near the top.
+    private var birthYearChoices: [Int] {
+        let now = Calendar.current.component(.year, from: Date())
+        return Array((now - 17)...(now - 4)).reversed()
+    }
+
+    private var canContinue: Bool {
+        !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 
     var body: some View {
         OnboardingV2ScreenContainer(
@@ -280,22 +342,41 @@ struct ChildProfileStep: View {
 
                     VStack(alignment: .leading, spacing: 6) {
                         OnboardingV2FieldLabel(text: "NAME")
-                        OnboardingV2Field(value: "Liam", showsCursor: true)
+                        OnboardingV2ChildTextField(placeholder: "Your name", text: $name)
                     }
                     VStack(alignment: .leading, spacing: 6) {
-                        OnboardingV2FieldLabel(text: "BIRTHDAY")
-                        OnboardingV2Field(value: "August 2, 2013") {
-                            Image(systemName: "calendar")
-                                .font(.system(size: 15))
-                                .foregroundStyle(OnboardingV2Theme.Palette.outline)
+                        OnboardingV2FieldLabel(text: "BIRTH YEAR")
+                        OnboardingV2ChildFieldBox {
+                            HStack {
+                                Menu {
+                                    ForEach(birthYearChoices, id: \.self) { year in
+                                        Button("\(year)") { birthYear = year }
+                                    }
+                                } label: {
+                                    Text(birthYear.map(String.init) ?? "Select")
+                                        .font(.system(size: 16, weight: .semibold))
+                                        .foregroundStyle(birthYear == nil
+                                            ? OnboardingV2Theme.Palette.onSurfaceVariant
+                                            : OnboardingV2Theme.Palette.onSurface)
+                                }
+                                Spacer(minLength: 0)
+                                Image(systemName: "calendar")
+                                    .font(.system(size: 15))
+                                    .foregroundStyle(OnboardingV2Theme.Palette.outline)
+                            }
                         }
                     }
                     VStack(alignment: .leading, spacing: 6) {
                         OnboardingV2FieldLabel(text: "GENDER")
                         HStack(spacing: 8) {
-                            OnboardingV2Segment(title: "Female", selected: false)
-                            OnboardingV2Segment(title: "Male", selected: true)
-                            OnboardingV2Segment(title: "Other", selected: false)
+                            ForEach(genderOptions, id: \.key) { opt in
+                                Button {
+                                    gender = opt.key
+                                } label: {
+                                    OnboardingV2Segment(title: opt.label, selected: gender == opt.key)
+                                }
+                                .buttonStyle(.plain)
+                            }
                         }
                     }
                 }
@@ -303,6 +384,8 @@ struct ChildProfileStep: View {
             },
             footer: {
                 OnboardingV2PrimaryButton("Continue", role: .child, action: onContinue)
+                    .disabled(!canContinue)
+                    .opacity(canContinue ? 1 : 0.5)
                 if let onBack { OnboardingV2BackLink(action: onBack) }
             }
         )
@@ -312,8 +395,26 @@ struct ChildProfileStep: View {
 // MARK: - 5/6 · Show code (kid)  ·  mockup: "Show this to your parent"
 
 struct ChildShowCodeStep: View {
-    let onContinue: () -> Void
+    @EnvironmentObject var apiClient: APIClient
+
+    /// Mints the family (POST /family/create) and threads code + child_device_id
+    /// into coordinator state. Returns nil on success or an error string. Run on
+    /// appear; the coordinator short-circuits if a code is already minted.
+    let createFamily: () async -> String?
+    /// The real 6-digit code from the coordinator (empty until create lands).
+    let pairingCode: String
+    /// Advance to the "linked" screen once a parent consumes the code.
+    let onConnected: () -> Void
     var onBack: (() -> Void)? = nil
+
+    @State private var creating = false
+    @State private var errorText: String?
+    @State private var pollTask: Task<Void, Never>?
+
+    /// "4 8 2 9 1 0" — space-separated for the big code readout.
+    private var spacedCode: String {
+        pairingCode.map(String.init).joined(separator: " ")
+    }
 
     var body: some View {
         OnboardingV2ScreenContainer(
@@ -325,7 +426,7 @@ struct ChildShowCodeStep: View {
             subtitle: "They'll scan it from their phone.",
             content: {
                 VStack(spacing: 12) {
-                    // QR card.
+                    // QR card (placeholder faux-QR until a real encoder lands).
                     OnboardingV2Card {
                         HStack {
                             Spacer(minLength: 0)
@@ -334,7 +435,7 @@ struct ChildShowCodeStep: View {
                         }
                     }
 
-                    // "Or type this code" fallback card.
+                    // "Or type this code" card — shows the REAL minted code.
                     OnboardingV2Card {
                         VStack(spacing: 4) {
                             Text("OR TYPE THIS CODE")
@@ -342,33 +443,84 @@ struct ChildShowCodeStep: View {
                                 .tracking(1)
                                 .foregroundStyle(OnboardingV2Theme.Palette.onSurfaceVariant)
                                 .frame(maxWidth: .infinity)
-                            Text("4 8 2 9 1 0")
-                                .font(.system(size: 24, weight: .bold))
-                                .tracking(5)
-                                .foregroundStyle(OnboardingV2Theme.Palette.primary)
-                                .frame(maxWidth: .infinity)
+                            if pairingCode.isEmpty {
+                                ProgressView().controlSize(.small)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 2)
+                            } else {
+                                Text(spacedCode)
+                                    .font(.system(size: 24, weight: .bold))
+                                    .tracking(5)
+                                    .foregroundStyle(OnboardingV2Theme.Palette.primary)
+                                    .frame(maxWidth: .infinity)
+                            }
                         }
                     }
 
-                    // Live "waiting for parent to scan" pulse cue.
-                    HStack(spacing: 8) {
-                        Circle()
-                            .fill(OnboardingV2Theme.Palette.tertiary)
-                            .frame(width: 8, height: 8)
-                        Text("Waiting for parent to scan…")
-                            .onboardingV2Body()
+                    if let errorText {
+                        VStack(spacing: 6) {
+                            Text(errorText)
+                                .font(OnboardingV2Theme.Typography.bodyXS)
+                                .foregroundStyle(OnboardingV2Theme.Palette.error)
+                                .multilineTextAlignment(.center)
+                            Button("Retry") { Task { await start() } }
+                                .font(OnboardingV2Theme.Typography.navButton)
+                                .foregroundStyle(OnboardingV2Theme.Palette.primary)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 2)
+                    } else {
+                        // Live "waiting for parent to scan" pulse cue.
+                        HStack(spacing: 8) {
+                            Circle()
+                                .fill(OnboardingV2Theme.Palette.tertiary)
+                                .frame(width: 8, height: 8)
+                            Text(pairingCode.isEmpty ? "Generating your code…"
+                                                     : "Waiting for parent to scan…")
+                                .onboardingV2Body()
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 4)
                     }
-                    .frame(maxWidth: .infinity)
-                    .padding(.top, 4)
                 }
             },
             footer: {
-                // Onboarding scaffold: a primary button stands in for the
-                // pairing-status poll so a human can advance the flow.
-                OnboardingV2PrimaryButton("Simulate parent paired", role: .child, action: onContinue)
                 if let onBack { OnboardingV2BackLink(action: onBack) }
             }
         )
+        .task { await start() }
+        .onDisappear { pollTask?.cancel() }
+    }
+
+    /// Create the family (if not already), then begin polling pairing-status.
+    @MainActor
+    private func start() async {
+        guard !creating else { return }
+        creating = true
+        errorText = nil
+        if let err = await createFamily() {
+            errorText = err
+            creating = false
+            return
+        }
+        creating = false
+        startPolling()
+    }
+
+    /// Poll GET /family/pairing-status?code= every 2s; advance once a parent
+    /// consumes the code (used == true). Cancels on disappear.
+    private func startPolling() {
+        pollTask?.cancel()
+        pollTask = Task { @MainActor in
+            while !Task.isCancelled, !pairingCode.isEmpty {
+                if let status = try? await apiClient.fetchPairingStatus(code: pairingCode),
+                   status.used {
+                    onConnected()
+                    return
+                }
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+            }
+        }
     }
 }
 
@@ -466,6 +618,8 @@ struct ChildAllowNotificationsStep: View {
     let onContinue: () -> Void
     var onBack: (() -> Void)? = nil
 
+    @State private var requesting = false
+
     var body: some View {
         OnboardingV2ScreenContainer(
             embeddedRole: .child,
@@ -490,8 +644,11 @@ struct ChildAllowNotificationsStep: View {
                             .padding(.horizontal, 4)
                             .padding(.top, 10)
                             .padding(.bottom, 18)
-                        OnboardingV2PrimaryButton("Allow", role: .child, action: onContinue)
-                            .padding(.bottom, 8)
+                        OnboardingV2PrimaryButton("Allow", role: .child) {
+                            Task { await requestThenAdvance() }
+                        }
+                        .disabled(requesting)
+                        .padding(.bottom, 8)
                         OnboardingV2SecondaryButton("Maybe later", action: onContinue)
                     }
                     .padding(.horizontal, 18)
@@ -510,6 +667,18 @@ struct ChildAllowNotificationsStep: View {
                 if let onBack { OnboardingV2BackLink(action: onBack) }
             }
         )
+    }
+
+    /// Fire the REAL system notification-permission prompt, then advance
+    /// regardless of the outcome (declining is a valid choice — never block the
+    /// flow on it). Errors are swallowed: the prompt is best-effort here.
+    @MainActor
+    private func requestThenAdvance() async {
+        requesting = true
+        defer { requesting = false }
+        _ = try? await UNUserNotificationCenter.current()
+            .requestAuthorization(options: [.alert, .sound, .badge])
+        onContinue()
     }
 }
 
