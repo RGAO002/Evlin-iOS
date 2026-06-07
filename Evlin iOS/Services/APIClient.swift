@@ -1063,6 +1063,99 @@ struct FamilyAppDTO: Codable, Sendable, Equatable {
     }
 }
 
+// MARK: - Plan 4 Profile / Family aggregate DTOs (spec §4.2)
+//
+// These decode the backend GET /family + GET /me/profile aggregate EXACTLY
+// (field names match app/schemas/profile.py snake_case; the Codable property
+// names ARE the JSON keys, so no CodingKeys are needed). `AuthAccountDTO` is
+// the Plan-1-owned canonical account block (declared later in this file) and
+// is REUSED here — it is NOT redeclared. Extra backend keys (e.g. email,
+// provider on the account) are ignored by the decoder.
+
+struct AvatarDTO: Codable, Sendable, Equatable {
+    let kind: String            // "photo" | "emoji" | "preset"
+    let value: String
+    let color: String
+    let signed_url: String?     // short-lived; only when kind == "photo"
+    let expires_at: String?     // ISO-8601 signed_url expiry
+}
+
+struct ParentProfileDTO: Codable, Sendable, Equatable {
+    let id: String
+    let display_name: String
+    let avatar: AvatarDTO
+}
+
+struct ParentMemberDTO: Codable, Sendable, Equatable, Identifiable {
+    let account_id: String
+    let display_name: String
+    let is_owner: Bool
+    let avatar: AvatarDTO
+    var id: String { account_id }
+}
+
+struct EnrolledDeviceDTO: Codable, Sendable, Equatable, Identifiable {
+    let device_id: String
+    let mode: String                 // "child" | "parent"
+    let label: String?
+    let device_model: String?
+    let platform: String?
+    let os_version: String?
+    let display: String?             // composed server-side (§1.7)
+    let last_seen_at: String?
+    let online: Bool
+    let is_self: Bool
+    var id: String { device_id }
+}
+
+struct ChildDTO: Codable, Sendable, Equatable, Identifiable {
+    let id: String
+    let display_name: String
+    let age: Int?                     // derived from birth_year
+    let gender: String?
+    let avatar: AvatarDTO
+    let devices: [EnrolledDeviceDTO]
+}
+
+struct FamilyBlockDTO: Codable, Sendable, Equatable {
+    let id: String
+    let display_name: String
+    let protection_mode: String
+    let smart_mode: Bool
+    let owner_account_id: String?
+    let members: [ParentMemberDTO]
+}
+
+struct MeProfileResponseDTO: Codable, Sendable, Equatable {
+    let account: AuthAccountDTO      // §15.7 — carries familyID + needsFamily
+    let parent_profile: ParentProfileDTO
+    let family: FamilyBlockDTO?      // membership read from me.family OR account.familyID (§15.7)
+    let children: [ChildDTO]
+    let parent_devices: [EnrolledDeviceDTO]
+}
+
+struct FamilyDTO: Codable, Sendable, Equatable {
+    let family: FamilyBlockDTO
+    let children: [ChildDTO]
+    let parent_devices: [EnrolledDeviceDTO]
+}
+
+// §15.8 R2 / PIN (B): GET /family/me — the pending co-parent poll path.
+struct PendingInviteDTO: Codable, Sendable, Equatable {
+    let code: String
+    let status: String          // mirrors FamilyInvite.approval_status, e.g. "pending"
+}
+
+struct FamilyMeResponseDTO: Codable, Sendable, Equatable {
+    let account: AuthAccountDTO          // §15.7 — carries familyID + needsFamily
+    let family: FamilyDTO?               // null until owner approval binds family_id
+    let pending_invite: PendingInviteDTO?
+}
+
+struct AvatarUploadResponseDTO: Codable, Sendable, Equatable {
+    let avatar_url: String?
+}
+
 extension APIClient {
     /// Child polls for queued commands.
     func pollCommands(deviceID: UUID) async throws -> [PollCommandDTO] {
@@ -1528,6 +1621,146 @@ extension APIClient {
         let (data, _) = try await URLSession.shared.data(for: req)
         struct R: Codable { let id: UUID }
         return try JSONDecoder().decode(R.self, from: data).id
+    }
+}
+
+// MARK: - Plan 4 Profile / Family methods (spec §4.2 / §6.1)
+//
+// All routes are authed (🔑 get_current_account / 👪 get_current_family on the
+// backend). They go through the existing `authedRequest(path:method:)` +
+// `authedData(for:)` layer (single-flight 401 refresh, §14.7) — this task does
+// NOT add a new interceptor. JSON bodies default to application/json; the
+// avatar upload overrides Content-Type with a multipart boundary.
+
+struct UpdateParentProfileBody: Codable {
+    var display_name: String?
+    var avatar_kind: String?
+    var avatar_value: String?
+    var avatar_color: String?
+}
+
+struct CreateChildBody: Codable {
+    var display_name: String
+    var birth_year: Int?
+    var gender: String?
+    var avatar_kind: String = "emoji"
+    var avatar_value: String = "🧒"
+    var avatar_color: String = "#2E7D32"
+    var child_device_id: String?
+}
+
+struct UpdateChildBody: Codable {
+    var display_name: String?
+    var birth_year: Int?
+    var gender: String?
+    var avatar_kind: String?
+    var avatar_value: String?
+    var avatar_color: String?
+}
+
+extension APIClient {
+    /// Runs an authed JSON request through the single-flight-refresh layer and
+    /// decodes the response. Throws `APIError.serverError` on a non-2xx status.
+    private func authedJSON<T: Decodable>(
+        path: String, method: String = "GET", jsonBody: Data? = nil
+    ) async throws -> T {
+        var req = authedRequest(path: path, method: method)
+        if let jsonBody {
+            req.httpBody = jsonBody
+        }
+        let (data, http) = try await authedData(for: req)
+        guard (200..<300).contains(http.statusCode) else {
+            throw APIError.serverError(http.statusCode)
+        }
+        return try JSONDecoder().decode(T.self, from: data)
+    }
+
+    /// GET /me/profile — the authed-account aggregate (account + parent profile
+    /// + family + children + parent devices). This is the primary read the
+    /// FamilyStore loads. 🔑 get_current_account.
+    func fetchMeProfile() async throws -> MeProfileResponseDTO {
+        try await authedJSON(path: "/me/profile", method: "GET")
+    }
+
+    /// GET /family — the family aggregate (family block + children + parent
+    /// devices). 👪 get_current_family; a pending co-parent (familyID == nil)
+    /// would 403 here and must use `fetchFamilyMe()` instead.
+    func fetchFamily() async throws -> FamilyDTO {
+        try await authedJSON(path: "/family", method: "GET")
+    }
+
+    /// §15.8 R2 / PIN (B): the PENDING co-parent poll path. A consumed-but-not-
+    /// approved co-parent has familyID == nil and CANNOT call `fetchFamily()`
+    /// (👪 → 403); it polls THIS 🔑 route until owner approval binds family_id.
+    /// Returns family=nil + pending_invite until approved.
+    func fetchFamilyMe() async throws -> FamilyMeResponseDTO {
+        try await authedJSON(path: "/family/me", method: "GET")
+    }
+
+    /// PUT /me/profile — rename + update the parent's emoji/preset avatar.
+    func updateParentProfile(_ body: UpdateParentProfileBody) async throws -> ParentProfileDTO {
+        let payload = try JSONEncoder().encode(body)
+        return try await authedJSON(path: "/me/profile", method: "PUT", jsonBody: payload)
+    }
+
+    /// POST /family/children — create a child profile (consent-stamped server-side).
+    func createChild(_ body: CreateChildBody) async throws -> ChildDTO {
+        let payload = try JSONEncoder().encode(body)
+        return try await authedJSON(path: "/family/children", method: "POST", jsonBody: payload)
+    }
+
+    /// PUT /family/children/{id}/profile — update a child's name/avatar/etc.
+    func updateChild(id: String, _ body: UpdateChildBody) async throws -> ChildDTO {
+        let payload = try JSONEncoder().encode(body)
+        return try await authedJSON(path: "/family/children/\(id)/profile", method: "PUT", jsonBody: payload)
+    }
+
+    /// DELETE /family/children/{id} — archive a child profile.
+    func deleteChild(id: String) async throws {
+        let req = authedRequest(path: "/family/children/\(id)", method: "DELETE")
+        let (_, http) = try await authedData(for: req)
+        guard (200..<300).contains(http.statusCode) else {
+            throw APIError.serverError(http.statusCode)
+        }
+    }
+
+    /// PUT /family — rename the family. 👪 get_current_family.
+    func renameFamily(displayName: String) async throws -> FamilyDTO {
+        let payload = try JSONEncoder().encode(["display_name": displayName])
+        return try await authedJSON(path: "/family", method: "PUT", jsonBody: payload)
+    }
+
+    /// Multipart upload of a parent avatar photo. Returns the fresh signed URL.
+    func uploadParentAvatar(jpegData: Data) async throws -> String? {
+        try await uploadAvatar(path: "/me/avatar", jpegData: jpegData)
+    }
+
+    /// Multipart upload of a child avatar photo. Returns the fresh signed URL.
+    func uploadChildAvatar(childId: String, jpegData: Data) async throws -> String? {
+        try await uploadAvatar(path: "/family/children/\(childId)/avatar", jpegData: jpegData)
+    }
+
+    private func uploadAvatar(path: String, jpegData: Data) async throws -> String? {
+        let boundary = "evlin-\(UUID().uuidString)"
+        var body = Data()
+        body.append("--\(boundary)\r\n".data(using: .utf8)!)
+        body.append("Content-Disposition: form-data; name=\"file\"; filename=\"avatar.jpg\"\r\n".data(using: .utf8)!)
+        body.append("Content-Type: image/jpeg\r\n\r\n".data(using: .utf8)!)
+        body.append(jpegData)
+        body.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
+
+        var req = authedRequest(path: path, method: "POST")
+        // Override the default application/json the authed builder sets — the
+        // multipart Content-Type MUST carry the boundary or the backend can't
+        // parse the form-data part.
+        req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        req.httpBody = body
+
+        let (data, http) = try await authedData(for: req)
+        guard (200..<300).contains(http.statusCode) else {
+            throw APIError.serverError(http.statusCode)
+        }
+        return try JSONDecoder().decode(AvatarUploadResponseDTO.self, from: data).avatar_url
     }
 }
 
