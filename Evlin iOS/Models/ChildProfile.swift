@@ -5,7 +5,7 @@ import SwiftUI
 struct ChildProfile: Identifiable, Hashable {
     enum Status: String, Hashable { case unlocked, locked }
 
-    let id: String              // "liam" / "maya" / "emma"
+    let id: String              // backend child id (UUID string) — was "liam"/"maya"/"emma"
     let name: String
     let age: Int
     let avatarURL: String?
@@ -18,44 +18,74 @@ struct ChildProfile: Identifiable, Hashable {
     var initial: String { String(name.prefix(1)).uppercased() }
 }
 
-// MARK: - Mock Data (mirrors frontend_for_app_evlin/tokens.js verbatim)
+// MARK: - Backend adapter (spec §6.3)
 
 extension ChildProfile {
-    static let liam = ChildProfile(
-        id: "liam",
-        name: "Liam",
-        age: 12,
-        avatarURL: "https://lh3.googleusercontent.com/aida-public/AB6AXuBka2hek2iCWOSQRWVwFCLdYUcsh87WZfrhCtc5YQ5YDn4ihWAzq5t8HypHJUMHa8XKcjzVTPucfTrO3jKUrXFVxRlRbXkV4aZRQTLzW7GAkR-wG1K7IR4dGBA6Q_QMB2H1iTH0byjAnA_LVUBsFUmmOxrwhpOhP538V8NhmgvYx6RKGtCOJNRjtbwMhL8zgSp-ymKuimRWWitAARSaq8BoR_GYesFIxUs0cZrbGWSs6xntdfYxbsLs5SDYLStU5AUBgmt4WxHqDoA",
-        accentColor: .evChildLiam,
-        status: .unlocked,
-        timeLeft: "1h 30m",
-        timePct: 0.75,
-        subtitle: "Focused today · 3 of 5 tasks done"
+    /// Build a presentation `ChildProfile` from the backend `ChildDTO`
+    /// (`GET /me/profile` / `GET /family`). The Home tab now sources its
+    /// children from `FamilyStore.childProfiles`, which maps each `ChildDTO`
+    /// through this initializer.
+    ///
+    /// Fields not yet provided by the aggregate (live time-budget / lock
+    /// status / subtitle) get neutral defaults — they are owned by other
+    /// surfaces and will be wired as those endpoints land. The avatar photo
+    /// (when `kind == "photo"`) is the short-lived `signed_url`; the avatar's
+    /// `color` hex drives the accent so each child keeps a stable tint.
+    init(dto: ChildDTO) {
+        self.id = dto.id
+        self.name = dto.display_name
+        self.age = dto.age ?? 0
+        self.avatarURL = dto.avatar.signed_url
+        self.accentColor = ChildProfile.color(fromHex: dto.avatar.color) ?? .evPrimary
+        self.status = .unlocked
+        self.timeLeft = ""
+        self.timePct = 0
+        self.subtitle = ""
+    }
+
+    /// Parse a `#RRGGBB` hex string into a SwiftUI `Color`. Returns nil for
+    /// unparseable input so the caller can fall back to a default accent.
+    private static func color(fromHex hex: String) -> Color? {
+        var s = hex.trimmingCharacters(in: .whitespacesAndNewlines)
+        if s.hasPrefix("#") { s.removeFirst() }
+        guard s.count == 6, let value = UInt32(s, radix: 16) else { return nil }
+        return Color(
+            red: Double((value >> 16) & 0xFF) / 255.0,
+            green: Double((value >> 8) & 0xFF) / 255.0,
+            blue: Double(value & 0xFF) / 255.0
+        )
+    }
+}
+
+// MARK: - Preview / fallback fixtures (NOT a live data source)
+
+extension ChildProfile {
+    /// Fixed fixtures for screens NOT yet migrated to real data (Calendar/
+    /// Reflection/Chat/Task previews). These REPLACE the deleted
+    /// `.liam/.maya/.emma` and are referenced by PRODUCTION (non-`#if DEBUG`)
+    /// code (e.g. `ParentReflectionModels.swift`, `TaskDetailView` fallback),
+    /// so they must exist in ALL build configs — do NOT wrap in `#if DEBUG`
+    /// (§15.8 R-iOS: a Debug-only guard breaks the Release/TestFlight build).
+    /// NOT a live Home data source — the Home tab reads
+    /// `FamilyStore.childProfiles` (spec §6.3).
+    static let previewLiam = ChildProfile(
+        id: "liam", name: "Liam", age: 12,
+        avatarURL: nil, accentColor: .evChildLiam, status: .unlocked,
+        timeLeft: "1h 30m", timePct: 0.75, subtitle: "Focused today"
+    )
+    static let previewMaya = ChildProfile(
+        id: "maya", name: "Maya", age: 8,
+        avatarURL: nil, accentColor: .evChildMaya, status: .unlocked,
+        timeLeft: "45m", timePct: 0.38, subtitle: "Wind-down soon"
+    )
+    static let previewEmma = ChildProfile(
+        id: "emma", name: "Emma", age: 6,
+        avatarURL: nil, accentColor: .evChildEmma, status: .locked,
+        timeLeft: "0m", timePct: 0.0, subtitle: "Quiet time"
     )
 
-    static let maya = ChildProfile(
-        id: "maya",
-        name: "Maya",
-        age: 8,
-        avatarURL: "https://i.pravatar.cc/256?img=47",
-        accentColor: .evChildMaya,
-        status: .unlocked,
-        timeLeft: "45m",
-        timePct: 0.38,
-        subtitle: "On bedtime wind-down in 2h"
-    )
-
-    static let emma = ChildProfile(
-        id: "emma",
-        name: "Emma",
-        age: 6,
-        avatarURL: "https://i.pravatar.cc/256?img=16",
-        accentColor: .evChildEmma,
-        status: .locked,
-        timeLeft: "0m",
-        timePct: 0.0,
-        subtitle: "Quiet time · unlocks at 4:00 PM"
-    )
-
-    static let all: [ChildProfile] = [.liam, .maya, .emma]
+    /// Aggregate fixture — replaces the deleted `.all` for the OUT-OF-SCOPE
+    /// consumers (Chat/Task previews) and any production fallback. NOT a live
+    /// data source; live Home data comes from `FamilyStore.childProfiles`.
+    static let previewAll: [ChildProfile] = [previewLiam, previewMaya, previewEmma]
 }

@@ -430,9 +430,9 @@ struct EventDetailCard: View {
 
     private func childAvatarURL(for id: String) -> String? {
         switch id {
-        case "liam": return ChildProfile.liam.avatarURL
-        case "maya": return ChildProfile.maya.avatarURL
-        case "emma": return ChildProfile.emma.avatarURL
+        case "liam": return ChildProfile.previewLiam.avatarURL
+        case "maya": return ChildProfile.previewMaya.avatarURL
+        case "emma": return ChildProfile.previewEmma.avatarURL
         default:     return nil
         }
     }
@@ -648,9 +648,9 @@ struct EventDetailCard: View {
 
     private func avatarURLFor(_ id: String) -> String? {
         switch id {
-        case "liam": return ChildProfile.liam.avatarURL
-        case "maya": return ChildProfile.maya.avatarURL
-        case "emma": return ChildProfile.emma.avatarURL
+        case "liam": return ChildProfile.previewLiam.avatarURL
+        case "maya": return ChildProfile.previewMaya.avatarURL
+        case "emma": return ChildProfile.previewEmma.avatarURL
         default:     return nil
         }
     }

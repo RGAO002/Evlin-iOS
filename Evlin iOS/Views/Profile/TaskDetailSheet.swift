@@ -370,20 +370,20 @@ struct TaskDetailSheet: View {
 #Preview("Review (with photos)") {
     TaskDetailSheet(
         task: ProfileMockData.tasks(for: "liam").first(where: { $0.state == .review })!,
-        child: .liam
+        child: .previewLiam
     )
 }
 
 #Preview("Bypass") {
     TaskDetailSheet(
         task: ProfileMockData.tasks(for: "liam").first(where: { $0.state == .bypass })!,
-        child: .liam
+        child: .previewLiam
     )
 }
 
 #Preview("Overdue") {
     TaskDetailSheet(
         task: ProfileMockData.tasks(for: "liam").first(where: { $0.state == .overdue })!,
-        child: .liam
+        child: .previewLiam
     )
 }

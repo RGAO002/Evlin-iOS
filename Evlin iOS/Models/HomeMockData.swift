@@ -156,7 +156,10 @@ enum HomeMockData {
         }
     }
 
-    static func avatarURL(_ id: String) -> String? {
-        ChildProfile.all.first(where: { $0.id == id })?.avatarURL
+    /// Look up a child's avatar URL among an injected list (real
+    /// `FamilyStore.childProfiles`). No longer reads the retired
+    /// `ChildProfile.all` global — the host passes the live children in.
+    static func avatarURL(_ id: String, in children: [ChildProfile]) -> String? {
+        children.first(where: { $0.id == id })?.avatarURL
     }
 }

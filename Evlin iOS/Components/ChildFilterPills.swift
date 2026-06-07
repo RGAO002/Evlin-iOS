@@ -1,15 +1,19 @@
 import SwiftUI
 
 struct ChildFilterPills: View {
-    @Binding var selection: String   // "all" | "liam" | "maya" | "emma"
+    @Binding var selection: String   // "all" | <child id>
     var includeAll: Bool = true
+    /// Children to render as pills — injected by the host view from
+    /// `FamilyStore.childProfiles` (real GET /family data). Presentation-only:
+    /// this component no longer reaches for the retired global mock.
+    var children: [ChildProfile] = []
 
     private var items: [(id: String, label: String, color: Color)] {
         var arr: [(String, String, Color)] = []
         if includeAll {
             arr.append(("all", "All", .evPrimary))
         }
-        for c in ChildProfile.all { arr.append((c.id, c.name, c.accentColor)) }
+        for c in children { arr.append((c.id, c.name, c.accentColor)) }
         return arr
     }
 

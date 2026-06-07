@@ -893,22 +893,22 @@ private enum WritingActionAlert: Identifiable {
 private enum ReflectionStepDetailPreviewData {
     static var finishedStore: ParentReflectionFixtureStore {
         let s = ParentReflectionFixtureStore()
-        s.simulateCompletion(childId: ChildProfile.liam.id)
+        s.simulateCompletion(childId: ChildProfile.previewLiam.id)
         return s
     }
 
     static var pendingStore: ParentReflectionFixtureStore {
         let s = ParentReflectionFixtureStore()
-        s.simulateAssignment(childId: ChildProfile.liam.id)
+        s.simulateAssignment(childId: ChildProfile.previewLiam.id)
         return s
     }
 
     static var finishedSummary: ParentReflectionSummary? {
-        finishedStore.summary(for: .liam)
+        finishedStore.summary(for: .previewLiam)
     }
 
     static var pendingSummary: ParentReflectionSummary? {
-        pendingStore.summary(for: .liam)
+        pendingStore.summary(for: .previewLiam)
     }
 }
 

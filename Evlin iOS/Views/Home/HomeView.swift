@@ -3,6 +3,7 @@ import SwiftUI
 struct HomeView: View {
     @AppStorage("parentName") private var parentName: String = "Morgan"
     @State private var showSettings = false
+    @Environment(FamilyStore.self) private var familyStore
     @Binding var selectedTab: EvlinTab
     var notifications: [HomeNotification] = HomeMockData.notifications
     var onOpenProfile: (ChildProfile) -> Void
@@ -42,20 +43,25 @@ struct HomeView: View {
                     // status + a "View reflection" CTA when applicable).
                     VStack(spacing: 14) {
                         SectionHead("Children", kicker: "Select a profile")
-                        ForEach(ChildProfile.all) { child in
-                            // Each row is its OWN view that holds its
-                            // own @Environment(ParentReflectionFixtureStore.self)
-                            // observation. This sidesteps the SwiftUI/
-                            // NavigationStack quirk where a top-of-stack
-                            // child mutating the store doesn't invalidate
-                            // the underlying-stack parent's body. The
-                            // row, as a leaf observer, still re-evaluates
-                            // its own body when the store changes — no
-                            // need to wait for HomeView.body to re-run.
-                            HomeChildRow(
-                                child: child,
-                                onOpenProfile: onOpenProfile
-                            )
+                        let children = familyStore.childProfiles
+                        if children.isEmpty {
+                            HomeChildrenEmptyState(state: familyStore.state)
+                        } else {
+                            ForEach(children) { child in
+                                // Each row is its OWN view that holds its
+                                // own @Environment(ParentReflectionFixtureStore.self)
+                                // observation. This sidesteps the SwiftUI/
+                                // NavigationStack quirk where a top-of-stack
+                                // child mutating the store doesn't invalidate
+                                // the underlying-stack parent's body. The
+                                // row, as a leaf observer, still re-evaluates
+                                // its own body when the store changes — no
+                                // need to wait for HomeView.body to re-run.
+                                HomeChildRow(
+                                    child: child,
+                                    onOpenProfile: onOpenProfile
+                                )
+                            }
                         }
                     }
                 }
@@ -106,6 +112,55 @@ private struct HomeChildRow: View {
     }
 }
 
+/// Placeholder shown when the FamilyStore has no children yet — e.g. not
+/// signed in, pre-pairing, or a cold-cache load failure. Renders an
+/// informative card rather than crashing on an empty list (spec §6.3).
+private struct HomeChildrenEmptyState: View {
+    let state: FamilyStore.LoadState
+
+    var body: some View {
+        VStack(spacing: 8) {
+            Image(systemName: state == .loading ? "person.2" : "person.crop.circle.badge.questionmark")
+                .font(.system(size: 28, weight: .regular))
+                .foregroundStyle(Color.evOutline)
+            Text(title)
+                .font(.custom("Manrope", size: 15).weight(.bold))
+                .foregroundStyle(Color.evOnSurface)
+            Text(subtitle)
+                .font(.custom("Inter", size: 13))
+                .foregroundStyle(Color.evOnSurfaceVariant)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 28)
+        .padding(.horizontal, 20)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color.evSurfaceContainerLowest)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(Color.evOutlineVariant, lineWidth: 1)
+        )
+    }
+
+    private var title: String {
+        switch state {
+        case .loading: return "Loading your family…"
+        case .failed:  return "Couldn't load your family"
+        default:       return "No children yet"
+        }
+    }
+
+    private var subtitle: String {
+        switch state {
+        case .loading: return "Fetching your children and devices."
+        case .failed:  return "Pull to refresh, or check your connection."
+        default:       return "Add a child to start managing their screen time."
+        }
+    }
+}
+
 #Preview("Home — no reflection") {
     @Previewable @State var tab: EvlinTab = .home
     return HomeView(
@@ -114,16 +169,18 @@ private struct HomeChildRow: View {
         onOpenNotifications: {}
     )
     .environment(ParentReflectionFixtureStore())
+    .environment(FamilyStore(api: APIClient(baseURL: "http://preview.local")))
 }
 
-#Preview("Home — Liam under reflection") {
+#Preview("Home — under reflection") {
     @Previewable @State var tab: EvlinTab = .home
     let store = ParentReflectionFixtureStore()
-    store.simulateAssignment(childId: ChildProfile.liam.id)
+    store.simulateAssignment(childId: "preview-child")
     return HomeView(
         selectedTab: $tab,
         onOpenProfile: { _ in },
         onOpenNotifications: {}
     )
     .environment(store)
+    .environment(FamilyStore(api: APIClient(baseURL: "http://preview.local")))
 }

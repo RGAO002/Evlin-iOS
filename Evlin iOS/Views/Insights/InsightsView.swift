@@ -6,7 +6,8 @@ struct InsightsView: View {
     /// anything about routing.
     var onOpenNotifications: () -> Void = {}
 
-    @State private var selection: String = "liam"
+    @Environment(FamilyStore.self) private var familyStore
+    @State private var selection: String = "all"
     @State private var heroDismissed: Bool = false
     @State private var toastText: String? = nil
     @State private var showSettings: Bool = false
@@ -30,7 +31,7 @@ struct InsightsView: View {
 
             ScrollView {
                 VStack(spacing: 22) {
-                    ChildFilterPills(selection: $selection)
+                    ChildFilterPills(selection: $selection, children: familyStore.childProfiles)
                         .padding(.horizontal, -4)
 
                     if !heroDismissed {
@@ -326,4 +327,5 @@ struct InsightsView: View {
 
 #Preview {
     InsightsView()
+        .environment(FamilyStore(api: APIClient(baseURL: "http://preview.local")))
 }

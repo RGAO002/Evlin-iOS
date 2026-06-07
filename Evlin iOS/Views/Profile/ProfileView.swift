@@ -52,6 +52,7 @@ struct ProfileView: View {
     // ProfileMockData for other children or when not paired.
     @AppStorage("evlin.childDeviceID") private var pairedChildID: String = ""
     @Environment(ParentReflectionFixtureStore.self) private var reflectionStore
+    @Environment(FamilyStore.self) private var familyStore
     @EnvironmentObject private var apiClient: APIClient
     @State private var backendError: String? = nil
     @State private var pollTask: Task<Void, Never>? = nil
@@ -349,7 +350,14 @@ struct ProfileView: View {
         .onAppear {
             rules = ProfileMockData.rules(for: child.id)
             events = ProfileMockData.events(for: child.id)
-            devices = ProfileMockData.devices(for: child.id)
+            // Enrolled Devices: prefer the live FamilyStore child's devices
+            // (real GET /family data). Fall back to the mock only when this
+            // child isn't in the store (preview / legacy fixtures).
+            if let liveDevices = familyStore.child(byId: child.id)?.devices, !liveDevices.isEmpty {
+                devices = liveDevices.map(DeviceItem.init(dto:))
+            } else {
+                devices = ProfileMockData.devices(for: child.id)
+            }
             // Initialise local mutables from the source profile.
             localStatus = child.status
             if localName.isEmpty { localName = child.name }
@@ -819,24 +827,27 @@ struct ProfileView: View {
 
 #Preview("Liam") {
     NavigationStack {
-        ProfileView(child: .liam)
+        ProfileView(child: .previewLiam)
     }
     .environmentObject(APIClient())
     .environment(ParentReflectionFixtureStore())
+    .environment(FamilyStore(api: APIClient(baseURL: "http://preview.local")))
 }
 
 #Preview("Maya") {
     NavigationStack {
-        ProfileView(child: .maya)
+        ProfileView(child: .previewMaya)
     }
     .environmentObject(APIClient())
     .environment(ParentReflectionFixtureStore())
+    .environment(FamilyStore(api: APIClient(baseURL: "http://preview.local")))
 }
 
 #Preview("Emma (locked)") {
     NavigationStack {
-        ProfileView(child: .emma)
+        ProfileView(child: .previewEmma)
     }
     .environmentObject(APIClient())
     .environment(ParentReflectionFixtureStore())
+    .environment(FamilyStore(api: APIClient(baseURL: "http://preview.local")))
 }

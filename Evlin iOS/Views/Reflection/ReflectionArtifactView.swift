@@ -121,22 +121,22 @@ private enum ReflectionArtifactAlert: Identifiable {
 private enum ReflectionArtifactPreviewData {
     static var completedStore: ParentReflectionFixtureStore {
         let store = ParentReflectionFixtureStore()
-        store.simulateCompletion(childId: ChildProfile.liam.id)
+        store.simulateCompletion(childId: ChildProfile.previewLiam.id)
         return store
     }
 
     static var pendingStore: ParentReflectionFixtureStore {
         let store = ParentReflectionFixtureStore()
-        store.simulateAssignment(childId: ChildProfile.liam.id)
+        store.simulateAssignment(childId: ChildProfile.previewLiam.id)
         return store
     }
 
     static var completedSummaryId: UUID? {
-        completedStore.summary(for: .liam)?.id
+        completedStore.summary(for: .previewLiam)?.id
     }
 
     static var pendingSummaryId: UUID? {
-        pendingStore.summary(for: .liam)?.id
+        pendingStore.summary(for: .previewLiam)?.id
     }
 }
 

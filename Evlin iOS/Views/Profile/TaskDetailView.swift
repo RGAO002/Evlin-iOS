@@ -23,9 +23,10 @@ struct TaskDetailView: View {
 
     @AppStorage("evlin.childDeviceID") private var pairedChildID: String = ""
     @EnvironmentObject private var apiClient: APIClient
+    @Environment(FamilyStore.self) private var familyStore
 
     private var resolvedChild: ChildProfile {
-        ChildProfile.all.first(where: { $0.id == childId }) ?? .liam
+        familyStore.childProfiles.first(where: { $0.id == childId }) ?? ChildProfile.previewLiam
     }
 
     private var backendChildID: UUID? {

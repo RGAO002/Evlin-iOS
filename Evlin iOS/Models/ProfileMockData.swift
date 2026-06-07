@@ -22,6 +22,27 @@ struct DeviceItem: Identifiable, Hashable {
     let name: String
     let detail: String
     let locked: Bool
+
+    /// Build a Profile "Enrolled Devices" row from a backend
+    /// `EnrolledDeviceDTO` (`GET /family` / `GET /me/profile`). The display
+    /// string is composed server-side (§1.7); we fall back to the model/OS
+    /// fields when it's absent. `locked` is not carried by this DTO (it's a
+    /// runtime lock concept), so it defaults to `false`.
+    init(dto: EnrolledDeviceDTO) {
+        self.iconSystemName = dto.mode == "parent" ? "iphone.gen3" : "ipad.and.iphone"
+        self.name = dto.label ?? dto.display ?? dto.device_model ?? "Device"
+        self.detail = dto.display
+            ?? [dto.device_model, dto.os_version].compactMap { $0 }.joined(separator: " · ")
+        self.locked = false
+    }
+
+    /// Direct memberwise-style initializer for the mock fixtures below.
+    init(iconSystemName: String, name: String, detail: String, locked: Bool) {
+        self.iconSystemName = iconSystemName
+        self.name = name
+        self.detail = detail
+        self.locked = locked
+    }
 }
 
 enum ProfileMockData {

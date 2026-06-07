@@ -3,6 +3,7 @@ import SwiftUI
 struct ChatView: View {
     @EnvironmentObject var apiClient: APIClient
     @Environment(ParentReflectionFixtureStore.self) private var reflectionStore
+    @Environment(FamilyStore.self) private var familyStore
     @StateObject private var viewModel = ChatViewModel()
     @State private var keyboardOverlapHeight: CGFloat = 0
     var isPreview = false
@@ -15,7 +16,7 @@ struct ChatView: View {
     /// surface deals in child *names* (display strings) — Home/Profile
     /// deal in child *ids*.
     private var matchedChildId: String? {
-        ChildProfile.all.first { $0.name == viewModel.childName }?.id
+        familyStore.childProfiles.first { $0.name == viewModel.childName }?.id
     }
 
 
@@ -601,4 +602,6 @@ private struct TypingDots: View {
     ChatView(isPreview: true)
         .environmentObject(APIClient(baseURL: "http://preview.local"))
         .environmentObject(ScreenTimeManager.shared)
+        .environment(ParentReflectionFixtureStore())
+        .environment(FamilyStore(api: APIClient(baseURL: "http://preview.local")))
 }

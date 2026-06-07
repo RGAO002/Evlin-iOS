@@ -23,6 +23,13 @@ final class FamilyStore {
     private(set) var parentDevices: [EnrolledDeviceDTO] = []
     private(set) var selfParent: ParentProfileDTO?
 
+    /// Presentation-layer children for the parent Home tab (spec §6.3). Maps
+    /// each decoded `ChildDTO` through `ChildProfile(dto:)` so Home / settings
+    /// / filter pills read real backend data instead of the retired
+    /// `ChildProfile.all` mock. Empty when no family is loaded yet (signed-out
+    /// or pre-pairing) — consumers render an empty/placeholder state.
+    var childProfiles: [ChildProfile] { children.map(ChildProfile.init(dto:)) }
+
     private let api: APIClient
     init(api: APIClient) { self.api = api }
 

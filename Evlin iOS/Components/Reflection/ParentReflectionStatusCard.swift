@@ -253,20 +253,20 @@ private enum ReflectionPalette {
 private enum ParentReflectionStatusCardPreviewData {
     static var pendingSummary: ParentReflectionSummary {
         let store = ParentReflectionFixtureStore()
-        store.simulateAssignment(childId: ChildProfile.liam.id)
-        return store.summary(for: .liam)!
+        store.simulateAssignment(childId: ChildProfile.previewLiam.id)
+        return store.summary(for: .previewLiam)!
     }
 
     static var completedSummary: ParentReflectionSummary {
         let store = ParentReflectionFixtureStore()
-        store.simulateCompletion(childId: ChildProfile.liam.id)
-        return store.summary(for: .liam)!
+        store.simulateCompletion(childId: ChildProfile.previewLiam.id)
+        return store.summary(for: .previewLiam)!
     }
 }
 
 #Preview("Reflection Status - Home Card") {
     ParentReflectionStatusCard(
-        child: .liam,
+        child: .previewLiam,
         summary: ParentReflectionStatusCardPreviewData.pendingSummary,
         layout: .homeCard,
         onViewReflection: {}
@@ -277,7 +277,7 @@ private enum ParentReflectionStatusCardPreviewData {
 
 #Preview("Reflection Status - Profile Header") {
     ParentReflectionStatusCard(
-        child: .liam,
+        child: .previewLiam,
         summary: ParentReflectionStatusCardPreviewData.completedSummary,
         layout: .profileHeader,
         onViewReflection: {}

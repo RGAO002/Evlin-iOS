@@ -79,16 +79,16 @@ private enum MissingStatePalette {
 
 #Preview("Reflection Pending — wraps Artifact") {
     let store = ParentReflectionFixtureStore()
-    store.simulateAssignment(childId: ChildProfile.liam.id)
+    store.simulateAssignment(childId: ChildProfile.previewLiam.id)
     return NavigationStack {
-        ReflectionPendingView(childId: ChildProfile.liam.id, onBack: {})
+        ReflectionPendingView(childId: ChildProfile.previewLiam.id, onBack: {})
     }
     .environment(store)
 }
 
 #Preview("Reflection Pending — empty") {
     NavigationStack {
-        ReflectionPendingView(childId: ChildProfile.maya.id, onBack: {})
+        ReflectionPendingView(childId: ChildProfile.previewMaya.id, onBack: {})
     }
     .environment(ParentReflectionFixtureStore())
 }

@@ -146,7 +146,7 @@ final class ParentReflectionFixtureStore {
     }
 
     func simulateAssignment(childId: String) {
-        guard childId == ChildProfile.liam.id else { return }
+        guard childId == ChildProfile.previewLiam.id else { return }
         summariesByChildId[childId] = Self.liamPendingSummary
         revision &+= 1
     }
@@ -360,8 +360,8 @@ private extension ParentReflectionFixtureStore {
     static var liamPendingSummary: ParentReflectionSummary {
         ParentReflectionSummary(
             id: UUID(uuidString: "AAE163C8-35B4-4B4E-A7B1-5D58AD477E28")!,
-            childId: ChildProfile.liam.id,
-            childName: ChildProfile.liam.name,
+            childId: ChildProfile.previewLiam.id,
+            childName: ChildProfile.previewLiam.name,
             state: .assignedPending,
             reason: "Used hurtful words during a sibling disagreement.",
             topicLabel: "Sibling Conflict",
@@ -384,8 +384,8 @@ private extension ParentReflectionFixtureStore {
     static var liamCompletedNotificationSummary: ParentReflectionSummary {
         ParentReflectionSummary(
             id: UUID(uuidString: "936E3E6A-D651-490C-9110-7B73BDA4EA26")!,
-            childId: ChildProfile.liam.id,
-            childName: ChildProfile.liam.name,
+            childId: ChildProfile.previewLiam.id,
+            childName: ChildProfile.previewLiam.name,
             state: .completedReady,
             reason: "Used hurtful words during a sibling disagreement.",
             topicLabel: "Hurtful Words",

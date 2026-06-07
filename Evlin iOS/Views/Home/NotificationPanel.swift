@@ -12,6 +12,7 @@ struct NotificationPanel: View {
     /// Step 1/2/3 listing inline. First arg is childId
     /// (`ChildProfile.id`), second is the reflection UUID.
     var onOpenReflection: (String, UUID) -> Void = { _, _ in }
+    @Environment(FamilyStore.self) private var familyStore
     @State private var notifs: [HomeNotification]
 
     init(
@@ -141,7 +142,7 @@ struct NotificationPanel: View {
                 ZStack {
                     RoundedRectangle(cornerRadius: 13, style: .continuous)
                         .fill(color.opacity(0.12))
-                    if let url = HomeMockData.avatarURL(n.childId), let u = URL(string: url) {
+                    if let url = HomeMockData.avatarURL(n.childId, in: familyStore.childProfiles), let u = URL(string: url) {
                         AsyncImage(url: u) { phase in
                             if let img = phase.image {
                                 img.resizable().scaledToFill()

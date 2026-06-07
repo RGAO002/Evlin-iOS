@@ -7,6 +7,7 @@ import AVFoundation
 struct HomeSettingsSheet: View {
     @EnvironmentObject var apiClient: APIClient
     @EnvironmentObject var screenTimeManager: ScreenTimeManager
+    @Environment(FamilyStore.self) private var familyStore
     var onClose: () -> Void
 
     @AppStorage("parentName") private var parentName: String = "Morgan"
@@ -16,7 +17,10 @@ struct HomeSettingsSheet: View {
     @AppStorage("evlin.parentDeviceID") private var parentDeviceID: String = ""
     @AppStorage("evlin.childDeviceID") private var childDeviceID: String = ""
 
-    @State private var children: [ChildProfile] = ChildProfile.all
+    /// Seeded from `FamilyStore.childProfiles` (real GET /family data) in
+    /// `.onAppear`. Kept as local state because add/edit/delete mutate the list
+    /// in place during the session.
+    @State private var children: [ChildProfile] = []
     @State private var editing: ChildProfile? = nil
     @State private var adding: Bool = false
 
@@ -724,6 +728,12 @@ struct HomeSettingsSheet: View {
                 screenTimeManager.saveSelection()
             }
             .onAppear {
+                // Seed the editable children list from the live FamilyStore
+                // (real GET /family data) instead of the retired mock. Only
+                // seed once so in-session add/edit/delete aren't clobbered.
+                if children.isEmpty {
+                    children = familyStore.childProfiles
+                }
                 serverURL = apiClient.baseURL
                 screenTimeManager.refreshAuthorizationStatus()
                 // Sync DEBUG protection-mode picker from backend so the
@@ -1353,4 +1363,5 @@ private struct ChildEditSheet: View {
     HomeSettingsSheet(onClose: {})
         .environmentObject(APIClient(baseURL: "http://preview.local"))
         .environmentObject(ScreenTimeManager.shared)
+        .environment(FamilyStore(api: APIClient(baseURL: "http://preview.local")))
 }

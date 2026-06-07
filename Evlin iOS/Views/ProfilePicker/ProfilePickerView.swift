@@ -18,7 +18,10 @@ struct ProfilePickerView: View {
     @State private var appearScale: CGFloat = 0.85
     @State private var appearOpacity: Double = 0
 
-    private let profiles = ChildProfile.all
+    /// Profiles to render. DEPRECATED screen (not wired into routing); the
+    /// host injects children when used. Defaults to empty rather than the
+    /// retired `ChildProfile.all` mock.
+    var profiles: [ChildProfile] = []
 
     var body: some View {
         ZStack {

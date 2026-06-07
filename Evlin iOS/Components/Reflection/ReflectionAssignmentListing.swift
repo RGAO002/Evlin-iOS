@@ -299,10 +299,10 @@ private enum ReflectionPalette {
 
 #Preview("Reflection Assignment Listing — finished") {
     let store = ParentReflectionFixtureStore()
-    store.simulateCompletion(childId: ChildProfile.liam.id)
+    store.simulateCompletion(childId: ChildProfile.previewLiam.id)
     return NavigationStack {
         ScrollView {
-            if let summary = store.summary(for: .liam) {
+            if let summary = store.summary(for: .previewLiam) {
                 ReflectionAssignmentListing(summary: summary, onCancel: {})
                     .padding()
             }
@@ -314,10 +314,10 @@ private enum ReflectionPalette {
 
 #Preview("Reflection Assignment Listing — pending") {
     let store = ParentReflectionFixtureStore()
-    store.simulateAssignment(childId: ChildProfile.liam.id)
+    store.simulateAssignment(childId: ChildProfile.previewLiam.id)
     return NavigationStack {
         ScrollView {
-            if let summary = store.summary(for: .liam) {
+            if let summary = store.summary(for: .previewLiam) {
                 ReflectionAssignmentListing(summary: summary, onCancel: {})
                     .padding()
             }

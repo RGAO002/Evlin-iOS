@@ -85,6 +85,7 @@ struct ParentRootView: View {
     @State private var parentReflectionPollTask: Task<Void, Never>? = nil
     @AppStorage("evlin.childDeviceID") private var pairedChildID: String = ""
     @EnvironmentObject private var apiClient: APIClient
+    @Environment(FamilyStore.self) private var familyStore
 
     var body: some View {
         // Keep the app shell itself out of keyboard avoidance so the tab bar
@@ -105,6 +106,7 @@ struct ParentRootView: View {
                             path: $profilePath,
                             selectedTab: $selectedTab,
                             notifications: homeNotifications,
+                            children: familyStore.childProfiles,
                             reflectionStore: reflectionStore
                         )
                     }
@@ -125,6 +127,7 @@ struct ParentRootView: View {
                             path: $insightsPath,
                             selectedTab: $selectedTab,
                             notifications: homeNotifications,
+                            children: familyStore.childProfiles,
                             reflectionStore: reflectionStore
                         )
                     }
@@ -186,7 +189,7 @@ struct ParentRootView: View {
         //      finished a reflection and parent hasn't acted yet.
         //   2. Nudge entries when the kid tapped "Give them a nudge"
         //      after our previously-acknowledged timestamp.
-        let completions: [HomeMockData.ReflectionCompletion] = ChildProfile.all.compactMap { child in
+        let completions: [HomeMockData.ReflectionCompletion] = familyStore.childProfiles.compactMap { child in
             guard let rid = reflectionStore.completedReflectionId(childId: child.id),
                   let summary = reflectionStore.summary(childId: child.id) else {
                 return nil
@@ -198,7 +201,7 @@ struct ParentRootView: View {
                 isRework: summary.parentRedoNote != nil
             )
         }
-        let nudges: [HomeMockData.ReflectionNudge] = ChildProfile.all.compactMap { child in
+        let nudges: [HomeMockData.ReflectionNudge] = familyStore.childProfiles.compactMap { child in
             guard reflectionStore.pendingNudgeAt(childId: child.id) != nil,
                   let summary = reflectionStore.summary(childId: child.id) else {
                 return nil
@@ -239,11 +242,15 @@ struct ParentRootView: View {
 
     @MainActor
     private func refreshParentReflectionState() async {
+        // The reflection-sync demo loop is keyed to the single paired backend
+        // child. Prefer the live FamilyStore child; fall back to the preview
+        // fixture for the legacy single-device path where the family aggregate
+        // hasn't been loaded but a child device is paired.
         guard let childID = pairedBackendChildID,
-              let client = BigKidParentClient(baseURLString: apiClient.baseURL),
-              let child = ChildProfile.all.first(where: { $0.id == ChildProfile.liam.id }) else {
+              let client = BigKidParentClient(baseURLString: apiClient.baseURL) else {
             return
         }
+        let child = familyStore.childProfiles.first ?? ChildProfile.previewLiam
 
         do {
             let snapshot = try await client.fetchKidState(childId: childID)
@@ -277,6 +284,7 @@ extension View {
         path: Binding<NavigationPath>,
         selectedTab: Binding<EvlinTab>,
         notifications: [HomeNotification] = HomeMockData.notifications,
+        children: [ChildProfile] = [],
         reflectionStore: ParentReflectionFixtureStore? = nil
     ) -> some View {
         self.navigationDestination(for: AppRoute.self) { route in
@@ -332,13 +340,13 @@ extension View {
                     },
                     notifications: notifications,
                     onOpenTask: { childId, taskId in
-                        guard let child = ChildProfile.all.first(where: { $0.id == childId }) else { return }
+                        guard let child = children.first(where: { $0.id == childId }) else { return }
                         path.wrappedValue.append(
                             AppRoute.taskDetail(child: child, taskId: taskId)
                         )
                     },
                     onOpenReflection: { childId, reflectionId in
-                        guard let child = ChildProfile.all.first(where: { $0.id == childId }) else { return }
+                        guard let child = children.first(where: { $0.id == childId }) else { return }
                         // Just deep-link — do NOT auto-ack the nudge
                         // here. The parent might be peeking without
                         // deciding yet. Both the completion and the
@@ -402,6 +410,7 @@ extension View {
     ParentRootView()
         .environmentObject(APIClient(baseURL: "http://preview.local"))
         .environmentObject(ScreenTimeManager.shared)
+        .environment(FamilyStore(api: APIClient(baseURL: "http://preview.local")))
 }
 
 // ContentView honoring @AppStorage — starts at onboarding if you haven't completed it.
@@ -409,4 +418,5 @@ extension View {
     ContentView()
         .environmentObject(APIClient(baseURL: "http://preview.local"))
         .environmentObject(ScreenTimeManager.shared)
+        .environment(FamilyStore(api: APIClient(baseURL: "http://preview.local")))
 }

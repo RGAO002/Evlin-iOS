@@ -333,9 +333,9 @@ struct CalendarView: View {
 
     private func urlFor(_ personId: String) -> String? {
         switch personId {
-        case "liam": return ChildProfile.liam.avatarURL
-        case "maya": return ChildProfile.maya.avatarURL
-        case "emma": return ChildProfile.emma.avatarURL
+        case "liam": return ChildProfile.previewLiam.avatarURL
+        case "maya": return ChildProfile.previewMaya.avatarURL
+        case "emma": return ChildProfile.previewEmma.avatarURL
         default: return nil
         }
     }

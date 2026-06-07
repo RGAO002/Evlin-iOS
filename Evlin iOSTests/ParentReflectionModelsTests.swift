@@ -5,7 +5,7 @@ final class ParentReflectionModelsTests: XCTestCase {
     func testStoreStartsWithoutReflectionSummary() {
         let store = ParentReflectionFixtureStore()
 
-        let summary = store.summary(for: .liam)
+        let summary = store.summary(for: .previewLiam)
 
         XCTAssertNil(summary)
     }
@@ -13,12 +13,12 @@ final class ParentReflectionModelsTests: XCTestCase {
     func testSimulateAssignmentCreatesLiamPendingSummary() {
         let store = ParentReflectionFixtureStore()
 
-        store.simulateAssignment(childId: ChildProfile.liam.id)
+        store.simulateAssignment(childId: ChildProfile.previewLiam.id)
 
-        let summary = store.summary(for: .liam)
+        let summary = store.summary(for: .previewLiam)
         XCTAssertNotNil(summary)
-        XCTAssertEqual(summary?.childId, ChildProfile.liam.id)
-        XCTAssertEqual(summary?.childName, ChildProfile.liam.name)
+        XCTAssertEqual(summary?.childId, ChildProfile.previewLiam.id)
+        XCTAssertEqual(summary?.childName, ChildProfile.previewLiam.name)
         XCTAssertEqual(summary?.state, .assignedPending)
         XCTAssertNil(summary?.submittedAt)
         XCTAssertNil(summary?.essayText)
@@ -28,9 +28,9 @@ final class ParentReflectionModelsTests: XCTestCase {
     func testSimulateCompletionFlipsLiamToCompletedReady() {
         let store = ParentReflectionFixtureStore()
 
-        store.simulateCompletion(childId: ChildProfile.liam.id)
+        store.simulateCompletion(childId: ChildProfile.previewLiam.id)
 
-        let summary = store.summary(childId: ChildProfile.liam.id)
+        let summary = store.summary(childId: ChildProfile.previewLiam.id)
         XCTAssertEqual(summary?.state, .completedReady)
         XCTAssertNotNil(summary?.submittedAt)
         XCTAssertNotNil(summary?.essayText)
@@ -40,9 +40,9 @@ final class ParentReflectionModelsTests: XCTestCase {
     func testCompletedFixtureHasExactlyThreeStandardSteps() {
         let store = ParentReflectionFixtureStore()
 
-        store.simulateCompletion(childId: ChildProfile.liam.id)
+        store.simulateCompletion(childId: ChildProfile.previewLiam.id)
 
-        let steps = store.summary(childId: ChildProfile.liam.id)?.steps
+        let steps = store.summary(childId: ChildProfile.previewLiam.id)?.steps
         XCTAssertEqual(steps?.count, 3)
         XCTAssertEqual(steps?.map(\.kind), [.video, .quiz, .writing])
     }

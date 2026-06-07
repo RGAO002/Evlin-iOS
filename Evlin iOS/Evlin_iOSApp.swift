@@ -14,6 +14,12 @@ struct Evlin_iOSApp: App {
     @StateObject private var apiClient = APIClient()
     @StateObject private var screenTimeManager = ScreenTimeManager.shared
 
+    /// Parent Home single-source-of-truth (spec §6.1). Built lazily from the
+    /// shared `APIClient` so authed reads share the session. `FamilyStore` is
+    /// `@Observable @MainActor`, so it is injected via `.environment(...)`
+    /// (not `@StateObject`) and held here so it survives view rebuilds.
+    @State private var familyStore: FamilyStore? = nil
+
     /// Tracks lifecycle so CommandPoller can start/stop with the scene.
     @Environment(\.scenePhase) private var scenePhase
 
@@ -43,6 +49,14 @@ struct Evlin_iOSApp: App {
                 .preferredColorScheme(.light)
                 .environmentObject(apiClient)
                 .environmentObject(screenTimeManager)
+                .environment(familyStore ?? FamilyStore(api: apiClient))
+                .task {
+                    // Build the store once off the shared APIClient and load
+                    // the family aggregate (GET /me/profile). No-op / .failed
+                    // when not signed in — Home then renders its empty state.
+                    if familyStore == nil { familyStore = FamilyStore(api: apiClient) }
+                    await familyStore?.load()
+                }
                 .simultaneousGesture(
                     TapGesture().onEnded {
                         UIApplication.shared.sendAction(
