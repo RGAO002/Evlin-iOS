@@ -41,7 +41,8 @@ final class ReflectionLockApplierTests: XCTestCase {
             approvedAt: nil,
             parentRedoNote: nil,
             lastNudgeAt: nil,
-            reflectionLockCapExpiresAt: now.addingTimeInterval(2 * 60 * 60)
+            reflectionLockCapExpiresAt: now.addingTimeInterval(2 * 60 * 60),
+            lockAppliedAt: nil
         )
         return ChildStateResponse(
             childName: "Liam", minutesLeft: 0, minutesMax: 120, tasks: [],

@@ -94,7 +94,8 @@ final class BigKidModelsTests: XCTestCase {
             approvedAt: nil,
             parentRedoNote: nil,
             lastNudgeAt: nil,
-            reflectionLockCapExpiresAt: nil
+            reflectionLockCapExpiresAt: nil,
+            lockAppliedAt: nil
         )
         let title = ReflectionVideoDisplay.cardTitle(for: r)
         XCTAssertFalse(title.lowercased().contains("brain"))
@@ -120,7 +121,8 @@ final class BigKidModelsTests: XCTestCase {
             approvedAt: nil,
             parentRedoNote: nil,
             lastNudgeAt: nil,
-            reflectionLockCapExpiresAt: nil
+            reflectionLockCapExpiresAt: nil,
+            lockAppliedAt: nil
         )
         XCTAssertEqual(
             ReflectionVideoDisplay.cardTitle(for: r),
@@ -147,7 +149,8 @@ final class BigKidModelsTests: XCTestCase {
             approvedAt: nil,
             parentRedoNote: nil,
             lastNudgeAt: nil,
-            reflectionLockCapExpiresAt: nil
+            reflectionLockCapExpiresAt: nil,
+            lockAppliedAt: nil
         )
         XCTAssertEqual(ReflectionVideoDisplay.cardTitle(for: r), "Authentic server title")
     }
