@@ -1582,3 +1582,153 @@ struct AnyCodable: Codable {
         }
     }
 }
+
+// MARK: - Single-flight 401 refresh (§14.7)
+
+/// Coalesces concurrent token refreshes into ONE in-flight task. All callers
+/// that hit a 401 await the SAME refresh; the underlying /auth/refresh rotates
+/// the token exactly once (rotation + reuse-detection on the backend would 401
+/// a second concurrent refresh, spuriously signing the user out mid-onboarding).
+actor SingleFlightRefresher {
+    private var inFlight: Task<String, Error>?
+    private let performRefresh: () async throws -> String
+
+    init(performRefresh: @escaping () async throws -> String) {
+        self.performRefresh = performRefresh
+    }
+
+    /// Returns a fresh access token, sharing any in-flight refresh.
+    func refreshedToken() async throws -> String {
+        if let task = inFlight {
+            return try await task.value
+        }
+        let task = Task { try await performRefresh() }
+        inFlight = task
+        defer { inFlight = nil }
+        return try await task.value
+    }
+}
+
+/// Signed-out signal — APIClient publishes this when refresh fails terminally.
+extension Notification.Name {
+    static let evlinSessionSignedOut = Notification.Name("evlin.session.signedOut")
+}
+
+extension APIClient {
+    enum AuthError: Error, Equatable {
+        case signedOut
+        case http(Int)
+    }
+
+    /// Builds an authed URLRequest with the current access token. Callers that
+    /// receive a 401 should call `refreshAndRetry` exactly once.
+    func authedRequest(path: String, method: String = "GET") -> URLRequest {
+        let url = URL(string: "\(baseURL)\(path)")!
+        var req = URLRequest(url: url)
+        req.httpMethod = method
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let access = KeychainStore.shared.load()?.accessToken {
+            req.setValue("Bearer \(access)", forHTTPHeaderField: "Authorization")
+        }
+        return req
+    }
+
+    /// Performs an authed request, transparently refreshing on a single 401 and
+    /// retrying exactly once. On refresh failure, publishes `.evlinSessionSignedOut`.
+    func authedData(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        let (data, resp) = try await URLSession.shared.data(for: request)
+        guard let http = resp as? HTTPURLResponse else { throw AuthError.http(-1) }
+        if http.statusCode != 401 { return (data, http) }
+
+        // Single 401 → single-flight refresh → retry once.
+        do {
+            let newAccess = try await Self.sharedRefresher.refreshedToken()
+            var retry = request
+            retry.setValue("Bearer \(newAccess)", forHTTPHeaderField: "Authorization")
+            let (data2, resp2) = try await URLSession.shared.data(for: retry)
+            guard let http2 = resp2 as? HTTPURLResponse else { throw AuthError.http(-1) }
+            return (data2, http2)
+        } catch {
+            KeychainStore.shared.clear()
+            NotificationCenter.default.post(name: .evlinSessionSignedOut, object: nil)
+            throw AuthError.signedOut
+        }
+    }
+
+    /// The process-wide single-flight refresher. Its work closure calls
+    /// POST /auth/refresh with the stored refresh token and atomically rewrites
+    /// the Keychain with the rotated tokens (§14.7).
+    static let sharedRefresher = SingleFlightRefresher {
+        guard let current = KeychainStore.shared.load() else {
+            throw APIClient.AuthError.signedOut
+        }
+        let base = APIClient().baseURL
+        let url = URL(string: "\(base)/auth/refresh")!
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONEncoder().encode(["refresh_token": current.refreshToken])
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
+            throw APIClient.AuthError.signedOut
+        }
+        let decoded = try JSONDecoder().decode(AuthResultDTO.self, from: data)
+        // Atomic Keychain rewrite with the rotated pair, preserving the full
+        // account (§15.7): familyID + displayName are NOT dropped on refresh.
+        // `decoded.account` is the Codable AuthAccountDTO (UUID-typed); persist
+        // its fields as strings in the StoredTokens blob.
+        let acct = decoded.account
+        try KeychainStore.shared.save(StoredTokens(
+            accessToken: decoded.access_token,
+            refreshToken: decoded.refresh_token,
+            accountID: acct.id.uuidString,
+            familyID: acct.familyID?.uuidString,
+            displayName: acct.displayName,
+            needsFamily: acct.needsFamily,
+        ))
+        return decoded.access_token
+    }
+}
+
+// MARK: - Auth wire DTOs (§4.1 AuthResult — snake_case, as the backend sends)
+
+/// Canonical, public auth-account shape (§15.7 / §15.8 PIN A). camelCase +
+/// UUID-typed, and `Codable` so it decodes DIRECTLY via JSONDecoder — there is
+/// NO non-Codable wire variant for the account object. `needsFamily` decodes
+/// from `needs_family` INSIDE the account object (NOT a separate top-level
+/// field). It carries BOTH `familyID` and `displayName` (the auth response does
+/// NOT discard them).
+///
+/// NOTE (cross-task seam, Task 11 owner): the §15.7 contract defines this type
+/// as "owned by" `AuthService.swift` (Task 11). Task 10's `AuthResultDTO.account`
+/// + single-flight `sharedRefresher` consume it, so it is declared here to keep
+/// Task 10 self-compiling. When Task 11 lands it reuses this EXACT type (move it
+/// to AuthService.swift then, do NOT redeclare it).
+struct AuthAccountDTO: Codable, Sendable, Equatable {
+    let id: UUID
+    let familyID: UUID?
+    let displayName: String?
+    let needsFamily: Bool
+    enum CodingKeys: String, CodingKey {
+        case id
+        case familyID = "family_id"
+        case displayName = "display_name"
+        case needsFamily = "needs_family"
+    }
+}
+
+/// The `/auth/*` `AuthResult` envelope. This raw struct carries only the TOKEN
+/// fields (§15.7 / §15.8 PIN A allows a raw token struct). The `account` object
+/// is the canonical `Codable` `AuthAccountDTO` and decodes DIRECTLY here — there
+/// is NO separate non-Codable `AuthAccountWireDTO`. `needs_family` lives INSIDE
+/// `account` (see `AuthAccountDTO`); the backend also echoes a top-level
+/// `needs_family` on the envelope for convenience, decoded below but never the
+/// source of truth (read `account.needsFamily`).
+struct AuthResultDTO: Codable, Sendable {
+    let access_token: String
+    let refresh_token: String
+    let expires_in: Int
+    let account: AuthAccountDTO
+    let is_new_account: Bool
+    let needs_family: Bool
+}
