@@ -835,6 +835,90 @@ struct ParentFirstActionsStep: View {
     }
 }
 
+// MARK: - 10.5 · Try a reflection (separate demo after the block)
+
+/// P2: a SEPARATE reflection demo AFTER the block. The parent is explicitly
+/// prompted to try a Reflection; it auto-clears when they finish setup (cancel
+/// on disappear + the §14.1 short cap backstop). It is NOT fired by the block.
+struct ParentTryReflectionStep: View {
+    let apiClient: APIClient
+    let childDeviceID: UUID?
+    let kidName: String
+    let onContinue: () -> Void
+    var onBack: (() -> Void)? = nil
+
+    @State private var sent = false
+    @State private var busy = false
+    @State private var reflectionID: UUID?
+
+    private var kid: String {
+        let t = kidName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return t.isEmpty ? "your kid" : t
+    }
+
+    var body: some View {
+        OnboardingV2ScreenContainer(
+            role: .parent,
+            phase: "5 · Parent finish",
+            stepIndex: 11,
+            stepTotal: parentTotal,
+            title: "Now try a reflection",
+            subtitle: sent
+                ? "Sent! \(kid)'s phone will ask them to pause and reflect. It clears itself when you finish setup."
+                : "A reflection asks \(kid) to stop and think before they keep scrolling — a gentler nudge than a hard block.",
+            content: {
+                VStack(alignment: .leading, spacing: Spacing.lg) {
+                    OnboardingV2ChatBubble(.me, text: "Have \(kid) take a quick reflection break")
+                    OnboardingV2ChatBubble(.evlin, text: sent
+                        ? "On its way — watch \(kid)'s screen."
+                        : "I'll send a short reflection to \(kid)'s phone.")
+                    if busy {
+                        HStack(spacing: Spacing.md) {
+                            ProgressView().controlSize(.small)
+                            Text("Sending…").onboardingV2BodyXS()
+                        }
+                    }
+                }
+            },
+            footer: {
+                if sent {
+                    OnboardingV2PrimaryButton("Done", role: .parent, action: onContinue)
+                } else {
+                    OnboardingV2PrimaryButton(busy ? "Sending…" : "Send a reflection",
+                                              systemImage: "sparkles", role: .parent) {
+                        Task { await sendReflection() }
+                    }
+                    .disabled(busy)
+                    OnboardingV2SecondaryButton("Skip", action: onContinue)
+                }
+                if let onBack { OnboardingV2BackLink(action: onBack) }
+            }
+        )
+        .onDisappear {
+            // Auto-clear at setup end: cancel the onboarding reflection when the
+            // parent leaves this step (the short cap is the backstop).
+            if let rid = reflectionID {
+                Task { try? await apiClient.cancelChildReflection(reflectionId: rid) }
+            }
+        }
+    }
+
+    @MainActor
+    private func sendReflection() async {
+        guard let childDeviceID else { onContinue(); return }
+        busy = true
+        defer { busy = false }
+        if let rid = try? await apiClient.triggerOnboardingReflection(
+            childDeviceID: childDeviceID,
+            reason: "Let's try Reflection together",
+            onboardingCapSeconds: 180
+        ) {
+            reflectionID = rid
+            sent = true
+        }
+    }
+}
+
 // MARK: - 11 · It works
 
 /// Mockup M[16].parent — "Sent ✓": a receipt card for the landed block, with an

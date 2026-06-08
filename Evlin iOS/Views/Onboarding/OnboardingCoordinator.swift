@@ -53,6 +53,7 @@ enum OnboardingStep: Equatable {
     case parentSetPasscode       // mockup 14: "Lock the Screen Time settings"
     case parentFirstActions      // mockup 15: "Send your first block (test)"
     case parentItWorks           // mockup 16: "It works — the test pays off"
+    case parentTryReflection     // P2: separate reflection demo (auto-clears at setup end)
 
     // v2 Kid flow (new cases)
     case childProfile            // mockup 3 (kid): "Set up your profile"
@@ -586,8 +587,17 @@ struct OnboardingCoordinator: View {
 
             case .parentItWorks:
                 ParentItWorksStep(
-                    onContinue: { step = .parentDone },
+                    onContinue: { step = .parentTryReflection },
                     onBack: { step = .parentFirstActions }
+                )
+
+            case .parentTryReflection:
+                ParentTryReflectionStep(
+                    apiClient: apiClient,
+                    childDeviceID: pairedChildDeviceID ?? childDeviceID,
+                    kidName: kidName,
+                    onContinue: { step = .parentDone },
+                    onBack: { step = .parentItWorks }
                 )
 
             // MARK: - Onboarding v2 (scaffold) — KID
