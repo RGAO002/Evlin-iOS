@@ -494,6 +494,14 @@ struct ChildShowCodeStep: View {
             }
         )
         .task { await start() }
+        // Poll with the FRESH code the moment it lands in coordinator state.
+        // (The old code called startPolling() from start() on the stale view
+        // snapshot, where `pairingCode` was still empty, so the loop exited
+        // immediately and the kid never auto-advanced after the parent scanned.)
+        .onChange(of: pairingCode, initial: true) { _, code in
+            guard !code.isEmpty else { return }
+            startPolling(code: code)
+        }
         .onDisappear { pollTask?.cancel() }
     }
 
@@ -509,16 +517,16 @@ struct ChildShowCodeStep: View {
             return
         }
         creating = false
-        startPolling()
+        // Polling starts via .onChange(of: pairingCode) once the real code lands.
     }
 
     /// Poll GET /family/pairing-status?code= every 2s; advance once a parent
     /// consumes the code (used == true). Cancels on disappear.
-    private func startPolling() {
+    private func startPolling(code: String) {
         pollTask?.cancel()
         pollTask = Task { @MainActor in
-            while !Task.isCancelled, !pairingCode.isEmpty {
-                if let status = try? await apiClient.fetchPairingStatus(code: pairingCode),
+            while !Task.isCancelled {
+                if let status = try? await apiClient.fetchPairingStatus(code: code),
                    status.used {
                     onConnected()
                     return

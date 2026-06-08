@@ -18,6 +18,18 @@ class APIClient: ObservableObject {
     /// the same as on prod.
     static let localDevURL = "http://\(localDevHost):8000/api/v1"
 
+    /// §14.4 — a stable per-install UUID minted once and persisted, so POST
+    /// /family/create is idempotent across timeout-retries (the backend returns
+    /// the SAME family/device/code for a repeated install id instead of creating
+    /// a duplicate family).
+    static let clientInstallID: String = {
+        let key = "evlin.clientInstallID"
+        if let existing = UserDefaults.standard.string(forKey: key) { return existing }
+        let fresh = UUID().uuidString
+        UserDefaults.standard.set(fresh, forKey: key)
+        return fresh
+    }()
+
     /// One-shot migration: 2026-05-07 backend split moved the Evlin Backend
     /// from the old `adaptive-engine` Railway service to its own Render
     /// service. Existing users have the old URL persisted in UserDefaults
@@ -1878,7 +1890,10 @@ extension APIClient {
     @discardableResult
     func createFamily(
         childDeviceLabel: String,
-        protectionMode: String = "std"
+        protectionMode: String = "std",
+        childDisplayName: String? = nil,
+        childBirthYear: Int? = nil,
+        childGender: String? = nil
     ) async throws -> CreateFamilyResponseDTO {
         let url = URL(string: "\(baseURL)/family/create")!
         var req = URLRequest(url: url)
@@ -1886,14 +1901,21 @@ extension APIClient {
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.timeoutInterval = 15
         let info = DeviceInfoProvider.current()
-        let body: [String: Any] = [
+        var body: [String: Any] = [
             "child_device_label": childDeviceLabel,
             "protection_mode": protectionMode,
             "device_model": info.device_model,
             "device_model_id": info.device_model_id,
             "platform": info.platform,
             "os_version": info.os_version,
+            // F7: stable idempotency key so a timed-out retry reuses the same family.
+            "client_install_id": Self.clientInstallID,
         ]
+        // F6: persist the kid-entered profile as a ChildProfile server-side so the
+        // parent's Home shows the real child after pairing.
+        if let n = childDisplayName, !n.isEmpty { body["child_display_name"] = n }
+        if let by = childBirthYear { body["child_birth_year"] = by }
+        if let g = childGender { body["child_gender"] = g }
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
         let (data, resp) = try await URLSession.shared.data(for: req)
         guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {

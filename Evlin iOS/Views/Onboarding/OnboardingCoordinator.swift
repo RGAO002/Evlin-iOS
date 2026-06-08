@@ -692,9 +692,15 @@ struct OnboardingCoordinator: View {
     private func createKidFamily() async -> String? {
         if !childPairingCode.isEmpty { return nil }
         do {
+            let trimmedName = childProfileName.trimmingCharacters(in: .whitespacesAndNewlines)
             let r = try await apiClient.createFamily(
                 childDeviceLabel: UIDevice.current.name,
-                protectionMode: protectionMode
+                protectionMode: protectionMode,
+                // F6: persist the kid-entered profile so the parent's Home shows
+                // the real child after pairing (was stashed to UserDefaults only).
+                childDisplayName: trimmedName.isEmpty ? nil : trimmedName,
+                childBirthYear: childBirthYear,
+                childGender: childGender
             )
             familyID = r.family_id
             childDeviceID = r.child_device_id
@@ -706,7 +712,6 @@ struct OnboardingCoordinator: View {
             // Stash the locally-captured profile so the post-onboarding kid shell
             // can recover it (the parent owns the authoritative child write once
             // paired). Trimmed name only; birth-year/gender when supplied.
-            let trimmedName = childProfileName.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmedName.isEmpty {
                 childName = trimmedName
                 UserDefaults.standard.set(trimmedName, forKey: "evlin.childProfileName")
