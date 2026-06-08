@@ -534,7 +534,11 @@ struct OnboardingCoordinator: View {
             case .parentConnected:
                 ParentConnectedStep(
                     kidName: kidName,
-                    onContinue: { step = .parentWaitingForKid },
+                    // I4: skip the fake "waiting for kid / Simulate kid ready"
+                    // gate — the kid finishes async. I5: the Screen Time passcode
+                    // ("One safety lock") moved to the KID chain, so the parent
+                    // goes straight to first actions.
+                    onContinue: { step = .parentFirstActions },
                     onBack: { step = .parentPairScan }
                 )
 
@@ -560,7 +564,7 @@ struct OnboardingCoordinator: View {
                     childDeviceID: childDeviceID ?? pairedChildDeviceID,
                     kidName: kidName,
                     onContinue: { step = .parentItWorks },
-                    onBack: { step = .parentSetPasscode }
+                    onBack: { step = .parentConnected }
                 )
 
             case .parentItWorks:
