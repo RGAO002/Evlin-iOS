@@ -35,14 +35,24 @@ class APIClient: ObservableObject {
         // launch — annoying when iterating against a local backend. Trust
         // whatever the user explicitly saved. The DEBUG-only picker in
         // HomeSettingsSheet still gives one-tap revert to production.
-        let useSaved = !saved.isEmpty
         // In DEBUG (simulator/local dev) default to the local backend so the
         // onboarding "Dev sign in" hits localhost:8000 instead of production.
         #if DEBUG
         let fallbackURL = Self.localDevURL
+        // A stale saved PRODUCTION url — Render, or a railway url the migration
+        // above just rewrote to Render — must NOT shadow the local backend in a
+        // debug build: /auth/dev-signin is debug-gated server-side (localhost
+        // only), and Render's free-tier cold-start would hang the request with
+        // no timeout. A purposely-saved localhost/LAN dev url is not a prod
+        // host, so it is preserved.
+        if saved.contains("onrender.com") || saved.contains("railway.app") {
+            saved = ""
+            UserDefaults.standard.removeObject(forKey: "serverURL")
+        }
         #else
         let fallbackURL = Self.defaultURL
         #endif
+        let useSaved = !saved.isEmpty
         let raw = baseURL.isEmpty
             ? (useSaved ? saved : fallbackURL)
             : baseURL

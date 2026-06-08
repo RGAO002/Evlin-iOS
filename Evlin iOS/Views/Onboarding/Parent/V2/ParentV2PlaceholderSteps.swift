@@ -133,7 +133,7 @@ struct ParentSignInStep: View {
 
     @MainActor
     private func signInWithApple() async {
-        guard let auth else { return }
+        guard let auth else { errorText = "Auth isn't ready yet — try again in a moment."; return }
         busy = true; errorText = nil
         defer { busy = false }
         do {
@@ -153,7 +153,7 @@ struct ParentSignInStep: View {
 
     @MainActor
     private func signInWithGoogle() async {
-        guard let auth else { return }
+        guard let auth else { errorText = "Auth isn't ready yet — try again in a moment."; return }
         busy = true; errorText = nil
         defer { busy = false }
         do {
@@ -174,7 +174,7 @@ struct ParentSignInStep: View {
     #if DEBUG
     @MainActor
     private func devSignIn() async {
-        guard let auth else { return }
+        guard let auth else { errorText = "Auth isn't ready yet — try again in a moment."; return }
         busy = true; errorText = nil
         defer { busy = false }
         let email = "dev+\(UUID().uuidString.prefix(8).lowercased())@evlin.test"

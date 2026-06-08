@@ -116,6 +116,7 @@ final class AuthService {
         lastError = nil
         let url = URL(string: "\(api.baseURL)\(path)")!
         var req = URLRequest(url: url)
+        req.timeoutInterval = 15
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let cleaned = body.compactMapValues { value -> Any? in
@@ -148,7 +149,7 @@ final class AuthService {
             ))
             state = .signedIn(acct)
         } catch {
-            lastError = "network_error"
+            lastError = "network_error: \(error.localizedDescription)"
         }
     }
 }
