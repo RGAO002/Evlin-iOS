@@ -304,11 +304,15 @@ struct ChildProfileStep: View {
     private let genderOptions: [(label: String, key: String)] =
         [("Female", "female"), ("Male", "male"), ("Other", "other")]
 
-    /// Years offered for the wheel: a sensible kid range (4–17 y/o relative to
-    /// the current year). Newest first so the common case is near the top.
-    private var birthYearChoices: [Int] {
-        let now = Calendar.current.component(.year, from: Date())
-        return Array((now - 17)...(now - 4)).reversed()
+    /// I2: collect a full BIRTHDAY (date) instead of just a year. Bounds = a
+    /// sensible kid range (4–17 y/o). We derive birthYear from the picked date,
+    /// so the backend wire (child_birth_year) is unchanged.
+    @State private var birthday = Calendar.current.date(byAdding: .year, value: -10, to: Date()) ?? Date()
+    private var birthdayRange: ClosedRange<Date> {
+        let now = Date(), cal = Calendar.current
+        let oldest = cal.date(byAdding: .year, value: -17, to: now) ?? now
+        let youngest = cal.date(byAdding: .year, value: -4, to: now) ?? now
+        return oldest...youngest
     }
 
     private var canContinue: Bool {
@@ -345,24 +349,16 @@ struct ChildProfileStep: View {
                         OnboardingV2ChildTextField(placeholder: "Your name", text: $name)
                     }
                     VStack(alignment: .leading, spacing: 6) {
-                        OnboardingV2FieldLabel(text: "BIRTH YEAR")
+                        OnboardingV2FieldLabel(text: "BIRTHDAY")
                         OnboardingV2ChildFieldBox {
                             HStack {
-                                Menu {
-                                    ForEach(birthYearChoices, id: \.self) { year in
-                                        Button("\(year)") { birthYear = year }
+                                DatePicker("", selection: $birthday, in: birthdayRange,
+                                           displayedComponents: .date)
+                                    .labelsHidden()
+                                    .onChange(of: birthday, initial: true) { _, d in
+                                        birthYear = Calendar.current.component(.year, from: d)
                                     }
-                                } label: {
-                                    Text(birthYear.map(String.init) ?? "Select")
-                                        .font(.system(size: 16, weight: .semibold))
-                                        .foregroundStyle(birthYear == nil
-                                            ? OnboardingV2Theme.Palette.onSurfaceVariant
-                                            : OnboardingV2Theme.Palette.onSurface)
-                                }
                                 Spacer(minLength: 0)
-                                Image(systemName: "calendar")
-                                    .font(.system(size: 15))
-                                    .foregroundStyle(OnboardingV2Theme.Palette.outline)
                             }
                         }
                     }
