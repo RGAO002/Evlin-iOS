@@ -296,6 +296,7 @@ struct ChildProfileStep: View {
     @Binding var name: String
     @Binding var birthYear: Int?
     @Binding var gender: String?
+    @Binding var pickedAvatar: UIImage?  // owned by coordinator → uploaded after /family/create
     let onContinue: () -> Void
     var onBack: (() -> Void)? = nil
 
@@ -308,7 +309,6 @@ struct ChildProfileStep: View {
     /// sensible kid range (4–17 y/o). We derive birthYear from the picked date,
     /// so the backend wire (child_birth_year) is unchanged.
     @State private var birthday = Calendar.current.date(byAdding: .year, value: -10, to: Date()) ?? Date()
-    @State private var pickedAvatar: UIImage?  // I1: local-only; backend upload deferred
     private var birthdayRange: ClosedRange<Date> {
         let now = Date(), cal = Calendar.current
         let oldest = cal.date(byAdding: .year, value: -17, to: now) ?? now

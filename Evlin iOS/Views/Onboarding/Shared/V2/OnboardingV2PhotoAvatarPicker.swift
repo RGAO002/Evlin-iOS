@@ -77,6 +77,16 @@ struct OnboardingV2PhotoAvatarPicker: View {
     }
 }
 
+/// Downscale + JPEG-encode a picked avatar for upload (keeps it small + fast).
+func evlinAvatarJPEG(_ image: UIImage, maxDim: CGFloat = 512) -> Data? {
+    let longest = max(image.size.width, image.size.height)
+    let scale = longest > maxDim ? maxDim / longest : 1
+    let size = CGSize(width: image.size.width * scale, height: image.size.height * scale)
+    let renderer = UIGraphicsImageRenderer(size: size)
+    let resized = renderer.image { _ in image.draw(in: CGRect(origin: .zero, size: size)) }
+    return resized.jpegData(compressionQuality: 0.7)
+}
+
 /// UIKit camera bridge (PhotosPicker has no camera capture). Uses the existing
 /// NSCameraUsageDescription. Camera is unavailable on the Simulator, so callers
 /// guard on `UIImagePickerController.isSourceTypeAvailable(.camera)`.

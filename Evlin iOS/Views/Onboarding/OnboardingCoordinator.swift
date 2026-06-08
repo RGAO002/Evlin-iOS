@@ -128,6 +128,7 @@ struct OnboardingCoordinator: View {
     // to UserDefaults so the post-onboarding kid shell + any later child-create
     // can read it (the parent, once paired, owns the real child profile write).
     @State private var childProfileName: String = ""
+    @State private var childAvatar: UIImage? = nil   // uploaded after /family/create
     @State private var childBirthYear: Int? = nil
     @State private var childGender: String? = nil
     @State private var childPairingCode: String = ""
@@ -624,6 +625,7 @@ struct OnboardingCoordinator: View {
                     name: $childProfileName,
                     birthYear: $childBirthYear,
                     gender: $childGender,
+                    pickedAvatar: $childAvatar,
                     onContinue: { step = .childShowCode },
                     onBack: { step = .modeSelect }
                 )
@@ -746,6 +748,12 @@ struct OnboardingCoordinator: View {
             familyID = r.family_id
             childDeviceID = r.child_device_id
             childPairingCode = r.pairing_code
+
+            // Upload the kid's picked avatar photo now that we have the device id
+            // (best-effort; the initials fallback covers a failure).
+            if let img = childAvatar, let data = evlinAvatarJPEG(img) {
+                try? await apiClient.uploadChildAvatar(childDeviceID: r.child_device_id, jpegData: data)
+            }
 
             UserDefaults.standard.set(r.family_id.uuidString, forKey: "evlin.familyID")
             UserDefaults.standard.set(r.child_device_id.uuidString, forKey: "evlin.childDeviceID")

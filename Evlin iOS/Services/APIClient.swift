@@ -1826,6 +1826,40 @@ extension APIClient {
         return try await authedJSON(path: "/family/children", method: "POST", jsonBody: payload)
     }
 
+    struct AvatarUploadResponse: Decodable, Sendable {
+        let ok: Bool
+        let object_key: String
+        let signed_url: String?
+    }
+
+    /// POST /me/avatar — upload the parent's avatar photo (authed). The backend
+    /// stores it (local DB now, Supabase in prod) + sets avatar_kind=photo, so
+    /// the photo shows on Home.
+    @discardableResult
+    func uploadParentAvatar(jpegData: Data) async throws -> AvatarUploadResponse {
+        let body: [String: Any] = ["image_base64": jpegData.base64EncodedString(),
+                                    "content_type": "image/jpeg"]
+        let payload = try JSONSerialization.data(withJSONObject: body)
+        return try await authedJSON(path: "/me/avatar", method: "POST", jsonBody: payload)
+    }
+
+    /// POST /child/avatar?child_device_id= — upload the kid's avatar photo
+    /// (UNauthed, keyed by the child device, like /family/create).
+    func uploadChildAvatar(childDeviceID: UUID, jpegData: Data) async throws {
+        let url = URL(string: "\(baseURL)/child/avatar?child_device_id=\(childDeviceID.uuidString)")!
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 20
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let body: [String: Any] = ["image_base64": jpegData.base64EncodedString(),
+                                    "content_type": "image/jpeg"]
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (_, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+    }
+
     /// PUT /family/children/{id}/profile — update a child's name/avatar/etc.
     func updateChild(id: String, _ body: UpdateChildBody) async throws -> ChildDTO {
         let payload = try JSONEncoder().encode(body)

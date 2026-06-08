@@ -295,6 +295,10 @@ struct ParentProfileStep: View {
         )
         do {
             _ = try await apiClient.updateParentProfile(body)
+            // Upload the picked avatar photo (best-effort; initials fallback covers failure).
+            if let img = pickedAvatar, let data = evlinAvatarJPEG(img) {
+                try? await apiClient.uploadParentAvatar(jpegData: data)
+            }
             withAnimation { saved = true }
         } catch {
             errorText = "Couldn't save your profile. Tap Continue to retry."
