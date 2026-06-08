@@ -204,6 +204,9 @@ struct EnterPairingCodeStep: View {
             req.httpBody = try JSONSerialization.data(withJSONObject: [
                 "child_device_label": UIDevice.current.name,
                 "protection_mode": "std",  // placeholder — parent overrides in /pair
+                // F7: idempotency key so a timed-out retry on this legacy create
+                // path reuses the same family instead of making a duplicate.
+                "client_install_id": APIClient.clientInstallID,
             ])
             let (data, response) = try await URLSession.shared.data(for: req)
             if let http = response as? HTTPURLResponse, http.statusCode != 200 {
