@@ -577,8 +577,9 @@ struct OnboardingCoordinator: View {
                 ParentFirstActionsStep(
                     apiClient: apiClient,
                     familyID: familyID,
-                    childDeviceID: childDeviceID ?? pairedChildDeviceID,
+                    childDeviceID: pairedChildDeviceID ?? childDeviceID,
                     kidName: kidName,
+                    firstBlockApp: firstBlockApp,
                     onContinue: { step = .parentItWorks },
                     onBack: { step = .parentConnected }
                 )

@@ -666,12 +666,18 @@ struct ParentFirstActionsStep: View {
     let familyID: UUID?
     let childDeviceID: UUID?
     let kidName: String
+    /// P2: the exact app (from the kid's lockable catalog, resolved by the
+    /// readiness poll) this first block targets — so "Send block" blocks ONE
+    /// real app, not an all-apps reflection.
+    var firstBlockApp: ChildReadinessDTO.App? = nil
     let onContinue: () -> Void
     var onBack: (() -> Void)? = nil
 
     @State private var phase: FirstActionPhase = .idle
-    @State private var reflectionID: UUID?
+    @State private var blockCommandID: UUID?
     @State private var pollTask: Task<Void, Never>?
+
+    private var blockAppName: String { firstBlockApp?.display_name ?? "a distracting app" }
 
     /// ≤30s payoff budget — short enough to keep onboarding snappy, long enough
     /// for a healthy kid device's 20s state poll to apply + post lock-applied.
@@ -695,14 +701,14 @@ struct ParentFirstActionsStep: View {
             content: {
                 VStack(alignment: .leading, spacing: Spacing.lg) {
                     VStack(alignment: .leading, spacing: OnboardingV2Theme.Metrics.ctaRowSpacing) {
-                        OnboardingV2ChatBubble(.me, text: "Block distracting apps for a few minutes")
+                        OnboardingV2ChatBubble(.me, text: "Block \(blockAppName) for a few minutes")
                         OnboardingV2ChatBubble(
                             .evlin,
                             attributed: {
-                                var s = AttributedString("Sending a quick test lock.")
+                                var s = AttributedString("Sending a quick test block.")
                                 s.font = OnboardingV2Theme.Typography.bodyStrong
                                 var t = AttributedString(
-                                    "\nIt'll lock \(kid)'s apps briefly — watch their screen to confirm it landed.")
+                                    "\nIt'll block \(blockAppName) on \(kid)'s phone briefly — watch their screen to confirm it landed.")
                                 t.font = OnboardingV2Theme.Typography.body
                                 return s + t
                             }()
@@ -766,33 +772,34 @@ struct ParentFirstActionsStep: View {
         case .failed:
             return "Couldn't reach the backend to send the test lock. Check your connection and try again."
         default:
-            return "This sends a REAL short lock to \(kid)'s phone. It auto-releases in a few minutes, so a missed exit can never strand them."
+            return "This blocks \(blockAppName) on \(kid)'s phone for a few minutes. It auto-releases, so a missed exit can never strand them."
         }
     }
 
     /// Fire the real test lock + poll for the honest payoff (§8 / §14.1).
     @MainActor
     private func sendBlock() async {
-        guard let childDeviceID else {
-            // No paired kid device threaded — can't run the live test; let the
-            // parent move on rather than stranding them.
+        guard let childDeviceID, let familyID, let app = firstBlockApp else {
+            // The readiness gate requires a configured app, so this shouldn't
+            // happen — but never strand the parent.
             onContinue()
             return
         }
         phase = .sending
         do {
-            // Trigger the all-apps reflection lock with the §14.1 short cap. The
-            // kid device applies it on its next /child/state poll and posts
-            // /child/reflection/{rid}/lock-applied; the backend stamps
-            // lock_applied_at, which we poll for below.
-            let rid = try await apiClient.triggerOnboardingReflection(
+            // Block ONE real app the kid configured (exact app, by alias_key) —
+            // NOT an all-apps reflection. The kid device applies it on its next
+            // command poll; we poll the command's ack until confirmed. It
+            // auto-releases in durationMinutes.
+            let cmd = try await apiClient.queueOnboardingAppBlock(
+                familyID: familyID,
                 childDeviceID: childDeviceID,
-                reason: "First-actions test lock",
-                onboardingCapSeconds: 180
+                target: .appID(app.alias_key),
+                durationMinutes: 5
             )
-            reflectionID = rid
+            blockCommandID = cmd
             phase = .waitingForKid
-            startPayoffPoll(childDeviceID: childDeviceID)
+            startBlockPoll(commandID: cmd)
         } catch {
             phase = .failed
         }
@@ -801,18 +808,14 @@ struct ParentFirstActionsStep: View {
     /// Poll /parent/state/{child} until the kid's phone reports it APPLIED the
     /// lock (`reflectionRequest.lockAppliedAt != nil`) or the ≤30s budget runs
     /// out (→ honest "queued" copy, never a fake checkmark).
-    private func startPayoffPoll(childDeviceID: UUID) {
+    private func startBlockPoll(commandID: UUID) {
         pollTask?.cancel()
-        let rid = reflectionID
         pollTask = Task { @MainActor in
             var waited = 0
             while !Task.isCancelled && waited < Self.payoffBudgetSeconds {
-                if let state = try? await apiClient.fetchParentChildState(childDeviceID: childDeviceID),
-                   let req = state.reflectionRequest,
-                   (rid == nil || req.id == rid),
-                   req.lockAppliedAt != nil {
-                    phase = .landed
-                    return
+                if let ack = try? await apiClient.fetchRichAckStatus(commandID: commandID) {
+                    if ack.status == "confirmed" { phase = .landed; return }
+                    if ack.status == "failed" { phase = .failed; return }
                 }
                 try? await Task.sleep(nanoseconds: 3_000_000_000) // 3s
                 waited += 3
@@ -827,9 +830,8 @@ struct ParentFirstActionsStep: View {
     private func cancelTestLock() {
         pollTask?.cancel()
         pollTask = nil
-        if let rid = reflectionID, phase != .landed {
-            Task { try? await apiClient.cancelChildReflection(reflectionId: rid) }
-        }
+        // The block is a real, short, timed app-lock that auto-releases on the
+        // kid device — no explicit cancel needed when the parent leaves.
     }
 }
 
