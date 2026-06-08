@@ -532,11 +532,40 @@ struct ParentConnectedStep: View {
 
 // MARK: - 8 · Waiting for kid
 
-/// Mockup M[7].parent — the parent column shows `waiting("Liam")`: a spinner +
-/// "Waiting for Liam…" while the kid completes their side.
+/// P3: a REAL cross-device wait — polls GET /family/onboarding/child-readiness
+/// and auto-advances only when the kid has granted Screen Time AND configured a
+/// lockable app (ready_for_first_block). No more fake "Simulate kid ready".
 struct ParentWaitingForKidStep: View {
-    let onContinue: () -> Void
+    let apiClient: APIClient
+    let childDeviceID: UUID?
+    var kidName: String = ""
+    /// Fires once the kid is ready; carries the resolved first-block app target.
+    let onReady: (ChildReadinessDTO) -> Void
     var onBack: (() -> Void)? = nil
+
+    @State private var status: ChildReadinessDTO?
+    @State private var pollTask: Task<Void, Never>?
+
+    private var name: String {
+        let t = kidName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return t.isEmpty ? "your kid" : t
+    }
+
+    private var waitingSubtitle: String {
+        guard let s = status else { return "Complete the steps on \(name)'s phone to continue." }
+        if !s.screen_time_granted { return "Waiting for \(name) to allow Screen Time…" }
+        if s.lockable_app_count == 0 { return "Waiting for \(name) to pick an app Evlin can lock…" }
+        return "Ready!"
+    }
+
+    private func waitRow(_ done: Bool, _ text: String) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: done ? "checkmark.circle.fill" : "circle")
+                .foregroundStyle(done ? OnboardingV2Theme.Palette.secondary
+                                      : OnboardingV2Theme.Palette.outline)
+            Text(text).onboardingV2BodyXS()
+        }
+    }
 
     var body: some View {
         OnboardingV2ScreenContainer(
@@ -549,19 +578,39 @@ struct ParentWaitingForKidStep: View {
             dotsCount: parentTotal,
             dotsCurrent: 7,
             content: {
-                OnboardingV2WaitingSpinner(
-                    name: "Liam",
-                    subtitle: "Complete the steps on Liam's phone to continue."
-                )
+                VStack(spacing: Spacing.lg) {
+                    OnboardingV2WaitingSpinner(name: name, subtitle: waitingSubtitle)
+                    if let s = status {
+                        VStack(alignment: .leading, spacing: 8) {
+                            waitRow(s.screen_time_granted, "Allowed Screen Time")
+                            waitRow(s.lockable_app_count > 0, "Picked an app Evlin can lock")
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, Spacing.section)
             },
             footer: {
-                // Mock advance — coordinator's "kid ready" hand-off.
-                OnboardingV2PrimaryButton("Simulate kid ready", role: .parent, action: onContinue)
                 if let onBack { OnboardingV2BackLink(action: onBack) }
             }
         )
+        .task { startPolling() }
+        .onDisappear { pollTask?.cancel() }
+    }
+
+    private func startPolling() {
+        guard let id = childDeviceID else { return }
+        pollTask?.cancel()
+        pollTask = Task { @MainActor in
+            while !Task.isCancelled {
+                if let r = try? await apiClient.fetchChildReadiness(childDeviceID: id) {
+                    status = r
+                    if r.ready_for_first_block { onReady(r); return }
+                }
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+            }
+        }
     }
 }
 

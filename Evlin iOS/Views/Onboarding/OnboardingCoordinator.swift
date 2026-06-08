@@ -83,6 +83,9 @@ struct OnboardingCoordinator: View {
     // it into the v2 parent screens. `restore()` rehydrates any Keychain session
     // (a returning parent who relaunches mid-onboarding stays signed in).
     @State private var auth: AuthService? = nil
+    /// P2: the exact app (from the kid's lockable catalog) the parent's first
+    /// block targets — resolved by the readiness poll on parentWaitingForKid.
+    @State private var firstBlockApp: ChildReadinessDTO.App? = nil
 
     // Onboarding v2 (scaffold): when true, `modeSelect` routes into the v2
     // screen sequence (spec §7) instead of the legacy pairing-first flow.
@@ -542,17 +545,22 @@ struct OnboardingCoordinator: View {
             case .parentConnected:
                 ParentConnectedStep(
                     kidName: kidName,
-                    // I4: skip the fake "waiting for kid / Simulate kid ready"
-                    // gate — the kid finishes async. I5: the Screen Time passcode
-                    // ("One safety lock") moved to the KID chain, so the parent
-                    // goes straight to first actions.
-                    onContinue: { step = .parentFirstActions },
+                    // P3: a REAL wait — poll the kid's onboarding readiness
+                    // (Screen Time + a lockable app) before the first block.
+                    // (I5: the Screen Time passcode moved to the kid chain.)
+                    onContinue: { step = .parentWaitingForKid },
                     onBack: { step = .parentPairScan }
                 )
 
             case .parentWaitingForKid:
                 ParentWaitingForKidStep(
-                    onContinue: { step = .parentSetPasscode },
+                    apiClient: apiClient,
+                    childDeviceID: pairedChildDeviceID ?? childDeviceID,
+                    kidName: kidName,
+                    onReady: { r in
+                        firstBlockApp = r.first_block_app
+                        step = .parentFirstActions
+                    },
                     onBack: { step = .parentConnected }
                 )
 

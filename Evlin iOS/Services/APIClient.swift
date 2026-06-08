@@ -1234,6 +1234,25 @@ struct FamilyMeResponseDTO: Codable, Sendable, Equatable {
     let pending_invite: PendingInviteDTO?
 }
 
+/// GET /family/onboarding/child-readiness — kid onboarding readiness for the
+/// parent's wait gate + first-block target (P3).
+struct ChildReadinessDTO: Codable, Sendable, Equatable {
+    struct App: Codable, Sendable, Equatable {
+        let alias_key: UUID
+        let display_name: String
+        let bundle_id: String?
+        let token_available: Bool
+        let status: String
+    }
+    let child_device_id: UUID
+    let child_profile_id: UUID?
+    let display_name: String?
+    let screen_time_granted: Bool
+    let lockable_app_count: Int
+    let first_block_app: App?
+    let ready_for_first_block: Bool
+}
+
 struct AvatarUploadResponseDTO: Codable, Sendable, Equatable {
     let avatar_url: String?
 }
@@ -1784,6 +1803,15 @@ extension APIClient {
     /// Returns family=nil + pending_invite until approved.
     func fetchFamilyMe() async throws -> FamilyMeResponseDTO {
         try await authedJSON(path: "/family/me", method: "GET")
+    }
+
+    /// GET /family/onboarding/child-readiness — parent polls the kid's onboarding
+    /// progress (Screen Time granted + a lockable app) to know when the first
+    /// real block can be sent. Replaces the fake "Simulate kid ready" gate.
+    func fetchChildReadiness(childDeviceID: UUID) async throws -> ChildReadinessDTO {
+        try await authedJSON(
+            path: "/family/onboarding/child-readiness?child_device_id=\(childDeviceID.uuidString)",
+            method: "GET")
     }
 
     /// PUT /me/profile — rename + update the parent's emoji/preset avatar.
