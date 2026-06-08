@@ -11,6 +11,8 @@
 	</dict>
 	<key>NSCameraUsageDescription</key>
 	<string>Evlin lets you take a photo to show your parent you finished a task.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Evlin connects to a development backend on your local network while testing on a real device.</string>
 	<key>UIAppFonts</key>
 	<array>
 		<string>Manrope-Variable.ttf</string>
