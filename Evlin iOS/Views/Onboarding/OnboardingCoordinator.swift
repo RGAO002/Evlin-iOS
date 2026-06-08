@@ -237,6 +237,13 @@ struct OnboardingCoordinator: View {
                     step = .welcome
                     childName = ""
                     familyID = nil
+                    // Clear the kid create-state too, otherwise createKidFamily's
+                    // "already minted" short-circuit skips the re-create and the
+                    // new name never upserts (kid keeps showing the old name).
+                    childProfileName = ""
+                    childPairingCode = ""
+                    childDeviceID = nil
+                    firstBlockApp = nil
                 }
             } label: {
                 Image(systemName: "ladybug.fill")
@@ -587,6 +594,8 @@ struct OnboardingCoordinator: View {
 
             case .parentItWorks:
                 ParentItWorksStep(
+                    kidName: kidName,
+                    blockAppName: firstBlockApp?.display_name ?? "the app",
                     onContinue: { step = .parentTryReflection },
                     onBack: { step = .parentFirstActions }
                 )

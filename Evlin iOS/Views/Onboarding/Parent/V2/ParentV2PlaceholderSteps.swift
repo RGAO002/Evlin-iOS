@@ -213,6 +213,7 @@ struct ParentProfileStep: View {
 
     @State private var name = "Morgan"
     @State private var genderIndex = 0
+    @State private var parentBirthday = Calendar.current.date(byAdding: .year, value: -30, to: Date()) ?? Date()
     @State private var saved = false
     @State private var busy = false
     @State private var errorText: String?
@@ -243,13 +244,24 @@ struct ParentProfileStep: View {
                             .frame(maxWidth: .infinity)
 
                         OnboardingV2EditableField(label: "NAME", text: $name)
-                        OnboardingV2LabeledField(label: "BIRTHDAY", value: "March 14, 1989",
-                                                 trailingSystemImage: "calendar")
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("BIRTHDAY").onboardingV2FieldLabel()
+                            HStack {
+                                DatePicker("", selection: $parentBirthday, in: ...Date(),
+                                           displayedComponents: .date)
+                                    .labelsHidden()
+                                Spacer(minLength: 0)
+                            }
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .fill(OnboardingV2Theme.Palette.surfaceContainer))
+                        }
 
                         VStack(alignment: .leading, spacing: 6) {
                             Text("GENDER").onboardingV2FieldLabel()
                             OnboardingV2Segmented(options: ["Female", "Male", "Other"],
-                                                  selectedIndex: genderIndex)
+                                                  selectedIndex: $genderIndex)
                         }
 
                         if let errorText {
@@ -924,8 +936,15 @@ struct ParentTryReflectionStep: View {
 /// Mockup M[16].parent — "Sent ✓": a receipt card for the landed block, with an
 /// "End now" affordance and the "you'll get a ping" footnote.
 struct ParentItWorksStep: View {
+    var kidName: String = ""
+    var blockAppName: String = "the app"
     let onContinue: () -> Void
     var onBack: (() -> Void)? = nil
+
+    private var kid: String {
+        let t = kidName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return t.isEmpty ? "your kid" : t
+    }
 
     var body: some View {
         OnboardingV2ScreenContainer(
@@ -934,24 +953,24 @@ struct ParentItWorksStep: View {
             stepIndex: 11,
             stepTotal: parentTotal,
             title: "Sent",
-            subtitle: "Liam's TikTok is blocked for 5 minutes. Check their phone — it landed.",
+            subtitle: "\(kid)'s \(blockAppName) is blocked for 5 minutes. Check their phone — it landed.",
             dotsCount: parentTotal,
             dotsCurrent: 10,
             content: {
                 VStack(alignment: .leading, spacing: Spacing.lg) {
                     OnboardingV2Card {
                         VStack(alignment: .leading, spacing: OnboardingV2Theme.Metrics.ctaRowSpacing) {
-                            OnboardingV2AppIcon(letter: "T", fill: .black)
+                            OnboardingV2AppIcon(letter: String(blockAppName.prefix(1)).uppercased(), fill: .black)
                             VStack(alignment: .leading, spacing: 2) {
-                                Text("TikTok · blocked").onboardingV2BodyStrong()
-                                Text("Unblocks at 9:46 · you can end it anytime").onboardingV2BodyXS()
+                                Text("\(blockAppName) · blocked").onboardingV2BodyStrong()
+                                Text("Unblocks in a few minutes · you can end it anytime").onboardingV2BodyXS()
                             }
                             OnboardingV2SecondaryButton("End now", action: {})
                                 .padding(.top, Spacing.sm)
                         }
                     }
 
-                    Text("You'll get a ping if Liam asks to unblock.")
+                    Text("You'll get a ping if \(kid) asks to unblock.")
                         .onboardingV2BodyXS()
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: .infinity)
@@ -1114,23 +1133,26 @@ private struct OnboardingV2CodeField: View {
 /// `seg()` — the 3-up segmented control; the selected pill is `--primary`.
 private struct OnboardingV2Segmented: View {
     let options: [String]
-    let selectedIndex: Int
+    @Binding var selectedIndex: Int
 
     var body: some View {
         HStack(spacing: 8) {
             ForEach(Array(options.enumerated()), id: \.offset) { i, label in
                 let on = i == selectedIndex
-                Text(label)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(on ? OnboardingV2Theme.Palette.onPrimary
-                                        : OnboardingV2Theme.Palette.onSurfaceVariant)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 11)
-                    .background(
-                        RoundedRectangle(cornerRadius: 11, style: .continuous)
-                            .fill(on ? OnboardingV2Theme.Palette.primary
-                                     : OnboardingV2Theme.Palette.surfaceContainer)
-                    )
+                Button { selectedIndex = i } label: {
+                    Text(label)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(on ? OnboardingV2Theme.Palette.onPrimary
+                                            : OnboardingV2Theme.Palette.onSurfaceVariant)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 11)
+                        .background(
+                            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                                .fill(on ? OnboardingV2Theme.Palette.primary
+                                         : OnboardingV2Theme.Palette.surfaceContainer)
+                        )
+                }
+                .buttonStyle(.plain)
             }
         }
     }

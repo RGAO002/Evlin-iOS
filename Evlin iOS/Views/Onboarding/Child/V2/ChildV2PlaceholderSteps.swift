@@ -694,6 +694,7 @@ struct ChildLockableHubStep: View {
     var onBack: (() -> Void)? = nil
 
     @State private var showAddApp = false
+    @State private var didAddApp = false
 
     var body: some View {
         OnboardingV2ScreenContainer(
@@ -745,13 +746,17 @@ struct ChildLockableHubStep: View {
                 }
             },
             footer: {
-                OnboardingV2SecondaryButton("Skip for now", action: onContinue)
+                if didAddApp {
+                    OnboardingV2PrimaryButton("Continue", role: .child, action: onContinue)
+                } else {
+                    OnboardingV2SecondaryButton("Skip for now", action: onContinue)
+                }
                 if let onBack { ChildOnboardingV2BackLink(action: onBack) }
             }
         )
         .sheet(isPresented: $showAddApp) {
             if let id = childDeviceID {
-                AddAppFlowView(childDeviceID: id, onSaved: { showAddApp = false })
+                AddAppFlowView(childDeviceID: id, onSaved: { didAddApp = true; showAddApp = false })
                     .environmentObject(apiClient)
             } else {
                 Text("Finish pairing first, then add apps you can lock.")
