@@ -686,8 +686,14 @@ struct ChildAllowNotificationsStep: View {
 //   mockup: "Choose what Evlin can lock"
 
 struct ChildLockableHubStep: View {
+    @EnvironmentObject var apiClient: APIClient
+    /// The kid's OWN device id (set after /family/create). Apps are made lockable
+    /// against it; guarded in the sheet if create hasn't landed yet.
+    var childDeviceID: UUID? = nil
     let onContinue: () -> Void
     var onBack: (() -> Void)? = nil
+
+    @State private var showAddApp = false
 
     var body: some View {
         OnboardingV2ScreenContainer(
@@ -699,18 +705,27 @@ struct ChildLockableHubStep: View {
             subtitle: "Set up the groups & apps Evlin can pause on this phone. Categories are the powerful one — they shield a whole group and any new app that joins it later.",
             content: {
                 VStack(spacing: 8) {
-                    OnboardingV2AddRow(emoji: "🗂️",
-                                       title: "Add a category",
-                                       subtitle: "Shield a group (e.g. Games) + future apps",
-                                       tint: Color(hex: 0x7C4DFF))
-                    OnboardingV2AddRow(emoji: "📱",
-                                       title: "Add an app",
-                                       subtitle: "Pick one app, confirm its label, name it",
-                                       tint: Color(hex: 0x2563EB))
-                    OnboardingV2AddRow(emoji: "📚",
-                                       title: "Add a list",
-                                       subtitle: "Group apps/categories into one target",
-                                       tint: OnboardingV2Theme.Palette.tertiary)
+                    // I3: the rows now open the REAL kid manage-apps picker
+                    // (AddAppFlowView → FamilyActivityPicker) instead of being
+                    // dead placeholders. One picker covers apps + categories.
+                    Button { showAddApp = true } label: {
+                        OnboardingV2AddRow(emoji: "🗂️",
+                                           title: "Add a category",
+                                           subtitle: "Shield a group (e.g. Games) + future apps",
+                                           tint: Color(hex: 0x7C4DFF))
+                    }.buttonStyle(.plain)
+                    Button { showAddApp = true } label: {
+                        OnboardingV2AddRow(emoji: "📱",
+                                           title: "Add an app",
+                                           subtitle: "Pick one app, confirm its label, name it",
+                                           tint: Color(hex: 0x2563EB))
+                    }.buttonStyle(.plain)
+                    Button { showAddApp = true } label: {
+                        OnboardingV2AddRow(emoji: "📚",
+                                           title: "Add a list",
+                                           subtitle: "Group apps/categories into one target",
+                                           tint: OnboardingV2Theme.Palette.tertiary)
+                    }.buttonStyle(.plain)
 
                     // "Not sure yet?" reassurance card (primary-container).
                     HStack(alignment: .top, spacing: 10) {
@@ -734,5 +749,15 @@ struct ChildLockableHubStep: View {
                 if let onBack { ChildOnboardingV2BackLink(action: onBack) }
             }
         )
+        .sheet(isPresented: $showAddApp) {
+            if let id = childDeviceID {
+                AddAppFlowView(childDeviceID: id, onSaved: { showAddApp = false })
+                    .environmentObject(apiClient)
+            } else {
+                Text("Finish pairing first, then add apps you can lock.")
+                    .onboardingV2Body()
+                    .padding()
+            }
+        }
     }
 }

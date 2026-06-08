@@ -623,6 +623,7 @@ struct OnboardingCoordinator: View {
 
             case .childLockableHub:
                 ChildLockableHubStep(
+                    childDeviceID: childDeviceID,
                     onContinue: { step = .childReady },
                     onBack: { step = .childDeletionProtection }
                 )
