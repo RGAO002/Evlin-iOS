@@ -216,6 +216,7 @@ struct ParentProfileStep: View {
     @State private var saved = false
     @State private var busy = false
     @State private var errorText: String?
+    @State private var pickedAvatar: UIImage?  // I1: local-only; backend upload deferred
 
     var body: some View {
         OnboardingV2ScreenContainer(
@@ -238,7 +239,7 @@ struct ParentProfileStep: View {
                     .padding(.vertical, Spacing.section)
                 } else {
                     VStack(alignment: .leading, spacing: Spacing.lg) {
-                        OnboardingV2AvatarPicker(emoji: "🙂", role: .parent)
+                        OnboardingV2PhotoAvatarPicker(name: name, pickedImage: $pickedAvatar)
                             .frame(maxWidth: .infinity)
 
                         OnboardingV2EditableField(label: "NAME", text: $name)

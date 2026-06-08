@@ -308,6 +308,7 @@ struct ChildProfileStep: View {
     /// sensible kid range (4–17 y/o). We derive birthYear from the picked date,
     /// so the backend wire (child_birth_year) is unchanged.
     @State private var birthday = Calendar.current.date(byAdding: .year, value: -10, to: Date()) ?? Date()
+    @State private var pickedAvatar: UIImage?  // I1: local-only; backend upload deferred
     private var birthdayRange: ClosedRange<Date> {
         let now = Date(), cal = Calendar.current
         let oldest = cal.date(byAdding: .year, value: -17, to: now) ?? now
@@ -329,20 +330,10 @@ struct ChildProfileStep: View {
             subtitle: "So Evlin and your parent know it's you.",
             content: {
                 VStack(spacing: 13) {
-                    // Avatar with the "+" add badge.
-                    ZStack(alignment: .bottomTrailing) {
-                        Text("🧒")
-                            .font(.system(size: 26))
-                            .frame(width: 66, height: 66)
-                            .background(Circle().fill(OnboardingV2Theme.Palette.surfaceContainer))
-                        Image(systemName: "plus")
-                            .font(.system(size: 12, weight: .bold))
-                            .foregroundStyle(OnboardingV2Theme.Palette.onPrimary)
-                            .frame(width: 24, height: 24)
-                            .background(Circle().fill(kidGreen))
-                            .overlay(Circle().stroke(OnboardingV2Theme.Palette.surface, lineWidth: 2))
-                    }
-                    .padding(.bottom, 1)
+                    // I1: real tappable photo picker (camera / library); initials
+                    // fallback via the Home EvlinAvatarView — no emoji placeholder.
+                    OnboardingV2PhotoAvatarPicker(name: name, pickedImage: $pickedAvatar, accent: kidGreen)
+                        .padding(.bottom, 1)
 
                     VStack(alignment: .leading, spacing: 6) {
                         OnboardingV2FieldLabel(text: "NAME")
