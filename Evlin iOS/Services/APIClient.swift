@@ -10,7 +10,7 @@ class APIClient: ObservableObject {
     /// HomeSettingsSheet. IP is the Mac's LAN address (`ipconfig getifaddr en0`
     /// on the dev machine). Path keeps `/api/v1` so chat / queue / etc. route
     /// the same as on prod.
-    static let localDevURL = "http://localhost:8000/api/v1"
+    static let localDevURL = "http://127.0.0.1:8000/api/v1"
 
     /// One-shot migration: 2026-05-07 backend split moved the Evlin Backend
     /// from the old `adaptive-engine` Railway service to its own Render
@@ -53,9 +53,16 @@ class APIClient: ObservableObject {
         let fallbackURL = Self.defaultURL
         #endif
         let useSaved = !saved.isEmpty
-        let raw = baseURL.isEmpty
+        var raw = baseURL.isEmpty
             ? (useSaved ? saved : fallbackURL)
             : baseURL
+        #if DEBUG
+        // The iOS Simulator resolves "localhost" to IPv6 ::1, but a dev uvicorn
+        // server bound to 127.0.0.1 listens on IPv4 ONLY — so a "localhost"
+        // request is refused ("could not connect to the server"). Force the
+        // IPv4 loopback literal, which the simulator shares with the Mac host.
+        raw = raw.replacingOccurrences(of: "//localhost", with: "//127.0.0.1")
+        #endif
         // Guard against missing scheme (user typed raw host in Settings)
         if raw.hasPrefix("http://") || raw.hasPrefix("https://") {
             self.baseURL = raw
