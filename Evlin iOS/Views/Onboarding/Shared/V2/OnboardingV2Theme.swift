@@ -533,16 +533,6 @@ struct OnboardingV2ScreenContainer<Content: View, Footer: View>: View {
     private var screenBody: some View {
         VStack(alignment: .leading, spacing: Spacing.xl) {
 
-            // Header: role chip + phase tag + counter.
-            VStack(alignment: .leading, spacing: Spacing.lg) {
-                roleChip
-                HStack(spacing: Spacing.md) {
-                    OnboardingV2PhaseTag(phase)
-                    Spacer(minLength: 0)
-                    OnboardingV2StepCounter(index: stepIndex, total: stepTotal)
-                }
-            }
-
             // Title + subtitle slots.
             VStack(alignment: .leading, spacing: Spacing.md) {
                 Text(title)
@@ -577,16 +567,6 @@ struct OnboardingV2ScreenContainer<Content: View, Footer: View>: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(dark ? OnboardingV2Theme.Palette.darkScreen
                          : OnboardingV2Theme.Palette.surface)
-    }
-
-    private var roleChip: some View {
-        Text(role.label)
-            .font(OnboardingV2Theme.Typography.phoneLabel)
-            .tracking(OnboardingV2Theme.Typography.phoneLabelTracking)
-            .foregroundStyle(role.accent)
-            .padding(.vertical, 4)
-            .padding(.horizontal, 12)
-            .background(Capsule().fill(role.accentContainer))
     }
 
     var body: some View {

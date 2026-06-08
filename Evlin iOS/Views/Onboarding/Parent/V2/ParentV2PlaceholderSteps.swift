@@ -414,8 +414,19 @@ struct ParentPairScanStep: View {
             dotsCurrent: 5,
             content: {
                 VStack(spacing: Spacing.lg) {
-                    OnboardingV2ScanFrame()
-                        .frame(maxWidth: .infinity)
+                    HStack {
+                        Spacer(minLength: 0)
+                        OnboardingV2QRScanner(onScan: { scanned in
+                            // Pull the 6-digit code out and feed it into the SAME
+                            // path the typed field uses: setting `code` triggers
+                            // the code-field onChange → submit().
+                            if let scannedCode = OnboardingV2PairPayload.code(from: scanned) {
+                                code = scannedCode
+                            }
+                        })
+                        Spacer(minLength: 0)
+                    }
+                    .frame(maxWidth: .infinity)
 
                     // The REAL path: type the kid's 6-digit code.
                     OnboardingV2CodeField(code: $code)
@@ -1112,32 +1123,6 @@ struct OnboardingV2WaitingSpinner: View {
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 220)
         }
-    }
-}
-
-/// `scanFrame()` — a dark camera box with a white corner reticle and a sweeping
-/// green scan line.
-private struct OnboardingV2ScanFrame: View {
-    @State private var sweepDown = false
-
-    var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .fill(OnboardingV2Theme.Palette.darkScreen)
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(Color.white.opacity(0.9), lineWidth: 3)
-                .padding(26)
-            // Sweeping green line.
-            Rectangle()
-                .fill(OnboardingV2Theme.Palette.secondary)
-                .frame(height: 2)
-                .shadow(color: OnboardingV2Theme.Palette.secondary, radius: 6)
-                .padding(.horizontal, 26)
-                .offset(y: sweepDown ? 69 : -69)
-                .animation(.easeInOut(duration: 2).repeatForever(autoreverses: true), value: sweepDown)
-                .onAppear { sweepDown = true }
-        }
-        .frame(width: 208, height: 208)
     }
 }
 

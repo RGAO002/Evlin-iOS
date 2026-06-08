@@ -426,11 +426,16 @@ struct ChildShowCodeStep: View {
             subtitle: "They'll scan it from their phone.",
             content: {
                 VStack(spacing: 12) {
-                    // QR card (placeholder faux-QR until a real encoder lands).
+                    // QR card — a real, scannable QR encoding the pairing code.
                     OnboardingV2Card {
                         HStack {
                             Spacer(minLength: 0)
-                            OnboardingV2FauxQR()
+                            if pairingCode.isEmpty {
+                                OnboardingV2FauxQR() // shimmer while the code mints
+                            } else {
+                                OnboardingV2QRImage(
+                                    string: OnboardingV2PairPayload.encode(code: pairingCode))
+                            }
                             Spacer(minLength: 0)
                         }
                     }
