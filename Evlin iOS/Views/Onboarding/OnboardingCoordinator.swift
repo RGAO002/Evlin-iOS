@@ -214,11 +214,19 @@ struct OnboardingCoordinator: View {
                     EvlinDemoShortcuts.scheduleBackendDemoPairingIfNeeded()
                 }
                 Button("Reset everything (hard)", role: .destructive) {
+                    // Clear the Keychain auth session too — otherwise the restored
+                    // session (account + family) makes the returning-parent
+                    // "welcome back" path auto-skip onboarding on the next run.
+                    auth?.signOutLocally()
                     EvlinDemoShortcuts.clearFlag()
                     UserDefaults.standard.removeObject(forKey: "onboardingComplete")
                     UserDefaults.standard.removeObject(forKey: "appMode")
-                    // v2 spec §7.4: also clear the v2 account/profile ids.
-                    for key in ["evlin.accountID", "evlin.parentProfileID", "evlin.childProfileID"] {
+                    // v2 spec §7.4: clear the v2 account/profile + family/device ids
+                    // so both parent AND kid re-onboard from scratch.
+                    for key in ["evlin.accountID", "evlin.parentProfileID",
+                                "evlin.childProfileID", "evlin.familyID",
+                                "evlin.childDeviceID", "evlin.childProfileName",
+                                "evlin.childBirthYear", "evlin.childGender"] {
                         UserDefaults.standard.removeObject(forKey: key)
                     }
                     useV2Flow = true
