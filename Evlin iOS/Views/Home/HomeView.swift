@@ -31,22 +31,13 @@ struct HomeView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 12) {
-                EvlinAvatarView(
-                    url: familyStore.selfParent?.avatar.signed_url,
-                    name: displayParentName,
-                    size: 40
-                )
-                .padding(.leading, 20)
-
-                GlassmorphicHeader(title: "", kicker: "\(greeting), \(displayParentName)") {
-                    HStack(spacing: 4) {
-                        HeaderIconButton(systemName: "bell", badge: unreadCount > 0) {
-                            onOpenNotifications()
-                        }
-                        HeaderIconButton(systemName: "gearshape") {
-                            showSettings = true
-                        }
+            GlassmorphicHeader(title: "", kicker: "\(greeting), \(displayParentName)") {
+                HStack(spacing: 4) {
+                    HeaderIconButton(systemName: "bell", badge: unreadCount > 0) {
+                        onOpenNotifications()
+                    }
+                    HeaderIconButton(systemName: "gearshape") {
+                        showSettings = true
                     }
                 }
             }
