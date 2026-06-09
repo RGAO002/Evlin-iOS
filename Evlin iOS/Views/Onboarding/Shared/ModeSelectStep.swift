@@ -44,8 +44,11 @@ struct ModeSelectStep: View {
             }
             .padding(.horizontal, Spacing.xl)
 
-            // Demo shortcuts only — skips pairing/Screen-Time onboarding. Full product expects `onSelect` path.
+            // Demo shortcuts only — skips pairing/Screen-Time onboarding. DEBUG-only:
+            // these must NEVER appear in a public/Release build.
+            #if DEBUG
             demoFooterSection
+            #endif
 
             Spacer()
         }

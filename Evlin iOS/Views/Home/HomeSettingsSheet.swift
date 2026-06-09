@@ -10,8 +10,8 @@ struct HomeSettingsSheet: View {
     @Environment(FamilyStore.self) private var familyStore
     var onClose: () -> Void
 
-    @AppStorage("parentName") private var parentName: String = "Morgan"
-    @AppStorage("childName") private var childName: String = "Liam"
+    @AppStorage("parentName") private var parentName: String = ""
+    @AppStorage("childName") private var childName: String = ""
     @AppStorage("appMode") private var appMode: String = ""
     @AppStorage("evlin.familyID") private var familyID: String = ""
     @AppStorage("evlin.parentDeviceID") private var parentDeviceID: String = ""
@@ -822,7 +822,7 @@ struct HomeSettingsSheet: View {
             .sheet(isPresented: $showAddApp) {
                 if let childID = UUID(uuidString: childDeviceID) {
                     NavigationStack {
-                        AddAppFlowView(childDeviceID: childID) {
+                        AddAppFlowView(childDeviceID: childID) { _ in
                             showAddApp = false
                         }
                         .environmentObject(apiClient)

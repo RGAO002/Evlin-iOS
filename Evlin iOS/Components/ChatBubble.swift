@@ -38,14 +38,6 @@ struct ChatBubble: View {
                 HStack(spacing: 6) {
                     Text(timestamp, style: .time)
                         .evTimestampStyle()
-
-                    #if DEBUG
-                    if let debugTurnID, debugTurnID.hasPrefix("turn:") {
-                        Text(String(debugTurnID.suffix(8)))
-                            .font(.caption2.monospaced())
-                            .foregroundStyle(.secondary)
-                    }
-                    #endif
                 }
                 .padding(.horizontal, 4)
             }

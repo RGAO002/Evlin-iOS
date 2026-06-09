@@ -38,8 +38,8 @@ extension ChildProfile {
         self.avatarURL = dto.avatar.signed_url
         self.accentColor = ChildProfile.color(fromHex: dto.avatar.color) ?? .evPrimary
         self.status = .unlocked
-        self.timeLeft = ""
-        self.timePct = 0
+        self.timeLeft = "2h"
+        self.timePct = 1.0
         self.subtitle = ""
     }
 

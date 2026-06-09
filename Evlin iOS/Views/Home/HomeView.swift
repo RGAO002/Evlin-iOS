@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct HomeView: View {
-    @AppStorage("parentName") private var parentName: String = "Morgan"
+    @AppStorage("parentName") private var parentName: String = ""
     @State private var showSettings = false
     @Environment(FamilyStore.self) private var familyStore
     @Binding var selectedTab: EvlinTab
@@ -16,13 +16,18 @@ struct HomeView: View {
         return "Good evening"
     }
 
+    private var displayParentName: String {
+        let trimmed = parentName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "there" : trimmed
+    }
+
     private var unreadCount: Int {
         notifications.filter(\.unread).count
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            GlassmorphicHeader(title: "", kicker: "\(greeting), \(parentName)") {
+            GlassmorphicHeader(title: "", kicker: "\(greeting), \(displayParentName)") {
                 HStack(spacing: 4) {
                     HeaderIconButton(systemName: "bell", badge: unreadCount > 0) {
                         onOpenNotifications()

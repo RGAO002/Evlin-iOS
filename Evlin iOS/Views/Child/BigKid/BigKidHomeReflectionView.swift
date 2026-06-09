@@ -48,8 +48,21 @@ struct BigKidHomeReflectionView: View {
         }
     }
 
+    private var displayChildName: String {
+        let server = state.childName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let local = (UserDefaults.standard.string(forKey: "evlin.childProfileName") ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let chosen: String
+        if !server.isEmpty && server.caseInsensitiveCompare("Liam") != .orderedSame {
+            chosen = server
+        } else {
+            chosen = local.isEmpty ? server : local
+        }
+        return chosen.split(separator: " ").first.map(String.init) ?? "there"
+    }
+
     private var greeting: some View {
-        Text("Hi, \(state.childName.split(separator: " ").first ?? "there")")
+        Text("Hi, \(displayChildName)")
             .font(.system(size: 22, weight: .heavy))
             .tracking(EvlinKidMetrics.Letter.mediumTitle)
             .foregroundStyle(EvlinKidColors.Reflection.titleText)

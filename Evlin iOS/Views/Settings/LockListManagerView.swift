@@ -239,7 +239,7 @@ struct LockListManagerView: View {
         }
         .sheet(isPresented: $showAddApp) {
             NavigationStack {
-                AddAppFlowView(childDeviceID: childDeviceID) {
+                AddAppFlowView(childDeviceID: childDeviceID) { _ in
                     showAddApp = false
                     model.reload()
                 }

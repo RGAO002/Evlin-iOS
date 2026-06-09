@@ -198,22 +198,20 @@ struct ParentSignInStep: View {
 
 // MARK: - 4 · Your profile
 
-/// Mockup M[3].parent — "Tell us about you": avatar + name / birthday fields +
-/// gender segmented control. On save we PUT /me/profile (display_name) and, on
+/// Mockup M[3].parent — "Tell us about you": avatar + name. On save we PUT
+/// /me/profile (display_name) and, on
 /// success, surface the mockup's "Profile saved" state before advancing.
 ///
 /// NOTE on shape: the live `UpdateParentProfileBody` (PUT /me/profile) carries
-/// `display_name` + avatar fields only — there is NO parent birth_year/gender on
-/// that DTO (those live on the CHILD profile). So the birthday/gender controls
-/// stay as visual placeholders; only the entered NAME is persisted.
+/// `display_name` + avatar fields only. Parent birthday/gender are intentionally
+/// not shown until the backend persists them.
 struct ParentProfileStep: View {
     let apiClient: APIClient
     let onSaved: () -> Void
     var onBack: (() -> Void)? = nil
 
-    @State private var name = "Morgan"
-    @State private var genderIndex = 0
-    @State private var parentBirthday = Calendar.current.date(byAdding: .year, value: -30, to: Date()) ?? Date()
+    @AppStorage("parentName") private var storedParentName: String = ""
+    @State private var name = ""
     @State private var saved = false
     @State private var busy = false
     @State private var errorText: String?
@@ -244,25 +242,6 @@ struct ParentProfileStep: View {
                             .frame(maxWidth: .infinity)
 
                         OnboardingV2EditableField(label: "NAME", text: $name)
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text("BIRTHDAY").onboardingV2FieldLabel()
-                            HStack {
-                                DatePicker("", selection: $parentBirthday, in: ...Date(),
-                                           displayedComponents: .date)
-                                    .labelsHidden()
-                                Spacer(minLength: 0)
-                            }
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 8)
-                            .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .fill(OnboardingV2Theme.Palette.surfaceContainer))
-                        }
-
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text("GENDER").onboardingV2FieldLabel()
-                            OnboardingV2Segmented(options: ["Female", "Male", "Other"],
-                                                  selectedIndex: $genderIndex)
-                        }
 
                         if let errorText {
                             Text(errorText)
@@ -280,6 +259,11 @@ struct ParentProfileStep: View {
                 if let onBack { OnboardingV2BackLink(action: onBack) }
             }
         )
+        .onAppear {
+            if name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                name = storedParentName
+            }
+        }
     }
 
     @MainActor
@@ -295,6 +279,9 @@ struct ParentProfileStep: View {
         )
         do {
             _ = try await apiClient.updateParentProfile(body)
+            if !trimmed.isEmpty {
+                storedParentName = trimmed
+            }
             // Upload the picked avatar photo (best-effort; initials fallback covers failure).
             if let img = pickedAvatar, let data = evlinAvatarJPEG(img) {
                 try? await apiClient.uploadParentAvatar(jpegData: data)
@@ -509,6 +496,7 @@ struct ParentConnectedStep: View {
     let kidName: String
     let onContinue: () -> Void
     var onBack: (() -> Void)? = nil
+    @State private var advancedToWait = false
 
     /// Trimmed display name with a neutral fallback so the copy never reads
     /// "Connected to ." before the FamilyStore projection lands.
@@ -539,10 +527,17 @@ struct ParentConnectedStep: View {
                 .padding(.vertical, Spacing.section)
             },
             footer: {
-                OnboardingV2PrimaryButton("Continue", role: .parent, action: onContinue)
+                OnboardingV2WaitingPill("Waiting for kid setup…")
                 if let onBack { OnboardingV2BackLink(action: onBack) }
             }
         )
+        .task {
+            guard !advancedToWait else { return }
+            advancedToWait = true
+            try? await Task.sleep(nanoseconds: 650_000_000)
+            guard !Task.isCancelled else { return }
+            onContinue()
+        }
     }
 }
 
@@ -557,6 +552,9 @@ struct ParentWaitingForKidStep: View {
     var kidName: String = ""
     /// Fires once the kid is ready; carries the resolved first-block app target.
     let onReady: (ChildReadinessDTO) -> Void
+    /// Safety valve: the parent can finish setup even if the kid skips adding a
+    /// lockable app (otherwise they wait forever — they can block from Home later).
+    var onSkip: (() -> Void)? = nil
     var onBack: (() -> Void)? = nil
 
     @State private var status: ChildReadinessDTO?
@@ -608,6 +606,9 @@ struct ParentWaitingForKidStep: View {
                 .padding(.vertical, Spacing.section)
             },
             footer: {
+                if let onSkip {
+                    OnboardingV2SecondaryButton("Skip — I'll set this up later", action: onSkip)
+                }
                 if let onBack { OnboardingV2BackLink(action: onBack) }
             }
         )
@@ -622,7 +623,16 @@ struct ParentWaitingForKidStep: View {
             while !Task.isCancelled {
                 if let r = try? await apiClient.fetchChildReadiness(childDeviceID: id) {
                     status = r
-                    if r.ready_for_first_block { onReady(r); return }
+                    // Be stricter than the backend boolean so the parent never
+                    // sees "Send block" until the kid has granted Screen Time
+                    // and at least one real lockable app is available.
+                    if r.ready_for_first_block,
+                       r.screen_time_granted,
+                       r.first_block_app != nil,
+                       r.lockable_app_count > 0 {
+                        onReady(r)
+                        return
+                    }
                 }
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
             }
@@ -635,8 +645,14 @@ struct ParentWaitingForKidStep: View {
 /// Mockup M[14].parent — "One safety lock": 3 numbered steps to set an iOS
 /// Screen Time passcode, then deep-link out / confirm.
 struct ParentSetPasscodeV2Step: View {
+    let kidName: String
     let onContinue: () -> Void
     var onBack: (() -> Void)? = nil
+
+    private var kid: String {
+        let trimmed = kidName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "your kid" : trimmed
+    }
 
     var body: some View {
         OnboardingV2ScreenContainer(
@@ -645,14 +661,14 @@ struct ParentSetPasscodeV2Step: View {
             stepIndex: 9,
             stepTotal: parentTotal,
             title: "One safety lock",
-            subtitle: "Set a Screen Time passcode Liam doesn't know — it stops them turning Evlin off.",
+            subtitle: "Set a Screen Time passcode \(kid) doesn't know — it stops them turning Evlin off.",
             dotsCount: parentTotal,
             dotsCurrent: 8,
             content: {
                 VStack(alignment: .leading, spacing: Spacing.lg) {
                     OnboardingV2NumberedStep(number: 1, text: "Open Settings → Screen Time")
                     OnboardingV2NumberedStep(number: 2, text: "Tap \u{201C}Lock Screen Time Settings\u{201D}")
-                    OnboardingV2NumberedStep(number: 3, text: "Pick a 4-digit code Liam won't guess")
+                    OnboardingV2NumberedStep(number: 3, text: "Pick a 4-digit code \(kid) won't guess")
                 }
             },
             footer: {
@@ -694,6 +710,7 @@ struct ParentFirstActionsStep: View {
     @State private var pollTask: Task<Void, Never>?
 
     private var blockAppName: String { firstBlockApp?.display_name ?? "a distracting app" }
+    private var hasResolvedFirstBlockTarget: Bool { firstBlockApp != nil }
 
     /// ≤30s payoff budget — short enough to keep onboarding snappy, long enough
     /// for a healthy kid device's 20s state poll to apply + post lock-applied.
@@ -701,7 +718,7 @@ struct ParentFirstActionsStep: View {
 
     private var kid: String {
         let t = kidName.trimmingCharacters(in: .whitespacesAndNewlines)
-        return t.isEmpty ? "Liam" : t
+        return t.isEmpty ? "your kid" : t
     }
 
     var body: some View {
@@ -716,26 +733,40 @@ struct ParentFirstActionsStep: View {
             dotsCurrent: 9,
             content: {
                 VStack(alignment: .leading, spacing: Spacing.lg) {
-                    VStack(alignment: .leading, spacing: OnboardingV2Theme.Metrics.ctaRowSpacing) {
-                        OnboardingV2ChatBubble(.me, text: "Block \(blockAppName) for a few minutes")
-                        OnboardingV2ChatBubble(
-                            .evlin,
-                            attributed: {
-                                var s = AttributedString("Sending a quick test block.")
-                                s.font = OnboardingV2Theme.Typography.bodyStrong
-                                var t = AttributedString(
-                                    "\nIt'll block \(blockAppName) on \(kid)'s phone briefly — watch their screen to confirm it landed.")
-                                t.font = OnboardingV2Theme.Typography.body
-                                return s + t
-                            }()
-                        )
+                    if hasResolvedFirstBlockTarget {
+                        VStack(alignment: .leading, spacing: OnboardingV2Theme.Metrics.ctaRowSpacing) {
+                            OnboardingV2ChatBubble(.me, text: "Block \(blockAppName) for a few minutes")
+                            OnboardingV2ChatBubble(
+                                .evlin,
+                                attributed: {
+                                    var s = AttributedString("Sending a quick test block.")
+                                    s.font = OnboardingV2Theme.Typography.bodyStrong
+                                    var t = AttributedString(
+                                        "\nIt'll block \(blockAppName) on \(kid)'s phone briefly — watch their screen to confirm it landed.")
+                                    t.font = OnboardingV2Theme.Typography.body
+                                    return s + t
+                                }()
+                            )
+                        }
+                    } else {
+                        OnboardingV2Card {
+                            VStack(alignment: .leading, spacing: Spacing.sm) {
+                                Text("Waiting for kid setup")
+                                    .font(OnboardingV2Theme.Typography.bodyStrong)
+                                    .foregroundStyle(OnboardingV2Theme.Palette.onSurface)
+                                Text("\(kid)'s phone still needs Screen Time access and one lockable app before you can send the first block.")
+                                    .onboardingV2BodyXS()
+                            }
+                        }
                     }
 
-                    OnboardingV2Card {
-                        HStack(alignment: .top, spacing: OnboardingV2Theme.Metrics.ctaRowSpacing) {
-                            OnboardingV2Badge(badgeText, style: phase == .landed ? .success : .new)
-                            Text(cardText)
-                                .onboardingV2BodyXS()
+                    if hasResolvedFirstBlockTarget {
+                        OnboardingV2Card {
+                            HStack(alignment: .top, spacing: OnboardingV2Theme.Metrics.ctaRowSpacing) {
+                                OnboardingV2Badge(badgeText, style: phase == .landed ? .success : .new)
+                                Text(cardText)
+                                    .onboardingV2BodyXS()
+                            }
                         }
                     }
 
@@ -749,20 +780,24 @@ struct ParentFirstActionsStep: View {
                 }
             },
             footer: {
-                switch phase {
-                case .landed:
-                    OnboardingV2PrimaryButton("It works — continue", role: .parent, action: onContinue)
-                case .timedOut, .failed:
-                    OnboardingV2PrimaryButton("Try again", systemImage: "paperplane.fill",
-                                              role: .parent) { Task { await sendBlock() } }
-                    OnboardingV2SecondaryButton("Skip for now", action: onContinue)
-                default:
-                    OnboardingV2PrimaryButton(
-                        phase == .idle ? "Send block" : "Sending…",
-                        systemImage: "paperplane.fill",
-                        role: .parent
-                    ) { Task { await sendBlock() } }
-                    .disabled(phase == .sending || phase == .waitingForKid)
+                if hasResolvedFirstBlockTarget {
+                    switch phase {
+                    case .landed:
+                        OnboardingV2PrimaryButton("It works — continue", role: .parent, action: onContinue)
+                    case .timedOut, .failed:
+                        OnboardingV2PrimaryButton("Try again", systemImage: "paperplane.fill",
+                                                  role: .parent) { Task { await sendBlock() } }
+                        OnboardingV2SecondaryButton("Skip for now", action: onContinue)
+                    default:
+                        OnboardingV2PrimaryButton(
+                            phase == .idle ? "Send block" : "Sending…",
+                            systemImage: "paperplane.fill",
+                            role: .parent
+                        ) { Task { await sendBlock() } }
+                        .disabled(phase == .sending || phase == .waitingForKid)
+                    }
+                } else {
+                    OnboardingV2SecondaryButton("Back to waiting", action: onBack ?? {})
                 }
                 if let onBack { OnboardingV2BackLink(action: onBack) }
             }
@@ -797,8 +832,9 @@ struct ParentFirstActionsStep: View {
     private func sendBlock() async {
         guard let childDeviceID, let familyID, let app = firstBlockApp else {
             // The readiness gate requires a configured app, so this shouldn't
-            // happen — but never strand the parent.
-            onContinue()
+            // happen. Keep the parent on this screen with an honest failure
+            // instead of advancing to the payoff.
+            phase = .failed
             return
         }
         phase = .sending
@@ -940,14 +976,28 @@ struct ParentTryReflectionStep: View {
 /// Mockup M[16].parent — "Sent ✓": a receipt card for the landed block, with an
 /// "End now" affordance and the "you'll get a ping" footnote.
 struct ParentItWorksStep: View {
+    let apiClient: APIClient
+    var familyID: UUID? = nil
+    var childDeviceID: UUID? = nil
     var kidName: String = ""
     var blockAppName: String = "the app"
+    var firstBlockApp: ChildReadinessDTO.App? = nil
     let onContinue: () -> Void
     var onBack: (() -> Void)? = nil
+
+    @State private var ending = false
+    @State private var ended = false
+    @State private var endFailed = false
 
     private var kid: String {
         let t = kidName.trimmingCharacters(in: .whitespacesAndNewlines)
         return t.isEmpty ? "your kid" : t
+    }
+
+    private var endButtonTitle: String {
+        if ended { return "Ended" }
+        if ending { return "Ending…" }
+        return "End now"
     }
 
     var body: some View {
@@ -967,10 +1017,19 @@ struct ParentItWorksStep: View {
                             OnboardingV2AppIcon(letter: String(blockAppName.prefix(1)).uppercased(), fill: .black)
                             VStack(alignment: .leading, spacing: 2) {
                                 Text("\(blockAppName) · blocked").onboardingV2BodyStrong()
-                                Text("Unblocks in a few minutes · you can end it anytime").onboardingV2BodyXS()
+                                Text(ended ? "Ended on \(kid)'s phone" : "Unblocks in a few minutes · you can end it anytime")
+                                    .onboardingV2BodyXS()
                             }
-                            OnboardingV2SecondaryButton("End now", action: {})
+                            OnboardingV2SecondaryButton(endButtonTitle) {
+                                Task { await endNow() }
+                            }
+                            .disabled(ending || ended)
                                 .padding(.top, Spacing.sm)
+                            if endFailed {
+                                Text("Couldn't end it yet. Try again or wait for the short timer.")
+                                    .onboardingV2BodyXS()
+                                    .foregroundStyle(Color.evError)
+                            }
                         }
                     }
 
@@ -985,6 +1044,43 @@ struct ParentItWorksStep: View {
                 if let onBack { OnboardingV2BackLink(action: onBack) }
             }
         )
+    }
+
+    @MainActor
+    private func endNow() async {
+        guard let familyID, let childDeviceID, let app = firstBlockApp else {
+            endFailed = true
+            return
+        }
+        ending = true
+        endFailed = false
+        defer { ending = false }
+        do {
+            let commandID = try await apiClient.queueOnboardingAppUnblock(
+                familyID: familyID,
+                childDeviceID: childDeviceID,
+                target: .appID(app.alias_key)
+            )
+            var waited = 0
+            while waited < 18 {
+                let ack = try await apiClient.fetchRichAckStatus(commandID: commandID)
+                if ack.status == "confirmed" {
+                    ended = true
+                    return
+                }
+                if ack.status == "failed" {
+                    endFailed = true
+                    return
+                }
+                try await Task.sleep(nanoseconds: 3_000_000_000)
+                waited += 3
+            }
+            // The child may be asleep; the command is still queued, so reflect
+            // that the button did something instead of looking inert.
+            ended = true
+        } catch {
+            endFailed = true
+        }
     }
 }
 
@@ -1285,6 +1381,39 @@ struct OnboardingV2WaitingSpinner: View {
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 220)
         }
+    }
+}
+
+private struct OnboardingV2WaitingPill: View {
+    let title: String
+    @State private var spin = false
+
+    init(_ title: String) {
+        self.title = title
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Circle()
+                .trim(from: 0, to: 0.75)
+                .stroke(OnboardingV2Theme.Palette.onPrimary,
+                        style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                .frame(width: 18, height: 18)
+                .rotationEffect(.degrees(spin ? 360 : 0))
+                .animation(.linear(duration: 1).repeatForever(autoreverses: false), value: spin)
+                .onAppear { spin = true }
+            Text(title)
+        }
+        .font(OnboardingV2Theme.Typography.cta)
+        .foregroundStyle(OnboardingV2Theme.Palette.onPrimary)
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, OnboardingV2Theme.Metrics.ctaPaddingVertical)
+        .padding(.horizontal, OnboardingV2Theme.Metrics.ctaPaddingHorizontal)
+        .background(
+            RoundedRectangle(cornerRadius: OnboardingV2Theme.Metrics.ctaCornerRadius,
+                             style: .continuous)
+                .fill(OnboardingV2Theme.Palette.primary.opacity(0.82))
+        )
     }
 }
 

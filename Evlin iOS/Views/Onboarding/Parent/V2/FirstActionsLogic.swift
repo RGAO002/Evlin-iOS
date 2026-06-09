@@ -16,18 +16,14 @@ enum FirstActionPhase: Equatable, Sendable {
 
 enum FirstActionsLogic {
 
-    /// §8 fallback chain for the block target. Prefer the kid's first real added
-    /// app (by alias_key → `app_id`); otherwise the guaranteed "Games" category
-    /// by name. "TikTok" by-name is the last resort, escalated by the caller
-    /// only after the Games attempt 422s on real hardware.
-    static func blockTarget(firstCatalogAppAliasKey: UUID?) -> FirstBlockTarget {
+    /// §8 first-block target. The parent can send the first test block only
+    /// after the kid device has registered a real lockable app. Do not fall back
+    /// to a synthetic app/category here; that would bypass the readiness gate
+    /// and make onboarding look ready before the kid phone is configured.
+    static func blockTarget(firstCatalogAppAliasKey: UUID?) -> FirstBlockTarget? {
         if let key = firstCatalogAppAliasKey { return .appID(key) }
-        return .appName("Games")
+        return nil
     }
-
-    /// Last-resort by-name target when both the catalog app AND the Games
-    /// category are unresolved on real hardware (§8 — avoids the 422 flake).
-    static let lastResortTarget: FirstBlockTarget = .appName("TikTok")
 
     /// §8 honest payoff copy — never a fake checkmark. `landed` is the only
     /// state that truthfully claims the kid applied the lock.

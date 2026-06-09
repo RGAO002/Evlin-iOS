@@ -66,7 +66,11 @@ struct DeletionProtectionStep: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.evSurface)
         .onAppear {
-            isEnabled = ScreenTimeManager.shared.deletionProtectionEnabled
+            // Onboarding default is ON. The user can explicitly turn it off
+            // from this screen, but entering the step should bias toward the
+            // safer setup.
+            isEnabled = true
+            ScreenTimeManager.shared.setDeletionProtectionEnabled(true)
         }
     }
 }

@@ -5,9 +5,19 @@ import ManagedSettings
 /// Add App captures one or more application tokens plus broad categories. Each
 /// app row must be named and explicitly confirmed before saving; category rows
 /// use Apple's picker label and broad-coverage semantics.
+struct AddAppFlowSaveResult: Equatable, Sendable {
+    let savedApps: Int
+    let savedCategories: Int
+    let blockableAppCount: Int
+
+    var isReadyForFirstBlock: Bool {
+        blockableAppCount > 0
+    }
+}
+
 struct AddAppFlowView: View {
     let childDeviceID: UUID
-    let onSaved: () -> Void
+    let onSaved: (AddAppFlowSaveResult) -> Void
 
     @EnvironmentObject var apiClient: APIClient
 
@@ -476,7 +486,14 @@ struct AddAppFlowView: View {
                     )
                 }
             }
-            onSaved()
+            let blockableAppCount = appPairs.filter {
+                ($0.upload.bundleID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
+            }.count
+            onSaved(AddAppFlowSaveResult(
+                savedApps: appPairs.count,
+                savedCategories: categoryPairs.count,
+                blockableAppCount: blockableAppCount
+            ))
         } catch {
             // Do NOT call onSaved() here — dismissing would hide the failure and
             // let a local-only save look like a real one. The app/category is saved

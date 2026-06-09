@@ -7,6 +7,11 @@ struct ProfileCard: View {
     @State private var ping: Bool = false
     @State private var pressed: Bool = false
 
+    private var displayTimeLeft: String {
+        let trimmed = child.timeLeft.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "2h" : trimmed
+    }
+
     var body: some View {
         Button(action: action) {
             HStack(alignment: .top, spacing: 16) {
@@ -37,7 +42,7 @@ struct ProfileCard: View {
                                     .fill(Color.evSecondary)
                                     .frame(width: 8, height: 8)
                             }
-                            Text("UNLOCKED · \(child.timeLeft) left")
+                            Text("UNLOCKED · \(displayTimeLeft) left")
                                 .font(.custom("Inter", size: 10).weight(.heavy))
                                 .tracking(1.4)
                                 .foregroundStyle(Color.evSecondary)

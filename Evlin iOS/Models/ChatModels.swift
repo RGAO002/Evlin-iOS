@@ -193,7 +193,7 @@ struct QuickPrompt {
 
     static let defaults: [QuickPrompt] = [
         QuickPrompt(icon: "checkmark.circle", text: "Review today's compliance"),
-        QuickPrompt(icon: "shield", text: "Is Liam safe?"),
+        QuickPrompt(icon: "shield", text: "Is my kid safe?"),
         QuickPrompt(icon: "moon", text: "Adjust bedtime strategy"),
         QuickPrompt(icon: "lock", text: "Lock phone for 30 min"),
     ]

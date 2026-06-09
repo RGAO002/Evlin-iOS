@@ -84,7 +84,7 @@ struct ChildFirstSavedListStep: View {
         .onAppear { model.reload() }
         .sheet(isPresented: $showAddApp) {
             NavigationStack {
-                AddAppFlowView(childDeviceID: childDeviceID) {
+                AddAppFlowView(childDeviceID: childDeviceID) { _ in
                     showAddApp = false
                     lastSaved = "App saved"
                     model.reload()

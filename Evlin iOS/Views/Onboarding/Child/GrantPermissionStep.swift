@@ -1,5 +1,6 @@
 import SwiftUI
 import FamilyControls
+import UserNotifications
 
 struct GrantPermissionStep: View {
     @EnvironmentObject var apiClient: APIClient
@@ -10,10 +11,13 @@ struct GrantPermissionStep: View {
     @State private var status: String = "Screen Time authorization is needed."
     @State private var granted = false
     @State private var requesting = false
+    @State private var notificationRequested = false
+    @State private var requestingNotifications = false
+    @State private var deletionProtectionOn = true
     @State private var errorText: String?
 
     var body: some View {
-        VStack(spacing: Spacing.section) {
+        VStack(spacing: Spacing.lg) {
             Spacer()
 
             Circle()
@@ -26,26 +30,64 @@ struct GrantPermissionStep: View {
                 )
 
             VStack(spacing: Spacing.lg) {
-                Text("Grant Screen Time Permission")
+                Text("Grant access")
                     .font(.evHeadlineLarge)
                     .foregroundStyle(Color.evPrimary)
                     .multilineTextAlignment(.center)
-                Text("Evlin needs permission to manage Screen Time on this phone.")
+                Text("Finish these on this phone before your parent can send the first block.")
                     .font(.evBodyMedium)
                     .multilineTextAlignment(.center)
                     .foregroundStyle(Color.evOnSurfaceVariant)
                     .padding(.horizontal, Spacing.xl)
             }
 
-            HStack(spacing: Spacing.md) {
-                if granted {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(Color.evSecondary)
+            VStack(spacing: Spacing.md) {
+                accessRow(
+                    title: "Screen Time",
+                    subtitle: status,
+                    done: granted,
+                    buttonTitle: requesting ? "Requesting…" : (granted ? "Granted" : "Grant"),
+                    disabled: requesting || granted,
+                    action: { Task { await requestScreenTime() } }
+                )
+
+                accessRow(
+                    title: "Notifications",
+                    subtitle: notificationRequested
+                        ? "Notification request completed."
+                        : "Evlin can tell you when rules change.",
+                    done: notificationRequested,
+                    buttonTitle: requestingNotifications
+                        ? "Requesting…" : (notificationRequested ? "Done" : "Allow"),
+                    disabled: requestingNotifications || notificationRequested,
+                    action: { Task { await requestNotifications() } }
+                )
+
+                HStack(alignment: .center, spacing: Spacing.md) {
+                    Image(systemName: deletionProtectionOn ? "checkmark.circle.fill" : "circle")
+                        .foregroundStyle(deletionProtectionOn ? Color.evSecondary : Color.evOnSurfaceVariant)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Prevent app deletion")
+                            .font(.evLabelLarge)
+                            .foregroundStyle(Color.evPrimary)
+                        Text("Default on. iOS applies this phone-wide.")
+                            .font(.evBodySmall)
+                            .foregroundStyle(Color.evOnSurfaceVariant)
+                    }
+                    Spacer()
+                    Toggle("", isOn: $deletionProtectionOn)
+                        .labelsHidden()
+                        .onChange(of: deletionProtectionOn) { _, newValue in
+                            ScreenTimeManager.shared.setDeletionProtectionEnabled(newValue)
+                        }
                 }
-                Text(status)
-                    .font(.evBodySmall)
-                    .foregroundStyle(granted ? Color.evSecondary : Color.evOnSurfaceVariant)
+                .padding(Spacing.lg)
+                .background(
+                    RoundedRectangle(cornerRadius: CornerRadius.md)
+                        .fill(Color.evSurfaceContainer)
+                )
             }
+            .padding(.horizontal, Spacing.lg)
 
             if let err = errorText {
                 Text(err)
@@ -57,19 +99,61 @@ struct GrantPermissionStep: View {
 
             Spacer()
 
-            if granted {
-                primaryButton(title: "Continue", action: onContinue)
-            } else if requesting {
-                ProgressView()
-            } else {
-                primaryButton(title: "Grant Permission") {
-                    Task { await request() }
-                }
+            primaryButton(title: "Continue") {
+                ScreenTimeManager.shared.setDeletionProtectionEnabled(deletionProtectionOn)
+                onContinue()
             }
+            .opacity(granted ? 1 : 0.5)
+            .disabled(!granted)
         }
         .padding(Spacing.xl)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.evSurface)
+        .onAppear {
+            deletionProtectionOn = true
+            ScreenTimeManager.shared.setDeletionProtectionEnabled(true)
+        }
+    }
+
+    @ViewBuilder
+    private func accessRow(
+        title: String,
+        subtitle: String,
+        done: Bool,
+        buttonTitle: String,
+        disabled: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        HStack(alignment: .center, spacing: Spacing.md) {
+            Image(systemName: done ? "checkmark.circle.fill" : "circle")
+                .foregroundStyle(done ? Color.evSecondary : Color.evOnSurfaceVariant)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.evLabelLarge)
+                    .foregroundStyle(Color.evPrimary)
+                Text(subtitle)
+                    .font(.evBodySmall)
+                    .foregroundStyle(done ? Color.evSecondary : Color.evOnSurfaceVariant)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+            Button(action: action) {
+                Text(buttonTitle)
+                    .font(.evLabelSmall)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(
+                        Capsule().fill(done ? Color.evSecondary.opacity(0.12) : Color.evPrimary)
+                    )
+                    .foregroundStyle(done ? Color.evSecondary : Color.evOnPrimary)
+            }
+            .disabled(disabled)
+        }
+        .padding(Spacing.lg)
+        .background(
+            RoundedRectangle(cornerRadius: CornerRadius.md)
+                .fill(Color.evSurfaceContainer)
+        )
     }
 
     @ViewBuilder
@@ -87,7 +171,7 @@ struct GrantPermissionStep: View {
         )
     }
 
-    private func request() async {
+    private func requestScreenTime() async {
         requesting = true
         defer { requesting = false }
         errorText = nil
@@ -109,6 +193,15 @@ struct GrantPermissionStep: View {
                 errorText = "Authorization failed: \(error.localizedDescription)"
             }
         }
+    }
+
+    @MainActor
+    private func requestNotifications() async {
+        requestingNotifications = true
+        defer { requestingNotifications = false }
+        _ = try? await UNUserNotificationCenter.current()
+            .requestAuthorization(options: [.alert, .sound, .badge])
+        notificationRequested = true
     }
 
     private func grantOnBackend() async {

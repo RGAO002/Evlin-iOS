@@ -254,6 +254,39 @@ extension APIClient {
         return try JSONDecoder().decode(LockResponse.self, from: data).command_id
     }
 
+    /// Onboarding Action 1 cleanup: queue a real app unblock for the same
+    /// catalog target used by `queueOnboardingAppBlock`. This backs the
+    /// "End now" affordance on the first-block payoff screen.
+    func queueOnboardingAppUnblock(
+        familyID: UUID,
+        childDeviceID: UUID,
+        target: FirstBlockTarget
+    ) async throws -> UUID {
+        let trimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let url = URL(string: "\(trimmed)/parent/child-app-catalog/unblock")
+        else { throw URLError(.badURL) }
+        var body: [String: Any] = [
+            "family_id": familyID.uuidString,
+            "child_device_id": childDeviceID.uuidString,
+        ]
+        switch target {
+        case .appID(let aliasKey): body["app_id"] = aliasKey.uuidString
+        case .appName(let name):   body["app_name"] = name
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 28
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+        struct UnblockResponse: Decodable { let command_id: UUID }
+        return try JSONDecoder().decode(UnblockResponse.self, from: data).command_id
+    }
+
     /// Onboarding Action 2: trigger a state-derived all-apps reflection via
     /// POST /parent/reflection/trigger with the §14.1 first-run short-cap so a
     /// missed exit/background auto-cancel can never brick the kid for 2h. Keyed

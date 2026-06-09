@@ -94,7 +94,7 @@ class ChatViewModel: ObservableObject {
 
     let quickPrompts = QuickPrompt.defaults
     var apiClient: APIClient = APIClient()
-    var childName: String = "Liam"
+    @Published var childName: String = "your kid"
     /// "std" | "max" — drives E1 copy branching. Read from UserDefaults at sendMessage time.
     private var protectionMode: String {
         UserDefaults.standard.string(forKey: "evlin.protectionMode") ?? "std"
@@ -122,6 +122,12 @@ class ChatViewModel: ObservableObject {
         }
         rebuildSurfacedReflectionSubmissionIndex()
         resumePendingAckPolls()
+    }
+
+    func setChildName(_ name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != childName else { return }
+        childName = trimmed
     }
 
     /// Re-attach ack-status polling for any persisted message still in
@@ -306,7 +312,7 @@ class ChatViewModel: ObservableObject {
         let now = Date()
         let m1 = ChatMessage(
             role: .agent,
-            content: "I've confirmed the manual lock on Liam's device. Given his recent focus patterns, he may experience a frustration spike.",
+            content: "I've confirmed the manual lock on your child's device. Given recent focus patterns, they may experience a frustration spike.",
             timestamp: now
         )
         var m2 = ChatMessage(
@@ -440,7 +446,7 @@ class ChatViewModel: ObservableObject {
 
         // 2. Queued command — append bubble + start ack poll.
         // Note: no longer sets msg.lockMinutes/lockChildName — the legacy
-        // LockConfirmationCard was mock UI ("Liam's device has been restricted")
+        // LockConfirmationCard was mock UI ("Child's device has been restricted")
         // that lied about execution state. ReceiptCard is now the single honest
         // source of truth; if the child fails (not authorized, category not
         // configured, etc.), the receipt shows the real error.

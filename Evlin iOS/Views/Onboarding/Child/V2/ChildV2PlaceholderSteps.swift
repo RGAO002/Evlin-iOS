@@ -695,6 +695,7 @@ struct ChildLockableHubStep: View {
 
     @State private var showAddApp = false
     @State private var didAddApp = false
+    @State private var addAppStatus: String?
 
     var body: some View {
         OnboardingV2ScreenContainer(
@@ -743,6 +744,14 @@ struct ChildLockableHubStep: View {
                             .fill(OnboardingV2Theme.Palette.primaryContainer)
                     )
                     .padding(.top, 2)
+
+                    if let addAppStatus {
+                        Text(addAppStatus)
+                            .font(OnboardingV2Theme.Typography.bodyXS)
+                            .foregroundStyle(OnboardingV2Theme.Palette.error)
+                            .padding(.top, 4)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                 }
             },
             footer: {
@@ -756,7 +765,16 @@ struct ChildLockableHubStep: View {
         )
         .sheet(isPresented: $showAddApp) {
             if let id = childDeviceID {
-                AddAppFlowView(childDeviceID: id, onSaved: { didAddApp = true; showAddApp = false })
+                AddAppFlowView(childDeviceID: id, onSaved: { result in
+                    showAddApp = false
+                    if result.isReadyForFirstBlock {
+                        didAddApp = true
+                        addAppStatus = nil
+                    } else {
+                        didAddApp = false
+                        addAppStatus = "Saved. Add one matched app too so the parent can send the first block."
+                    }
+                })
                     .environmentObject(apiClient)
             } else {
                 Text("Finish pairing first, then add apps you can lock.")

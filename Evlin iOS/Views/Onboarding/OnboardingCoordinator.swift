@@ -436,13 +436,16 @@ struct OnboardingCoordinator: View {
                 }
 
             case .childGrantPermission:
-                // REUSED by v2 — v2 next is childAllowNotifications, v1 is
-                // childDeletionProtection.
+                // REUSED by v2 as the single "grant access" checklist. v2
+                // now keeps Screen Time, notifications, and deletion
+                // protection on one page, then moves straight to lockable
+                // target capture. Legacy still keeps its separate deletion
+                // step.
                 GrantPermissionStep(
                     childDeviceID: childDeviceID ?? OnboardingDemoPlaceholders.childDeviceUUID,
                     protectionMode: protectionMode
                 ) {
-                    step = useV2Flow ? .childAllowNotifications : .childDeletionProtection
+                    step = useV2Flow ? .childLockableHub : .childDeletionProtection
                 }
 
             case .childDeletionProtection:
@@ -568,13 +571,15 @@ struct OnboardingCoordinator: View {
                     kidName: kidName,
                     onReady: { r in
                         firstBlockApp = r.first_block_app
-                        step = .parentFirstActions
+                        step = .parentSetPasscode
                     },
+                    onSkip: { step = .parentDone },
                     onBack: { step = .parentConnected }
                 )
 
             case .parentSetPasscode:
                 ParentSetPasscodeV2Step(
+                    kidName: kidName,
                     onContinue: { step = .parentFirstActions },
                     onBack: { step = .parentWaitingForKid }
                 )
@@ -590,13 +595,17 @@ struct OnboardingCoordinator: View {
                     kidName: kidName,
                     firstBlockApp: firstBlockApp,
                     onContinue: { step = .parentItWorks },
-                    onBack: { step = .parentConnected }
+                    onBack: { step = .parentWaitingForKid }
                 )
 
             case .parentItWorks:
                 ParentItWorksStep(
+                    apiClient: apiClient,
+                    familyID: familyID,
+                    childDeviceID: pairedChildDeviceID ?? childDeviceID,
                     kidName: kidName,
                     blockAppName: firstBlockApp?.display_name ?? "the app",
+                    firstBlockApp: firstBlockApp,
                     onContinue: { step = .parentTryReflection },
                     onBack: { step = .parentFirstActions }
                 )
@@ -663,7 +672,7 @@ struct OnboardingCoordinator: View {
                 ChildLockableHubStep(
                     childDeviceID: childDeviceID,
                     onContinue: { step = .childReady },
-                    onBack: { step = .childDeletionProtection }
+                    onBack: { step = .childGrantPermission }
                 )
             }
         }

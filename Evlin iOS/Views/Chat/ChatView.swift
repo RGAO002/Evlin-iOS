@@ -19,6 +19,33 @@ struct ChatView: View {
         familyStore.childProfiles.first { $0.name == viewModel.childName }?.id
     }
 
+    private var resolvedChildName: String? {
+        if let activeChild {
+            return activeChild.name
+        }
+
+        if let childDeviceID = UserDefaults.standard.string(forKey: "evlin.childDeviceID") {
+            if let match = familyStore.children.first(where: { child in
+                child.devices.contains {
+                    $0.device_id.caseInsensitiveCompare(childDeviceID) == .orderedSame
+                }
+            }) {
+                return match.display_name
+            }
+        }
+
+        if let first = familyStore.children.first {
+            return first.display_name
+        }
+
+        return UserDefaults.standard.string(forKey: "evlin.childProfileName")
+    }
+
+    private func syncResolvedChildName() {
+        if let name = resolvedChildName {
+            viewModel.setChildName(name)
+        }
+    }
 
     var body: some View {
         GeometryReader { geometry in
@@ -345,13 +372,20 @@ struct ChatView: View {
             if !isPreview {
                 viewModel.apiClient = apiClient
             }
-            if let active = activeChild {
-                viewModel.childName = active.name
-            }
+            syncResolvedChildName()
             guard !isPreview else { return }
+            if familyStore.children.isEmpty {
+                Task {
+                    await familyStore.refresh()
+                    syncResolvedChildName()
+                }
+            }
             viewModel.startReflectionSubmissionPolling()
             Task { await viewModel.tickReflectionSubmissionPoll() }
             viewModel.startReflectionEventPolling()
+        }
+        .onChange(of: familyStore.children) { _, _ in
+            syncResolvedChildName()
         }
         .onDisappear {
             guard !isPreview else { return }
