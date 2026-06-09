@@ -203,8 +203,8 @@ struct ParentSignInStep: View {
 /// success, surface the mockup's "Profile saved" state before advancing.
 ///
 /// NOTE on shape: the live `UpdateParentProfileBody` (PUT /me/profile) carries
-/// `display_name` + avatar fields only. Parent birthday/gender are intentionally
-/// not shown until the backend persists them.
+/// `display_name` + avatar fields only. Birthday/gender are shown as display-only
+/// inputs (restored per request); only NAME + avatar persist to the backend today.
 struct ParentProfileStep: View {
     let apiClient: APIClient
     let onSaved: () -> Void
@@ -212,6 +212,8 @@ struct ParentProfileStep: View {
 
     @AppStorage("parentName") private var storedParentName: String = ""
     @State private var name = ""
+    @State private var genderIndex = 0
+    @State private var parentBirthday = Calendar.current.date(byAdding: .year, value: -30, to: Date()) ?? Date()
     @State private var saved = false
     @State private var busy = false
     @State private var errorText: String?
@@ -242,6 +244,26 @@ struct ParentProfileStep: View {
                             .frame(maxWidth: .infinity)
 
                         OnboardingV2EditableField(label: "NAME", text: $name)
+
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("BIRTHDAY").onboardingV2FieldLabel()
+                            HStack {
+                                DatePicker("", selection: $parentBirthday, in: ...Date(),
+                                           displayedComponents: .date)
+                                    .labelsHidden()
+                                Spacer(minLength: 0)
+                            }
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .fill(OnboardingV2Theme.Palette.surfaceContainer))
+                        }
+
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("GENDER").onboardingV2FieldLabel()
+                            OnboardingV2Segmented(options: ["Female", "Male", "Other"],
+                                                  selectedIndex: $genderIndex)
+                        }
 
                         if let errorText {
                             Text(errorText)
