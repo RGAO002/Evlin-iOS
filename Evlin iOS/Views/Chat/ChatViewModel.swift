@@ -92,6 +92,16 @@ class ChatViewModel: ObservableObject {
         return (familyID, childID)
     }
 
+    /// Pure unpaired decision. The parent's phone can dispatch a chat command
+    /// only when it knows BOTH a family to scope to AND a child device to queue
+    /// the command on. Missing either means the backend would parse the message
+    /// but never queue anything (a silent no-op) — so we block locally and ask
+    /// the parent to pair first. Pure + nonisolated so it unit-tests without
+    /// UserDefaults or network.
+    nonisolated static func isUnpaired(familyID: UUID?, childDeviceID: UUID?) -> Bool {
+        familyID == nil || childDeviceID == nil
+    }
+
     let quickPrompts = QuickPrompt.defaults
     var apiClient: APIClient = APIClient()
     @Published var childName: String = "your kid"
@@ -106,12 +116,10 @@ class ChatViewModel: ObservableObject {
 
     init() {
         loadMessages()
-        // Re-seed if empty OR if the persisted strategy artifact is from an older
-        // format (no videoId wired in). Bumps legacy chat history to the latest seed.
-        let staleStrategy = messages.contains { $0.isStrategyArtifact && $0.videoId == nil }
-        if messages.isEmpty || staleStrategy {
-            UserDefaults.standard.removeObject(forKey: Self.storageKey)
-            messages = []
+        // Only seed on a genuinely empty history (fresh install / cleared chat).
+        // No stale-strategy re-seed: the neutral welcome carries no strategy
+        // artifact, and a returning user's real history must never be wiped.
+        if messages.isEmpty {
             seedInitialMessages()
         }
         clearObserver = NotificationCenter.default.addObserver(
@@ -250,6 +258,22 @@ class ChatViewModel: ObservableObject {
         let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
 
+        // Unpaired guard (beta P0 C2): if this phone isn't paired to a family
+        // with a child device, the backend would parse but never queue the
+        // command — a silent no-op. Block locally and surface a pairing CTA
+        // instead of pretending the message went through. We deliberately do
+        // NOT append a parent bubble or clear `inputText`, so the parent can
+        // pair and retry the exact same message.
+        let ids = currentFamilyAndChildIDs()
+        if Self.isUnpaired(familyID: ids.familyID, childDeviceID: ids.childDeviceID) {
+            messages.append(ChatMessage(
+                role: .agent,
+                content: "Pair a child's device first so I can actually lock apps and set limits. Open Settings to start pairing — then send this again.",
+                timestamp: Date()
+            ))
+            return
+        }
+
         // Dismiss any stale card / queue from the previous turn. The user
         // typing a new question signals they've moved on; otherwise the
         // old card stays pinned to the bottom and the new user bubble +
@@ -308,34 +332,18 @@ class ChatViewModel: ObservableObject {
 
     // MARK: - Seed initial messages
 
+    /// Fresh-install welcome. Beta-honest: NO fabricated lock receipt and NO
+    /// fabricated StrategyCard (those misled testers into thinking a lock had
+    /// already happened). Just a neutral greeting; the real dispatch/receipt
+    /// path takes over the moment the parent sends a message.
     private func seedInitialMessages() {
-        let now = Date()
-        let m1 = ChatMessage(
-            role: .agent,
-            content: "I've confirmed the manual lock on your child's device. Given recent focus patterns, they may experience a frustration spike.",
-            timestamp: now
-        )
-        var m2 = ChatMessage(
-            role: .agent,
-            content: "",
-            timestamp: now
-        )
-        m2.strategyTitle = "Real-time De-escalation Strategy"
-        m2.strategyStatus = "Locked"
-        m2.strategyCategory = "Active Monitoring › Immediate Action"
-        m2.strategyVideoLabel = "Managing Transition Frustration"
-        m2.strategyVideoDuration = "3:00"
-        m2.strategyTip = "If a tantrum occurs, use \"Planned Ignoring\". I've prepared a 30-second refresher for you."
-        // Real YouTube video: "The Easy Way to Dramatically Reduce Toddler Tantrums"
-        m2.videoId = "vaGT_FtWEQU"
-        m2.videoThumbnail = "https://img.youtube.com/vi/vaGT_FtWEQU/maxresdefault.jpg"
-
-        let m3 = ChatMessage(
-            role: .agent,
-            content: "Would you like to review the suggested de-escalation steps or watch the briefing video now?",
-            timestamp: now
-        )
-        messages = [m1, m2, m3]
+        messages = [
+            ChatMessage(
+                role: .agent,
+                content: "Hi, I'm Evlin. Ask me to lock an app, set a limit, or check in on your child's screen time and I'll help.",
+                timestamp: Date()
+            )
+        ]
     }
 
     // MARK: - Chat pipeline (Phase 9 — unified)
@@ -894,7 +902,7 @@ class ChatViewModel: ObservableObject {
             // the card view itself. MissingInfoCard doesn't plumb the state back
             // yet; until that's wired, the primary button falls through to a
             // user-visible hint.
-            showComingSoon(cardID, note: "Multi-child selection UI isn't fully wired yet — include the child's name in your message, e.g. \"lock Liam's phone for 30 min\".")
+            showComingSoon(cardID, note: "Multi-child selection UI isn't fully wired yet — include the child's name in your message, e.g. \"lock \(childName)'s phone for 30 min\".")
 
         case .D1:
             // D1 primary should never fire — D1 only has duration buttons (onDurationPicked).
