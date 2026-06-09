@@ -19,42 +19,12 @@ struct HomeNotification: Identifiable, Hashable {
 }
 
 enum HomeMockData {
-    /// Notifications array. Task entries deep-link to TaskDetail; reflection
-    /// entries deep-link to the parent reflection artifact; the rest are informational.
-    static let notifications: [HomeNotification] = [
-        .init(id: 1, childId: "liam",   iconSystemName: "checkmark.circle",
-              title: "Science Project — needs review",
-              body: "Liam submitted his Science Project. Tap to review and approve.",
-              time: "2m ago", unread: true, kind: "task", taskId: 2),
-        .init(id: 2, childId: "maya",   iconSystemName: "music.note",
-              title: "Piano Practice — needs review",
-              body: "Maya finished her 45-min piano session and uploaded a clip.",
-              time: "18m ago", unread: true, kind: "task", taskId: 2),
-        .init(id: 6, childId: "liam",   iconSystemName: "exclamationmark.circle",
-              title: "Walk Dog — overdue",
-              body: "Liam hasn't checked off Walk Dog from yesterday.",
-              time: "12h ago", unread: true, kind: "task", taskId: 4),
-        .init(id: 7, childId: "liam",   iconSystemName: "clock",
-              title: "Math Practice — due soon",
-              body: "Math Practice is due at 6:00 PM today.",
-              time: "30m ago", unread: false, kind: "task", taskId: 3),
-        .init(id: 8, childId: "liam",   iconSystemName: "hand.raised",
-              title: "Bypass requested — Read for 20 minutes",
-              body: "\"I had football practice and got home too late. Can I do double tomorrow instead?\"",
-              time: "5m ago", unread: true, kind: "task", taskId: 5),
-        .init(id: 3, childId: "liam",   iconSystemName: "figure.soccer",
-              title: "Soccer Practice",
-              body: "Liam's session starts in 30 minutes at City Park.",
-              time: "1h ago", unread: false),
-        .init(id: 4, childId: "emma",   iconSystemName: "book",
-              title: "Reading Goal Reached",
-              body: "Emma read for 60 minutes today — new personal best!",
-              time: "2h ago", unread: false),
-        .init(id: 5, childId: "family", iconSystemName: "fork.knife",
-              title: "Family Dinner Reminder",
-              body: "Family dinner is in 1 hour. Everyone to the dining room.",
-              time: "3h ago", unread: false),
-    ]
+    /// Notification baseline. Empty for the public beta — the 8 fabricated
+    /// liam/maya/emma entries misled testers more than an honest empty state
+    /// (spec decision A). Real entries are appended by the combiner below from
+    /// live reflection polling (ContentView.homeNotifications). A real
+    /// notification feed is deferred to P2.
+    static let notifications: [HomeNotification] = []
 
     /// One completion descriptor per child that has just finished a
     /// reflection. The caller (ContentView) collects these by walking

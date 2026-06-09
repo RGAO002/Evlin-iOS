@@ -17,6 +17,10 @@ struct HomeView: View {
     }
 
     private var displayParentName: String {
+        if let server = familyStore.selfParent?.display_name,
+           !server.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return server
+        }
         let trimmed = parentName.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? "there" : trimmed
     }
@@ -27,13 +31,22 @@ struct HomeView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            GlassmorphicHeader(title: "", kicker: "\(greeting), \(displayParentName)") {
-                HStack(spacing: 4) {
-                    HeaderIconButton(systemName: "bell", badge: unreadCount > 0) {
-                        onOpenNotifications()
-                    }
-                    HeaderIconButton(systemName: "gearshape") {
-                        showSettings = true
+            HStack(spacing: 12) {
+                EvlinAvatarView(
+                    url: familyStore.selfParent?.avatar.signed_url,
+                    name: displayParentName,
+                    size: 40
+                )
+                .padding(.leading, 20)
+
+                GlassmorphicHeader(title: "", kicker: "\(greeting), \(displayParentName)") {
+                    HStack(spacing: 4) {
+                        HeaderIconButton(systemName: "bell", badge: unreadCount > 0) {
+                            onOpenNotifications()
+                        }
+                        HeaderIconButton(systemName: "gearshape") {
+                            showSettings = true
+                        }
                     }
                 }
             }
@@ -73,6 +86,7 @@ struct HomeView: View {
                 .padding(20)
                 .padding(.bottom, 40)
             }
+            .refreshable { await familyStore.refresh() }
         }
         .background(Color.evSurfaceContainerLow)
         .fullScreenCover(isPresented: $showSettings) {
@@ -91,28 +105,12 @@ private struct HomeChildRow: View {
     let child: ChildProfile
     var onOpenProfile: (ChildProfile) -> Void
 
-    @Environment(ParentReflectionFixtureStore.self) private var reflectionStore
-
     var body: some View {
-        // Touch the revision counter so SwiftUI's Observation
-        // framework reliably tracks this view against ANY mutation
-        // to the store — not just reads that happen to land on
-        // `summariesByChildId` (which sometimes don't invalidate
-        // views below the NavigationStack top).
-        let _ = reflectionStore.revision
-
-        if let summary = reflectionStore.summary(for: child),
-           summary.state != .none {
-            ParentReflectionStatusCard(
-                child: child,
-                summary: summary,
-                layout: .homeCard,
-                onViewReflection: { onOpenProfile(child) }
-            )
-        } else {
-            ProfileCard(child: child) {
-                onOpenProfile(child)
-            }
+        // ParentReflectionFixtureStore is a pure in-memory FIXTURE (no backend
+        // polling) — hide its fabricated reflection status for beta (spec H4).
+        // When a real reflection-poll store lands, restore the summary branch.
+        ProfileCard(child: child) {
+            onOpenProfile(child)
         }
     }
 }

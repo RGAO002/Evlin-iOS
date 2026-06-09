@@ -4,6 +4,44 @@ import ManagedSettings
 import DeviceActivity
 import AVFoundation
 
+/// Pure, testable mapping for child create/edit/delete. Kept free of SwiftUI
+/// so it can be unit-tested without a view host. The view layer (below) calls
+/// these then performs the async APIClient round-trip + FamilyStore refresh.
+enum ChildCRUDMapper {
+    static func createBody(name: String, age: Int, referenceYear: Int) -> CreateChildBody {
+        CreateChildBody(
+            display_name: name,
+            birth_year: referenceYear - age,
+            gender: nil,
+            child_device_id: nil
+        )
+    }
+
+    static func updateBody(name: String, age: Int, referenceYear: Int) -> UpdateChildBody {
+        UpdateChildBody(
+            display_name: name,
+            birth_year: referenceYear - age,
+            gender: nil,
+            avatar_kind: nil,
+            avatar_value: nil,
+            avatar_color: nil
+        )
+    }
+
+    /// Human-readable message for a delete failure. The backend returns 409
+    /// when a child still has a linked device (DELETE /family/children/{id}).
+    static func deleteErrorMessage(for error: Error) -> String {
+        if case APIError.serverError(409) = error {
+            return "This child still has a paired device. Unpair the device before deleting."
+        }
+        return "Couldn't delete this child. \(error.localizedDescription)"
+    }
+
+    static func saveErrorMessage(for error: Error) -> String {
+        "Couldn't save. \(error.localizedDescription)"
+    }
+}
+
 struct HomeSettingsSheet: View {
     @EnvironmentObject var apiClient: APIClient
     @EnvironmentObject var screenTimeManager: ScreenTimeManager
@@ -25,6 +63,8 @@ struct HomeSettingsSheet: View {
     @State private var adding: Bool = false
 
     @State private var serverURL: String = ""
+    @State private var childOpError: String? = nil
+    @State private var isChildOpInFlight: Bool = false
     @State private var isPickerPresented = false
     @State private var showPINGate = false
     @State private var showAddApp = false
@@ -70,7 +110,10 @@ struct HomeSettingsSheet: View {
                             }
                         }
                     }
-                    .onDelete { children.remove(atOffsets: $0) }
+                    .onDelete { offsets in
+                        let toDelete = offsets.map { children[$0] }
+                        Task { await deleteChildren(toDelete) }
+                    }
 
                     Button { adding = true } label: {
                         Label("Add child", systemImage: "plus.circle.fill")
@@ -81,6 +124,12 @@ struct HomeSettingsSheet: View {
                         TextField("", text: $parentName)
                             .multilineTextAlignment(.trailing)
                             .textFieldStyle(.plain)
+                    }
+
+                    if let childOpError {
+                        Text(childOpError)
+                            .font(.caption)
+                            .foregroundStyle(Color.evError)
                     }
                 }
 
@@ -758,17 +807,13 @@ struct HomeSettingsSheet: View {
                 }
             }
             .sheet(item: $editing) { child in
-                ChildEditSheet(child: child) { updated in
-                    if let idx = children.firstIndex(where: { $0.id == updated.id }) {
-                        children[idx] = updated
-                    }
-                    editing = nil
+                ChildEditSheet(child: child) { name, age in
+                    Task { await saveEditedChild(id: child.id, name: name, age: age) }
                 }
             }
             .sheet(isPresented: $adding) {
-                ChildEditSheet(child: nil) { newChild in
-                    children.append(newChild)
-                    adding = false
+                ChildEditSheet(child: nil) { name, age in
+                    Task { await addChild(name: name, age: age) }
                 }
             }
             .sheet(isPresented: $showPINGate) {
@@ -1272,6 +1317,59 @@ struct HomeSettingsSheet: View {
         }
     }
 
+    private var referenceYear: Int { Calendar.current.component(.year, from: Date()) }
+
+    @MainActor
+    private func addChild(name: String, age: Int) async {
+        isChildOpInFlight = true
+        defer { isChildOpInFlight = false }
+        do {
+            // Server returns the authoritative ChildDTO (with the real id).
+            _ = try await apiClient.createChild(
+                ChildCRUDMapper.createBody(name: name, age: age, referenceYear: referenceYear))
+            await familyStore.refresh()
+            children = familyStore.childProfiles            // re-seed from truth
+            adding = false
+            childOpError = nil
+        } catch {
+            childOpError = ChildCRUDMapper.saveErrorMessage(for: error)
+        }
+    }
+
+    @MainActor
+    private func saveEditedChild(id: String, name: String, age: Int) async {
+        isChildOpInFlight = true
+        defer { isChildOpInFlight = false }
+        do {
+            _ = try await apiClient.updateChild(
+                id: id,
+                ChildCRUDMapper.updateBody(name: name, age: age, referenceYear: referenceYear))
+            await familyStore.refresh()
+            children = familyStore.childProfiles
+            editing = nil
+            childOpError = nil
+        } catch {
+            childOpError = ChildCRUDMapper.saveErrorMessage(for: error)
+        }
+    }
+
+    @MainActor
+    private func deleteChildren(_ toDelete: [ChildProfile]) async {
+        isChildOpInFlight = true
+        defer { isChildOpInFlight = false }
+        for child in toDelete {
+            do {
+                try await apiClient.deleteChild(id: child.id)
+            } catch {
+                // 409 (linked device) or other — keep the child, show why.
+                childOpError = ChildCRUDMapper.deleteErrorMessage(for: error)
+                break
+            }
+        }
+        await familyStore.refresh()
+        children = familyStore.childProfiles                // truth wins; failed delete stays
+    }
+
     /// Nuclear reset — wipes every layer that holds lock state. See the
     /// Button comment above for rationale. Idempotent: safe to call when
     /// nothing is locked. Async because ActiveLockStore is an actor.
@@ -1323,7 +1421,7 @@ struct HomeSettingsSheet: View {
 
 private struct ChildEditSheet: View {
     let child: ChildProfile?
-    var onSave: (ChildProfile) -> Void
+    var onSave: (_ name: String, _ age: Int) -> Void
 
     @State private var name: String = ""
     @State private var age: Int = 8
@@ -1347,19 +1445,9 @@ private struct ChildEditSheet: View {
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
-                        let id = child?.id ?? name.lowercased()
-                        let updated = ChildProfile(
-                            id: id, name: name, age: age,
-                            avatarURL: child?.avatarURL,
-                            accentColor: child?.accentColor ?? .evPrimary,
-                            status: child?.status ?? .unlocked,
-                            timeLeft: child?.timeLeft ?? "1h",
-                            timePct: child?.timePct ?? 0.5,
-                            subtitle: child?.subtitle ?? "New family member"
-                        )
-                        onSave(updated)
+                        onSave(name.trimmingCharacters(in: .whitespacesAndNewlines), age)
                     }
-                    .disabled(name.isEmpty)
+                    .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
         }

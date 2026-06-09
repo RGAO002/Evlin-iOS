@@ -4,13 +4,7 @@ struct ProfileCard: View {
     let child: ChildProfile
     var action: () -> Void = {}
 
-    @State private var ping: Bool = false
     @State private var pressed: Bool = false
-
-    private var displayTimeLeft: String {
-        let trimmed = child.timeLeft.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? "2h" : trimmed
-    }
 
     var body: some View {
         Button(action: action) {
@@ -29,48 +23,20 @@ struct ProfileCard: View {
                             .foregroundStyle(Color.evOnSurfaceVariant)
                     }
 
-                    // Line 2: status + time (single line)
-                    HStack(spacing: 6) {
-                        if child.status == .unlocked {
-                            ZStack {
-                                Circle()
-                                    .fill(Color.evSecondary.opacity(0.6))
-                                    .frame(width: 8, height: 8)
-                                    .scaleEffect(ping ? 1.8 : 1.0)
-                                    .opacity(ping ? 0 : 0.6)
-                                Circle()
-                                    .fill(Color.evSecondary)
-                                    .frame(width: 8, height: 8)
-                            }
-                            Text("UNLOCKED · \(displayTimeLeft) left")
+                    // Line 2: real device presence (online / last seen / offline).
+                    // No fabricated "UNLOCKED · 2h" or fake progress bar — the
+                    // backend has no live time-budget field yet (spec B / P1).
+                    if let line = child.deviceStatusLine {
+                        HStack(spacing: 6) {
+                            Circle()
+                                .fill(line == "Online" ? Color.evSecondary : Color.evOutline)
+                                .frame(width: 8, height: 8)
+                            Text(line.uppercased())
                                 .font(.custom("Inter", size: 10).weight(.heavy))
                                 .tracking(1.4)
-                                .foregroundStyle(Color.evSecondary)
-                                .fixedSize(horizontal: true, vertical: false)
-                        } else {
-                            Text("QUIET TIME")
-                                .font(.custom("Inter", size: 10).weight(.heavy))
-                                .tracking(1.4)
-                                .foregroundStyle(Color.evOnSurfaceVariant)
+                                .foregroundStyle(line == "Online" ? Color.evSecondary : Color.evOnSurfaceVariant)
                         }
                     }
-
-                    // Line 3: progress bar — gray (flat) for locked, green (filled) for unlocked
-                    GeometryReader { geo in
-                        ZStack(alignment: .leading) {
-                            Capsule()
-                                .fill(child.status == .unlocked
-                                      ? Color.evSecondaryContainer
-                                      : Color.evSurfaceContainerHigh)
-                                .frame(height: 5)
-                            if child.status == .unlocked {
-                                Capsule()
-                                    .fill(Color.evSecondary)
-                                    .frame(width: max(6, geo.size.width * child.timePct), height: 5)
-                            }
-                        }
-                    }
-                    .frame(height: 5)
 
                     // Line 4: subtitle
                     Text(child.subtitle)
@@ -108,12 +74,5 @@ struct ProfileCard: View {
                 .onChanged { _ in pressed = true }
                 .onEnded { _ in pressed = false }
         )
-        .onAppear {
-            if child.status == .unlocked {
-                withAnimation(.easeOut(duration: 1.6).repeatForever(autoreverses: false)) {
-                    ping = true
-                }
-            }
-        }
     }
 }

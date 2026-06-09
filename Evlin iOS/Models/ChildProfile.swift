@@ -14,6 +14,7 @@ struct ChildProfile: Identifiable, Hashable {
     let timeLeft: String        // "1h 30m"
     let timePct: Double         // 0.0 ... 1.0
     let subtitle: String
+    var deviceStatusLine: String? = nil   // real device online/last-seen; nil = no control line
 
     var initial: String { String(name.prefix(1)).uppercased() }
 }
@@ -37,10 +38,25 @@ extension ChildProfile {
         self.age = dto.age ?? 0
         self.avatarURL = dto.avatar.signed_url
         self.accentColor = ChildProfile.color(fromHex: dto.avatar.color) ?? .evPrimary
-        self.status = .unlocked
-        self.timeLeft = "2h"
-        self.timePct = 1.0
+        // No backend lock/time-budget field exists yet (spec decision B / P1
+        // control_summary). Do NOT fabricate "UNLOCKED · 2h": neutral status,
+        // empty time-budget, and a real device online/last-seen line instead.
+        self.status = .locked
+        self.timeLeft = ""
+        self.timePct = 0
         self.subtitle = ""
+        self.deviceStatusLine = ChildProfile.deviceLine(from: dto.devices)
+    }
+
+    /// Honest device-presence line from the child's enrolled devices.
+    /// Returns nil when there is no device at all → the card shows no control
+    /// line (better than a fabricated state). Prefers the child-mode device.
+    private static func deviceLine(from devices: [EnrolledDeviceDTO]) -> String? {
+        let device = devices.first(where: { $0.mode == "child" }) ?? devices.first
+        guard let device else { return nil }
+        if device.online { return "Online" }
+        if device.last_seen_at != nil { return "Last seen recently" }
+        return "Offline"
     }
 
     /// Parse a `#RRGGBB` hex string into a SwiftUI `Color`. Returns nil for
