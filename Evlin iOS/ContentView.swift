@@ -86,6 +86,10 @@ struct ParentRootView: View {
     @AppStorage("evlin.childDeviceID") private var pairedChildID: String = ""
     @EnvironmentObject private var apiClient: APIClient
     @Environment(FamilyStore.self) private var familyStore
+    /// Created with a placeholder client (SwiftUI can't read the environment at
+    /// `@StateObject` init); `CalendarView.onAppear` rebinds the shell's real
+    /// client before any request fires.
+    @StateObject private var calendarStore = CalendarStore(api: APIClient())
 
     var body: some View {
         // Keep the app shell itself out of keyboard avoidance so the tab bar
@@ -111,7 +115,8 @@ struct ParentRootView: View {
                         )
                     }
                 case .calendar:
-                    CalendarView()
+                    CalendarView(store: calendarStore)
+                        .onAppear { calendarStore.rebind(api: apiClient) }
                 case .chat:
                     ChatView()
                 case .library:

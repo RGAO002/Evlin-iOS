@@ -2,12 +2,29 @@ import SwiftUI
 import Combine
 
 struct CalendarView: View {
+    @Environment(FamilyStore.self) private var familyStore
+    @ObservedObject var store: CalendarStore
+
     @State private var selectedDate: Date = Date()
     @State private var showMonthPicker = false
     @State private var focusPerson: String? = nil
     @State private var activeEvent: CalendarEvent? = nil
     @State private var newEvent: PendingNewEvent? = nil
     @State private var now: Date = Date()
+
+    /// Real people columns: a synthetic "family" pseudo-person first, then the
+    /// live FamilyStore children. Replaces the retired `CalendarMockData.people`.
+    private var people: [CalendarPerson] {
+        CalendarStore.people(from: familyStore.childProfiles)
+    }
+
+    /// Look up a person column by id, falling back to the family pseudo-person
+    /// (or a synthetic family stand-in if the list is somehow empty).
+    private func person(_ id: String) -> CalendarPerson {
+        people.first(where: { $0.id == id }) ?? people.first ?? CalendarPerson(
+            id: "family", name: "Family events",
+            color: .evPrimary, bg: .evSurfaceContainerHigh)
+    }
 
     private struct PendingNewEvent: Equatable {
         let event: CalendarEvent
@@ -18,12 +35,12 @@ struct CalendarView: View {
     private let nowTimer = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
     private let totalHeight: CGFloat = CGFloat(CalendarMockData.END_H) * CalendarMockData.HOUR_H
 
-    private var events: [CalendarEvent] { CalendarMockData.events(for: selectedDate) }
+    private var events: [CalendarEvent] { store.events }
     private var visibleEvents: [CalendarEvent] {
         guard let focusPerson else { return events }
         return events.filter { $0.col == focusPerson }
     }
-    private var allDayItems: [AllDayItem] { CalendarMockData.allDay(for: selectedDate) }
+    private var allDayItems: [AllDayItem] { store.allDayItems }
     private var isViewingToday: Bool { calendar.isDateInToday(selectedDate) }
 
     /// All-day pills shown above the timeline. In focus mode we hide
@@ -60,23 +77,19 @@ struct CalendarView: View {
             if let event = activeEvent {
                 EventDetailCard(
                     event: event,
-                    person: CalendarMockData.person(event.col),
+                    person: person(event.col),
+                    people: people,
                     dayLabel: "\(isViewingToday ? "Today" : CalendarMockData.shortDateLabel(selectedDate)), \(event.start) – \(event.end)",
                     onClose: { activeEvent = nil },
                     onSave: { updated, extras in
-                        let offset = CalendarMockData.daysFromToday(to: selectedDate)
-                        var todays = CalendarMockData.runtimeEventsByOffset[offset] ?? []
-                        if let i = todays.firstIndex(where: { $0.id == updated.id }) {
-                            todays[i] = updated
-                        } else {
-                            todays.append(updated)
+                        persistSave(updated, extras: extras, isNew: false)
+                        activeEvent = nil
+                    },
+                    onDelete: {
+                        let target = selectedDate
+                        if let backendID = event.backendID {
+                            Task { await store.delete(id: backendID, refetchFor: target) }
                         }
-                        for rid in extras {
-                            var copy = updated
-                            copy.col = rid
-                            todays.append(copy)
-                        }
-                        CalendarMockData.runtimeEventsByOffset[offset] = todays
                         activeEvent = nil
                     }
                 )
@@ -87,19 +100,12 @@ struct CalendarView: View {
                 EventDetailCard(
                     event: pending.event,
                     person: pending.person,
+                    people: people,
                     dayLabel: CalendarMockData.shortDateLabel(selectedDate),
                     isNew: true,
                     onClose: { newEvent = nil },
                     onSave: { created, extras in
-                        let offset = CalendarMockData.daysFromToday(to: selectedDate)
-                        var todays = CalendarMockData.runtimeEventsByOffset[offset] ?? []
-                        todays.append(created)
-                        for rid in extras {
-                            var copy = created
-                            copy.col = rid
-                            todays.append(copy)
-                        }
-                        CalendarMockData.runtimeEventsByOffset[offset] = todays
+                        persistSave(created, extras: extras, isNew: true)
                         newEvent = nil
                     }
                 )
@@ -110,6 +116,50 @@ struct CalendarView: View {
         .animation(.easeInOut(duration: 0.2), value: activeEvent)
         .animation(.easeInOut(duration: 0.2), value: newEvent)
         .onReceive(nowTimer) { t in now = t }
+        // Re-runs on first appearance AND whenever the viewed day changes,
+        // covering both initial load and day navigation.
+        .task(id: selectedDate) { await store.load(for: selectedDate) }
+        .refreshable { await store.load(for: selectedDate) }
+        .alert("Calendar", isPresented: Binding(
+            get: { store.lastError != nil },
+            set: { if !$0 { store.lastError = nil } }
+        )) {
+            Button("OK", role: .cancel) { store.lastError = nil }
+        } message: {
+            Text(store.lastError ?? "")
+        }
+    }
+
+    /// Convert an edited event's wall-clock string times (interpreted on the
+    /// viewed day, in the device timezone) into UTC ISO, build the participants
+    /// from the chosen columns, and call the store (create or update). The store
+    /// re-fetches the window on success so the grid reflects the server.
+    private func persistSave(_ ev: CalendarEvent, extras: [String], isNew: Bool) {
+        let cols = [ev.col] + extras
+        let tz = TimeZone.current.identifier
+        let startISO = CalendarTimeWire.utcISO(
+            wallClock: ev.start, onDay: selectedDate, timezoneID: tz)
+        let endISO = CalendarTimeWire.utcISO(
+            wallClock: ev.end, onDay: selectedDate, timezoneID: tz)
+        let parts = CalendarTimeWire.participants(fromColumns: cols)
+        let target = selectedDate
+        if isNew {
+            let body = CalendarEventCreateBody(
+                title: ev.title, emoji: ev.emoji, category: ev.category,
+                location: ev.location, note: ev.note, all_day: false,
+                start_at: startISO, end_at: endISO, timezone: tz,
+                recurrence_type: ev.recurrence, recurrence_until: nil,
+                participants: parts)
+            Task { await store.create(body, refetchFor: target) }
+        } else if let backendID = ev.backendID {
+            let body = CalendarEventUpdateBody(
+                title: ev.title, emoji: ev.emoji, category: ev.category,
+                location: ev.location, note: ev.note, all_day: false,
+                start_at: startISO, end_at: endISO, timezone: tz,
+                recurrence_type: ev.recurrence, recurrence_until: nil,
+                participants: parts)
+            Task { await store.update(id: backendID, body, refetchFor: target) }
+        }
     }
 
     private var outerDayNav: some View {
@@ -282,7 +332,7 @@ struct CalendarView: View {
             // in the hierarchy (not removed via ForEach filter) is
             // what lets SwiftUI smoothly animate the frame change
             // instead of pop-removing the views.
-            ForEach(CalendarMockData.people) { p in
+            ForEach(people) { p in
                 let visible = focusPerson == nil || focusPerson == p.id
                 avatarButton(for: p)
                     .frame(maxWidth: visible ? .infinity : 0)
@@ -332,12 +382,7 @@ struct CalendarView: View {
     }
 
     private func urlFor(_ personId: String) -> String? {
-        switch personId {
-        case "liam": return ChildProfile.previewLiam.avatarURL
-        case "maya": return ChildProfile.previewMaya.avatarURL
-        case "emma": return ChildProfile.previewEmma.avatarURL
-        default: return nil
-        }
+        familyStore.childProfiles.first(where: { $0.id == personId })?.avatarURL
     }
 
     private var timelineBody: some View {
@@ -360,7 +405,7 @@ struct CalendarView: View {
 
                     GeometryReader { geo in
                         let totalW = geo.size.width
-                        let normalColW = totalW / CGFloat(CalendarMockData.people.count)
+                        let normalColW = totalW / CGFloat(max(people.count, 1))
 
                         // Render every person column unconditionally
                         // so SwiftUI animates frame/offset/opacity
@@ -386,7 +431,7 @@ struct CalendarView: View {
                         //   • Opacity does the visual hiding; opacity 0
                         //     also disables hit testing so taps fall
                         //     through to the focused column underneath.
-                        ForEach(Array(CalendarMockData.people.enumerated()), id: \.element.id) { colIdx, person in
+                        ForEach(Array(people.enumerated()), id: \.element.id) { colIdx, person in
                             let isFocused = focusPerson == person.id
                             let isAnyFocused = focusPerson != nil
 
@@ -438,7 +483,7 @@ struct CalendarView: View {
                 .tracking(1.4)
                 .foregroundStyle(Color.evOnSurfaceVariant)
             ForEach(visibleAllDayItems) { item in
-                let p = CalendarMockData.person(item.col)
+                let p = person(item.col)
                 Text(item.title)
                     .font(.custom("Inter", size: 12).weight(.semibold))
                     .foregroundStyle(p.color)
@@ -549,7 +594,7 @@ struct CalendarView: View {
     /// recipients inside the sheet itself.
     private func startNewEvent() {
         let personId = focusPerson ?? "family"
-        let person = CalendarMockData.person(personId)
+        let chosenPerson = person(personId)
         let formatter = DateFormatter()
         formatter.dateFormat = "hh:mm a"
         let startDate = Date()
@@ -565,7 +610,7 @@ struct CalendarView: View {
             location: "",
             note: ""
         )
-        newEvent = PendingNewEvent(event: event, person: person)
+        newEvent = PendingNewEvent(event: event, person: chosenPerson)
     }
 
     private func addOneHour(to date: Date) -> Date {
@@ -581,5 +626,6 @@ struct CalendarView: View {
 }
 
 #Preview {
-    CalendarView()
+    CalendarView(store: CalendarStore(api: APIClient(baseURL: "http://preview.local")))
+        .environment(FamilyStore(api: APIClient(baseURL: "http://preview.local")))
 }

@@ -19,6 +19,10 @@ struct CalendarEvent: Identifiable, Hashable {
     var note: String
     /// One of: "none" | "daily" | "weekdays" | "weekly" | "monthly". See HTML 1418.
     var recurrence: String = "none"
+    /// Backend event id (nil for mock/preview rows). Multiple column rows that
+    /// fan out from one multi-participant backend event share this id, so an
+    /// edit/delete maps back to the single server event.
+    var backendID: UUID? = nil
 }
 
 struct AllDayItem: Identifiable, Hashable {

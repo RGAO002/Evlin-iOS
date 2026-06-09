@@ -3,6 +3,10 @@ import SwiftUI
 struct EventDetailCard: View {
     let event: CalendarEvent
     let person: CalendarPerson
+    /// Real people columns (family + live children), injected by the caller so
+    /// the recipient pills + avatar lookups show real data instead of the
+    /// retired liam/maya/emma mock.
+    var people: [CalendarPerson] = []
     let dayLabel: String
     var isNew: Bool = false
     var onClose: () -> Void = {}
@@ -28,6 +32,9 @@ struct EventDetailCard: View {
     /// (consistent with how the app interprets a family event).
     @State private var recipientSelection: Set<String> = []
 
+    /// Read-mode delete confirmation gate.
+    @State private var showDeleteConfirm = false
+
     private static let defaultCategories: [String] =
         ["Activity", "Lesson", "Sport", "Family", "Routine", "Study"]
     private var allCategories: [String] {
@@ -36,6 +43,7 @@ struct EventDetailCard: View {
 
     init(event: CalendarEvent,
          person: CalendarPerson,
+         people: [CalendarPerson] = [],
          dayLabel: String,
          isNew: Bool = false,
          onClose: @escaping () -> Void = {},
@@ -43,6 +51,7 @@ struct EventDetailCard: View {
          onDelete: @escaping () -> Void = {}) {
         self.event = event
         self.person = person
+        self.people = people
         self.dayLabel = dayLabel
         self.isNew = isNew
         self.onClose = onClose
@@ -100,6 +109,13 @@ struct EventDetailCard: View {
         }
         .ignoresSafeArea(.keyboard, edges: .bottom)
         .preferredColorScheme(.light)
+        .confirmationDialog("Delete this event?",
+                            isPresented: $showDeleteConfirm, titleVisibility: .visible) {
+            Button("Delete event", role: .destructive) { onDelete() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This removes \"\(event.title)\" for everyone it's assigned to.")
+        }
     }
 
     // MARK: - Header
@@ -368,7 +384,7 @@ struct EventDetailCard: View {
     /// rule but remain tappable so the user can swap with one tap.
     private var recipientPills: some View {
         HStack(spacing: 6) {
-            ForEach(CalendarMockData.people) { p in
+            ForEach(people) { p in
                 let isSel = recipientSelection.contains(p.id)
                 let conflicting = isRecipientDisabled(p.id)
                 Button {
@@ -428,14 +444,10 @@ struct EventDetailCard: View {
         }
     }
 
-    private func childAvatarURL(for id: String) -> String? {
-        switch id {
-        case "liam": return ChildProfile.previewLiam.avatarURL
-        case "maya": return ChildProfile.previewMaya.avatarURL
-        case "emma": return ChildProfile.previewEmma.avatarURL
-        default:     return nil
-        }
-    }
+    /// `CalendarPerson` does not carry an avatar URL, so the pill avatar falls
+    /// back to the name initial (honest — no fake liam/maya/emma photo). The
+    /// timeline grid resolves real child photos via `CalendarView.urlFor`.
+    private func childAvatarURL(for id: String) -> String? { nil }
 
     private func toggleRecipient(_ id: String) {
         if id == "family" {
@@ -462,7 +474,10 @@ struct EventDetailCard: View {
     /// as `col`, then forwards any extras to the parent so it can fan
     /// out a copy under each.
     private func commitSave() {
-        let order = ["family", "liam", "maya", "emma"]
+        // Order recipients by the real people-column order (family first, then
+        // children). Fall back to the selection itself if no people were
+        // injected (e.g. preview), so a save still produces a valid primary.
+        let order = people.isEmpty ? Array(recipientSelection) : people.map(\.id)
         let chosen = order.filter { recipientSelection.contains($0) }
         guard let primary = chosen.first else {
             onSave(draft, [])
@@ -613,6 +628,20 @@ struct EventDetailCard: View {
                 .buttonStyle(.plain)
                 .disabled(!canSaveDraft)
             } else {
+                Button(role: .destructive) {
+                    showDeleteConfirm = true
+                } label: {
+                    Image(systemName: "trash")
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundStyle(Color.evError)
+                        .frame(width: 52, height: 52)
+                        .background(
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .fill(Color.evError.opacity(0.10))
+                        )
+                }
+                .buttonStyle(.plain)
+
                 Button { onClose() } label: {
                     Text("Close")
                         .font(.custom("Manrope", size: 18).weight(.heavy))
@@ -646,14 +675,7 @@ struct EventDetailCard: View {
         }
     }
 
-    private func avatarURLFor(_ id: String) -> String? {
-        switch id {
-        case "liam": return ChildProfile.previewLiam.avatarURL
-        case "maya": return ChildProfile.previewMaya.avatarURL
-        case "emma": return ChildProfile.previewEmma.avatarURL
-        default:     return nil
-        }
-    }
+    private func avatarURLFor(_ id: String) -> String? { nil }
 }
 
 #Preview {

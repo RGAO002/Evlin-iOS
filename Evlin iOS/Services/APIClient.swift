@@ -2039,6 +2039,79 @@ extension APIClient {
     }
 }
 
+// MARK: - Calendar events (spec §"Surface 3 — Calendar")
+//
+// Authed family-scoped CRUD over /calendar/events. Goes through the same
+// single-flight-refresh authed layer as /me/profile + /family/children (no new
+// interceptor). This extension MUST live in APIClient.swift so it can call the
+// file-private `authedJSON` helper. The window URL builder is factored out so it
+// is unit-testable.
+//
+// Two response shapes (match the backend exactly):
+//   • GET  → envelope `{ "occurrences": [CalendarOccurrenceDTO] }` (event_id).
+//   • POST/PUT → `CalendarEventDTO` (id). DELETE → `{ ok, deleted }`.
+
+extension APIClient {
+    /// Builds `GET /calendar/events?start=<iso>&end=<iso>` as a FULL url (used by
+    /// a unit test to assert the path/query). The runtime fetch passes only the
+    /// RELATIVE path+query to `authedRequest` so `baseURL`'s `/api/v1` prefix is
+    /// not duplicated.
+    func calendarEventsWindowURL(startISO: String, endISO: String) -> URL {
+        var comps = URLComponents(string: "\(baseURL)/calendar/events")!
+        comps.queryItems = [
+            URLQueryItem(name: "start", value: startISO),
+            URLQueryItem(name: "end", value: endISO),
+        ]
+        return comps.url!
+    }
+
+    /// Relative `/calendar/events?start=&end=` path (no baseURL, no double
+    /// `/api/v1`). Encodes the ISO instants as query items so `+`/`:` are escaped.
+    func calendarEventsWindowPath(startISO: String, endISO: String) -> String {
+        var comps = URLComponents()
+        comps.path = "/calendar/events"
+        comps.queryItems = [
+            URLQueryItem(name: "start", value: startISO),
+            URLQueryItem(name: "end", value: endISO),
+        ]
+        // comps.string is "/calendar/events?start=...&end=..." — exactly the
+        // relative path `authedRequest` expects appended to baseURL.
+        return comps.string ?? "/calendar/events"
+    }
+
+    /// GET /calendar/events — occurrences overlapping [start,end], recurrence
+    /// already expanded server-side. Decodes the `{ "occurrences": [...] }`
+    /// envelope and returns the occurrence array. Family-scoped.
+    func fetchCalendarEvents(startISO: String, endISO: String) async throws -> [CalendarOccurrenceDTO] {
+        let path = calendarEventsWindowPath(startISO: startISO, endISO: endISO)
+        let envelope: CalendarEventsListResponse = try await authedJSON(path: path, method: "GET")
+        return envelope.occurrences
+    }
+
+    /// POST /calendar/events — create. Returns the persisted base event.
+    @discardableResult
+    func createCalendarEvent(_ body: CalendarEventCreateBody) async throws -> CalendarEventDTO {
+        let payload = try JSONEncoder().encode(body)
+        return try await authedJSON(path: "/calendar/events", method: "POST", jsonBody: payload)
+    }
+
+    /// PUT /calendar/events/{id} — update (whole series in P0). Returns the event.
+    @discardableResult
+    func updateCalendarEvent(id: UUID, _ body: CalendarEventUpdateBody) async throws -> CalendarEventDTO {
+        let payload = try JSONEncoder().encode(body)
+        return try await authedJSON(path: "/calendar/events/\(id.uuidString)", method: "PUT", jsonBody: payload)
+    }
+
+    /// DELETE /calendar/events/{id} — soft delete server-side.
+    func deleteCalendarEvent(id: UUID) async throws {
+        let req = authedRequest(path: "/calendar/events/\(id.uuidString)", method: "DELETE")
+        let (_, http) = try await authedData(for: req)
+        guard (200..<300).contains(http.statusCode) else {
+            throw APIError.serverError(http.statusCode)
+        }
+    }
+}
+
 // MARK: - AnyCodable (for flexible action dict)
 
 struct AnyCodable: Codable {
