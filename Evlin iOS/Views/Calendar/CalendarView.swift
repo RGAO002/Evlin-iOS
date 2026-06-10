@@ -35,7 +35,13 @@ struct CalendarView: View {
     private let nowTimer = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
     private let totalHeight: CGFloat = CGFloat(CalendarMockData.END_H) * CalendarMockData.HOUR_H
 
-    private var events: [CalendarEvent] { store.events }
+    /// Store events with unknown columns remapped to "family" (CAL-5).
+    /// Computed against the LIVE people list on every render, so an event
+    /// whose child column was deleted/unpaired stays visible in the family
+    /// lane instead of silently vanishing from the grid.
+    private var events: [CalendarEvent] {
+        CalendarStore.remapOrphanColumns(store.events, knownCols: Set(people.map(\.id)))
+    }
     private var visibleEvents: [CalendarEvent] {
         guard let focusPerson else { return events }
         return events.filter { $0.col == focusPerson }
@@ -251,12 +257,26 @@ struct CalendarView: View {
         }
     }
 
+    /// True while the day has nothing to draw — placeholders only ever
+    /// replace an EMPTY timeline; once events exist they stay on screen
+    /// through reloads/failures (the store keeps the last good list).
+    private var hasNoEvents: Bool { events.isEmpty && allDayItems.isEmpty }
+
     private var cardContent: some View {
         VStack(alignment: .leading, spacing: 0) {
             cardTopBar
             avatarRow
             Rectangle().fill(Color.evOutlineVariant.opacity(0.4)).frame(height: 1)
-            timelineBody
+            // CAL-4: surface fetch state instead of rendering a failed or
+            // in-flight load as an innocent empty day. Load errors stay
+            // inline here — `lastError`/the alert is reserved for mutations.
+            if store.state == .loading && hasNoEvents {
+                loadingPlaceholder
+            } else if case .failed(let message) = store.state, hasNoEvents {
+                failedPlaceholder(message)
+            } else {
+                timelineBody
+            }
         }
         .padding(.bottom, 20)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -268,6 +288,55 @@ struct CalendarView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 12)
         .padding(.bottom, 80)
+    }
+
+    // MARK: - Fetch-state placeholders (CAL-4)
+
+    /// Shown while the FIRST load of a day is in flight (no cached events).
+    /// Mirrors the `HomeChildrenEmptyState` informative-placeholder pattern.
+    private var loadingPlaceholder: some View {
+        VStack(spacing: 8) {
+            ProgressView("Loading events…")
+                .font(.custom("Inter", size: 13))
+                .tint(Color.evPrimary)
+                .foregroundStyle(Color.evOnSurfaceVariant)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 48)
+        .padding(.horizontal, 20)
+    }
+
+    /// Shown when the day's fetch failed and there is nothing cached to draw —
+    /// an honest inline error instead of an innocent empty day. "Try Again"
+    /// re-runs the same window fetch.
+    private func failedPlaceholder(_ message: String) -> some View {
+        VStack(spacing: 8) {
+            Image(systemName: "wifi.exclamationmark")
+                .font(.system(size: 28, weight: .regular))
+                .foregroundStyle(Color.evOutline)
+            Text("Couldn't load events")
+                .font(.custom("Manrope", size: 15).weight(.bold))
+                .foregroundStyle(Color.evOnSurface)
+            Text(message)
+                .font(.custom("Inter", size: 13))
+                .foregroundStyle(Color.evOnSurfaceVariant)
+                .multilineTextAlignment(.center)
+            Button {
+                Task { await store.load(for: selectedDate) }
+            } label: {
+                Text("Try Again")
+                    .font(.custom("Manrope", size: 14).weight(.heavy))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 10)
+                    .background(Capsule().fill(Color.evPrimary))
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 6)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 40)
+        .padding(.horizontal, 20)
     }
 
     private var cardTopBar: some View {
@@ -373,7 +442,7 @@ struct CalendarView: View {
                             .foregroundStyle(.white)
                     } else {
                         EvlinAvatarView(
-                            url: urlFor(p.id),
+                            url: p.avatarURL,
                             name: p.name,
                             size: focused ? 44 : 36,
                             ring: true,
@@ -390,10 +459,6 @@ struct CalendarView: View {
             }
         }
         .buttonStyle(.plain)
-    }
-
-    private func urlFor(_ personId: String) -> String? {
-        familyStore.childProfiles.first(where: { $0.id == personId })?.avatarURL
     }
 
     private var timelineBody: some View {

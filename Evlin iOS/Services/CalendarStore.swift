@@ -96,9 +96,31 @@ final class CalendarStore: ObservableObject {
         let kids = children.map { child in
             CalendarPerson(id: child.id, name: child.name,
                            color: child.accentColor,
-                           bg: child.accentColor.opacity(0.14))
+                           bg: child.accentColor.opacity(0.14),
+                           avatarURL: child.avatarURL)
         }
         return [family] + kids
+    }
+
+    /// CAL-5: a row whose `col` references a child that is no longer in the
+    /// live people columns (deleted/unpaired child profile) would otherwise
+    /// render in NO column and silently vanish from the grid. Remap any
+    /// unknown column to "family" so orphaned events stay visible. Display
+    /// only — `participantCols` is left untouched so the save boundary still
+    /// round-trips the true backend participant set. Rows that fan out from
+    /// the same backend event and collapse onto the same column after the
+    /// remap are de-duplicated so the family lane doesn't stack twins.
+    nonisolated static func remapOrphanColumns(
+        _ events: [CalendarEvent], knownCols: Set<String>
+    ) -> [CalendarEvent] {
+        var seen = Set<String>()
+        var out: [CalendarEvent] = []
+        for var ev in events {
+            if !knownCols.contains(ev.col) { ev.col = "family" }
+            let key = "\(ev.backendID?.uuidString ?? ev.id.uuidString)|\(ev.col)"
+            if seen.insert(key).inserted { out.append(ev) }
+        }
+        return out
     }
 
     /// Map backend TIMED occurrences to draw-ready `CalendarEvent`s. A

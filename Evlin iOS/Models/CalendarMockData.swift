@@ -5,6 +5,12 @@ struct CalendarPerson: Identifiable, Hashable {
     let name: String
     let color: Color
     let bg: Color
+    /// Child avatar photo URL (`ChildProfile.avatarURL`), populated by
+    /// `CalendarStore.people(from:)`. nil for the family pseudo-person and
+    /// mock/preview rows — `EvlinAvatarView` falls back to the name initial.
+    /// `var` + default so it gets a defaulted memberwise-init parameter and
+    /// existing constructions compile unchanged.
+    var avatarURL: String? = nil
 }
 
 struct CalendarEvent: Identifiable, Hashable {

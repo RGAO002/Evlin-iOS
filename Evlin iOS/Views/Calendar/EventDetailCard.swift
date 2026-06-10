@@ -19,10 +19,13 @@ struct EventDetailCard: View {
 
     @State private var isEditing: Bool
     @State private var draft: CalendarEvent
-    @State private var reminderOn: Bool = true
 
     // Inline-pill "add new category" — HTML 1494-1502, 1566.
-    @State private var customCategories: [String] = []
+    /// CAL-8: custom categories persist across cards + launches as a small
+    /// JSON-encoded `[String]` in UserDefaults (device-local by design —
+    /// cross-device sync is explicitly out of scope until a backend field
+    /// exists).
+    @AppStorage("calendar.customCategories") private var customCategoriesData: Data = Data()
     @State private var addingCategory: Bool = false
     @State private var newCategoryName: String = ""
     @FocusState private var newCategoryFocused: Bool
@@ -41,8 +44,27 @@ struct EventDetailCard: View {
 
     private static let defaultCategories: [String] =
         ["Activity", "Lesson", "Sport", "Family", "Routine", "Study"]
+
+    /// Persisted custom list, decoded on demand from the @AppStorage blob.
+    private var storedCustomCategories: [String] {
+        (try? JSONDecoder().decode([String].self, from: customCategoriesData)) ?? []
+    }
+
+    private func persistCustomCategories(_ list: [String]) {
+        customCategoriesData = (try? JSONEncoder().encode(list)) ?? Data()
+    }
+
+    /// Defaults + persisted customs, then the event's OWN category when it's
+    /// neither (CAL-8a) — e.g. a custom category created on another device —
+    /// so reopening the card shows the event's category selected instead of
+    /// nothing.
     private var allCategories: [String] {
-        Self.defaultCategories + customCategories
+        var list = Self.defaultCategories
+        for c in storedCustomCategories where !list.contains(c) { list.append(c) }
+        if !event.category.isEmpty && !list.contains(event.category) {
+            list.append(event.category)
+        }
+        return list
     }
 
     init(event: CalendarEvent,
@@ -77,8 +99,7 @@ struct EventDetailCard: View {
                 // Card — header + scrollable middle + footer.
                 // Caps height at ~85% of the screen so the form never
                 // overflows when many fields are visible (Title / Time /
-                // Assigned to / Category / Repeat / Notes / Location /
-                // Reminder).
+                // Assigned to / Category / Repeat / Notes / Location).
                 VStack(alignment: .leading, spacing: 0) {
                     header
                         .padding(.horizontal, 20)
@@ -174,8 +195,6 @@ struct EventDetailCard: View {
             noteRow
             Divider()
             locationRow
-            Divider()
-            reminderRow
         }
     }
 
@@ -245,39 +264,10 @@ struct EventDetailCard: View {
                 ))
                 .evlinFormInput()
             }
-            // Editable reminder row — HTML 1579-1584.
-            evField("REMINDER") {
-                HStack {
-                    Text("30 minutes before")
-                        .font(.custom("Inter", size: 14))
-                        .foregroundStyle(Color.evOnSurface)
-                    Spacer()
-                    Toggle("", isOn: $reminderOn)
-                        .labelsHidden()
-                        .tint(Color.evSecondary)
-                        .fixedSize()
-                        // Extra breathing room for the native UISwitch
-                        // knob shadow so it isn't shaved off by either
-                        // the bordered rect's trailing strokeBorder or
-                        // the surrounding ScrollView clip.
-                        .padding(.trailing, 4)
-                }
-                .padding(.leading, 14)
-                .padding(.trailing, 10)
-                .padding(.vertical, 10)
-                .background(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(Color.evSurfaceContainerLowest)
-                )
-                .overlay(
-                    // strokeBorder (vs. stroke) keeps the 1pt line fully
-                    // inside the rounded rect so the trailing edge of
-                    // the toggle no longer gets shaved off by the
-                    // ScrollView clip.
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .strokeBorder(Color.evOutlineVariant, lineWidth: 1)
-                )
-            }
+            // NOTE: no reminder field — no reminder exists on the backend
+            // event model and nothing is ever scheduled, so rendering a
+            // toggle would be decorative (CAL-2). Re-add alongside a real
+            // backend reminder field.
         }
         .padding(.vertical, 4)
         // Tiny horizontal breathing room for shape-stroke pills sitting
@@ -372,7 +362,7 @@ struct EventDetailCard: View {
     private func commitNewCategory() {
         let trimmed = newCategoryName.trimmingCharacters(in: .whitespaces)
         if !trimmed.isEmpty && !allCategories.contains(trimmed) {
-            customCategories.append(trimmed)
+            persistCustomCategories(storedCustomCategories + [trimmed])
             draft.category = trimmed
         }
         newCategoryName = ""
@@ -439,7 +429,7 @@ struct EventDetailCard: View {
             .frame(width: 16, height: 16)
         } else {
             EvlinAvatarView(
-                url: childAvatarURL(for: p.id),
+                url: p.avatarURL,
                 name: p.name,
                 size: 16,
                 ring: true,
@@ -447,11 +437,6 @@ struct EventDetailCard: View {
             )
         }
     }
-
-    /// `CalendarPerson` does not carry an avatar URL, so the pill avatar falls
-    /// back to the name initial (honest — no fake liam/maya/emma photo). The
-    /// timeline grid resolves real child photos via `CalendarView.urlFor`.
-    private func childAvatarURL(for id: String) -> String? { nil }
 
     private func toggleRecipient(_ id: String) {
         if id == "family" {
@@ -511,7 +496,7 @@ struct EventDetailCard: View {
                 .font(.system(size: 16))
                 .foregroundStyle(Color.evOnSurfaceVariant)
                 .frame(width: 24)
-            EvlinAvatarView(url: avatarURLFor(person.id), name: person.name, size: 26, ring: true, ringColor: person.color)
+            EvlinAvatarView(url: person.avatarURL, name: person.name, size: 26, ring: true, ringColor: person.color)
             Text(person.name)
                 .font(.custom("Manrope", size: 14).weight(.heavy))
                 .foregroundStyle(Color.evPrimary)
@@ -561,29 +546,6 @@ struct EventDetailCard: View {
             Spacer()
         }
         .padding(.vertical, 12)
-    }
-
-    private var reminderRow: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "alarm")
-                .font(.system(size: 16))
-                .foregroundStyle(Color.evOnSurfaceVariant)
-                .frame(width: 24)
-            Text("30 minutes before")
-                .font(.custom("Inter", size: 14))
-                .foregroundStyle(Color.evOnSurface)
-            Spacer()
-            Toggle("", isOn: $reminderOn)
-                .labelsHidden()
-                .tint(Color.evSecondary)
-                .fixedSize()
-                // The native UISwitch renders a soft knob shadow that
-                // bleeds ~2pt past its frame on the trailing side. Without
-                // this padding the row sits flush with the ScrollView's
-                // clip edge and the rightmost pixels get shaved off.
-                .padding(.trailing, 4)
-        }
-        .padding(.vertical, 10)
     }
 
     // MARK: - Footer
@@ -678,8 +640,6 @@ struct EventDetailCard: View {
             }
         }
     }
-
-    private func avatarURLFor(_ id: String) -> String? { nil }
 }
 
 #Preview {

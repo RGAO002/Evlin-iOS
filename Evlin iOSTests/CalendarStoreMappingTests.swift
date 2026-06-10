@@ -19,6 +19,73 @@ final class CalendarStoreMappingTests: XCTestCase {
         XCTAssertEqual(people.map(\.name), ["Family events", "Liam", "Maya"])
     }
 
+    /// CAL-3: people columns must carry the child's avatar URL so the detail
+    /// card (recipient pills + person row) can render the real photo.
+    func test_peopleCarryChildAvatarURL() {
+        let child = ChildProfile(
+            id: "kid-1", name: "Nova", age: 9,
+            avatarURL: "https://cdn.example/nova.jpg",
+            accentColor: .evChildLiam, status: .unlocked,
+            timeLeft: "1h", timePct: 0.5, subtitle: "")
+        let people = CalendarStore.people(from: [child])
+        XCTAssertNil(people[0].avatarURL)   // family pseudo-person has no photo
+        XCTAssertEqual(people[1].avatarURL, "https://cdn.example/nova.jpg")
+    }
+
+    // MARK: Orphan-column remap (CAL-5)
+
+    /// A row whose col references a child absent from the live people columns
+    /// (deleted/unpaired profile) is remapped to "family" so it stays visible;
+    /// known columns pass through untouched. The remap is DISPLAY-only: the
+    /// true backend participant set survives for the save boundary.
+    func test_remapOrphanColumns_remapsUnknownChildToFamilyKeepsKnown() {
+        let known = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        let orphan = "99999999-9999-9999-9999-999999999999"
+        var keep = CalendarEvent(
+            col: known, title: "Keep", emoji: "📌",
+            start: "10:00 AM", end: "11:00 AM",
+            category: "Activity", location: "", note: "")
+        keep.backendID = UUID()
+        keep.participantCols = [known]
+        var lost = CalendarEvent(
+            col: orphan, title: "Lost", emoji: "📌",
+            start: "01:00 PM", end: "02:00 PM",
+            category: "Activity", location: "", note: "")
+        lost.backendID = UUID()
+        lost.participantCols = [orphan]
+
+        let out = CalendarStore.remapOrphanColumns(
+            [keep, lost], knownCols: ["family", known])
+        XCTAssertEqual(out.map(\.col), [known, "family"])
+        XCTAssertEqual(out.map(\.title), ["Keep", "Lost"])
+        // Display-only remap — participantCols still carries the real set.
+        XCTAssertEqual(out[1].participantCols, [orphan])
+    }
+
+    /// One backend event fanned out across two orphaned children collapses
+    /// onto the family column ONCE — no stacked twin pills.
+    func test_remapOrphanColumns_dedupsRowsCollapsingOntoSameColumn() {
+        let orphanA = "11111111-1111-1111-1111-111111111111"
+        let orphanB = "22222222-2222-2222-2222-222222222222"
+        var rowA = CalendarEvent(
+            col: orphanA, title: "Shared", emoji: "📌",
+            start: "10:00 AM", end: "11:00 AM",
+            category: "Activity", location: "", note: "")
+        rowA.backendID = UUID()
+        rowA.participantCols = [orphanA, orphanB]
+        var rowB = rowA
+        rowB.col = orphanB
+
+        let out = CalendarStore.remapOrphanColumns([rowA, rowB], knownCols: ["family"])
+        XCTAssertEqual(out.count, 1)
+        XCTAssertEqual(out[0].col, "family")
+        // Distinct backend events landing on the same column do NOT dedup.
+        var other = rowA
+        other.backendID = UUID()
+        let both = CalendarStore.remapOrphanColumns([rowA, other], knownCols: ["family"])
+        XCTAssertEqual(both.count, 2)
+    }
+
     func test_childParticipantMapsToChildColumnWithLocalClockTimes() {
         let childID = UUID(uuidString: "BBBBBBBB-CCCC-DDDD-EEEE-FFFFFFFFFFFF")!
         let occ = makeOccurrence(
