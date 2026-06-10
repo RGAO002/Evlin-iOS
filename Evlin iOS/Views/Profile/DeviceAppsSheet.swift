@@ -3,10 +3,19 @@ import SwiftUI
 /// Per-app management for one device. Mirrors HTML 563-625.
 /// Each row: app icon + name + toggle + tappable limit pill + progress bar.
 /// Tap pill → expands inline 7-option limit picker (15/20/30/45/60/90/120 min).
+///
+/// HP-12: there is no backend for per-app usage/limits yet. At RUNTIME this
+/// screen renders an honest "App limits coming soon" placeholder (the old
+/// behavior keyed `DeviceAppsMockData` fixtures on literal "liam"/"maya", so
+/// every real child saw emma's fake apps with invented usage). The fixture
+/// rows are preview-only via `fixtureApps` (see #Preview below).
 struct DeviceAppsSheet: View {
     let device: DeviceItem
     let childId: String
     var onClose: () -> Void = {}
+    /// Preview-only seed. Runtime callers (ContentView's `.deviceDetail`
+    /// route) leave this nil and get the coming-soon placeholder.
+    var fixtureApps: [DeviceAppItem]? = nil
 
     @State private var apps: [DeviceAppItem] = []
     @State private var editingLimitFor: String? = nil
@@ -14,28 +23,32 @@ struct DeviceAppsSheet: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            ScrollView {
-                VStack(spacing: 0) {
-                    ForEach(Array(apps.enumerated()), id: \.element.id) { idx, app in
-                        appRow(app)
-                        if idx < apps.count - 1 {
-                            Rectangle()
-                                .fill(Color.evOutlineVariant.opacity(0.4))
-                                .frame(height: 1)
+            if apps.isEmpty {
+                comingSoonPlaceholder
+            } else {
+                ScrollView {
+                    VStack(spacing: 0) {
+                        ForEach(Array(apps.enumerated()), id: \.element.id) { idx, app in
+                            appRow(app)
+                            if idx < apps.count - 1 {
+                                Rectangle()
+                                    .fill(Color.evOutlineVariant.opacity(0.4))
+                                    .frame(height: 1)
+                            }
                         }
                     }
+                    .background(
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .fill(Color.evSurfaceContainerLowest)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .stroke(Color.evOutlineVariant.opacity(0.4), lineWidth: 1)
+                    )
+                    .padding(.horizontal, 20)
+                    .padding(.top, 16)
+                    .padding(.bottom, 110)
                 }
-                .background(
-                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .fill(Color.evSurfaceContainerLowest)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .stroke(Color.evOutlineVariant.opacity(0.4), lineWidth: 1)
-                )
-                .padding(.horizontal, 20)
-                .padding(.top, 16)
-                .padding(.bottom, 110)
             }
         }
         .background(Color.evSurfaceContainerLow)
@@ -44,7 +57,29 @@ struct DeviceAppsSheet: View {
         .navigationBarBackButtonHidden(true)
         .toolbar(.hidden, for: .navigationBar)
         .enableSwipeBack()
-        .onAppear { apps = DeviceAppsMockData.apps(for: childId) }
+        .onAppear {
+            if let fixtureApps { apps = fixtureApps }
+        }
+    }
+
+    /// Honest runtime state — per-app limits aren't backend-wired yet.
+    private var comingSoonPlaceholder: some View {
+        VStack(spacing: 14) {
+            Spacer()
+            Image(systemName: "hourglass")
+                .font(.system(size: 36, weight: .light))
+                .foregroundStyle(Color.evOnSurfaceVariant)
+            Text("App limits coming soon")
+                .font(.custom("Manrope", size: 16).weight(.heavy))
+                .foregroundStyle(Color.evOnSurface)
+            Text("Per-app limits for \(device.name) aren't connected to real usage yet.")
+                .font(.custom("Inter", size: 13))
+                .foregroundStyle(Color.evOnSurfaceVariant)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 40)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var header: some View {
@@ -220,5 +255,26 @@ struct DeviceAppsSheet: View {
                 .buttonStyle(.plain)
             }
         }
+    }
+}
+
+#Preview("Fixture apps (preview-only)") {
+    NavigationStack {
+        DeviceAppsSheet(
+            device: DeviceItem(iconSystemName: "iphone", name: "iPhone 13",
+                               detail: "Primary device", locked: false),
+            childId: "liam",
+            fixtureApps: DeviceAppsMockData.apps(for: "liam")
+        )
+    }
+}
+
+#Preview("Runtime (coming soon)") {
+    NavigationStack {
+        DeviceAppsSheet(
+            device: DeviceItem(iconSystemName: "iphone", name: "iPhone 13",
+                               detail: "Primary device", locked: false),
+            childId: "liam"
+        )
     }
 }

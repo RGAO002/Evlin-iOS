@@ -17,6 +17,10 @@ struct ProfileEditSheet: View {
     var isNew: Bool = false
     var onClose: () -> Void = {}
     var onSave: () -> Void = {}
+    /// HP-2: when provided, the "Delete Child" row routes into the parent's
+    /// REAL delete flow (ProfileView's confirm alert → DELETE
+    /// /family/children/{id}). When nil the row is hidden — no visual stub.
+    var onDelete: (() -> Void)? = nil
 
     @State private var draftName: String = ""
     @State private var draftAge: String = ""
@@ -33,7 +37,7 @@ struct ProfileEditSheet: View {
                     avatarBlock
                         .padding(.top, 28)
                     profileGroup
-                    if !isNew { deleteGroup }
+                    if !isNew, onDelete != nil { deleteGroup }
                 }
                 .padding(.horizontal, 16)
                 .padding(.bottom, 60)
@@ -180,8 +184,10 @@ struct ProfileEditSheet: View {
     private var deleteGroup: some View {
         VStack(spacing: 0) {
             Button {
-                // Visual stub — real flow handled by the parent's delete confirm.
-                onClose()
+                // Routes into the parent's real delete confirm (HP-2) —
+                // ProfileView closes this sheet and shows the destructive
+                // alert that calls DELETE /family/children/{id}.
+                onDelete?()
             } label: {
                 HStack {
                     Text("Delete Child")

@@ -7,8 +7,10 @@ import SwiftUI
 ///
 /// Keeps the heavy presentation in `TaskDetailSheet` (renamed for legacy
 /// reasons but acts as a pure rendering view). This wrapper:
-///   - resolves the live task from `ProfileMockData.runtimeTasks`
-///   - mutates that store on Approve/Redo/Edit/Delete
+///   - resolves the live task from the BigKid backend when this child owns
+///     the paired device (`FamilyStore.ownsPairedDevice`); otherwise shows
+///     the graceful missing-task fallback (no mock fixtures at runtime)
+///   - performs Approve/Redo/Edit/Delete against the backend
 ///   - hosts the in-place EditTaskCard modal (no native sheet)
 struct TaskDetailView: View {
     let childId: String
@@ -25,12 +27,25 @@ struct TaskDetailView: View {
     @EnvironmentObject private var apiClient: APIClient
     @Environment(FamilyStore.self) private var familyStore
 
-    private var resolvedChild: ChildProfile {
-        familyStore.childProfiles.first(where: { $0.id == childId }) ?? ChildProfile.previewLiam
+    /// Live child from the family aggregate; nil when the id isn't in the
+    /// store (HP-9 — no more silent `previewLiam` fallback).
+    private var resolvedChild: ChildProfile? {
+        familyStore.childProfiles.first(where: { $0.id == childId })
+    }
+
+    /// What we hand `TaskDetailSheet`. When the child can't be resolved,
+    /// render neutral copy ("Your kid") instead of pretending it's Liam.
+    private var displayChild: ChildProfile {
+        resolvedChild ?? ChildProfile(
+            id: childId, name: "Your kid", age: 0,
+            avatarURL: nil, accentColor: .evPrimary, status: .unlocked,
+            timeLeft: "", timePct: 0, subtitle: ""
+        )
     }
 
     private var backendChildID: UUID? {
-        guard childId == "liam", !pairedChildID.isEmpty else { return nil }
+        guard familyStore.ownsPairedDevice(childId: childId,
+                                           pairedDeviceID: pairedChildID) else { return nil }
         return UUID(uuidString: pairedChildID)
     }
     private var bigKidParent: BigKidParentClient? {
@@ -43,7 +58,7 @@ struct TaskDetailView: View {
             if let liveTask = task {
                 TaskDetailSheet(
                     task: liveTask,
-                    child: resolvedChild,
+                    child: displayChild,
                     onClose: onBack,
                     onApprove: {
                         approve(liveTask)
@@ -78,17 +93,20 @@ struct TaskDetailView: View {
                 EditTaskForm(
                     task: activeEdit,
                     onSave: { updated in
-                        ProfileMockData.updateTask(updated, for: childId)
+                        // Local-only update; the backend poll re-syncs the
+                        // authoritative row. (ProfileMockData is no longer a
+                        // runtime store — tasks only exist for backend-backed
+                        // children, see `reloadTask`.)
+                        task = updated
                         editingTask = nil
                         reloadTask()
                     },
                     onDelete: {
-                        // If this task lives in the BigKid backend (Liam +
-                        // paired), hit DELETE /parent/task/{id}. Otherwise
-                        // mutate ProfileMockData. Without this branch the
-                        // Profile UI was lying — local state cleared, but
-                        // backend kept the task and the next 8s poll
-                        // resurrected it on the row list.
+                        // If this task lives in the BigKid backend (paired
+                        // child), hit DELETE /parent/task/{id}. Without this
+                        // branch the Profile UI was lying — local state
+                        // cleared, but backend kept the task and the next 8s
+                        // poll resurrected it on the row list.
                         if let backendID = activeEdit.backendID,
                            let client = bigKidParent {
                             Task {
@@ -101,7 +119,6 @@ struct TaskDetailView: View {
                                 }
                             }
                         } else {
-                            ProfileMockData.deleteTask(activeEdit.id, for: childId)
                             editingTask = nil
                             onBack()
                         }
@@ -148,8 +165,10 @@ struct TaskDetailView: View {
             }
             return
         }
-        let list = ProfileMockData.tasks(for: childId)
-        task = list.first(where: { $0.id == taskId })
+        // No backend for this child → there are no real tasks to resolve.
+        // Render the graceful missing-task fallback instead of resurrecting
+        // ProfileMockData fixtures (item 9 — runtime path is fixture-free).
+        task = nil
     }
 
     private func approve(_ t: TaskItem) {
@@ -177,10 +196,10 @@ struct TaskDetailView: View {
             }
             return
         }
+        // Non-backend fallback: local state only (no mock-store writes).
         var copy = t
         copy.state = (t.state == .bypass) ? .bypassed : .done
-        ProfileMockData.updateTask(copy, for: childId)
-        reloadTask()
+        task = copy
     }
 
     private func redo(_ t: TaskItem) {
@@ -209,10 +228,10 @@ struct TaskDetailView: View {
             }
             return
         }
+        // Non-backend fallback: local state only (no mock-store writes).
         var copy = t
         copy.state = .pending
-        ProfileMockData.updateTask(copy, for: childId)
-        reloadTask()
+        task = copy
     }
 
     // MARK: - Fallback

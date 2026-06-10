@@ -45,12 +45,18 @@ struct DeviceItem: Identifiable, Hashable {
     }
 }
 
+/// PREVIEW-ONLY fixtures. The runtime Profile surface no longer reads any of
+/// these: tasks come from the BigKid backend when the child owns the paired
+/// device (else an honest "No tasks yet" empty state), devices come from
+/// `FamilyStore` (else "No devices enrolled yet"), and rules render a
+/// "coming soon" state because there is no rules backend. `devices(for:)`
+/// is still used as a fallback ONLY when the child id isn't present in
+/// `FamilyStore` at all (i.e. #Preview hosts).
 enum ProfileMockData {
     /// Mutable per-child task store. Seeded lazily from `defaultTasks(for:)`
-    /// the first time a child is read, then mutated in place by Profile +
-    /// Task Detail screens. Both screens reach in here so they always see
-    /// the same source of truth (a notification deep-linking into Task
-    /// Detail picks up the same tasks Profile already shows).
+    /// the first time a child is read. PREVIEW-ONLY — `TaskDetailSheet`'s
+    /// #Preview blocks read `tasks(for:)`; the runtime task path is the
+    /// BigKid backend.
     static var runtimeTasks: [String: [TaskItem]] = [:]
 
     static func rules(for childId: String) -> [RuleItem] {
