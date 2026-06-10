@@ -2110,6 +2110,37 @@ extension APIClient {
             throw APIError.serverError(http.statusCode)
         }
     }
+
+    // MARK: Device lock-all (Profile "Lock devices" CTA)
+
+    struct DeviceLockAllResponse: Decodable {
+        let command_id: UUID
+        let action: String
+    }
+
+    private struct DeviceLockAllBody: Encodable {
+        let family_id: UUID
+        let child_device_id: UUID
+    }
+
+    /// POST /parent/device/lock-all — queues the all-apps shield on the kid
+    /// device (same mechanism the reflection lockdown applies), permanent
+    /// until `unlockAllApps`. The kid's CommandPoller applies it on its next
+    /// poll.
+    @discardableResult
+    func lockAllApps(familyID: UUID, childDeviceID: UUID) async throws -> DeviceLockAllResponse {
+        let payload = try JSONEncoder().encode(
+            DeviceLockAllBody(family_id: familyID, child_device_id: childDeviceID))
+        return try await authedJSON(path: "/parent/device/lock-all", method: "POST", jsonBody: payload)
+    }
+
+    /// POST /parent/device/unlock-all — reverses `lockAllApps` (unshield_all).
+    @discardableResult
+    func unlockAllApps(familyID: UUID, childDeviceID: UUID) async throws -> DeviceLockAllResponse {
+        let payload = try JSONEncoder().encode(
+            DeviceLockAllBody(family_id: familyID, child_device_id: childDeviceID))
+        return try await authedJSON(path: "/parent/device/unlock-all", method: "POST", jsonBody: payload)
+    }
 }
 
 // MARK: - AnyCodable (for flexible action dict)

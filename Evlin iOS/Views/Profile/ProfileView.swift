@@ -68,6 +68,9 @@ struct ProfileView: View {
     // Local mutable status so the Lock/Unlock button can flip the avatar
     // and pills without requiring a global mutation. See HTML 1029-1034.
     @State private var localStatus: ChildProfile.Status = .unlocked
+    // Lock/Unlock-all CTA wiring (POST /parent/device/lock-all|unlock-all).
+    @State private var lockBusy = false
+    @State private var lockError: String? = nil
     // Local mutable copy of the child's display fields so Edit Profile
     // can show changes within the session.
     @State private var localName: String = ""
@@ -588,6 +591,37 @@ struct ProfileView: View {
     /// has a linked device, mapped through `ChildCRUDMapper` like the
     /// HomeSettingsSheet flow) show the error and do NOT pop.
     @MainActor
+    /// Lock/Unlock-all CTA: queues the all-apps shield (or unshield_all) for
+    /// the PAIRED kid device — the same lock the reflection lockdown applies.
+    /// Optimistic flip; reverted with an inline error if the queue fails.
+    private func toggleDeviceLock() async {
+        guard let cid = backendChildID,
+              let famRaw = UserDefaults.standard.string(forKey: "evlin.familyID"),
+              let famID = UUID(uuidString: famRaw) else {
+            lockError = "Pair \(displayChild.name)'s device first."
+            return
+        }
+        let wasUnlocked = localStatus == .unlocked
+        lockBusy = true
+        lockError = nil
+        withAnimation(.easeOut(duration: 0.18)) {
+            localStatus = wasUnlocked ? .locked : .unlocked
+        }
+        do {
+            if wasUnlocked {
+                _ = try await apiClient.lockAllApps(familyID: famID, childDeviceID: cid)
+            } else {
+                _ = try await apiClient.unlockAllApps(familyID: famID, childDeviceID: cid)
+            }
+        } catch {
+            withAnimation(.easeOut(duration: 0.18)) {
+                localStatus = wasUnlocked ? .unlocked : .locked
+            }
+            lockError = "Couldn't \(wasUnlocked ? "lock" : "unlock") — try again."
+        }
+        lockBusy = false
+    }
+
     private func performDelete() async {
         do {
             try await apiClient.deleteChild(id: child.id)
@@ -909,13 +943,13 @@ struct ProfileView: View {
             }
 
             // HP-1: the old Lock/Unlock CTA only flipped local @State — it
-            // never touched the kid device. The backend has no parent-
-            // reachable "lock ALL apps" endpoint yet (command vocabulary has
-            // unshield_all but no shield_all; the only direct lock route is
-            // /parent/child-app-catalog/lock for a single alias_key). Until
-            // that lands, the button is honestly disabled — no fake flip.
+            // Locks EVERY registered device — for iOS that's the all-apps
+            // shield, the same mechanism the reflection lockdown applies
+            // (POST /parent/device/lock-all → kid CommandPoller → shield
+            // tier=all; unlock queues unshield_all). Optimistic flip,
+            // reverted with an inline error if the queue call fails.
             VStack(spacing: 6) {
-                Button {} label: {
+                Button { Task { await toggleDeviceLock() } } label: {
                     HStack(spacing: 10) {
                         Image(systemName: isUnlocked ? "lock" : "lock.open")
                             .font(.system(size: 18, weight: .semibold))
@@ -936,13 +970,25 @@ struct ProfileView: View {
                     )
                 }
                 .buttonStyle(.plain)
-                .disabled(true)
-                .opacity(0.45)
+                .disabled(lockBusy || backendChildID == nil)
+                .opacity(backendChildID == nil ? 0.45 : (lockBusy ? 0.7 : 1))
 
-                Text("Lock controls coming soon")
-                    .font(.custom("Inter", size: 11).weight(.medium))
-                    .foregroundStyle(Color.evOnSurfaceVariant)
-                    .frame(maxWidth: .infinity)
+                if let lockError {
+                    Text(lockError)
+                        .font(.custom("Inter", size: 11).weight(.medium))
+                        .foregroundStyle(Color.evError)
+                        .frame(maxWidth: .infinity)
+                } else if backendChildID == nil {
+                    Text("Pair \(displayChild.name)'s device to lock")
+                        .font(.custom("Inter", size: 11).weight(.medium))
+                        .foregroundStyle(Color.evOnSurfaceVariant)
+                        .frame(maxWidth: .infinity)
+                } else {
+                    Text("Locks every app on their phone")
+                        .font(.custom("Inter", size: 11).weight(.medium))
+                        .foregroundStyle(Color.evOnSurfaceVariant)
+                        .frame(maxWidth: .infinity)
+                }
             }
         }
         .padding(18)
