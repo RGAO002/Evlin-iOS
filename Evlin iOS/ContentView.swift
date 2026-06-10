@@ -217,15 +217,42 @@ struct ParentRootView: View {
                 reflectionId: summary.id
             )
         }
-        return HomeMockData.notifications(
-            completedReflections: completions,
-            pendingNudges: nudges
+        // HP-13: this list is regenerated on every body evaluation with
+        // unread == true, so read/dismiss state must come from the durable
+        // ack store (written by NotificationPanel's actions) — otherwise
+        // "Mark all read" / dismiss silently undo themselves on reopen.
+        return HomeNotificationAckStore.applying(
+            to: HomeMockData.notifications(
+                completedReflections: completions,
+                pendingNudges: nudges
+            )
         )
     }
 
     private var pairedBackendChildID: UUID? {
         guard !pairedChildID.isEmpty else { return nil }
         return UUID(uuidString: pairedChildID)
+    }
+
+    /// HP-10: resolve which child OWNS the paired device. `pairedChildID`
+    /// (`evlin.childDeviceID`) is a DEVICE id, so map it through the family
+    /// aggregate: the `ChildDTO` whose `.devices` contains that device id is
+    /// the owner. Falls back to the only child when the family has exactly
+    /// one; returns nil when the store hasn't loaded yet (callers skip the
+    /// sync round and retry on the next poll) or when no child matches in a
+    /// multi-child family — never the previewLiam fixture, which used to pin
+    /// reflection state to whatever child happened to be first.
+    private var pairedChild: ChildProfile? {
+        let profiles = familyStore.childProfiles
+        guard !profiles.isEmpty else { return nil }
+        if let owner = familyStore.children.first(where: { dto in
+            dto.devices.contains {
+                $0.device_id.caseInsensitiveCompare(pairedChildID) == .orderedSame
+            }
+        }) {
+            return profiles.first { $0.id == owner.id }
+        }
+        return profiles.count == 1 ? profiles.first : nil
     }
 
     private func startParentReflectionPolling() {
@@ -247,18 +274,27 @@ struct ParentRootView: View {
 
     @MainActor
     private func refreshParentReflectionState() async {
-        // The reflection-sync demo loop is keyed to the single paired backend
-        // child. Prefer the live FamilyStore child; fall back to the preview
-        // fixture for the legacy single-device path where the family aggregate
-        // hasn't been loaded but a child device is paired.
         guard let childID = pairedBackendChildID,
               let client = BigKidParentClient(baseURLString: apiClient.baseURL) else {
             return
         }
-        let child = familyStore.childProfiles.first ?? ChildProfile.previewLiam
+        // HP-10: the snapshot we fetch belongs to the child that owns the
+        // paired device — store it under THAT child, never under
+        // `childProfiles.first` / previewLiam. If the family aggregate
+        // hasn't loaded yet (empty store), skip this round entirely; the
+        // 8s poll (or the next bigKidStateInvalidated ping) retries.
+        guard let child = pairedChild else { return }
 
         do {
             let snapshot = try await client.fetchKidState(childId: childID)
+            // HP-11: publish the kid's REAL minutes/lock state for the Home
+            // card (ChildStateResponse.minutesLeft / .minutesMax +
+            // reflection-lock signals) instead of the fabricated
+            // "UNLOCKED · 2h" every card used to show.
+            ChildLiveStatusStore.shared.update(
+                Self.liveStatus(from: snapshot),
+                forChildID: child.id
+            )
             if let req = snapshot.reflectionRequest {
                 do {
                     let parentReq = try await apiClient.fetchReflectionForParent(reflectionId: req.id)
@@ -274,6 +310,45 @@ struct ParentRootView: View {
             // lightweight parent refresh misses once. ProfileView still
             // surfaces detailed refresh errors in its own task section.
         }
+    }
+
+    /// HP-11: derive the Home card's live status from the parent state
+    /// snapshot. Time budget comes straight from
+    /// `ChildStateResponse.minutesLeft` / `.minutesMax`. The lock flag is
+    /// the Reflection Lockdown: locked while a non-approved
+    /// `reflectionRequest` exists whose `lockAppliedAt` is set (the §8.1
+    /// truthful "kid device applied the all-apps lock" signal) and whose
+    /// server hard-cap (`reflectionLockCapExpiresAt`, trigger + 2h) hasn't
+    /// passed — mirroring `ReflectionLockReconciler`'s active/cap-terminal
+    /// semantics.
+    private static func liveStatus(
+        from snapshot: ChildStateResponse, now: Date = Date()
+    ) -> ChildLiveStatus {
+        let locked: Bool = {
+            guard let req = snapshot.reflectionRequest,
+                  req.status != .approved,
+                  req.lockAppliedAt != nil else { return false }
+            if let cap = req.reflectionLockCapExpiresAt, now >= cap { return false }
+            return true
+        }()
+        let minutesLeft = max(0, snapshot.minutesLeft)
+        let pct: Double = snapshot.minutesMax > 0
+            ? min(1.0, Double(minutesLeft) / Double(snapshot.minutesMax))
+            : 0.0
+        return ChildLiveStatus(
+            status: locked ? .locked : .unlocked,
+            timeLeft: Self.formatMinutes(minutesLeft),
+            timePct: pct
+        )
+    }
+
+    /// 83 → "1h 23m", 120 → "2h", 45 → "45m", 0 → "0m".
+    private static func formatMinutes(_ minutes: Int) -> String {
+        let m = max(0, minutes)
+        guard m >= 60 else { return "\(m)m" }
+        let h = m / 60
+        let r = m % 60
+        return r == 0 ? "\(h)h" : "\(h)h \(r)m"
     }
 }
 

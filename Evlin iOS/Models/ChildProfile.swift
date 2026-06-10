@@ -1,4 +1,5 @@
 import SwiftUI
+import Observation
 
 // MARK: - Child Profile Model (aligned to Esen's EvlinFamily)
 
@@ -14,8 +15,46 @@ struct ChildProfile: Identifiable, Hashable {
     let timeLeft: String        // "1h 30m"
     let timePct: Double         // 0.0 ... 1.0
     let subtitle: String
+    /// HP-11: whether `status`/`timeLeft`/`timePct` carry real values.
+    /// `false` for backend children (the family aggregate has no live
+    /// time-budget data — see `init(dto:)`); `true` for fixtures, which
+    /// declare their values explicitly. When false, the Home card hides
+    /// the status/progress rows unless `ChildLiveStatusStore` has a
+    /// polled live entry for this child. Declared LAST with a default so
+    /// the synthesized memberwise init stays source-compatible.
+    var hasLiveStatus: Bool = true
 
     var initial: String { String(name.prefix(1)).uppercased() }
+}
+
+// MARK: - Live status side channel (HP-11)
+
+/// Real, polled per-child status for the Home cards. Fed by the parent
+/// state poll (`ParentRootView.refreshParentReflectionState()` →
+/// `ChildStateResponse.minutesLeft` / `.minutesMax` / reflection-lock
+/// signals). Children without a paired device never get an entry, and
+/// `ProfileCard` hides its status line + progress bar for them instead
+/// of fabricating "UNLOCKED · 2h".
+struct ChildLiveStatus: Hashable {
+    var status: ChildProfile.Status
+    var timeLeft: String        // "1h 23m"
+    var timePct: Double         // 0.0 ... 1.0
+}
+
+/// Tiny observable keyed store bridging the poll (writer: ContentView)
+/// and the Home cards (reader: ProfileCard). Lives beside `FamilyStore`
+/// conceptually but is kept separate so the family aggregate stays a
+/// pure mirror of `GET /me/profile`.
+@Observable
+@MainActor
+final class ChildLiveStatusStore {
+    static let shared = ChildLiveStatusStore()
+
+    private(set) var byChildID: [String: ChildLiveStatus] = [:]
+
+    func update(_ status: ChildLiveStatus, forChildID id: String) {
+        byChildID[id] = status
+    }
 }
 
 // MARK: - Backend adapter (spec §6.3)
@@ -26,21 +65,26 @@ extension ChildProfile {
     /// children from `FamilyStore.childProfiles`, which maps each `ChildDTO`
     /// through this initializer.
     ///
-    /// Fields not yet provided by the aggregate (live time-budget / lock
-    /// status / subtitle) get neutral defaults — they are owned by other
-    /// surfaces and will be wired as those endpoints land. The avatar photo
-    /// (when `kind == "photo"`) is the short-lived `signed_url`; the avatar's
-    /// `color` hex drives the accent so each child keeps a stable tint.
+    /// Fields not provided by the aggregate (live time-budget / lock status)
+    /// are flagged `hasLiveStatus = false` instead of being fabricated
+    /// (HP-11: every card used to claim "UNLOCKED · 2h"). Real values for a
+    /// paired child arrive through `ChildLiveStatusStore`, fed by the parent
+    /// state poll. The placeholders below are never rendered — `ProfileCard`
+    /// hides the status/progress rows when there is no live data. The avatar
+    /// photo (when `kind == "photo"`) is the short-lived `signed_url`; the
+    /// avatar's `color` hex drives the accent so each child keeps a stable
+    /// tint.
     init(dto: ChildDTO) {
         self.id = dto.id
         self.name = dto.display_name
         self.age = dto.age ?? 0
         self.avatarURL = dto.avatar.signed_url
         self.accentColor = ChildProfile.color(fromHex: dto.avatar.color) ?? .evPrimary
-        self.status = .unlocked
-        self.timeLeft = "2h"
-        self.timePct = 1.0
+        self.status = .unlocked   // placeholder — gated behind hasLiveStatus
+        self.timeLeft = ""
+        self.timePct = 0.0
         self.subtitle = ""
+        self.hasLiveStatus = false
     }
 
     /// Parse a `#RRGGBB` hex string into a SwiftUI `Color`. Returns nil for

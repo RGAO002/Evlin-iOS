@@ -65,6 +65,13 @@ struct HomeSettingsSheet: View {
     @State private var serverURL: String = ""
     @State private var childOpError: String? = nil
     @State private var isChildOpInFlight: Bool = false
+    /// HP-14: baseline for the "Parent name" field captured on appear, so we
+    /// only PUT /me/profile when the user actually edited the name in THIS
+    /// session (a stale legacy @AppStorage value must not silently rename
+    /// the parent on Done).
+    @State private var parentNameAtOpen: String = ""
+    @State private var parentNameError: String? = nil
+    @State private var isSavingParentName: Bool = false
     @State private var isPickerPresented = false
     @State private var showPINGate = false
     @State private var showAddApp = false
@@ -124,6 +131,16 @@ struct HomeSettingsSheet: View {
                         TextField("", text: $parentName)
                             .multilineTextAlignment(.trailing)
                             .textFieldStyle(.plain)
+                            // HP-14: the @AppStorage write alone is dead —
+                            // HomeView prefers the server display_name, so
+                            // commit edits to the backend.
+                            .onSubmit { Task { _ = await saveParentNameIfChanged() } }
+                    }
+
+                    if let parentNameError {
+                        Text(parentNameError)
+                            .font(.caption)
+                            .foregroundStyle(Color.evError)
                     }
 
                     if let childOpError {
@@ -205,7 +222,7 @@ struct HomeSettingsSheet: View {
                             .tracking(1.2)
                             .textCase(.uppercase)
                             .foregroundStyle(Color.evOutline)
-                        TextField("Liam", text: $childName)
+                        TextField("Child's name", text: $childName)
                     }
 
                     if !familyID.isEmpty {
@@ -766,7 +783,14 @@ struct HomeSettingsSheet: View {
                         if !serverURL.isEmpty {
                             apiClient.saveServerURL(serverURL)
                         }
-                        onClose()
+                        // HP-14: commit a parent-name edit before closing.
+                        // On failure the sheet stays open so the error is
+                        // actually visible (revert the field or retry).
+                        Task {
+                            if await saveParentNameIfChanged() {
+                                onClose()
+                            }
+                        }
                     }
                 }
             }
@@ -791,6 +815,16 @@ struct HomeSettingsSheet: View {
                 if children.isEmpty {
                     children = familyStore.childProfiles
                 }
+                // HP-14: the server display_name is the source of truth
+                // (HomeView prefers it over the local @AppStorage shadow) —
+                // seed the field from it so the user edits what they
+                // actually see, and capture the baseline so Done only PUTs
+                // names changed in this session.
+                if let serverName = familyStore.selfParent?.display_name,
+                   !serverName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    parentName = serverName
+                }
+                parentNameAtOpen = parentName
                 serverURL = apiClient.baseURL
                 screenTimeManager.refreshAuthorizationStatus()
                 // Sync DEBUG protection-mode picker from backend so the
@@ -947,7 +981,7 @@ struct HomeSettingsSheet: View {
                         .tracking(1.2)
                         .textCase(.uppercase)
                         .foregroundStyle(Color.evOutline)
-                    TextField("Liam", text: $childName)
+                    TextField("Child's name", text: $childName)
                 }
 
                 if !familyID.isEmpty {
@@ -1318,6 +1352,39 @@ struct HomeSettingsSheet: View {
     }
 
     private var referenceYear: Int { Calendar.current.component(.year, from: Date()) }
+
+    /// HP-14: push an edited parent name to the backend
+    /// (`PUT /me/profile`) and refresh the family aggregate so HomeView's
+    /// header (which prefers `selfParent.display_name`) picks it up.
+    /// Returns true when there was nothing to save or the save succeeded;
+    /// false on failure (an inline error is shown and the sheet should
+    /// stay open).
+    @MainActor
+    private func saveParentNameIfChanged() async -> Bool {
+        let trimmed = parentName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let baseline = parentNameAtOpen.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != baseline else { return true }
+        guard !isSavingParentName else { return false }
+        isSavingParentName = true
+        defer { isSavingParentName = false }
+        do {
+            _ = try await apiClient.updateParentProfile(
+                UpdateParentProfileBody(
+                    display_name: trimmed,
+                    avatar_kind: nil,
+                    avatar_value: nil,
+                    avatar_color: nil
+                )
+            )
+            await familyStore.refresh()
+            parentNameAtOpen = trimmed   // new baseline — don't re-PUT on Done
+            parentNameError = nil
+            return true
+        } catch {
+            parentNameError = "Couldn't save parent name. \(error.localizedDescription)"
+            return false
+        }
+    }
 
     @MainActor
     private func addChild(name: String, age: Int) async {
