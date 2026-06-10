@@ -23,6 +23,16 @@ struct CalendarEvent: Identifiable, Hashable {
     /// fan out from one multi-participant backend event share this id, so an
     /// edit/delete maps back to the single server event.
     var backendID: UUID? = nil
+    /// FULL participant column set of the backend event this row fans out from
+    /// (child column ids and/or "family"). nil for mock/preview rows — treat as
+    /// `[col]`. Carrying the complete set lets an edit of one fanned-out row
+    /// round-trip every participant instead of hard-deleting the siblings.
+    var participantCols: [String]? = nil
+    /// IANA timezone the backend event was stored with (display times are
+    /// rendered in it). nil for mock/preview rows — fall back to the device
+    /// timezone. Updates must convert wall-clock times back to UTC in THIS
+    /// timezone or editing from another device timezone shifts the event.
+    var timezone: String? = nil
 }
 
 struct AllDayItem: Identifiable, Hashable {

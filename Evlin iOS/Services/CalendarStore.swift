@@ -128,6 +128,11 @@ final class CalendarStore: ObservableObject {
                     recurrence: occ.recurrence_type
                 )
                 ev.backendID = occ.event_id
+                // Every fanned-out row carries the FULL participant column set
+                // + the event's own timezone so the save boundary can round-trip
+                // them (see CalendarEvent doc comments).
+                ev.participantCols = cols
+                ev.timezone = occ.timezone
                 out.append(ev)
             }
         }

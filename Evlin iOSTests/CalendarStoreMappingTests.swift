@@ -34,6 +34,10 @@ final class CalendarStoreMappingTests: XCTestCase {
         XCTAssertEqual(events[0].recurrence, "weekly")
         XCTAssertEqual(events[0].title, "Piano Practice")
         XCTAssertEqual(events[0].backendID, occ.event_id)
+        // The row carries the full participant column set + the event's own
+        // timezone so the save boundary can round-trip them.
+        XCTAssertEqual(events[0].participantCols, [childID.uuidString.lowercased()])
+        XCTAssertEqual(events[0].timezone, "America/New_York")
     }
 
     func test_familyParticipantMapsToFamilyColumn() {
@@ -44,6 +48,8 @@ final class CalendarStoreMappingTests: XCTestCase {
         let events = CalendarStore.calendarEvents(from: [occ])
         XCTAssertEqual(events.count, 1)
         XCTAssertEqual(events[0].col, "family")
+        XCTAssertEqual(events[0].participantCols, ["family"])
+        XCTAssertEqual(events[0].timezone, "America/New_York")
     }
 
     func test_multiChildEventFansOutOneRowPerChildSharingBackendID() {
@@ -60,6 +66,72 @@ final class CalendarStoreMappingTests: XCTestCase {
         XCTAssertEqual(Set(events.map(\.col)),
                        Set([a.uuidString.lowercased(), b.uuidString.lowercased()]))
         XCTAssertEqual(Set(events.map(\.backendID)), [occ.event_id])
+        // EVERY fanned-out row carries the FULL participant column set (and the
+        // event timezone), not just its own column — editing from either row
+        // must be able to round-trip both children.
+        for ev in events {
+            XCTAssertEqual(ev.participantCols,
+                           [a.uuidString.lowercased(), b.uuidString.lowercased()])
+            XCTAssertEqual(ev.timezone, "America/New_York")
+        }
+    }
+
+    // MARK: Save round-trip (bug-fix regressions)
+
+    /// Bug 1 regression: an UNTOUCHED edit of one fanned-out row must rebuild
+    /// the PUT participants from the row's full `participantCols` — not just
+    /// its own column — so the other child's participant row survives.
+    func test_saveRoundTripPreservesFullParticipantSet() {
+        let a = UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!
+        let b = UUID(uuidString: "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB")!
+        let occ = makeOccurrence(
+            startUTC: "2026-06-09T13:00:00Z", endUTC: "2026-06-09T14:00:00Z",
+            tz: "America/New_York", recurrence: "none", allDay: false,
+            participants: [
+                .init(participant_kind: "child", child_profile_id: a),
+                .init(participant_kind: "child", child_profile_id: b),
+            ])
+        let events = CalendarStore.calendarEvents(from: [occ])
+        // Pick either row (the one the parent happened to tap)...
+        let tapped = events.first(where: { $0.col == a.uuidString.lowercased() })!
+        // ...and rebuild the PUT payload the way the save boundary does:
+        // from the full participantCols (fallback to the single col only for
+        // mock/legacy rows that have none).
+        let parts = CalendarTimeWire.participants(
+            fromColumns: tapped.participantCols ?? [tapped.col])
+        XCTAssertEqual(parts.count, 2)
+        XCTAssertEqual(Set(parts.compactMap(\.child_profile_id)), [a, b])
+        XCTAssertTrue(parts.allSatisfy { $0.participant_kind == "child" })
+    }
+
+    /// Bug 2 regression: re-encoding the displayed wall clock with the EVENT's
+    /// stored timezone (not the device's) reproduces the original UTC instant.
+    /// 13:00Z == 9:00 AM America/New_York (EDT); converting that 9:00 AM back
+    /// in a Los Angeles device timezone would yield 16:00Z — a 3h shift.
+    func test_saveRoundTripUsesEventTimezoneNotDeviceTimezone() {
+        let occ = makeOccurrence(
+            startUTC: "2026-06-09T13:00:00Z", endUTC: "2026-06-09T14:00:00Z",
+            tz: "America/New_York", recurrence: "none", allDay: false,
+            participants: [.init(participant_kind: "family", child_profile_id: nil)])
+        let ev = CalendarStore.calendarEvents(from: [occ])[0]
+        XCTAssertEqual(ev.timezone, "America/New_York")
+        XCTAssertEqual(ev.start, "09:00 AM")
+
+        let day = makeDay(year: 2026, month: 6, day: 9, tz: "America/New_York")
+        // Save boundary rule: prefer the event's stored timezone.
+        let tzID = ev.timezone ?? TimeZone.current.identifier
+        let startISO = CalendarTimeWire.utcISO(
+            wallClock: ev.start, onDay: day, timezoneID: tzID)
+        let endISO = CalendarTimeWire.utcISO(
+            wallClock: ev.end, onDay: day, timezoneID: tzID)
+        XCTAssertEqual(startISO, occ.occurrence_start)
+        XCTAssertEqual(endISO, occ.occurrence_end)
+
+        // The same wall clock re-encoded in a DIFFERENT device timezone shifts
+        // the instant — exactly the bug the stored timezone prevents.
+        let shifted = CalendarTimeWire.utcISO(
+            wallClock: ev.start, onDay: day, timezoneID: "America/Los_Angeles")
+        XCTAssertNotEqual(shifted, occ.occurrence_start)
     }
 
     func test_allDayOccurrenceGoesToAllDayLaneNotTimeline() {

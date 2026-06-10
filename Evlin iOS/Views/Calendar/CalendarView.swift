@@ -131,12 +131,23 @@ struct CalendarView: View {
     }
 
     /// Convert an edited event's wall-clock string times (interpreted on the
-    /// viewed day, in the device timezone) into UTC ISO, build the participants
-    /// from the chosen columns, and call the store (create or update). The store
-    /// re-fetches the window on success so the grid reflects the server.
+    /// viewed day, in the event's own timezone — device timezone only for new
+    /// events) into UTC ISO, build the participants from the chosen columns,
+    /// and call the store (create or update). The store re-fetches the window
+    /// on success so the grid reflects the server.
     private func persistSave(_ ev: CalendarEvent, extras: [String], isNew: Bool) {
+        // EventDetailCard.commitSave passes the FULL recipient selection
+        // (seeded from the event's participantCols): the primary as `ev.col`
+        // plus every other selected recipient in `extras`. Building the PUT
+        // participants from this complete set means an untouched edit
+        // round-trips all participants instead of hard-deleting the rows of
+        // children whose column wasn't tapped.
         let cols = [ev.col] + extras
-        let tz = TimeZone.current.identifier
+        // UPDATE must stay in the event's stored timezone — display times were
+        // rendered in it, so re-encoding them in a different device timezone
+        // would silently shift the stored UTC instant. Only NEW events (and
+        // legacy rows with no timezone) adopt the current device timezone.
+        let tz = (isNew ? nil : ev.timezone) ?? TimeZone.current.identifier
         let startISO = CalendarTimeWire.utcISO(
             wallClock: ev.start, onDay: selectedDate, timezoneID: tz)
         let endISO = CalendarTimeWire.utcISO(

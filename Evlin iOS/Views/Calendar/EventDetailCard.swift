@@ -27,9 +27,13 @@ struct EventDetailCard: View {
     @State private var newCategoryName: String = ""
     @FocusState private var newCategoryFocused: Bool
 
-    /// Multi-select recipients for the event. Defaults to {`event.col`}.
-    /// Picking "family" is mutually exclusive with the per-child options
-    /// (consistent with how the app interprets a family event).
+    /// Multi-select recipients for the event. Defaults to the event's FULL
+    /// backend participant set (`participantCols`), falling back to just
+    /// {`event.col`} for mock/preview rows. Seeding the full set means an
+    /// untouched edit round-trips every participant instead of silently
+    /// dropping the other children's rows. Picking "family" is mutually
+    /// exclusive with the per-child options (consistent with how the app
+    /// interprets a family event).
     @State private var recipientSelection: Set<String> = []
 
     /// Read-mode delete confirmation gate.
@@ -59,7 +63,7 @@ struct EventDetailCard: View {
         self.onDelete = onDelete
         _isEditing = State(initialValue: isNew)
         _draft = State(initialValue: event)
-        _recipientSelection = State(initialValue: [event.col])
+        _recipientSelection = State(initialValue: Set(event.participantCols ?? [event.col]))
     }
 
     var body: some View {
