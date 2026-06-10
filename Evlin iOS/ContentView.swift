@@ -287,14 +287,6 @@ struct ParentRootView: View {
 
         do {
             let snapshot = try await client.fetchKidState(childId: childID)
-            // HP-11: publish the kid's REAL minutes/lock state for the Home
-            // card (ChildStateResponse.minutesLeft / .minutesMax +
-            // reflection-lock signals) instead of the fabricated
-            // "UNLOCKED · 2h" every card used to show.
-            ChildLiveStatusStore.shared.update(
-                Self.liveStatus(from: snapshot),
-                forChildID: child.id
-            )
             if let req = snapshot.reflectionRequest {
                 do {
                     let parentReq = try await apiClient.fetchReflectionForParent(reflectionId: req.id)
@@ -312,44 +304,6 @@ struct ParentRootView: View {
         }
     }
 
-    /// HP-11: derive the Home card's live status from the parent state
-    /// snapshot. Time budget comes straight from
-    /// `ChildStateResponse.minutesLeft` / `.minutesMax`. The lock flag is
-    /// the Reflection Lockdown: locked while a non-approved
-    /// `reflectionRequest` exists whose `lockAppliedAt` is set (the §8.1
-    /// truthful "kid device applied the all-apps lock" signal) and whose
-    /// server hard-cap (`reflectionLockCapExpiresAt`, trigger + 2h) hasn't
-    /// passed — mirroring `ReflectionLockReconciler`'s active/cap-terminal
-    /// semantics.
-    private static func liveStatus(
-        from snapshot: ChildStateResponse, now: Date = Date()
-    ) -> ChildLiveStatus {
-        let locked: Bool = {
-            guard let req = snapshot.reflectionRequest,
-                  req.status != .approved,
-                  req.lockAppliedAt != nil else { return false }
-            if let cap = req.reflectionLockCapExpiresAt, now >= cap { return false }
-            return true
-        }()
-        let minutesLeft = max(0, snapshot.minutesLeft)
-        let pct: Double = snapshot.minutesMax > 0
-            ? min(1.0, Double(minutesLeft) / Double(snapshot.minutesMax))
-            : 0.0
-        return ChildLiveStatus(
-            status: locked ? .locked : .unlocked,
-            timeLeft: Self.formatMinutes(minutesLeft),
-            timePct: pct
-        )
-    }
-
-    /// 83 → "1h 23m", 120 → "2h", 45 → "45m", 0 → "0m".
-    private static func formatMinutes(_ minutes: Int) -> String {
-        let m = max(0, minutes)
-        guard m >= 60 else { return "\(m)m" }
-        let h = m / 60
-        let r = m % 60
-        return r == 0 ? "\(h)h" : "\(h)h \(r)m"
-    }
 }
 
 // MARK: - Shared navigation destinations
