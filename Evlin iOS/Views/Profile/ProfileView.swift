@@ -973,6 +973,8 @@ struct ProfileView: View {
                 .disabled(lockBusy || backendChildID == nil)
                 .opacity(backendChildID == nil ? 0.45 : (lockBusy ? 0.7 : 1))
 
+                // Caption only when something needs saying: a failure, or why
+                // the button is disabled. No informational line otherwise.
                 if let lockError {
                     Text(lockError)
                         .font(.custom("Inter", size: 11).weight(.medium))
@@ -980,11 +982,6 @@ struct ProfileView: View {
                         .frame(maxWidth: .infinity)
                 } else if backendChildID == nil {
                     Text("Pair \(displayChild.name)'s device to lock")
-                        .font(.custom("Inter", size: 11).weight(.medium))
-                        .foregroundStyle(Color.evOnSurfaceVariant)
-                        .frame(maxWidth: .infinity)
-                } else {
-                    Text("Locks every app on their phone")
                         .font(.custom("Inter", size: 11).weight(.medium))
                         .foregroundStyle(Color.evOnSurfaceVariant)
                         .frame(maxWidth: .infinity)
