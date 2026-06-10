@@ -52,11 +52,14 @@ struct BigKidHomeReflectionView: View {
         let server = state.childName.trimmingCharacters(in: .whitespacesAndNewlines)
         let local = (UserDefaults.standard.string(forKey: "evlin.childProfileName") ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        // Same placeholder rule as BigKidHomeView: "Liam"/"your kid" are seeds,
+        // not names — fall back to the locally captured onboarding name.
+        let placeholders: Set<String> = ["liam", "your kid"]
         let chosen: String
-        if !server.isEmpty && server.caseInsensitiveCompare("Liam") != .orderedSame {
+        if !server.isEmpty && !placeholders.contains(server.lowercased()) {
             chosen = server
         } else {
-            chosen = local.isEmpty ? server : local
+            chosen = local.isEmpty ? "" : local
         }
         return chosen.split(separator: " ").first.map(String.init) ?? "there"
     }

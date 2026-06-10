@@ -15,14 +15,15 @@ struct BigKidHomeView: View {
         let server = state.childName.trimmingCharacters(in: .whitespacesAndNewlines)
         let local = (UserDefaults.standard.string(forKey: "evlin.childProfileName") ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        // Avoid showing the old fixture/default "Liam" when the kid entered a
-        // different name during onboarding but the first backend snapshot has
-        // not caught up yet.
+        // Server placeholders ("Liam" legacy fixture, "your kid" store seed)
+        // are never a real name — prefer the locally captured onboarding name
+        // until the backend hydrates the real ChildProfile display name.
+        let placeholders: Set<String> = ["liam", "your kid"]
         let chosen: String
-        if !server.isEmpty && server.caseInsensitiveCompare("Liam") != .orderedSame {
+        if !server.isEmpty && !placeholders.contains(server.lowercased()) {
             chosen = server
         } else {
-            chosen = local.isEmpty ? server : local
+            chosen = local.isEmpty ? "" : local
         }
         return chosen.split(separator: " ").first.map(String.init) ?? "there"
     }
