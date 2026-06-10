@@ -373,11 +373,27 @@ struct ProfileView: View {
                             },
                             onCancel: { addMode = nil }
                         )
-                    case .rule, .device:
-                        // Unreachable — these entries no longer exist in
-                        // ProfileAddMenu (no rules backend; devices enroll
-                        // through onboarding pairing).
-                        EmptyView()
+                    case .rule:
+                        // Restored entry. Rules have no backend yet — show an
+                        // honest "coming soon" instead of the old local-only
+                        // form that silently dropped the rule (HP-3/HP-4).
+                        ProfileComingSoonSheet(
+                            icon: "shield",
+                            title: "Rules are coming soon",
+                            message: "Screen-time and routine rules aren't ready yet. For now, use Add Task, the chat, or Lock devices to manage \(displayChild.name)'s phone.",
+                            onClose: { addMode = nil }
+                        )
+                    case .device:
+                        // Restored entry. Real device pairing happens from the
+                        // CHILD's phone during setup (the parent scans/enters the
+                        // kid's code) — the old free-text form enrolled nothing
+                        // (HP-6). Explain the real path honestly.
+                        ProfileComingSoonSheet(
+                            icon: "iphone",
+                            title: "Add a device",
+                            message: "To enroll a new phone or tablet, open Evlin on that device and choose “Child Device,” then enter the pairing code. In-app pairing from here is coming soon.",
+                            onClose: { addMode = nil }
+                        )
                     }
                 }
             }
@@ -1034,6 +1050,52 @@ extension FamilyStore {
 ///   • Add to Calendar → POST /calendar/events
 /// "Add Rule" (no rules backend — HP-3/HP-4) and "Enroll Device" (cosmetic
 /// local row; devices enroll via onboarding pairing — HP-6) were removed.
+/// Honest placeholder shown for menu entries whose backend isn't built yet
+/// (Add Rule, Add Device) — restores the option without faking a save.
+private struct ProfileComingSoonSheet: View {
+    let icon: String
+    let title: String
+    let message: String
+    var onClose: () -> Void = {}
+
+    var body: some View {
+        VStack(spacing: 16) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(Color.evSurfaceContainerLow)
+                Image(systemName: icon)
+                    .font(.system(size: 28, weight: .medium))
+                    .foregroundStyle(Color.evPrimary)
+            }
+            .frame(width: 64, height: 64)
+
+            Text(title)
+                .font(.custom("Manrope", size: 18).weight(.heavy))
+                .foregroundStyle(Color.evPrimary)
+                .multilineTextAlignment(.center)
+
+            Text(message)
+                .font(.custom("Inter", size: 13))
+                .foregroundStyle(Color.evOnSurfaceVariant)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Button(action: onClose) {
+                Text("Got it")
+                    .font(.custom("Manrope", size: 15).weight(.heavy))
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 13)
+                    .background(RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(Color.evPrimary))
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 4)
+        }
+        .padding(24)
+    }
+}
+
 private struct ProfileAddMenu: View {
     let child: ChildProfile
     @Binding var mode: AddBottomMode?
@@ -1051,6 +1113,10 @@ private struct ProfileAddMenu: View {
                   sub: "New chore or homework for \(child.name)"),
             .init(id: .calendar, icon: "calendar", label: "Add to Calendar",
                   sub: "Schedule something on \(child.name)'s day"),
+            .init(id: .rule, icon: "shield", label: "Add Rule",
+                  sub: "New screen-time or routine rule"),
+            .init(id: .device, icon: "iphone", label: "Add Device",
+                  sub: "Pair another phone or tablet"),
         ]
     }
 
