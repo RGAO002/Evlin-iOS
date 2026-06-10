@@ -89,10 +89,13 @@ struct ParentCoParentJoinStep: View {
 struct ParentBackInInstantlyStep: View {
     let apiClient: APIClient
     /// Registers this device as a parent device (POST /family/device/register)
-    /// + loads the FamilyStore. Returns the resolved family/kid display name (or
-    /// nil) so the copy reads "Welcome back to <family>". Injected by the
-    /// coordinator where the FamilyStore + device-info are in scope.
-    let recover: () async -> String?
+    /// + loads the FamilyStore. Returns `.success` with the resolved family
+    /// display name (or nil) so the copy reads "Welcome back to <family>", or
+    /// `.failure` when nothing could actually be recovered (e.g. offline:
+    /// device-register failed AND the family aggregate didn't load) — which
+    /// renders the failed + "Try again" state (P4). Injected by the coordinator
+    /// where the FamilyStore + device-info are in scope.
+    let recover: () async -> Result<String?, Error>
     /// Called when recovery is complete — the coordinator finishes onboarding.
     let onDone: () -> Void
     var onBack: (() -> Void)? = nil
@@ -166,7 +169,16 @@ struct ParentBackInInstantlyStep: View {
     private func runRecovery() async {
         phase = .working
         errorText = nil
-        familyName = await recover()
-        phase = .ready
+        // P4: recovery can FAIL (offline / backend down) — surface it so the
+        // existing phase == .failed "Try again" UI is actually reachable
+        // instead of unconditionally claiming "Welcome back".
+        switch await recover() {
+        case .success(let name):
+            familyName = name
+            phase = .ready
+        case .failure(let error):
+            errorText = error.localizedDescription
+            phase = .failed
+        }
     }
 }

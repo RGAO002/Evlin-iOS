@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 // Onboarding v2 — PARENT-side screens (spec §7.1).
 //
@@ -7,8 +8,8 @@ import SwiftUI
 // Every screen consumes ONLY the tokens + chrome from `OnboardingV2Theme.swift`
 // so it stays pixel-aligned with the prototype. Data is intentionally MOCK
 // (sample name "Morgan", kid "Liam", code "4 8 2 9 1 0", a fake QR/scan box) —
-// the wiring lives in the coordinator, which passes the onContinue / onBack /
-// onEnterCodeInstead closures these views call.
+// the wiring lives in the coordinator, which passes the onContinue / onBack
+// closures these views call.
 //
 // The struct NAMES are load-bearing (the coordinator renders them by name); only
 // the bodies are real now. Step counter convention: the parent v2 primary chain
@@ -421,7 +422,6 @@ struct ParentPairScanStep: View {
     let pairedSucceeded: Bool
     /// Advance to the connected screen (called after a successful pair).
     let onAdvance: () -> Void
-    var onEnterCodeInstead: (() -> Void)? = nil
     var onBack: (() -> Void)? = nil
 
     @State private var code = ""
@@ -484,10 +484,10 @@ struct ParentPairScanStep: View {
                 }
             },
             footer: {
-                if let onEnterCodeInstead {
-                    OnboardingV2SecondaryButton("Enter 6-digit code instead",
-                                                action: onEnterCodeInstead)
-                }
+                // P2: the "Enter 6-digit code instead" affordance is gone — it
+                // routed to the legacy unauthed PairingCodeStep (always 401s on
+                // a v2 authed account, with no Back). The typed-code entry
+                // above IS the 6-digit path.
                 if let onBack { OnboardingV2BackLink(action: onBack) }
             }
         )
@@ -694,11 +694,33 @@ struct ParentSetPasscodeV2Step: View {
                 }
             },
             footer: {
-                OnboardingV2PrimaryButton("Open Screen Time settings", role: .parent, action: onContinue)
+                // P1: the primary deep-links OUT to Settings and does NOT
+                // advance the step — only "I've set it" continues the chain.
+                OnboardingV2PrimaryButton("Open Screen Time settings", role: .parent,
+                                          action: openScreenTimeSettings)
                 OnboardingV2SecondaryButton("I've set it", action: onContinue)
                 if let onBack { OnboardingV2BackLink(action: onBack) }
             }
         )
+    }
+
+    /// Best-effort deep link to Settings → Screen Time. Mirrors the existing
+    /// fallback-chain pattern in `CreateChildAppleIDStep.openFamilySettings`:
+    /// App-Prefs paths are not API-stable, so fall down the chain to plain
+    /// Settings (`openSettingsURLString`) when a candidate doesn't parse.
+    private func openScreenTimeSettings() {
+        let candidates = [
+            "App-prefs:root=SCREEN_TIME",
+            "App-Prefs:root=SCREEN_TIME",
+            "App-Prefs:",
+            UIApplication.openSettingsURLString,
+        ]
+
+        for candidate in candidates {
+            guard let url = URL(string: candidate) else { continue }
+            UIApplication.shared.open(url)
+            return
+        }
     }
 }
 
@@ -724,7 +746,11 @@ struct ParentFirstActionsStep: View {
     /// readiness poll) this first block targets — so "Send block" blocks ONE
     /// real app, not an all-apps reflection.
     var firstBlockApp: ChildReadinessDTO.App? = nil
-    let onContinue: () -> Void
+    /// P5: carries whether the kid's phone CONFIRMED the lock applied
+    /// (`true` only from the .landed payoff; `false` from "Skip for now" after
+    /// a timeout/failure) so the next screen never claims "it landed" when it
+    /// didn't.
+    let onContinue: (_ landed: Bool) -> Void
     var onBack: (() -> Void)? = nil
 
     @State private var phase: FirstActionPhase = .idle
@@ -805,11 +831,13 @@ struct ParentFirstActionsStep: View {
                 if hasResolvedFirstBlockTarget {
                     switch phase {
                     case .landed:
-                        OnboardingV2PrimaryButton("It works — continue", role: .parent, action: onContinue)
+                        OnboardingV2PrimaryButton("It works — continue", role: .parent) {
+                            onContinue(true)
+                        }
                     case .timedOut, .failed:
                         OnboardingV2PrimaryButton("Try again", systemImage: "paperplane.fill",
                                                   role: .parent) { Task { await sendBlock() } }
-                        OnboardingV2SecondaryButton("Skip for now", action: onContinue)
+                        OnboardingV2SecondaryButton("Skip for now") { onContinue(false) }
                     default:
                         OnboardingV2PrimaryButton(
                             phase == .idle ? "Send block" : "Sending…",
@@ -924,11 +952,16 @@ struct ParentTryReflectionStep: View {
     @State private var sent = false
     @State private var busy = false
     @State private var reflectionID: UUID?
+    @State private var errorText: String?   // P6: trigger failures surface inline
 
     private var kid: String {
         let t = kidName.trimmingCharacters(in: .whitespacesAndNewlines)
         return t.isEmpty ? "your kid" : t
     }
+
+    /// P6: without a threaded child device id there is nothing to send to —
+    /// show an explained, disabled state instead of silently faking success.
+    private var hasKidDevice: Bool { childDeviceID != nil }
 
     var body: some View {
         OnboardingV2ScreenContainer(
@@ -942,15 +975,35 @@ struct ParentTryReflectionStep: View {
                 : "A reflection asks \(kid) to stop and think before they keep scrolling — a gentler nudge than a hard block.",
             content: {
                 VStack(alignment: .leading, spacing: Spacing.lg) {
-                    OnboardingV2ChatBubble(.me, text: "Have \(kid) take a quick reflection break")
-                    OnboardingV2ChatBubble(.evlin, text: sent
-                        ? "On its way — watch \(kid)'s screen."
-                        : "I'll send a short reflection to \(kid)'s phone.")
+                    if hasKidDevice {
+                        OnboardingV2ChatBubble(.me, text: "Have \(kid) take a quick reflection break")
+                        OnboardingV2ChatBubble(.evlin, text: sent
+                            ? "On its way — watch \(kid)'s screen."
+                            : "I'll send a short reflection to \(kid)'s phone.")
+                    } else {
+                        // P6: explained state — no device id means the send
+                        // button below is disabled, not a fake success.
+                        OnboardingV2Card {
+                            VStack(alignment: .leading, spacing: Spacing.sm) {
+                                Text("No kid phone connected yet")
+                                    .font(OnboardingV2Theme.Typography.bodyStrong)
+                                    .foregroundStyle(OnboardingV2Theme.Palette.onSurface)
+                                Text("We couldn't find \(kid)'s phone on this family, so a reflection can't be sent right now. You can skip and try it from Home later.")
+                                    .onboardingV2BodyXS()
+                            }
+                        }
+                    }
                     if busy {
                         HStack(spacing: Spacing.md) {
                             ProgressView().controlSize(.small)
                             Text("Sending…").onboardingV2BodyXS()
                         }
+                    }
+                    if let errorText {
+                        Text(errorText)
+                            .font(OnboardingV2Theme.Typography.bodyXS)
+                            .foregroundStyle(OnboardingV2Theme.Palette.error)
+                            .multilineTextAlignment(.leading)
                     }
                 }
             },
@@ -958,11 +1011,13 @@ struct ParentTryReflectionStep: View {
                 if sent {
                     OnboardingV2PrimaryButton("Done", role: .parent, action: onContinue)
                 } else {
-                    OnboardingV2PrimaryButton(busy ? "Sending…" : "Send a reflection",
-                                              systemImage: "sparkles", role: .parent) {
+                    OnboardingV2PrimaryButton(
+                        busy ? "Sending…" : (errorText == nil ? "Send a reflection" : "Try again"),
+                        systemImage: "sparkles", role: .parent
+                    ) {
                         Task { await sendReflection() }
                     }
-                    .disabled(busy)
+                    .disabled(busy || !hasKidDevice)
                     OnboardingV2SecondaryButton("Skip", action: onContinue)
                 }
                 if let onBack { OnboardingV2BackLink(action: onBack) }
@@ -979,16 +1034,24 @@ struct ParentTryReflectionStep: View {
 
     @MainActor
     private func sendReflection() async {
-        guard let childDeviceID else { onContinue(); return }
+        // P6: no silent onContinue() here — a missing device id renders the
+        // explained/disabled state above instead of faking a sent reflection.
+        guard let childDeviceID else { return }
         busy = true
+        errorText = nil
         defer { busy = false }
-        if let rid = try? await apiClient.triggerOnboardingReflection(
-            childDeviceID: childDeviceID,
-            reason: "Let's try Reflection together",
-            onboardingCapSeconds: 180
-        ) {
+        do {
+            let rid = try await apiClient.triggerOnboardingReflection(
+                childDeviceID: childDeviceID,
+                reason: "Let's try Reflection together",
+                onboardingCapSeconds: 180
+            )
             reflectionID = rid
             sent = true
+        } catch {
+            // P6: mirror ParentFirstActionsStep's failed treatment — honest
+            // inline error + the button becomes "Try again".
+            errorText = "Couldn't send the reflection. Check your connection and try again."
         }
     }
 }
@@ -997,6 +1060,11 @@ struct ParentTryReflectionStep: View {
 
 /// Mockup M[16].parent — "Sent ✓": a receipt card for the landed block, with an
 /// "End now" affordance and the "you'll get a ping" footnote.
+///
+/// P5: `landed` is threaded from ParentFirstActionsStep via the coordinator —
+/// `true` only when the kid's phone CONFIRMED the lock applied. When the
+/// parent arrives via "Skip for now" (timed out / failed) the copy honestly
+/// says the block is queued instead of claiming "it landed".
 struct ParentItWorksStep: View {
     let apiClient: APIClient
     var familyID: UUID? = nil
@@ -1004,11 +1072,14 @@ struct ParentItWorksStep: View {
     var kidName: String = ""
     var blockAppName: String = "the app"
     var firstBlockApp: ChildReadinessDTO.App? = nil
+    /// P5: did the kid's phone confirm the first block applied?
+    var landed: Bool = true
     let onContinue: () -> Void
     var onBack: (() -> Void)? = nil
 
     @State private var ending = false
-    @State private var ended = false
+    @State private var ended = false        // P7: confirmed unblock ack only
+    @State private var endQueued = false    // P7: ack timed out — command still queued
     @State private var endFailed = false
 
     private var kid: String {
@@ -1018,8 +1089,19 @@ struct ParentItWorksStep: View {
 
     private var endButtonTitle: String {
         if ended { return "Ended" }
+        if endQueued { return "Unblock queued" }
         if ending { return "Ending…" }
         return "End now"
+    }
+
+    /// P5/P7 honest status line: confirmed end → "Ended"; un-acked end →
+    /// "queued"; landed block → the live countdown copy; un-landed block →
+    /// "applies on next check-in".
+    private var receiptStatusText: String {
+        if ended { return "Ended on \(kid)'s phone" }
+        if endQueued { return "Unblock queued — ends on their next check-in" }
+        if landed { return "Unblocks in a few minutes · you can end it anytime" }
+        return "Applies when their phone next checks in · auto-releases shortly after"
     }
 
     var body: some View {
@@ -1028,8 +1110,10 @@ struct ParentItWorksStep: View {
             phase: "5 · Parent finish",
             stepIndex: 11,
             stepTotal: parentTotal,
-            title: "Sent",
-            subtitle: "\(kid)'s \(blockAppName) is blocked for 5 minutes. Check their phone — it landed.",
+            title: landed ? "Sent" : "Queued",
+            subtitle: landed
+                ? "\(kid)'s \(blockAppName) is blocked for 5 minutes. Check their phone — it landed."
+                : "Block queued — it applies when \(kid)'s phone next checks in. It auto-releases so it can't get stuck.",
             dotsCount: parentTotal,
             dotsCurrent: 10,
             content: {
@@ -1038,14 +1122,15 @@ struct ParentItWorksStep: View {
                         VStack(alignment: .leading, spacing: OnboardingV2Theme.Metrics.ctaRowSpacing) {
                             OnboardingV2AppIcon(letter: String(blockAppName.prefix(1)).uppercased(), fill: .black)
                             VStack(alignment: .leading, spacing: 2) {
-                                Text("\(blockAppName) · blocked").onboardingV2BodyStrong()
-                                Text(ended ? "Ended on \(kid)'s phone" : "Unblocks in a few minutes · you can end it anytime")
+                                Text(landed ? "\(blockAppName) · blocked" : "\(blockAppName) · block queued")
+                                    .onboardingV2BodyStrong()
+                                Text(receiptStatusText)
                                     .onboardingV2BodyXS()
                             }
                             OnboardingV2SecondaryButton(endButtonTitle) {
                                 Task { await endNow() }
                             }
-                            .disabled(ending || ended)
+                            .disabled(ending || ended || endQueued)
                                 .padding(.top, Spacing.sm)
                             if endFailed {
                                 Text("Couldn't end it yet. Try again or wait for the short timer.")
@@ -1097,9 +1182,11 @@ struct ParentItWorksStep: View {
                 try await Task.sleep(nanoseconds: 3_000_000_000)
                 waited += 3
             }
-            // The child may be asleep; the command is still queued, so reflect
-            // that the button did something instead of looking inert.
-            ended = true
+            // P7: the ack never arrived inside the budget — the child may be
+            // asleep and the command is still QUEUED. Don't claim "Ended on
+            // <kid>'s phone"; show the honest "queued — ends on next check-in"
+            // state instead (the button still reflects that it did something).
+            endQueued = true
         } catch {
             endFailed = true
         }

@@ -87,6 +87,11 @@ struct OnboardingCoordinator: View {
     /// P2: the exact app (from the kid's lockable catalog) the parent's first
     /// block targets — resolved by the readiness poll on parentWaitingForKid.
     @State private var firstBlockApp: ChildReadinessDTO.App? = nil
+    /// P5: did the kid's phone CONFIRM the first block applied? Set by
+    /// parentFirstActions' onContinue (true only from the .landed payoff;
+    /// false via "Skip for now" after a timeout/failure) and read by
+    /// parentItWorks so it never claims "it landed" when it didn't.
+    @State private var firstBlockLanded = false
 
     // Onboarding v2 (scaffold): when true, `modeSelect` routes into the v2
     // screen sequence (spec §7) instead of the legacy pairing-first flow.
@@ -245,6 +250,7 @@ struct OnboardingCoordinator: View {
                     childPairingCode = ""
                     childDeviceID = nil
                     firstBlockApp = nil
+                    firstBlockLanded = false
                 }
             } label: {
                 Image(systemName: "ladybug.fill")
@@ -441,11 +447,20 @@ struct OnboardingCoordinator: View {
                 // protection on one page, then moves straight to lockable
                 // target capture. Legacy still keeps its separate deletion
                 // step.
-                GrantPermissionStep(
-                    childDeviceID: childDeviceID ?? OnboardingDemoPlaceholders.childDeviceUUID,
-                    protectionMode: protectionMode
-                ) {
-                    step = useV2Flow ? .childLockableHub : .childDeletionProtection
+                //
+                // KID-4: the demo placeholder UUID fallback is DEBUG-only.
+                // In Release a nil childDeviceID means family create/pair never
+                // completed — never grant permissions against a fake device id;
+                // render an inline error with a way back instead.
+                if let grantChildDeviceID = grantPermissionChildDeviceID {
+                    GrantPermissionStep(
+                        childDeviceID: grantChildDeviceID,
+                        protectionMode: protectionMode
+                    ) {
+                        step = useV2Flow ? .childLockableHub : .childDeletionProtection
+                    }
+                } else {
+                    missingChildDeviceFallback
                 }
 
             case .childDeletionProtection:
@@ -544,13 +559,16 @@ struct OnboardingCoordinator: View {
                 )
 
             case .parentPairScan:
+                // P2: no "Enter 6-digit code instead" routing — it sent the
+                // parent to the legacy unauthed PairingCodeStep (always 401s
+                // for a v2 authed account, with no Back). The pair-scan step's
+                // own typed-code field IS the 6-digit path.
                 ParentPairScanStep(
                     // Scan is a placeholder; the typed-code path is the real
                     // one. Both submit POST /family/pair via onPaired(code:).
                     onPaired: { code in await pairWithKidCode(code) },
                     pairedSucceeded: pairedChildDeviceID != nil,
                     onAdvance: { step = .parentConnected },
-                    onEnterCodeInstead: { step = .parentPairingCode },
                     onBack: { step = .parentNewOrJoin }
                 )
 
@@ -594,7 +612,13 @@ struct OnboardingCoordinator: View {
                     childDeviceID: pairedChildDeviceID ?? childDeviceID,
                     kidName: kidName,
                     firstBlockApp: firstBlockApp,
-                    onContinue: { step = .parentItWorks },
+                    // P5: thread whether the kid's phone confirmed the lock
+                    // (true from the .landed payoff; false via "Skip for now")
+                    // so parentItWorks renders honest queued copy on a skip.
+                    onContinue: { landed in
+                        firstBlockLanded = landed
+                        step = .parentItWorks
+                    },
                     onBack: { step = .parentWaitingForKid }
                 )
 
@@ -606,6 +630,7 @@ struct OnboardingCoordinator: View {
                     kidName: kidName,
                     blockAppName: firstBlockApp?.display_name ?? "the app",
                     firstBlockApp: firstBlockApp,
+                    landed: firstBlockLanded,
                     onContinue: { step = .parentTryReflection },
                     onBack: { step = .parentFirstActions }
                 )
@@ -677,6 +702,53 @@ struct OnboardingCoordinator: View {
             }
         }
         .animation(.easeInOut(duration: 0.2), value: step)
+    }
+
+    /// KID-4: the child device id fed to GrantPermissionStep. The demo
+    /// placeholder UUID is a DEBUG convenience only (single-device tap-through);
+    /// Release returns nil when no real device id exists so the coordinator can
+    /// show an inline error instead of granting against a fake UUID.
+    private var grantPermissionChildDeviceID: UUID? {
+        #if DEBUG
+        return childDeviceID ?? OnboardingDemoPlaceholders.childDeviceUUID
+        #else
+        return childDeviceID
+        #endif
+    }
+
+    /// KID-4 (Release-reachable): rendered when childGrantPermission is hit
+    /// without a real child device id. Explains the broken state and routes the
+    /// kid back to re-establish the device instead of faking a grant.
+    private var missingChildDeviceFallback: some View {
+        VStack(spacing: Spacing.lg) {
+            Spacer()
+            Text("Something went wrong")
+                .font(.evHeadlineLarge)
+                .foregroundStyle(Color.evPrimary)
+                .multilineTextAlignment(.center)
+            Text("This phone isn't registered with a family yet, so permissions can't be granted. Go back and pair again.")
+                .font(.evBodyMedium)
+                .foregroundStyle(Color.evOnSurfaceVariant)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, Spacing.xl)
+            Spacer()
+            Button {
+                step = useV2Flow ? .childShowCode : .childEnterPairingCode
+            } label: {
+                Text("Go back")
+                    .font(.evLabelLarge)
+                    .frame(maxWidth: .infinity)
+            }
+            .foregroundStyle(Color.evOnPrimary)
+            .padding(.vertical, Spacing.lg)
+            .background(
+                RoundedRectangle(cornerRadius: CornerRadius.md)
+                    .fill(Color.evPrimary)
+            )
+        }
+        .padding(Spacing.xl)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.evSurface)
     }
 
     /// Submits the kid's 6-digit code to POST /family/pair (authed), threads the
@@ -822,14 +894,26 @@ struct OnboardingCoordinator: View {
         }
     }
 
+    /// P4 — recovery failure surfaced to `ParentBackInInstantlyStep` so its
+    /// existing phase == .failed + "Try again" UI is reachable (e.g. offline).
+    private enum FamilyRecoveryError: LocalizedError {
+        case nothingRecovered
+        var errorDescription: String? {
+            "We couldn't reconnect this device. Check your connection and try again."
+        }
+    }
+
     /// Plan 8 — returning-parent / approved-co-parent recovery. Registers THIS
     /// device as a parent device on the already-existing family via
     /// POST /family/device/register (authed, idempotent on X-Device-Id), loads
     /// the FamilyStore, persists the same UserDefaults keys the rest of the app
     /// reads, and resolves a family display name for the welcome-back copy.
-    /// Returns the family name (or nil). Does NOT create a new family or pair a kid.
+    /// Returns `.success(familyName)` (name may be nil), or `.failure` (P4)
+    /// when nothing was actually recovered: device-register failed AND the
+    /// family aggregate failed to load with no cached snapshot — the offline
+    /// case. Does NOT create a new family or pair a kid.
     @MainActor
-    private func recoverExistingFamily() async -> String? {
+    private func recoverExistingFamily() async -> Result<String?, Error> {
         // Register this device against the bound family (idempotent upsert).
         let registered = await registerParentDevice()
         if let r = registered {
@@ -847,7 +931,16 @@ struct OnboardingCoordinator: View {
 
         // Load the family aggregate so Home renders immediately.
         await familyStore.load()
-        return familyStore.family?.display_name
+
+        // P4: recovery FAILED when the device didn't register AND the family
+        // aggregate didn't load (no cached snapshot either) — nothing was
+        // recovered, so the welcome-back screen must show "Try again" instead
+        // of a false "You're back in.".
+        if registered == nil, familyStore.family == nil,
+           case .failed = familyStore.state {
+            return .failure(FamilyRecoveryError.nothingRecovered)
+        }
+        return .success(familyStore.family?.display_name)
     }
 
     /// POST /family/device/register (authed) — register this device as a parent
