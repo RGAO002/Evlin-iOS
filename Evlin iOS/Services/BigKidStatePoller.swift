@@ -10,7 +10,7 @@ extension Notification.Name {
     static let bigKidStateInvalidated = Notification.Name("bigKidStateInvalidated")
 }
 
-/// Polls `/child/state` every 20s while app is foregrounded; refreshes
+/// Polls `/child/state` every 10s while app is foregrounded; refreshes
 /// immediately on `scenePhase == .active` transitions and on the
 /// `bigKidStateInvalidated` notification. Hands snapshots to
 /// `BigKidState` via the `apply(_:)` method.
@@ -35,11 +35,13 @@ final class BigKidStatePoller: ObservableObject {
     private let reflectionLockApplier = ReflectionLockApplier(
         scheduler: LockScheduler(activityScheduler: DeviceActivityCenterScheduler()))
 
-    /// Polling cadence. 20s is short enough that a kid sees a reflection
-    /// landing within "a few seconds" without explicit triggering, while
-    /// still being polite to the backend. The notification path covers
-    /// the same-device parent→kid mode-toggle case more tightly.
-    private static let pollIntervalNanoseconds: UInt64 = 20_000_000_000
+    /// Polling cadence. 10s keeps a foregrounded kid device's worst-case
+    /// reflection-delivery latency under ten seconds without explicit
+    /// triggering, while still being polite to the backend. The
+    /// `bigKidStateInvalidated` notification path and the scene-active
+    /// `refreshNow()` in BigKidRootView cover the same-device
+    /// parent→kid mode-toggle and foreground-return cases more tightly.
+    private static let pollIntervalNanoseconds: UInt64 = 10_000_000_000
 
     init(client: BigKidAPIClient, state: BigKidState) {
         self.client = client

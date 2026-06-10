@@ -36,6 +36,12 @@ struct ChildReadyStep: View {
             Spacer()
 
             Button {
+                // ORDER MATTERS: persist `evlin.childDeviceID` / `evlin.familyID`
+                // STRICTLY BEFORE flipping `onboardingComplete`. The app-level
+                // `.onChange(of: onboardingComplete)` in Evlin_iOSApp calls
+                // `startPollerIfPaired()`, which reads those UserDefaults keys
+                // synchronously — flipping the flag first would race it against
+                // stale/missing pairing keys and leave the CommandPoller stopped.
                 persistPairedIdentifiers()
                 onboardingComplete = true
                 onEnter()

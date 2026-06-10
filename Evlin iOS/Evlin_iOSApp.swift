@@ -29,6 +29,13 @@ struct Evlin_iOSApp: App {
     /// `evlin.childDeviceID` set, so the guard inside is moot.
     @AppStorage("appMode") private var appMode: String = ""
 
+    /// Mirrors the key ChildReadyStep / DoneStep / OnboardingCoordinator write
+    /// when onboarding finishes. Without observing this, a kid device that
+    /// completes v2 onboarding sits foregrounded with CommandPoller stopped —
+    /// `startPollerIfPaired()` was only re-evaluated on .onAppear, scenePhase,
+    /// and appMode changes, none of which fire at onboarding completion.
+    @AppStorage("onboardingComplete") private var onboardingComplete = false
+
     init() {
         // One-shot migration from legacy evlin.activeLocks store.
         // Pre-launch, so safe to drop legacy data. See plan Phase 11.
@@ -80,6 +87,14 @@ struct Evlin_iOSApp: App {
                     // Toggling P↔K starts/stops the poller — see the
                     // doc on startPollerIfPaired for why.
                     startPollerIfPaired()
+                }
+                .onChange(of: onboardingComplete) { _, complete in
+                    // Kid finishes v2 onboarding → ChildReadyStep has already
+                    // persisted `evlin.childDeviceID` (strictly before flipping
+                    // this flag), so the guard inside reads fresh keys and the
+                    // CommandPoller starts immediately — no background+reopen
+                    // round-trip required for parent commands to land.
+                    if complete { startPollerIfPaired() }
                 }
                 .onReceive(NotificationCenter.default.publisher(for: .bigKidStateInvalidated)) { _ in
                     // Demo bootstrap (or parent approve) can rewrite `evlin.childDeviceID` while

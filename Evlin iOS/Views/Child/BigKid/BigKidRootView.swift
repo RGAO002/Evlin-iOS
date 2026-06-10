@@ -136,6 +136,7 @@ struct BigKidRootView: View {
             // fetch happens. Calling refreshNow here is idempotent and
             // costs one /child/state request per appearance.
             Task { await poller.refreshNow() }
+            ensureCommandPollerRunning()
         }
         .onDisappear { poller.stop() }
         .onChange(of: scenePhase) { _, new in
@@ -276,6 +277,26 @@ struct BigKidRootView: View {
                 .padding()
             }
         }
+    }
+
+    /// Defensive backstop for command delivery: whenever the big-kid root is
+    /// on screen, the app-level `CommandPoller` MUST be running so parent
+    /// block/shield commands land on this foregrounded device. The app-level
+    /// `startPollerIfPaired()` (Evlin_iOSApp) normally handles this, but its
+    /// triggers (onAppear / scenePhase / appMode / onboardingComplete) don't
+    /// cover every path into this view (e.g. coordinator state changes that
+    /// rebuild ContentView without a lifecycle event). `start(deviceID:apiClient:)`
+    /// is documented "Safe to call repeatedly" — it resets the 5s timer and
+    /// fires one immediate poll, so calling it on every appearance is cheap.
+    /// Mirrors the app-level gate: only start with a valid paired UUID while
+    /// in child mode (never lock a parent device).
+    private func ensureCommandPollerRunning() {
+        guard let deviceID = UserDefaults.standard
+                .string(forKey: CommandPoller.childDeviceIDDefaultsKey)
+                .flatMap(UUID.init(uuidString:))
+        else { return }
+        guard UserDefaults.standard.string(forKey: "appMode") == "child" else { return }
+        CommandPoller.shared.start(deviceID: deviceID, apiClient: apiClient)
     }
 
     /// Optimistically mark a reflection sub-step as completed in the local
