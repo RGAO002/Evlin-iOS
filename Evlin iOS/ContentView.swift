@@ -361,30 +361,15 @@ extension View {
                     }
                 )
             case .notifications:
-                NotificationPanel(
+                FeedNotificationPanel(
                     onClose: {
                         if !path.wrappedValue.isEmpty { path.wrappedValue.removeLast() }
                     },
-                    notifications: notifications,
-                    onOpenTask: { childId, taskId in
-                        guard let child = children.first(where: { $0.id == childId }) else { return }
-                        path.wrappedValue.append(
-                            AppRoute.taskDetail(child: child, taskId: taskId)
-                        )
-                    },
-                    onOpenReflection: { childId, reflectionId in
-                        guard let child = children.first(where: { $0.id == childId }) else { return }
-                        // Just deep-link — do NOT auto-ack the nudge
-                        // here. The parent might be peeking without
-                        // deciding yet. Both the completion and the
-                        // nudge notifications persist until the parent
-                        // actually approves or requests a redo on
-                        // Step 3 (handlers there clear the summary /
-                        // call applyParentRedoLocally, which in turn
-                        // wipes the lastNudgeAt + ack state).
-                        path.wrappedValue.append(
-                            AppRoute.profileReflection(child, reflectionId: reflectionId)
-                        )
+                    onOpenDeepLink: { _ in
+                        // v1: tapping marks the row opened (in the panel) and
+                        // returns to Home. Full deep-link routing
+                        // (deviceDetail / settings) is a follow-up.
+                        if !path.wrappedValue.isEmpty { path.wrappedValue.removeLast() }
                     }
                 )
             case .taskDetail(let child, let taskId):

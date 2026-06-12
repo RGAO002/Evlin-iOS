@@ -4,11 +4,18 @@ import SwiftUI
 /// backend notification feed in the existing panel style and routes taps to the
 /// app's deep links. Read/dismiss state is written back to the backend.
 struct FeedNotificationPanel: View {
-    @ObservedObject var feed: NotificationFeedClient
+    @StateObject private var feed: NotificationFeedClient
     var onClose: () -> Void
     /// Called with the event's `deep_link` dict (e.g. {"route":"deviceDetail",
     /// "device_id":"…"}). The caller maps it onto AppRoute.
     var onOpenDeepLink: ([String: String]) -> Void
+
+    init(onClose: @escaping () -> Void,
+         onOpenDeepLink: @escaping ([String: String]) -> Void) {
+        _feed = StateObject(wrappedValue: NotificationFeedClient())
+        self.onClose = onClose
+        self.onOpenDeepLink = onOpenDeepLink
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -16,7 +23,10 @@ struct FeedNotificationPanel: View {
             content
         }
         .background(Color(.systemGroupedBackground).ignoresSafeArea())
-        .task { await feed.refresh() }
+        .task {
+            await feed.refresh()
+            feed.markOpened()  // opening the panel clears the bell's red dot
+        }
         .refreshable { await feed.refresh() }
     }
 
