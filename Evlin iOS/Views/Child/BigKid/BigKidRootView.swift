@@ -14,6 +14,7 @@ struct BigKidRootView: View {
     @State private var state: BigKidState
     @StateObject private var client: BigKidAPIClient
     @StateObject private var poller: BigKidStatePoller
+    @StateObject private var notifMonitor: NotificationStatusMonitor
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage("evlin.familyID") private var familyID: String = ""
 
@@ -36,6 +37,8 @@ struct BigKidRootView: View {
         _client = StateObject(wrappedValue: client)
         _state = State(initialValue: initialState)
         _poller = StateObject(wrappedValue: poller)
+        _notifMonitor = StateObject(wrappedValue: NotificationStatusMonitor(
+            childDeviceID: childId, baseURL: baseURL.absoluteString))
 
         // Mirror baseURL + childId into the App Group so the
         // EvlinDeviceActivityMonitor extension can hit /child/time-consumption
@@ -128,6 +131,15 @@ struct BigKidRootView: View {
         .environment(state)
         .environmentObject(client)
         .environmentObject(poller)
+        .safeAreaInset(edge: .top) {
+            if notifMonitor.notificationsOff {
+                NotificationsOffBanner()
+            }
+        }
+        .task { notifMonitor.refresh() }
+        .onChange(of: scenePhase) { _, newPhase in
+            if newPhase == .active { notifMonitor.refresh() }
+        }
         .onAppear {
             poller.start()
             // Belt and suspenders: explicitly refresh on every appearance.
