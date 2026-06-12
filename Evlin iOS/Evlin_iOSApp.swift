@@ -188,7 +188,7 @@ struct Evlin_iOSApp: App {
 /// provisioning profile. That's a device-signing step; the code and the
 /// `UIBackgroundModes: remote-notification` Info.plist key compile and run on
 /// the simulator without it.
-final class AppDelegate: NSObject, UIApplicationDelegate {
+final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
     /// UserDefaults key for the most-recent hex-encoded APNs device token.
     /// Cached unconditionally on `didRegister...` so a token that arrives
     /// before pairing isn't lost — `uploadCachedAPNsTokenIfPossible()` (and
@@ -223,7 +223,31 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         // didRegister.../didFailToRegister... below. Safe to call every
         // launch; iOS coalesces and returns the cached token quickly.
         UIApplication.shared.registerForRemoteNotifications()
+        UNUserNotificationCenter.current().delegate = self
         return true
+    }
+
+    // MARK: - UNUserNotificationCenterDelegate (notif spec §1.5 / Phase 3)
+
+    /// Present Evlin alerts as banners even while the app is foregrounded so a
+    /// lock / receipt notification isn't silently swallowed.
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .list, .sound])
+    }
+
+    /// A tapped notification brings the app forward; surface the bell. (Per-
+    /// event deep-link routing is a follow-up.)
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        NotificationCenter.default.post(name: .evlinOpenNotifications, object: nil)
+        completionHandler()
     }
 
     func application(
@@ -419,4 +443,8 @@ enum EvlinShieldIconPublisher {
         defaults.set(data, forKey: dataKey)
         defaults.set(version, forKey: versionKey)
     }
+}
+
+extension Notification.Name {
+    static let evlinOpenNotifications = Notification.Name("evlin.openNotifications")
 }
