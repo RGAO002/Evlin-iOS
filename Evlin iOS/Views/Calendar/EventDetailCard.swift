@@ -264,10 +264,21 @@ struct EventDetailCard: View {
                 ))
                 .evlinFormInput()
             }
-            // NOTE: no reminder field — no reminder exists on the backend
-            // event model and nothing is ever scheduled, so rendering a
-            // toggle would be decorative (CAL-2). Re-add alongside a real
-            // backend reminder field.
+            evField("REMINDER") {
+                HStack {
+                    Text("30 minutes before")
+                        .font(.custom("Inter", size: 14))
+                        .foregroundStyle(Color.evOnSurface)
+                    Spacer()
+                    Toggle("", isOn: Binding(
+                        get: { draft.reminderMinutesBefore != nil },
+                        set: { draft.reminderMinutesBefore = $0 ? 30 : nil }
+                    ))
+                    .labelsHidden()
+                    .tint(Color.evPrimary)
+                }
+                .evlinFormInput()
+            }
         }
         .padding(.vertical, 4)
         // Tiny horizontal breathing room for shape-stroke pills sitting

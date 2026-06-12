@@ -39,6 +39,10 @@ struct CalendarEvent: Identifiable, Hashable {
     /// timezone. Updates must convert wall-clock times back to UTC in THIS
     /// timezone or editing from another device timezone shifts the event.
     var timezone: String? = nil
+    /// Minutes-before reminder. nil = no reminder; 30 = "30 minutes before".
+    /// Drives the REMINDER toggle in EventDetailCard and round-trips to the
+    /// backend `reminder_minutes_before` (which fires the calendar_reminder push).
+    var reminderMinutesBefore: Int? = nil
 }
 
 struct AllDayItem: Identifiable, Hashable {

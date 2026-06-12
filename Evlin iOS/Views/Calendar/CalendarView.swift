@@ -166,6 +166,7 @@ struct CalendarView: View {
                 location: ev.location, note: ev.note, all_day: false,
                 start_at: startISO, end_at: endISO, timezone: tz,
                 recurrence_type: ev.recurrence, recurrence_until: nil,
+                reminder_minutes_before: ev.reminderMinutesBefore,
                 participants: parts)
             Task { await store.create(body, refetchFor: target) }
         } else if let backendID = ev.backendID {
@@ -174,6 +175,7 @@ struct CalendarView: View {
                 location: ev.location, note: ev.note, all_day: false,
                 start_at: startISO, end_at: endISO, timezone: tz,
                 recurrence_type: ev.recurrence, recurrence_until: nil,
+                reminder_minutes_before: ev.reminderMinutesBefore,
                 participants: parts)
             Task { await store.update(id: backendID, body, refetchFor: target) }
         }

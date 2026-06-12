@@ -55,6 +55,7 @@ struct CalendarOccurrenceDTO: Codable, Sendable, Equatable, Identifiable {
     let occurrence_start: String      // ISO8601 UTC instant of THIS occurrence
     let occurrence_end: String
     let participants: [CalendarEventParticipantDTO]
+    let reminder_minutes_before: Int?   // nil = none; 30 = "30 minutes before"
 
     /// SwiftUI identity: one base event can fan out to many occurrences in a
     /// window, so combine the event id with the occurrence start to stay unique.
@@ -66,6 +67,7 @@ struct CalendarOccurrenceDTO: Codable, Sendable, Equatable, Identifiable {
         case event_id, title, emoji, icon, category, location, note
         case all_day, timezone, recurrence_type
         case occurrence_start, occurrence_end, participants
+        case reminder_minutes_before
     }
 
     init(from decoder: Decoder) throws {
@@ -84,6 +86,7 @@ struct CalendarOccurrenceDTO: Codable, Sendable, Equatable, Identifiable {
         occurrence_start = try c.decode(String.self, forKey: .occurrence_start)
         occurrence_end = try c.decode(String.self, forKey: .occurrence_end)
         participants = try c.decodeIfPresent([CalendarEventParticipantDTO].self, forKey: .participants) ?? []
+        reminder_minutes_before = try c.decodeIfPresent(Int.self, forKey: .reminder_minutes_before)
     }
 }
 
@@ -169,6 +172,7 @@ struct CalendarEventCreateBody: Codable, Sendable {
     var timezone: String
     var recurrence_type: String
     var recurrence_until: String?
+    var reminder_minutes_before: Int? = nil
     var participants: [CalendarEventParticipantDTO]
 }
 
@@ -186,7 +190,36 @@ struct CalendarEventUpdateBody: Codable, Sendable {
     var timezone: String?
     var recurrence_type: String?
     var recurrence_until: String?
+    var reminder_minutes_before: Int? = nil
     var participants: [CalendarEventParticipantDTO]?
+
+    enum CodingKeys: String, CodingKey {
+        case title, emoji, category, location, note, all_day
+        case start_at, end_at, timezone, recurrence_type, recurrence_until
+        case reminder_minutes_before, participants
+    }
+
+    /// Every field but `reminder_minutes_before` uses omit-to-leave-untouched
+    /// (encodeIfPresent). The reminder is ALWAYS sent — including an explicit
+    /// `null` — so that toggling it OFF actually clears it on the backend
+    /// (the synthesized encoder would otherwise drop a nil and the reminder
+    /// would silently persist). Pairs with the backend's `model_fields_set` gate.
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encodeIfPresent(title, forKey: .title)
+        try c.encodeIfPresent(emoji, forKey: .emoji)
+        try c.encodeIfPresent(category, forKey: .category)
+        try c.encodeIfPresent(location, forKey: .location)
+        try c.encodeIfPresent(note, forKey: .note)
+        try c.encodeIfPresent(all_day, forKey: .all_day)
+        try c.encodeIfPresent(start_at, forKey: .start_at)
+        try c.encodeIfPresent(end_at, forKey: .end_at)
+        try c.encodeIfPresent(timezone, forKey: .timezone)
+        try c.encodeIfPresent(recurrence_type, forKey: .recurrence_type)
+        try c.encodeIfPresent(recurrence_until, forKey: .recurrence_until)
+        try c.encode(reminder_minutes_before, forKey: .reminder_minutes_before)
+        try c.encodeIfPresent(participants, forKey: .participants)
+    }
 }
 
 // MARK: - Time conversion at the wire boundary

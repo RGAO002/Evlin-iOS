@@ -155,6 +155,7 @@ final class CalendarStore: ObservableObject {
                 // them (see CalendarEvent doc comments).
                 ev.participantCols = cols
                 ev.timezone = occ.timezone
+                ev.reminderMinutesBefore = occ.reminder_minutes_before
                 out.append(ev)
             }
         }
