@@ -1116,12 +1116,12 @@ class ChatViewModel: ObservableObject {
     }
 
     func requestUnlock(_ target: ReceiptUnlockTarget) {
-        Task { [weak self] in
-            let result = await ActionExecutor.shared.executeReceiptUnlock(target)
-            await MainActor.run {
-                self?.appendReceiptUnlockResult(result, requestedTarget: target)
-            }
-        }
+        resendWithPhrase(Self.receiptUnlockPhrase(for: target))
+    }
+
+    nonisolated static func receiptUnlockPhrase(for target: ReceiptUnlockTarget) -> String {
+        let name = target.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return "unshield \(name)"
     }
 
     /// Task 11 — "Block instead" on a receipt. Escalates the still-covered
@@ -1145,7 +1145,12 @@ class ChatViewModel: ObservableObject {
 
         switch result {
         case .confirmedExact(let verb, let displayName, let effectiveState):
-            message.receiptState = .confirmedExact(verb: verb, displayName: displayName, unlocksAt: nil)
+            message.receiptState = .confirmedExact(
+                verb: verb,
+                displayName: displayName,
+                unlocksAt: nil,
+                artworkURL: nil
+            )
             message.receiptEffectiveState = effectiveState
         case .confirmedFallback(let verb, let displayName, let category, let origRequest, let effectiveState):
             message.receiptState = .confirmedFallback(
@@ -1185,6 +1190,34 @@ class ChatViewModel: ObservableObject {
 
     // MARK: - Ack-status polling (P1-1 fix)
 
+    /// Re-arm ack polling for any receipt still stuck in a non-confirmed "we
+    /// gave up waiting" state (`.pending` / `.pickedUp` / `.kidNotResponding`).
+    ///
+    /// The kid frequently acks LATE — e.g. it was backgrounded and only finished
+    /// the ack on its next foreground poll, minutes after `startAckPoll`'s 90s
+    /// deadline. The original poll has long since ended, so without this the
+    /// receipt card spins forever even though the backend is already
+    /// `confirmed`. Called when chat (re)appears and on push / state-invalidation
+    /// wakes; an already-acked command resolves on the first 2s tick.
+    func reconcilePendingReceipts() {
+        for message in messages {
+            guard let commandID = message.commandID,
+                  let state = message.receiptState else { continue }
+            switch state {
+            case .pending, .pickedUp, .kidNotResponding:
+                activePolls[commandID]?.cancel()
+                startAckPoll(
+                    commandID: commandID,
+                    messageID: message.id,
+                    targetDisplay: nil,
+                    expiresAt: nil
+                )
+            default:
+                break
+            }
+        }
+    }
+
     /// Polls /parent/ack-status for a queued command and mutates the agent
     /// message's receiptState when the child acks. Times out at 30 s.
     private func startAckPoll(commandID: UUID, messageID: UUID, targetDisplay: String?, expiresAt: Date?) {
@@ -1199,6 +1232,7 @@ class ChatViewModel: ObservableObject {
             // queued server-side regardless of when we stop polling.
             let deadline = Date().addingTimeInterval(90)
             var tickCount = 0
+            var sawKidPickup = false
             while Date() < deadline, !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
                 guard let self else { print("[AckPoll] self gone cmd=\(commandID)"); return }
@@ -1210,11 +1244,21 @@ class ChatViewModel: ObservableObject {
                     print("[AckPoll] tick=\(tickCount) cmd=\(commandID) fetch error: \(error)")
                     continue
                 }
-                print("[AckPoll] tick=\(tickCount) cmd=\(commandID) status=\(resp.status)")
+                print("[AckPoll] tick=\(tickCount) cmd=\(commandID) status=\(resp.status) delivery=\(resp.deliveryState ?? "nil")")
 
                 let done = await MainActor.run { () -> Bool in
                     switch resp.status {
                     case "pending", "queued", "in_flight":
+                        switch resp.deliveryState {
+                        case "picked_up":
+                            sawKidPickup = true
+                            self.applyReceipt(.pickedUp, effective: nil, messageID: messageID)
+                        case "delayed":
+                            self.applyReceipt(.kidNotResponding, effective: nil, messageID: messageID)
+                            return true
+                        default:
+                            break
+                        }
                         return false
                     case "confirmed", "confirmed_exact":
                         let verb = AckVerb(rawValue: resp.verb ?? "shield") ?? .shield
@@ -1231,7 +1275,12 @@ class ChatViewModel: ObservableObject {
                             .flatMap { ISO8601DateFormatter().date(from: $0) }
                             ?? expiresAt
                         self.applyReceipt(
-                            .confirmedExact(verb: verb, displayName: name, unlocksAt: actualUnlocksAt),
+                            .confirmedExact(
+                                verb: verb,
+                                displayName: name,
+                                unlocksAt: actualUnlocksAt,
+                                artworkURL: resp.artworkURL
+                            ),
                             effective: resp.effectiveState,
                             messageID: messageID
                         )
@@ -1310,7 +1359,7 @@ class ChatViewModel: ObservableObject {
             // still executes once the kid comes back.
             print("[AckPoll] deadline hit cmd=\(commandID) ticks=\(tickCount) cancelled=\(Task.isCancelled) — applying .kidNotResponding")
             await MainActor.run {
-                self?.applyReceipt(.kidNotResponding, effective: nil, messageID: messageID)
+                self?.applyReceipt(sawKidPickup ? .pickedUp : .kidNotResponding, effective: nil, messageID: messageID)
                 print("[AckPoll] applyReceipt done cmd=\(commandID)")
             }
         }

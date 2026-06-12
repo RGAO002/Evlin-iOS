@@ -9,6 +9,7 @@ final class BigKidActivityScheduler {
     private let center = DeviceActivityCenter()
     private let activityName = DeviceActivityName("evlin.bigkid.freeplay")
     private let eventName = DeviceActivityEvent.Name("evlin.bigkid.chunk")
+    private let commandHeartbeatName = DeviceActivityName("evlin.command.heartbeat")
 
     func start(threshold minutes: Int = BigKidTimeReporter.chunkMinutes,
                appsToMeasure: FamilyActivitySelection) {
@@ -30,5 +31,24 @@ final class BigKidActivityScheduler {
 
     func stop() {
         center.stopMonitoring([activityName])
+    }
+
+    func startCommandHeartbeatSpike(delaySeconds: TimeInterval = 120) throws {
+        let calendar = Calendar.current
+        let start = Date().addingTimeInterval(delaySeconds)
+        let end = start.addingTimeInterval(15 * 60)
+        let components: Set<Calendar.Component> = [
+            .calendar, .timeZone, .year, .month, .day, .hour, .minute, .second
+        ]
+        let schedule = DeviceActivitySchedule(
+            intervalStart: calendar.dateComponents(components, from: start),
+            intervalEnd: calendar.dateComponents(components, from: end),
+            repeats: false
+        )
+        try center.startMonitoring(commandHeartbeatName, during: schedule)
+    }
+
+    func stopCommandHeartbeatSpike() {
+        center.stopMonitoring([commandHeartbeatName])
     }
 }

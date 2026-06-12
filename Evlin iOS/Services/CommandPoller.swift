@@ -4,6 +4,65 @@ import ManagedSettings
 import UIKit
 import Sentry
 
+enum CommandDeliveryDiagnostics {
+    static let keyTokenRegistered = "evlin.delivery.apnsTokenRegistered"
+    static let keyTokenUpload = "evlin.delivery.apnsTokenUpload"
+    static let keyRemoteNotification = "evlin.delivery.remoteNotification"
+    static let keyOneShotPoll = "evlin.delivery.oneShotPoll"
+    static let keyCommandPoll = "evlin.delivery.commandPoll"
+    static let keyCommandAck = "evlin.delivery.commandAck"
+    static let keyDAMHeartbeat = "evlin.delivery.damHeartbeat"
+    /// SPIKE-ONLY (DAM heartbeat experiment). Capped history of heartbeat
+    /// `intervalDidStart` fires written by the extension, so the diagnostics
+    /// view can show the cadence + self-rearm result SEQUENCE, not just the
+    /// last fire. MUST match the literals the extension writes in
+    /// `DeviceActivityMonitorExtension.intervalDidStart` (the extension can't
+    /// import this enum — it has UIKit/Sentry deps — so the strings are paired
+    /// by convention).
+    static let keyHeartbeatLog = "evlin.spike.heartbeatLog"
+    static let keyHeartbeatCount = "evlin.spike.heartbeatCount"
+    /// SPIKE-ONLY (NSE force-quit experiment). Capped history of pushes the
+    /// EvlinPushApplier Notification Service Extension processed, with whether
+    /// it could apply a ManagedSettings shield off-process. MUST match the
+    /// literals the NSE writes in `NotificationService.didReceive`.
+    static let keyNSELog = "evlin.spike.nseLog"
+    static let keyNSECount = "evlin.spike.nseCount"
+
+    private static var defaults: UserDefaults {
+        UserDefaults(suiteName: "group.com.evlin.ios") ?? .standard
+    }
+
+    static func record(_ key: String, _ message: String) {
+        let ts = ISO8601DateFormatter().string(from: Date())
+        defaults.set("\(ts) \(message)", forKey: key)
+    }
+
+    static func read(_ key: String) -> String {
+        defaults.string(forKey: key) ?? "(none)"
+    }
+
+    /// SPIKE-ONLY. Read the capped heartbeat-fire history (oldest → newest).
+    static func readLog(_ key: String) -> [String] {
+        defaults.stringArray(forKey: key) ?? []
+    }
+
+    /// SPIKE-ONLY. Read a running integer counter (e.g. total heartbeat fires).
+    static func readInt(_ key: String) -> Int {
+        defaults.integer(forKey: key)
+    }
+
+    /// SPIKE-ONLY. Wipe the heartbeat history + counter between experiments.
+    static func clearHeartbeatLog() {
+        defaults.removeObject(forKey: keyHeartbeatLog)
+        defaults.removeObject(forKey: keyHeartbeatCount)
+    }
+
+    static func tokenSummary(_ token: String) -> String {
+        let suffix = String(token.suffix(8))
+        return "len=\(token.count) suffix=\(suffix)"
+    }
+}
+
 /// Foreground command poller. Every 5s, fetches pending commands from the backend
 /// and dispatches them to ActionExecutor. Posts ack back on completion.
 ///
@@ -19,6 +78,7 @@ final class CommandPoller {
     private var isPolling = false
     private var currentDeviceID: UUID?
     private var currentAPIClient: APIClient?
+    private var pendingPollAfterCurrent = false
 
     /// UserDefaults key the whole app uses for the paired child device id.
     /// Same store `@AppStorage("evlin.childDeviceID")` writes to (see
@@ -46,6 +106,9 @@ final class CommandPoller {
     /// path, so a unit test can assert the wiring without hitting the network.
     /// Nil in production → the real `pollOnce()` runs.
     var oneShotPollOverride: ((UUID, APIClient) async -> Void)?
+
+    /// Test seam for the real network poll. Nil in production.
+    var pollCommandsOverride: ((UUID, APIClient) async throws -> [PollCommandDTO])?
 
     /// How often to poll while iOS grants background execution after the app
     /// leaves foreground. Tunable in tests.
@@ -119,34 +182,66 @@ final class CommandPoller {
 
     /// Fetch all pending commands and dispatch. Safe to call manually (e.g. on push wake).
     func pollOnce() async {
-        guard !isPolling, let deviceID = currentDeviceID, let api = currentAPIClient else { return }
-        isPolling = true
-        defer { isPolling = false }
-
-        do {
-            // DeviceActivityMonitor is the primary expiry path, but Screen Time
-            // callbacks can be delayed or missed. Polling is our foreground
-            // fallback so timed shields/blocks don't stay applied forever.
-            _ = await ActiveLockStore.shared.sweepExpired()
-            let cmds = try await api.pollCommands(deviceID: deviceID)
-            for poll in cmds {
-                await execute(poll: poll, api: api)
-            }
-        } catch {
-            // Plan 8 (§15.3): a terminal `410 family_removed` from the kid
-            // command read-path means this device's family was deleted. FAIL
-            // OPEN — release every Evlin shield/block, clear the reflection
-            // sticky + reset pairing — then stop the poller so a deleted family
-            // can never brick the kid by leaving stale locks applied.
-            if FamilyGoneDetector.isFamilyGone(error: error) {
-                print("[CommandPoller] family_removed → failing open")
-                await FamilyGoneDetector.failOpen()
-                stop()
-                return
-            }
-            print("[CommandPoller] poll error: \(error)")
-            SentrySDK.capture(error: error)
+        guard currentDeviceID != nil, currentAPIClient != nil else { return }
+        if isPolling {
+            pendingPollAfterCurrent = true
+            CommandDeliveryDiagnostics.record(
+                CommandDeliveryDiagnostics.keyCommandPoll,
+                "coalesced pending_poll"
+            )
+            return
         }
+        isPolling = true
+        defer {
+            isPolling = false
+            pendingPollAfterCurrent = false
+        }
+
+        repeat {
+            pendingPollAfterCurrent = false
+            guard let deviceID = currentDeviceID, let api = currentAPIClient else { return }
+            do {
+                // DeviceActivityMonitor is the primary expiry path, but Screen Time
+                // callbacks can be delayed or missed. Polling is our foreground
+                // fallback so timed shields/blocks don't stay applied forever.
+                _ = await ActiveLockStore.shared.sweepExpired()
+                let cmds: [PollCommandDTO]
+                if let override = pollCommandsOverride {
+                    cmds = try await override(deviceID, api)
+                } else {
+                    cmds = try await api.pollCommands(deviceID: deviceID)
+                }
+                CommandDeliveryDiagnostics.record(
+                    CommandDeliveryDiagnostics.keyCommandPoll,
+                    "ok device=\(deviceID.uuidString) commands=\(cmds.count)"
+                )
+                for poll in cmds {
+                    await execute(poll: poll, api: api)
+                }
+            } catch {
+                // Plan 8 (§15.3): a terminal `410 family_removed` from the kid
+                // command read-path means this device's family was deleted. FAIL
+                // OPEN — release every Evlin shield/block, clear the reflection
+                // sticky + reset pairing — then stop the poller so a deleted family
+                // can never brick the kid by leaving stale locks applied.
+                if FamilyGoneDetector.isFamilyGone(error: error) {
+                    CommandDeliveryDiagnostics.record(
+                        CommandDeliveryDiagnostics.keyCommandPoll,
+                        "family_removed device=\(deviceID.uuidString)"
+                    )
+                    print("[CommandPoller] family_removed → failing open")
+                    await FamilyGoneDetector.failOpen()
+                    stop()
+                    return
+                }
+                CommandDeliveryDiagnostics.record(
+                    CommandDeliveryDiagnostics.keyCommandPoll,
+                    "failed device=\(deviceID.uuidString) error=\(error.localizedDescription)"
+                )
+                print("[CommandPoller] poll error: \(error)")
+                SentrySDK.capture(error: error)
+            }
+        } while pendingPollAfterCurrent
     }
 
     /// One-shot poll for the current child device WITHOUT starting the timer.
@@ -165,11 +260,25 @@ final class CommandPoller {
     /// foreground poller is already running with a client, that client is
     /// reused, otherwise a default `APIClient` is constructed.
     func pollOnceForCurrentDevice() async {
-        guard let deviceID = childDeviceIDProvider() else { return }
+        guard let deviceID = childDeviceIDProvider() else {
+            CommandDeliveryDiagnostics.record(
+                CommandDeliveryDiagnostics.keyOneShotPoll,
+                "skipped no_child_device_id"
+            )
+            return
+        }
         let api = currentAPIClient ?? oneShotAPIClientFactory()
+        CommandDeliveryDiagnostics.record(
+            CommandDeliveryDiagnostics.keyOneShotPoll,
+            "started device=\(deviceID.uuidString)"
+        )
 
         if let override = oneShotPollOverride {
             await override(deviceID, api)
+            CommandDeliveryDiagnostics.record(
+                CommandDeliveryDiagnostics.keyOneShotPoll,
+                "override_completed device=\(deviceID.uuidString)"
+            )
             return
         }
 
@@ -178,6 +287,10 @@ final class CommandPoller {
         currentDeviceID = deviceID
         currentAPIClient = api
         await pollOnce()
+        CommandDeliveryDiagnostics.record(
+            CommandDeliveryDiagnostics.keyOneShotPoll,
+            "completed device=\(deviceID.uuidString)"
+        )
     }
 
     static func lockCommand(from poll: PollCommandDTO) -> LockCommand {
@@ -291,7 +404,15 @@ final class CommandPoller {
 
         do {
             try await api.ack(commandID: cmd.id, status: status, detail: ackDetail)
+            CommandDeliveryDiagnostics.record(
+                CommandDeliveryDiagnostics.keyCommandAck,
+                "ok command=\(cmd.id.uuidString) status=\(status)"
+            )
         } catch {
+            CommandDeliveryDiagnostics.record(
+                CommandDeliveryDiagnostics.keyCommandAck,
+                "failed command=\(cmd.id.uuidString) status=\(status) error=\(error.localizedDescription)"
+            )
             print("[CommandPoller] ack failed for \(cmd.id): \(error)")
         }
     }

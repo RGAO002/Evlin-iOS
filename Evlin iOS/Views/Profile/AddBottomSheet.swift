@@ -110,12 +110,8 @@ private struct AddMenu: View {
         [
             .init(id: .task, icon: "checkmark.circle", label: "Add Task",
                   sub: "New chore or homework for \(child.name)"),
-            .init(id: .calendar, icon: "calendar", label: "Add to Calendar",
-                  sub: "Schedule something on \(child.name)'s day"),
             .init(id: .rule, icon: "shield", label: "Add Rule",
                   sub: "New screen-time or routine rule"),
-            .init(id: .device, icon: "iphone", label: "Add Device",
-                  sub: "Enroll a phone, tablet, or laptop"),
         ]
     }
 }

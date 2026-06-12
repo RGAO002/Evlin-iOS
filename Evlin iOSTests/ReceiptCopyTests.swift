@@ -29,7 +29,12 @@ final class ReceiptCopyTests: XCTestCase {
         )
 
         let actions = ReceiptCardActionModel.actions(
-            for: .confirmedExact(verb: .unshield, displayName: "Instagram", unlocksAt: nil),
+            for: .confirmedExact(
+                verb: .unshield,
+                displayName: "Instagram",
+                unlocksAt: nil,
+                artworkURL: nil
+            ),
             effectiveState: state
         )
 
@@ -50,10 +55,77 @@ final class ReceiptCopyTests: XCTestCase {
         )
 
         let actions = ReceiptCardActionModel.actions(
-            for: .confirmedExact(verb: .unshield, displayName: "Instagram", unlocksAt: nil),
+            for: .confirmedExact(
+                verb: .unshield,
+                displayName: "Instagram",
+                unlocksAt: nil,
+                artworkURL: nil
+            ),
             effectiveState: state
         )
 
         XCTAssertNil(actions)
+    }
+
+    func test_timedBlockReceiptShowsRestoreTimeInsteadOfPermanentCopy() {
+        let date = Date(timeIntervalSince1970: 1_800)
+
+        XCTAssertEqual(
+            ReceiptCardCopyModel.timeLimitLine(
+                verb: .block,
+                unlocksAt: date,
+                timeString: { _ in "3:45 PM" }
+            ),
+            "Restores at 3:45 PM"
+        )
+    }
+
+    func test_permanentBlockReceiptUsesUnblockCopy() {
+        XCTAssertEqual(
+            ReceiptCardCopyModel.timeLimitLine(
+                verb: .block,
+                unlocksAt: nil,
+                timeString: { _ in "unused" }
+            ),
+            "Until you unblock"
+        )
+    }
+
+    func test_kidNotRespondingCopyDoesNotRequireOpeningEvlin() {
+        XCTAssertEqual(
+            ReceiptCardCopyModel.kidNotRespondingDetail,
+            "Still queued — it will apply when the kid device receives or polls for commands."
+        )
+    }
+
+    func test_pickedUpCopySaysKidDeviceReceivedCommand() {
+        XCTAssertEqual(
+            ReceiptCardCopyModel.pickedUpDetail,
+            "Kid device received the command — applying now."
+        )
+    }
+
+    func test_ackStatusDecodesDeliveryStateAndTimestamps() throws {
+        let json = Data("""
+        {
+          "command_id": "11111111-1111-1111-1111-111111111111",
+          "status": "pending",
+          "delivery_state": "picked_up",
+          "created_at": "2026-06-10T22:50:00Z",
+          "picked_up_at": "2026-06-10T22:50:02Z",
+          "acked_at": null,
+          "bundle_id": "com.burbn.instagram",
+          "artwork_url": "https://example.com/instagram.png"
+        }
+        """.utf8)
+
+        let response = try JSONDecoder().decode(AckStatusResponse.self, from: json)
+
+        XCTAssertEqual(response.deliveryState, "picked_up")
+        XCTAssertEqual(response.createdAt, "2026-06-10T22:50:00Z")
+        XCTAssertEqual(response.pickedUpAt, "2026-06-10T22:50:02Z")
+        XCTAssertNil(response.ackedAt)
+        XCTAssertEqual(response.bundleID, "com.burbn.instagram")
+        XCTAssertEqual(response.artworkURL, URL(string: "https://example.com/instagram.png"))
     }
 }

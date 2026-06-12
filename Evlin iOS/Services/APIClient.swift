@@ -459,13 +459,36 @@ struct AckPendingConfirmation: Decodable, Sendable {
 
 struct AckStatusResponse: Decodable, Sendable {
     let status: String  // "pending" | "confirmed" | "failed" | "timeout" | "pending_confirmation"
+    let deliveryState: String?
+    let createdAt: String?
+    let pickedUpAt: String?
+    let ackedAt: String?
     let verb: String?
     let detail: [String: AnyCodable]?
     let displayName: String?
+    let bundleID: String?
+    let artworkURL: URL?
     let category: String?
     let origRequest: String?
     let effectiveState: AckEffectiveState?
     let pendingConfirmation: AckPendingConfirmation?
+
+    enum CodingKeys: String, CodingKey {
+        case status
+        case deliveryState = "delivery_state"
+        case createdAt = "created_at"
+        case pickedUpAt = "picked_up_at"
+        case ackedAt = "acked_at"
+        case verb
+        case detail
+        case displayName
+        case bundleID = "bundle_id"
+        case artworkURL = "artwork_url"
+        case category
+        case origRequest
+        case effectiveState
+        case pendingConfirmation
+    }
 }
 
 // MARK: - Child app catalog capture APIs
@@ -2140,6 +2163,29 @@ extension APIClient {
         let payload = try JSONEncoder().encode(
             DeviceLockAllBody(family_id: familyID, child_device_id: childDeviceID))
         return try await authedJSON(path: "/parent/device/unlock-all", method: "POST", jsonBody: payload)
+    }
+
+    struct DeviceLockStateResponse: Decodable {
+        /// True iff EVERY app is currently shielded on the kid device — the real
+        /// device truth, derived from the kid's last-reported effective state
+        /// (only flips once the kid actually applied + acked the lock).
+        let locked: Bool
+    }
+
+    /// GET /parent/device/lock-state — the kid device's real lock truth, so the
+    /// Profile button + Home card can show the actual state instead of an
+    /// ephemeral optimistic flip.
+    func fetchDeviceLockState(familyID: UUID, childDeviceID: UUID) async throws -> DeviceLockStateResponse {
+        var comps = URLComponents(string: "\(baseURL)/parent/device/lock-state")!
+        comps.queryItems = [
+            URLQueryItem(name: "family_id", value: familyID.uuidString),
+            URLQueryItem(name: "child_device_id", value: childDeviceID.uuidString),
+        ]
+        let (data, resp) = try await URLSession.shared.data(from: comps.url!)
+        guard let http = resp as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+        return try JSONDecoder().decode(DeviceLockStateResponse.self, from: data)
     }
 }
 

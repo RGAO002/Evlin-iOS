@@ -170,18 +170,11 @@ struct ParentRootView: View {
         }
         .onChange(of: pairedChildID) { _, newValue in
             startParentReflectionPolling()
-            // Pairing just completed (childDeviceID became non-empty). If an
-            // APNs token was cached before pairing, upload it now — without
-            // this, a device that pairs mid-session never uploads its token
-            // and silent push can't target it until the next relaunch.
-            if !newValue.isEmpty {
-                AppDelegate.uploadCachedAPNsTokenIfPossible(using: apiClient)
-                // Belt-and-suspenders: re-request registration so iOS
-                // re-delivers the cached token, re-firing didRegister... with
-                // childDeviceID now present (the cached upload above is the
-                // primary fix; this covers the no-token-cached-yet race).
-                UIApplication.shared.registerForRemoteNotifications()
-            }
+            AppDelegate.handleChildDeviceIDAvailability(
+                newValue,
+                appMode: "parent",
+                using: apiClient
+            )
         }
         .onReceive(NotificationCenter.default.publisher(for: .bigKidStateInvalidated)) { _ in
             Task { await refreshParentReflectionState() }

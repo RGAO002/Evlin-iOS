@@ -4,6 +4,7 @@ struct BigKidHomeView: View {
     @Environment(BigKidState.self) private var state
     var onTaskTap: (BigKidTask) -> Void
     var onManageApps: (() -> Void)? = nil
+    var onCommandDelivery: (() -> Void)? = nil
 
     private var doneCount: Int {
         state.tasks.filter { $0.status == .done || $0.bypass?.status == .approved }.count
@@ -36,6 +37,11 @@ struct BigKidHomeView: View {
                 if onManageApps != nil {
                     manageAppsCard.padding(.bottom, 22)
                 }
+                #if DEBUG
+                if onCommandDelivery != nil {
+                    commandDeliveryCard.padding(.bottom, 22)
+                }
+                #endif
                 tasksHeader.padding(.bottom, 10)
                 questPips.padding(.bottom, 14)
                 taskList
@@ -95,6 +101,48 @@ struct BigKidHomeView: View {
         .buttonStyle(.plain)
         .accessibilityLabel("Manage locked apps")
     }
+
+    #if DEBUG
+    private var commandDeliveryCard: some View {
+        Button {
+            onCommandDelivery?()
+        } label: {
+            EvKidCard(padding: 18) {
+                HStack(spacing: 14) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 14).fill(Color.white)
+                        Image(systemName: "antenna.radiowaves.left.and.right")
+                            .font(.system(size: 20, weight: .semibold))
+                            .foregroundStyle(EvlinKidColors.green700)
+                    }
+                    .frame(width: 44, height: 44)
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("DEBUG")
+                            .font(.system(size: 11, weight: .heavy))
+                            .tracking(1)
+                            .foregroundStyle(EvlinKidColors.green700)
+                        Text("Command delivery")
+                            .font(.system(size: 16, weight: .heavy))
+                            .tracking(EvlinKidMetrics.Letter.body)
+                            .foregroundStyle(EvlinKidColors.ink)
+                        Text("APNs, poll, and ack diagnostics")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(EvlinKidColors.ink3)
+                    }
+
+                    Spacer(minLength: 0)
+
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(EvlinKidColors.ink3)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Command delivery diagnostics")
+    }
+    #endif
 
     @ViewBuilder
     private var heroCard: some View {

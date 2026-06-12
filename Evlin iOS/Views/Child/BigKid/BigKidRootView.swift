@@ -55,6 +55,7 @@ struct BigKidRootView: View {
     #if DEBUG
     @State private var debugScenario: BigKidDebugScenario = .live
     @State private var showCatalogDebug: Bool = false
+    @State private var showCommandDeliveryDebug: Bool = false
     #endif
 
     var body: some View {
@@ -63,7 +64,8 @@ struct BigKidRootView: View {
             case .home:
                 BigKidHomeView(
                     onTaskTap: { task in taskNav = task },
-                    onManageApps: { showLockListGate = true }
+                    onManageApps: { showLockListGate = true },
+                    onCommandDelivery: { showCommandDeliveryDebug = true }
                 )
             case .homeReflectionA:
                 NavigationStack(path: $reflectionPath) {
@@ -171,6 +173,7 @@ struct BigKidRootView: View {
                 current: $debugScenario,
                 onSelect: { selected in applyDebugScenario(selected) },
                 onCatalog: { showCatalogDebug = true },
+                onCommandDelivery: { showCommandDeliveryDebug = true },
                 onReset: {
                     Task {
                         do { try await client.debugResetState() } catch {
@@ -240,6 +243,9 @@ struct BigKidRootView: View {
         #if DEBUG
         .sheet(isPresented: $showCatalogDebug) {
             NavigationStack { ChildAppCatalogDebugView() }
+        }
+        .sheet(isPresented: $showCommandDeliveryDebug) {
+            NavigationStack { CommandDeliveryDiagnosticsView() }
         }
         #endif
         .sheet(isPresented: $showLockListGate) {

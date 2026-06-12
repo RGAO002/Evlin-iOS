@@ -383,6 +383,10 @@ struct ChatView: View {
             viewModel.startReflectionSubmissionPolling()
             Task { await viewModel.tickReflectionSubmissionPoll() }
             viewModel.startReflectionEventPolling()
+            // Re-check any receipt still spinning: the kid often acks late
+            // (after the 90s poll deadline), so a card can be stuck on
+            // "applying now" while the backend is already confirmed.
+            viewModel.reconcilePendingReceipts()
         }
         .onChange(of: familyStore.children) { _, _ in
             syncResolvedChildName()
@@ -395,6 +399,9 @@ struct ChatView: View {
         .onReceive(NotificationCenter.default.publisher(for: .bigKidStateInvalidated)) { _ in
             guard !isPreview else { return }
             Task { await viewModel.tickReflectionSubmissionPoll() }
+            // A push / state-invalidation wake often coincides with the kid
+            // acking queued commands — re-check stuck receipts so they resolve.
+            viewModel.reconcilePendingReceipts()
         }
         .sheet(item: $viewModel.activeLazyTagRequest) { req in
             CustomTokenPickerView(

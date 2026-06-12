@@ -1250,6 +1250,20 @@ struct HomeSettingsSheet: View {
     @ViewBuilder
     private var diagnosticsSections: some View {
         Section {
+            NavigationLink {
+                CommandDeliveryDiagnosticsView()
+            } label: {
+                Label("Command Delivery", systemImage: "antenna.radiowaves.left.and.right")
+            }
+        } header: {
+            Text("Command Delivery")
+        } footer: {
+            Text("Use this when parent commands do not land on the kid device. On the kid phone, prefer opening this from Kid mode so switching modes does not poll and contaminate the result.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+        }
+
+        Section {
             let lastResult = UserDefaults(suiteName: "group.com.evlin.ios")?
                 .string(forKey: "evlin.lastScheduleResult")
                 ?? "(no schedule attempted yet — set a timed lock first)"

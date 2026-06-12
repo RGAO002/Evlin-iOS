@@ -48,26 +48,31 @@ struct ProfileCard: View {
                                 .foregroundStyle(Color.evSecondary)
                                 .fixedSize(horizontal: true, vertical: false)
                         } else {
-                            Text("QUIET TIME")
+                            Circle()
+                                .fill(Color.evError)
+                                .frame(width: 8, height: 8)
+                            Text("LOCKED")
                                 .font(.custom("Inter", size: 10).weight(.heavy))
                                 .tracking(1.4)
-                                .foregroundStyle(Color.evOnSurfaceVariant)
+                                .foregroundStyle(Color.evError)
                         }
                     }
 
-                    // Line 3: progress bar — gray (flat) for locked, green (filled) for unlocked
+                    // Line 3: progress bar — red (locked) or green (unlocked).
+                    // Fill width = remaining-time fraction (child.timePct).
+                    // timePct is a hardcoded 1.0 today, so it reads full until
+                    // real remaining-time data is wired in.
                     GeometryReader { geo in
+                        let isLocked = child.status != .unlocked
                         ZStack(alignment: .leading) {
                             Capsule()
-                                .fill(child.status == .unlocked
-                                      ? Color.evSecondaryContainer
-                                      : Color.evSurfaceContainerHigh)
+                                .fill(isLocked
+                                      ? Color.evErrorContainer
+                                      : Color.evSecondaryContainer)
                                 .frame(height: 5)
-                            if child.status == .unlocked {
-                                Capsule()
-                                    .fill(Color.evSecondary)
-                                    .frame(width: max(6, geo.size.width * child.timePct), height: 5)
-                            }
+                            Capsule()
+                                .fill(isLocked ? Color.evError : Color.evSecondary)
+                                .frame(width: max(6, geo.size.width * child.timePct), height: 5)
                         }
                     }
                     .frame(height: 5)

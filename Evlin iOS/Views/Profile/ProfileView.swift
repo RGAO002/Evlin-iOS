@@ -32,6 +32,8 @@ struct ProfileView: View {
     @State private var devicesExpanded = true
     @State private var rulesExpanded = true
     @State private var addMode: AddBottomMode? = nil
+    @State private var showAddDevicePairing = false
+    @State private var addedDeviceKidName = ""
     /// In-profile sub-tab toggle for when an active reflection exists.
     /// The header card's CTA stripe flips between
     ///   `.overview`   — shows Current Tasks / Devices / Rules
@@ -71,6 +73,9 @@ struct ProfileView: View {
     // Lock/Unlock-all CTA wiring (POST /parent/device/lock-all|unlock-all).
     @State private var lockBusy = false
     @State private var lockError: String? = nil
+    // Neutral (non-error) status note, e.g. "queued — will apply when the
+    // phone next checks in". Shown in muted text, distinct from lockError.
+    @State private var lockNote: String? = nil
     // Local mutable copy of the child's display fields so Edit Profile
     // can show changes within the session.
     @State private var localName: String = ""
@@ -354,7 +359,15 @@ struct ProfileView: View {
                 Group {
                     switch mode {
                     case .menu:
-                        ProfileAddMenu(child: displayChild, mode: $addMode)
+                        ProfileAddMenu(
+                            child: displayChild,
+                            mode: $addMode,
+                            onAddDevice: {
+                                addMode = nil
+                                addedDeviceKidName = displayChild.name
+                                showAddDevicePairing = true
+                            }
+                        )
                     case .task:
                         AddTaskForm(
                             child: child,
@@ -384,19 +397,22 @@ struct ProfileView: View {
                             onClose: { addMode = nil }
                         )
                     case .device:
-                        // Restored entry. Real device pairing happens from the
-                        // CHILD's phone during setup (the parent scans/enters the
-                        // kid's code) — the old free-text form enrolled nothing
-                        // (HP-6). Explain the real path honestly.
-                        ProfileComingSoonSheet(
-                            icon: "iphone",
-                            title: "Add a device",
-                            message: "To enroll a new phone or tablet, open Evlin on that device and choose “Child Device,” then enter the pairing code. In-app pairing from here is coming soon.",
-                            onClose: { addMode = nil }
-                        )
+                        EmptyView()
                     }
                 }
             }
+        }
+        .fullScreenCover(isPresented: $showAddDevicePairing) {
+            AddDevicePairingFlow(
+                kidName: addedDeviceKidName.isEmpty ? displayChild.name : addedDeviceKidName,
+                onPair: { code in await pairAdditionalDevice(code) },
+                onDone: {
+                    showAddDevicePairing = false
+                },
+                onCancel: {
+                    showAddDevicePairing = false
+                }
+            )
         }
         .onAppear {
             // Enrolled Devices: live FamilyStore data is authoritative. The
@@ -408,8 +424,13 @@ struct ProfileView: View {
             } else {
                 devices = ProfileMockData.devices(for: child.id)
             }
-            // Initialise local mutables from the source profile.
+            // Initialise local mutables from the source profile. `child.status`
+            // already carries the live lock state when navigated from Home
+            // (FamilyStore overlays it); refreshLockState then reconciles against
+            // the device's REAL truth, so a stale snapshot can't leave the
+            // button green after the kid is actually locked.
             localStatus = child.status
+            Task { await refreshLockState() }
             if localName.isEmpty { localName = child.name }
             if localAge == 0    { localAge = child.age }
             if localSubtitle.isEmpty { localSubtitle = child.subtitle }
@@ -443,6 +464,38 @@ struct ProfileView: View {
         .onDisappear {
             pollTask?.cancel()
             pollTask = nil
+        }
+    }
+
+    @MainActor
+    private func pairAdditionalDevice(_ code: String) async -> String? {
+        let trimmed = code.filter(\.isNumber)
+        guard trimmed.count == 6 else { return "Enter the 6-digit code." }
+        do {
+            let r = try await apiClient.pairFamily(
+                code: trimmed,
+                deviceLabel: UIDevice.current.name
+            )
+            UserDefaults.standard.set(r.family_id.uuidString, forKey: "evlin.familyID")
+            UserDefaults.standard.set(r.parent_device_id.uuidString, forKey: "evlin.parentDeviceID")
+            UserDefaults.standard.set(r.child_device_id.uuidString, forKey: "evlin.childDeviceID")
+            await familyStore.refresh()
+            if let matched = familyStore.children
+                .first(where: { child in
+                    child.devices.contains { UUID(uuidString: $0.device_id) == r.child_device_id }
+                }) {
+                addedDeviceKidName = matched.display_name
+            }
+            return nil
+        } catch let APIError.serverError(status) {
+            switch status {
+            case 404: return "That code wasn't found. Double-check the 6 digits."
+            case 400: return "That code has expired or was already used. Ask your kid for a fresh one."
+            case 409: return "This account is already in a different family."
+            default:  return "Couldn't pair (error \(status)). Try again."
+            }
+        } catch {
+            return "Network error. Check your connection and try again."
         }
     }
 
@@ -617,25 +670,67 @@ struct ProfileView: View {
             lockError = "Pair \(displayChild.name)'s device first."
             return
         }
-        let wasUnlocked = localStatus == .unlocked
+        let wantLocked = localStatus == .unlocked
         lockBusy = true
         lockError = nil
+        lockNote = nil
         withAnimation(.easeOut(duration: 0.18)) {
-            localStatus = wasUnlocked ? .locked : .unlocked
+            localStatus = wantLocked ? .locked : .unlocked
         }
         do {
-            if wasUnlocked {
+            if wantLocked {
                 _ = try await apiClient.lockAllApps(familyID: famID, childDeviceID: cid)
             } else {
                 _ = try await apiClient.unlockAllApps(familyID: famID, childDeviceID: cid)
             }
         } catch {
             withAnimation(.easeOut(duration: 0.18)) {
-                localStatus = wasUnlocked ? .unlocked : .locked
+                localStatus = wantLocked ? .unlocked : .locked
             }
-            lockError = "Couldn't \(wasUnlocked ? "lock" : "unlock") — try again."
+            lockError = "Couldn't \(wantLocked ? "lock" : "unlock") — try again."
+            lockBusy = false
+            return
         }
         lockBusy = false
+        // The queue accepted it, but "queued" ≠ "applied". Poll the kid device's
+        // REAL state until it actually applies + acks (or time out), so the
+        // parent gets a truthful receipt instead of a silent optimistic flip.
+        let applied = await waitForLockState(wantLocked, cid: cid, famID: famID)
+        lockNote = applied ? nil : (wantLocked
+            ? "Queued — \(displayChild.name)'s phone will lock when it next checks in."
+            : "Queued — \(displayChild.name)'s phone will unlock when it next checks in.")
+        // Push the now-real state out to Home (FamilyStore.refresh re-reads
+        // lock-state and re-renders the child card).
+        await familyStore.refresh()
+    }
+
+    /// Set `localStatus` from the device's REAL all-apps lock state (instead of
+    /// the always-`.unlocked` `child.status` default), so re-entering the screen
+    /// shows the actual lock — not a stale green button.
+    @MainActor
+    private func refreshLockState() async {
+        guard let cid = backendChildID,
+              let famRaw = UserDefaults.standard.string(forKey: "evlin.familyID"),
+              let famID = UUID(uuidString: famRaw),
+              let state = try? await apiClient.fetchDeviceLockState(familyID: famID, childDeviceID: cid)
+        else { return }
+        withAnimation(.easeOut(duration: 0.18)) {
+            localStatus = state.locked ? .locked : .unlocked
+        }
+    }
+
+    /// Poll `lock-state` until it matches `want` (the kid applied + acked) or a
+    /// ~15s budget elapses. The kid's pollers run on a ~10s cadence, so this
+    /// usually confirms within one or two ticks.
+    private func waitForLockState(_ want: Bool, cid: UUID, famID: UUID) async -> Bool {
+        for _ in 0..<6 {
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            if let state = try? await apiClient.fetchDeviceLockState(familyID: famID, childDeviceID: cid),
+               state.locked == want {
+                return true
+            }
+        }
+        return false
     }
 
     private func performDelete() async {
@@ -890,7 +985,6 @@ struct ProfileView: View {
                         .font(.custom("Manrope", size: 16).weight(.heavy))
                         .tracking(-0.16)
                         .foregroundStyle(Color.evOnSurface)
-                    EvlinPill(text: "soon", tone: .neutral, size: .xs)
                     Spacer()
                     Image(systemName: "chevron.down")
                         .font(.system(size: 14, weight: .semibold))
@@ -989,13 +1083,19 @@ struct ProfileView: View {
                 .disabled(lockBusy || backendChildID == nil)
                 .opacity(backendChildID == nil ? 0.45 : (lockBusy ? 0.7 : 1))
 
-                // Caption only when something needs saying: a failure, or why
-                // the button is disabled. No informational line otherwise.
+                // Caption only when something needs saying: a failure (red), a
+                // neutral "queued" receipt, or why the button is disabled.
                 if let lockError {
                     Text(lockError)
                         .font(.custom("Inter", size: 11).weight(.medium))
                         .foregroundStyle(Color.evError)
                         .frame(maxWidth: .infinity)
+                } else if let lockNote {
+                    Text(lockNote)
+                        .font(.custom("Inter", size: 11).weight(.medium))
+                        .foregroundStyle(Color.evOnSurfaceVariant)
+                        .frame(maxWidth: .infinity)
+                        .multilineTextAlignment(.center)
                 } else if backendChildID == nil {
                     Text("Pair \(displayChild.name)'s device to lock")
                         .font(.custom("Inter", size: 11).weight(.medium))
@@ -1096,9 +1196,86 @@ private struct ProfileComingSoonSheet: View {
     }
 }
 
+private struct AddDevicePairingFlow: View {
+    let kidName: String
+    let onPair: (String) async -> String?
+    let onDone: () -> Void
+    let onCancel: () -> Void
+
+    @State private var paired = false
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if paired {
+                    AddDeviceSuccessStep(kidName: kidName, onDone: onDone)
+                } else {
+                    ParentPairScanStep(
+                        onPaired: onPair,
+                        pairedSucceeded: false,
+                        onAdvance: { paired = true },
+                        onBack: onCancel
+                    )
+                }
+            }
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button(paired ? "Done" : "Cancel") {
+                        if paired {
+                            onDone()
+                        } else {
+                            onCancel()
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct AddDeviceSuccessStep: View {
+    let kidName: String
+    let onDone: () -> Void
+
+    private var name: String {
+        let trimmed = kidName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "your kid" : trimmed
+    }
+
+    var body: some View {
+        OnboardingV2ScreenContainer(
+            role: .parent,
+            phase: "Device added",
+            stepIndex: 1,
+            stepTotal: 1,
+            title: "Device added",
+            subtitle: nil,
+            dotsCount: 1,
+            dotsCurrent: 0,
+            content: {
+                VStack(spacing: Spacing.xl) {
+                    OnboardingV2SuccessCheck(role: .parent, size: 62)
+                    Text("Connected to \(name)").onboardingV2TitleL()
+                    Text("This device is now linked. You can return to \(name)'s profile.")
+                        .onboardingV2Body()
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, Spacing.section)
+            },
+            footer: {
+                OnboardingV2PrimaryButton("Done", role: .parent) {
+                    onDone()
+                }
+            }
+        )
+    }
+}
+
 private struct ProfileAddMenu: View {
     let child: ChildProfile
     @Binding var mode: AddBottomMode?
+    var onAddDevice: () -> Void = {}
 
     private struct Option {
         let id: AddBottomMode
@@ -1111,8 +1288,6 @@ private struct ProfileAddMenu: View {
         [
             .init(id: .task, icon: "checkmark.circle", label: "Add Task",
                   sub: "New chore or homework for \(child.name)"),
-            .init(id: .calendar, icon: "calendar", label: "Add to Calendar",
-                  sub: "Schedule something on \(child.name)'s day"),
             .init(id: .rule, icon: "shield", label: "Add Rule",
                   sub: "New screen-time or routine rule"),
             .init(id: .device, icon: "iphone", label: "Add Device",
@@ -1133,7 +1308,11 @@ private struct ProfileAddMenu: View {
             VStack(spacing: 0) {
                 ForEach(Array(options.enumerated()), id: \.element.id) { idx, o in
                     Button {
-                        mode = o.id
+                        if o.id == .device {
+                            onAddDevice()
+                        } else {
+                            mode = o.id
+                        }
                     } label: {
                         HStack(spacing: 16) {
                             ZStack {

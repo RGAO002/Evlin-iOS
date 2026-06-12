@@ -1,6 +1,15 @@
 {
-  "originHash" : "7b053422b020dce7a9be2c7ef325d71eb584450711cd5f7fb96891e9a6f1c298",
+  "originHash" : "6c6149c4ceba3d5d2ff19e121e033c5d8b74afa95660cd59d566c5b8138d5d0b",
   "pins" : [
+    {
+      "identity" : "sentry-cocoa",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/getsentry/sentry-cocoa",
+      "state" : {
+        "revision" : "e6d00b6171c0c055debdf278554db035ae958926",
+        "version" : "9.16.1"
+      }
+    },
     {
       "identity" : "youtubeplayerkit",
       "kind" : "remoteSourceControl",

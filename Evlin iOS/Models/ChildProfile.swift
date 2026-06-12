@@ -31,13 +31,18 @@ extension ChildProfile {
     /// surfaces and will be wired as those endpoints land. The avatar photo
     /// (when `kind == "photo"`) is the short-lived `signed_url`; the avatar's
     /// `color` hex drives the accent so each child keeps a stable tint.
-    init(dto: ChildDTO) {
+    /// `locked` carries the kid device's REAL all-apps lock state (from
+    /// `GET /parent/device/lock-state`, threaded by `FamilyStore`) so the Home
+    /// card + filter pills reflect whether the child is actually locked instead
+    /// of a hardcoded `.unlocked`. Defaults to unlocked for callers without the
+    /// live state.
+    init(dto: ChildDTO, locked: Bool = false) {
         self.id = dto.id
         self.name = dto.display_name
         self.age = dto.age ?? 0
         self.avatarURL = dto.avatar.signed_url
         self.accentColor = ChildProfile.color(fromHex: dto.avatar.color) ?? .evPrimary
-        self.status = .unlocked
+        self.status = locked ? .locked : .unlocked
         self.timeLeft = "2h"
         self.timePct = 1.0
         self.subtitle = ""

@@ -35,11 +35,16 @@ struct Evlin_iOSApp: App {
     /// `startPollerIfPaired()` was only re-evaluated on .onAppear, scenePhase,
     /// and appMode changes, none of which fire at onboarding completion.
     @AppStorage("onboardingComplete") private var onboardingComplete = false
+    @AppStorage("evlin.childDeviceID") private var childDeviceID: String = ""
 
     init() {
         // One-shot migration from legacy evlin.activeLocks store.
         // Pre-launch, so safe to drop legacy data. See plan Phase 11.
         ActiveLockMigration.runIfNeeded()
+        // Publish the Evlin app icon into the shared App Group so the
+        // EvlinShieldConfig lock screen can render it (the extension can't
+        // read this app's asset catalog). Versioned + cheap.
+        EvlinShieldIconPublisher.publish()
     }
 
     var body: some Scene {
@@ -72,7 +77,9 @@ struct Evlin_iOSApp: App {
                         )
                     }
                 )
-                .onAppear { startPollerIfPaired() }
+                .onAppear {
+                    startPollerIfPaired()
+                }
                 .onChange(of: scenePhase) { _, phase in
                     switch phase {
                     case .active: startPollerIfPaired()
@@ -83,9 +90,14 @@ struct Evlin_iOSApp: App {
                     @unknown default: break
                     }
                 }
-                .onChange(of: appMode) { _, _ in
+                .onChange(of: appMode) { _, newValue in
                     // Toggling P↔K starts/stops the poller — see the
                     // doc on startPollerIfPaired for why.
+                    AppDelegate.handleChildDeviceIDAvailability(
+                        childDeviceID,
+                        appMode: newValue,
+                        using: apiClient
+                    )
                     startPollerIfPaired()
                 }
                 .onChange(of: onboardingComplete) { _, complete in
@@ -95,6 +107,14 @@ struct Evlin_iOSApp: App {
                     // CommandPoller starts immediately — no background+reopen
                     // round-trip required for parent commands to land.
                     if complete { startPollerIfPaired() }
+                }
+                .onChange(of: childDeviceID) { _, newValue in
+                    AppDelegate.handleChildDeviceIDAvailability(
+                        newValue,
+                        appMode: appMode,
+                        using: apiClient
+                    )
+                    startPollerIfPaired()
                 }
                 .onReceive(NotificationCenter.default.publisher(for: .bigKidStateInvalidated)) { _ in
                     // Demo bootstrap (or parent approve) can rewrite `evlin.childDeviceID` while
@@ -160,7 +180,8 @@ struct Evlin_iOSApp: App {
 ///      `POST /child/register-apns` for the current child device.
 ///   3. On a background `content-available:1` push, run a one-shot
 ///      `CommandPoller` poll so queued shield/block commands apply even when
-///      the app isn't foregrounded.
+///      the app isn't foregrounded. The same wake also invalidates BigKid
+///      state so reflection assignments apply immediately.
 ///
 /// Note: real APNs on a physical device additionally needs the Push
 /// Notifications capability (the `aps-environment` entitlement) + a
@@ -215,6 +236,10 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         // the pairing hook (ContentView.onChange(of: pairedChildID)) can upload
         // it the moment pairing completes — no relaunch required.
         UserDefaults.standard.set(token, forKey: Self.apnsDeviceTokenDefaultsKey)
+        CommandDeliveryDiagnostics.record(
+            CommandDeliveryDiagnostics.keyTokenRegistered,
+            CommandDeliveryDiagnostics.tokenSummary(token)
+        )
         AppDelegate.uploadCachedAPNsTokenIfPossible(using: apiClient)
     }
 
@@ -230,12 +255,24 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         let cached = UserDefaults.standard.string(forKey: apnsDeviceTokenDefaultsKey)
         let childID = UserDefaults.standard.string(forKey: CommandPoller.childDeviceIDDefaultsKey)
         guard let upload = shouldUploadAPNsToken(cachedToken: cached, childDeviceID: childID) else {
+            CommandDeliveryDiagnostics.record(
+                CommandDeliveryDiagnostics.keyTokenUpload,
+                "skipped cached=\(cached?.isEmpty == false ? "yes" : "no") child_id=\(childID?.isEmpty == false ? "yes" : "no")"
+            )
             return
         }
         Task {
             do {
                 try await apiClient.registerAPNsToken(deviceID: upload.deviceID, token: upload.token)
+                CommandDeliveryDiagnostics.record(
+                    CommandDeliveryDiagnostics.keyTokenUpload,
+                    "ok device=\(upload.deviceID.uuidString) \(CommandDeliveryDiagnostics.tokenSummary(upload.token))"
+                )
             } catch {
+                CommandDeliveryDiagnostics.record(
+                    CommandDeliveryDiagnostics.keyTokenUpload,
+                    "failed device=\(upload.deviceID.uuidString) error=\(error.localizedDescription)"
+                )
                 print("[AppDelegate] APNs token upload failed: \(error)")
                 SentrySDK.capture(error: error)
             }
@@ -264,12 +301,55 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         return (deviceID: deviceID, token: token)
     }
 
+    /// Called whenever the app learns or re-learns the paired child device id.
+    ///
+    /// This fixes the reinstall/pairing race where APNs registration succeeds
+    /// before `evlin.childDeviceID` exists: the token is cached, but there was
+    /// no reliable kid-side replay once pairing completed. Only child mode may
+    /// upload to `/child/register-apns`; parent devices also store a child id
+    /// for chat targeting and must not overwrite the kid device's APNs token.
+    static func handleChildDeviceIDAvailability(
+        _ rawChildDeviceID: String,
+        appMode: String,
+        using apiClient: APIClient
+    ) {
+        handleChildDeviceIDAvailability(
+            rawChildDeviceID,
+            appMode: appMode,
+            uploadCachedToken: { uploadCachedAPNsTokenIfPossible(using: apiClient) }
+        )
+    }
+
+    static func handleChildDeviceIDAvailability(
+        _ rawChildDeviceID: String,
+        appMode: String,
+        uploadCachedToken: () -> Void,
+        registerForRemoteNotifications: () -> Void = {
+            UIApplication.shared.registerForRemoteNotifications()
+        }
+    ) {
+        guard shouldReplayAPNsForChildDeviceID(rawChildDeviceID, appMode: appMode) else { return }
+        uploadCachedToken()
+        registerForRemoteNotifications()
+    }
+
+    static func shouldReplayAPNsForChildDeviceID(
+        _ rawChildDeviceID: String,
+        appMode: String
+    ) -> Bool {
+        appMode == "child" && UUID(uuidString: rawChildDeviceID) != nil
+    }
+
     func application(
         _ application: UIApplication,
         didFailToRegisterForRemoteNotificationsWithError error: Error
     ) {
         // Expected on the simulator (no real APNs) and when the Push
         // Notifications capability/provisioning isn't configured. Log only.
+        CommandDeliveryDiagnostics.record(
+            CommandDeliveryDiagnostics.keyTokenRegistered,
+            "failed error=\(error.localizedDescription)"
+        )
         print("[AppDelegate] APNs registration failed: \(error)")
     }
 
@@ -278,9 +358,65 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         didReceiveRemoteNotification userInfo: [AnyHashable: Any],
         fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void
     ) {
+        let aps = userInfo["aps"] as? [AnyHashable: Any]
+        CommandDeliveryDiagnostics.record(
+            CommandDeliveryDiagnostics.keyRemoteNotification,
+            "received content_available=\(aps?["content-available"] ?? "unknown") keys=\(userInfo.keys.map { String(describing: $0) }.sorted().joined(separator: ","))"
+        )
         Task { @MainActor in
+            NotificationCenter.default.post(name: .bigKidStateInvalidated, object: nil)
             await CommandPoller.shared.pollOnceForCurrentDevice()
             completionHandler(.newData)
         }
+    }
+}
+
+/// Publishes the Evlin app icon into the shared App Group so the
+/// `EvlinShieldConfig` lock-screen extension can render it.
+///
+/// The extension can't read the main app's asset catalog (extensions have their
+/// own bundle), and inside that specific extension only App Group *UserDefaults*
+/// is reliable — its App Group file + Keychain writes are sandbox-blocked (the
+/// old "E1 probe" proved `UD=rtok` but `file=…`/`KC=…` failed). So we hand the
+/// icon across as PNG `Data` in UserDefaults. Versioned + cheap: it only
+/// rewrites when the bundled icon version changes.
+enum EvlinShieldIconPublisher {
+    static let appGroup = "group.com.evlin.ios"
+    static let dataKey = "evlin.shield.icon"
+    static let versionKey = "evlin.shield.icon.v"
+    /// Bump when the bundled `EvlinShieldIcon` artwork changes (or its size)
+    /// so devices re-publish the new image. (2 = mascot; 3 = larger mascot.)
+    static let version = 3
+    /// Mascot width in the published image (points). The extension reloads at
+    /// scale 2, so this renders ~120pt wide on the shield. Increase to make the
+    /// mascot bigger.
+    private static let mascotWidth: CGFloat = 240
+    /// Transparent strip baked BELOW the mascot. ShieldConfiguration has no
+    /// spacing API, so this padding is how we get air between the icon and the
+    /// title — but it also shrinks the mascot's share of the icon box, so keep
+    /// it small when a big mascot matters more than the gap.
+    private static let bottomPadding: CGFloat = 28
+
+    static func publish() {
+        guard let defaults = UserDefaults(suiteName: appGroup) else { return }
+        if defaults.integer(forKey: versionKey) == version,
+           defaults.data(forKey: dataKey) != nil {
+            return
+        }
+        guard let source = UIImage(named: "EvlinShieldIcon") else { return }
+        // Preserve the mascot's (portrait) aspect ratio, then add a transparent
+        // strip below it for icon↔title breathing room.
+        let aspect = source.size.width / max(source.size.height, 1)
+        let mascotHeight = (mascotWidth / max(aspect, 0.01)).rounded()
+        let canvas = CGSize(width: mascotWidth, height: mascotHeight + bottomPadding)
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1
+        format.opaque = false
+        let rendered = UIGraphicsImageRenderer(size: canvas, format: format).image { _ in
+            source.draw(in: CGRect(x: 0, y: 0, width: mascotWidth, height: mascotHeight))
+        }
+        guard let data = rendered.pngData() else { return }
+        defaults.set(data, forKey: dataKey)
+        defaults.set(version, forKey: versionKey)
     }
 }

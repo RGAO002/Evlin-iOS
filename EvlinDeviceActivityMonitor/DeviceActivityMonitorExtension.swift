@@ -13,6 +13,32 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
     private let defaults = UserDefaults(suiteName: "group.com.evlin.ios")
     private let store = ManagedSettingsStore()
 
+    override func intervalDidStart(for activity: DeviceActivityName) {
+        super.intervalDidStart(for: activity)
+
+        let raw = activity.rawValue
+        guard raw == "evlin.command.heartbeat" else { return }
+
+        let ts = ISO8601DateFormatter().string(from: Date())
+
+        // SPIKE: re-arm the next heartbeat window from INSIDE this extension
+        // process. Whether `startMonitoring` is even permitted here (no repo
+        // precedent — arming has only ever happened in the main app) is THE
+        // unknown this experiment resolves. Capture ok / throw verbatim.
+        let rearm = rearmHeartbeatSpike()
+
+        // SPIKE: append (don't overwrite) to a capped history so the main app
+        // can read the whole fire SEQUENCE + cadence, not just the last fire.
+        let count = appendHeartbeatSpikeLog("fired \(ts) \(rearm)")
+
+        defaults?.set(
+            "\(ts) intervalDidStart activity=\(raw) fire#\(count) \(rearm)",
+            forKey: "evlin.delivery.damHeartbeat"
+        )
+        NSLog("[Evlin/Ext] command heartbeat intervalDidStart %@ #%d %@", raw, count, rearm)
+        Task { await BigKidExtensionReporter.shared.reportCommandHeartbeat() }
+    }
+
     override func intervalDidEnd(for activity: DeviceActivityName) {
         super.intervalDidEnd(for: activity)
 
@@ -168,25 +194,92 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         store.application.blockedApplications = blockedApps.isEmpty ? nil : blockedApps
         return true
     }
+
+    // MARK: - DAM heartbeat spike (throwaway diagnostics)
+
+    /// SPIKE-ONLY. Re-arm a fresh 15-minute heartbeat window (start +60s) under
+    /// the SAME activity name, from inside the extension process. Returns a
+    /// short status ("rearm:ok" / "rearm:FAILED <err>") so the history log shows
+    /// whether the extension can sustain its own heartbeat (the A2 ~15-min path)
+    /// or whether only the main app can arm it (forcing the A1 tiled fallback).
+    private func rearmHeartbeatSpike() -> String {
+        let center = DeviceActivityCenter()
+        let name = DeviceActivityName("evlin.command.heartbeat")
+        let calendar = Calendar.current
+        let start = Date().addingTimeInterval(60)
+        let end = start.addingTimeInterval(15 * 60)
+        let comps: Set<Calendar.Component> = [
+            .calendar, .timeZone, .year, .month, .day, .hour, .minute, .second
+        ]
+        let schedule = DeviceActivitySchedule(
+            intervalStart: calendar.dateComponents(comps, from: start),
+            intervalEnd: calendar.dateComponents(comps, from: end),
+            repeats: false
+        )
+        do {
+            try center.startMonitoring(name, during: schedule)
+            return "rearm:ok"
+        } catch {
+            return "rearm:FAILED \(error.localizedDescription)"
+        }
+    }
+
+    /// SPIKE-ONLY. Append one line to a capped (last 30) history array in the
+    /// App Group + bump a running total, so the diagnostics view can show the
+    /// whole fire sequence. Keys MUST match `CommandDeliveryDiagnostics`
+    /// (`keyHeartbeatLog` / `keyHeartbeatCount`).
+    private func appendHeartbeatSpikeLog(_ line: String) -> Int {
+        let logKey = "evlin.spike.heartbeatLog"
+        let countKey = "evlin.spike.heartbeatCount"
+        var log = defaults?.stringArray(forKey: logKey) ?? []
+        log.append(line)
+        if log.count > 30 { log.removeFirst(log.count - 30) }
+        defaults?.set(log, forKey: logKey)
+        let count = (defaults?.integer(forKey: countKey) ?? 0) + 1
+        defaults?.set(count, forKey: countKey)
+        return count
+    }
+}
+
+// CRITICAL: date strategy MUST match `ActiveLockStore.persist()` / `restore()`,
+// which use `.iso8601` (dates as strings). A plain `JSONDecoder()` defaults to
+// `.deferredToDate` (dates as numbers) and so FAILS to decode the main app's
+// records — silently returning empty. When this extension recomputed on a
+// shield interval-end, that empty read made it write
+// `store.application.blockedApplications = nil`, wiping EVERY active block
+// (e.g. unshielding a timed app cancelled its activity → intervalDidEnd → this
+// recompute → all blocks dropped) even though the main app's records were
+// intact. Keeping the strategy aligned is what makes the cross-process read
+// faithful.
+private func evlinJSONDecoder() -> JSONDecoder {
+    let d = JSONDecoder()
+    d.dateDecodingStrategy = .iso8601
+    return d
+}
+
+private func evlinJSONEncoder() -> JSONEncoder {
+    let e = JSONEncoder()
+    e.dateEncodingStrategy = .iso8601
+    return e
 }
 
 /// Match `ActiveLockStore` — JSON for token-heavy `ShieldRecord`; plist only for legacy payloads.
 private func decodeShields(from data: Data) -> [String: ShieldRecord]? {
-    if let d = try? JSONDecoder().decode([String: ShieldRecord].self, from: data) { return d }
+    if let d = try? evlinJSONDecoder().decode([String: ShieldRecord].self, from: data) { return d }
     return try? PropertyListDecoder().decode([String: ShieldRecord].self, from: data)
 }
 
 private func encodeShields(_ shields: [String: ShieldRecord]) -> Data? {
-    try? JSONEncoder().encode(shields)
+    try? evlinJSONEncoder().encode(shields)
 }
 
 private func decodeBlocks(from data: Data) -> [String: BlockRecord]? {
-    if let d = try? JSONDecoder().decode([String: BlockRecord].self, from: data) { return d }
+    if let d = try? evlinJSONDecoder().decode([String: BlockRecord].self, from: data) { return d }
     return try? PropertyListDecoder().decode([String: BlockRecord].self, from: data)
 }
 
 private func encodeBlocks(_ blocks: [String: BlockRecord]) -> Data? {
-    try? JSONEncoder().encode(blocks)
+    try? evlinJSONEncoder().encode(blocks)
 }
 
 private func sha256Hex16(_ data: Data) -> String {

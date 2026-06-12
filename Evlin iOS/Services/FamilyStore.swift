@@ -23,12 +23,28 @@ final class FamilyStore {
     private(set) var parentDevices: [EnrolledDeviceDTO] = []
     private(set) var selfParent: ParentProfileDTO?
 
+    /// Real all-apps lock state of the single paired kid device
+    /// (`evlin.childDeviceID`), refreshed alongside the family aggregate from
+    /// `GET /parent/device/lock-state`. Drives the Home child card's
+    /// locked/unlocked status so it reflects the device, not a stale default.
+    private(set) var pairedDeviceLocked: Bool = false
+
     /// Presentation-layer children for the parent Home tab (spec §6.3). Maps
     /// each decoded `ChildDTO` through `ChildProfile(dto:)` so Home / settings
     /// / filter pills read real backend data instead of the retired
-    /// `ChildProfile.all` mock. Empty when no family is loaded yet (signed-out
-    /// or pre-pairing) — consumers render an empty/placeholder state.
-    var childProfiles: [ChildProfile] { children.map(ChildProfile.init(dto:)) }
+    /// `ChildProfile.all` mock. The child that owns the paired device carries
+    /// the live lock state (`pairedDeviceLocked`). Empty when no family is
+    /// loaded yet (signed-out or pre-pairing) — consumers render a placeholder.
+    var childProfiles: [ChildProfile] {
+        let pairedID = UserDefaults.standard.string(forKey: "evlin.childDeviceID") ?? ""
+        return children.map { dto in
+            ChildProfile(
+                dto: dto,
+                locked: pairedDeviceLocked
+                    && ownsPairedDevice(childId: dto.id, pairedDeviceID: pairedID)
+            )
+        }
+    }
 
     private let api: APIClient
     init(api: APIClient) { self.api = api }
@@ -41,6 +57,7 @@ final class FamilyStore {
         do {
             let me = try await api.fetchMeProfile()
             apply(me)
+            await refreshPairedLockState()
             state = .loaded
         } catch {
             state = .failed(error.localizedDescription)
@@ -54,6 +71,7 @@ final class FamilyStore {
         do {
             let me = try await api.fetchMeProfile()
             apply(me)
+            await refreshPairedLockState()
             state = .loaded
         } catch {
             if children.isEmpty && family == nil {
@@ -70,6 +88,7 @@ final class FamilyStore {
         do {
             let fam = try await api.fetchFamily()
             apply(fam)
+            await refreshPairedLockState()
             state = .loaded
         } catch {
             state = .failed(error.localizedDescription)
@@ -93,4 +112,23 @@ final class FamilyStore {
 
     /// Look up a child by its backend id.
     func child(byId id: String) -> ChildDTO? { children.first { $0.id == id } }
+
+    /// Refresh the paired kid device's real all-apps lock state so the Home
+    /// child card reflects the device (not a stale `.unlocked` default). One
+    /// paired device per install (`evlin.childDeviceID`); no-op when unpaired or
+    /// no family id is known. Best-effort — a failed fetch keeps the last value.
+    func refreshPairedLockState() async {
+        guard
+            let pairedRaw = UserDefaults.standard.string(forKey: "evlin.childDeviceID"),
+            let deviceID = UUID(uuidString: pairedRaw),
+            let famRaw = UserDefaults.standard.string(forKey: "evlin.familyID"),
+            let famID = UUID(uuidString: famRaw)
+        else {
+            pairedDeviceLocked = false
+            return
+        }
+        if let state = try? await api.fetchDeviceLockState(familyID: famID, childDeviceID: deviceID) {
+            pairedDeviceLocked = state.locked
+        }
+    }
 }

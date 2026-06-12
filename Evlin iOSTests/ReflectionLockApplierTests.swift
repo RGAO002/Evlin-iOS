@@ -103,6 +103,33 @@ final class ReflectionLockApplierTests: XCTestCase {
         XCTAssertEqual(spy.stopped.count, 1)
     }
 
+    func test_release_preserves_existing_blocks() async {
+        let store = ActiveLockStore()
+        let spy = LockSchedulerSpy()
+        let applier = makeApplier(store: store, spy: spy)
+        let rid = UUID()
+        let childID = UUID()
+        let block = BlockRecord(
+            bundleID: "com.burbn.instagram",
+            displayName: "Instagram",
+            blockedAt: Date(),
+            lastCommandID: UUID(),
+            originalRequest: "block Instagram",
+            targetChildID: childID
+        )
+
+        _ = await store.addBlock(block)
+        await applier.reconcile(snapshot: pendingSnapshot(rid: rid), childID: childID)
+        await applier.reconcile(snapshot: resolvedSnapshot(rid: rid, resolution: .approved),
+                                childID: childID)
+
+        let current = await store.allCurrent()
+        XCTAssertFalse(current.shields.contains(where: { $0.recordKey == "all:reflection:\(rid.uuidString)" }),
+                       "reflection release must remove only its dedicated all-apps shield")
+        XCTAssertTrue(current.blocks.contains(where: { $0.bundleID == "com.burbn.instagram" }),
+                      "reflection release must not clear unrelated active blocks")
+    }
+
     // MARK: - schedule failure recorded, not swallowed
 
     func test_schedule_failure_is_recorded_not_swallowed() async {

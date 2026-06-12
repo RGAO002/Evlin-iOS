@@ -4,7 +4,7 @@ enum ReceiptState: Sendable, Equatable, Codable {
     case pending
     /// Mirrors AckResult.confirmedExact. `verb` drives copy branching so
     /// `unblock Instagram` renders as "Unblocked Instagram", not "Shielded Instagram".
-    case confirmedExact(verb: AckVerb, displayName: String, unlocksAt: Date?)
+    case confirmedExact(verb: AckVerb, displayName: String, unlocksAt: Date?, artworkURL: URL?)
     case confirmedFallback(verb: AckVerb, displayName: String, category: String, origRequest: String)
     case failedPermission
     case failedListNotFound(listName: String)
@@ -16,6 +16,8 @@ enum ReceiptState: Sendable, Equatable, Codable {
     /// still queued server-side and will run when the kid comes back —
     /// we just stopped polling so the parent isn't staring at a spinner.
     case kidNotResponding
+    /// Kid device picked up the command but hasn't posted the terminal ack yet.
+    case pickedUp
     case failedOther(reason: String)
 }
 
@@ -39,7 +41,7 @@ enum ReceiptCardActionModel {
         for state: ReceiptState,
         effectiveState: AckEffectiveState?
     ) -> ReceiptCardActions? {
-        guard case .confirmedExact(let verb, _, _) = state,
+        guard case .confirmedExact(let verb, _, _, _) = state,
               verb == .unshield || verb == .unblock,
               let effectiveState,
               !effectiveState.shieldsCovering.isEmpty
@@ -79,6 +81,34 @@ enum ReceiptCardActionModel {
             return .exactApp
         }
         return nil
+    }
+}
+
+enum ReceiptCardCopyModel {
+    static let kidNotRespondingTitle = "Kid's phone hasn't responded yet"
+    static let kidNotRespondingDetail =
+        "Still queued — it will apply when the kid device receives or polls for commands."
+    static let pickedUpDetail = "Kid device received the command — applying now."
+
+    static func timeLimitLine(
+        verb: AckVerb,
+        unlocksAt: Date?,
+        timeString: (Date) -> String
+    ) -> String? {
+        switch verb {
+        case .shield:
+            if let at = unlocksAt {
+                return "Unlocks at \(timeString(at))"
+            }
+            return "Until you unlock"
+        case .block:
+            if let at = unlocksAt {
+                return "Restores at \(timeString(at))"
+            }
+            return "Until you unblock"
+        default:
+            return nil
+        }
     }
 }
 
@@ -135,7 +165,7 @@ struct ReceiptCard: View {
     /// iPhone" footer. Failures and pending receipts render their own copy.
     private var showsHonestReceiptFooter: Bool {
         switch state {
-        case .confirmedExact(let verb, _, _),
+        case .confirmedExact(let verb, _, _, _),
              .confirmedFallback(let verb, _, _, _):
             return verb == .shield || verb == .block
         default:
@@ -223,21 +253,25 @@ struct ReceiptCard: View {
                 // accepted and is waiting on the kid.
                 Text("Queued — waiting for kid device").font(.subheadline)
             }
-        case .confirmedExact(let verb, let name, let unlocksAt):
+        case .confirmedExact(let verb, let name, let unlocksAt, let artworkURL):
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 8) {
-                    NameWithIcon(name: name, kind: .app, titleFont: .subheadline.weight(.medium))
+                    NameWithIcon(
+                        name: name,
+                        kind: .app,
+                        artworkURL: artworkURL,
+                        titleFont: .subheadline.weight(.medium)
+                    )
                     Spacer()
                     Image(systemName: iconForVerb(verb))
                 }
-                if verb == .shield {
-                    if let at = unlocksAt {
-                        Text("Unlocks at \(timeString(at))")
-                            .font(.caption).foregroundStyle(.secondary)
-                    } else {
-                        Text("Until you unlock")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
+                if let line = ReceiptCardCopyModel.timeLimitLine(
+                    verb: verb,
+                    unlocksAt: unlocksAt,
+                    timeString: timeString
+                ) {
+                    Text(line)
+                        .font(.caption).foregroundStyle(.secondary)
                 }
             }
         case .confirmedFallback(_, let name, let category, let orig):
@@ -277,12 +311,18 @@ struct ReceiptCard: View {
             HStack(spacing: 8) {
                 Image(systemName: "exclamationmark.bubble")
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Kid's phone hasn't responded yet")
+                    Text(ReceiptCardCopyModel.kidNotRespondingTitle)
                         .font(.subheadline).fontWeight(.medium)
                         .foregroundStyle(.orange)
-                    Text("Still queued — will apply when Evlin opens on their device.")
+                    Text(ReceiptCardCopyModel.kidNotRespondingDetail)
                         .font(.caption).foregroundStyle(.secondary)
                 }
+            }
+        case .pickedUp:
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text(ReceiptCardCopyModel.pickedUpDetail)
+                    .font(.subheadline)
             }
         case .failedOther(let reason):
             Label(reason, systemImage: "xmark.octagon").font(.subheadline).foregroundStyle(.red)
