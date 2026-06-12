@@ -8,6 +8,7 @@ struct HomeView: View {
     var notifications: [HomeNotification] = HomeMockData.notifications
     var onOpenProfile: (ChildProfile) -> Void
     var onOpenNotifications: () -> Void
+    var bellHasNew: Bool = false
 
     private var greeting: String {
         let h = Calendar.current.component(.hour, from: Date())
@@ -33,7 +34,7 @@ struct HomeView: View {
         VStack(spacing: 0) {
             GlassmorphicHeader(title: "", kicker: "\(greeting), \(displayParentName)") {
                 HStack(spacing: 4) {
-                    HeaderIconButton(systemName: "bell", badge: unreadCount > 0) {
+                    HeaderIconButton(systemName: "bell", badge: bellHasNew) {
                         onOpenNotifications()
                     }
                     HeaderIconButton(systemName: "gearshape") {

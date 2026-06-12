@@ -90,6 +90,10 @@ struct ParentRootView: View {
     /// `@StateObject` init); `CalendarView.onAppear` rebinds the shell's real
     /// client before any request fires.
     @StateObject private var calendarStore = CalendarStore(api: APIClient())
+    /// Drives the bell's red dot (new-since-opened). Default-inits its
+    /// baseURL from the persisted serverURL.
+    @StateObject private var notifBell = NotificationFeedClient()
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         // Keep the app shell itself out of keyboard avoidance so the tab bar
@@ -104,7 +108,8 @@ struct ParentRootView: View {
                             selectedTab: $selectedTab,
                             notifications: homeNotifications,
                             onOpenProfile: { child in profilePath.append(AppRoute.profile(child)) },
-                            onOpenNotifications: { profilePath.append(AppRoute.notifications) }
+                            onOpenNotifications: { notifBell.markOpened(); profilePath.append(AppRoute.notifications) },
+                            bellHasNew: notifBell.hasNew
                         )
                         .appNavigationDestination(
                             path: $profilePath,
@@ -124,7 +129,9 @@ struct ParentRootView: View {
                 case .insights:
                     NavigationStack(path: $insightsPath) {
                         InsightsView(
+                            bellHasNew: notifBell.hasNew,
                             onOpenNotifications: {
+                                notifBell.markOpened()
                                 insightsPath.append(AppRoute.notifications)
                             }
                         )
@@ -146,6 +153,10 @@ struct ParentRootView: View {
                 .padding(.bottom, EvlinTabBar.bottomOffset)
         }
         .ignoresSafeArea(.keyboard, edges: .bottom)
+        .task { await notifBell.refresh() }
+        .onChange(of: scenePhase) { _, p in
+            if p == .active { Task { await notifBell.refresh() } }
+        }
         .overlay(alignment: .top) {
             if let b = banner {
                 NotificationBanner(

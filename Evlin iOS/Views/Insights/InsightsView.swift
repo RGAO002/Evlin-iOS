@@ -4,6 +4,7 @@ struct InsightsView: View {
     /// Push `.notifications` onto the parent's NavigationStack. Keeping
     /// it as a callback means the view itself doesn't have to know
     /// anything about routing.
+    var bellHasNew: Bool = false
     var onOpenNotifications: () -> Void = {}
 
     @Environment(FamilyStore.self) private var familyStore
@@ -20,7 +21,7 @@ struct InsightsView: View {
         VStack(spacing: 0) {
             GlassmorphicHeader(title: "Child Insights", kicker: "Past 7 days") {
                 HStack(spacing: 4) {
-                    HeaderIconButton(systemName: "bell", badge: unreadCount > 0) {
+                    HeaderIconButton(systemName: "bell", badge: bellHasNew) {
                         onOpenNotifications()
                     }
                     HeaderIconButton(systemName: "gearshape") {
