@@ -157,6 +157,12 @@ struct ParentRootView: View {
         .onChange(of: scenePhase) { _, p in
             if p == .active { Task { await notifBell.refresh() } }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .evlinOpenNotifications)) { _ in
+            // A tapped push routes the parent to the bell.
+            selectedTab = .home
+            notifBell.markOpened()
+            profilePath.append(AppRoute.notifications)
+        }
         .overlay(alignment: .top) {
             if let b = banner {
                 NotificationBanner(
