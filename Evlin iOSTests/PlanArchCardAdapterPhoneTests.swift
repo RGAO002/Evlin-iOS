@@ -33,6 +33,39 @@ final class PlanArchCardAdapterPhoneTests: XCTestCase {
         XCTAssertNil(PlanArchCardAdapter.adapt(card, childName: "Liam"))
     }
 
+    func testMissingDurationWithBackendBodyFallsBackSoMinimumCopyRenders() throws {
+        let body: [String: Any] = [
+            "type": "duration_picker",
+            "title": "How long should YouTube be shielded?",
+            "body": "Apple requires a 15-minute minimum for Screen Time shields. I can set YouTube to 15 minutes instead.",
+            "plan_token": "x",
+            "step_index": 0,
+            "kind": "phone.missing_duration",
+            "source": "plan",
+            "detail": [
+                "target_name": "YouTube",
+                "requested_minutes": 2,
+                "minimum_minutes": 15,
+            ],
+            "options": [],
+            "danger": "low",
+        ]
+        let data = try JSONSerialization.data(withJSONObject: body)
+        let card = try JSONDecoder().decode(PlanArchCardPayload.self, from: data)
+
+        XCTAssertNil(
+            PlanArchCardAdapter.adapt(card, childName: "Liam"),
+            "Backend-authored minimum-duration copy must render through PlanArchCardView instead of legacy D1, which has no body slot."
+        )
+    }
+
+    func testMissingDurationWithoutBackendBodyStillUsesLegacyDurationCard() {
+        let card = payload(kind: "phone.missing_duration", detail: ["target_name": "YouTube"])
+        let model = PlanArchCardAdapter.adapt(card, childName: "Liam")
+
+        XCTAssertEqual(model?.cardID, .D1)
+    }
+
     func testAdaptReflectionPrefixDispatchesIn2B() {
         // Phase 2B: reflection.confirm_propose now routes to .A1 via ReflectionCardAdapter.
         // (Was nil in 2A — updated when ReflectionCardAdapter was filled in.)

@@ -16,6 +16,9 @@ enum PhoneCardAdapter {
         switch payload.kind {
 
         case "phone.missing_duration":
+            if hasBackendAuthoredBody(payload) {
+                return nil
+            }
             let target = stringFromDetail(payload, "target_name")
                 ?? stringFromDetail(payload, "target")
                 ?? payload.title
@@ -25,6 +28,9 @@ enum PhoneCardAdapter {
             )
 
         case "phone.below_min_duration":
+            if hasBackendAuthoredBody(payload) {
+                return nil
+            }
             let target = stringFromDetail(payload, "target_name") ?? payload.title
             let requested = intFromDetail(payload, "requested_minutes")
             return CardRenderModel(
@@ -195,6 +201,11 @@ enum PhoneCardAdapter {
 
     private static func stringArrayFromDetail(_ p: PlanArchCardPayload, _ key: String) -> [String]? {
         p.detail[key]?.value as? [String]
+    }
+
+    private static func hasBackendAuthoredBody(_ p: PlanArchCardPayload) -> Bool {
+        guard let body = p.body else { return false }
+        return !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private static func u1ShieldEntriesFromDetail(_ p: PlanArchCardPayload) -> [U1ShieldEntry] {
