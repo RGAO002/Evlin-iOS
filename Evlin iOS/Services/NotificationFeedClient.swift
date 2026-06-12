@@ -16,6 +16,7 @@ struct FeedNotification: Decodable, Identifiable, Equatable {
     let title: String?
     let body: String?
     let renderKey: String?
+    let renderArgs: [String: String]?   // command_applied: kind/name/device_label/verb
     let deepLink: [String: String]?
     let createdAt: String?
     let readAt: String?
@@ -25,6 +26,7 @@ struct FeedNotification: Decodable, Identifiable, Equatable {
         case eventId = "event_id"
         case childProfileId = "child_profile_id"
         case renderKey = "render_key"
+        case renderArgs = "render_args"
         case deepLink = "deep_link"
         case createdAt = "created_at"
         case readAt = "read_at"

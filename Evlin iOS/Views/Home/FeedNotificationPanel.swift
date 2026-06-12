@@ -140,7 +140,7 @@ struct FeedNotificationPanel: View {
                     Color.clear.frame(width: 6, height: 6).offset(y: 10)
                 }
 
-                tile(for: n, color: color, symbol: style.symbol)
+                tile(for: n, style: style)
 
                 VStack(alignment: .leading, spacing: 3) {
                     if let title = n.title {
@@ -188,37 +188,75 @@ struct FeedNotificationPanel: View {
         )
     }
 
-    /// 46pt tinted tile: the kid's avatar for a child-scoped event, else the
-    /// type's SF Symbol — both over the type tint with the original stroke ring.
+    /// Lock receipt → app artwork / all-grid / category symbol / list (+ a
+    /// lock/block/failed corner badge). Kid-scoped event → the kid's avatar
+    /// (initial fallback, like Home) + a type badge. Else → a tinted SF Symbol.
     @ViewBuilder
-    private func tile(for n: FeedNotification, color: Color, symbol: String) -> some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 13, style: .continuous)
-                .fill(color.opacity(0.12))
-            if let cid = n.childProfileId,
-               let child = familyStore.childProfiles.first(where: { $0.id == cid }),
-               let urlStr = child.avatarURL, let url = URL(string: urlStr) {
-                AsyncImage(url: url) { phase in
-                    if let img = phase.image {
-                        img.resizable().scaledToFill()
-                    } else {
-                        Image(systemName: symbol)
-                            .font(.system(size: 16))
-                            .foregroundStyle(color)
-                    }
-                }
-                .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
-            } else {
-                Image(systemName: symbol)
-                    .font(.system(size: 18))
-                    .foregroundStyle(color)
+    private func tile(for n: FeedNotification, style: FeedNotificationStyle) -> some View {
+        if n.type == "command_applied", let kind = n.renderArgs?["kind"] {
+            let failed = n.urgency != "in_app_only"
+            let verb = n.renderArgs?["verb"] ?? "locked"
+            badged(badge: failed ? "exclamationmark.triangle.fill"
+                              : (verb == "blocked" ? "nosign" : "lock.fill"),
+                   color: failed ? .red : (verb == "blocked" ? .orange : .green)) {
+                lockBase(kind: kind, name: n.renderArgs?["name"] ?? "", color: style.color)
             }
+        } else if let cid = n.childProfileId,
+                  let child = familyStore.childProfiles.first(where: { $0.id == cid }) {
+            badged(badge: style.symbol, color: style.color) {
+                EvlinAvatarView(url: child.avatarURL, name: child.name, size: 46)
+            }
+        } else {
+            symbolTile(symbol: style.symbol, color: style.color)
+        }
+    }
+
+    @ViewBuilder
+    private func lockBase(kind: String, name: String, color: Color) -> some View {
+        switch kind {
+        case "app":      LockAppIcon(name: name)
+        case "all":      AllAppsTile()
+        case "category": symbolTile(symbol: FeedNotificationPanel.categorySymbol(name), color: color)
+        default:         symbolTile(symbol: "list.bullet.rectangle.fill", color: color)
+        }
+    }
+
+    private func symbolTile(symbol: String, color: Color) -> some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 13, style: .continuous).fill(color.opacity(0.12))
+            Image(systemName: symbol).font(.system(size: 18)).foregroundStyle(color)
         }
         .frame(width: 46, height: 46)
-        .overlay(
-            RoundedRectangle(cornerRadius: 13, style: .continuous)
-                .stroke(color.opacity(0.25), lineWidth: 1.5)
-        )
+        .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous)
+            .stroke(color.opacity(0.25), lineWidth: 1.5))
+    }
+
+    /// 46pt content with a punched-out corner badge (bottom-trailing).
+    @ViewBuilder
+    private func badged<Content: View>(badge: String, color: Color,
+                                       @ViewBuilder content: () -> Content) -> some View {
+        ZStack(alignment: .bottomTrailing) {
+            content().frame(width: 46, height: 46)
+            ZStack {
+                Circle().fill(Color.evSurfaceContainerLow).frame(width: 19, height: 19)
+                Circle().fill(color).frame(width: 16, height: 16)
+                Image(systemName: badge).font(.system(size: 8.5, weight: .bold)).foregroundStyle(.white)
+            }
+            .offset(x: 3, y: 3)
+        }
+        .frame(width: 46, height: 46)
+    }
+
+    /// Evlin's 5 reserved categories → a distinct SF Symbol (vs the all-apps grid).
+    static func categorySymbol(_ name: String) -> String {
+        switch name.lowercased() {
+        case "social":        return "bubble.left.and.bubble.right.fill"
+        case "games":         return "gamecontroller.fill"
+        case "entertainment": return "play.tv.fill"
+        case "education":     return "graduationcap.fill"
+        case "productivity":  return "briefcase.fill"
+        default:              return "square.grid.2x2.fill"
+        }
     }
 
     private func relativeTime(_ iso: String?) -> String {
@@ -274,5 +312,55 @@ struct FeedNotificationStyle {
         default:
             return .init(symbol: "bell.fill", color: .secondary)
         }
+    }
+}
+
+/// 46pt App Store artwork for a locked app, resolved by name (same source the
+/// chat uses — AppArtworkResolver / iTunes lookup, cached). Falls back to a
+/// generic app glyph while loading or when no artwork is found.
+private struct LockAppIcon: View {
+    let name: String
+    @State private var artURL: URL?
+
+    var body: some View {
+        content
+            .frame(width: 46, height: 46)
+            .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .stroke(Color.evOutlineVariant.opacity(0.5), lineWidth: 0.5))
+            .task(id: name) { artURL = await AppArtworkResolver.shared.artwork(forName: name) }
+    }
+
+    @ViewBuilder private var content: some View {
+        if let artURL {
+            AsyncImage(url: artURL) { phase in
+                if let img = phase.image { img.resizable().scaledToFill() } else { placeholder }
+            }
+        } else { placeholder }
+    }
+
+    private var placeholder: some View {
+        RoundedRectangle(cornerRadius: 13, style: .continuous).fill(Color.evSurfaceContainerHigh)
+            .overlay(Image(systemName: "app.fill").font(.system(size: 18)).foregroundStyle(Color.evOutline))
+    }
+}
+
+/// 46pt "all apps" tile — a 2×2 grid, visually distinct from a single app icon.
+private struct AllAppsTile: View {
+    var body: some View {
+        RoundedRectangle(cornerRadius: 13, style: .continuous).fill(Color.evSurfaceContainerHigh)
+            .frame(width: 46, height: 46)
+            .overlay(
+                VStack(spacing: 3) {
+                    HStack(spacing: 3) { dot(.pink); dot(.blue) }
+                    HStack(spacing: 3) { dot(.green); dot(.orange) }
+                }
+            )
+            .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .stroke(Color.evOutlineVariant.opacity(0.5), lineWidth: 0.5))
+    }
+
+    private func dot(_ c: Color) -> some View {
+        RoundedRectangle(cornerRadius: 4, style: .continuous).fill(c.opacity(0.85)).frame(width: 13, height: 13)
     }
 }
