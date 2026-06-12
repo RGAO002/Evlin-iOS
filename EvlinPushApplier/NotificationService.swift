@@ -21,10 +21,11 @@ import Foundation
 ///      (`lock_escalation.py`) stops and the parent sees confirmation,
 ///   5. presents the (time-sensitive) alert.
 ///
-/// SCOPE: only the inline-token LOCK fast-path (`shield` / `block`) is applied
-/// here — that is all the `lock_command_alert` channel carries. Anything else
-/// (no inline tokens, unlocks, library expansion) is deliberately left PENDING
-/// and UNACKED so the full app poller — which has the LocalAliasStore /
+/// SCOPE: the inline-token LOCK fast-path (`shield` / `block`) AND unlocks
+/// (`unshield` / `unblock` / `unshield_all` / `unblock_all`) are applied here —
+/// the `lock_command_alert` channel now carries both (NSE-primary for lock and
+/// unlock). A lock that lacks inline tokens, or `expand_library`, is left
+/// PENDING and UNACKED so the full app poller — which has the LocalAliasStore /
 /// pending-blob fallbacks this target intentionally does NOT link — applies it
 /// on next launch. Fail-safe: the NSE never guesses a lock, and never acks one
 /// it did not actually apply.
@@ -118,11 +119,40 @@ enum NSELockApplier {
             guard let record = buildBlockRecord(from: cmd) else { return nil }
             _ = await ActiveLockStore.shared.addBlock(record)
             return Outcome(verb: "block", displayName: record.displayName)
-        case .unshield, .unblock, .unshieldAll, .unblockAll, .expandLibrary:
-            // Not safety-critical under force-quit (fail-safe = stay locked).
-            // Leave for the app poller, which reconciles on next launch.
+        case .unshieldAll:
+            _ = await ActiveLockStore.shared.unshieldAll()
+            return Outcome(verb: "unshield_all", displayName: cmd.target.targetDisplay ?? "All apps")
+        case .unblockAll:
+            _ = await ActiveLockStore.shared.unblockAll()
+            return Outcome(verb: "unblock_all", displayName: cmd.target.targetDisplay ?? "All apps")
+        case .unshield:
+            // Idempotent: removing an absent record is still "unlocked" from the
+            // parent's intent, so we always report success.
+            _ = await ActiveLockStore.shared.removeShield(recordKey: unshieldRecordKey(from: cmd))
+            return Outcome(verb: "unshield", displayName: cmd.target.targetDisplay ?? "App")
+        case .unblock:
+            guard let bundleID = cmd.target.bundleID?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !bundleID.isEmpty else { return nil }
+            _ = await ActiveLockStore.shared.removeBlock(bundleID: bundleID)
+            return Outcome(verb: "unblock", displayName: cmd.target.targetDisplay ?? bundleID)
+        case .expandLibrary:
+            // Not a lock-state change — leave for the app.
             return nil
         }
+    }
+
+    /// recordKey of the shield an `unshield` command targets — mirrors the key
+    /// `buildShieldRecord` would have produced for the same tier/target.
+    private static func unshieldRecordKey(from cmd: LockCommand) -> String {
+        let tier = cmd.tier ?? .category
+        let targetKey: String
+        switch tier {
+        case .exactApp: targetKey = exactAppTargetKey(cmd.target)
+        case .savedList: targetKey = cmd.target.listID?.uuidString ?? "?"
+        case .category: targetKey = (categoryLookupName(cmd.target) ?? "?").lowercased()
+        case .all: targetKey = "all"
+        }
+        return ShieldRecord.makeRecordKey(tier: tier, targetKey: targetKey)
     }
 
     // MARK: Record construction
