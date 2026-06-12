@@ -96,6 +96,13 @@ final class NotificationFeedClient: ObservableObject {
         await refresh()
     }
 
+    /// Dismiss one row: drop it from the list immediately (snappy, matches the
+    /// original panel's ✕), then persist the dismiss to the backend.
+    func dismiss(_ recipientId: String) async {
+        items.removeAll { $0.id == recipientId }
+        await mark(recipientId, action: "dismiss")
+    }
+
     private static let lastOpenedKey = "evlin.notif.lastOpenedAt"
 
     /// Call when the bell panel is opened: clears the red dot and remembers the
