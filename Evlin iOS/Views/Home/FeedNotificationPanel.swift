@@ -5,6 +5,7 @@ import SwiftUI
 /// app's deep links. Read/dismiss state is written back to the backend.
 struct FeedNotificationPanel: View {
     @StateObject private var feed: NotificationFeedClient
+    @Environment(FamilyStore.self) private var familyStore
     var onClose: () -> Void
     /// Called with the event's `deep_link` dict (e.g. {"route":"deviceDetail",
     /// "device_id":"…"}). The caller maps it onto AppRoute.
@@ -102,14 +103,7 @@ struct FeedNotificationPanel: View {
                 Circle().fill(n.isUnread ? style.color : Color.clear)
                     .frame(width: 6, height: 6).offset(y: 10)
 
-                ZStack {
-                    RoundedRectangle(cornerRadius: 13, style: .continuous)
-                        .fill(style.color.opacity(0.14))
-                    Image(systemName: style.symbol)
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(style.color)
-                }
-                .frame(width: 38, height: 38)
+                tile(for: n, style: style)
 
                 VStack(alignment: .leading, spacing: 2) {
                     if let title = n.title {
@@ -141,6 +135,37 @@ struct FeedNotificationPanel: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+
+    /// A child-specific event shows the kid's avatar with a corner event
+    /// badge; everything else uses a tinted symbol tile.
+    @ViewBuilder
+    private func tile(for n: FeedNotification, style: FeedNotificationStyle) -> some View {
+        if let cid = n.childProfileId,
+           let child = familyStore.childProfiles.first(where: { $0.id == cid }),
+           let urlStr = child.avatarURL, let url = URL(string: urlStr) {
+            ZStack(alignment: .bottomTrailing) {
+                AsyncImage(url: url) { phase in
+                    if let img = phase.image { img.resizable().scaledToFill() }
+                    else { Circle().fill(style.color.opacity(0.14)) }
+                }
+                .frame(width: 38, height: 38).clipShape(Circle())
+                ZStack {
+                    Circle().fill(Color(.systemBackground)).frame(width: 18, height: 18)
+                    Image(systemName: style.symbol).font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(style.color)
+                }
+                .offset(x: 3, y: 3)
+            }
+            .frame(width: 38, height: 38)
+        } else {
+            ZStack {
+                RoundedRectangle(cornerRadius: 13, style: .continuous).fill(style.color.opacity(0.14))
+                Image(systemName: style.symbol).font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(style.color)
+            }
+            .frame(width: 38, height: 38)
+        }
     }
 
     private func relativeTime(_ iso: String?) -> String {
