@@ -131,7 +131,9 @@ struct FeedNotificationPanel: View {
         Button {
             locallyRead.insert(n.id)
             Task { await feed.mark(n.id, action: "opened") }
-            if let link = n.deepLink { onOpenDeepLink(link) }
+            var link = n.deepLink ?? [:]
+            if let cid = n.childProfileId { link["child_profile_id"] = cid }
+            onOpenDeepLink(link)
         } label: {
             HStack(alignment: .top, spacing: 12) {
                 if unreadRow {

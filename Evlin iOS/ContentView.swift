@@ -382,11 +382,19 @@ extension View {
                     onClose: {
                         if !path.wrappedValue.isEmpty { path.wrappedValue.removeLast() }
                     },
-                    onOpenDeepLink: { _ in
-                        // v1: tapping marks the row opened (in the panel) and
-                        // returns to Home. Full deep-link routing
-                        // (deviceDetail / settings) is a follow-up.
+                    onOpenDeepLink: { link in
+                        // Pop the notifications panel, then route to the target.
                         if !path.wrappedValue.isEmpty { path.wrappedValue.removeLast() }
+                        switch link["route"] {
+                        case "calendarEvent", "calendar":
+                            selectedTab.wrappedValue = .calendar
+                        default:
+                            // lock / block / reflection / device → the kid's page.
+                            if let cid = link["child_profile_id"],
+                               let kid = children.first(where: { $0.id == cid }) {
+                                path.wrappedValue.append(AppRoute.profile(kid))
+                            }
+                        }
                     }
                 )
             case .taskDetail(let child, let taskId):
