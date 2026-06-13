@@ -56,6 +56,11 @@ extension Color {
     static let evChildMaya = Color(hex: 0x2E7D32)   // forest (same as evSecondary)
     static let evChildEmma = Color(hex: 0xEF6C00)   // amber
 
+    // MARK: Calendar accent (muted brick red — chat calendar cards' identity;
+    // action buttons stay navy evPrimary so the app's "do it" color is uniform)
+    static let evCalendar = Color(hex: 0xA6443E)
+    static let evCalendarContainer = Color(hex: 0xF7ECEA)
+
     // MARK: Gradients
     static let evChatGradient = LinearGradient(
         colors: [Color(hex: 0x041627), Color(hex: 0x1A2B3C)],

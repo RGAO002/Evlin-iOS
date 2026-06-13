@@ -102,4 +102,17 @@ final class EventTargetCardTests: XCTestCase {
         XCTAssertFalse(pretty.contains("+00:00"))
         XCTAssertFalse(pretty.contains("T19:35"))
     }
+
+    func testDisplayDateRangeJoinsStartAndEnd() {
+        // start + end → "<start label> – <end time>" (en-dash separator present).
+        let range = EventTargetDetail.displayDateRange(
+            start: "2026-06-14T19:35:00+00:00", end: "2026-06-14T20:35:00+00:00")
+        XCTAssertTrue(range.contains("–"), "range must join with an en dash: \(range)")
+        XCTAssertFalse(range.contains("+00:00"))
+        // Missing end → falls back to the single start label (no separator).
+        let single = EventTargetDetail.displayDateRange(
+            start: "2026-06-14T19:35:00+00:00", end: "")
+        XCTAssertFalse(single.contains("–"))
+        XCTAssertEqual(single, EventTargetDetail.displayDateTime("2026-06-14T19:35:00+00:00"))
+    }
 }

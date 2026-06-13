@@ -7,6 +7,13 @@
 //  QuestionCardAdapter, before PlanArchCardAdapter). Actions are delegated to
 //  ChatViewModel (AgentClient + 410 handling + next-card swap).
 //
+//  Styling: aligned to the app's ProposalCard/EvlinCard language — white
+//  evSurface card, hairline border, glyph-chip header, system fonts. The
+//  CALENDAR-specific kinds (result/create/bundle/disambiguation/scope) wear the
+//  muted brick-red `evCalendar` accent; action buttons stay navy `evPrimary`
+//  (the app-wide "do it" color). The target.* kinds are GLOBAL (shared with
+//  lock/block device pick) so they render via TargetSelectView in neutral navy.
+//
 
 import SwiftUI
 
@@ -51,109 +58,221 @@ struct EventTargetCardView: View {
         }
     }
 
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(payload.title).font(.headline)
-            if let b = payload.body, !b.isEmpty { Text(b).font(.subheadline).foregroundStyle(.secondary) }
-        }
-    }
+    // MARK: - Shared chrome (calendar identity = evCalendar red)
 
-    private var resultCard: some View {
-        // event.result is a read-only receipt (list results + "couldn't find" /
-        // "can't edit a repeating event yet" notices). It MUST render detail.rows
-        // (list events) and carry a Done button — otherwise it pins on screen and
-        // stalls the pendingPlanArchCard queue (code-review finding #2).
-        let rows = detail.rows("rows")
-        return VStack(alignment: .leading, spacing: 12) {
-            // Decorated header: calendar glyph + title + count subtitle.
-            HStack(spacing: 10) {
-                Image(systemName: "calendar")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(Color.accentColor)
-                    .frame(width: 32, height: 32)
-                    .background(Color.accentColor.opacity(0.12),
-                                in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(payload.title).font(.headline)
-                    if let b = payload.body, !b.isEmpty {
-                        Text(b).font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-            }
-            if !rows.isEmpty {
-                VStack(spacing: 0) {
-                    ForEach(Array(rows.enumerated()), id: \.offset) { idx, row in
-                        if idx > 0 { Divider().padding(.leading, 19) }
-                        eventRow(row)
-                    }
-                }
-                .padding(.vertical, 2)
-                .background(Color(.secondarySystemBackground),
-                            in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-            }
-            HStack {
-                Spacer()
-                Button("Done", action: onSkip)
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-            }
-        }
-        .padding(16)
-        .background(Color(.systemBackground),
-                    in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
-            .stroke(Color.primary.opacity(0.06), lineWidth: 1))
-    }
-
-    /// One list row: a dot bullet, the event title, and the occurrence time
-    /// formatted to the device timezone (not a raw ISO string).
-    @ViewBuilder
-    private func eventRow(_ row: [String: Any]) -> some View {
-        let title = (row["title"] as? String) ?? "Event"
-        let start = (row["occurrence_start"] as? String) ?? ""
+    private func glyphHeader(_ icon: String, title: String, subtitle: String?) -> some View {
         HStack(spacing: 10) {
-            Circle().fill(Color.accentColor).frame(width: 7, height: 7)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(title).font(.subheadline.weight(.medium))
-                if !start.isEmpty {
-                    Text(EventTargetDetail.displayDateTime(start))
-                        .font(.caption).foregroundStyle(.secondary)
+            Image(systemName: icon)
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(Color.evCalendar)
+                .frame(width: 34, height: 34)
+                .background(Color.evCalendarContainer,
+                            in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.headline).foregroundStyle(Color.evOnSurface)
+                if let s = subtitle, !s.isEmpty {
+                    Text(s).font(.subheadline).foregroundStyle(Color.evOnSurfaceVariant)
                 }
             }
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 9)
     }
 
-    private var confirmCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            header
-            HStack {
-                Button("Skip", action: onSkip).buttonStyle(.bordered)
-                Spacer()
-                Button("Confirm") { onConfirm(detail.string("proposal_token") ?? "") }
-                    .buttonStyle(.borderedProminent)
-                    .disabled((detail.string("proposal_token") ?? "").isEmpty)
+    private func primaryButton(_ title: String, enabled: Bool = true,
+                               action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 15, weight: .semibold))
+                .frame(maxWidth: .infinity).padding(.vertical, 11)
+                .foregroundStyle(.white)
+                .background(Color.evPrimary.opacity(enabled ? 1 : 0.35),
+                            in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+    }
+
+    private func neutralButton(_ title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 15, weight: .semibold))
+                .frame(maxWidth: .infinity).padding(.vertical, 11)
+                .foregroundStyle(Color.evOnSurface)
+                .background(Color.evSurfaceContainer,
+                            in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func cardSurface<V: View>(@ViewBuilder _ content: () -> V) -> some View {
+        content()
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.evSurfaceContainerLowest,
+                        in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(Color.evOutlineVariant.opacity(0.6), lineWidth: 1))
+    }
+
+    /// One list row: a red dot, the event title, and the occurrence time formatted
+    /// to the device timezone. Reads `occurrence_start` (list) or `time` (bundle).
+    private func eventRow(_ row: [String: Any]) -> some View {
+        let title = (row["title"] as? String) ?? "Event"
+        let start = (row["occurrence_start"] as? String) ?? (row["time"] as? String) ?? ""
+        return HStack(spacing: 10) {
+            Circle().fill(Color.evCalendar).frame(width: 7, height: 7)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title).font(.subheadline.weight(.medium)).foregroundStyle(Color.evOnSurface)
+                if !start.isEmpty {
+                    Text(EventTargetDetail.displayDateTime(start))
+                        .font(.caption).foregroundStyle(Color.evOnSurfaceVariant)
+                }
             }
-        }.padding(16).background(Color(.systemBackground)).cornerRadius(12)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12).padding(.vertical, 9)
     }
 
+    private func groupedRows(_ rows: [[String: Any]]) -> some View {
+        VStack(spacing: 0) {
+            ForEach(Array(rows.enumerated()), id: \.offset) { idx, row in
+                if idx > 0 { Divider().padding(.leading, 19) }
+                eventRow(row)
+            }
+        }
+        .background(Color.evSurfaceContainerLow,
+                    in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    // MARK: - result (read-only; NO button)
+    // Read-only receipt: a list result, or a "couldn't find" / "can't edit a
+    // repeating event yet" notice. Intentionally has no dismiss button — it's
+    // cleared when the parent sends their next message (sendMessage()) or replaced
+    // by the next turn's cards, and in practice it is always the turn's only card.
+    private var resultCard: some View {
+        let rows = detail.rows("rows")
+        return cardSurface {
+            VStack(alignment: .leading, spacing: 12) {
+                glyphHeader("calendar", title: payload.title, subtitle: payload.body)
+                if !rows.isEmpty { groupedRows(rows) }
+            }
+        }
+    }
+
+    // MARK: - confirm (create + bundle)
+    private var confirmCard: some View {
+        let token = detail.string("proposal_token") ?? ""
+        let isBundle = payload.kind == "event.bundle_confirm"
+        return cardSurface {
+            VStack(alignment: .leading, spacing: 12) {
+                glyphHeader("calendar.badge.plus", title: payload.title,
+                            subtitle: isBundle ? "Confirm to save all" : "Confirm to save")
+                if isBundle {
+                    groupedRows(detail.rows("rows"))
+                } else {
+                    createDetailBlock
+                }
+                HStack(spacing: 10) {
+                    neutralButton("Skip", action: onSkip)
+                    primaryButton(isBundle ? "Confirm all" : "Confirm",
+                                  enabled: !token.isEmpty) { onConfirm(token) }
+                }
+            }
+        }
+    }
+
+    private var createDetailBlock: some View {
+        let title = detail.string("title") ?? "Event"
+        let start = detail.string("start_at_iso") ?? ""
+        let end = detail.string("end_at_iso") ?? ""
+        let names = detail.stringList("participant_names")
+        return VStack(alignment: .leading, spacing: 6) {
+            Text(title).font(.system(size: 15, weight: .semibold)).foregroundStyle(Color.evOnSurface)
+            if !start.isEmpty {
+                HStack(spacing: 6) {
+                    Image(systemName: "clock").font(.system(size: 13))
+                    Text(EventTargetDetail.displayDateRange(start: start, end: end))
+                }
+                .font(.subheadline).foregroundStyle(Color.evOnSurfaceVariant)
+            }
+            if !names.isEmpty {
+                HStack(spacing: 6) {
+                    Image(systemName: "person").font(.system(size: 13))
+                    Text("For " + names.joined(separator: ", "))
+                }
+                .font(.subheadline).foregroundStyle(Color.evOnSurfaceVariant)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(Color.evSurfaceContainerLow,
+                    in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    // MARK: - disambiguation (pick which event)
     private var disambiguationCard: some View {
         let ct = detail.string("continuation_token") ?? ""
-        return VStack(alignment: .leading, spacing: 12) {
-            header
-            ForEach(detail.options("options")) { opt in
-                Button(opt.label) {
-                    // option id == event_id; pass the emitted occurrence_start so
-                    // event-select can re-verify it belongs to the expanded event (§6.4).
-                    onPickEvent(ct, opt.id, opt.occurrenceStart)
-                }.buttonStyle(.bordered).frame(maxWidth: .infinity)
+        let options = detail.options("options")
+        return cardSurface {
+            VStack(alignment: .leading, spacing: 12) {
+                glyphHeader("list.bullet.rectangle", title: payload.title, subtitle: payload.body)
+                VStack(spacing: 8) {
+                    ForEach(options) { opt in
+                        Button {
+                            // option id == event_id; pass occurrence_start so event-select
+                            // can re-verify it belongs to the expanded event (§6.4).
+                            onPickEvent(ct, opt.id, opt.occurrenceStart)
+                        } label: {
+                            HStack(spacing: 10) {
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(opt.label).font(.subheadline.weight(.medium))
+                                        .foregroundStyle(Color.evOnSurface)
+                                    if !opt.occurrenceStart.isEmpty {
+                                        Text(EventTargetDetail.displayDateTime(opt.occurrenceStart))
+                                            .font(.caption).foregroundStyle(Color.evOnSurfaceVariant)
+                                    }
+                                }
+                                Spacer(minLength: 0)
+                                Image(systemName: "chevron.right")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundStyle(Color.evOutline)
+                            }
+                            .padding(.horizontal, 12).padding(.vertical, 11)
+                            .frame(maxWidth: .infinity)
+                            .background(Color.evSurfaceContainerLow,
+                                        in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                neutralButton("Cancel", action: onSkip)
             }
-            Button("Cancel", action: onSkip).buttonStyle(.plain).foregroundStyle(.secondary)
-        }.padding(16).background(Color(.systemBackground)).cornerRadius(12)
+        }
     }
 
+    // MARK: - scope (recurring whole-series confirm)
+    private var scopeCard: some View {
+        let ct = detail.string("continuation_token") ?? ""
+        return cardSurface {
+            VStack(alignment: .leading, spacing: 12) {
+                glyphHeader("repeat", title: payload.title, subtitle: nil)
+                if let b = payload.body, !b.isEmpty {
+                    Text(b)
+                        .font(.subheadline).foregroundStyle(Color.evOnSurfaceVariant)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(12)
+                        .background(Color.evSurfaceContainerLow,
+                                    in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+                HStack(spacing: 10) {
+                    neutralButton("Cancel", action: onSkip)
+                    primaryButton("Whole series") { onScope(ct) }
+                }
+            }
+        }
+    }
+
+    // MARK: - target (GLOBAL — neutral navy, shared with lock/block)
     private var targetCard: some View {
         let ct = detail.string("continuation_token") ?? ""
         let groups = !detail.groups("groups").isEmpty
@@ -163,20 +282,8 @@ struct EventTargetCardView: View {
             onConfirm: { ids in onResolveTarget(ct, ids) }, onCancel: onSkip)
     }
 
-    private var scopeCard: some View {
-        let ct = detail.string("continuation_token") ?? ""
-        return VStack(alignment: .leading, spacing: 12) {
-            header
-            HStack {
-                Button("Cancel", action: onSkip).buttonStyle(.bordered)
-                Spacer()
-                Button("Whole series") { onScope(ct) }.buttonStyle(.borderedProminent)
-            }
-        }.padding(16).background(Color(.systemBackground)).cornerRadius(12)
-    }
-
+    // MARK: - reflection (unchanged — reuses the existing review card)
     private var reflectionCard: some View {
-        // Preserve render + act (§2 item 2 / §11): route to the existing card.
         ReflectionSubmissionReviewCard(
             childName: childName,
             writingPrompt: detail.string("summary") ?? "",

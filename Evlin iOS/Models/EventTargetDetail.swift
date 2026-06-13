@@ -61,6 +61,10 @@ struct EventTargetDetail {
     }
 
     func rows(_ key: String) -> [[String: Any]] { raw[key] as? [[String: Any]] ?? [] }
+
+    func stringList(_ key: String) -> [String] {
+        (raw[key] as? [Any] ?? []).compactMap { $0 as? String }
+    }
 }
 
 extension EventTargetDetail {
@@ -75,5 +79,18 @@ extension EventTargetDetail {
         f.timeZone = .current
         f.dateFormat = "EEE, MMM d · h:mm a"
         return f.string(from: date)
+    }
+
+    /// "Sun, Jun 14 · 3:35 PM – 4:35 PM" for a start/end pair (both UTC ISO).
+    /// Drops the date on the end side. Falls back to the single start label if end
+    /// is missing/unparseable.
+    static func displayDateRange(start: String, end: String) -> String {
+        let startLabel = displayDateTime(start)
+        guard !end.isEmpty, let e = CalendarWireTime.parseInstant(end) else { return startLabel }
+        let f = DateFormatter()
+        f.locale = .current
+        f.timeZone = .current
+        f.dateFormat = "h:mm a"
+        return "\(startLabel) – \(f.string(from: e))"
     }
 }
