@@ -7,6 +7,14 @@ enum DeviceModelMap {
     /// Curated subset; extend as new hardware ships. The raw id is always a
     /// safe fallback for anything not listed.
     static let names: [String: String] = [
+        "iPhone12,1": "iPhone 11",
+        "iPhone12,3": "iPhone 11 Pro",
+        "iPhone12,5": "iPhone 11 Pro Max",
+        "iPhone12,8": "iPhone SE (2nd generation)",
+        "iPhone13,1": "iPhone 12 mini",
+        "iPhone13,2": "iPhone 12",
+        "iPhone13,3": "iPhone 12 Pro",
+        "iPhone13,4": "iPhone 12 Pro Max",
         "iPhone14,4": "iPhone 13 mini",
         "iPhone14,5": "iPhone 13",
         "iPhone14,2": "iPhone 13 Pro",

@@ -45,6 +45,22 @@ struct ContentView: View {
                     OnboardingCoordinator()   // fallback
                 } else if appMode == "parent" {
                     ParentRootView()
+                        // Parent push transport: upload this device's APNs token
+                        // to its own parent Device row so parent-audience feed
+                        // pushes (reflection-complete, lock-delay, device offline)
+                        // deliver as banners. Idempotent POST upsert; routed by
+                        // appMode so it can't clobber the kid's token. The token
+                        // itself is already requested + cached at launch
+                        // (didFinishLaunching), so we only need to replay the
+                        // upload here once the parent row id exists.
+                        //
+                        // Also request notification *display* permission — the kid
+                        // onboarding does this, but the parent app never did, so
+                        // parent pushes were delivered (APNs 200) yet invisible.
+                        .task {
+                            AppDelegate.requestNotificationAuthorizationIfNeeded()
+                            AppDelegate.uploadCachedAPNsTokenIfPossible(using: APIClient())
+                        }
                 } else {
                     // Big-kid product UI (`BigKidRootView`) when paired + API base
                     // is known; otherwise a minimal "waiting for setup" placeholder.
@@ -163,6 +179,16 @@ struct ParentRootView: View {
             notifBell.markOpened()
             profilePath.append(AppRoute.notifications)
         }
+        .onReceive(NotificationCenter.default.publisher(for: .evlinOpenNotificationEvent)) { note in
+            guard let eventID = note.userInfo?["event_id"] as? String, !eventID.isEmpty else {
+                selectedTab = .home
+                notifBell.markOpened()
+                profilePath.append(AppRoute.notifications)
+                return
+            }
+            PendingNotificationOpenStore().clear(eventID)
+            Task { await openNotificationEvent(eventID) }
+        }
         .overlay(alignment: .top) {
             if let b = banner {
                 NotificationBanner(
@@ -180,6 +206,7 @@ struct ParentRootView: View {
         .environment(reflectionStore)
         .onAppear {
             startParentReflectionPolling()
+            openPendingNotificationEventIfNeeded()
         }
         .onDisappear {
             parentReflectionPollTask?.cancel()
@@ -195,6 +222,9 @@ struct ParentRootView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .bigKidStateInvalidated)) { _ in
             Task { await refreshParentReflectionState() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .evlinNotificationFeedInvalidated)) { _ in
+            Task { await notifBell.refresh() }
         }
     }
 
@@ -314,6 +344,45 @@ struct ParentRootView: View {
         }
     }
 
+    @MainActor
+    private func openNotificationEvent(_ eventID: String) async {
+        selectedTab = .home
+        await notifBell.refresh()
+        guard let notification = notifBell.items.first(where: { $0.eventId == eventID }) else {
+            notifBell.markOpened()
+            profilePath.append(AppRoute.notifications)
+            return
+        }
+        notifBell.markOpened()
+        await notifBell.mark(notification.id, action: "opened")
+        openParentNotificationRoute(
+            ParentNotificationRouteResolver.route(
+                for: notification,
+                children: familyStore.childProfiles
+            )
+        )
+    }
+
+    @MainActor
+    private func openPendingNotificationEventIfNeeded() {
+        guard let eventID = PendingNotificationOpenStore().consume() else { return }
+        Task { await openNotificationEvent(eventID) }
+    }
+
+    @MainActor
+    private func openParentNotificationRoute(_ route: ParentNotificationRoute?) {
+        switch route {
+        case .calendar:
+            selectedTab = .calendar
+        case .appRoute(let appRoute):
+            selectedTab = .home
+            profilePath.append(appRoute)
+        case nil:
+            selectedTab = .home
+            profilePath.append(AppRoute.notifications)
+        }
+    }
+
 }
 
 // MARK: - Shared navigation destinations
@@ -385,15 +454,13 @@ extension View {
                     onOpenDeepLink: { link in
                         // Pop the notifications panel, then route to the target.
                         if !path.wrappedValue.isEmpty { path.wrappedValue.removeLast() }
-                        switch link["route"] {
-                        case "calendarEvent", "calendar":
+                        switch ParentNotificationRouteResolver.route(for: link, children: children) {
+                        case .calendar:
                             selectedTab.wrappedValue = .calendar
-                        default:
-                            // lock / block / reflection / device → the kid's page.
-                            if let cid = link["child_profile_id"],
-                               let kid = children.first(where: { $0.id == cid }) {
-                                path.wrappedValue.append(AppRoute.profile(kid))
-                            }
+                        case .appRoute(let appRoute):
+                            path.wrappedValue.append(appRoute)
+                        case nil:
+                            break
                         }
                     }
                 )

@@ -214,10 +214,31 @@ final class FamilyStoreTests: XCTestCase {
     // MARK: - DeviceModelMap / DeviceInfoProvider (spec §1.7)
 
     func testDeviceModelMapKnownAndFallback() {
+        XCTAssertEqual(DeviceModelMap.friendlyName(for: "iPhone12,1"), "iPhone 11")
         XCTAssertEqual(DeviceModelMap.friendlyName(for: "iPhone16,1"), "iPhone 15 Pro")
         XCTAssertEqual(DeviceModelMap.friendlyName(for: "iPhone17,1"), "iPhone 16 Pro")
         // Unmapped raw id falls back to the raw id verbatim.
         XCTAssertEqual(DeviceModelMap.friendlyName(for: "iPhone99,9"), "iPhone99,9")
+    }
+
+    func testDeviceItemMapsRawBackendModelIdentifierForLegacyRows() {
+        let dto = EnrolledDeviceDTO(
+            device_id: "device-1",
+            mode: "child",
+            label: nil,
+            device_model: "iPhone12,1",
+            platform: "ios",
+            os_version: "18.5",
+            display: "iPhone12,1 · iOS 18",
+            last_seen_at: nil,
+            online: false,
+            is_self: false
+        )
+
+        let item = DeviceItem(dto: dto)
+
+        XCTAssertEqual(item.name, "iPhone 11")
+        XCTAssertEqual(item.detail, "iPhone 11 · iOS 18")
     }
 
     func testDeviceInfoProviderFieldNames() {

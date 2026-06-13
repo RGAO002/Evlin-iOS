@@ -1,5 +1,19 @@
 import SwiftUI
 
+enum U1ExpiryParser {
+    private static let withFractionalSeconds: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    private static let withoutFractionalSeconds = ISO8601DateFormatter()
+
+    static func date(from iso: String) -> Date? {
+        withFractionalSeconds.date(from: iso) ?? withoutFractionalSeconds.date(from: iso)
+    }
+}
+
 struct U1Card: View {
     let entries: [U1ShieldEntry]
     let verb: String
@@ -165,9 +179,20 @@ struct U1Card: View {
         // suggested an actual time would resolve later, but for permanent
         // shields none ever will. Make the permanence explicit.
         let expiry: String = {
-            guard let iso = entry.expiresAtISO,
-                  let date = ISO8601DateFormatter().date(from: iso)
-            else { return "Permanent — manual unlock only" }
+            guard let iso = entry.expiresAtISO else {
+                #if DEBUG
+                return "Permanent — manual unlock only · debug: no expires_at_iso"
+                #else
+                return "Permanent — manual unlock only"
+                #endif
+            }
+            guard let date = U1ExpiryParser.date(from: iso) else {
+                #if DEBUG
+                return "Permanent — manual unlock only · debug: bad expires_at_iso \(iso)"
+                #else
+                return "Permanent — manual unlock only"
+                #endif
+            }
             let f = DateFormatter()
             f.dateStyle = .none
             f.timeStyle = .short

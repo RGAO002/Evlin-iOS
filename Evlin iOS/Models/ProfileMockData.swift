@@ -29,10 +29,11 @@ struct DeviceItem: Identifiable, Hashable {
     /// fields when it's absent. `locked` is not carried by this DTO (it's a
     /// runtime lock concept), so it defaults to `false`.
     init(dto: EnrolledDeviceDTO) {
+        let friendlyModel = dto.device_model.map(DeviceModelMap.friendlyName(for:))
+        let display = Self.friendlyDisplay(dto: dto, friendlyModel: friendlyModel)
         self.iconSystemName = dto.mode == "parent" ? "iphone.gen3" : "ipad.and.iphone"
-        self.name = dto.label ?? dto.display ?? dto.device_model ?? "Device"
-        self.detail = dto.display
-            ?? [dto.device_model, dto.os_version].compactMap { $0 }.joined(separator: " · ")
+        self.name = dto.label ?? friendlyModel ?? dto.display ?? "Device"
+        self.detail = display
         self.locked = false
     }
 
@@ -42,6 +43,22 @@ struct DeviceItem: Identifiable, Hashable {
         self.name = name
         self.detail = detail
         self.locked = locked
+    }
+
+    private static func friendlyDisplay(dto: EnrolledDeviceDTO, friendlyModel: String?) -> String {
+        guard let model = friendlyModel else {
+            return dto.display ?? [dto.device_model, dto.os_version].compactMap { $0 }.joined(separator: " · ")
+        }
+        let platform = (dto.platform ?? "").lowercased()
+        if platform == "ios" {
+            let major = dto.os_version?.split(separator: ".", maxSplits: 1).first.map(String.init)
+            let os = ["iOS", major].compactMap { $0 }.joined(separator: " ")
+            return [model, os.isEmpty ? nil : os].compactMap { $0 }.joined(separator: " · ")
+        }
+        if let raw = dto.device_model, let display = dto.display, raw != model {
+            return display.replacingOccurrences(of: raw, with: model)
+        }
+        return dto.display ?? [model, dto.os_version].compactMap { $0 }.joined(separator: " · ")
     }
 }
 

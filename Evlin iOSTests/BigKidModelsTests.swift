@@ -176,4 +176,11 @@ final class BigKidModelsTests: XCTestCase {
         let req = ReflectionRequest.fixture()
         XCTAssertNil(req.reflectionLockCapExpiresAt)
     }
+
+    func testTaskDetailAllowsBypassDuringRedo() {
+        XCTAssertTrue(BigKidTaskDetailView.canRequestBypass(for: .fixture(status: .todo, phase: .input)))
+        XCTAssertTrue(BigKidTaskDetailView.canRequestBypass(for: .fixture(status: .todo, phase: .redo)))
+        XCTAssertFalse(BigKidTaskDetailView.canRequestBypass(for: .fixture(status: .submitted, phase: .submitted)))
+        XCTAssertFalse(BigKidTaskDetailView.canRequestBypass(for: .fixture(status: .done, phase: .submitted)))
+    }
 }

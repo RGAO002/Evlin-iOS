@@ -382,7 +382,13 @@ struct ChatView: View {
             }
             viewModel.startReflectionSubmissionPolling()
             Task { await viewModel.tickReflectionSubmissionPoll() }
-            viewModel.startReflectionEventPolling()
+            // NOTE: the `/parent/reflection/pending-events` poll is intentionally
+            // NOT started — it surfaces the SAME submitted reflection as the
+            // submission poll above, but as a generic plan-arch card + a plain
+            // text bubble ("Your child completed the reflection: …"), which
+            // duplicates (and reads worse than) the rich essay-review card
+            // `surfaceReflectionSubmissionBubbleIfNeeded` produces ("<child> has
+            // finished the reflection…", with Approve / Write-again). One surface.
             // Re-check any receipt still spinning: the kid often acks late
             // (after the 90s poll deadline), so a card can be stuck on
             // "applying now" while the backend is already confirmed.

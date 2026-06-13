@@ -1852,7 +1852,13 @@ class ChatViewModel: ObservableObject {
         let rawBase = await MainActor.run { self.apiClient.baseURL }
         guard !rawBase.isEmpty, let _ = URL(string: rawBase) else { return }
 
-        let url = URL(string: "\(rawBase)/parent/reflection/pending-events")!
+        // The endpoint requires `child_id` (the kid's device id, same source as
+        // tickReflectionSubmissionPoll). Without it the backend 422s every poll.
+        guard let childRaw = UserDefaults.standard.string(forKey: "evlin.childDeviceID"),
+              let childUUID = UUID(uuidString: childRaw)
+        else { return }
+
+        let url = URL(string: "\(rawBase)/parent/reflection/pending-events?child_id=\(childUUID.uuidString)")!
         do {
             let (data, response) = try await URLSession.shared.data(from: url)
             guard (response as? HTTPURLResponse)?.statusCode == 200 else { return }

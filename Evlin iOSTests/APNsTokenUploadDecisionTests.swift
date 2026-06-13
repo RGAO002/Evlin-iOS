@@ -50,4 +50,50 @@ final class APNsTokenUploadDecisionTests: XCTestCase {
             AppDelegate.shouldUploadAPNsToken(cachedToken: validToken, childDeviceID: "not-a-uuid")
         )
     }
+
+    // MARK: - Mode-aware routing (parent push transport)
+
+    private let validParentID = "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB"
+
+    func test_parentMode_routesToParentDeviceID() {
+        // A parent device uploads to its OWN parent row, never to the kid's
+        // remote childDeviceID (which would clobber the kid's lock token).
+        let result = AppDelegate.shouldUploadAPNsToken(
+            cachedToken: validToken, appMode: "parent",
+            childDeviceID: validChildID, parentDeviceID: validParentID
+        )
+        XCTAssertEqual(result?.deviceID, UUID(uuidString: validParentID))
+        XCTAssertEqual(result?.token, validToken)
+    }
+
+    func test_parentMode_missingParentDeviceID_returnsNil_doesNotFallBackToChild() {
+        // Critical: parent mode must NOT silently fall back to childDeviceID.
+        XCTAssertNil(
+            AppDelegate.shouldUploadAPNsToken(
+                cachedToken: validToken, appMode: "parent",
+                childDeviceID: validChildID, parentDeviceID: nil
+            )
+        )
+    }
+
+    func test_childMode_routesToChildDeviceID() {
+        let result = AppDelegate.shouldUploadAPNsToken(
+            cachedToken: validToken, appMode: "child",
+            childDeviceID: validChildID, parentDeviceID: validParentID
+        )
+        XCTAssertEqual(result?.deviceID, UUID(uuidString: validChildID))
+        XCTAssertEqual(result?.route, .childRegisterAPNs)
+    }
+
+    func test_prePairingMode_keepsLegacyChildPath() {
+        // "setup" / "" (mode not yet decided) keep the legacy childDeviceID path.
+        for mode in ["", "setup"] {
+            let result = AppDelegate.shouldUploadAPNsToken(
+                cachedToken: validToken, appMode: mode,
+                childDeviceID: validChildID, parentDeviceID: nil
+            )
+            XCTAssertEqual(result?.deviceID, UUID(uuidString: validChildID), "mode=\(mode)")
+            XCTAssertEqual(result?.route, .childRegisterAPNs, "mode=\(mode)")
+        }
+    }
 }

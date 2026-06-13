@@ -172,4 +172,9 @@ extension PlanArchCardAdapterPhoneTests {
         XCTAssertEqual(model?.context.u1ShieldList.first?.displayName, "Facebook")
         XCTAssertEqual(model?.context.u1ShieldList.first?.expiresAtISO, "2026-06-04T18:41:00Z")
     }
+
+    func testU1ExpiryParserAcceptsBackendFractionalSeconds() {
+        XCTAssertNotNil(U1ExpiryParser.date(from: "2026-06-12T21:08:59.433611Z"))
+        XCTAssertNotNil(U1ExpiryParser.date(from: "2026-06-12T21:08:59Z"))
+    }
 }

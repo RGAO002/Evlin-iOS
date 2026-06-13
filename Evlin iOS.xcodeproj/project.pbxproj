@@ -106,6 +106,18 @@
 			);
 			target = B600D6332FDB4C5F000E60E6 /* EvlinPushApplier */;
 		};
+		B600D64A2FDC7126000E60E6 /* Exceptions for "Evlin iOS" folder in "EvlinPushApplier" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Models/BlockRecord.swift,
+				Models/CommandModels.swift,
+				Models/ShieldRecord.swift,
+				Models/ShieldTier.swift,
+				Services/ActiveLockStore.swift,
+				Services/ActiveLockStoreTypes.swift,
+			);
+			target = B600D6332FDB4C5F000E60E6 /* EvlinPushApplier */;
+		};
 		B63459912F8305CB002D7E5D /* Exceptions for "Evlin iOS" folder in "Evlin iOS" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
@@ -167,6 +179,7 @@
 			exceptions = (
 				B63459912F8305CB002D7E5D /* Exceptions for "Evlin iOS" folder in "Evlin iOS" target */,
 				B6F1645E2F999D8A008E858C /* Exceptions for "Evlin iOS" folder in "EvlinDeviceActivityMonitor" target */,
+				B600D64A2FDC7126000E60E6 /* Exceptions for "Evlin iOS" folder in "EvlinPushApplier" target */,
 			);
 			path = "Evlin iOS";
 			sourceTree = "<group>";

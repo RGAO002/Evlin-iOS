@@ -114,13 +114,90 @@ struct FeedNotificationPanel: View {
         } else {
             ScrollView {
                 LazyVStack(spacing: 0) {
-                    ForEach(feed.items) { n in
-                        row(for: n)
+                    ForEach(groupedRows(feed.items)) { bellRow in
+                        switch bellRow {
+                        case .single(let n): row(for: n)
+                        case .group(let g):  groupRow(for: g)
+                        }
                     }
                 }
                 .padding(.vertical, 8)
             }
         }
+    }
+
+    // MARK: - Multi-app grouping (lock/block receipts applied together)
+    //
+    // The kid acks each command separately, so blocking N apps in one action
+    // emits N single-app `command_applied` receipts. Rather than N bell rows,
+    // collapse a run of success receipts that share verb + device and land
+    // within a short window into ONE multi-app tile (matches the redesign's
+    // stacked-icon notification). Failures and non-app kinds never group.
+
+    private static let groupWindow: TimeInterval = 90
+
+    private func groupedRows(_ items: [FeedNotification]) -> [BellRow] {
+        var rows: [BellRow] = []
+        var i = 0
+        while i < items.count {
+            let n = items[i]
+            if isGroupableAppLock(n), var last = parsedDate(n.createdAt) {
+                var members = [n]
+                var j = i + 1
+                while j < items.count {
+                    let m = items[j]
+                    guard isGroupableAppLock(m), sameGroupKey(n, m),
+                          let md = parsedDate(m.createdAt),
+                          last.timeIntervalSince(md) <= Self.groupWindow  // newest-first ⇒ last ≥ md
+                    else { break }
+                    members.append(m); last = md; j += 1
+                }
+                if members.count >= 2 {
+                    rows.append(.group(makeGroup(members)))
+                    i = j
+                    continue
+                }
+            }
+            rows.append(.single(n))
+            i += 1
+        }
+        return rows
+    }
+
+    private func isGroupableAppLock(_ n: FeedNotification) -> Bool {
+        n.type == "command_applied"
+            && n.renderArgs?["kind"] == "app"
+            && n.urgency == "in_app_only"   // success receipts only — failures stay individual
+    }
+
+    private func sameGroupKey(_ a: FeedNotification, _ b: FeedNotification) -> Bool {
+        (a.renderArgs?["verb"] ?? "") == (b.renderArgs?["verb"] ?? "")
+            && (a.renderArgs?["device_label"] ?? "") == (b.renderArgs?["device_label"] ?? "")
+            && a.childProfileId == b.childProfileId
+    }
+
+    private func makeGroup(_ members: [FeedNotification]) -> AppLockGroup {
+        let first = members[0]
+        var seen = Set<String>(); var apps: [String] = []
+        for m in members {
+            let name = m.renderArgs?["name"] ?? ""
+            if !name.isEmpty, seen.insert(name).inserted { apps.append(name) }
+        }
+        var link = first.deepLink ?? [:]
+        link["event_id"] = link["event_id"] ?? first.eventId
+        link["notification_type"] = link["notification_type"] ?? first.type
+        if let cid = first.childProfileId { link["child_profile_id"] = cid }
+        return AppLockGroup(
+            id: first.id,
+            verb: first.renderArgs?["verb"] ?? "locked",
+            deviceLabel: first.renderArgs?["device_label"] ?? "their device",
+            deepLink: link, apps: apps, members: members,
+            latestCreatedAt: first.createdAt)
+    }
+
+    private func parsedDate(_ iso: String?) -> Date? {
+        guard let iso else { return nil }
+        return ISO8601DateFormatter.feed.date(from: iso) ?? ISO8601DateFormatter().date(from: iso)
     }
 
     @ViewBuilder
@@ -132,6 +209,8 @@ struct FeedNotificationPanel: View {
             locallyRead.insert(n.id)
             Task { await feed.mark(n.id, action: "opened") }
             var link = n.deepLink ?? [:]
+            link["event_id"] = link["event_id"] ?? n.eventId
+            link["notification_type"] = link["notification_type"] ?? n.type
             if let cid = n.childProfileId { link["child_profile_id"] = cid }
             onOpenDeepLink(link)
         } label: {
@@ -168,6 +247,75 @@ struct FeedNotificationPanel: View {
                         .foregroundStyle(Color.evOutline)
                     Button {
                         Task { await feed.dismiss(n.id) }
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(Color.evOnSurfaceVariant)
+                            .frame(width: 22, height: 22)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.vertical, 14)
+            .padding(.horizontal, 14)
+            .background(unreadRow ? color.opacity(0.03) : Color.clear)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .overlay(
+            Rectangle().fill(Color.evOutlineVariant.opacity(0.4)).frame(height: 1),
+            alignment: .bottom
+        )
+    }
+
+    /// A collapsed run of single-app lock/block receipts → one multi-app tile.
+    @ViewBuilder
+    private func groupRow(for g: AppLockGroup) -> some View {
+        let color: Color = g.verb == "blocked" ? .orange : .green
+        let unreadRow = g.members.contains(where: isUnread)
+        let multi = g.apps.count >= 2
+        let title = multi ? "\(g.apps.count) apps \(g.verb)"
+                          : "\(g.apps.first ?? "App") \(g.verb)"
+        let subtitle = multi ? "\(g.apps.joined(separator: ", ")) · \(g.deviceLabel)"
+                             : g.deviceLabel
+        Button {
+            for m in g.members { locallyRead.insert(m.id) }
+            Task { for m in g.members { await feed.mark(m.id, action: "opened") } }
+            onOpenDeepLink(g.deepLink ?? [:])
+        } label: {
+            HStack(alignment: .top, spacing: 12) {
+                if unreadRow {
+                    Circle().fill(color).frame(width: 6, height: 6).offset(y: 10)
+                } else {
+                    Color.clear.frame(width: 6, height: 6).offset(y: 10)
+                }
+
+                badged(badge: g.verb == "blocked" ? "nosign" : "lock.fill", color: color) {
+                    if multi { MultiAppTile(names: g.apps) }
+                    else { LockAppIcon(name: g.apps.first ?? "") }
+                }
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title)
+                        .font(.custom("Manrope", size: 14).weight(.heavy))
+                        .foregroundStyle(Color.evPrimary)
+                    Text(subtitle)
+                        .font(.custom("Inter", size: 12))
+                        .foregroundStyle(Color.evOnSurfaceVariant)
+                        .lineSpacing(2)
+                        .multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Spacer(minLength: 8)
+
+                VStack(alignment: .trailing, spacing: 10) {
+                    Text(relativeTime(g.latestCreatedAt))
+                        .font(.custom("Inter", size: 11))
+                        .foregroundStyle(Color.evOutline)
+                    Button {
+                        Task { for m in g.members { await feed.dismiss(m.id) } }
                     } label: {
                         Image(systemName: "xmark")
                             .font(.system(size: 12, weight: .bold))
@@ -364,5 +512,85 @@ private struct AllAppsTile: View {
 
     private func dot(_ c: Color) -> some View {
         RoundedRectangle(cornerRadius: 4, style: .continuous).fill(c.opacity(0.85)).frame(width: 13, height: 13)
+    }
+}
+
+// MARK: - Multi-app grouping models + tile
+
+/// One displayed bell entry: a lone notification, or a collapsed cluster of
+/// single-app lock/block receipts applied together.
+private enum BellRow: Identifiable {
+    case single(FeedNotification)
+    case group(AppLockGroup)
+    var id: String {
+        switch self {
+        case .single(let n): return n.id
+        case .group(let g):  return "grp:\(g.id)"
+        }
+    }
+}
+
+/// A run of `command_applied` (kind=app, success) receipts that share verb +
+/// device and landed in the same short window — rendered as one multi-app tile.
+private struct AppLockGroup {
+    let id: String                 // stable: newest member's recipient id
+    let verb: String               // "blocked" | "locked"
+    let deviceLabel: String
+    let deepLink: [String: String]?
+    let apps: [String]             // unique app names, newest-first
+    let members: [FeedNotification]
+    let latestCreatedAt: String?
+}
+
+/// 46pt multi-app tile — up to 3 real App Store artworks fanned in a diagonal
+/// stack (newest on top). A distinct silhouette from the 2×2 grid used by the
+/// "all apps" tile, so "3 apps locked" never reads as "everything locked". The
+/// exact count + names live in the row's title/subtitle, so the stack only needs
+/// to convey "a bundle of apps".
+private struct MultiAppTile: View {
+    let names: [String]
+
+    var body: some View {
+        let shown = Array(names.prefix(3))
+        let count = shown.count
+        ZStack {
+            ForEach(Array(shown.enumerated()), id: \.offset) { idx, name in
+                let d = (CGFloat(idx) - CGFloat(count - 1) / 2) * 6.5
+                MiniAppArtwork(name: name, size: 27)
+                    .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .stroke(Color.evSurfaceContainerLow, lineWidth: 2))
+                    .offset(x: d, y: d)
+                    .zIndex(Double(count - idx))   // idx 0 (newest) on top
+            }
+        }
+        .frame(width: 46, height: 46)
+    }
+}
+
+/// App Store artwork resolved by name (same source as `LockAppIcon`), sized for
+/// the stacked multi-app tile.
+private struct MiniAppArtwork: View {
+    let name: String
+    var size: CGFloat = 18
+    @State private var artURL: URL?
+
+    var body: some View {
+        content
+            .frame(width: size, height: size)
+            .clipShape(RoundedRectangle(cornerRadius: size * 0.26, style: .continuous))
+            .task(id: name) { artURL = await AppArtworkResolver.shared.artwork(forName: name) }
+    }
+
+    @ViewBuilder private var content: some View {
+        if let artURL {
+            AsyncImage(url: artURL) { phase in
+                if let img = phase.image { img.resizable().scaledToFill() } else { placeholder }
+            }
+        } else { placeholder }
+    }
+
+    private var placeholder: some View {
+        RoundedRectangle(cornerRadius: size * 0.26, style: .continuous).fill(Color.evSurfaceContainerHigh)
+            .overlay(Image(systemName: "app.fill").font(.system(size: size * 0.45)).foregroundStyle(Color.evOutline))
     }
 }

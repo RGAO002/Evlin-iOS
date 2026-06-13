@@ -91,23 +91,35 @@ final class CommandPollerTests: XCTestCase {
         XCTAssertFalse(didPoll, "With no child device id the poll path must not run")
     }
 
-    /// APNs wakes are shared by command delivery and BigKid reflection state.
-    /// The app delegate must both poll commands and invalidate BigKid state so
-    /// a reflection assignment can lock immediately without opening K mode.
+    /// APNs wakes are shared by command delivery, BigKid reflection state, and
+    /// parent notification feed rows. The app delegate must invalidate both
+    /// UI stores so foreground parent sessions see reflection/nudge notifications
+    /// without relaunching or tapping the system banner.
     func testRemoteNotificationPollsCommandsAndInvalidatesBigKidState() async {
         let expectedID = UUID(uuidString: "ABCDEF00-0000-0000-0000-000000000002")!
         poller.childDeviceIDProvider = { expectedID }
 
         let stateInvalidated = expectation(description: "BigKid state invalidated")
+        let feedInvalidated = expectation(description: "notification feed invalidated")
         let completionCalled = expectation(description: "APNs completion called")
-        let observer = NotificationCenter.default.addObserver(
+        let stateObserver = NotificationCenter.default.addObserver(
             forName: .bigKidStateInvalidated,
             object: nil,
             queue: .main
         ) { _ in
             stateInvalidated.fulfill()
         }
-        defer { NotificationCenter.default.removeObserver(observer) }
+        let feedObserver = NotificationCenter.default.addObserver(
+            forName: .evlinNotificationFeedInvalidated,
+            object: nil,
+            queue: .main
+        ) { _ in
+            feedInvalidated.fulfill()
+        }
+        defer {
+            NotificationCenter.default.removeObserver(stateObserver)
+            NotificationCenter.default.removeObserver(feedObserver)
+        }
 
         var observedID: UUID?
         poller.oneShotPollOverride = { deviceID, _ in
@@ -126,7 +138,7 @@ final class CommandPollerTests: XCTestCase {
             completionCalled.fulfill()
         }
 
-        await fulfillment(of: [stateInvalidated, completionCalled], timeout: 1.0)
+        await fulfillment(of: [stateInvalidated, feedInvalidated, completionCalled], timeout: 1.0)
         XCTAssertEqual(observedID, expectedID)
     }
 

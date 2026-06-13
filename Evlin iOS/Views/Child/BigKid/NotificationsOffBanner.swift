@@ -17,7 +17,7 @@ struct NotificationsOffBanner: View {
                 Text("Turn notifications back on")
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(Color.primary)
-                Text("Notifications for Evlin are off. Your parent may not be able to lock or unlock your device until you turn them back on.")
+                Text("Notifications for Evlin are off. Your apps would not be able to unlock your device until you turn them back on.")
                     .font(.system(size: 13))
                     .foregroundStyle(Color.secondary)
                     .fixedSize(horizontal: false, vertical: true)

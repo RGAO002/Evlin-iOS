@@ -824,7 +824,8 @@ struct OnboardingCoordinator: View {
                 // the real child after pairing (was stashed to UserDefaults only).
                 childDisplayName: trimmedName.isEmpty ? nil : trimmedName,
                 childBirthYear: childBirthYear,
-                childGender: childGender
+                childGender: childGender,
+                resetChildAvatar: childAvatar == nil
             )
             familyID = r.family_id
             childDeviceID = r.child_device_id

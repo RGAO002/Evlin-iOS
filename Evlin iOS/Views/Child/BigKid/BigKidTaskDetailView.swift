@@ -8,7 +8,7 @@ struct BigKidTaskDetailView: View {
     /// The first element is the primary photo (parent sees it first in
     /// the carousel). The list REPLACES any existing evidence on the
     /// backend.
-    var onSubmit: ([Data], String?) async -> Void
+    var onSubmit: ([Data], String?) async throws -> Void
 
     @State private var note: String = ""
     /// Working set the kid is building up before tapping Submit. Empty
@@ -17,6 +17,7 @@ struct BigKidTaskDetailView: View {
     @State private var photos: [Data] = []
     @State private var showCamera = false
     @State private var submitting = false
+    @State private var submitError: String?
     @FocusState private var noteFocused: Bool
     /// Drives the fullscreen `PhotoGalleryViewer` that opens when the kid
     /// taps a submitted-evidence photo. Mirrors the parent-side flow so
@@ -121,11 +122,15 @@ struct BigKidTaskDetailView: View {
     }
 
     // MARK: - Top bar
+    static func canRequestBypass(for task: BigKidTask) -> Bool {
+        task.status != .done && (task.phase == .input || task.phase == .redo)
+    }
+
     private var topBar: some View {
         HStack {
             EvKidBackButton(label: "Today", action: onBack)
             Spacer()
-            if task.phase == .input {
+            if Self.canRequestBypass(for: task) {
                 Button(action: onBypass) {
                     Text("I couldn't do this")
                         .font(.system(size: 12.5, weight: .semibold))
@@ -191,6 +196,16 @@ struct BigKidTaskDetailView: View {
                 .foregroundStyle(EvlinKidColors.ink3)
             cameraButton
             noteField
+            if let submitError {
+                Text(submitError)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.red)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.red.opacity(0.08))
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+            }
             EvKidBigButton(isDisabled: photos.isEmpty || submitting,
                            action: submitAction) {
                 Text(submitting ? "Submitting…" : "Submit for approval")
@@ -387,6 +402,7 @@ struct BigKidTaskDetailView: View {
     private func submitAction() {
         guard !photos.isEmpty else { return }
         submitting = true
+        submitError = nil
         // Cache the bytes locally so this kid always sees their photos on
         // re-open, regardless of whether the backend kept its copies.
         // Saves before the network call so a slow upload doesn't lose
@@ -394,9 +410,25 @@ struct BigKidTaskDetailView: View {
         KidEvidenceCache.save(taskId: task.id, photos: photos)
         let batch = photos
         Task {
-            await onSubmit(batch, note.isEmpty ? nil : note)
-            submitting = false
+            do {
+                try await onSubmit(batch, note.isEmpty ? nil : note)
+                await MainActor.run {
+                    submitting = false
+                }
+            } catch {
+                await MainActor.run {
+                    submitting = false
+                    submitError = submitErrorMessage(error)
+                }
+            }
         }
+    }
+
+    private func submitErrorMessage(_ error: Error) -> String {
+        if let apiError = error as? BigKidAPIError {
+            return "Could not submit: \(apiError.detail)"
+        }
+        return "Could not submit. Check the connection and try again."
     }
 
     // MARK: - Submitted phase

@@ -96,13 +96,25 @@ struct HomeView: View {
 private struct HomeChildRow: View {
     let child: ChildProfile
     var onOpenProfile: (ChildProfile) -> Void
+    @Environment(ParentReflectionFixtureStore.self) private var reflectionStore
 
     var body: some View {
-        // ParentReflectionFixtureStore is a pure in-memory FIXTURE (no backend
-        // polling) — hide its fabricated reflection status for beta (spec H4).
-        // When a real reflection-poll store lands, restore the summary branch.
-        ProfileCard(child: child) {
-            onOpenProfile(child)
+        // Force SwiftUI to observe reflection changes even when Home sits
+        // underneath another NavigationStack destination.
+        let _ = reflectionStore.revision
+
+        if let summary = reflectionStore.summary(for: child),
+           summary.state != .none {
+            ParentReflectionStatusCard(
+                child: child,
+                summary: summary,
+                layout: .homeCard,
+                onViewReflection: { onOpenProfile(child) }
+            )
+        } else {
+            ProfileCard(child: child) {
+                onOpenProfile(child)
+            }
         }
     }
 }

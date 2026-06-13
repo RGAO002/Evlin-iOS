@@ -1313,6 +1313,30 @@ extension APIClient {
         }
     }
 
+    /// Parent uploads its APNs token to its own account-scoped Device row.
+    /// Do not use `/child/register-apns` for parent devices: that endpoint has no
+    /// auth context and leaves the parent row account-less, which makes parent
+    /// reflection/nudge pushes attach to the wrong recipient.
+    func registerParentAPNsToken(deviceID: UUID, token: String) async throws {
+        var req = authedRequest(path: "/family/device/register", method: "POST")
+        req.setValue(deviceID.uuidString, forHTTPHeaderField: "X-Device-Id")
+        let info = DeviceInfoProvider.current()
+        let body: [String: Any] = [
+            "label": "iPhone",
+            "device_model": info.device_model,
+            "device_model_id": info.device_model_id,
+            "platform": info.platform,
+            "os_version": info.os_version,
+            "apns_token": token
+        ]
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (data, http) = try await authedData(for: req)
+        guard (200..<300).contains(http.statusCode) else {
+            throw APIError.serverError(http.statusCode)
+        }
+        _ = data
+    }
+
     /// Child posts an ack for a command.
     func ack(commandID: UUID, status: String, detail: [String: Any]? = nil) async throws {
         let url = URL(string: "\(baseURL)/child/ack")!
@@ -1978,7 +2002,8 @@ extension APIClient {
         protectionMode: String = "std",
         childDisplayName: String? = nil,
         childBirthYear: Int? = nil,
-        childGender: String? = nil
+        childGender: String? = nil,
+        resetChildAvatar: Bool = false
     ) async throws -> CreateFamilyResponseDTO {
         let url = URL(string: "\(baseURL)/family/create")!
         var req = URLRequest(url: url)
@@ -2001,6 +2026,7 @@ extension APIClient {
         if let n = childDisplayName, !n.isEmpty { body["child_display_name"] = n }
         if let by = childBirthYear { body["child_birth_year"] = by }
         if let g = childGender { body["child_gender"] = g }
+        if resetChildAvatar { body["child_avatar_reset"] = true }
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
         let (data, resp) = try await URLSession.shared.data(for: req)
         guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {

@@ -10,17 +10,13 @@ struct EvlinAvatarView: View {
     var status: ChildProfile.Status? = nil
     var ring: Bool = false
     var ringColor: Color = .evPrimary
+    @State private var retryID: Int = 0
 
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
             Group {
                 if let url, let u = URL(string: url) {
-                    AsyncImage(url: u) { phase in
-                        switch phase {
-                        case .success(let img): img.resizable().scaledToFill()
-                        default: fallback
-                        }
-                    }
+                    avatarImage(url: u)
                 } else {
                     fallback
                 }
@@ -37,6 +33,29 @@ struct EvlinAvatarView: View {
             }
         }
         .frame(width: size, height: size)
+        .onChange(of: url) { _, _ in retryID = 0 }
+    }
+
+    @ViewBuilder
+    private func avatarImage(url: URL) -> some View {
+        AsyncImage(url: url) { phase in
+            switch phase {
+            case .success(let img):
+                img.resizable().scaledToFill()
+            case .failure:
+                fallback
+                    .task(id: retryID) {
+                        guard retryID < 2 else { return }
+                        try? await Task.sleep(nanoseconds: 700_000_000)
+                        if !Task.isCancelled {
+                            retryID += 1
+                        }
+                    }
+            default:
+                fallback
+            }
+        }
+        .id("\(url.absoluteString)#\(retryID)")
     }
 
     private var fallback: some View {

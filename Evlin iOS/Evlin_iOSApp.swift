@@ -36,6 +36,7 @@ struct Evlin_iOSApp: App {
     /// and appMode changes, none of which fire at onboarding completion.
     @AppStorage("onboardingComplete") private var onboardingComplete = false
     @AppStorage("evlin.childDeviceID") private var childDeviceID: String = ""
+    @AppStorage(AppDelegate.parentDeviceIDDefaultsKey) private var parentDeviceID: String = ""
 
     init() {
         // One-shot migration from legacy evlin.activeLocks store.
@@ -78,11 +79,14 @@ struct Evlin_iOSApp: App {
                     }
                 )
                 .onAppear {
+                    refreshParentPushRegistrationIfNeeded()
                     startPollerIfPaired()
                 }
                 .onChange(of: scenePhase) { _, phase in
                     switch phase {
-                    case .active: startPollerIfPaired()
+                    case .active:
+                        refreshParentPushRegistrationIfNeeded()
+                        startPollerIfPaired()
                     case .background:
                         startBackgroundPollerIfPaired()
                     case .inactive:
@@ -98,6 +102,7 @@ struct Evlin_iOSApp: App {
                         appMode: newValue,
                         using: apiClient
                     )
+                    refreshParentPushRegistrationIfNeeded(appMode: newValue)
                     startPollerIfPaired()
                 }
                 .onChange(of: onboardingComplete) { _, complete in
@@ -116,12 +121,22 @@ struct Evlin_iOSApp: App {
                     )
                     startPollerIfPaired()
                 }
+                .onChange(of: parentDeviceID) { _, _ in
+                    refreshParentPushRegistrationIfNeeded()
+                }
                 .onReceive(NotificationCenter.default.publisher(for: .bigKidStateInvalidated)) { _ in
                     // Demo bootstrap (or parent approve) can rewrite `evlin.childDeviceID` while
                     // already in K mode — restart polling with the fresh UUID.
                     startPollerIfPaired()
                 }
         }
+    }
+
+    private func refreshParentPushRegistrationIfNeeded(appMode explicitMode: String? = nil) {
+        let mode = explicitMode ?? appMode
+        guard mode == "parent" else { return }
+        AppDelegate.requestNotificationAuthorizationIfNeeded()
+        AppDelegate.uploadCachedAPNsTokenIfPossible(using: apiClient)
     }
 
     /// Start CommandPoller only when the user is in K mode. The poller
@@ -195,6 +210,13 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     /// the pairing hook in ContentView) replay it once `childDeviceID` exists.
     static let apnsDeviceTokenDefaultsKey = "evlin.apnsDeviceToken"
 
+    /// UserDefaults key for THIS device's *own* parent Device-row id (written on
+    /// parent pairing). A parent device uploads its APNs token to this row so
+    /// parent-audience feed pushes (reflection-complete, lock-delay, device
+    /// offline, …) can be delivered. Distinct from `evlin.childDeviceID`, which
+    /// on a parent device holds the *kid's* remote device id (chat targeting).
+    static let parentDeviceIDDefaultsKey = "evlin.parentDeviceID"
+
     /// Dedicated client for token upload. Reads the same persisted `serverURL`
     /// as the app's `@StateObject` client, so it targets the same backend.
     private let apiClient = APIClient()
@@ -236,18 +258,48 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         willPresent notification: UNNotification,
         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
+        AppDelegate.invalidateRemoteNotificationDrivenStores()
         completionHandler([.banner, .list, .sound])
     }
 
-    /// A tapped notification brings the app forward; surface the bell. (Per-
-    /// event deep-link routing is a follow-up.)
+    /// A tapped notification brings the app forward. If the APNs payload
+    /// carries a backend event id, ParentRootView refreshes the bell feed and
+    /// routes that exact event; otherwise fall back to the bell.
     func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         didReceive response: UNNotificationResponse,
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
-        NotificationCenter.default.post(name: .evlinOpenNotifications, object: nil)
+        let userInfo = response.notification.request.content.userInfo
+        NotificationCenter.default.post(name: .evlinNotificationFeedInvalidated, object: nil)
+        if let eventID = Self.notificationEventID(from: userInfo) {
+            PendingNotificationOpenStore().save(eventID)
+            NotificationCenter.default.post(
+                name: .evlinOpenNotificationEvent,
+                object: nil,
+                userInfo: ["event_id": eventID]
+            )
+        } else {
+            NotificationCenter.default.post(name: .evlinOpenNotifications, object: nil)
+        }
         completionHandler()
+    }
+
+    static func notificationEventID(from userInfo: [AnyHashable: Any]) -> String? {
+        if let evlin = userInfo["evlin"] as? [String: Any],
+           let eventID = evlin["event_id"] as? String,
+           !eventID.isEmpty {
+            return eventID
+        }
+        if let evlin = userInfo["evlin"] as? [AnyHashable: Any],
+           let eventID = evlin["event_id"] as? String,
+           !eventID.isEmpty {
+            return eventID
+        }
+        if let eventID = userInfo["event_id"] as? String, !eventID.isEmpty {
+            return eventID
+        }
+        return nil
     }
 
     func application(
@@ -267,6 +319,25 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         AppDelegate.uploadCachedAPNsTokenIfPossible(using: apiClient)
     }
 
+    /// Ask iOS for permission to DISPLAY alerts/sounds/badges.
+    ///
+    /// `registerForRemoteNotifications()` only obtains an APNs token — it does
+    /// NOT grant permission to show banners. Without this call APNs accepts the
+    /// push (HTTP 200) but iOS silently drops the banner. The kid onboarding
+    /// already requests this; the PARENT app never did, so parent-audience feed
+    /// pushes (reflection-complete, lock-delay, …) were delivered-but-invisible.
+    /// Idempotent: after the first prompt iOS returns the existing decision.
+    static func requestNotificationAuthorizationIfNeeded() {
+        UNUserNotificationCenter.current().requestAuthorization(
+            options: [.alert, .sound, .badge]
+        ) { granted, _ in
+            guard granted else { return }
+            DispatchQueue.main.async {
+                UIApplication.shared.registerForRemoteNotifications()
+            }
+        }
+    }
+
     /// Upload the cached APNs token for the current child device, but only if
     /// BOTH a cached token and a paired `childDeviceID` exist. Idempotent —
     /// `registerAPNsToken` is safe to call repeatedly (POST upsert), so this is
@@ -277,25 +348,35 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     /// without UIKit, mirroring how `AppControlRouter` isolates routing logic.
     static func uploadCachedAPNsTokenIfPossible(using apiClient: APIClient) {
         let cached = UserDefaults.standard.string(forKey: apnsDeviceTokenDefaultsKey)
+        let appMode = UserDefaults.standard.string(forKey: "appMode") ?? ""
         let childID = UserDefaults.standard.string(forKey: CommandPoller.childDeviceIDDefaultsKey)
-        guard let upload = shouldUploadAPNsToken(cachedToken: cached, childDeviceID: childID) else {
+        let parentID = UserDefaults.standard.string(forKey: parentDeviceIDDefaultsKey)
+        guard let upload = apnsTokenUploadPlan(
+            cachedToken: cached, appMode: appMode,
+            childDeviceID: childID, parentDeviceID: parentID
+        ) else {
             CommandDeliveryDiagnostics.record(
                 CommandDeliveryDiagnostics.keyTokenUpload,
-                "skipped cached=\(cached?.isEmpty == false ? "yes" : "no") child_id=\(childID?.isEmpty == false ? "yes" : "no")"
+                "skipped mode=\(appMode.isEmpty ? "?" : appMode) cached=\(cached?.isEmpty == false ? "yes" : "no") child_id=\(childID?.isEmpty == false ? "yes" : "no") parent_id=\(parentID?.isEmpty == false ? "yes" : "no")"
             )
             return
         }
         Task {
             do {
-                try await apiClient.registerAPNsToken(deviceID: upload.deviceID, token: upload.token)
+                switch upload.route {
+                case .childRegisterAPNs:
+                    try await apiClient.registerAPNsToken(deviceID: upload.deviceID, token: upload.token)
+                case .familyDeviceRegister:
+                    try await apiClient.registerParentAPNsToken(deviceID: upload.deviceID, token: upload.token)
+                }
                 CommandDeliveryDiagnostics.record(
                     CommandDeliveryDiagnostics.keyTokenUpload,
-                    "ok device=\(upload.deviceID.uuidString) \(CommandDeliveryDiagnostics.tokenSummary(upload.token))"
+                    "ok route=\(upload.route.rawValue) device=\(upload.deviceID.uuidString) \(CommandDeliveryDiagnostics.tokenSummary(upload.token))"
                 )
             } catch {
                 CommandDeliveryDiagnostics.record(
                     CommandDeliveryDiagnostics.keyTokenUpload,
-                    "failed device=\(upload.deviceID.uuidString) error=\(error.localizedDescription)"
+                    "failed route=\(upload.route.rawValue) device=\(upload.deviceID.uuidString) error=\(error.localizedDescription)"
                 )
                 print("[AppDelegate] APNs token upload failed: \(error)")
                 SentrySDK.capture(error: error)
@@ -323,6 +404,55 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
             return nil
         }
         return (deviceID: deviceID, token: token)
+    }
+
+    /// Mode-aware overload: route the cached APNs token to the backend Device
+    /// row THIS physical device OWNS.
+    ///
+    /// A parent device (`appMode == "parent"`) uploads to its own
+    /// `parentDeviceID`. It must NOT upload to `childDeviceID`, which on a parent
+    /// device holds the *kid's* remote device id (kept for chat targeting) —
+    /// uploading there would overwrite the kid's lock-delivery token and break
+    /// force-quit locks. `"child"` and pre-pairing (`"setup"` / `""`) keep the
+    /// legacy `childDeviceID` path. Delegates to the single-id resolver so all
+    /// its validation (and its tests) still apply.
+    static func shouldUploadAPNsToken(
+        cachedToken: String?,
+        appMode: String,
+        childDeviceID: String?,
+        parentDeviceID: String?
+    ) -> APNsTokenUploadPlan? {
+        apnsTokenUploadPlan(
+            cachedToken: cachedToken,
+            appMode: appMode,
+            childDeviceID: childDeviceID,
+            parentDeviceID: parentDeviceID
+        )
+    }
+
+    enum APNsTokenUploadRoute: String, Equatable {
+        case childRegisterAPNs
+        case familyDeviceRegister
+    }
+
+    struct APNsTokenUploadPlan: Equatable {
+        let deviceID: UUID
+        let token: String
+        let route: APNsTokenUploadRoute
+    }
+
+    static func apnsTokenUploadPlan(
+        cachedToken: String?,
+        appMode: String,
+        childDeviceID: String?,
+        parentDeviceID: String?
+    ) -> APNsTokenUploadPlan? {
+        let ownDeviceID = appMode == "parent" ? parentDeviceID : childDeviceID
+        guard let upload = shouldUploadAPNsToken(cachedToken: cachedToken, childDeviceID: ownDeviceID) else {
+            return nil
+        }
+        let route: APNsTokenUploadRoute = appMode == "parent" ? .familyDeviceRegister : .childRegisterAPNs
+        return APNsTokenUploadPlan(deviceID: upload.deviceID, token: upload.token, route: route)
     }
 
     /// Called whenever the app learns or re-learns the paired child device id.
@@ -388,10 +518,16 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
             "received content_available=\(aps?["content-available"] ?? "unknown") keys=\(userInfo.keys.map { String(describing: $0) }.sorted().joined(separator: ","))"
         )
         Task { @MainActor in
-            NotificationCenter.default.post(name: .bigKidStateInvalidated, object: nil)
+            AppDelegate.invalidateRemoteNotificationDrivenStores()
             await CommandPoller.shared.pollOnceForCurrentDevice()
             completionHandler(.newData)
         }
+    }
+
+    @MainActor
+    static func invalidateRemoteNotificationDrivenStores() {
+        NotificationCenter.default.post(name: .bigKidStateInvalidated, object: nil)
+        NotificationCenter.default.post(name: .evlinNotificationFeedInvalidated, object: nil)
     }
 }
 
@@ -447,4 +583,6 @@ enum EvlinShieldIconPublisher {
 
 extension Notification.Name {
     static let evlinOpenNotifications = Notification.Name("evlin.openNotifications")
+    static let evlinOpenNotificationEvent = Notification.Name("evlin.openNotificationEvent")
+    static let evlinNotificationFeedInvalidated = Notification.Name("evlin.notificationFeedInvalidated")
 }
