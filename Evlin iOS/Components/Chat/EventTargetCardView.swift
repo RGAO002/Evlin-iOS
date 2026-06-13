@@ -178,8 +178,37 @@ struct EventTargetCardView: View {
                 } else {
                     createDetailBlock
                 }
+                conflictWarning
                 confirmFooter(token: token, isBundle: isBundle)
             }
+        }
+    }
+
+    /// Amber, non-blocking overlap warning (backend `conflicts`: same-person events
+    /// that overlap this one). The parent can still Confirm — it's advisory.
+    @ViewBuilder
+    private var conflictWarning: some View {
+        let conflicts = detail.rows("conflicts")
+        if !conflicts.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 13))
+                    Text(conflicts.count == 1 ? "Overlaps with an event"
+                                              : "Overlaps with \(conflicts.count) events")
+                        .font(.subheadline.weight(.semibold))
+                }
+                .foregroundStyle(Color.evOnTertiaryContainer)
+                ForEach(Array(conflicts.enumerated()), id: \.offset) { _, c in
+                    let title = (c["title"] as? String) ?? "Event"
+                    let start = (c["occurrence_start"] as? String) ?? ""
+                    Text("• \(title)" + (start.isEmpty ? "" : " · \(EventTargetDetail.displayDateTime(start))"))
+                        .font(.caption).foregroundStyle(Color.evOnTertiaryContainer)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(10)
+            .background(Color.evTertiaryContainer,
+                        in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
     }
 
