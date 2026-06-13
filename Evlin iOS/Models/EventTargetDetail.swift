@@ -16,7 +16,10 @@ struct TargetOption: Identifiable, Equatable {
 }
 
 struct TargetGroup: Identifiable {
-    var id: String { childName }
+    // Stable UNIQUE id (not childName) so two children with the same display name
+    // don't collide in ForEach and drop one group — which would make that child's
+    // devices unselectable, defeating the disambiguation (code-review finding #9).
+    let id: String
     let childName: String
     let options: [TargetOption]
 }
@@ -46,13 +49,14 @@ struct EventTargetDetail {
     }
 
     func groups(_ key: String) -> [TargetGroup] {
-        (raw[key] as? [[String: Any]] ?? []).compactMap { g in
+        (raw[key] as? [[String: Any]] ?? []).enumerated().compactMap { idx, g in
             guard let name = g["child_name"] as? String else { return nil }
             let opts = (g["options"] as? [[String: Any]] ?? []).compactMap { o -> TargetOption? in
                 guard let id = o["id"] as? String, let label = o["label"] as? String else { return nil }
                 return TargetOption(id: id, label: label)
             }
-            return TargetGroup(childName: name, options: opts)
+            // id includes the array index so same-named children stay distinct.
+            return TargetGroup(id: "\(idx)-\(name)", childName: name, options: opts)
         }
     }
 

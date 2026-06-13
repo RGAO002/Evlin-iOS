@@ -59,8 +59,28 @@ struct EventTargetCardView: View {
     }
 
     private var resultCard: some View {
-        VStack(alignment: .leading, spacing: 8) { header }.padding(16)
-            .background(Color(.systemBackground)).cornerRadius(12)
+        // event.result is a read-only receipt (list results + "couldn't find" /
+        // "can't edit a repeating event yet" notices). It MUST render detail.rows
+        // (list events) and carry a Done button — otherwise it pins on screen and
+        // stalls the pendingPlanArchCard queue (code-review finding #2).
+        let rows = detail.rows("rows")
+        return VStack(alignment: .leading, spacing: 8) {
+            header
+            if !rows.isEmpty {
+                ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                    HStack {
+                        Text((row["title"] as? String) ?? "Event").font(.subheadline)
+                        Spacer()
+                        if let t = row["occurrence_start"] as? String, !t.isEmpty {
+                            Text(t).font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+            HStack { Spacer(); Button("Done", action: onSkip).buttonStyle(.bordered) }
+        }
+        .padding(16)
+        .background(Color(.systemBackground)).cornerRadius(12)
     }
 
     private var confirmCard: some View {
@@ -95,7 +115,7 @@ struct EventTargetCardView: View {
         let ct = detail.string("continuation_token") ?? ""
         let groups = !detail.groups("groups").isEmpty
             ? detail.groups("groups")
-            : [TargetGroup(childName: "", options: detail.options("options"))]
+            : [TargetGroup(id: "flat", childName: "", options: detail.options("options"))]
         return TargetSelectView(title: payload.title, groups: groups,
             onConfirm: { ids in onResolveTarget(ct, ids) }, onCancel: onSkip)
     }
