@@ -2205,7 +2205,9 @@ class ChatViewModel: ObservableObject {
         case .plan:
             submitPlanArchPatch(card: card, option: opt)
         case .event:
-            handleEventCardStub(card: card, option: opt)
+            // event.*/target.* now self-render + act via EventTargetCardView; the
+            // generic PlanArchCardView option path no longer drives them.
+            dismissEventCard()
         case .query:
             handleQueryCardStub(card: card, option: opt)
         }
@@ -2272,13 +2274,60 @@ class ChatViewModel: ObservableObject {
         }
     }
 
-    private func handleEventCardStub(card: PlanArchCardPayload, option: PlanArchCardOption) {
-        // 2A stub — event family is not yet emitted by backend; populated
-        // in 2B alongside the reflection submission review polling change.
-        Task { @MainActor in
-            self.errorMessage = "Event-card actions arrive in Phase 2B."
-            self.advancePlanArchCardQueue()
+    // MARK: - P5 calendar-in-chat: event.* / target.* card handlers
+
+    private func agentClient() -> AgentClient { AgentClient(baseURL: apiClient.baseURL) }
+
+    @MainActor func dismissEventCard() {
+        pendingPlanArchCard = nil
+        advancePlanArchCardQueue()
+    }
+
+    private func applyAgentResult(_ result: AgentClient.AgentCardResponse) {
+        // If the backend staged a follow-up card (event-select / resolve-target
+        // return a concrete event.create_confirm), show it; else clear.
+        if let next = result.card_payloads?.first {
+            pendingPlanArchCard = next
+        } else {
+            pendingPlanArchCard = nil
+            advancePlanArchCardQueue()
         }
+    }
+
+    func handleEventConfirm(_ token: String) async {
+        do { _ = try await agentClient().eventExec(token: token)
+             await MainActor.run { dismissEventCard() } }
+        catch AgentClient.AgentTargetError.expired { await expireEventCard() }
+        catch { await MainActor.run { self.errorMessage = "Couldn't save — try again." } }
+    }
+
+    func handleEventSelect(_ ct: String, _ eventId: String, _ occ: String) async {
+        do { let r = try await agentClient().eventSelect(
+                continuationToken: ct, eventId: eventId,
+                occurrenceStart: occ, continuationAction: "")
+             await MainActor.run { applyAgentResult(r) } }
+        catch AgentClient.AgentTargetError.expired { await expireEventCard() }
+        catch { await MainActor.run { self.errorMessage = "Couldn't continue — try again." } }
+    }
+
+    func handleResolveTarget(_ ct: String, _ ids: [String]) async {
+        do { let r = try await agentClient().resolveTarget(continuationToken: ct, selectedIds: ids)
+             await MainActor.run { applyAgentResult(r) } }
+        catch AgentClient.AgentTargetError.expired { await expireEventCard() }
+        catch { await MainActor.run { self.errorMessage = "Couldn't continue — try again." } }
+    }
+
+    @MainActor private func expireEventCard() {
+        pendingPlanArchCard = nil
+        errorMessage = "That expired — just ask again."
+        advancePlanArchCardQueue()
+    }
+
+    // Reflection review (event.reflection_review_pending) wiring is completed in
+    // Task 6 — this temporary handler keeps the EventTargetCardView intercept
+    // compiling for the Task 5 build.
+    func handleReflectionReview(_ card: PlanArchCardPayload, approve: Bool, note: String) async {
+        await MainActor.run { dismissEventCard() }
     }
 
     private func handleQueryCardStub(

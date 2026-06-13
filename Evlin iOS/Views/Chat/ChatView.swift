@@ -306,6 +306,25 @@ struct ChatView: View {
                                 }
                                 .padding(.top, Spacing.md)
                                 .transition(.opacity.combined(with: .scale))
+                            } else if planArchCard.kind.hasPrefix("event.")
+                                        || planArchCard.kind.hasPrefix("target.") {
+                                VStack(spacing: Spacing.sm) {
+                                    EventTargetCardView(
+                                        payload: planArchCard,
+                                        childName: viewModel.childName,
+                                        onConfirm: { token in
+                                            Task { await viewModel.handleEventConfirm(token) } },
+                                        onPickEvent: { ct, eid, occ in
+                                            Task { await viewModel.handleEventSelect(ct, eid, occ) } },
+                                        onResolveTarget: { ct, ids in
+                                            Task { await viewModel.handleResolveTarget(ct, ids) } },
+                                        onReflection: { approve, note in
+                                            await viewModel.handleReflectionReview(planArchCard, approve: approve, note: note) },
+                                        onSkip: { viewModel.dismissEventCard() })
+                                    reinterpretButton
+                                }
+                                .padding(.top, Spacing.md)
+                                .transition(.opacity.combined(with: .scale))
                             } else if let renderModel = PlanArchCardAdapter.adapt(
                                 planArchCard, childName: viewModel.childName
                             ) {
