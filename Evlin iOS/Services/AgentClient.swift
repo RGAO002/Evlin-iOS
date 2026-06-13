@@ -174,8 +174,17 @@ extension AgentClient {
     enum AgentTargetError: Error { case expired, server(Int) }
 
     func sendCardRequest(_ req: URLRequest) async throws -> AgentCardResponse {
-        let (data, resp) = try await URLSession.shared.data(for: req)
-        let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        // The agent endpoints require get_current_account. Raw URLSession requests
+        // sent NO Authorization header, so every Confirm/select/resolve 401'd and
+        // the card "did nothing". Attach the Bearer token and route through
+        // APIClient.authedData so we get the same single-flight 401-refresh + retry
+        // the rest of the app uses.
+        var authed = req
+        if let access = KeychainStore.shared.load()?.accessToken {
+            authed.setValue("Bearer \(access)", forHTTPHeaderField: "Authorization")
+        }
+        let (data, http) = try await APIClient().authedData(for: authed)
+        let code = http.statusCode
         if code == 410 { throw AgentTargetError.expired }
         guard code == 200 else { throw AgentTargetError.server(code) }
         return (try? JSONDecoder().decode(AgentCardResponse.self, from: data))
