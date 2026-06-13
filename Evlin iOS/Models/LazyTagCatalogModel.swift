@@ -23,6 +23,7 @@ struct LazyTagCatalogTarget: Identifiable, Codable, Sendable, Equatable, Hashabl
     let artworkURL: URL?
     let isManual: Bool
     let memberCount: Int?
+    let members: [CatalogListMemberDTO]
 
     var id: UUID { aliasKey }
 
@@ -34,7 +35,8 @@ struct LazyTagCatalogTarget: Identifiable, Codable, Sendable, Equatable, Hashabl
         bundleID: String? = nil,
         artworkURL: URL? = nil,
         isManual: Bool = false,
-        memberCount: Int? = nil
+        memberCount: Int? = nil,
+        members: [CatalogListMemberDTO] = []
     ) {
         self.aliasKey = aliasKey
         self.type = type
@@ -44,6 +46,7 @@ struct LazyTagCatalogTarget: Identifiable, Codable, Sendable, Equatable, Hashabl
         self.artworkURL = artworkURL
         self.isManual = isManual
         self.memberCount = memberCount
+        self.members = members
     }
 
     enum CodingKeys: String, CodingKey {
@@ -55,6 +58,7 @@ struct LazyTagCatalogTarget: Identifiable, Codable, Sendable, Equatable, Hashabl
         case artworkURL = "artwork_url"
         case isManual = "is_manual"
         case memberCount = "member_count"
+        case members
     }
 
     init(from decoder: Decoder) throws {
@@ -67,6 +71,7 @@ struct LazyTagCatalogTarget: Identifiable, Codable, Sendable, Equatable, Hashabl
         artworkURL = try container.decodeIfPresent(URL.self, forKey: .artworkURL)
         isManual = try container.decodeIfPresent(Bool.self, forKey: .isManual) ?? false
         memberCount = try container.decodeIfPresent(Int.self, forKey: .memberCount)
+        members = try container.decodeIfPresent([CatalogListMemberDTO].self, forKey: .members) ?? []
     }
 
     var supportingText: String {
@@ -344,6 +349,7 @@ struct LockSetupCatalogRow: Equatable, Identifiable {
     let bundleID: String?
     let artworkURL: URL?
     let memberCount: Int?
+    let members: [CatalogListMemberDTO]
 }
 
 struct LockSetupCatalogPresentationModel: Equatable {
@@ -361,7 +367,8 @@ struct LockSetupCatalogPresentationModel: Equatable {
                 badgeText: nil,
                 bundleID: target.bundleID,
                 artworkURL: target.artworkURL,
-                memberCount: nil
+                memberCount: nil,
+                members: []
             )
         }
         categoryRows = categories.map { target in
@@ -373,7 +380,8 @@ struct LockSetupCatalogPresentationModel: Equatable {
                 badgeText: nil,
                 bundleID: nil,
                 artworkURL: target.artworkURL,
-                memberCount: nil
+                memberCount: nil,
+                members: []
             )
         }
         listRows = lists.map { target in
@@ -386,7 +394,8 @@ struct LockSetupCatalogPresentationModel: Equatable {
                 badgeText: nil,
                 bundleID: nil,
                 artworkURL: target.artworkURL,
-                memberCount: count
+                memberCount: count,
+                members: target.members
             )
         }
     }

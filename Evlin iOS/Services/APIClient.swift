@@ -6,6 +6,14 @@ class APIClient: ObservableObject {
 
     static let defaultURL = "https://evlin-backend.onrender.com/api/v1"
 
+    /// The baseURL of the most-recently configured live `APIClient` — set at the
+    /// END of `init` and by `saveServerURL`. The process-wide `sharedRefresher`
+    /// reads THIS instead of constructing a throwaway `APIClient()`, which both
+    /// (a) re-ran init's UserDefaults-mutating migration as a side effect, and
+    /// (b) could resolve a DIFFERENT host than the instance that actually got the
+    /// 401 — so a backend switch / saved-URL change refreshed to the wrong server.
+    static var currentBaseURL = defaultURL
+
     /// Dev backend host — the Mac's LAN address (`ipconfig getifaddr en0`) so
     /// BOTH the simulator AND a real iPhone on the same WiFi can reach it. A
     /// loopback host (localhost/127.0.0.1) only works on the simulator; on a
@@ -89,6 +97,9 @@ class APIClient: ObservableObject {
         } else {
             self.baseURL = "https://" + raw
         }
+        // Mirror the resolved host process-wide so `sharedRefresher` refreshes
+        // against the SAME backend this live instance uses (see currentBaseURL).
+        Self.currentBaseURL = self.baseURL
     }
 
     // MARK: - Parent Chat
@@ -225,6 +236,7 @@ class APIClient: ObservableObject {
 
     func saveServerURL(_ url: String) {
         baseURL = url
+        Self.currentBaseURL = url
         UserDefaults.standard.set(url, forKey: "serverURL")
     }
 
@@ -612,9 +624,19 @@ struct CatalogListUploadResponse: Codable, Sendable, Equatable {
     }
 }
 
-enum CatalogListMemberTargetType: String, Codable, Sendable, Equatable {
+enum CatalogListMemberTargetType: String, Codable, Sendable, Equatable, Hashable {
     case app
     case category
+}
+
+struct CatalogListMemberDTO: Codable, Sendable, Equatable, Hashable {
+    let targetType: CatalogListMemberTargetType
+    let aliasKey: UUID
+
+    enum CodingKeys: String, CodingKey {
+        case targetType = "target_type"
+        case aliasKey = "alias_key"
+    }
 }
 
 struct CatalogListMemberUpload: Codable, Sendable, Equatable {
@@ -726,6 +748,7 @@ struct ParentLazyTagListProjection: Codable, Sendable, Equatable {
     let aliases: [String]
     let appCount: Int
     let status: String
+    let members: [CatalogListMemberDTO]
 
     enum CodingKeys: String, CodingKey {
         case aliasKey = "alias_key"
@@ -734,6 +757,18 @@ struct ParentLazyTagListProjection: Codable, Sendable, Equatable {
         case aliases
         case appCount = "app_count"
         case status
+        case members
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        aliasKey = try container.decode(UUID.self, forKey: .aliasKey)
+        targetType = try container.decode(LazyTagCatalogTargetType.self, forKey: .targetType)
+        listName = try container.decode(String.self, forKey: .listName)
+        aliases = try container.decodeIfPresent([String].self, forKey: .aliases) ?? []
+        appCount = try container.decodeIfPresent(Int.self, forKey: .appCount) ?? 0
+        status = try container.decodeIfPresent(String.self, forKey: .status) ?? "active"
+        members = try container.decodeIfPresent([CatalogListMemberDTO].self, forKey: .members) ?? []
     }
 
     var lazyTagTarget: LazyTagCatalogTarget {
@@ -742,7 +777,8 @@ struct ParentLazyTagListProjection: Codable, Sendable, Equatable {
             type: .list,
             displayName: listName,
             aliases: aliases,
-            memberCount: appCount
+            memberCount: appCount,
+            members: members
         )
     }
 }
@@ -932,6 +968,7 @@ struct LockSetupCatalog: Decodable, Sendable, Equatable {
         let bindingKind: String?
         let appCount: Int?
         let artworkURL: URL?
+        let members: [CatalogListMemberDTO]
 
         enum CodingKeys: String, CodingKey {
             case aliasKey = "alias_key"
@@ -943,6 +980,7 @@ struct LockSetupCatalog: Decodable, Sendable, Equatable {
             case bindingKind = "binding_kind"
             case appCount = "app_count"
             case artworkURL = "artwork_url"
+            case members
         }
 
         init(from decoder: Decoder) throws {
@@ -958,6 +996,7 @@ struct LockSetupCatalog: Decodable, Sendable, Equatable {
             bindingKind = try c.decodeIfPresent(String.self, forKey: .bindingKind)
             appCount = try c.decodeIfPresent(Int.self, forKey: .appCount)
             artworkURL = try c.decodeIfPresent(URL.self, forKey: .artworkURL)
+            members = try c.decodeIfPresent([CatalogListMemberDTO].self, forKey: .members) ?? []
         }
 
         var target: LockSetupTarget {
@@ -971,7 +1010,8 @@ struct LockSetupCatalog: Decodable, Sendable, Equatable {
                 isManual: targetType == .app
                     && (bindingKind?.caseInsensitiveCompare("manual") == .orderedSame
                         || (bundleID?.isEmpty ?? true)),
-                memberCount: targetType == .list ? appCount : nil
+                memberCount: targetType == .list ? appCount : nil,
+                members: targetType == .list ? members : []
             )
         }
     }
@@ -2391,7 +2431,11 @@ extension APIClient {
             let (data2, resp2) = try await URLSession.shared.data(for: retry)
             guard let http2 = resp2 as? HTTPURLResponse else { throw AuthError.http(-1) }
             return (data2, http2)
-        } catch {
+        } catch AuthError.signedOut {
+            // Terminal auth failure ONLY (invalid/expired/reused refresh token, or
+            // no stored session). Transient failures — network blips, 5xx, Render
+            // cold starts — propagate WITHOUT clearing the Keychain, so a hiccup
+            // can't sign the user out mid-onboarding.
             KeychainStore.shared.clear()
             NotificationCenter.default.post(name: .evlinSessionSignedOut, object: nil)
             throw AuthError.signedOut
@@ -2405,15 +2449,23 @@ extension APIClient {
         guard let current = KeychainStore.shared.load() else {
             throw APIClient.AuthError.signedOut
         }
-        let base = APIClient().baseURL
+        let base = APIClient.currentBaseURL
         let url = URL(string: "\(base)/auth/refresh")!
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try JSONEncoder().encode(["refresh_token": current.refreshToken])
         let (data, resp) = try await URLSession.shared.data(for: req)
-        guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
-            throw APIClient.AuthError.signedOut
+        guard let http = resp as? HTTPURLResponse else {
+            throw APIClient.AuthError.http(-1)
+        }
+        guard http.statusCode == 200 else {
+            // Only an explicit 401 (invalid/expired/reused refresh token) is
+            // terminal → sign out. 5xx / other statuses are transient (cold start,
+            // blip) and must NOT clear the session, or a flaky backend logs the
+            // user out. They surface as `.http` and propagate (no signout).
+            if http.statusCode == 401 { throw APIClient.AuthError.signedOut }
+            throw APIClient.AuthError.http(http.statusCode)
         }
         let decoded = try JSONDecoder().decode(AuthResultDTO.self, from: data)
         // Atomic Keychain rewrite with the rotated pair, preserving the full

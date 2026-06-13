@@ -22,6 +22,8 @@ struct SavedListPickerView: View {
     let familyID: UUID
     let owningDeviceID: UUID
     let mode: String   // "child_device" or "parent_device"
+    let editingListID: UUID?
+    let initialName: String?
     let onSaved: (String) -> Void
 
     @State private var name: String = ""
@@ -33,6 +35,23 @@ struct SavedListPickerView: View {
     @State private var loadError: String?
     @State private var saving = false
     @State private var saveError: String?
+
+    init(
+        familyID: UUID,
+        owningDeviceID: UUID,
+        mode: String,
+        editingListID: UUID? = nil,
+        initialName: String? = nil,
+        onSaved: @escaping (String) -> Void
+    ) {
+        self.familyID = familyID
+        self.owningDeviceID = owningDeviceID
+        self.mode = mode
+        self.editingListID = editingListID
+        self.initialName = initialName
+        self.onSaved = onSaved
+        _name = State(initialValue: initialName ?? "")
+    }
 
     private var trimmedName: String {
         name.trimmingCharacters(in: .whitespaces)
@@ -102,7 +121,7 @@ struct SavedListPickerView: View {
             .padding(.bottom, 36)
         }
         .background(Color.evSurface.ignoresSafeArea())
-        .navigationTitle("Create list")
+        .navigationTitle(editingListID == nil ? "Create list" : "Edit list")
         .navigationBarTitleDisplayMode(.inline)
         .task {
             await reloadTargetsFromBackend()
@@ -283,6 +302,26 @@ struct SavedListPickerView: View {
             let model = LockSetupCatalogPresentationModel(catalog: catalog)
             availableApps = model.appRows
             availableCategories = model.categoryRows
+            if let editingListID {
+                guard let list = model.listRows.first(where: { $0.id == editingListID }) else {
+                    loadError = "Couldn't load this list. Try again."
+                    return
+                }
+                guard !list.members.isEmpty else {
+                    loadError = "Couldn't load this list's members. Try again."
+                    return
+                }
+                selectedAppIDs = Set(
+                    list.members
+                        .filter { $0.targetType == .app }
+                        .map(\.aliasKey)
+                )
+                selectedCategoryIDs = Set(
+                    list.members
+                        .filter { $0.targetType == .category }
+                        .map(\.aliasKey)
+                )
+            }
             loadError = nil
         } catch {
             loadError = "Could not load lock targets: \(error.localizedDescription)"
@@ -318,15 +357,18 @@ struct SavedListPickerView: View {
                 description: nil,
                 mode: mode
             ))
-            _ = try await apiClient.uploadCatalogList(
-                deviceID: owningDeviceID,
-                sourceDeviceID: owningDeviceID,
+            let input = ControlListInput(
+                aliasKey: editingListID,
                 listName: trimmed,
                 aliases: [trimmed],
-                selectionBlobBase64: nil,
-                appCount: members.count,
-                members: members
+                members: members,
+                selectionBlobBase64: nil
             )
+            if editingListID == nil {
+                _ = try await apiClient.createControlList(input, deviceID: owningDeviceID)
+            } else {
+                _ = try await apiClient.updateControlList(input, deviceID: owningDeviceID)
+            }
             onSaved(trimmed)
         } catch {
             saveError = "Could not save list: \(error.localizedDescription)"

@@ -194,6 +194,7 @@ struct LockListManagerView: View {
     @State private var syncing = false
     @State private var syncBanner: String?
     @State private var deletingTargetID: UUID?
+    @State private var editListRow: LockSetupCatalogRow?
 
     init(
         familyID: UUID,
@@ -250,7 +251,12 @@ struct LockListManagerView: View {
                 ) {
                     ForEach(Array(model.catalog.listRows.enumerated()), id: \.element.id) { index, row in
                         if index > 0 { rowDivider }
-                        backendTargetRow(row, kind: .savedList) {
+                        backendTargetRow(
+                            row,
+                            kind: .savedList,
+                            canEdit: true,
+                            onEdit: { editListRow = row }
+                        ) {
                             deleteTarget(row)
                         }
                     }
@@ -296,6 +302,21 @@ struct LockListManagerView: View {
                     mode: "child_device"
                 ) { _ in
                     showAddList = false
+                    Task { await reloadFromBackend(recoverLocal: false) }
+                }
+                .environmentObject(apiClient)
+            }
+        }
+        .sheet(item: $editListRow) { row in
+            NavigationStack {
+                SavedListPickerView(
+                    familyID: familyID,
+                    owningDeviceID: childDeviceID,
+                    mode: "child_device",
+                    editingListID: row.id,
+                    initialName: row.title
+                ) { _ in
+                    editListRow = nil
                     Task { await reloadFromBackend(recoverLocal: false) }
                 }
                 .environmentObject(apiClient)
