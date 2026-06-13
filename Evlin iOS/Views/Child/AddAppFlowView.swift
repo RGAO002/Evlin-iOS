@@ -17,6 +17,7 @@ struct AddAppFlowSaveResult: Equatable, Sendable {
 
 struct AddAppFlowView: View {
     let childDeviceID: UUID
+    let mode: AddTargetMode
     let onSaved: (AddAppFlowSaveResult) -> Void
 
     @EnvironmentObject var apiClient: APIClient
@@ -43,7 +44,17 @@ struct AddAppFlowView: View {
     private var canAttemptSave: Bool {
         uploading == false
             && counts.webDomainTokens == 0
-            && (pendingRows.isEmpty == false || pendingCategoryRows.isEmpty == false)
+            && (mode == .app ? pendingRows.isEmpty == false : pendingCategoryRows.isEmpty == false)
+    }
+
+    init(
+        childDeviceID: UUID,
+        mode: AddTargetMode = .app,
+        onSaved: @escaping (AddAppFlowSaveResult) -> Void
+    ) {
+        self.childDeviceID = childDeviceID
+        self.mode = mode
+        self.onSaved = onSaved
     }
 
     var body: some View {
@@ -56,11 +67,11 @@ struct AddAppFlowView: View {
                     AddAppSaveValidationBanner(message: "Websites are not supported here. Remove website selections before saving.")
                 }
 
-                if !pendingRows.isEmpty {
+                if mode == .app, !pendingRows.isEmpty {
                     appsBindCard
                 }
 
-                if !pendingCategoryRows.isEmpty {
+                if mode == .category, !pendingCategoryRows.isEmpty {
                     categoriesCard
                 }
 
@@ -73,7 +84,7 @@ struct AddAppFlowView: View {
             .padding(.bottom, 36)
         }
         .background(Color.evSurface.ignoresSafeArea())
-        .navigationTitle("Add App")
+        .navigationTitle(mode.title)
         .navigationBarTitleDisplayMode(.inline)
         .onChange(of: selection) { _, newValue in
             saveBanner = nil
@@ -95,10 +106,12 @@ struct AddAppFlowView: View {
             .frame(width: 46, height: 46)
 
             VStack(alignment: .leading, spacing: 4) {
-                Text("Add apps")
+                Text(mode == .app ? "Add apps" : "Add categories")
                     .font(.headline)
                     .foregroundStyle(Color.evOnSurface)
-                Text("Pick apps and Apple categories from this device. Apps must be named before saving; categories cover current and future matching apps.")
+                Text(mode == .app
+                    ? "Pick individual apps from this device. Category selections are ignored here."
+                    : "Pick Apple categories from this device. App selections are ignored here.")
                     .font(.subheadline)
                     .foregroundStyle(Color.evOnSurfaceVariant)
                     .fixedSize(horizontal: false, vertical: true)
@@ -125,10 +138,12 @@ struct AddAppFlowView: View {
                     .frame(width: 42, height: 42)
 
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Pick app")
+                        Text(mode == .app ? "Pick app" : "Pick category")
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(Color.evOnSurface)
-                        Text("You can choose multiple apps and broad categories in one pass.")
+                        Text(mode == .app
+                            ? "Choose one or more individual apps in one pass."
+                            : "Choose one or more Apple categories in one pass.")
                             .font(.caption)
                             .foregroundStyle(Color.evOnSurfaceVariant)
                             .fixedSize(horizontal: false, vertical: true)
@@ -254,7 +269,12 @@ struct AddAppFlowView: View {
     }
 
     private var selectionSummary: String {
-        "\(counts.applicationTokens) apps · \(counts.categoryTokens) categories · \(counts.webDomainTokens) websites"
+        switch mode {
+        case .app:
+            "\(pendingRows.count) apps ready · \(counts.categoryTokens) ignored categories · \(counts.webDomainTokens) websites"
+        case .category:
+            "\(pendingCategoryRows.count) categories ready · \(counts.applicationTokens) ignored apps · \(counts.webDomainTokens) websites"
+        }
     }
 
     @ViewBuilder
@@ -262,17 +282,17 @@ struct AddAppFlowView: View {
         if uploading {
             ProgressView()
                 .frame(maxWidth: .infinity)
-        } else if pendingRows.allSatisfy(\.isLockableApp), pendingRows.isEmpty == false {
-            Text(pendingCategoryRows.isEmpty ? "Save apps" : "Save apps and categories")
+        } else if mode == .app, pendingRows.allSatisfy(\.isLockableApp), pendingRows.isEmpty == false {
+            Text("Save apps")
                 .frame(maxWidth: .infinity)
-        } else if pendingRows.isEmpty, pendingCategoryRows.isEmpty == false {
+        } else if mode == .category, pendingCategoryRows.isEmpty == false {
             Text("Save categories")
                 .frame(maxWidth: .infinity)
-        } else if pendingRows.isEmpty == false {
+        } else if mode == .app, pendingRows.isEmpty == false {
             Text("Name every app before saving")
                 .frame(maxWidth: .infinity)
         } else {
-            Text("Save app")
+            Text(mode == .app ? "Save app" : "Save category")
                 .frame(maxWidth: .infinity)
         }
     }
@@ -334,6 +354,28 @@ struct AddAppFlowView: View {
         categoryTokensByRowID = Dictionary(uniqueKeysWithValues: zip(pendingCategoryRows, categoryPairs).map { row, pair in
             (row.id, pair.0)
         })
+
+        let decision = AddTargetFlowRules.decision(
+            mode: mode,
+            appCount: pendingRows.count,
+            categoryCount: pendingCategoryRows.count,
+            webDomainCount: SelectionCounts(newValue).webDomainTokens
+        )
+        switch decision.action {
+        case .saveApps:
+            if !pendingCategoryRows.isEmpty {
+                pendingCategoryRows = []
+                categoryTokensByRowID = [:]
+            }
+        case .saveCategories:
+            if !pendingRows.isEmpty {
+                pendingRows = []
+                appTokensByRowID = [:]
+            }
+        case .reject:
+            break
+        }
+        saveBanner = decision.warning
     }
 
     private func attemptSave() {
@@ -355,30 +397,37 @@ struct AddAppFlowView: View {
 
     @MainActor
     private func upload() async {
-        var model = CaptureSheetModel(rows: pendingRows)
-        model.attemptSave()
-        guard model.isPresented == false else {
-            saveBanner = model.errorBanner
-            highlightedRows = Set(model.highlightedRows.compactMap { index in
-                model.rows.indices.contains(index) ? model.rows[index].id : nil
-            })
-            return
+        let savedAppRows: [PendingAppRow]
+        if mode == .app {
+            var model = CaptureSheetModel(rows: pendingRows)
+            model.attemptSave()
+            guard model.isPresented == false else {
+                saveBanner = model.errorBanner
+                highlightedRows = Set(model.highlightedRows.compactMap { index in
+                    model.rows.indices.contains(index) ? model.rows[index].id : nil
+                })
+                return
+            }
+            savedAppRows = model.savedRows
+        } else {
+            savedAppRows = []
         }
 
         // Pair each pending row with its upload payload so we can correlate the
         // backend response without relying on the wire alias_key (which is now nil
         // for fresh captures — see makeUploadApp/makeUploadCategory).
         let appPairs: [(row: PendingAppRow, upload: ChildAppCatalogUploadApp)] =
-            model.savedRows.compactMap { row in
+            savedAppRows.compactMap { row in
                 guard let upload = row.makeUploadApp(sourceDeviceID: childDeviceID) else { return nil }
                 return (row, upload)
             }
         let categoryPairs: [(row: PendingCategoryRow, upload: ChildAppCatalogUploadApp)] =
-            pendingCategoryRows.map { ($0, $0.makeUploadCategory(sourceDeviceID: childDeviceID)) }
-        let apps = appPairs.map(\.upload)
-        let categories = categoryPairs.map(\.upload)
-        guard !apps.isEmpty || !categories.isEmpty else {
-            saveBanner = "Pick at least one app or category first."
+            mode == .category ? pendingCategoryRows.map { ($0, $0.makeUploadCategory(sourceDeviceID: childDeviceID)) } : []
+        let appPairsForUpload = mode == .app ? appPairs : []
+        let categoryPairsForUpload = mode == .category ? categoryPairs : []
+        let uploadRows = appPairsForUpload.map(\.upload) + categoryPairsForUpload.map(\.upload)
+        guard !uploadRows.isEmpty else {
+            saveBanner = mode == .app ? "Pick at least one app first." : "Pick at least one category first."
             return
         }
 
@@ -387,7 +436,7 @@ struct AddAppFlowView: View {
         saveBanner = nil
         highlightedRows = []
 
-        for (row, upload) in appPairs {
+        for (row, upload) in appPairsForUpload {
             guard let token = appTokensByRowID[row.id] else { continue }
             LocalAliasStore.shared.saveApplicationAliases(
                 token: token,
@@ -395,7 +444,7 @@ struct AddAppFlowView: View {
                 bundleIdentifier: upload.bundleID
             )
         }
-        for (row, upload) in categoryPairs {
+        for (row, upload) in categoryPairsForUpload {
             guard let token = categoryTokensByRowID[row.id] else { continue }
             LocalAliasStore.shared.saveCategoryToken(token, forName: upload.displayName)
             if let semantic = upload.aliases.last {
@@ -403,54 +452,8 @@ struct AddAppFlowView: View {
             }
         }
 
-        // SNAPSHOT SEMANTICS: the backend upload deletes any catalog row NOT present
-        // in this request (test_child_catalog_reupload_deletes_referenced_stale_app_and_members).
-        // The capture above only covers the newly-picked apps, so sending just those
-        // would WIPE every previously-added app. The new captures were just saved to
-        // LocalAliasStore in the loops above, so rebuild the COMPLETE local catalog
-        // and upload that as the full snapshot.
-        var fullUpload: [ChildAppCatalogUploadApp] = []
-        for entry in LocalAliasStore.shared.groupedApplicationAliases() {
-            guard let key = entry.keys.first,
-                  let token = LocalAliasStore.shared.applicationToken(forLookupKey: key),
-                  let blob = try? AppCatalogBlobEncoder.base64(token), !blob.isEmpty
-            else { continue }
-            fullUpload.append(ChildAppCatalogUploadApp(
-                aliasKey: nil,
-                displayName: entry.label,
-                tokenKind: "app",
-                bundleID: entry.bundleID,
-                aliases: entry.keys,
-                tokenAvailable: true,
-                tokenDataBase64: blob,
-                sourceDeviceID: childDeviceID
-            ))
-        }
-        for name in LocalAliasStore.shared.allCategoryNames() {
-            guard let token = LocalAliasStore.shared.categoryToken(forName: name),
-                  let blob = try? AppCatalogBlobEncoder.base64(token), !blob.isEmpty
-            else { continue }
-            fullUpload.append(ChildAppCatalogUploadApp(
-                aliasKey: nil,
-                displayName: NameWithIcon.displayName(name),
-                tokenKind: "category",
-                bundleID: nil,
-                aliases: [name],
-                tokenAvailable: true,
-                tokenDataBase64: blob,
-                sourceDeviceID: childDeviceID
-            ))
-        }
-        // Never upload an empty snapshot — that would delete the whole catalog.
-        // We know the capture is non-empty (guarded above), so the local set should
-        // contain it; bail safely if token re-encode unexpectedly produced nothing.
-        guard !fullUpload.isEmpty else {
-            saveBanner = "Couldn’t read the saved app tokens. Nothing was changed on Evlin — try Save again."
-            return
-        }
-
         do {
-            let response = try await apiClient.uploadChildAppCatalog(deviceID: childDeviceID, apps: fullUpload)
+            let response = try await apiClient.mergeChildAppCatalog(deviceID: childDeviceID, apps: uploadRows)
             // The backend assigns its own alias_key. Map each response row back by
             // (displayName, bundleID, kind) so LocalAliasStore stores the REAL key
             // (nil if not found — never a bogus local id).
@@ -461,7 +464,7 @@ struct AddAppFlowView: View {
                         && ($0.tokenKind.lowercased() == "category") == isCategory
                 }?.id
             }
-            for (row, upload) in appPairs {
+            for (row, upload) in appPairsForUpload {
                 guard let token = appTokensByRowID[row.id] else { continue }
                 LocalAliasStore.shared.saveApplicationAliases(
                     token: token,
@@ -470,7 +473,7 @@ struct AddAppFlowView: View {
                     catalogAliasKey: backendAliasKey(displayName: upload.displayName, bundleID: upload.bundleID, isCategory: false)
                 )
             }
-            for (row, upload) in categoryPairs {
+            for (row, upload) in categoryPairsForUpload {
                 guard let token = categoryTokensByRowID[row.id] else { continue }
                 let key = backendAliasKey(displayName: upload.displayName, bundleID: nil, isCategory: true)
                 LocalAliasStore.shared.saveCategoryToken(
@@ -486,12 +489,12 @@ struct AddAppFlowView: View {
                     )
                 }
             }
-            let blockableAppCount = appPairs.filter {
+            let blockableAppCount = appPairsForUpload.filter {
                 ($0.upload.bundleID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
             }.count
             onSaved(AddAppFlowSaveResult(
-                savedApps: appPairs.count,
-                savedCategories: categoryPairs.count,
+                savedApps: appPairsForUpload.count,
+                savedCategories: categoryPairsForUpload.count,
                 blockableAppCount: blockableAppCount
             ))
         } catch {
