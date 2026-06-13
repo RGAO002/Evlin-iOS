@@ -56,6 +56,31 @@ final class LockListManagerModelTests: XCTestCase {
             LockListCategoryEntry(name: "social")
         ])
     }
+
+    func test_kidPresentationUsesBackendCatalogAndStripsBadgesAndCopy() {
+        let appID = UUID(uuidString: "11111111-1111-1111-1111-111111111111")!
+        let categoryID = UUID(uuidString: "22222222-2222-2222-2222-222222222222")!
+        let listID = UUID(uuidString: "33333333-3333-3333-3333-333333333333")!
+        let catalog = LockSetupCatalogPresentationModel(
+            apps: [
+                .init(aliasKey: appID, type: .app, displayName: "Instagram", aliases: ["ig"], bundleID: "com.burbn.instagram", artworkURL: nil, isManual: true, memberCount: nil)
+            ],
+            categories: [
+                .init(aliasKey: categoryID, type: .category, displayName: "Games", aliases: ["games"], bundleID: nil, artworkURL: nil, isManual: false, memberCount: nil)
+            ],
+            lists: [
+                .init(aliasKey: listID, type: .list, displayName: "Entertainment", aliases: ["fun"], bundleID: nil, artworkURL: nil, isManual: false, memberCount: 2)
+            ]
+        )
+
+        XCTAssertEqual(catalog.appRows.map(\.title), ["Instagram"])
+        XCTAssertEqual(catalog.appRows.map(\.subtitle), ["com.burbn.instagram"])
+        XCTAssertEqual(catalog.appRows.map(\.badgeText), [nil])
+        XCTAssertEqual(catalog.categoryRows.map(\.title), ["Games"])
+        XCTAssertEqual(catalog.categoryRows.map(\.subtitle), [nil])
+        XCTAssertEqual(catalog.categoryRows.map(\.badgeText), [nil])
+        XCTAssertEqual(catalog.listRows.map(\.subtitle), ["2 members"])
+    }
 }
 
 private struct FakeLockListStore: LockListStoreReading {

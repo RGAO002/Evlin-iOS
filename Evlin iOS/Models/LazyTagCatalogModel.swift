@@ -257,3 +257,139 @@ enum LockSetupSaveRules {
         value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 }
+
+enum AddTargetMode: String, Sendable, Equatable {
+    case app
+    case category
+
+    var title: String {
+        switch self {
+        case .app: return "Add app"
+        case .category: return "Add category"
+        }
+    }
+}
+
+enum AddTargetFlowRules {
+    enum Action: Equatable {
+        case saveApps
+        case saveCategories
+        case reject
+    }
+
+    struct Decision: Equatable {
+        let action: Action
+        let warning: String?
+    }
+
+    static func decision(
+        mode: AddTargetMode,
+        appCount: Int,
+        categoryCount: Int,
+        webDomainCount: Int
+    ) -> Decision {
+        if webDomainCount > 0 {
+            return .init(action: .reject, warning: "Websites are not supported here.")
+        }
+
+        switch mode {
+        case .app:
+            if appCount > 0 {
+                return .init(
+                    action: .saveApps,
+                    warning: categoryCount > 0 ? "Category selections were ignored. Add categories from Add category." : nil
+                )
+            }
+            if categoryCount > 0 {
+                return .init(action: .reject, warning: "Expand the category or search to select individual apps.")
+            }
+            return .init(action: .reject, warning: "Pick at least one app first.")
+        case .category:
+            if categoryCount > 0 {
+                return .init(
+                    action: .saveCategories,
+                    warning: appCount > 0 ? "App selections were ignored. Add apps from Add app." : nil
+                )
+            }
+            if appCount > 0 {
+                return .init(action: .reject, warning: "Select a category, not an individual app.")
+            }
+            return .init(action: .reject, warning: "Pick at least one category first.")
+        }
+    }
+}
+
+struct LockSetupCatalogRow: Equatable, Identifiable {
+    let id: UUID
+    let type: LazyTagCatalogTargetType
+    let title: String
+    let subtitle: String?
+    let badgeText: String?
+    let bundleID: String?
+    let artworkURL: URL?
+    let memberCount: Int?
+}
+
+struct LockSetupCatalogPresentationModel: Equatable {
+    let appRows: [LockSetupCatalogRow]
+    let categoryRows: [LockSetupCatalogRow]
+    let listRows: [LockSetupCatalogRow]
+
+    init(apps: [LockSetupTarget], categories: [LockSetupTarget], lists: [LockSetupTarget]) {
+        appRows = apps.map { target in
+            LockSetupCatalogRow(
+                id: target.aliasKey,
+                type: .app,
+                title: target.displayName,
+                subtitle: target.bundleID,
+                badgeText: nil,
+                bundleID: target.bundleID,
+                artworkURL: target.artworkURL,
+                memberCount: nil
+            )
+        }
+        categoryRows = categories.map { target in
+            LockSetupCatalogRow(
+                id: target.aliasKey,
+                type: .category,
+                title: target.displayName,
+                subtitle: nil,
+                badgeText: nil,
+                bundleID: nil,
+                artworkURL: target.artworkURL,
+                memberCount: nil
+            )
+        }
+        listRows = lists.map { target in
+            let count = target.memberCount ?? 0
+            return LockSetupCatalogRow(
+                id: target.aliasKey,
+                type: .list,
+                title: target.displayName,
+                subtitle: "\(count) member\(count == 1 ? "" : "s")",
+                badgeText: nil,
+                bundleID: nil,
+                artworkURL: target.artworkURL,
+                memberCount: count
+            )
+        }
+    }
+
+    init(catalog: LockSetupCatalog) {
+        self.init(
+            apps: catalog.appTargets,
+            categories: catalog.categoryTargets,
+            lists: catalog.listTargets
+        )
+    }
+
+    var hasUsableTarget: Bool {
+        !appRows.isEmpty || !categoryRows.isEmpty || !listRows.isEmpty
+    }
+
+    var hasBlockableApp: Bool {
+        appRows.contains { row in
+            row.bundleID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        }
+    }
+}
