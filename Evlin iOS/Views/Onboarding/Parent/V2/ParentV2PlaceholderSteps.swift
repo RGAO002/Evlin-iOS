@@ -114,10 +114,13 @@ struct ParentSignInStep: View {
                             .disabled(busy || email.isEmpty || password.count < 8)
                         }
                     } else {
+                        // Email sign-in is temporarily disabled — button kept visible
+                        // but greyed/non-tappable while Apple/Google are being wired up.
+                        // (The form branch above stays compiled for easy re-enable.)
                         OnboardingV2SecondaryButton("Sign in with email",
                                                     systemImage: "envelope",
-                                                    action: { showEmailForm = true })
-                            .disabled(busy)
+                                                    action: {})
+                            .disabled(true)
                     }
 
                     if busy {
