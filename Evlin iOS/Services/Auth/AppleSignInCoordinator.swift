@@ -1,4 +1,5 @@
 import AuthenticationServices
+import CryptoKit
 import Foundation
 
 /// Wraps ASAuthorizationController for Sign in with Apple. Produces the
@@ -12,17 +13,22 @@ final class AppleSignInCoordinator: NSObject, ASAuthorizationControllerDelegate 
         let identityToken: String
         let authorizationCode: String?
         let fullName: String?
+        let rawNonce: String
     }
 
     private var continuation: CheckedContinuation<AppleCredential, Error>?
+    private var currentRawNonce: String?
 
     enum AppleSignInError: Error { case cancelled, missingToken, failed }
 
     func signIn() async throws -> AppleCredential {
         try await withCheckedThrowingContinuation { cont in
             self.continuation = cont
+            let raw = randomNonceString()
+            self.currentRawNonce = raw
             let request = ASAuthorizationAppleIDProvider().createRequest()
             request.requestedScopes = [.fullName, .email]
+            request.nonce = sha256Hex(raw)
             let controller = ASAuthorizationController(authorizationRequests: [request])
             controller.delegate = self
             controller.performRequests()
@@ -47,9 +53,11 @@ final class AppleSignInCoordinator: NSObject, ASAuthorizationControllerDelegate 
         continuation?.resume(returning: AppleCredential(
             identityToken: token,
             authorizationCode: code,
-            fullName: name.isEmpty ? nil : name
+            fullName: name.isEmpty ? nil : name,
+            rawNonce: currentRawNonce ?? ""
         ))
         continuation = nil
+        currentRawNonce = nil
     }
 
     func authorizationController(
@@ -62,5 +70,19 @@ final class AppleSignInCoordinator: NSObject, ASAuthorizationControllerDelegate 
             continuation?.resume(throwing: AppleSignInError.failed)
         }
         continuation = nil
+    }
+
+    private func randomNonceString(length: Int = 32) -> String {
+        var bytes = [UInt8](repeating: 0, count: length)
+        let status = SecRandomCopyBytes(kSecRandomDefault, length, &bytes)
+        precondition(status == errSecSuccess, "SecRandomCopyBytes failed")
+        let charset: [Character] =
+            Array("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-._")
+        return String(bytes.map { charset[Int($0) % charset.count] })
+    }
+
+    private func sha256Hex(_ input: String) -> String {
+        SHA256.hash(data: Data(input.utf8))
+            .map { String(format: "%02x", $0) }.joined()
     }
 }

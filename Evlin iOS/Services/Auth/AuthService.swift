@@ -81,13 +81,14 @@ final class AuthService {
         ])
     }
 
-    /// POST /auth/apple with the identity token + authorization code.
+    /// POST /auth/apple with the identity token + authorization code + nonce.
     func signInWithApple(identityToken: String, authorizationCode: String?,
-                         fullName: String?) async {
+                         fullName: String?, rawNonce: String) async {
         await postAuth(path: "/auth/apple", body: [
             "identity_token": identityToken,
             "authorization_code": authorizationCode as Any,
             "full_name": fullName as Any,
+            "nonce": rawNonce,
         ])
     }
 
@@ -96,21 +97,18 @@ final class AuthService {
         state = .signedOut
     }
 
-    #if DEBUG
-    /// DEBUG-only password-less sign-in for the simulator. POSTs to
-    /// /auth/dev-signin {email, display_name}, which (when the backend is in
-    /// debug mode) returns the SAME session JSON as /auth/google. Feeds the
-    /// result through the SAME `postAuth` path so the Keychain + `state` are
-    /// populated identically to a real Apple/Google sign-in. The caller passes
-    /// a unique dev email (e.g. dev+<uuid>@evlin.test) so each run mints a
-    /// fresh family-less account that can then pair.
-    func signInWithDevEmail(email: String, displayName: String) async {
-        await postAuth(path: "/auth/dev-signin", body: [
+    /// POST /auth/email {email, password, full_name?}. The backend create-or-
+    /// authenticates on (provider=email, provider_sub=lowercased email) and
+    /// returns the SAME session JSON as /auth/google, so the result feeds the
+    /// SAME `postAuth` path (Keychain + state populated identically).
+    func signInWithEmail(email: String, password: String,
+                         fullName: String? = nil) async {
+        await postAuth(path: "/auth/email", body: [
             "email": email,
-            "display_name": displayName,
+            "password": password,
+            "full_name": fullName as Any,
         ])
     }
-    #endif
 
     private func postAuth(path: String, body: [String: Any]) async {
         lastError = nil

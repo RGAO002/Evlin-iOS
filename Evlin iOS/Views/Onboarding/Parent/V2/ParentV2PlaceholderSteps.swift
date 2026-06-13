@@ -36,6 +36,9 @@ struct ParentSignInStep: View {
 
     @State private var busy = false
     @State private var errorText: String?
+    @State private var email = ""
+    @State private var password = ""
+    @State private var showEmailForm = false
 
     // Held for the duration of an Apple/Google presentation.
     @State private var appleCoordinator = AppleSignInCoordinator()
@@ -87,15 +90,35 @@ struct ParentSignInStep: View {
                     .buttonStyle(.plain)
                     .disabled(busy)
 
-                    #if DEBUG
-                    // DEBUG-only: lets the simulator authenticate without a real
-                    // Apple/Google id_token. POSTs /auth/dev-signin with a unique
-                    // dev email so each run mints a fresh family-less account.
-                    OnboardingV2SecondaryButton("Dev sign in (sim)",
-                                                systemImage: "ladybug",
-                                                action: { Task { await devSignIn() } })
-                        .disabled(busy)
-                    #endif
+                    // Email + password — replaces the old dev-signin escape hatch.
+                    if showEmailForm {
+                        VStack(spacing: Spacing.sm) {
+                            TextField("Email", text: $email)
+                                .textContentType(.username)
+                                .keyboardType(.emailAddress)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                                .padding(12)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                        .stroke(OnboardingV2Theme.Palette.outlineVariant, lineWidth: 1))
+                            SecureField("Password (8+ characters)", text: $password)
+                                .textContentType(.password)
+                                .padding(12)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                        .stroke(OnboardingV2Theme.Palette.outlineVariant, lineWidth: 1))
+                            OnboardingV2PrimaryButton("Continue with email", role: .parent) {
+                                Task { await signInWithEmail() }
+                            }
+                            .disabled(busy || email.isEmpty || password.count < 8)
+                        }
+                    } else {
+                        OnboardingV2SecondaryButton("Sign in with email",
+                                                    systemImage: "envelope",
+                                                    action: { showEmailForm = true })
+                            .disabled(busy)
+                    }
 
                     if busy {
                         HStack(spacing: Spacing.md) {
@@ -142,7 +165,8 @@ struct ParentSignInStep: View {
             await auth.signInWithApple(
                 identityToken: cred.identityToken,
                 authorizationCode: cred.authorizationCode,
-                fullName: cred.fullName
+                fullName: cred.fullName,
+                rawNonce: cred.rawNonce
             )
             finish(auth)
         } catch AppleSignInCoordinator.AppleSignInError.cancelled {
@@ -172,17 +196,17 @@ struct ParentSignInStep: View {
         }
     }
 
-    #if DEBUG
     @MainActor
-    private func devSignIn() async {
+    private func signInWithEmail() async {
         guard let auth else { errorText = "Auth isn't ready yet — try again in a moment."; return }
         busy = true; errorText = nil
         defer { busy = false }
-        let email = "dev+\(UUID().uuidString.prefix(8).lowercased())@evlin.test"
-        await auth.signInWithDevEmail(email: email, displayName: "Dev Parent")
+        await auth.signInWithEmail(
+            email: email.trimmingCharacters(in: .whitespaces).lowercased(),
+            password: password
+        )
         finish(auth)
     }
-    #endif
 
     /// Advance only when AuthService actually has a session; otherwise surface
     /// the last error it recorded.
