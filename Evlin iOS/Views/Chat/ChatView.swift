@@ -313,7 +313,7 @@ struct ChatView: View {
                                         payload: planArchCard,
                                         childName: viewModel.childName,
                                         onConfirm: { token in
-                                            Task { await viewModel.handleEventConfirm(token) } },
+                                            await viewModel.handleEventConfirm(token) },
                                         onPickEvent: { ct, eid, occ in
                                             Task { await viewModel.handleEventSelect(ct, eid, occ) } },
                                         onResolveTarget: { ct, ids in

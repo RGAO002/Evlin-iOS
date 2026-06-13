@@ -32,17 +32,23 @@ enum EventTargetRoute: Equatable {
     }
 }
 
+/// Local lifecycle for the create/bundle confirm button: tap → working → confirmed
+/// (shown IN PLACE, no new card) or failed (buttons return + error line).
+private enum CalendarConfirmState: Equatable { case idle, working, confirmed, failed }
+
 /// Self-rendering card for event.* / target.* kinds. Actions are delegated to
 /// ChatViewModel (which calls AgentClient + handles 410 + swaps the next card).
 struct EventTargetCardView: View {
     let payload: PlanArchCardPayload
     let childName: String
-    let onConfirm: (_ token: String) -> Void
+    let onConfirm: (_ token: String) async -> Bool
     let onPickEvent: (_ continuationToken: String, _ eventId: String, _ occurrenceStart: String) -> Void
     let onResolveTarget: (_ continuationToken: String, _ ids: [String]) -> Void
     let onReflection: (_ approve: Bool, _ note: String) async -> Void
     let onScope: (_ continuationToken: String) -> Void
     let onSkip: () -> Void
+
+    @State private var confirmState: CalendarConfirmState = .idle
 
     private var detail: EventTargetDetail { EventTargetDetail(payload.detail) }
 
@@ -172,10 +178,50 @@ struct EventTargetCardView: View {
                 } else {
                     createDetailBlock
                 }
+                confirmFooter(token: token, isBundle: isBundle)
+            }
+        }
+    }
+
+    /// Confirm/Skip → "Adding…" → "✓ Added to calendar" IN PLACE (no new card).
+    /// Tapping Confirm runs onConfirm and flips the same card to a confirmed (or
+    /// failed) state instead of dismissing it.
+    @ViewBuilder
+    private func confirmFooter(token: String, isBundle: Bool) -> some View {
+        switch confirmState {
+        case .confirmed:
+            HStack(spacing: 7) {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(Color.evSecondary)
+                Text(isBundle ? "Added to calendar" : "Added to calendar")
+                    .font(.subheadline.weight(.semibold)).foregroundStyle(Color.evSecondary)
+                Spacer(minLength: 0)
+            }
+            .padding(.top, 2)
+        case .working:
+            HStack(spacing: 8) {
+                Spacer()
+                ProgressView()
+                Text("Adding…").font(.subheadline).foregroundStyle(Color.evOnSurfaceVariant)
+                Spacer()
+            }
+            .padding(.vertical, 4)
+        default:
+            VStack(alignment: .leading, spacing: 8) {
+                if confirmState == .failed {
+                    Text("Couldn't save — try again.")
+                        .font(.caption).foregroundStyle(Color.evError)
+                }
                 HStack(spacing: 10) {
                     neutralButton("Skip", action: onSkip)
                     primaryButton(isBundle ? "Confirm all" : "Confirm",
-                                  enabled: !token.isEmpty) { onConfirm(token) }
+                                  enabled: !token.isEmpty) {
+                        Task {
+                            confirmState = .working
+                            let ok = await onConfirm(token)
+                            confirmState = ok ? .confirmed : .failed
+                        }
+                    }
                 }
             }
         }

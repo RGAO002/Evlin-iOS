@@ -2305,11 +2305,19 @@ class ChatViewModel: ObservableObject {
         }
     }
 
-    func handleEventConfirm(_ token: String) async {
-        do { _ = try await agentClient().eventExec(token: token)
-             await MainActor.run { dismissEventCard() } }
-        catch AgentClient.AgentTargetError.expired { await expireEventCard() }
-        catch { await MainActor.run { self.errorMessage = "Couldn't save — try again." } }
+    /// Returns true on success so the card shows "✓ Added" IN PLACE — no dismiss,
+    /// no new card (finding D). expired → clear + notice; other error → false so the
+    /// card surfaces an inline retry.
+    func handleEventConfirm(_ token: String) async -> Bool {
+        do {
+            _ = try await agentClient().eventExec(token: token)
+            return true
+        } catch AgentClient.AgentTargetError.expired {
+            await expireEventCard()
+            return false
+        } catch {
+            return false
+        }
     }
 
     func handleEventSelect(_ ct: String, _ eventId: String, _ occ: String) async {
