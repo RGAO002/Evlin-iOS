@@ -89,4 +89,17 @@ final class EventTargetCardTests: XCTestCase {
         XCTAssertEqual(body?["continuation_token"] as? String, "ct")
         XCTAssertEqual(body?["scope"] as? String, "series")
     }
+
+    func testDisplayDateTimeFormatsAndFallsBack() {
+        // Empty / unparseable input returns the raw string unchanged (no crash).
+        XCTAssertEqual(EventTargetDetail.displayDateTime(""), "")
+        XCTAssertEqual(EventTargetDetail.displayDateTime("not-a-date"), "not-a-date")
+        // A real UTC ISO instant is reformatted into a human label — tz/locale of
+        // the device decide the exact text, so just assert it changed and dropped
+        // the ISO "T..+00:00" machine markers.
+        let pretty = EventTargetDetail.displayDateTime("2026-06-14T19:35:00+00:00")
+        XCTAssertNotEqual(pretty, "2026-06-14T19:35:00+00:00")
+        XCTAssertFalse(pretty.contains("+00:00"))
+        XCTAssertFalse(pretty.contains("T19:35"))
+    }
 }

@@ -64,23 +64,66 @@ struct EventTargetCardView: View {
         // (list events) and carry a Done button — otherwise it pins on screen and
         // stalls the pendingPlanArchCard queue (code-review finding #2).
         let rows = detail.rows("rows")
-        return VStack(alignment: .leading, spacing: 8) {
-            header
-            if !rows.isEmpty {
-                ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
-                    HStack {
-                        Text((row["title"] as? String) ?? "Event").font(.subheadline)
-                        Spacer()
-                        if let t = row["occurrence_start"] as? String, !t.isEmpty {
-                            Text(t).font(.caption).foregroundStyle(.secondary)
-                        }
+        return VStack(alignment: .leading, spacing: 12) {
+            // Decorated header: calendar glyph + title + count subtitle.
+            HStack(spacing: 10) {
+                Image(systemName: "calendar")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                    .frame(width: 32, height: 32)
+                    .background(Color.accentColor.opacity(0.12),
+                                in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(payload.title).font(.headline)
+                    if let b = payload.body, !b.isEmpty {
+                        Text(b).font(.caption).foregroundStyle(.secondary)
                     }
                 }
             }
-            HStack { Spacer(); Button("Done", action: onSkip).buttonStyle(.bordered) }
+            if !rows.isEmpty {
+                VStack(spacing: 0) {
+                    ForEach(Array(rows.enumerated()), id: \.offset) { idx, row in
+                        if idx > 0 { Divider().padding(.leading, 19) }
+                        eventRow(row)
+                    }
+                }
+                .padding(.vertical, 2)
+                .background(Color(.secondarySystemBackground),
+                            in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            }
+            HStack {
+                Spacer()
+                Button("Done", action: onSkip)
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+            }
         }
         .padding(16)
-        .background(Color(.systemBackground)).cornerRadius(12)
+        .background(Color(.systemBackground),
+                    in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .stroke(Color.primary.opacity(0.06), lineWidth: 1))
+    }
+
+    /// One list row: a dot bullet, the event title, and the occurrence time
+    /// formatted to the device timezone (not a raw ISO string).
+    @ViewBuilder
+    private func eventRow(_ row: [String: Any]) -> some View {
+        let title = (row["title"] as? String) ?? "Event"
+        let start = (row["occurrence_start"] as? String) ?? ""
+        HStack(spacing: 10) {
+            Circle().fill(Color.accentColor).frame(width: 7, height: 7)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title).font(.subheadline.weight(.medium))
+                if !start.isEmpty {
+                    Text(EventTargetDetail.displayDateTime(start))
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
     }
 
     private var confirmCard: some View {

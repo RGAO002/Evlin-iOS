@@ -62,3 +62,18 @@ struct EventTargetDetail {
 
     func rows(_ key: String) -> [[String: Any]] { raw[key] as? [[String: Any]] ?? [] }
 }
+
+extension EventTargetDetail {
+    /// Friendly device-local label for a UTC ISO instant, e.g. "Sun, Jun 14 · 3:35 PM".
+    /// The event.result card carries occurrence_start as a raw UTC ISO string; this
+    /// turns it into something a parent can read instead of "2026-06-14T19:35:00+00:00".
+    /// Falls back to the raw string if unparseable.
+    static func displayDateTime(_ isoUTC: String) -> String {
+        guard !isoUTC.isEmpty, let date = CalendarWireTime.parseInstant(isoUTC) else { return isoUTC }
+        let f = DateFormatter()
+        f.locale = .current
+        f.timeZone = .current
+        f.dateFormat = "EEE, MMM d · h:mm a"
+        return f.string(from: date)
+    }
+}
