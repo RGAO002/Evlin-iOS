@@ -1598,6 +1598,52 @@ extension APIClient {
         return try JSONDecoder().decode(LockSetupCatalog.self, from: data)
     }
 
+    func childLockSetupCatalogURL(deviceID: UUID) -> URL {
+        var comps = URLComponents(string: "\(baseURL)/child/lock-setup-catalog")!
+        comps.queryItems = [URLQueryItem(name: "device_id", value: deviceID.uuidString)]
+        return comps.url!
+    }
+
+    /// Fetch the kid-scoped Lock-setup catalog for the current child device.
+    /// The backend requires the header to match `device_id` as a scoping guard.
+    func fetchChildLockSetupCatalog(deviceID: UUID) async throws -> LockSetupCatalog {
+        var req = URLRequest(url: childLockSetupCatalogURL(deviceID: deviceID))
+        req.timeoutInterval = 22
+        req.setValue(deviceID.uuidString, forHTTPHeaderField: "X-Evlin-Child-Device-ID")
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+        return try JSONDecoder().decode(LockSetupCatalog.self, from: data)
+    }
+
+    @discardableResult
+    func mergeChildAppCatalog(
+        deviceID: UUID,
+        apps: [ChildAppCatalogUploadApp]
+    ) async throws -> ChildAppCatalogUploadResponse {
+        let url = URL(string: "\(baseURL)/child/app-catalog/merge")!
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 22
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        struct Body: Codable {
+            let deviceID: UUID
+            let apps: [ChildAppCatalogUploadApp]
+
+            enum CodingKeys: String, CodingKey {
+                case deviceID = "device_id"
+                case apps
+            }
+        }
+        req.httpBody = try JSONEncoder().encode(Body(deviceID: deviceID, apps: apps))
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+        return try JSONDecoder().decode(ChildAppCatalogUploadResponse.self, from: data)
+    }
+
     /// Publish one captured app token to the catalog. Reuses the existing
     /// `POST /child/app-catalog` upload (token_kind=app). Returns the saved
     /// target with the backend-assigned alias_key.

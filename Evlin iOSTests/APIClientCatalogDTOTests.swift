@@ -2,6 +2,11 @@ import XCTest
 @testable import Evlin_iOS
 
 final class APIClientCatalogDTOTests: XCTestCase {
+    // APIClient is an ObservableObject used as app state; keeping the test
+    // instance for the process lifetime avoids a simulator host crash on
+    // deinit while still keeping the test deterministic.
+    private static let childCatalogURLClient = APIClient(baseURL: "https://example.test/api/v1")
+
     func test_parentChildDevicesResponseDecodesSnakeCaseChildren() throws {
         let familyID = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
         let childID = UUID(uuidString: "66666666-7777-8888-9999-AAAAAAAAAAAA")!
@@ -344,6 +349,18 @@ final class APIClientCatalogDTOTests: XCTestCase {
 
     // MARK: - Lock-setup catalog (Task 10)
 
+    @MainActor
+    func test_childLockSetupCatalogURLUsesChildScopedEndpoint() throws {
+        let deviceID = UUID(uuidString: "99999999-8888-7777-6666-555555555555")!
+
+        let url = Self.childCatalogURLClient.childLockSetupCatalogURL(deviceID: deviceID)
+
+        XCTAssertEqual(
+            url.absoluteString,
+            "https://example.test/api/v1/child/lock-setup-catalog?device_id=\(deviceID.uuidString)"
+        )
+    }
+
     func test_lockSetupCatalogDecodesThreeSectionsInOrder() throws {
         let childID = UUID(uuidString: "99999999-8888-7777-6666-555555555555")!
         let appID = UUID(uuidString: "11111111-1111-1111-1111-111111111111")!
@@ -416,6 +433,37 @@ final class APIClientCatalogDTOTests: XCTestCase {
         // allTargets flattens in app, category, list order.
         XCTAssertEqual(catalog.allTargets.map(\.type), [.app, .category, .list])
         XCTAssertEqual(catalog.categorySectionCopy, "Broad categories — current + future apps.")
+    }
+
+    func test_lockSetupCatalogDecodesMemberCountFromAppCountForLists() throws {
+        let childID = UUID(uuidString: "99999999-8888-7777-6666-555555555555")!
+        let listID = UUID(uuidString: "33333333-3333-3333-3333-333333333333")!
+        let data = """
+        {
+          "child_device_id": "\(childID.uuidString)",
+          "sections": [
+            {
+              "type": "list",
+              "copy": "Saved lists your kid has shared.",
+              "targets": [
+                {
+                  "alias_key": "\(listID.uuidString)",
+                  "target_type": "list",
+                  "list_name": "Entertainment",
+                  "aliases": ["fun"],
+                  "app_count": 2,
+                  "status": "active"
+                }
+              ]
+            }
+          ]
+        }
+        """.data(using: .utf8)!
+
+        let catalog = try JSONDecoder().decode(LockSetupCatalog.self, from: data)
+
+        XCTAssertEqual(catalog.listTargets.first?.memberCount, 2)
+        XCTAssertEqual(catalog.listTargets.first?.displayName, "Entertainment")
     }
 
     func test_familyAppDTODecodesConfirmResponse() throws {
