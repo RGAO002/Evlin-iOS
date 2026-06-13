@@ -229,4 +229,65 @@ final class ChatViewModelPlanArchLifecycleTests: XCTestCase {
         XCTAssertEqual(vm.messages.last?.content, "Thanks, I understand.")
         XCTAssertFalse(vm.isThinking)
     }
+
+    // MARK: - Finding #8: applyAgentResult keeps the queue invariant
+
+    /// Retains ChatViewModels for the lifetime of the process. On the x86_64
+    /// simulator the Swift-concurrency back-deploy shim malloc-aborts when a
+    /// @MainActor ChatViewModel (holding an APIClient) deinits at test exit —
+    /// an environment teardown crash, unrelated to the code under test. Holding
+    /// the vm here defers deinit past process exit so the assertions' result is
+    /// what the test reports.
+    private static var retainedViewModels: [ChatViewModel] = []
+    private func makeRetainedViewModel() -> ChatViewModel {
+        let vm = ChatViewModel()
+        Self.retainedViewModels.append(vm)
+        return vm
+    }
+
+    /// A compound turn leaves more than one card queued. When the user acts on
+    /// the front card and a continuation endpoint (event-select / resolve-target
+    /// / event-scope) stages a follow-up, applyAgentResult must REPLACE the front
+    /// of the queue — not just retarget the head pointer — so the sibling card
+    /// queued behind it survives the next advance. Pre-fix this dropped the
+    /// sibling: the stale front got popped instead of the follow-up.
+    func testApplyAgentResultFollowUpReplacesFrontAndPreservesSibling() {
+        let vm = makeRetainedViewModel()
+        let front = makePayload(kind: "target.device_select", source: "event", planToken: "A")
+        let sibling = makePayload(kind: "event.create_confirm", source: "event", planToken: "C")
+        vm.pendingPlanArchCardQueue = [front, sibling]
+        vm.pendingPlanArchCard = front
+
+        let followUp = makePayload(kind: "event.create_confirm", source: "event", planToken: "B")
+        let response = AgentClient.AgentCardResponse(card_payloads: [followUp], ok: true)
+        vm.applyAgentResult(response)
+
+        // Invariant: head === queue.first, and the follow-up took the front slot.
+        XCTAssertEqual(vm.pendingPlanArchCard?.planToken, "B")
+        XCTAssertEqual(vm.pendingPlanArchCardQueue.map(\.planToken), ["B", "C"])
+        XCTAssertEqual(vm.pendingPlanArchCard?.planToken,
+                       vm.pendingPlanArchCardQueue.first?.planToken,
+                       "head must equal queue.first")
+
+        // Acting on the follow-up then advancing must surface the sibling (not drop it).
+        vm.advancePlanArchCardQueue()
+        XCTAssertEqual(vm.pendingPlanArchCard?.planToken, "C")
+        XCTAssertEqual(vm.pendingPlanArchCardQueue.map(\.planToken), ["C"])
+    }
+
+    /// No follow-up → the front card is done; advance pops it and the sibling
+    /// behind it becomes the visible head (queue invariant preserved).
+    func testApplyAgentResultNoFollowUpAdvancesToSibling() {
+        let vm = makeRetainedViewModel()
+        let front = makePayload(kind: "target.device_select", source: "event", planToken: "A")
+        let sibling = makePayload(kind: "event.create_confirm", source: "event", planToken: "C")
+        vm.pendingPlanArchCardQueue = [front, sibling]
+        vm.pendingPlanArchCard = front
+
+        let response = AgentClient.AgentCardResponse(card_payloads: nil, ok: true)
+        vm.applyAgentResult(response)
+
+        XCTAssertEqual(vm.pendingPlanArchCard?.planToken, "C")
+        XCTAssertEqual(vm.pendingPlanArchCardQueue.map(\.planToken), ["C"])
+    }
 }

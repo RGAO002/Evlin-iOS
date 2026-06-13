@@ -2283,10 +2283,21 @@ class ChatViewModel: ObservableObject {
         advancePlanArchCardQueue()
     }
 
-    private func applyAgentResult(_ result: AgentClient.AgentCardResponse) {
-        // If the backend staged a follow-up card (event-select / resolve-target
-        // return a concrete event.create_confirm), show it; else clear.
+    /// Apply a continuation endpoint's response (event-select / resolve-target /
+    /// event-scope). A staged follow-up card (e.g. a concrete event.create_confirm)
+    /// is the SUCCESSOR of the card the user just acted on, so it REPLACES the
+    /// front of the queue rather than just overwriting the head pointer. That
+    /// keeps the invariant pendingPlanArchCard === pendingPlanArchCardQueue.first,
+    /// so a sibling card queued behind it on a compound turn isn't stranded by a
+    /// later advancePlanArchCardQueue() popping a stale front (finding #8). No
+    /// follow-up → pop the front and advance to the next queued card.
+    @MainActor func applyAgentResult(_ result: AgentClient.AgentCardResponse) {
         if let next = result.card_payloads?.first {
+            if pendingPlanArchCardQueue.isEmpty {
+                pendingPlanArchCardQueue = [next]
+            } else {
+                pendingPlanArchCardQueue[0] = next
+            }
             pendingPlanArchCard = next
         } else {
             pendingPlanArchCard = nil
