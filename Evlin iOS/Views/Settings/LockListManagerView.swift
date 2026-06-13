@@ -92,6 +92,14 @@ struct LockListManagerSnapshot: Equatable {
 
 @MainActor
 final class LockListManagerModel: ObservableObject {
+    @Published private(set) var catalog: LockSetupCatalogPresentationModel = .init(
+        apps: [],
+        categories: [],
+        lists: []
+    )
+    @Published private(set) var loading = false
+    @Published private(set) var errorText: String?
+    @Published private(set) var localOnlyWarning: String?
     @Published private(set) var apps: [LockListAppEntry] = []
     @Published private(set) var advancedTokens: [LockListAppEntry] = []
     @Published private(set) var categories: [LockListCategoryEntry] = []
@@ -107,8 +115,9 @@ final class LockListManagerModel: ObservableObject {
         self.store = store
     }
 
-    /// Unlabeled token rows block Save (per spec). Surfaced so the view can warn.
-    var hasUnlabeledTokens: Bool { !advancedTokens.isEmpty }
+    func apply(catalog: LockSetupCatalog) {
+        self.catalog = LockSetupCatalogPresentationModel(catalog: catalog)
+    }
 
     func reload() {
         let snapshot = LockListManagerSnapshot.make(from: store)
@@ -117,12 +126,51 @@ final class LockListManagerModel: ObservableObject {
         categories = snapshot.categories
         lists = snapshot.lists
     }
+}
 
-    /// Member count for a saved list — drives the "N targets" copy on list rows.
-    /// Reads the saved selection's app + category token counts from the store.
-    func listMemberCount(_ name: String) -> Int {
-        guard let selection = LocalAliasStore.shared.savedList(named: name) else { return 0 }
-        return selection.applicationTokens.count + selection.categoryTokens.count
+enum LockSetupRecoveryPlanner {
+    static func recoverableLocalApps(_ snapshot: LockListManagerSnapshot) -> [LockListAppEntry] {
+        snapshot.apps + snapshot.advancedTokens
+    }
+
+    static func missingLocalApps(
+        _ localApps: [LockListAppEntry],
+        backend: LockSetupCatalogPresentationModel
+    ) -> [LockListAppEntry] {
+        localApps.filter { app in
+            !backend.appRows.contains { row in
+                row.title.caseInsensitiveCompare(app.label) == .orderedSame
+                    && row.bundleID == app.bundleID
+            }
+        }
+    }
+
+    static func uploadApp(
+        app: LockListAppEntry,
+        tokenDataBase64: String,
+        childDeviceIDChanged: Bool
+    ) -> ChildAppCatalogUploadApp {
+        ChildAppCatalogUploadApp(
+            aliasKey: nil,
+            displayName: app.label,
+            tokenKind: "app",
+            bundleID: app.bundleID,
+            aliases: app.keys,
+            tokenAvailable: true,
+            tokenDataBase64: tokenDataBase64,
+            sourceDeviceID: nil
+        )
+    }
+
+    static func missingLocalCategories(
+        _ localCategories: [LockListCategoryEntry],
+        backend: LockSetupCatalogPresentationModel
+    ) -> [LockListCategoryEntry] {
+        localCategories.filter { category in
+            !backend.categoryRows.contains { row in
+                row.title.caseInsensitiveCompare(category.displayName) == .orderedSame
+            }
+        }
     }
 }
 
@@ -134,17 +182,13 @@ struct LockListManagerView: View {
 
     @StateObject private var model = LockListManagerModel()
     @State private var showAddApp = false
+    @State private var showAddCategory = false
     @State private var showAddList = false
     @State private var syncing = false
     @State private var syncBanner: String?
-    @State private var didAutoSync = false
-    @State private var showClearAllConfirm = false
 
     private var hasAnything: Bool {
-        !model.apps.isEmpty
-            || !model.advancedTokens.isEmpty
-            || !model.categories.isEmpty
-            || !model.lists.isEmpty
+        model.catalog.hasUsableTarget
     }
 
     var body: some View {
@@ -154,51 +198,36 @@ struct LockListManagerView: View {
                 addActions
                 syncRow
 
-                if model.hasUnlabeledTokens {
-                    unlabeledWarningBanner
-                }
-
                 section(
-                    title: "Installed apps",
-                    count: model.apps.count,
-                    emptyText: "No apps saved yet. Tap “Add app” to capture one from this device."
+                    title: "Apps",
+                    count: model.catalog.appRows.count,
+                    emptyText: "No apps saved yet. Tap “Add app”."
                 ) {
-                    ForEach(Array(model.apps.enumerated()), id: \.element.id) { index, app in
+                    ForEach(Array(model.catalog.appRows.enumerated()), id: \.element.id) { index, row in
                         if index > 0 { rowDivider }
-                        appRow(app)
+                        backendTargetRow(row, kind: .app)
                     }
                 }
 
                 section(
-                    title: "Broad categories",
-                    count: model.categories.count,
-                    emptyText: "No broad categories saved yet. Use “Add app” to capture an Apple category."
+                    title: "Categories",
+                    count: model.catalog.categoryRows.count,
+                    emptyText: "No categories saved yet. Tap “Add category”."
                 ) {
-                    ForEach(Array(model.categories.enumerated()), id: \.element.id) { index, category in
+                    ForEach(Array(model.catalog.categoryRows.enumerated()), id: \.element.id) { index, row in
                         if index > 0 { rowDivider }
-                        categoryRow(category)
+                        backendTargetRow(row, kind: .category)
                     }
                 }
 
                 section(
                     title: "Lists",
-                    count: model.lists.count,
+                    count: model.catalog.listRows.count,
                     emptyText: "No lists yet. Group added apps and categories with “Create list”."
                 ) {
-                    ForEach(Array(model.lists.enumerated()), id: \.element) { index, list in
+                    ForEach(Array(model.catalog.listRows.enumerated()), id: \.element.id) { index, row in
                         if index > 0 { rowDivider }
-                        listRow(list)
-                    }
-                }
-
-                section(
-                    title: "Advanced shield tokens",
-                    count: model.advancedTokens.count,
-                    emptyText: "No raw shield tokens. Captured tokens appear here until you label them with a real app name."
-                ) {
-                    ForEach(Array(model.advancedTokens.enumerated()), id: \.element.id) { index, app in
-                        if index > 0 { rowDivider }
-                        advancedTokenRow(app)
+                        backendTargetRow(row, kind: .savedList)
                     }
                 }
             }
@@ -209,39 +238,23 @@ struct LockListManagerView: View {
         .background(Color.evSurface.ignoresSafeArea())
         .navigationTitle("Lock setup")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            if hasAnything {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button(role: .destructive) {
-                        showClearAllConfirm = true
-                    } label: {
-                        Text("Clear All").foregroundStyle(Color.evError)
-                    }
-                }
-            }
-        }
-        .confirmationDialog(
-            "Remove every app, category and list from this device’s lock setup? This also clears them from Evlin. Nothing currently locked is affected.",
-            isPresented: $showClearAllConfirm,
-            titleVisibility: .visible
-        ) {
-            Button("Clear everything", role: .destructive) { clearAll() }
-            Button("Cancel", role: .cancel) {}
-        }
-        .onAppear {
-            model.reload()
-            // Auto-push anything that's local-only up to the backend catalog so the
-            // parent can lock it by name. Idempotent upsert; runs once per appearance.
-            if !didAutoSync {
-                didAutoSync = true
-                Task { await syncToBackend() }
-            }
+        .task {
+            await reloadFromBackend(recoverLocal: true)
         }
         .sheet(isPresented: $showAddApp) {
             NavigationStack {
-                AddAppFlowView(childDeviceID: childDeviceID) { _ in
+                AddAppFlowView(childDeviceID: childDeviceID, mode: .app) { _ in
                     showAddApp = false
-                    model.reload()
+                    Task { await reloadFromBackend(recoverLocal: false) }
+                }
+                .environmentObject(apiClient)
+            }
+        }
+        .sheet(isPresented: $showAddCategory) {
+            NavigationStack {
+                AddAppFlowView(childDeviceID: childDeviceID, mode: .category) { _ in
+                    showAddCategory = false
+                    Task { await reloadFromBackend(recoverLocal: false) }
                 }
                 .environmentObject(apiClient)
             }
@@ -254,7 +267,7 @@ struct LockListManagerView: View {
                     mode: "child_device"
                 ) { _ in
                     showAddList = false
-                    model.reload()
+                    Task { await reloadFromBackend(recoverLocal: false) }
                 }
                 .environmentObject(apiClient)
             }
@@ -289,47 +302,14 @@ struct LockListManagerView: View {
         .lockListCard()
     }
 
-    // MARK: - Unlabeled-token warning
+    // MARK: - Backend reload and recovery
 
-    private var unlabeledWarningBanner: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.subheadline)
-                .foregroundStyle(Color.evTertiary)
-            VStack(alignment: .leading, spacing: 2) {
-                Text("\(model.advancedTokens.count) unlabeled shield token\(model.advancedTokens.count == 1 ? "" : "s")")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(Color.evOnSurface)
-                Text("Label them with a real app name, or remove them, so the parent can lock them by name. See “Advanced shield tokens” below.")
-                    .font(.caption)
-                    .foregroundStyle(Color.evOnSurfaceVariant)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(12)
-        .background(Color.evTertiaryContainer, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(Color.evTertiaryFixedDim.opacity(0.75), lineWidth: 1)
-        }
-    }
-
-    // MARK: - Sync to backend
-
-    /// Apps/categories captured on this device live in `LocalAliasStore`, but the
-    /// parent's chat / lazy-tag picker resolve against the BACKEND catalog. Anything
-    /// that got into the local store without uploading (e.g. report-hydrated apps, or
-    /// an Add-App whose upload failed) is invisible to the parent. This pushes the
-    /// local app/category tokens up so they become lockable by name from parent chat.
-    /// Status only — sync is automatic (see `.onAppear`). Shows a spinner while
-    /// syncing and a warning only if it FAILED; silent on success.
     @ViewBuilder
     private var syncRow: some View {
         if syncing {
             HStack(spacing: 8) {
                 ProgressView().controlSize(.small)
-                Text("Syncing to Evlin…")
+                Text("Loading from Evlin…")
                     .font(.caption)
                     .foregroundStyle(Color.evOnSurfaceVariant)
                 Spacer(minLength: 0)
@@ -349,65 +329,79 @@ struct LockListManagerView: View {
         }
     }
 
-    private func syncToBackend() async {
+    private func reloadFromBackend(recoverLocal: Bool = true) async {
         syncing = true
         defer { syncing = false }
-        var uploads: [ChildAppCatalogUploadApp] = []
-        // Push BOTH labeled apps and unlabeled tokens — the backend keeps the
-        // token-bearing row either way; labeling later just renames it.
-        for app in (model.apps + model.advancedTokens) {
-            guard let key = app.keys.first,
-                  let token = LocalAliasStore.shared.applicationToken(forLookupKey: key),
-                  let blob = try? AppCatalogBlobEncoder.base64(token), !blob.isEmpty
-            else { continue }
-            uploads.append(ChildAppCatalogUploadApp(
-                displayName: app.label,
-                tokenKind: "app",
-                bundleID: app.bundleID,
-                aliases: app.keys,
-                tokenAvailable: true,
-                tokenDataBase64: blob,
-                sourceDeviceID: childDeviceID
-            ))
-        }
-        for category in model.categories {
-            guard let token = LocalAliasStore.shared.categoryToken(forName: category.name),
-                  let blob = try? AppCatalogBlobEncoder.base64(token), !blob.isEmpty
-            else { continue }
-            uploads.append(ChildAppCatalogUploadApp(
-                displayName: category.displayName,
-                tokenKind: "category",
-                bundleID: nil,
-                aliases: [category.name],
-                tokenAvailable: true,
-                tokenDataBase64: blob,
-                sourceDeviceID: childDeviceID
-            ))
-        }
-        guard !uploads.isEmpty else { return }   // nothing local-only to push; stay silent
         do {
-            _ = try await apiClient.uploadChildAppCatalog(deviceID: childDeviceID, apps: uploads)
-            syncBanner = nil   // success is silent — the apps just become lockable in parent chat
-            model.reload()
+            let first = try await apiClient.fetchChildLockSetupCatalog(deviceID: childDeviceID)
+            let backend = LockSetupCatalogPresentationModel(catalog: first)
+            if recoverLocal {
+                let localSnapshot = LockListManagerSnapshot.make(from: LocalAliasStore.shared)
+                var uploads: [ChildAppCatalogUploadApp] = []
+                let localApps = LockSetupRecoveryPlanner.recoverableLocalApps(localSnapshot)
+                for app in LockSetupRecoveryPlanner.missingLocalApps(localApps, backend: backend) {
+                    guard let key = app.keys.first,
+                          let token = LocalAliasStore.shared.applicationToken(forLookupKey: key),
+                          let blob = try? AppCatalogBlobEncoder.base64(token),
+                          !blob.isEmpty else { continue }
+                    uploads.append(LockSetupRecoveryPlanner.uploadApp(
+                        app: app,
+                        tokenDataBase64: blob,
+                        childDeviceIDChanged: true
+                    ))
+                }
+                for category in LockSetupRecoveryPlanner.missingLocalCategories(localSnapshot.categories, backend: backend) {
+                    guard let token = LocalAliasStore.shared.categoryToken(forName: category.name),
+                          let blob = try? AppCatalogBlobEncoder.base64(token),
+                          !blob.isEmpty else { continue }
+                    uploads.append(ChildAppCatalogUploadApp(
+                        aliasKey: nil,
+                        displayName: category.displayName,
+                        tokenKind: "category",
+                        bundleID: nil,
+                        aliases: [category.name],
+                        tokenAvailable: true,
+                        tokenDataBase64: blob,
+                        sourceDeviceID: childDeviceID
+                    ))
+                }
+                if !uploads.isEmpty {
+                    _ = try await apiClient.mergeChildAppCatalog(deviceID: childDeviceID, apps: uploads)
+                    let refreshed = try await apiClient.fetchChildLockSetupCatalog(deviceID: childDeviceID)
+                    model.apply(catalog: refreshed)
+                    syncBanner = nil
+                    return
+                }
+            }
+            model.apply(catalog: first)
+            syncBanner = nil
         } catch {
-            syncBanner = "Couldn’t sync your apps to Evlin (\(error.localizedDescription)). They’re saved on this device but won’t be lockable from parent chat until this succeeds."
+            syncBanner = "Couldn’t load Evlin lock setup: \(error.localizedDescription). Try again."
         }
     }
 
     // MARK: - Add actions
 
     private var addActions: some View {
-        HStack(spacing: 12) {
-            addButton(
-                title: "Add app",
-                systemImage: "plus.app.fill",
-                tint: Color.evPrimary
-            ) { showAddApp = true }
+        VStack(spacing: 12) {
+            HStack(spacing: 12) {
+                addButton(
+                    title: "Add app",
+                    systemImage: "plus.app.fill",
+                    tint: Color.evPrimary
+                ) { showAddApp = true }
+
+                addButton(
+                    title: "Add category",
+                    systemImage: "square.grid.2x2.fill",
+                    tint: Color.evSecondary
+                ) { showAddCategory = true }
+            }
 
             addButton(
                 title: "Create list",
                 systemImage: "rectangle.stack.badge.plus",
-                tint: Color.evSecondary
+                tint: Color.evTertiary
             ) { showAddList = true }
         }
     }
@@ -486,153 +480,22 @@ struct LockListManagerView: View {
 
     // MARK: - Rows
 
-    private func appRow(_ app: LockListAppEntry) -> some View {
+    private func backendTargetRow(_ row: LockSetupCatalogRow, kind: NameIconKind) -> some View {
         HStack(spacing: 12) {
-            NameWithIcon(name: app.label, kind: .app, titleFont: .body)
-                .foregroundStyle(Color.evOnSurface)
-            Spacer(minLength: 8)
-            bindingBadge(verified: app.isVerified)
-            if let bundleID = app.bundleID, !bundleID.isEmpty {
-                Text(bundleID)
-                    .font(.caption2.monospaced())
-                    .foregroundStyle(Color.evOnSurfaceVariant)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-            deleteButton { deleteApp(app) }
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 13)
-    }
-
-    /// Raw token rows that have no human label yet. Block Save (warned above)
-    /// until the parent labels or removes them.
-    private func advancedTokenRow(_ app: LockListAppEntry) -> some View {
-        HStack(spacing: 12) {
-            NameWithIcon(name: app.label, kind: .app, titleFont: .body)
+            NameWithIcon(name: row.title, kind: kind, artworkURL: row.artworkURL, titleFont: .body)
                 .foregroundStyle(Color.evOnSurface)
             VStack(alignment: .leading, spacing: 2) {
-                Text("Unlabeled shield token")
-                    .font(.caption2)
-                    .foregroundStyle(Color.evOnSurfaceVariant)
+                if let subtitle = row.subtitle, !subtitle.isEmpty {
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundStyle(Color.evOnSurfaceVariant)
+                        .lineLimit(2)
+                }
             }
             Spacer(minLength: 0)
-            Text("needs label")
-                .font(.caption2.weight(.bold))
-                .foregroundStyle(Color.evTertiary)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(Capsule().fill(Color.evTertiary.opacity(0.12)))
-            deleteButton { deleteApp(app) }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 13)
-    }
-
-    private func listRow(_ list: String) -> some View {
-        let memberCount = model.listMemberCount(list)
-        return HStack(spacing: 12) {
-            NameWithIcon(name: list, kind: .savedList, titleFont: .body)
-                .foregroundStyle(Color.evOnSurface)
-            VStack(alignment: .leading, spacing: 2) {
-                Text("\(memberCount) member\(memberCount == 1 ? "" : "s")")
-                    .font(.caption2)
-                    .foregroundStyle(Color.evOnSurfaceVariant)
-            }
-            Spacer(minLength: 0)
-            deleteButton { deleteList(list) }
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 13)
-    }
-
-    private func categoryRow(_ category: LockListCategoryEntry) -> some View {
-        HStack(spacing: 12) {
-            NameWithIcon(name: category.displayName, kind: .category, titleFont: .body)
-                .foregroundStyle(Color.evOnSurface)
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Current + future apps Apple classifies as \(category.displayName)")
-                    .font(.caption2)
-                    .foregroundStyle(Color.evOnSurfaceVariant)
-                    .lineLimit(2)
-            }
-            Spacer(minLength: 0)
-            Text("broad")
-                .font(.caption2.weight(.bold))
-                .foregroundStyle(Color.evPrimary)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(Capsule().fill(Color.evPrimary.opacity(0.08)))
-            deleteButton { deleteCategory(category) }
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 13)
-    }
-
-    /// Verified (catalog/Family-Dictionary) vs Manual (typed) binding badge.
-    private func bindingBadge(verified: Bool) -> some View {
-        let title = verified ? "Verified" : "Manual"
-        let tint = verified ? Color.evPrimary : Color.evOnSurfaceVariant
-        return HStack(spacing: 3) {
-            Image(systemName: verified ? "checkmark.seal.fill" : "pencil")
-                .font(.system(size: 9, weight: .bold))
-            Text(title)
-                .font(.caption2.weight(.bold))
-        }
-        .foregroundStyle(tint)
-        .padding(.horizontal, 7)
-        .padding(.vertical, 3)
-        .background(Capsule().fill(tint.opacity(0.10)))
-        .accessibilityLabel(verified ? "Verified binding" : "Manual binding")
-    }
-
-    private func deleteButton(_ action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: "trash")
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(Color.evError)
-                .frame(width: 30, height: 30)
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Remove from lock setup")
-    }
-
-    // MARK: - Delete / clear
-
-    private func deleteApp(_ app: LockListAppEntry) {
-        LocalAliasStore.shared.removeApplicationAliases(keys: app.keys)
-        model.reload()
-        Task { await syncToBackend() }
-    }
-
-    private func deleteCategory(_ category: LockListCategoryEntry) {
-        LocalAliasStore.shared.removeCategory(named: category.name)
-        model.reload()
-        Task { await syncToBackend() }
-    }
-
-    private func deleteList(_ list: String) {
-        LocalAliasStore.shared.removeList(named: list)
-        model.reload()
-        Task { await syncToBackend() }
-    }
-
-    private func clearAll() {
-        LocalAliasStore.shared.removeAllAliases()
-        model.reload()
-        // Push an EMPTY snapshot so the backend drops everything too (snapshot
-        // semantics). syncToBackend() bails on an empty local set, so clear the
-        // backend explicitly here.
-        Task {
-            syncing = true
-            defer { syncing = false }
-            do {
-                _ = try await apiClient.uploadChildAppCatalog(deviceID: childDeviceID, apps: [])
-                syncBanner = nil
-            } catch {
-                syncBanner = "Cleared on this device, but couldn’t clear Evlin (\(error.localizedDescription))."
-            }
-        }
     }
 }
 
