@@ -1,5 +1,18 @@
 import SwiftUI
 
+enum SavedListMemberPlanner {
+    static func members(
+        selectedAppIDs: Set<UUID>,
+        selectedCategoryIDs: Set<UUID>
+    ) -> [CatalogListMemberUpload] {
+        selectedAppIDs.sorted { $0.uuidString < $1.uuidString }.map {
+            CatalogListMemberUpload(targetType: .app, aliasKey: $0)
+        } + selectedCategoryIDs.sorted { $0.uuidString < $1.uuidString }.map {
+            CatalogListMemberUpload(targetType: .category, aliasKey: $0)
+        }
+    }
+}
+
 /// Builds a custom lock list from app/category targets that have already been
 /// captured on the kid device. This deliberately does not open
 /// FamilyActivityPicker; picker capture creates token-backed targets, and this
@@ -12,10 +25,12 @@ struct SavedListPickerView: View {
     let onSaved: (String) -> Void
 
     @State private var name: String = ""
-    @State private var availableApps: [LocalCatalogAppTarget] = []
-    @State private var availableCategories: [LocalCatalogCategoryTarget] = []
+    @State private var availableApps: [LockSetupCatalogRow] = []
+    @State private var availableCategories: [LockSetupCatalogRow] = []
     @State private var selectedAppIDs: Set<UUID> = []
     @State private var selectedCategoryIDs: Set<UUID> = []
+    @State private var loading = false
+    @State private var loadError: String?
     @State private var saving = false
     @State private var saveError: String?
 
@@ -36,6 +51,14 @@ struct SavedListPickerView: View {
             VStack(spacing: 18) {
                 headerCard
                 nameCard
+                if let loadError {
+                    Text(loadError)
+                        .font(.caption)
+                        .foregroundStyle(Color.evError)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(12)
+                        .background(Color.evError.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                }
                 memberSection(
                     title: "Apps",
                     count: availableApps.count,
@@ -46,8 +69,9 @@ struct SavedListPickerView: View {
                             id: app.id,
                             isSelected: selectedAppIDs.contains(app.id),
                             kind: .app,
-                            title: app.label,
-                            subtitle: app.bundleID ?? app.lookupKeys.first ?? "Token-backed app"
+                            title: app.title,
+                            subtitle: app.bundleID ?? "App",
+                            artworkURL: app.artworkURL
                         ) {
                             toggle(app.id, in: &selectedAppIDs)
                         }
@@ -56,15 +80,16 @@ struct SavedListPickerView: View {
                 memberSection(
                     title: "Categories",
                     count: availableCategories.count,
-                    emptyText: "No categories yet. Capture a category with Add app."
+                    emptyText: "No categories yet. Use Add category first."
                 ) {
                     ForEach(availableCategories) { category in
                         selectableRow(
                             id: category.id,
                             isSelected: selectedCategoryIDs.contains(category.id),
                             kind: .category,
-                            title: category.displayName,
-                            subtitle: "Broad coverage: current + future apps Apple classifies here"
+                            title: category.title,
+                            subtitle: "Category",
+                            artworkURL: category.artworkURL
                         ) {
                             toggle(category.id, in: &selectedCategoryIDs)
                         }
@@ -79,7 +104,9 @@ struct SavedListPickerView: View {
         .background(Color.evSurface.ignoresSafeArea())
         .navigationTitle("Create list")
         .navigationBarTitleDisplayMode(.inline)
-        .onAppear(perform: reloadTargets)
+        .task {
+            await reloadTargetsFromBackend()
+        }
     }
 
     private var headerCard: some View {
@@ -97,7 +124,7 @@ struct SavedListPickerView: View {
                 Text("Create a list")
                     .font(.headline)
                     .foregroundStyle(Color.evOnSurface)
-                Text("Group apps and broad Apple categories you already added. Lists do not re-open the system picker.")
+                Text("Group apps and categories you already added. Lists do not re-open the system picker.")
                     .font(.subheadline)
                     .foregroundStyle(Color.evOnSurfaceVariant)
                     .fixedSize(horizontal: false, vertical: true)
@@ -176,6 +203,7 @@ struct SavedListPickerView: View {
         kind: NameIconKind,
         title: String,
         subtitle: String,
+        artworkURL: URL? = nil,
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
@@ -186,7 +214,7 @@ struct SavedListPickerView: View {
                     .frame(width: 26)
 
                 VStack(alignment: .leading, spacing: 3) {
-                    NameWithIcon(name: title, kind: kind, titleFont: .subheadline.weight(.semibold))
+                    NameWithIcon(name: title, kind: kind, artworkURL: artworkURL, titleFont: .subheadline.weight(.semibold))
                         .foregroundStyle(Color.evOnSurface)
                     Text(subtitle)
                         .font(.caption)
@@ -243,8 +271,22 @@ struct SavedListPickerView: View {
     }
 
     private func reloadTargets() {
-        availableApps = LocalAliasStore.shared.catalogAppTargets()
-        availableCategories = LocalAliasStore.shared.catalogCategoryTargets()
+        Task { await reloadTargetsFromBackend() }
+    }
+
+    @MainActor
+    private func reloadTargetsFromBackend() async {
+        loading = true
+        defer { loading = false }
+        do {
+            let catalog = try await apiClient.fetchChildLockSetupCatalog(deviceID: owningDeviceID)
+            let model = LockSetupCatalogPresentationModel(catalog: catalog)
+            availableApps = model.appRows
+            availableCategories = model.categoryRows
+            loadError = nil
+        } catch {
+            loadError = "Could not load lock targets: \(error.localizedDescription)"
+        }
     }
 
     private func toggle(_ id: UUID, in set: inout Set<UUID>) {
@@ -258,13 +300,10 @@ struct SavedListPickerView: View {
     private func save() async {
         let trimmed = trimmedName
         guard !trimmed.isEmpty else { return }
-        let selectedAppMembers = availableApps
-            .filter { selectedAppIDs.contains($0.id) }
-            .map { CatalogListMemberUpload(targetType: .app, aliasKey: $0.aliasKey) }
-        let selectedCategoryMembers = availableCategories
-            .filter { selectedCategoryIDs.contains($0.id) }
-            .map { CatalogListMemberUpload(targetType: .category, aliasKey: $0.aliasKey) }
-        let members = selectedAppMembers + selectedCategoryMembers
+        let members = SavedListMemberPlanner.members(
+            selectedAppIDs: selectedAppIDs,
+            selectedCategoryIDs: selectedCategoryIDs
+        )
         guard !members.isEmpty else { return }
 
         saving = true
