@@ -591,7 +591,6 @@ struct OnboardingCoordinator: View {
                         firstBlockApp = r.first_block_app
                         step = .parentSetPasscode
                     },
-                    onSkip: { step = .parentDone },
                     onBack: { step = .parentConnected }
                 )
 
@@ -660,7 +659,19 @@ struct OnboardingCoordinator: View {
                     birthYear: $childBirthYear,
                     gender: $childGender,
                     pickedAvatar: $childAvatar,
-                    onContinue: { step = .childShowCode },
+                    onContinue: {
+                        // Always persist the just-entered name locally so the kid's
+                        // home greeting reflects the latest name immediately — even
+                        // if the later /family/create short-circuits or the backend
+                        // still serves a seed placeholder. Fixes a re-onboard showing
+                        // the OLD name from a stale `evlin.childProfileName`.
+                        let trimmed = childProfileName.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !trimmed.isEmpty {
+                            childName = trimmed
+                            UserDefaults.standard.set(trimmed, forKey: "evlin.childProfileName")
+                        }
+                        step = .childShowCode
+                    },
                     onBack: { step = .modeSelect }
                 )
 

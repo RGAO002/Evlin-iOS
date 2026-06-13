@@ -655,9 +655,8 @@ struct ParentWaitingForKidStep: View {
                 .padding(.vertical, Spacing.section)
             },
             footer: {
-                if let onSkip {
-                    OnboardingV2SecondaryButton("Skip — I'll set this up later", action: onSkip)
-                }
+                // No "Skip" — the parent auto-advances once the kid is ready
+                // (kid is required to pick a lockable app, so readiness lands).
                 if let onBack { OnboardingV2BackLink(action: onBack) }
             }
         )

@@ -263,6 +263,17 @@ struct LockListManagerView: View {
                 }
 
                 if mode == .onboarding {
+                    if !model.catalog.hasUsableTarget {
+                        // Onboarding-only hint: the Continue button requires at
+                        // least one target, but nothing on screen said so — this
+                        // tells the kid up front. (Hidden in Settings mode.)
+                        Text("Pick at least one app, category, or list so Evlin has something to lock.")
+                            .font(.footnote)
+                            .foregroundStyle(Color.evOnSurfaceVariant)
+                            .multilineTextAlignment(.center)
+                            .frame(maxWidth: .infinity)
+                            .padding(.bottom, 4)
+                    }
                     continueButton
                 }
             }
