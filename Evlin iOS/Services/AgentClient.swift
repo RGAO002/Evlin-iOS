@@ -121,3 +121,69 @@ enum AgentError: LocalizedError {
         }
     }
 }
+
+// MARK: - P5 calendar-in-chat: event.* / target.* card actions
+
+extension AgentClient {
+    /// Returned by event-select / resolve-target when the backend stages a NEW
+    /// card to display next (e.g. a concrete event.create_confirm after a pick).
+    struct AgentCardResponse: Decodable {
+        let card_payloads: [PlanArchCardPayload]?
+        let ok: Bool?
+    }
+
+    func makeEventExecRequest(token: String) throws -> URLRequest {
+        var r = URLRequest(url: URL(string: "\(baseURL)/parent/agent/event-exec")!)
+        r.httpMethod = "POST"; r.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        r.timeoutInterval = 20
+        r.httpBody = try JSONSerialization.data(withJSONObject: ["token": token])
+        return r
+    }
+
+    func makeEventSelectRequest(continuationToken: String, eventId: String,
+                                occurrenceStart: String, continuationAction: String) throws -> URLRequest {
+        var r = URLRequest(url: URL(string: "\(baseURL)/parent/agent/event-select")!)
+        r.httpMethod = "POST"; r.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        r.timeoutInterval = 20
+        r.httpBody = try JSONSerialization.data(withJSONObject: [
+            "continuation_token": continuationToken, "event_id": eventId,
+            "occurrence_start": occurrenceStart, "continuation_action": continuationAction])
+        return r
+    }
+
+    func makeResolveTargetRequest(continuationToken: String, selectedIds: [String]) throws -> URLRequest {
+        var r = URLRequest(url: URL(string: "\(baseURL)/parent/agent/resolve-target")!)
+        r.httpMethod = "POST"; r.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        r.timeoutInterval = 20
+        r.httpBody = try JSONSerialization.data(withJSONObject: [
+            "continuation_token": continuationToken, "selected_ids": selectedIds])
+        return r
+    }
+
+    /// Sends a built request. Returns the optional follow-up card; throws
+    /// AgentTargetError.expired on HTTP 410 so the caller can clear + show "expired".
+    enum AgentTargetError: Error { case expired, server(Int) }
+
+    func sendCardRequest(_ req: URLRequest) async throws -> AgentCardResponse {
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        if code == 410 { throw AgentTargetError.expired }
+        guard code == 200 else { throw AgentTargetError.server(code) }
+        return (try? JSONDecoder().decode(AgentCardResponse.self, from: data))
+            ?? AgentCardResponse(card_payloads: nil, ok: true)
+    }
+
+    func eventExec(token: String) async throws -> AgentCardResponse {
+        try await sendCardRequest(try makeEventExecRequest(token: token))
+    }
+    func eventSelect(continuationToken: String, eventId: String,
+                     occurrenceStart: String, continuationAction: String) async throws -> AgentCardResponse {
+        try await sendCardRequest(try makeEventSelectRequest(
+            continuationToken: continuationToken, eventId: eventId,
+            occurrenceStart: occurrenceStart, continuationAction: continuationAction))
+    }
+    func resolveTarget(continuationToken: String, selectedIds: [String]) async throws -> AgentCardResponse {
+        try await sendCardRequest(try makeResolveTargetRequest(
+            continuationToken: continuationToken, selectedIds: selectedIds))
+    }
+}
