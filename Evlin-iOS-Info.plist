@@ -27,5 +27,18 @@
 	<string>https://a23e10f9fc3690c80dae5e8de5f36d25@o4511508522270720.ingest.us.sentry.io/4511508813709312</string>
 	<key>SENTRY_ENVIRONMENT</key>
 	<string>development</string>
+	<key>GIDClientID</key>
+	<string>287494540401-kri4qi5bnk2nvf466iskhj7s20darnk8.apps.googleusercontent.com</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>com.googleusercontent.apps.287494540401-kri4qi5bnk2nvf466iskhj7s20darnk8</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>

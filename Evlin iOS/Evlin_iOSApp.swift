@@ -60,6 +60,9 @@ struct Evlin_iOSApp: App {
                 // on ProposalCard, app names on the lazy-tag picker).
                 // Force light app-wide instead of patching each view.
                 .preferredColorScheme(.light)
+                // Google Sign-In OAuth redirect (via the reversed-client-id URL
+                // scheme). No-op until the GoogleSignIn SPM package is linked.
+                .onOpenURL { GoogleSignInCoordinator.handleURL($0) }
                 .environmentObject(apiClient)
                 .environmentObject(screenTimeManager)
                 .environment(familyStore ?? FamilyStore(api: apiClient))

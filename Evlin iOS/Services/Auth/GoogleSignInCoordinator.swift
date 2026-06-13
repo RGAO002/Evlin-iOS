@@ -42,6 +42,13 @@ final class GoogleSignInCoordinator {
         while let presented = top?.presentedViewController { top = presented }
         return top
     }
+
+    /// Forward an incoming OAuth-redirect URL to GoogleSignIn. Called from the
+    /// app's `.onOpenURL`. Returns true if GoogleSignIn handled it.
+    @discardableResult
+    static func handleURL(_ url: URL) -> Bool {
+        GIDSignIn.sharedInstance.handle(url)
+    }
 }
 #else
 /// Build-time fallback used until the GoogleSignIn SPM package is added
@@ -54,5 +61,8 @@ final class GoogleSignInCoordinator {
     func signIn() async throws -> GoogleCredential {
         throw GoogleSignInError.notConfigured
     }
+    /// No-op until the GoogleSignIn SPM package is added.
+    @discardableResult
+    static func handleURL(_ url: URL) -> Bool { false }
 }
 #endif
