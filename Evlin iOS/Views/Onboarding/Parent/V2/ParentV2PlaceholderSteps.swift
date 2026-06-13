@@ -189,7 +189,7 @@ struct ParentSignInStep: View {
             // GoogleSignIn surfaces cancel as an error too; only show a banner
             // when no session resulted.
             if auth.account == nil {
-                errorText = "Google sign-in isn't available. Use Apple or Dev sign in."
+                errorText = "Google sign-in isn't available. Use Apple or email."
             } else {
                 finish(auth)
             }
