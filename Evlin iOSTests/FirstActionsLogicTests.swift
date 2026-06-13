@@ -31,6 +31,32 @@ final class FirstActionsLogicTests: XCTestCase {
         )
     }
 
+    func testGeneralLockSetupCanContinueWithCategoryOnly() {
+        let model = LockSetupCatalogPresentationModel(
+            apps: [],
+            categories: [
+                .init(aliasKey: UUID(), type: .category, displayName: "Games")
+            ],
+            lists: []
+        )
+
+        XCTAssertTrue(model.hasUsableTarget)
+        XCTAssertFalse(model.hasBlockableApp)
+    }
+
+    func testFirstBlockRequiresBundleBackedApp() {
+        let model = LockSetupCatalogPresentationModel(
+            apps: [
+                .init(aliasKey: UUID(), type: .app, displayName: "Manual Token", bundleID: nil)
+            ],
+            categories: [],
+            lists: []
+        )
+
+        XCTAssertTrue(model.hasUsableTarget)
+        XCTAssertFalse(model.hasBlockableApp)
+    }
+
     func testPayoffCopyNeverClaimsSuccessBeforeLanded() {
         XCTAssertFalse(
             FirstActionsLogic.payoffSubtitle(phase: .waitingForKid, kidName: "Ava").localizedCaseInsensitiveContains("applied the lock")

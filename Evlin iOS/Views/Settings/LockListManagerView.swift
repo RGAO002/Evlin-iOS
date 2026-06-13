@@ -174,11 +174,18 @@ enum LockSetupRecoveryPlanner {
     }
 }
 
+enum LockSetupManagerMode {
+    case settings
+    case onboarding
+}
+
 struct LockListManagerView: View {
     @EnvironmentObject var apiClient: APIClient
 
     let familyID: UUID
     let childDeviceID: UUID
+    let mode: LockSetupManagerMode
+    let onCompleted: (() -> Void)?
 
     @StateObject private var model = LockListManagerModel()
     @State private var showAddApp = false
@@ -187,8 +194,16 @@ struct LockListManagerView: View {
     @State private var syncing = false
     @State private var syncBanner: String?
 
-    private var hasAnything: Bool {
-        model.catalog.hasUsableTarget
+    init(
+        familyID: UUID,
+        childDeviceID: UUID,
+        mode: LockSetupManagerMode = .settings,
+        onCompleted: (() -> Void)? = nil
+    ) {
+        self.familyID = familyID
+        self.childDeviceID = childDeviceID
+        self.mode = mode
+        self.onCompleted = onCompleted
     }
 
     var body: some View {
@@ -229,6 +244,10 @@ struct LockListManagerView: View {
                         if index > 0 { rowDivider }
                         backendTargetRow(row, kind: .savedList)
                     }
+                }
+
+                if mode == .onboarding {
+                    continueButton
                 }
             }
             .padding(.horizontal, 16)
@@ -272,6 +291,28 @@ struct LockListManagerView: View {
                 .environmentObject(apiClient)
             }
         }
+    }
+
+    private var continueButton: some View {
+        Button {
+            if model.catalog.hasUsableTarget {
+                onCompleted?()
+            } else {
+                syncBanner = "Add at least one app, category, or list before continuing."
+            }
+        } label: {
+            Text("Continue")
+                .frame(maxWidth: .infinity)
+                .font(.subheadline.weight(.semibold))
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(model.catalog.hasUsableTarget ? Color.white : Color.evOutline)
+        .padding(.vertical, 14)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(model.catalog.hasUsableTarget ? Color.evPrimary : Color.evSurfaceContainerHighest)
+        )
+        .disabled(!model.catalog.hasUsableTarget || syncing)
     }
 
     // MARK: - Header

@@ -695,6 +695,7 @@ struct OnboardingCoordinator: View {
 
             case .childLockableHub:
                 ChildLockableHubStep(
+                    familyID: familyID,
                     childDeviceID: childDeviceID,
                     onContinue: { step = .childReady },
                     onBack: { step = .childGrantPermission }

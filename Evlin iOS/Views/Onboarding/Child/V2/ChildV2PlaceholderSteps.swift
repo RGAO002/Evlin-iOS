@@ -689,98 +689,51 @@ struct ChildLockableHubStep: View {
     @EnvironmentObject var apiClient: APIClient
     /// The kid's OWN device id (set after /family/create). Apps are made lockable
     /// against it; guarded in the sheet if create hasn't landed yet.
+    var familyID: UUID? = nil
     var childDeviceID: UUID? = nil
     let onContinue: () -> Void
     var onBack: (() -> Void)? = nil
 
-    @State private var showAddApp = false
-    @State private var didAddApp = false
-    @State private var addAppStatus: String?
-
     var body: some View {
-        OnboardingV2ScreenContainer(
-            embeddedRole: .child,
-            phase: "4 · Lockable",
-            stepIndex: 10,
-            stepTotal: childTotal,
-            title: "Choose what Evlin can lock",
-            subtitle: "Set up the groups & apps Evlin can pause on this phone. Categories are the powerful one — they shield a whole group and any new app that joins it later.",
-            content: {
-                VStack(spacing: 8) {
-                    // I3: the rows now open the REAL kid manage-apps picker
-                    // (AddAppFlowView → FamilyActivityPicker) instead of being
-                    // dead placeholders. One picker covers apps + categories.
-                    Button { showAddApp = true } label: {
-                        OnboardingV2AddRow(emoji: "🗂️",
-                                           title: "Add a category",
-                                           subtitle: "Shield a group (e.g. Games) + future apps",
-                                           tint: Color(hex: 0x7C4DFF))
-                    }.buttonStyle(.plain)
-                    Button { showAddApp = true } label: {
-                        OnboardingV2AddRow(emoji: "📱",
-                                           title: "Add an app",
-                                           subtitle: "Pick one app, confirm its label, name it",
-                                           tint: Color(hex: 0x2563EB))
-                    }.buttonStyle(.plain)
-                    Button { showAddApp = true } label: {
-                        OnboardingV2AddRow(emoji: "📚",
-                                           title: "Add a list",
-                                           subtitle: "Group apps/categories into one target",
-                                           tint: OnboardingV2Theme.Palette.tertiary)
-                    }.buttonStyle(.plain)
-
-                    // "Not sure yet?" reassurance card (primary-container).
-                    HStack(alignment: .top, spacing: 10) {
-                        Text("✨").font(.system(size: 16))
-                        Text("Not sure yet? Skip — you can add these later (Kid mode → Apps, behind the Evlin PIN), and still just say \u{201C}block Instagram\u{201D} by name anytime.")
-                            .font(OnboardingV2Theme.Typography.bodyXS)
-                            .foregroundStyle(OnboardingV2Theme.Palette.primary)
-                    }
-                    .padding(OnboardingV2Theme.Metrics.cardPadding)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(
-                        RoundedRectangle(cornerRadius: OnboardingV2Theme.Metrics.cardCornerRadius,
-                                         style: .continuous)
-                            .fill(OnboardingV2Theme.Palette.primaryContainer)
-                    )
-                    .padding(.top, 2)
-
-                    if let addAppStatus {
-                        Text(addAppStatus)
-                            .font(OnboardingV2Theme.Typography.bodyXS)
-                            .foregroundStyle(OnboardingV2Theme.Palette.error)
-                            .padding(.top, 4)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
+        if let familyID, let childDeviceID {
+            LockListManagerView(
+                familyID: familyID,
+                childDeviceID: childDeviceID,
+                mode: .onboarding,
+                onCompleted: onContinue
+            )
+            .environmentObject(apiClient)
+            .safeAreaInset(edge: .top) {
+                if let onBack {
+                    ChildOnboardingV2BackLink(action: onBack)
+                        .padding(.horizontal, 16)
+                        .padding(.top, 8)
+                        .background(Color.evSurface)
                 }
-            },
-            footer: {
-                if didAddApp {
-                    OnboardingV2PrimaryButton("Continue", role: .child, action: onContinue)
-                } else {
-                    OnboardingV2SecondaryButton("Skip for now", action: onContinue)
-                }
-                if let onBack { ChildOnboardingV2BackLink(action: onBack) }
             }
-        )
-        .sheet(isPresented: $showAddApp) {
-            if let id = childDeviceID {
-                AddAppFlowView(childDeviceID: id, onSaved: { result in
-                    showAddApp = false
-                    if result.isReadyForFirstBlock {
-                        didAddApp = true
-                        addAppStatus = nil
-                    } else {
-                        didAddApp = false
-                        addAppStatus = "Saved. Add one matched app too so the parent can send the first block."
+        } else {
+            OnboardingV2ScreenContainer(
+                embeddedRole: .child,
+                phase: "4 · Lockable",
+                stepIndex: 10,
+                stepTotal: childTotal,
+                title: "Choose what Evlin can lock",
+                subtitle: "Evlin is still pairing this device.",
+                content: {
+                    VStack(spacing: 12) {
+                        Text("Evlin is still pairing this device.")
+                            .font(.headline)
+                        Text("Go back and scan the pairing code again if this message does not clear.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
                     }
-                })
-                    .environmentObject(apiClient)
-            } else {
-                Text("Finish pairing first, then add apps you can lock.")
-                    .onboardingV2Body()
-                    .padding()
-            }
+                    .frame(maxWidth: .infinity)
+                },
+                footer: {
+                    if let onBack { ChildOnboardingV2BackLink(action: onBack) }
+                }
+            )
         }
     }
 }
