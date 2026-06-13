@@ -2197,7 +2197,7 @@ class ChatViewModel: ObservableObject {
 
     /// Plan-arch card option tapped. Switches on payload.source to route:
     ///   .plan  → POST /parent/chat/plan-patch (submitPlanArchPatch)
-    ///   .event → handleEventCardStub (2B placeholder)
+    ///   .event → dismissEventCard (event.*/target.* self-render+act via EventTargetCardView)
     ///   .query → handleQueryCardStub (2D placeholder)
     func handlePlanArchOption(_ opt: PlanArchCardOption) {
         guard let card = self.pendingPlanArchCard else { return }
@@ -2323,11 +2323,26 @@ class ChatViewModel: ObservableObject {
         advancePlanArchCardQueue()
     }
 
-    // Reflection review (event.reflection_review_pending) wiring is completed in
-    // Task 6 — this temporary handler keeps the EventTargetCardView intercept
-    // compiling for the Task 5 build.
+    /// event.reflection_review_pending — Approve/Redo now ACT (spec §11). Reuses
+    /// the two SEPARATE existing endpoints: approve → /approve {parent_note};
+    /// redo → /request-redo {redo_note}. `rid` comes from detail["rid"]
+    /// (bigkid_parent.py emits rid/summary/essay_excerpt).
     func handleReflectionReview(_ card: PlanArchCardPayload, approve: Bool, note: String) async {
-        await MainActor.run { dismissEventCard() }
+        let detail = EventTargetDetail(card.detail)
+        guard let ridStr = detail.string("rid"), let rid = UUID(uuidString: ridStr) else { return }
+        let trimmed = note.trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            if approve {
+                try await apiClient.approveChildReflectionSubmission(
+                    reflectionId: rid, parentNote: trimmed.isEmpty ? nil : trimmed)
+            } else {
+                try await apiClient.requestRedoChildReflection(
+                    reflectionId: rid, redoNote: trimmed.isEmpty ? nil : trimmed)
+            }
+            await MainActor.run { dismissEventCard() }
+        } catch {
+            await MainActor.run { self.errorMessage = "Couldn't submit — try again." }
+        }
     }
 
     private func handleQueryCardStub(
