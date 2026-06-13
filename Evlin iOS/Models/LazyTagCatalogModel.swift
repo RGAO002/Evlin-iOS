@@ -288,34 +288,50 @@ enum AddTargetFlowRules {
         categoryCount: Int,
         webDomainCount: Int
     ) -> Decision {
-        if webDomainCount > 0 {
-            return .init(action: .reject, warning: "Websites are not supported here.")
-        }
-
         switch mode {
         case .app:
             if appCount > 0 {
+                var ignored: [String] = []
+                if categoryCount > 0 { ignored.append("Category") }
+                if webDomainCount > 0 { ignored.append("website") }
                 return .init(
                     action: .saveApps,
-                    warning: categoryCount > 0 ? "Category selections were ignored. Add categories from Add category." : nil
+                    warning: ignoredSelectionWarning(for: ignored)
                 )
             }
             if categoryCount > 0 {
-                return .init(action: .reject, warning: "Expand the category or search to select individual apps.")
+                return .init(action: .reject, warning: "Expand categories or search to select individual apps.")
+            }
+            if webDomainCount > 0 {
+                return .init(action: .reject, warning: "Websites are not supported here.")
             }
             return .init(action: .reject, warning: "Pick at least one app first.")
         case .category:
             if categoryCount > 0 {
+                var ignored: [String] = []
+                if appCount > 0 { ignored.append("App") }
+                if webDomainCount > 0 { ignored.append("website") }
                 return .init(
                     action: .saveCategories,
-                    warning: appCount > 0 ? "App selections were ignored. Add apps from Add app." : nil
+                    warning: ignoredSelectionWarning(for: ignored)
                 )
             }
             if appCount > 0 {
                 return .init(action: .reject, warning: "Select a category, not an individual app.")
             }
+            if webDomainCount > 0 {
+                return .init(action: .reject, warning: "Websites are not supported here.")
+            }
             return .init(action: .reject, warning: "Pick at least one category first.")
         }
+    }
+
+    private static func ignoredSelectionWarning(for ignored: [String]) -> String? {
+        guard !ignored.isEmpty else { return nil }
+        if ignored.count == 1 {
+            return "\(ignored[0]) selections were ignored."
+        }
+        return "\(ignored.dropLast().joined(separator: ", ")) and \(ignored[ignored.count - 1]) selections were ignored."
     }
 }
 

@@ -2,19 +2,19 @@
 import XCTest
 
 final class AddTargetFlowRulesTests: XCTestCase {
-    func test_addAppWithAppsAndCategoriesSavesAppsAndWarnsCategoriesIgnored() {
+    func test_addAppWithAppsCategoriesAndWebsitesSavesAppsAndWarnsIgnoredTokens() {
         let decision = AddTargetFlowRules.decision(
             mode: .app,
             appCount: 2,
             categoryCount: 1,
-            webDomainCount: 0
+            webDomainCount: 1
         )
 
         XCTAssertEqual(decision.action, .saveApps)
-        XCTAssertEqual(decision.warning, "Category selections were ignored. Add categories from Add category.")
+        XCTAssertEqual(decision.warning, "Category and website selections were ignored.")
     }
 
-    func test_addAppWithCategoryOnlyRejects() {
+    func test_addAppWithCategoryOnlyRejectsInPicker() {
         let decision = AddTargetFlowRules.decision(
             mode: .app,
             appCount: 0,
@@ -23,22 +23,22 @@ final class AddTargetFlowRulesTests: XCTestCase {
         )
 
         XCTAssertEqual(decision.action, .reject)
-        XCTAssertEqual(decision.warning, "Expand the category or search to select individual apps.")
+        XCTAssertEqual(decision.warning, "Expand categories or search to select individual apps.")
     }
 
-    func test_addCategoryWithCategoriesAndAppsSavesCategoriesAndWarnsAppsIgnored() {
+    func test_addCategoryWithCategoriesAppsAndWebsitesSavesCategoriesAndWarnsIgnoredTokens() {
         let decision = AddTargetFlowRules.decision(
             mode: .category,
             appCount: 1,
             categoryCount: 2,
-            webDomainCount: 0
+            webDomainCount: 1
         )
 
         XCTAssertEqual(decision.action, .saveCategories)
-        XCTAssertEqual(decision.warning, "App selections were ignored. Add apps from Add app.")
+        XCTAssertEqual(decision.warning, "App and website selections were ignored.")
     }
 
-    func test_addCategoryWithAppOnlyRejects() {
+    func test_addCategoryWithAppOnlyRejectsInPicker() {
         let decision = AddTargetFlowRules.decision(
             mode: .category,
             appCount: 1,
@@ -48,5 +48,26 @@ final class AddTargetFlowRulesTests: XCTestCase {
 
         XCTAssertEqual(decision.action, .reject)
         XCTAssertEqual(decision.warning, "Select a category, not an individual app.")
+    }
+
+    func test_webDomainOnlyRejectsBothModes() {
+        XCTAssertEqual(
+            AddTargetFlowRules.decision(
+                mode: .app,
+                appCount: 0,
+                categoryCount: 0,
+                webDomainCount: 1
+            ).action,
+            .reject
+        )
+        XCTAssertEqual(
+            AddTargetFlowRules.decision(
+                mode: .category,
+                appCount: 0,
+                categoryCount: 0,
+                webDomainCount: 1
+            ).action,
+            .reject
+        )
     }
 }
