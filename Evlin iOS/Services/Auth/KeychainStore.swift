@@ -18,8 +18,12 @@ struct StoredTokens: Codable, Equatable {
 }
 
 /// Keychain-backed token store. Item is a single JSON blob keyed by
-/// (service, account="session"), with kSecAttrAccessibleAfterFirstUnlock so
-/// the app can refresh in the background after the first device unlock.
+/// (service, account="session"), with kSecAttrAccessibleAfterFirstUnlock**ThisDeviceOnly**
+/// so the app can still refresh in the background after the first device unlock,
+/// while the session secret is EXCLUDED from iCloud/iTunes/encrypted backups and
+/// device-to-device migration. A long-lived refresh token must not survive a
+/// restore onto a different device (would enable persistent account hijack);
+/// the ThisDeviceOnly variant keeps it bound to this hardware.
 final class KeychainStore {
     static let shared = KeychainStore(service: "com.evlin.session")
 
@@ -36,7 +40,7 @@ final class KeychainStore {
         SecItemDelete(baseQuery() as CFDictionary)
         var attrs = baseQuery()
         attrs[kSecValueData as String] = data
-        attrs[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
+        attrs[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         let status = SecItemAdd(attrs as CFDictionary, nil)
         guard status == errSecSuccess else {
             throw KeychainError.unexpectedStatus(status)
