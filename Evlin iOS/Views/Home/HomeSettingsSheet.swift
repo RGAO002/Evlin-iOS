@@ -318,7 +318,7 @@ struct HomeSettingsSheet: View {
                     Button {
                         showLockListGate = true
                     } label: {
-                        Label("Lock setup", systemImage: "lock.rectangle.stack")
+                        Label("App Controls", systemImage: "slider.horizontal.3")
                     }
 
                     Button {
@@ -458,7 +458,7 @@ struct HomeSettingsSheet: View {
                     Button {
                         showLockListGate = true
                     } label: {
-                        Label("Lock setup", systemImage: "lock.rectangle.stack")
+                        Label("App Controls", systemImage: "slider.horizontal.3")
                     }
 
                     NavigationLink {

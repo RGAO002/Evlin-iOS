@@ -1617,6 +1617,19 @@ extension APIClient {
         return try JSONDecoder().decode(LockSetupCatalog.self, from: data)
     }
 
+    func deleteChildAppControlTarget(deviceID: UUID, aliasKey: UUID) async throws {
+        var comps = URLComponents(string: "\(baseURL)/child/app-controls-targets/\(aliasKey.uuidString)")!
+        comps.queryItems = [URLQueryItem(name: "device_id", value: deviceID.uuidString)]
+        var req = URLRequest(url: comps.url!)
+        req.httpMethod = "DELETE"
+        req.timeoutInterval = 22
+        req.setValue(deviceID.uuidString, forHTTPHeaderField: "X-Evlin-Child-Device-ID")
+        let (_, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+    }
+
     @discardableResult
     func mergeChildAppCatalog(
         deviceID: UUID,

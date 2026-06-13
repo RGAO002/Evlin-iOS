@@ -193,6 +193,7 @@ struct LockListManagerView: View {
     @State private var showAddList = false
     @State private var syncing = false
     @State private var syncBanner: String?
+    @State private var deletingTargetID: UUID?
 
     init(
         familyID: UUID,
@@ -216,33 +217,42 @@ struct LockListManagerView: View {
                 section(
                     title: "Apps",
                     count: model.catalog.appRows.count,
+                    description: appsSectionDescription,
                     emptyText: "No apps saved yet. Tap “Add app”."
                 ) {
                     ForEach(Array(model.catalog.appRows.enumerated()), id: \.element.id) { index, row in
                         if index > 0 { rowDivider }
-                        backendTargetRow(row, kind: .app)
+                        backendTargetRow(row, kind: .app) {
+                            deleteTarget(row)
+                        }
                     }
                 }
 
                 section(
                     title: "Categories",
                     count: model.catalog.categoryRows.count,
+                    description: categoriesSectionDescription,
                     emptyText: "No categories saved yet. Tap “Add category”."
                 ) {
                     ForEach(Array(model.catalog.categoryRows.enumerated()), id: \.element.id) { index, row in
                         if index > 0 { rowDivider }
-                        backendTargetRow(row, kind: .category)
+                        backendTargetRow(row, kind: .category) {
+                            deleteTarget(row)
+                        }
                     }
                 }
 
                 section(
                     title: "Lists",
                     count: model.catalog.listRows.count,
+                    description: listsSectionDescription,
                     emptyText: "No lists yet. Group added apps and categories with “Create list”."
                 ) {
                     ForEach(Array(model.catalog.listRows.enumerated()), id: \.element.id) { index, row in
                         if index > 0 { rowDivider }
-                        backendTargetRow(row, kind: .savedList)
+                        backendTargetRow(row, kind: .savedList) {
+                            deleteTarget(row)
+                        }
                     }
                 }
 
@@ -255,7 +265,7 @@ struct LockListManagerView: View {
             .padding(.bottom, 36)
         }
         .background(Color.evSurface.ignoresSafeArea())
-        .navigationTitle("Lock setup")
+        .navigationTitle("App Controls")
         .navigationBarTitleDisplayMode(.inline)
         .task {
             await reloadFromBackend(recoverLocal: true)
@@ -329,10 +339,10 @@ struct LockListManagerView: View {
             .frame(width: 46, height: 46)
 
             VStack(alignment: .leading, spacing: 4) {
-                Text("Lock setup")
+                Text("App Controls")
                     .font(.headline)
                     .foregroundStyle(Color.evOnSurface)
-                Text("The apps, categories and lists Evlin can lock on this device. Editing here doesn’t change anything that’s locked right now.")
+                Text("Add apps and categories from this child's device. Apps support usage insights and app-specific time limits; categories and lists help lock broader sets of apps.")
                     .font(.subheadline)
                     .foregroundStyle(Color.evOnSurfaceVariant)
                     .fixedSize(horizontal: false, vertical: true)
@@ -423,6 +433,10 @@ struct LockListManagerView: View {
 
     // MARK: - Add actions
 
+    private let appsSectionDescription = "Apps added from this child's device. Evlin can recognize them by name, show usage insights, set app-specific limits, and block or shield them when needed."
+    private let categoriesSectionDescription = "Broad Apple categories like Games or Social. Shielding a category can cover matching apps now and apps installed later."
+    private let listsSectionDescription = "Custom groups of apps and categories. Use a group when one rule should lock a mix, e.g. YouTube + Games + Netflix."
+
     private var addActions: some View {
         VStack(spacing: 12) {
             HStack(spacing: 12) {
@@ -477,6 +491,7 @@ struct LockListManagerView: View {
     private func section<Content: View>(
         title: String,
         count: Int,
+        description: String,
         emptyText: String,
         @ViewBuilder content: () -> Content
     ) -> some View {
@@ -497,6 +512,12 @@ struct LockListManagerView: View {
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 4)
+
+            Text(description)
+                .font(.caption)
+                .foregroundStyle(Color.evOnSurfaceVariant)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 4)
 
             VStack(spacing: 0) {
                 if count == 0 {
@@ -521,7 +542,13 @@ struct LockListManagerView: View {
 
     // MARK: - Rows
 
-    private func backendTargetRow(_ row: LockSetupCatalogRow, kind: NameIconKind) -> some View {
+    private func backendTargetRow(
+        _ row: LockSetupCatalogRow,
+        kind: NameIconKind,
+        canEdit: Bool = false,
+        onEdit: (() -> Void)? = nil,
+        onDelete: @escaping () -> Void
+    ) -> some View {
         HStack(spacing: 12) {
             NameWithIcon(name: row.title, kind: kind, artworkURL: row.artworkURL, titleFont: .body)
                 .foregroundStyle(Color.evOnSurface)
@@ -534,9 +561,50 @@ struct LockListManagerView: View {
                 }
             }
             Spacer(minLength: 0)
+
+            if canEdit, let onEdit {
+                Button(action: onEdit) {
+                    Image(systemName: "pencil")
+                        .font(.system(size: 18, weight: .semibold))
+                        .frame(width: 44, height: 44)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Color.evPrimary)
+                .disabled(deletingTargetID == row.id)
+            }
+
+            Button(action: onDelete) {
+                ZStack {
+                    if deletingTargetID == row.id {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Image(systemName: "trash")
+                            .font(.system(size: 18, weight: .semibold))
+                    }
+                }
+                .frame(width: 44, height: 44)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Color.evError)
+            .disabled(deletingTargetID == row.id)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 13)
+    }
+
+    private func deleteTarget(_ row: LockSetupCatalogRow) {
+        guard deletingTargetID == nil else { return }
+        deletingTargetID = row.id
+        Task {
+            defer { deletingTargetID = nil }
+            do {
+                try await apiClient.deleteChildAppControlTarget(deviceID: childDeviceID, aliasKey: row.id)
+                await reloadFromBackend(recoverLocal: false)
+            } catch {
+                syncBanner = "Couldn't delete \(row.title): \(error.localizedDescription)"
+            }
+        }
     }
 }
 
