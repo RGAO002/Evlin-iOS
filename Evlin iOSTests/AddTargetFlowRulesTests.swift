@@ -95,4 +95,30 @@ final class AddTargetFlowRulesTests: XCTestCase {
         XCTAssertFalse(model.isPresented)
         XCTAssertNil(model.errorBanner)
     }
+
+    func test_blankCategoryLabelBlocksSave() {
+        let row = PendingCategoryRow(
+            semanticKey: "games",
+            displayName: "   ",
+            tokenBase64: "Q0FURUdPUlk="
+        )
+
+        XCTAssertFalse(row.isNamedCategory)
+    }
+
+    func test_typedCategoryNameIsUsedInUploadPayload() {
+        let deviceID = UUID()
+        let row = PendingCategoryRow(
+            semanticKey: "games",
+            displayName: "Arcade Games",
+            tokenBase64: "Q0FURUdPUlk="
+        )
+
+        let upload = row.makeUploadCategory(sourceDeviceID: deviceID)
+
+        XCTAssertTrue(row.isNamedCategory)
+        XCTAssertEqual(upload.displayName, "Arcade Games")
+        XCTAssertEqual(upload.aliases, ["Arcade Games", "games"])
+        XCTAssertEqual(upload.sourceDeviceID, deviceID)
+    }
 }

@@ -234,7 +234,7 @@ struct PendingAppRow: Identifiable, Equatable, Sendable {
 struct PendingCategoryRow: Identifiable, Equatable, Sendable {
     let id: UUID
     let semanticKey: String
-    let displayName: String
+    var displayName: String
     let tokenBase64: String
 
     init(rowID: UUID = UUID(), semanticKey: String, displayName: String, tokenBase64: String) {
@@ -242,6 +242,10 @@ struct PendingCategoryRow: Identifiable, Equatable, Sendable {
         self.semanticKey = semanticKey
         self.displayName = displayName
         self.tokenBase64 = tokenBase64
+    }
+
+    var isNamedCategory: Bool {
+        !displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     func makeUploadCategory(sourceDeviceID: UUID?) -> ChildAppCatalogUploadApp {

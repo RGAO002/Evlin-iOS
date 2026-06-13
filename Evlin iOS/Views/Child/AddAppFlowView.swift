@@ -189,10 +189,10 @@ struct AddAppFlowView: View {
 
     private var appsBindCard: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Which app is this?")
+            Text("Name what you selected")
                 .font(.headline)
                 .foregroundStyle(Color.evOnSurface)
-            Text("The token and icon come from iOS. The app name and bundle ID come from the catalog match. Confirm every app before saving.")
+            Text("We know this is annoying. iOS lets Evlin display the icon and name, but does not let us read the text. Please type the same name you see here so Evlin can remember it.")
                 .font(.subheadline)
                 .foregroundStyle(Color.evOnSurfaceVariant)
                 .fixedSize(horizontal: false, vertical: true)
@@ -214,33 +214,21 @@ struct AddAppFlowView: View {
 
     private var categoriesCard: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Broad categories")
+            Text("Name what you selected")
                 .font(.headline)
                 .foregroundStyle(Color.evOnSurface)
-            Text("Apple categories cover matching apps installed now and matching apps added later.")
+            Text("We know this is annoying. iOS lets Evlin display the icon and name, but does not let us read the text. Please type the same name you see here so Evlin can remember it.")
                 .font(.subheadline)
                 .foregroundStyle(Color.evOnSurfaceVariant)
                 .fixedSize(horizontal: false, vertical: true)
 
             ForEach(pendingCategoryRows) { row in
-                HStack(spacing: 12) {
-                    NameWithIcon(name: row.semanticKey, kind: .category, titleFont: .subheadline.weight(.semibold))
-                        .foregroundStyle(Color.evOnSurface)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(row.displayName)
-                            .font(.caption)
-                            .foregroundStyle(Color.evOnSurfaceVariant)
-                        Text("broad")
-                            .font(.caption2.weight(.bold))
-                            .foregroundStyle(Color.evPrimary)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(Capsule().fill(Color.evPrimary.opacity(0.08)))
-                    }
-                    Spacer(minLength: 0)
+                if let token = categoryTokensByRowID[row.id] {
+                    CategoryBindRowView(
+                        token: token,
+                        row: binding(for: row)
+                    )
                 }
-                .padding(12)
-                .background(Color.evSurfaceContainerLow, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             }
         }
         .padding(16)
@@ -317,6 +305,19 @@ struct AddAppFlowView: View {
             set: { newValue in
                 if let index = pendingRows.firstIndex(where: { $0.id == row.id }) {
                     pendingRows[index] = newValue
+                }
+            }
+        )
+    }
+
+    private func binding(for row: PendingCategoryRow) -> Binding<PendingCategoryRow> {
+        Binding(
+            get: {
+                pendingCategoryRows.first(where: { $0.id == row.id }) ?? row
+            },
+            set: { newValue in
+                if let index = pendingCategoryRows.firstIndex(where: { $0.id == row.id }) {
+                    pendingCategoryRows[index] = newValue
                 }
             }
         )
@@ -487,6 +488,13 @@ struct AddAppFlowView: View {
             }
         let categoryPairs: [(row: PendingCategoryRow, upload: ChildAppCatalogUploadApp)] =
             mode == .category ? pendingCategoryRows.map { ($0, $0.makeUploadCategory(sourceDeviceID: childDeviceID)) } : []
+        if mode == .category {
+            let blankCategories = pendingCategoryRows.filter { !$0.isNamedCategory }
+            guard blankCategories.isEmpty else {
+                saveBanner = "Name every category before saving."
+                return
+            }
+        }
         let appPairsForUpload = mode == .app ? appPairs : []
         let categoryPairsForUpload = mode == .category ? categoryPairs : []
         let uploadRows = appPairsForUpload.map(\.upload) + categoryPairsForUpload.map(\.upload)
@@ -631,6 +639,34 @@ private struct AddPickerErrorToast: View {
             Color.evError.opacity(0.12),
             in: RoundedRectangle(cornerRadius: 18, style: .continuous)
         )
+    }
+}
+
+private struct CategoryBindRowView: View {
+    let token: ActivityCategoryToken
+    @Binding var row: PendingCategoryRow
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(token)
+                .font(.headline)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(12)
+                .background(Color.evSurfaceContainerLow, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+            TextField("Type the category name you see above", text: $row.displayName)
+                .textInputAutocapitalization(.words)
+                .autocorrectionDisabled()
+                .padding(.horizontal, 12)
+                .padding(.vertical, 11)
+                .background(Color.evSurfaceContainerLowest, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.evOutlineVariant, lineWidth: 1.5)
+                }
+        }
+        .padding(12)
+        .background(Color.evSurfaceContainerLow, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 }
 
