@@ -74,13 +74,16 @@ final class APIClientCatalogDTOTests: XCTestCase {
 
     func test_lazyTagTargetsURLUsesThreeSectionFeedEndpoint() throws {
         let childID = UUID(uuidString: "99999999-8888-7777-6666-555555555555")!
-        let client = APIClient(baseURL: "https://example.test/api/v1")
 
-        let url = client.lazyTagTargetsURL(childDeviceID: childID)
+        let url = Self.childCatalogURLClient.lazyTagTargetsURL(childDeviceID: childID)
 
+        let components = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false))
+        XCTAssertEqual(components.scheme, "https")
+        XCTAssertEqual(components.host, "example.test")
+        XCTAssertEqual(components.path, "/api/v1/parent/lazy-tag-targets")
         XCTAssertEqual(
-            url.absoluteString,
-            "https://example.test/api/v1/parent/lazy-tag-targets?child_device_id=\(childID.uuidString)"
+            components.queryItems,
+            [URLQueryItem(name: "child_device_id", value: childID.uuidString)]
         )
     }
 
