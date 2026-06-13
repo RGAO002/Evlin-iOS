@@ -77,4 +77,16 @@ final class EventTargetCardTests: XCTestCase {
         XCTAssertEqual(EventTargetRoute(kind: "event.reflection_review_pending"), .reflection)
         XCTAssertNil(EventTargetRoute(kind: "phone.proposal_confirm"))
     }
+
+    // MARK: - Task P6: event.scope route + request builder
+
+    func testEventScopeRouteAndRequest() throws {
+        XCTAssertEqual(EventTargetRoute(kind: "event.scope"), .scope)
+        let c = AgentClient(baseURL: "https://example.com")
+        let req = try c.makeEventScopeRequest(continuationToken: "ct", scope: "series")
+        XCTAssertEqual(req.url?.absoluteString, "https://example.com/parent/agent/event-scope")
+        let body = try JSONSerialization.jsonObject(with: req.httpBody ?? Data()) as? [String: Any]
+        XCTAssertEqual(body?["continuation_token"] as? String, "ct")
+        XCTAssertEqual(body?["scope"] as? String, "series")
+    }
 }

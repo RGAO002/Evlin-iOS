@@ -2317,6 +2317,13 @@ class ChatViewModel: ObservableObject {
         catch { await MainActor.run { self.errorMessage = "Couldn't continue — try again." } }
     }
 
+    func handleEventScope(_ ct: String) async {
+        do { let r = try await agentClient().eventScope(continuationToken: ct, scope: "series")
+             await MainActor.run { applyAgentResult(r) } }
+        catch AgentClient.AgentTargetError.expired { await expireEventCard() }
+        catch { await MainActor.run { self.errorMessage = "Couldn't continue — try again." } }
+    }
+
     @MainActor private func expireEventCard() {
         pendingPlanArchCard = nil
         errorMessage = "That expired — just ask again."

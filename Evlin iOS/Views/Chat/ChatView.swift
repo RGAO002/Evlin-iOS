@@ -320,6 +320,8 @@ struct ChatView: View {
                                             Task { await viewModel.handleResolveTarget(ct, ids) } },
                                         onReflection: { approve, note in
                                             await viewModel.handleReflectionReview(planArchCard, approve: approve, note: note) },
+                                        onScope: { ct in
+                                            Task { await viewModel.handleEventScope(ct) } },
                                         onSkip: { viewModel.dismissEventCard() })
                                     reinterpretButton
                                 }

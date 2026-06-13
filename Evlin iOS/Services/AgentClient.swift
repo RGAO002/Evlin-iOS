@@ -160,6 +160,15 @@ extension AgentClient {
         return r
     }
 
+    func makeEventScopeRequest(continuationToken: String, scope: String) throws -> URLRequest {
+        var r = URLRequest(url: URL(string: "\(baseURL)/parent/agent/event-scope")!)
+        r.httpMethod = "POST"; r.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        r.timeoutInterval = 20
+        r.httpBody = try JSONSerialization.data(withJSONObject: [
+            "continuation_token": continuationToken, "scope": scope])
+        return r
+    }
+
     /// Sends a built request. Returns the optional follow-up card; throws
     /// AgentTargetError.expired on HTTP 410 so the caller can clear + show "expired".
     enum AgentTargetError: Error { case expired, server(Int) }
@@ -185,5 +194,9 @@ extension AgentClient {
     func resolveTarget(continuationToken: String, selectedIds: [String]) async throws -> AgentCardResponse {
         try await sendCardRequest(try makeResolveTargetRequest(
             continuationToken: continuationToken, selectedIds: selectedIds))
+    }
+    func eventScope(continuationToken: String, scope: String = "series") async throws -> AgentCardResponse {
+        try await sendCardRequest(try makeEventScopeRequest(
+            continuationToken: continuationToken, scope: scope))
     }
 }

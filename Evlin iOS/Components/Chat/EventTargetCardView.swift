@@ -11,13 +11,14 @@
 import SwiftUI
 
 enum EventTargetRoute: Equatable {
-    case result, confirm, disambiguation, targetSelect, reflection
+    case result, confirm, disambiguation, targetSelect, reflection, scope
     init?(kind: String) {
         switch kind {
         case "event.result": self = .result
         case "event.create_confirm", "event.bundle_confirm": self = .confirm
         case "event.disambiguation": self = .disambiguation
         case "event.reflection_review_pending": self = .reflection
+        case "event.scope": self = .scope
         case let k where k.hasPrefix("target."): self = .targetSelect
         default: return nil
         }
@@ -33,6 +34,7 @@ struct EventTargetCardView: View {
     let onPickEvent: (_ continuationToken: String, _ eventId: String, _ occurrenceStart: String) -> Void
     let onResolveTarget: (_ continuationToken: String, _ ids: [String]) -> Void
     let onReflection: (_ approve: Bool, _ note: String) async -> Void
+    let onScope: (_ continuationToken: String) -> Void
     let onSkip: () -> Void
 
     private var detail: EventTargetDetail { EventTargetDetail(payload.detail) }
@@ -44,6 +46,7 @@ struct EventTargetCardView: View {
         case .disambiguation: disambiguationCard
         case .targetSelect:  targetCard
         case .reflection:    reflectionCard
+        case .scope:         scopeCard
         case .none:          EmptyView()
         }
     }
@@ -95,6 +98,18 @@ struct EventTargetCardView: View {
             : [TargetGroup(childName: "", options: detail.options("options"))]
         return TargetSelectView(title: payload.title, groups: groups,
             onConfirm: { ids in onResolveTarget(ct, ids) }, onCancel: onSkip)
+    }
+
+    private var scopeCard: some View {
+        let ct = detail.string("continuation_token") ?? ""
+        return VStack(alignment: .leading, spacing: 12) {
+            header
+            HStack {
+                Button("Cancel", action: onSkip).buttonStyle(.bordered)
+                Spacer()
+                Button("Whole series") { onScope(ct) }.buttonStyle(.borderedProminent)
+            }
+        }.padding(16).background(Color(.systemBackground)).cornerRadius(12)
     }
 
     private var reflectionCard: some View {
