@@ -23,7 +23,9 @@ struct AddAppFlowView: View {
     @EnvironmentObject var apiClient: APIClient
 
     @State private var selection = FamilyActivitySelection()
+    @State private var draftSelection = FamilyActivitySelection()
     @State private var showPicker = false
+    @State private var pickerError: String?
     @State private var pendingRows: [PendingAppRow] = []
     @State private var appTokensByRowID: [UUID: ApplicationToken] = [:]
     @State private var pendingCategoryRows: [PendingCategoryRow] = []
@@ -125,6 +127,8 @@ struct AddAppFlowView: View {
     private var pickerCard: some View {
         VStack(alignment: .leading, spacing: 14) {
             Button {
+                draftSelection = normalizedDraftSelection(from: selection, mode: mode)
+                pickerError = nil
                 showPicker = true
             } label: {
                 HStack(spacing: 12) {
@@ -159,7 +163,15 @@ struct AddAppFlowView: View {
                 .background(Color.evSurfaceContainerLow, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
             }
             .buttonStyle(.plain)
-            .familyActivityPicker(isPresented: $showPicker, selection: $selection)
+            .sheet(isPresented: $showPicker) {
+                AddTargetPickerSheet(
+                    mode: mode,
+                    selection: $draftSelection,
+                    errorText: pickerError,
+                    onCancel: { showPicker = false },
+                    onSave: { applyDraftSelection() }
+                )
+            }
 
             HStack(spacing: 8) {
                 Text(selectionSummary)
@@ -308,6 +320,58 @@ struct AddAppFlowView: View {
                 }
             }
         )
+    }
+
+    private func normalizedDraftSelection(
+        from selection: FamilyActivitySelection,
+        mode: AddTargetMode
+    ) -> FamilyActivitySelection {
+        var draft = FamilyActivitySelection(includeEntireCategory: mode == .category)
+        draft.applicationTokens = selection.applicationTokens
+        draft.categoryTokens = selection.categoryTokens
+        draft.webDomainTokens = selection.webDomainTokens
+        return draft
+    }
+
+    private func applyDraftSelection() {
+        let draftCounts = SelectionCounts(draftSelection)
+        let decision = AddTargetFlowRules.decision(
+            mode: mode,
+            appCount: draftCounts.applicationTokens,
+            categoryCount: draftCounts.categoryTokens,
+            webDomainCount: draftCounts.webDomainTokens
+        )
+        var shell = AddTargetPickerShellModel()
+        if shell.attemptSave(decision: decision) {
+            selection = sanitizedSelectionForSave(from: draftSelection, decision: decision)
+            saveBanner = decision.warning
+            pickerError = nil
+            showPicker = false
+        } else {
+            pickerError = decision.warning
+            showPicker = true
+        }
+    }
+
+    private func sanitizedSelectionForSave(
+        from draft: FamilyActivitySelection,
+        decision: AddTargetFlowRules.Decision
+    ) -> FamilyActivitySelection {
+        switch decision.action {
+        case .saveApps:
+            var selection = FamilyActivitySelection()
+            selection.applicationTokens = draft.applicationTokens
+            return selection
+        case .saveCategories:
+            // FamilyActivitySelection.categories is derived by the framework.
+            // Preserve the picker-produced category selection and clear ignored buckets.
+            var selection = draft
+            selection.applicationTokens = []
+            selection.webDomainTokens = []
+            return selection
+        case .reject:
+            return draft
+        }
     }
 
     private func rebuildPendingRow(from newValue: FamilyActivitySelection) {
@@ -505,6 +569,68 @@ struct AddAppFlowView: View {
             // sheet open with a visible error so the user can retry.
             errorText = "Couldn't sync to Evlin: \(error.localizedDescription). Saved on this device only — it won't be lockable from parent chat until the sync succeeds. Check the connection and try Save again."
         }
+    }
+}
+
+private struct AddTargetPickerSheet: View {
+    let mode: AddTargetMode
+    @Binding var selection: FamilyActivitySelection
+    let errorText: String?
+    let onCancel: () -> Void
+    let onSave: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            FamilyActivityPicker(selection: $selection)
+
+            if let errorText {
+                AddPickerErrorToast(message: errorText)
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 12)
+            }
+
+            Button(action: onSave) {
+                Text("Save")
+                    .font(.headline)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 16)
+                    .background(Color.evPrimary, in: Capsule())
+                    .foregroundStyle(.white)
+            }
+            .padding(.horizontal, 24)
+            .padding(.bottom, 12)
+
+            Button(action: onCancel) {
+                Text("Cancel")
+                    .font(.headline)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 14)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Color.evOnSurface)
+            .padding(.horizontal, 24)
+            .padding(.bottom, 20)
+        }
+        .presentationDetents([.large])
+    }
+}
+
+private struct AddPickerErrorToast: View {
+    let message: String
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+            Text(message)
+                .font(.subheadline.weight(.semibold))
+        }
+        .foregroundStyle(Color.evError)
+        .padding(16)
+        .frame(maxWidth: .infinity)
+        .background(
+            Color.evError.opacity(0.12),
+            in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+        )
     }
 }
 

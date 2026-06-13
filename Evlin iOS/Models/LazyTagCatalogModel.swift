@@ -340,6 +340,24 @@ enum AddTargetFlowRules {
     }
 }
 
+struct AddTargetPickerShellModel: Equatable {
+    var isPresented = true
+    var errorBanner: String?
+
+    mutating func attemptSave(decision: AddTargetFlowRules.Decision) -> Bool {
+        switch decision.action {
+        case .saveApps, .saveCategories:
+            errorBanner = decision.warning
+            isPresented = false
+            return true
+        case .reject:
+            errorBanner = decision.warning
+            isPresented = true
+            return false
+        }
+    }
+}
+
 struct LockSetupCatalogRow: Equatable, Identifiable {
     let id: UUID
     let type: LazyTagCatalogTargetType

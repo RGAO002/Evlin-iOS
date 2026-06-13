@@ -70,4 +70,29 @@ final class AddTargetFlowRulesTests: XCTestCase {
             .reject
         )
     }
+
+    func test_pickerShellRejectKeepsPickerOpen() {
+        var model = AddTargetPickerShellModel()
+
+        let saved = model.attemptSave(
+            decision: .init(
+                action: .reject,
+                warning: "Select a category, not an individual app."
+            )
+        )
+
+        XCTAssertFalse(saved)
+        XCTAssertTrue(model.isPresented)
+        XCTAssertEqual(model.errorBanner, "Select a category, not an individual app.")
+    }
+
+    func test_pickerShellValidSaveDismissesPicker() {
+        var model = AddTargetPickerShellModel()
+
+        let saved = model.attemptSave(decision: .init(action: .saveApps, warning: nil))
+
+        XCTAssertTrue(saved)
+        XCTAssertFalse(model.isPresented)
+        XCTAssertNil(model.errorBanner)
+    }
 }
