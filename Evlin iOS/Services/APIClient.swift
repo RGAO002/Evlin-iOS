@@ -2314,6 +2314,94 @@ extension APIClient {
     }
 }
 
+// MARK: - App-alias management (Task F1)
+//
+// Parent CRUD over /parent/app-aliases. Mirrors the AliasManagingClient pattern:
+// protocol declared here, methods in `extension APIClient`, conformance via
+// `extension APIClient: AppAliasManagingClient {}`.
+
+protocol AppAliasManagingClient {
+    /// GET /parent/app-aliases?family_id= — all family apps with their aliases
+    /// and the child devices that can receive a lock command for each.
+    func fetchAppAliases(familyID: UUID) async throws -> [AppAliasRow]
+
+    /// POST /parent/app-aliases/{bundleID}/alias — add an alias to an app.
+    func addAppAlias(familyID: UUID, bundleID: String, alias: String) async throws
+
+    /// DELETE /parent/app-aliases/{bundleID}/alias?family_id=&alias= — remove an alias.
+    func removeAppAlias(familyID: UUID, bundleID: String, alias: String) async throws
+
+    /// PATCH /parent/app-aliases/{bundleID}/alias — rename an alias.
+    func renameAppAlias(familyID: UUID, bundleID: String, old: String, new: String) async throws
+}
+
+extension APIClient {
+    func fetchAppAliases(familyID: UUID) async throws -> [AppAliasRow] {
+        var comps = URLComponents(string: "\(baseURL)/parent/app-aliases")!
+        comps.queryItems = [URLQueryItem(name: "family_id", value: familyID.uuidString)]
+        let (data, resp) = try await URLSession.shared.data(from: comps.url!)
+        guard let http = resp as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+        return try JSONDecoder().decode(AppAliasFeedResponse.self, from: data).apps
+    }
+
+    func addAppAlias(familyID: UUID, bundleID: String, alias: String) async throws {
+        let encoded = Self.pathComponent(bundleID)
+        let url = URL(string: "\(baseURL)/parent/app-aliases/\(encoded)/alias")!
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 22
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        struct Body: Encodable {
+            let alias: String
+            let family_id: UUID
+        }
+        req.httpBody = try JSONEncoder().encode(Body(alias: alias, family_id: familyID))
+        let (_, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+    }
+
+    func removeAppAlias(familyID: UUID, bundleID: String, alias: String) async throws {
+        let encoded = Self.pathComponent(bundleID)
+        var comps = URLComponents(string: "\(baseURL)/parent/app-aliases/\(encoded)/alias")!
+        comps.queryItems = [
+            URLQueryItem(name: "family_id", value: familyID.uuidString),
+            URLQueryItem(name: "alias", value: alias),
+        ]
+        var req = URLRequest(url: comps.url!)
+        req.httpMethod = "DELETE"
+        req.timeoutInterval = 22
+        let (_, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+    }
+
+    func renameAppAlias(familyID: UUID, bundleID: String, old: String, new: String) async throws {
+        let encoded = Self.pathComponent(bundleID)
+        let url = URL(string: "\(baseURL)/parent/app-aliases/\(encoded)/alias")!
+        var req = URLRequest(url: url)
+        req.httpMethod = "PATCH"
+        req.timeoutInterval = 22
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        struct Body: Encodable {
+            let old: String
+            let new: String
+            let family_id: UUID
+        }
+        req.httpBody = try JSONEncoder().encode(Body(old: old, new: new, family_id: familyID))
+        let (_, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+    }
+}
+
+extension APIClient: AppAliasManagingClient {}
+
 // MARK: - AnyCodable (for flexible action dict)
 
 struct AnyCodable: Codable {
