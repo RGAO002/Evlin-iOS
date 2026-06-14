@@ -1,127 +1,84 @@
 import Foundation
 import Combine
 
-protocol AliasManagingClient {
-    func fetchLazyTagCatalogTargets(
-        childDeviceID: UUID,
-        query: String?
-    ) async throws -> [LazyTagCatalogTarget]
-
-    func saveLazyTagAlias(
-        familyID: UUID,
-        childDeviceID: UUID,
-        target: LazyTagCatalogTarget,
-        alias: String
-    ) async throws -> LazyTagCatalogTarget
-
-    func removeLazyTagAlias(
-        familyID: UUID,
-        childDeviceID: UUID,
-        target: LazyTagCatalogTarget,
-        alias: String
-    ) async throws -> LazyTagCatalogTarget
-
-    func renameLazyTagAlias(
-        familyID: UUID,
-        childDeviceID: UUID,
-        target: LazyTagCatalogTarget,
-        oldAlias: String,
-        newAlias: String
-    ) async throws -> LazyTagCatalogTarget
-}
+// MARK: - AliasManagerModel (Task F2)
+//
+// Family-scoped app-alias model. Keyed by familyID (not childDeviceID).
+// Depends on AppAliasManagingClient (declared in APIClient.swift).
+// All mutations call the server and re-fetch on success; on error the
+// prior state is preserved and errorMessage is set (server-confirmed,
+// NOT optimistic).
 
 @MainActor
 final class AliasManagerModel: ObservableObject {
-    @Published private(set) var targets: [LazyTagCatalogTarget] = []
+    @Published private(set) var rows: [AppAliasRow] = []
     @Published private(set) var isLoading = false
     @Published var errorMessage: String?
     @Published var searchText = ""
 
     let familyID: UUID
-    let childDeviceID: UUID
-    private let client: AliasManagingClient
+    private let client: AppAliasManagingClient
 
-    init(
-        familyID: UUID,
-        childDeviceID: UUID,
-        client: AliasManagingClient
-    ) {
+    init(familyID: UUID, client: AppAliasManagingClient) {
         self.familyID = familyID
-        self.childDeviceID = childDeviceID
         self.client = client
     }
 
-    var sections: [LazyTagCatalogSection] {
-        LazyTagCatalogModel.sections(from: targets, searchText: searchText)
+    // MARK: - Computed
+
+    /// Rows filtered by searchText (case-insensitive match on canonicalName, bundleID, or any alias).
+    var visibleRows: [AppAliasRow] {
+        let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return rows }
+        return rows.filter { row in
+            row.canonicalName.localizedCaseInsensitiveContains(q)
+                || row.bundleID.localizedCaseInsensitiveContains(q)
+                || row.aliases.contains { $0.localizedCaseInsensitiveContains(q) }
+        }
     }
+
+    // MARK: - Load
 
     func load() async {
         isLoading = true
         errorMessage = nil
         defer { isLoading = false }
         do {
-            targets = try await client.fetchLazyTagCatalogTargets(
-                childDeviceID: childDeviceID,
-                query: nil
-            )
+            rows = try await client.fetchAppAliases(familyID: familyID)
         } catch {
             errorMessage = error.localizedDescription
         }
     }
 
-    func addAlias(_ alias: String, to target: LazyTagCatalogTarget) async {
+    // MARK: - Mutations (server-confirmed; re-fetch on success)
+
+    func addAlias(_ alias: String, to row: AppAliasRow) async {
         errorMessage = nil
         do {
-            let updated = try await client.saveLazyTagAlias(
-                familyID: familyID,
-                childDeviceID: childDeviceID,
-                target: target,
-                alias: alias
-            )
-            replaceTarget(updated)
+            try await client.addAppAlias(familyID: familyID, bundleID: row.bundleID, alias: alias)
+            await load()
         } catch {
             errorMessage = error.localizedDescription
         }
     }
 
-    func removeAlias(_ alias: String, from target: LazyTagCatalogTarget) async {
+    func removeAlias(_ alias: String, from row: AppAliasRow) async {
         errorMessage = nil
         do {
-            let updated = try await client.removeLazyTagAlias(
-                familyID: familyID,
-                childDeviceID: childDeviceID,
-                target: target,
-                alias: alias
-            )
-            replaceTarget(updated)
+            try await client.removeAppAlias(familyID: familyID, bundleID: row.bundleID, alias: alias)
+            await load()
         } catch {
             errorMessage = error.localizedDescription
         }
     }
 
-    func renameAlias(_ oldAlias: String, to newAlias: String, for target: LazyTagCatalogTarget) async {
+    func renameAlias(_ old: String, to new: String, for row: AppAliasRow) async {
         errorMessage = nil
         do {
-            let updated = try await client.renameLazyTagAlias(
-                familyID: familyID,
-                childDeviceID: childDeviceID,
-                target: target,
-                oldAlias: oldAlias,
-                newAlias: newAlias
-            )
-            replaceTarget(updated)
+            try await client.renameAppAlias(familyID: familyID, bundleID: row.bundleID, old: old, new: new)
+            await load()
         } catch {
             errorMessage = error.localizedDescription
         }
-    }
-
-    private func replaceTarget(_ updated: LazyTagCatalogTarget) {
-        guard let idx = targets.firstIndex(where: { $0.aliasKey == updated.aliasKey }) else {
-            targets.append(updated)
-            return
-        }
-        targets[idx] = updated
     }
 }
-
-extension APIClient: AliasManagingClient {}

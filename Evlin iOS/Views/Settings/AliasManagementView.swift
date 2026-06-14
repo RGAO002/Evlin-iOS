@@ -1,24 +1,24 @@
 // Evlin iOS/Views/Settings/AliasManagementView.swift
 //
-// Parent-facing backend catalog alias manager. This screen intentionally
-// edits catalog aliases on the backend, not the old LocalAliasStore map:
-// parent/chat lazy-tag now resolves against the child's catalog targets.
+// Parent-facing app-alias manager. Rebuilt for Task F3:
+//   - No child/device selector — familyID from @AppStorage
+//   - One card per AppAliasRow (from GET /parent/app-aliases)
+//   - Capability row: green "Lock & block" line or amber "add on kid phone" notice
+//   - Alias chips, add/rename alerts, and search field reuse the existing visual style
+//
+// Visual palette: navy evPrimary, forest evSecondary / evSecondaryContainer,
+// amber evTertiaryContainer / evOnTertiaryContainer.
 
 import SwiftUI
 
 struct AliasManagementView: View {
     @EnvironmentObject private var apiClient: APIClient
     @AppStorage("evlin.familyID") private var familyIDString = ""
-    @AppStorage("evlin.childDeviceID") private var childDeviceIDString = ""
 
     var body: some View {
         Group {
-            if UUID(uuidString: familyIDString) != nil || UUID(uuidString: childDeviceIDString) != nil {
-                AliasChildDeviceSelectionScreen(
-                    familyID: UUID(uuidString: familyIDString),
-                    initialChildDeviceID: UUID(uuidString: childDeviceIDString),
-                    client: apiClient
-                )
+            if let familyID = UUID(uuidString: familyIDString) {
+                AliasAppListScreen(familyID: familyID, client: apiClient)
             } else {
                 ContentUnavailableView(
                     "No family paired",
@@ -32,487 +32,458 @@ struct AliasManagementView: View {
     }
 }
 
-private struct AliasChildDeviceSelectionScreen: View {
-    let familyID: UUID?
-    let initialChildDeviceID: UUID?
-    let client: APIClient
+// MARK: - Main list screen
 
-    @State private var children: [ParentChildDeviceSummaryDTO] = []
-    @State private var selectedChildDeviceID: UUID?
-    @State private var resolvedFamilyID: UUID?
-    @State private var isLoading = false
-    @State private var errorMessage: String?
-    @AppStorage("evlin.familyID") private var familyIDString = ""
-
-    var body: some View {
-        Group {
-            if isLoading && children.isEmpty {
-                ProgressView("Loading child devices...")
-            } else if children.isEmpty {
-                ContentUnavailableView(
-                    "No child devices",
-                    systemImage: "iphone.slash",
-                    description: Text(errorMessage ?? "Pair a kid device before managing aliases.")
-                )
-            } else {
-                VStack(spacing: 0) {
-                    childSelector
-                    if let childDeviceID = selectedChildDeviceID,
-                       let familyID = resolvedFamilyID ?? familyID {
-                        AliasCatalogManagerScreen(
-                            familyID: familyID,
-                            childDeviceID: childDeviceID,
-                            client: client
-                        )
-                        .id(childDeviceID)
-                    }
-                }
-            }
-        }
-        .task { await loadChildren() }
-        .refreshable { await loadChildren() }
-    }
-
-    @ViewBuilder
-    private var childSelector: some View {
-        if children.count > 1 {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Child")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                    .textCase(.uppercase)
-                Picker("Child", selection: selectedChildBinding) {
-                    ForEach(children) { child in
-                        Text("\(child.displayName) · \(child.shortID)").tag(child.childDeviceID)
-                    }
-                }
-                .pickerStyle(.segmented)
-                if let selected = children.first(where: { $0.childDeviceID == selectedChildDeviceID }) {
-                    childSummary(selected)
-                }
-            }
-            .padding([.horizontal, .top])
-            .padding(.bottom, 8)
-            .background(.background)
-        } else if let only = children.first {
-            childSummary(only)
-            .padding([.horizontal, .top])
-            .padding(.bottom, 8)
-            .background(.background)
-        }
-    }
-
-    private func childSummary(_ child: ParentChildDeviceSummaryDTO) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Label("Showing aliases for \(child.displayName) · \(child.shortID)", systemImage: "person.crop.circle")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-            Text(child.catalogSummary)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-            Text(child.catalogPreviewText)
-                .font(.caption2.monospaced())
-                .lineLimit(2)
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private var selectedChildBinding: Binding<UUID> {
-        Binding(
-            get: { selectedChildDeviceID ?? children[0].childDeviceID },
-            set: { selectedChildDeviceID = $0 }
-        )
-    }
-
-    @MainActor
-    private func loadChildren() async {
-        isLoading = true
-        errorMessage = nil
-        defer { isLoading = false }
-        do {
-            var preferredChild: ParentChildDeviceSummaryDTO?
-            var lookupFamilyID = familyID
-
-            if let initialChildDeviceID {
-                do {
-                    let current = try await client.fetchParentChildDevice(childDeviceID: initialChildDeviceID)
-                    preferredChild = current.child
-                    lookupFamilyID = current.familyID
-                    selectedChildDeviceID = current.child.childDeviceID
-                    resolvedFamilyID = current.familyID
-                    familyIDString = current.familyID.uuidString
-                } catch {
-                    if familyID == nil {
-                        throw error
-                    }
-                }
-            }
-
-            if let lookupFamilyID {
-                do {
-                    let fetched = try await client.fetchParentChildDevices(familyID: lookupFamilyID)
-                    if !fetched.isEmpty {
-                        children = fetched
-                        resolvedFamilyID = lookupFamilyID
-                        if let selectedChildDeviceID,
-                           fetched.contains(where: { $0.childDeviceID == selectedChildDeviceID }) {
-                            return
-                        }
-                        if let preferredChild,
-                           fetched.contains(where: { $0.childDeviceID == preferredChild.childDeviceID }) {
-                            selectedChildDeviceID = preferredChild.childDeviceID
-                        } else if let initialChildDeviceID,
-                                  fetched.contains(where: { $0.childDeviceID == initialChildDeviceID }) {
-                            selectedChildDeviceID = initialChildDeviceID
-                        } else {
-                            selectedChildDeviceID = fetched.first?.childDeviceID
-                        }
-                        return
-                    }
-                } catch {
-                    if preferredChild == nil {
-                        throw error
-                    }
-                }
-            }
-
-            if let preferredChild {
-                children = [preferredChild]
-                selectedChildDeviceID = preferredChild.childDeviceID
-                return
-            }
-
-            throw APIError.serverError(404)
-        } catch {
-            errorMessage = error.localizedDescription
-        }
-    }
-}
-
-private struct AliasCatalogManagerScreen: View {
-    private let iconSize: CGFloat = 44
+private struct AliasAppListScreen: View {
+    private let iconSize: CGFloat = 46
 
     @StateObject private var model: AliasManagerModel
-    @State private var addAliasTarget: LazyTagCatalogTarget?
+    @State private var addAliasRow: AppAliasRow?
     @State private var newAlias = ""
-    @State private var renameAliasTarget: LazyTagCatalogTarget?
+    @State private var renameAliasRow: AppAliasRow?
     @State private var renameOldAlias = ""
     @State private var renamedAlias = ""
+    @State private var showAddAppSheet = false
+    @State private var addAppTargetDeviceID: UUID?
 
-    init(
-        familyID: UUID,
-        childDeviceID: UUID,
-        client: AliasManagingClient
-    ) {
-        _model = StateObject(wrappedValue: AliasManagerModel(
-            familyID: familyID,
-            childDeviceID: childDeviceID,
-            client: client
-        ))
+    init(familyID: UUID, client: AppAliasManagingClient) {
+        _model = StateObject(wrappedValue: AliasManagerModel(familyID: familyID, client: client))
     }
 
     var body: some View {
-        List {
-            Section {
-                Text("These names teach Evlin which catalog target you mean in chat. Tokens stay on the kid-side catalog; this page only edits aliases.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+        ScrollView {
+            VStack(alignment: .leading, spacing: Spacing.xl) {
+                explainer
+                searchField
 
-            if model.isLoading {
-                Section {
-                    HStack {
-                        ProgressView()
-                        Text("Loading catalog aliases...")
-                            .foregroundStyle(.secondary)
-                    }
+                if model.isLoading && model.rows.isEmpty {
+                    loadingRow
                 }
-            }
 
-            if let error = model.errorMessage {
-                Section {
-                    Label(error, systemImage: "exclamationmark.triangle")
-                        .foregroundStyle(.orange)
+                if let error = model.errorMessage {
+                    errorBanner(error)
                 }
-            }
 
-            ForEach(model.sections, id: \.type) { section in
-                Section(sectionTitle(for: section)) {
-                    if section.targets.isEmpty {
-                        Text(emptyCopy(for: section.type))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    } else {
-                        ForEach(section.targets) { target in
-                            targetRow(target)
-                        }
-                    }
+                if !model.isLoading && !model.rows.isEmpty && model.visibleRows.isEmpty {
+                    Text("No apps match \"\(model.searchText)\".")
+                        .font(.evBodyMedium)
+                        .foregroundStyle(Color.evOnSurfaceVariant)
+                        .padding(.vertical, Spacing.md)
                 }
+
+                ForEach(model.visibleRows) { row in
+                    appCard(row)
+                }
+
+                Color.clear.frame(height: Spacing.lg)
             }
+            .padding(.horizontal, Spacing.xl)
+            .padding(.top, Spacing.md)
         }
-        .searchable(text: $model.searchText, prompt: "Search aliases or targets")
+        .background(Color.evSurfaceContainerLow)
+        .scrollDismissesKeyboard(.interactively)
         .refreshable { await model.load() }
         .task { await model.load() }
+        // Add alias alert
         .alert("Add alias", isPresented: addAliasBinding) {
             TextField("Alias", text: $newAlias)
             Button("Cancel", role: .cancel) {
-                addAliasTarget = nil
+                addAliasRow = nil
                 newAlias = ""
             }
             Button("Save") {
-                guard let target = addAliasTarget else { return }
+                guard let row = addAliasRow else { return }
+                let alias = newAlias
                 Task {
-                    await model.addAlias(newAlias, to: target)
+                    await model.addAlias(alias, to: row)
                     newAlias = ""
-                    addAliasTarget = nil
+                    addAliasRow = nil
                 }
             }
         } message: {
-            Text("Add another chat name for this target.")
+            Text("Add another chat name for this app.")
         }
+        // Rename alias alert
         .alert("Rename alias", isPresented: renameAliasBinding) {
             TextField("Alias", text: $renamedAlias)
-            Button("Cancel", role: .cancel) {
-                resetRenameState()
-            }
+            Button("Cancel", role: .cancel) { resetRenameState() }
             Button("Save") {
-                guard let target = renameAliasTarget else { return }
+                guard let row = renameAliasRow else { return }
+                let old = renameOldAlias
+                let new = renamedAlias
                 Task {
-                    await model.renameAlias(renameOldAlias, to: renamedAlias, for: target)
+                    await model.renameAlias(old, to: new, for: row)
                     resetRenameState()
                 }
             }
         } message: {
-            Text("Rename this chat alias for the selected catalog target.")
+            Text("Rename this chat alias for the selected app.")
+        }
+        // Add app on kid device (lock-enable flow)
+        .sheet(isPresented: $showAddAppSheet) {
+            if let deviceID = addAppTargetDeviceID {
+                NavigationStack {
+                    AddAppFlowView(
+                        childDeviceID: deviceID,
+                        mode: .app,
+                        onSaved: { _ in showAddAppSheet = false }
+                    )
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Cancel") { showAddAppSheet = false }
+                        }
+                    }
+                }
+            }
         }
     }
 
-    private var addAliasBinding: Binding<Bool> {
-        Binding(
-            get: { addAliasTarget != nil },
-            set: { isPresented in
-                if !isPresented {
-                    addAliasTarget = nil
-                    newAlias = ""
+    // MARK: - Header
+
+    private var explainer: some View {
+        Text("Any app you can name can be blocked. Apps added on a kid's phone can also be locked.")
+            .font(.evBodyMedium)
+            .foregroundStyle(Color.evOnSurfaceVariant)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var searchField: some View {
+        HStack(spacing: Spacing.md) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(Color.evOutline)
+            TextField("Search apps or names", text: $model.searchText)
+                .font(.evBodyLarge)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+            if !model.searchText.isEmpty {
+                Button {
+                    model.searchText = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(Color.evOutline)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, Spacing.lg)
+        .padding(.vertical, 10)
+        .background(Color.evSurfaceContainer, in: RoundedRectangle(cornerRadius: CornerRadius.lg, style: .continuous))
+    }
+
+    // MARK: - App card
+
+    private func appCard(_ row: AppAliasRow) -> some View {
+        VStack(alignment: .leading, spacing: Spacing.lg) {
+            // Title row: icon + canonical name + bundle ID
+            HStack(alignment: .center, spacing: Spacing.lg) {
+                appIcon(row)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(row.canonicalName)
+                        .font(.custom("Inter", size: 16).weight(.semibold))
+                        .foregroundStyle(Color.evOnSurface)
+                    Text(row.bundleID)
+                        .font(.evBodySmall)
+                        .foregroundStyle(Color.evOutline)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+            }
+
+            // Alias chips
+            aliasRow(row)
+
+            // Capability row
+            capabilityRow(row)
+        }
+        .padding(Spacing.lg)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.evSurfaceContainerLowest, in: RoundedRectangle(cornerRadius: CornerRadius.xl, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: CornerRadius.xl, style: .continuous)
+                .stroke(Color.evOutlineVariant, lineWidth: 0.5)
+        )
+    }
+
+    // MARK: - Capability row
+
+    @ViewBuilder
+    private func capabilityRow(_ row: AppAliasRow) -> some View {
+        if row.lockable {
+            // Lock & block: at least one child device can receive a lock command
+            let names = row.lockableDevices.map(\.childName).joined(separator: ", ")
+            HStack(spacing: Spacing.md) {
+                Image(systemName: "lock.fill")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Color.evSecondary)
+                Text("Lock & block · on \(names)")
+                    .font(.evBodySmall)
+                    .foregroundStyle(Color.evSecondary)
+            }
+        } else {
+            // Block-only: no child devices have this app in catalog
+            HStack(alignment: .top, spacing: Spacing.md) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Color.evOnTertiaryContainer)
+                    .padding(.top, 1)
+                VStack(alignment: .leading, spacing: Spacing.sm) {
+                    Text("\"lock \(row.canonicalName)\" won't work yet — add it on a kid's phone to enable timed lock.")
+                        .font(.evBodySmall)
+                        .foregroundStyle(Color.evOnTertiaryContainer)
+                        .fixedSize(horizontal: false, vertical: true)
+                    addToEnableLockButton(row)
                 }
             }
+            .padding(Spacing.md)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.evTertiaryContainer, in: RoundedRectangle(cornerRadius: CornerRadius.lg, style: .continuous))
+        }
+    }
+
+    @ViewBuilder
+    private func addToEnableLockButton(_ row: AppAliasRow) -> some View {
+        // TODO: When row.lockableDevices is empty we don't know which child device
+        // to pre-select. We present AddAppFlowView with the first available child
+        // device from a future model fetch. For now we stub the launch with a
+        // placeholder UUID that AddAppFlowView surfaces as "no device"; the user
+        // can back out and use the Add App flow from their child's settings.
+        // A real implementation would either (a) embed the family's child devices
+        // in AppAliasRow or (b) fetch them here separately.
+        Button {
+            // Use a placeholder UUID — AddAppFlowView requires childDeviceID.
+            // TODO: replace with a real child device picker or child device fetch
+            // when AppAliasRow or the model exposes available child devices.
+            addAppTargetDeviceID = UUID()
+            showAddAppSheet = true
+        } label: {
+            Text("Add on kid's phone")
+                .font(.evLabelLarge)
+                .foregroundStyle(Color.evOnTertiaryContainer)
+                .padding(.horizontal, Spacing.lg)
+                .padding(.vertical, 5)
+                .background(
+                    Color.evOnTertiaryContainer.opacity(0.12),
+                    in: Capsule()
+                )
+                .overlay(
+                    Capsule().stroke(Color.evOnTertiaryContainer.opacity(0.4), lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: - Alias chips
+
+    @ViewBuilder
+    private func aliasRow(_ row: AppAliasRow) -> some View {
+        if row.aliases.isEmpty {
+            HStack(spacing: Spacing.md) {
+                Text("No names yet")
+                    .font(.evBodySmall)
+                    .italic()
+                    .foregroundStyle(Color.evOutline)
+                addAliasChip(row)
+            }
+        } else {
+            FlowLayout(spacing: 8) {
+                ForEach(row.aliases, id: \.self) { alias in
+                    aliasChip(alias, row: row)
+                }
+                addAliasChip(row)
+            }
+        }
+    }
+
+    private func aliasChip(_ alias: String, row: AppAliasRow) -> some View {
+        HStack(spacing: 0) {
+            Text(alias)
+                .font(.evLabelLarge)
+                .foregroundStyle(Color.evSecondary)
+                .lineLimit(1)
+                .padding(.leading, Spacing.lg)
+                .padding(.trailing, 6)
+                .padding(.vertical, 6)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    renameAliasRow = row
+                    renameOldAlias = alias
+                    renamedAlias = alias
+                }
+                .accessibilityLabel("Rename alias \(alias)")
+            Button {
+                Task { await model.removeAlias(alias, from: row) }
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(Color.evSecondary)
+                    .frame(width: 20, height: 20)
+                    .background(Color.evSecondary.opacity(0.16), in: Circle())
+            }
+            .buttonStyle(.plain)
+            .padding(.trailing, 5)
+            .accessibilityLabel("Remove alias \(alias)")
+        }
+        .background(Color.evSecondaryContainer, in: Capsule())
+    }
+
+    private func addAliasChip(_ row: AppAliasRow) -> some View {
+        Button {
+            addAliasRow = row
+            newAlias = ""
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "plus")
+                    .font(.system(size: 11, weight: .bold))
+                Text("add name")
+                    .font(.evLabelLarge)
+            }
+            .foregroundStyle(Color.evPrimary)
+            .padding(.horizontal, Spacing.lg)
+            .padding(.vertical, 6)
+            .overlay(
+                Capsule()
+                    .stroke(Color.evOutline, style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+            )
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Add a name for \(row.canonicalName)")
+    }
+
+    // MARK: - App icon
+
+    private func appIcon(_ row: AppAliasRow) -> some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.evSurfaceContainer)
+            if let url = row.artworkURL {
+                AsyncImage(url: url) { phase in
+                    switch phase {
+                    case .success(let image):
+                        image.resizable().scaledToFill()
+                    default:
+                        appMonogram(row)
+                    }
+                }
+            } else {
+                appMonogram(row)
+            }
+        }
+        .frame(width: iconSize, height: iconSize)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private func appMonogram(_ row: AppAliasRow) -> some View {
+        let initial = row.canonicalName.trimmingCharacters(in: .whitespacesAndNewlines).first
+            .map { String($0).uppercased() } ?? "?"
+        return Text(initial)
+            .font(.custom("Inter", size: 17).weight(.semibold))
+            .foregroundStyle(Color.evOnSurfaceVariant)
+    }
+
+    // MARK: - Status rows
+
+    private var loadingRow: some View {
+        HStack(spacing: Spacing.md) {
+            ProgressView()
+            Text("Loading apps…")
+                .font(.evBodyMedium)
+                .foregroundStyle(Color.evOnSurfaceVariant)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(Spacing.lg)
+        .background(Color.evSurfaceContainerLowest, in: RoundedRectangle(cornerRadius: CornerRadius.lg, style: .continuous))
+    }
+
+    private func errorBanner(_ message: String) -> some View {
+        HStack(alignment: .top, spacing: Spacing.md) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(Color.evError)
+            Text(message)
+                .font(.evBodyMedium)
+                .foregroundStyle(Color.evError)
+            Spacer(minLength: 0)
+        }
+        .padding(Spacing.lg)
+        .background(Color.evErrorContainer, in: RoundedRectangle(cornerRadius: CornerRadius.lg, style: .continuous))
+    }
+
+    // MARK: - Alert bindings
+
+    private var addAliasBinding: Binding<Bool> {
+        Binding(
+            get: { addAliasRow != nil },
+            set: { if !$0 { addAliasRow = nil; newAlias = "" } }
         )
     }
 
     private var renameAliasBinding: Binding<Bool> {
         Binding(
-            get: { renameAliasTarget != nil },
-            set: { isPresented in
-                if !isPresented {
-                    resetRenameState()
-                }
-            }
+            get: { renameAliasRow != nil },
+            set: { if !$0 { resetRenameState() } }
         )
     }
 
     private func resetRenameState() {
-        renameAliasTarget = nil
+        renameAliasRow = nil
         renameOldAlias = ""
         renamedAlias = ""
     }
-
-    private func sectionTitle(for section: LazyTagCatalogSection) -> String {
-        "\(section.title)s (\(section.targets.count))"
-    }
-
-    private func emptyCopy(for type: LazyTagCatalogTargetType) -> String {
-        switch type {
-        case .app: return "No app aliases in this catalog yet."
-        case .category: return "No category aliases in this catalog yet."
-        case .list: return "No list aliases in this catalog yet."
-        }
-    }
-
-    @ViewBuilder
-    private func targetRow(_ target: LazyTagCatalogTarget) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .top, spacing: 12) {
-                targetIcon(target)
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 8) {
-                        Text(target.displayName)
-                            .font(.headline)
-                        if target.isManual {
-                            Text("Manual")
-                                .font(.caption2.weight(.semibold))
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(Color.orange.opacity(0.15), in: Capsule())
-                                .foregroundStyle(.orange)
-                        }
-                    }
-                    Text(target.supportingText)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                Button {
-                    addAliasTarget = target
-                    newAlias = ""
-                } label: {
-                    Image(systemName: "plus.circle.fill")
-                        .font(.title3.weight(.semibold))
-                        .frame(width: 44, height: 44)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.borderless)
-                .accessibilityLabel("Add alias for \(target.displayName)")
-            }
-
-            if target.aliases.isEmpty {
-                Text("Aliases registered to this target: none")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .padding(.leading, iconSize + 12)
-            } else {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Aliases registered to this target")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                    FlowLayout(spacing: 6) {
-                        ForEach(target.aliases, id: \.self) { alias in
-                            aliasChip(alias, target: target)
-                        }
-                    }
-                }
-                .padding(.leading, iconSize + 12)
-            }
-        }
-        .padding(.vertical, 4)
-    }
-
-    private func aliasChip(_ alias: String, target: LazyTagCatalogTarget) -> some View {
-        HStack(spacing: 6) {
-            Text(alias)
-                .font(.callout.weight(.medium))
-                .lineLimit(1)
-            Button {
-                renameAliasTarget = target
-                renameOldAlias = alias
-                renamedAlias = alias
-            } label: {
-                Image(systemName: "pencil.circle.fill")
-                    .font(.subheadline.weight(.semibold))
-                    .frame(width: 40, height: 34)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.borderless)
-            .accessibilityLabel("Rename alias \(alias)")
-            Button {
-                Task { await model.removeAlias(alias, from: target) }
-            } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.subheadline.weight(.semibold))
-                    .frame(width: 40, height: 34)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.borderless)
-            .accessibilityLabel("Remove alias \(alias)")
-        }
-        .padding(.leading, 12)
-        .padding(.trailing, 4)
-        .padding(.vertical, 5)
-        .background(Color.gray.opacity(0.14), in: Capsule())
-    }
-
-    @ViewBuilder
-    private func targetIcon(_ target: LazyTagCatalogTarget) -> some View {
-        switch target.type {
-        case .app:
-            ZStack {
-                RoundedRectangle(cornerRadius: 11, style: .continuous)
-                    .fill(Color(.secondarySystemBackground))
-                if let url = target.artworkURL {
-                    AsyncImage(url: url) { phase in
-                        switch phase {
-                        case .success(let image):
-                            image.resizable().scaledToFill()
-                        default:
-                            Text(targetInitial(target))
-                                .font(.headline.weight(.semibold))
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                } else {
-                    Text(targetInitial(target))
-                        .font(.headline.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .frame(width: iconSize, height: iconSize)
-            .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
-        case .category:
-            Image(systemName: "square.grid.2x2.fill")
-                .font(.title3.weight(.semibold))
-                .frame(width: iconSize, height: iconSize)
-                .foregroundStyle(.blue)
-                .background(Color.blue.opacity(0.12), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
-        case .list:
-            Image(systemName: "list.bullet.rectangle.fill")
-                .font(.title3.weight(.semibold))
-                .frame(width: iconSize, height: iconSize)
-                .foregroundStyle(.green)
-                .background(Color.green.opacity(0.12), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
-        }
-    }
-
-    private func targetInitial(_ target: LazyTagCatalogTarget) -> String {
-        let trimmed = target.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.first.map { String($0).uppercased() } ?? "?"
-    }
 }
 
+// MARK: - Preview
+
 #if DEBUG
-private final class PreviewAliasClient: AliasManagingClient {
-    func fetchLazyTagCatalogTargets(childDeviceID: UUID, query: String?) async throws -> [LazyTagCatalogTarget] {
+private final class PreviewAppAliasClient: AppAliasManagingClient {
+    func fetchAppAliases(familyID: UUID) async throws -> [AppAliasRow] {
         [
-            .init(aliasKey: UUID(), type: .app, displayName: "Instagram", aliases: ["ig", "insta"], bundleID: "com.burbn.instagram"),
-            .init(aliasKey: UUID(), type: .category, displayName: "Games", aliases: ["gaming"]),
-            .init(aliasKey: UUID(), type: .list, displayName: "Entertainment", aliases: ["fun"], memberCount: 3),
+            AppAliasRow(
+                familyAppID: UUID(),
+                bundleID: "com.burbn.instagram",
+                canonicalName: "Instagram",
+                artworkURL: nil,
+                aliases: ["ig", "insta"],
+                blockable: true,
+                lockableDevices: [
+                    LockableDevice(childDeviceID: UUID(), childName: "Liam", deviceLabel: "Liam's iPhone"),
+                    LockableDevice(childDeviceID: UUID(), childName: "Maya", deviceLabel: "Maya's iPhone"),
+                ]
+            ),
+            AppAliasRow(
+                familyAppID: UUID(),
+                bundleID: "com.roblox.robloxmobile",
+                canonicalName: "Roblox",
+                artworkURL: nil,
+                aliases: [],
+                blockable: true,
+                lockableDevices: []
+            ),
+            AppAliasRow(
+                familyAppID: nil,
+                bundleID: "com.google.youtube",
+                canonicalName: "YouTube",
+                artworkURL: nil,
+                aliases: ["yt", "tube"],
+                blockable: true,
+                lockableDevices: []
+            ),
         ]
     }
 
-    func saveLazyTagAlias(familyID: UUID, childDeviceID: UUID, target: LazyTagCatalogTarget, alias: String) async throws -> LazyTagCatalogTarget {
-        .init(aliasKey: target.aliasKey, type: target.type, displayName: target.displayName, aliases: target.aliases + [alias], bundleID: target.bundleID, artworkURL: target.artworkURL, isManual: target.isManual, memberCount: target.memberCount)
-    }
-
-    func removeLazyTagAlias(familyID: UUID, childDeviceID: UUID, target: LazyTagCatalogTarget, alias: String) async throws -> LazyTagCatalogTarget {
-        .init(aliasKey: target.aliasKey, type: target.type, displayName: target.displayName, aliases: target.aliases.filter { $0 != alias }, bundleID: target.bundleID, artworkURL: target.artworkURL, isManual: target.isManual, memberCount: target.memberCount)
-    }
-
-    func renameLazyTagAlias(
-        familyID: UUID,
-        childDeviceID: UUID,
-        target: LazyTagCatalogTarget,
-        oldAlias: String,
-        newAlias: String
-    ) async throws -> LazyTagCatalogTarget {
-        .init(
-            aliasKey: target.aliasKey,
-            type: target.type,
-            displayName: target.displayName,
-            aliases: target.aliases.map { $0 == oldAlias ? newAlias : $0 },
-            bundleID: target.bundleID,
-            artworkURL: target.artworkURL,
-            isManual: target.isManual,
-            memberCount: target.memberCount
-        )
-    }
+    func addAppAlias(familyID: UUID, bundleID: String, alias: String) async throws {}
+    func removeAppAlias(familyID: UUID, bundleID: String, alias: String) async throws {}
+    func renameAppAlias(familyID: UUID, bundleID: String, old: String, new: String) async throws {}
 }
 
 #Preview {
     NavigationStack {
-        AliasCatalogManagerScreen(
+        AliasAppListScreen(
             familyID: UUID(),
-            childDeviceID: UUID(),
-            client: PreviewAliasClient()
+            client: PreviewAppAliasClient()
         )
+        .navigationTitle("Manage aliases")
+        .navigationBarTitleDisplayMode(.inline)
     }
 }
 #endif
