@@ -77,11 +77,11 @@ struct BigKidHomeView: View {
                     .frame(width: 44, height: 44)
 
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("LOCKED APPS")
+                        Text("PARENT")
                             .font(.system(size: 11, weight: .heavy))
                             .tracking(1)
                             .foregroundStyle(EvlinKidColors.green700)
-                        Text("Manage apps and lists")
+                        Text("Parent controls")
                             .font(.system(size: 16, weight: .heavy))
                             .tracking(EvlinKidMetrics.Letter.body)
                             .foregroundStyle(EvlinKidColors.ink)

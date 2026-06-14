@@ -1,4 +1,5 @@
 import SwiftUI
+import ManagedSettings
 
 enum ReflectionNav: Hashable {
     case locked
@@ -53,13 +54,21 @@ struct BigKidRootView: View {
     @State private var bypassNav: BigKidTask?
     @State private var reflectionPath = NavigationPath()
     @State private var showLockListGate = false
-    @State private var showLockListManager = false
+    @State private var showParentControls = false
 
     #if DEBUG
     @State private var debugScenario: BigKidDebugScenario = .live
     @State private var showCatalogDebug: Bool = false
     @State private var showCommandDeliveryDebug: Bool = false
     #endif
+
+    private var commandDeliveryDebugAction: (() -> Void)? {
+        #if DEBUG
+        return { showCommandDeliveryDebug = true }
+        #else
+        return nil
+        #endif
+    }
 
     var body: some View {
         Group {
@@ -68,7 +77,7 @@ struct BigKidRootView: View {
                 BigKidHomeView(
                     onTaskTap: { task in taskNav = task },
                     onManageApps: { showLockListGate = true },
-                    onCommandDelivery: { showCommandDeliveryDebug = true }
+                    onCommandDelivery: commandDeliveryDebugAction
                 )
             case .homeReflectionA:
                 NavigationStack(path: $reflectionPath) {
@@ -254,41 +263,60 @@ struct BigKidRootView: View {
             NavigationStack { CommandDeliveryDiagnosticsView() }
         }
         #endif
-        .sheet(isPresented: $showLockListGate) {
+        .fullScreenCover(isPresented: $showLockListGate) {
             EvlinPINGateView(
                 store: .shared,
                 onUnlocked: {
                     showLockListGate = false
-                    showLockListManager = true
+                    showParentControls = true
                 },
-                onCancel: {
-                    showLockListGate = false
-                }
+                onCancel: { showLockListGate = false }
             )
         }
-        .sheet(isPresented: $showLockListManager) {
-            if let familyUUID = UUID(uuidString: familyID) {
-                NavigationStack {
-                    LockListManagerView(
-                        familyID: familyUUID,
-                        childDeviceID: childDeviceID
-                    )
-                    .environmentObject(apiClient)
-                }
+        .fullScreenCover(isPresented: $showParentControls) {
+            if let famUUID = UUID(uuidString: familyID) {
+                ParentControlsView(
+                    familyID: famUUID,
+                    childDeviceID: childDeviceID,
+                    onSignOut: {
+                        showParentControls = false
+                        Task { await performKidSignOut() }
+                    },
+                    onClose: { showParentControls = false }
+                )
+                .environmentObject(apiClient)
             } else {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("Pair this device first")
-                        .font(.headline)
-                    Text("Evlin needs a family id before it can sync the lock list.")
-                        .foregroundStyle(.secondary)
-                    Button("Close") {
-                        showLockListManager = false
-                    }
-                    .buttonStyle(.borderedProminent)
+                VStack(spacing: 16) {
+                    Text("Pair this device first.")
+                    Button("Close") { showParentControls = false }
                 }
                 .padding()
             }
         }
+    }
+
+    /// Local-reset sign out: release enforcement → stop polling → clear local
+    /// state → route back to onboarding. No backend call. MUST be async because
+    /// ActiveLockStore is an actor (await), and awaiting first preserves the order.
+    @MainActor
+    private func performKidSignOut() async {
+        _ = await ActiveLockStore.shared.unshieldAll()
+        _ = await ActiveLockStore.shared.unblockAll()
+        ScreenTimeManager.shared.setDeletionProtectionEnabled(false)
+        ManagedSettingsStore().clearAllSettings()
+
+        CommandPoller.shared.stop()
+        poller.stop()
+
+        let d = UserDefaults.standard
+        for key in ["appMode", "evlin.childDeviceID", "evlin.familyID",
+                    "evlin.childProfileName", "evlin.childBirthYear", "evlin.childGender",
+                    "evlin.childProfileID"] {
+            d.removeObject(forKey: key)
+        }
+        LocalAliasStore.shared.removeAllAliases()
+        EvlinPINStore.shared.clear()
+        d.set(false, forKey: "onboardingComplete")
     }
 
     /// Defensive backstop for command delivery: whenever the big-kid root is
