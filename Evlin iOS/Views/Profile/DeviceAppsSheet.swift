@@ -76,10 +76,12 @@ struct DeviceAppsSheet: View {
             Task {
                 do {
                     let targets = try await apiClient.fetchLazyTagCatalogTargets(childDeviceID: cid)
-                    apps = targets.filter { $0.type == .app }.map { t in
+                    let appTargets = targets.filter { $0.type == .app }
+                    // 1) Render immediately: prettified names + any backend artwork.
+                    apps = appTargets.map { t in
                         DeviceAppItem(
                             id: t.aliasKey.uuidString,
-                            name: t.displayName,
+                            name: NameWithIcon.displayName(t.displayName),   // fixes casing (ig→Instagram, etc.)
                             iconSystemName: "app.fill",
                             brandColor: Color.evPrimary,
                             bgColor: Color.evPrimaryContainer,
@@ -89,10 +91,20 @@ struct DeviceAppsSheet: View {
                             artworkURL: t.artworkURL
                         )
                     }
+                    isLoading = false
+                    // 2) Backfill real icons: when the backend gave no artwork URL,
+                    //    resolve the App Store icon by name (cached) and patch it in.
+                    for t in appTargets where t.artworkURL == nil {
+                        let pretty = NameWithIcon.displayName(t.displayName)
+                        if let url = await AppArtworkResolver.shared.artwork(forName: pretty),
+                           let i = apps.firstIndex(where: { $0.id == t.aliasKey.uuidString }) {
+                            apps[i].artworkURL = url
+                        }
+                    }
                 } catch {
                     loadFailed = true
+                    isLoading = false
                 }
-                isLoading = false
             }
         }
     }
