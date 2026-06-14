@@ -69,7 +69,7 @@ struct ModeSelectStep: View {
 
             selectionCard(
                 title: "Single Device Mode",
-                description: "Testing on just this phone? You'll set up both sides — the parent and the kid — then a floating P/K button lets you switch roles to try sending a lock, getting notifications, and chatting.",
+                description: "Test on a single phone — you'll play both the parent and the kid.",
                 icon: "iphone"
             ) { onSingleDevice() }
             .padding(.horizontal, Spacing.xl)
