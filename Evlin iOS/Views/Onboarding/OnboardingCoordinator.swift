@@ -152,11 +152,11 @@ struct OnboardingCoordinator: View {
         auth?.account?.familyID != nil
     }
 
-    /// True throughout Single Device Mode onboarding (flag set, not yet finished). Drives the
-    /// interleave that switches THIS device between kid and parent at each phase boundary.
-    private var singleDevice: Bool {
-        SingleDeviceSession.shared.isEnabled && !onboardingComplete
-    }
+    /// True only AFTER the tester picks "Single Device Mode" (set in `startSingleDeviceFlow`).
+    /// Deliberately NOT derived from the persisted `EvlinDemoShortcuts` flag — that flag survives
+    /// across runs to drive the home-screen float, so reading it here would light up the role pill
+    /// + interleave before the card is even tapped. Drives the role pill + every interleave branch.
+    @State private var singleDevice = false
 
     /// Single Device Mode top banner — tells the tester which role this phone is currently
     /// playing (the P/K float only appears AFTER onboarding finishes, so during the interleave
@@ -185,6 +185,7 @@ struct OnboardingCoordinator: View {
     /// kid chain. The interleave (kid create → parent pair → kid permit → parent payoff) is
     /// driven by `singleDevice` branches at each boundary below — no new screens.
     private func startSingleDeviceFlow() {
+        singleDevice = true
         SingleDeviceSession.shared.enable()
         useV2Flow = true
         kidName = ""
@@ -341,6 +342,11 @@ struct OnboardingCoordinator: View {
             case .modeSelect:
                 ModeSelectStep(
                     onSelect: { mode in
+                        // Picking a REAL parent/kid setup → this is not single-device. Drop any
+                        // leftover single-device flag from a prior demo run so the home-screen
+                        // float doesn't leak into a normal device.
+                        singleDevice = false
+                        EvlinDemoShortcuts.clearFlag()
                         // Onboarding v2 (scaffold) is the DEFAULT next-path.
                         // Each role enters its v2 sequence (spec §7.1 / §7.2).
                         if useV2Flow {
