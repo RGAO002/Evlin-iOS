@@ -1,0 +1,153 @@
+import SwiftUI
+import UserNotifications
+
+/// PIN-gated "Parent controls" hub on the kid device. Drills into the existing
+/// LockListManagerView, exposes Screen Time / Notifications / delete-protection /
+/// read-only device info, and a local-reset Sign out. No backend calls.
+struct ParentControlsView: View {
+    let familyID: UUID
+    let childDeviceID: UUID
+    /// Performs the local-reset teardown + dismiss. Owned by the caller.
+    let onSignOut: () -> Void
+    let onClose: () -> Void
+
+    @ObservedObject private var screenTime = ScreenTimeManager.shared
+    @State private var notifAuthorized = false
+    @State private var showLockList = false
+    @State private var showSignOutConfirm = false
+
+    private var deletionBinding: Binding<Bool> {
+        Binding(
+            get: { screenTime.deletionProtectionEnabled },
+            set: { screenTime.setDeletionProtectionEnabled($0) }
+        )
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    Button { showLockList = true } label: {
+                        rowLabel(icon: "square.grid.2x2.fill", title: "Locked apps & lists",
+                                 subtitle: "Choose what Evlin can lock", trailingChevron: true)
+                    }
+                }
+
+                Section("Permissions") {
+                    HStack {
+                        rowLabel(icon: "hourglass", title: "Screen Time access")
+                        Spacer()
+                        if screenTime.isAuthorized {
+                            statusPill("On")
+                        } else {
+                            Button("Turn on") { Task { await screenTime.requestScreenTimeAuthorization() } }
+                                .buttonStyle(.borderedProminent).controlSize(.small)
+                        }
+                    }
+                    HStack {
+                        rowLabel(icon: "bell.fill", title: "Notifications")
+                        Spacer()
+                        if notifAuthorized {
+                            statusPill("On")
+                        } else {
+                            Button("Turn on") { requestNotifications() }
+                                .buttonStyle(.borderedProminent).controlSize(.small)
+                        }
+                    }
+                }
+
+                Section("Protection") {
+                    Toggle(isOn: deletionBinding) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("Stop deleting Evlin").font(.system(size: 15))
+                            Text("This also stops deleting any other app on this phone.")
+                                .font(.system(size: 12)).foregroundStyle(.secondary)
+                            if !screenTime.isAuthorized {
+                                Text("Turn on Screen Time access first.")
+                                    .font(.system(size: 12)).foregroundStyle(.orange)
+                            }
+                        }
+                    }
+                    .disabled(!screenTime.isAuthorized)
+                }
+
+                Section("Device") {
+                    LabeledContent("Paired", value: "Yes")
+                    LabeledContent("Device ID", value: String(childDeviceID.uuidString.prefix(8)) + "…")
+                        .textSelection(.enabled)
+                }
+
+                Section {
+                    Button(role: .destructive) { showSignOutConfirm = true } label: {
+                        Text("Sign out").frame(maxWidth: .infinity)
+                    }
+                }
+            }
+            .navigationTitle("Parent controls")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") { onClose() }
+                }
+            }
+            .task { await refreshNotifStatus() }
+            .fullScreenCover(isPresented: $showLockList) {
+                NavigationStack {
+                    LockListManagerView(familyID: familyID, childDeviceID: childDeviceID, mode: .settings)
+                        .toolbar {
+                            ToolbarItem(placement: .cancellationAction) {
+                                Button("Done") { showLockList = false }
+                            }
+                        }
+                }
+            }
+            .alert("Sign out this device?", isPresented: $showSignOutConfirm) {
+                Button("Cancel", role: .cancel) {}
+                Button("Sign out", role: .destructive) { onSignOut() }
+            } message: {
+                Text("It resets this phone back to setup. Your family link isn't removed — a parent can remove this child from the parent app if needed.")
+            }
+        }
+    }
+
+    private func rowLabel(icon: String, title: String, subtitle: String? = nil, trailingChevron: Bool = false) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon).font(.system(size: 18)).frame(width: 26)
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.system(size: 15)).foregroundStyle(.primary)
+                if let subtitle { Text(subtitle).font(.system(size: 12)).foregroundStyle(.secondary) }
+            }
+            if trailingChevron { Spacer(); Image(systemName: "chevron.right").font(.system(size: 13)).foregroundStyle(.tertiary) }
+        }
+    }
+
+    private func statusPill(_ text: String) -> some View {
+        Text(text).font(.system(size: 12, weight: .semibold))
+            .padding(.horizontal, 10).padding(.vertical, 3)
+            .background(Capsule().fill(Color.green.opacity(0.15)))
+            .foregroundStyle(.green)
+    }
+
+    private func refreshNotifStatus() async {
+        let settings = await UNUserNotificationCenter.current().notificationSettings()
+        notifAuthorized = settings.authorizationStatus == .authorized
+    }
+
+    private func requestNotifications() {
+        UNUserNotificationCenter.current().getNotificationSettings { settings in
+            switch settings.authorizationStatus {
+            case .notDetermined:
+                UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in
+                    Task { await refreshNotifStatus() }
+                }
+            case .denied:
+                DispatchQueue.main.async {
+                    if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
+                }
+            default:
+                Task { await refreshNotifStatus() }
+            }
+        }
+    }
+}
