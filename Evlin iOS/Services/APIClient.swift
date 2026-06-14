@@ -2113,13 +2113,22 @@ extension APIClient {
     /// ("std") the parent overrides at /family/pair time. Device hardware fields
     /// (§1.7) are reported from `DeviceInfoProvider`.
     @discardableResult
+    /// Resolve the install-id sent to /family/create. Single Device Mode passes a per-run
+    /// override (a fresh UUID) so a reset+rerun creates a brand-new child row instead of the
+    /// idempotent one; everyone else uses the stable per-install id.
+    static func resolveInstallID(_ override: String?) -> String {
+        let o = (override ?? "").trimmingCharacters(in: .whitespaces)
+        return o.isEmpty ? clientInstallID : o
+    }
+
     func createFamily(
         childDeviceLabel: String,
         protectionMode: String = "std",
         childDisplayName: String? = nil,
         childBirthYear: Int? = nil,
         childGender: String? = nil,
-        resetChildAvatar: Bool = false
+        resetChildAvatar: Bool = false,
+        clientInstallIDOverride: String? = nil
     ) async throws -> CreateFamilyResponseDTO {
         let url = URL(string: "\(baseURL)/family/create")!
         var req = URLRequest(url: url)
@@ -2135,7 +2144,8 @@ extension APIClient {
             "platform": info.platform,
             "os_version": info.os_version,
             // F7: stable idempotency key so a timed-out retry reuses the same family.
-            "client_install_id": Self.clientInstallID,
+            // Single Device Mode overrides it per-run (fresh family each demo).
+            "client_install_id": Self.resolveInstallID(clientInstallIDOverride),
         ]
         // F6: persist the kid-entered profile as a ChildProfile server-side so the
         // parent's Home shows the real child after pairing.
