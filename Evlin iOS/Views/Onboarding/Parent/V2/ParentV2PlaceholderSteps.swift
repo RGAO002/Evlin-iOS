@@ -498,7 +498,10 @@ struct ParentPairScanStep: View {
 
                     // The REAL path: type the kid's 6-digit code.
                     OnboardingV2CodeField(code: $code)
-                        .onChange(of: code) { _, newValue in
+                        // `initial: true` so a PREFILLED code (Single Device Mode seeds the kid's
+                        // code) auto-submits on appear — otherwise onChange never fires for the
+                        // seeded value and the tester is stuck with nothing happening.
+                        .onChange(of: code, initial: true) { _, newValue in
                             let digits = newValue.filter(\.isNumber)
                             if digits != newValue { code = digits }
                             if digits.count > 6 { code = String(digits.prefix(6)) }
