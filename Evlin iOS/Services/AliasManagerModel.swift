@@ -12,6 +12,7 @@ import Combine
 @MainActor
 final class AliasManagerModel: ObservableObject {
     @Published private(set) var rows: [AppAliasRow] = []
+    @Published private(set) var childDevices: [ParentChildDeviceSummaryDTO] = []
     @Published private(set) var isLoading = false
     @Published var errorMessage: String?
     @Published var searchText = ""
@@ -48,6 +49,10 @@ final class AliasManagerModel: ObservableObject {
         } catch {
             errorMessage = error.localizedDescription
         }
+        // Best-effort: fetch child devices so the view can pick a real device ID
+        // when presenting AddAppFlowView for block-only apps. A failure here must
+        // NOT disrupt the alias list — alias rows remain visible regardless.
+        childDevices = (try? await client.fetchParentChildDevices(familyID: familyID)) ?? []
     }
 
     // MARK: - Mutations (server-confirmed; re-fetch on success)

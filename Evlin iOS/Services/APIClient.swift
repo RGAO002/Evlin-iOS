@@ -2325,6 +2325,9 @@ protocol AppAliasManagingClient {
     /// and the child devices that can receive a lock command for each.
     func fetchAppAliases(familyID: UUID) async throws -> [AppAliasRow]
 
+    /// GET /parent/child-devices?family_id= — all child devices in the family.
+    func fetchParentChildDevices(familyID: UUID) async throws -> [ParentChildDeviceSummaryDTO]
+
     /// POST /parent/app-aliases/{bundleID}/alias — add an alias to an app.
     func addAppAlias(familyID: UUID, bundleID: String, alias: String) async throws
 

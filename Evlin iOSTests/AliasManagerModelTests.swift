@@ -66,6 +66,35 @@ final class AliasManagerModelTests: XCTestCase {
         // errors. See the mutation tests below for that behavior.
     }
 
+    // MARK: - childDevices
+
+    func test_load_populatesChildDevices() async {
+        let device1 = makeChildDevice(displayName: "Liam's iPhone")
+        let device2 = makeChildDevice(displayName: "Maya's iPhone")
+        let client = FakeAppAliasClient(rows: [], childDevices: [device1, device2])
+        let model = AliasManagerModel(familyID: familyID, client: client)
+
+        await model.load()
+
+        XCTAssertEqual(model.childDevices.count, 2)
+        XCTAssertEqual(model.childDevices.map(\.displayName), ["Liam's iPhone", "Maya's iPhone"])
+    }
+
+    func test_load_childDeviceFetchFailure_doesNotAffectRows() async {
+        let rows = [makeRow(bundleID: "com.burbn.instagram", canonicalName: "Instagram", aliases: ["ig"])]
+        let client = FakeAppAliasClient(rows: rows)
+        client.throwOnChildDeviceFetch = true
+        let model = AliasManagerModel(familyID: familyID, client: client)
+
+        await model.load()
+
+        // Alias rows must still be populated despite device fetch failure.
+        XCTAssertEqual(model.rows.count, 1)
+        XCTAssertNil(model.errorMessage)
+        // childDevices falls back to empty array on failure.
+        XCTAssertTrue(model.childDevices.isEmpty)
+    }
+
     // MARK: - addAlias
 
     func test_addAlias_callsClientAndRefetchesRow() async {
@@ -176,16 +205,19 @@ final class AliasManagerModelTests: XCTestCase {
 private final class FakeAppAliasClient: AppAliasManagingClient {
     var rows: [AppAliasRow]
     var rowsAfterMutation: [AppAliasRow]?
+    var childDeviceStubs: [ParentChildDeviceSummaryDTO]
     var throwOnFetch = false
     var throwOnMutate = false
+    var throwOnChildDeviceFetch = false
     var fetchCalls: [UUID] = []
     var addCalls: [(bundleID: String, alias: String)] = []
     var removeCalls: [(bundleID: String, alias: String)] = []
     var renameCalls: [(bundleID: String, old: String, new: String)] = []
     private var mutationCount = 0
 
-    init(rows: [AppAliasRow]) {
+    init(rows: [AppAliasRow], childDevices: [ParentChildDeviceSummaryDTO] = []) {
         self.rows = rows
+        self.childDeviceStubs = childDevices
     }
 
     func fetchAppAliases(familyID: UUID) async throws -> [AppAliasRow] {
@@ -196,6 +228,11 @@ private final class FakeAppAliasClient: AppAliasManagingClient {
             return mutated
         }
         return rows
+    }
+
+    func fetchParentChildDevices(familyID: UUID) async throws -> [ParentChildDeviceSummaryDTO] {
+        if throwOnChildDeviceFetch { throw APIError.serverError(500) }
+        return childDeviceStubs
     }
 
     func addAppAlias(familyID: UUID, bundleID: String, alias: String) async throws {
@@ -215,4 +252,15 @@ private final class FakeAppAliasClient: AppAliasManagingClient {
         renameCalls.append((bundleID: bundleID, old: old, new: new))
         mutationCount += 1
     }
+}
+
+// MARK: - Helpers
+
+private func makeChildDevice(id: UUID = UUID(), displayName: String) -> ParentChildDeviceSummaryDTO {
+    let json = """
+    {"child_device_id":"\(id.uuidString)","display_name":"\(displayName)",
+     "child_auth_granted":true,"catalog_app_count":0,
+     "catalog_category_count":0,"catalog_list_count":0,"catalog_preview":[]}
+    """.data(using: .utf8)!
+    return try! JSONDecoder().decode(ParentChildDeviceSummaryDTO.self, from: json)
 }

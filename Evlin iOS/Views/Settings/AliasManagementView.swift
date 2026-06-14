@@ -44,6 +44,7 @@ private struct AliasAppListScreen: View {
     @State private var renameOldAlias = ""
     @State private var renamedAlias = ""
     @State private var showAddAppSheet = false
+    @State private var showDevicePickerSheet = false
     @State private var addAppTargetDeviceID: UUID?
 
     init(familyID: UUID, client: AppAliasManagingClient) {
@@ -132,6 +133,25 @@ private struct AliasAppListScreen: View {
                         ToolbarItem(placement: .cancellationAction) {
                             Button("Cancel") { showAddAppSheet = false }
                         }
+                    }
+                }
+            }
+        }
+        // Device picker — shown when the family has more than one child device.
+        .sheet(isPresented: $showDevicePickerSheet) {
+            NavigationStack {
+                List(model.childDevices) { device in
+                    Button(device.displayName) {
+                        addAppTargetDeviceID = device.childDeviceID
+                        showDevicePickerSheet = false
+                        showAddAppSheet = true
+                    }
+                }
+                .navigationTitle("Choose kid's device")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel") { showDevicePickerSheet = false }
                     }
                 }
             }
@@ -243,34 +263,48 @@ private struct AliasAppListScreen: View {
 
     @ViewBuilder
     private func addToEnableLockButton(_ row: AppAliasRow) -> some View {
-        // TODO: When row.lockableDevices is empty we don't know which child device
-        // to pre-select. We present AddAppFlowView with the first available child
-        // device from a future model fetch. For now we stub the launch with a
-        // placeholder UUID that AddAppFlowView surfaces as "no device"; the user
-        // can back out and use the Add App flow from their child's settings.
-        // A real implementation would either (a) embed the family's child devices
-        // in AppAliasRow or (b) fetch them here separately.
-        Button {
-            // Use a placeholder UUID — AddAppFlowView requires childDeviceID.
-            // TODO: replace with a real child device picker or child device fetch
-            // when AppAliasRow or the model exposes available child devices.
-            addAppTargetDeviceID = UUID()
-            showAddAppSheet = true
-        } label: {
+        let devices = model.childDevices
+        if devices.isEmpty {
+            // No kid devices paired — disable the button and surface a hint.
             Text("Add on kid's phone")
                 .font(.evLabelLarge)
-                .foregroundStyle(Color.evOnTertiaryContainer)
+                .foregroundStyle(Color.evOnTertiaryContainer.opacity(0.4))
                 .padding(.horizontal, Spacing.lg)
                 .padding(.vertical, 5)
                 .background(
-                    Color.evOnTertiaryContainer.opacity(0.12),
+                    Color.evOnTertiaryContainer.opacity(0.06),
                     in: Capsule()
                 )
                 .overlay(
-                    Capsule().stroke(Color.evOnTertiaryContainer.opacity(0.4), lineWidth: 1)
+                    Capsule().stroke(Color.evOnTertiaryContainer.opacity(0.2), lineWidth: 1)
                 )
+                .accessibilityHint("No kid device is paired with this family.")
+        } else {
+            Button {
+                if devices.count == 1 {
+                    // Single device — go straight to AddAppFlowView.
+                    addAppTargetDeviceID = devices[0].childDeviceID
+                    showAddAppSheet = true
+                } else {
+                    // Multiple devices — show a picker first.
+                    showDevicePickerSheet = true
+                }
+            } label: {
+                Text("Add on kid's phone")
+                    .font(.evLabelLarge)
+                    .foregroundStyle(Color.evOnTertiaryContainer)
+                    .padding(.horizontal, Spacing.lg)
+                    .padding(.vertical, 5)
+                    .background(
+                        Color.evOnTertiaryContainer.opacity(0.12),
+                        in: Capsule()
+                    )
+                    .overlay(
+                        Capsule().stroke(Color.evOnTertiaryContainer.opacity(0.4), lineWidth: 1)
+                    )
+            }
+            .buttonStyle(.plain)
         }
-        .buttonStyle(.plain)
     }
 
     // MARK: - Alias chips
@@ -468,6 +502,21 @@ private final class PreviewAppAliasClient: AppAliasManagingClient {
                 blockable: true,
                 lockableDevices: []
             ),
+        ]
+    }
+
+    func fetchParentChildDevices(familyID: UUID) async throws -> [ParentChildDeviceSummaryDTO] {
+        func makeDevice(id: UUID, name: String) -> ParentChildDeviceSummaryDTO {
+            let json = """
+            {"child_device_id":"\(id.uuidString)","display_name":"\(name)",
+             "child_auth_granted":true,"catalog_app_count":0,
+             "catalog_category_count":0,"catalog_list_count":0,"catalog_preview":[]}
+            """.data(using: .utf8)!
+            return try! JSONDecoder().decode(ParentChildDeviceSummaryDTO.self, from: json)
+        }
+        return [
+            makeDevice(id: UUID(), name: "Liam's iPhone"),
+            makeDevice(id: UUID(), name: "Maya's iPhone"),
         ]
     }
 
