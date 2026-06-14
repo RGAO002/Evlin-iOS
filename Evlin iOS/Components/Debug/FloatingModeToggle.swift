@@ -28,11 +28,11 @@ struct FloatingModeToggle: View {
 
     private var label: some View {
         Button {
-            let nextMode = (appMode == "parent") ? "child" : "parent"
-            if nextMode == "child" {
-                EvlinDemoShortcuts.seedPlaceholderChildUUIDIfMissing()
-            }
-            appMode = nextMode
+            // Single Device Mode only mounts this float (see ContentView gating), and by then a
+            // REAL childDeviceID exists from onboarding — so do NOT seed the placeholder UUID
+            // (it would clobber the real id and break the lock path). Pure appMode flip; the
+            // Evlin_iOSApp `.onChange(of: appMode)` observer handles token replay + poller start/stop.
+            appMode = (appMode == "parent") ? "child" : "parent"
         } label: {
             ZStack {
                 Circle()

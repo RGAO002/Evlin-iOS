@@ -110,6 +110,15 @@ final class AuthService {
         ])
     }
 
+    /// Single Device Mode (demo): create-or-auth the per-run demo parent account. Reuses the real
+    /// `/auth/email` path; `SingleDeviceSession` mints a fresh email+password each run so a
+    /// reset+rerun never collides with the prior account (and so `/family/pair` never 409s).
+    func signInDemoAccount() async {
+        await signInWithEmail(email: SingleDeviceSession.shared.demoEmail,
+                              password: SingleDeviceSession.shared.demoPassword,
+                              fullName: "Demo Parent")
+    }
+
     private func postAuth(path: String, body: [String: Any]) async {
         lastError = nil
         let url = URL(string: "\(api.baseURL)\(path)")!
