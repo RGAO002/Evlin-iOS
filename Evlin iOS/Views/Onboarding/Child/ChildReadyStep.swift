@@ -10,6 +10,12 @@ struct ChildReadyStep: View {
 
     let onEnter: () -> Void
 
+    /// Single Device Mode: when set, "Enter Evlin" does NOT flip `onboardingComplete`
+    /// (which would unmount the whole OnboardingCoordinator at ContentView). Instead it
+    /// persists the ids and hands control back so the coordinator can switch this SAME
+    /// device to the parent payoff phase. Nil for normal kid onboarding (unchanged).
+    var onSingleDeviceContinue: (() -> Void)? = nil
+
     var body: some View {
         VStack(spacing: Spacing.section) {
             Spacer()
@@ -44,8 +50,13 @@ struct ChildReadyStep: View {
                 // synchronously — flipping the flag first would race it against
                 // stale/missing pairing keys and leave the CommandPoller stopped.
                 persistPairedIdentifiers()
-                onboardingComplete = true
-                onEnter()
+                if let cont = onSingleDeviceContinue {
+                    // Single device: stay in onboarding; coordinator flips to parent payoff.
+                    cont()
+                } else {
+                    onboardingComplete = true
+                    onEnter()
+                }
             } label: {
                 Text("Enter Evlin")
                     .font(.evLabelLarge)

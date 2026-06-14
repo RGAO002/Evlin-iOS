@@ -152,6 +152,36 @@ struct OnboardingCoordinator: View {
         auth?.account?.familyID != nil
     }
 
+    /// True throughout Single Device Mode onboarding (flag set, not yet finished). Drives the
+    /// interleave that switches THIS device between kid and parent at each phase boundary.
+    private var singleDevice: Bool {
+        SingleDeviceSession.shared.isEnabled && !onboardingComplete
+    }
+
+    /// Entry from the ModeSelect "Single Device Mode" card: enable the flag + start the real v2
+    /// kid chain. The interleave (kid create → parent pair → kid permit → parent payoff) is
+    /// driven by `singleDevice` branches at each boundary below — no new screens.
+    private func startSingleDeviceFlow() {
+        SingleDeviceSession.shared.enable()
+        useV2Flow = true
+        kidName = ""
+        appMode = "child"
+        SingleDeviceSession.shared.stage = .kidCreate
+        step = .childProfile
+    }
+
+    /// Kid finished creating the family + code → switch THIS device to the parent side, sign in
+    /// the per-run demo account (fresh each run so /family/pair never 409s), then collect the
+    /// parent profile. (Async sign-in runs while the code screen is still up; brief.)
+    private func singleDeviceEnterParentPhase() {
+        SingleDeviceSession.shared.stage = .parentPair
+        Task { @MainActor in
+            await auth?.signInDemoAccount()
+            appMode = "parent"
+            step = .parentProfile
+        }
+    }
+
     var body: some View {
         ZStack(alignment: .topTrailing) {
             stepBody
@@ -174,6 +204,9 @@ struct OnboardingCoordinator: View {
                 .onReceive(NotificationCenter.default.publisher(
                     for: .evlinSingleDeviceJumpToParent,
                 )) { _ in
+                    // Single Device Mode drives the kid→parent switch itself (childShowCode
+                    // boundary); ignore this legacy jump so the two mechanisms don't race.
+                    guard !SingleDeviceSession.shared.isEnabled else { return }
                     appMode = "parent"
                     // v2 retargets the single-device jump to the parent pair
                     // step (spec §7.4); v1 lands on the code-entry step.
@@ -325,22 +358,7 @@ struct OnboardingCoordinator: View {
                             #endif
                         }
                     },
-                    onDemoJump: { mode in
-                        EvlinDemoShortcuts.enable()
-                        switch mode {
-                        case .parent:
-                            EvlinDemoShortcuts.seedPlaceholderChildUUIDIfMissing()
-                            appMode = "parent"
-                        case .child:
-                            appMode = "child"
-                            UserDefaults.standard.set(
-                                OnboardingDemoPlaceholders.childDeviceUUIDString,
-                                forKey: "evlin.childDeviceID"
-                            )
-                        }
-                        onboardingComplete = true
-                        EvlinDemoShortcuts.scheduleBackendDemoPairingIfNeeded()
-                    }
+                    onSingleDevice: { startSingleDeviceFlow() }
                 )
 
             // MARK: - Backend choice (DEBUG only — Release skips this case)
@@ -489,10 +507,19 @@ struct OnboardingCoordinator: View {
             case .childReady:
                 ChildReadyStep(
                     childDeviceID: childDeviceID,
-                    familyID: familyID
-                ) {
-                    // onboardingComplete flipped inside ChildReadyStep; appMode already set
-                }
+                    familyID: familyID,
+                    onEnter: {
+                        // onboardingComplete flipped inside ChildReadyStep; appMode already set
+                    },
+                    // Single device: kid all-set on THIS phone → become the parent for the payoff
+                    // (readiness poll succeeds immediately → first block → reflection → done).
+                    // Crucially this does NOT finish onboarding (that would unmount the coordinator).
+                    onSingleDeviceContinue: singleDevice ? {
+                        SingleDeviceSession.shared.stage = .parentPayoff
+                        appMode = "parent"
+                        step = .parentWaitingForKid
+                    } : nil
+                )
 
             // MARK: - Onboarding v2 — PARENT (live backend)
             //
@@ -521,7 +548,9 @@ struct OnboardingCoordinator: View {
             case .parentProfile:
                 ParentProfileStep(
                     apiClient: apiClient,
-                    onSaved: { step = .parentNewOrJoin },
+                    // Single device always starts a new family (the kid created it) → skip the
+                    // new-or-join chooser and go straight to pairing.
+                    onSaved: { step = singleDevice ? .parentPairScan : .parentNewOrJoin },
                     onBack: { step = .parentSignIn }
                 )
 
@@ -569,7 +598,9 @@ struct OnboardingCoordinator: View {
                     onPaired: { code in await pairWithKidCode(code) },
                     pairedSucceeded: pairedChildDeviceID != nil,
                     onAdvance: { step = .parentConnected },
-                    onBack: { step = .parentNewOrJoin }
+                    onBack: { step = .parentNewOrJoin },
+                    // Single device: prefill the code the kid just generated on this same phone.
+                    initialCode: singleDevice ? childPairingCode : ""
                 )
 
             case .parentConnected:
@@ -578,7 +609,16 @@ struct OnboardingCoordinator: View {
                     // P3: a REAL wait — poll the kid's onboarding readiness
                     // (Screen Time + a lockable app) before the first block.
                     // (I5: the Screen Time passcode moved to the kid chain.)
-                    onContinue: { step = .parentWaitingForKid },
+                    onContinue: {
+                        // Single device: parent paired → become the kid to grant + pick apps.
+                        if singleDevice {
+                            SingleDeviceSession.shared.stage = .kidPermit
+                            appMode = "child"
+                            step = .childConnected
+                        } else {
+                            step = .parentWaitingForKid
+                        }
+                    },
                     onBack: { step = .parentPairScan }
                 )
 
@@ -682,7 +722,11 @@ struct OnboardingCoordinator: View {
                     // success or an error string for inline display.
                     createFamily: { await createKidFamily() },
                     pairingCode: childPairingCode,
-                    onConnected: { step = .childConnected },
+                    onConnected: {
+                        // Single device: kid has the code → become the parent and pair.
+                        if singleDevice { singleDeviceEnterParentPhase() }
+                        else { step = .childConnected }
+                    },
                     onBack: { step = .childProfile }
                 )
 
@@ -837,7 +881,10 @@ struct OnboardingCoordinator: View {
                 childDisplayName: trimmedName.isEmpty ? nil : trimmedName,
                 childBirthYear: childBirthYear,
                 childGender: childGender,
-                resetChildAvatar: childAvatar == nil
+                resetChildAvatar: childAvatar == nil,
+                // Single device: fresh install id per run → a brand-new family each demo
+                // (not the idempotent one) so a reset+rerun never reuses a stale child row.
+                clientInstallIDOverride: singleDevice ? SingleDeviceSession.shared.clientInstallIDOverride : nil
             )
             familyID = r.family_id
             childDeviceID = r.child_device_id

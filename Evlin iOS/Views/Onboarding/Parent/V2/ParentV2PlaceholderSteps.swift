@@ -451,9 +451,24 @@ struct ParentPairScanStep: View {
     let onAdvance: () -> Void
     var onBack: (() -> Void)? = nil
 
-    @State private var code = ""
+    @State private var code: String
     @State private var busy = false
     @State private var errorText: String?
+
+    /// `initialCode` prefills the 6-digit field — Single Device Mode passes the code the
+    /// kid just generated so the tester doesn't read it off their own screen. Defaults to
+    /// empty, so normal two-device pairing is unchanged.
+    init(onPaired: @escaping (String) async -> String?,
+         pairedSucceeded: Bool,
+         onAdvance: @escaping () -> Void,
+         onBack: (() -> Void)? = nil,
+         initialCode: String = "") {
+        self.onPaired = onPaired
+        self.pairedSucceeded = pairedSucceeded
+        self.onAdvance = onAdvance
+        self.onBack = onBack
+        _code = State(initialValue: initialCode)
+    }
 
     var body: some View {
         OnboardingV2ScreenContainer(

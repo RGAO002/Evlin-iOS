@@ -3,8 +3,10 @@ import SwiftUI
 struct ModeSelectStep: View {
     /// Chooses Parent vs Child → continues into the normal pairing / permissions flow.
     let onSelect: (OnboardingMode) -> Void
-    /// Bypasses onboarding for demos — must never replace real pairing / Screen Time in production.
-    let onDemoJump: (OnboardingMode) -> Void
+    /// Single Device Mode (demo purpose only): many testers have just ONE device. This runs the
+    /// FULL real onboarding on one phone, then shows a P/K float to switch this device between
+    /// parent and kid for single-device testing. Replaces the old parent/kid "(demo)" skip cards.
+    let onSingleDevice: () -> Void
 
     var body: some View {
         VStack(spacing: Spacing.section) {
@@ -44,10 +46,10 @@ struct ModeSelectStep: View {
             }
             .padding(.horizontal, Spacing.xl)
 
-            // Demo shortcuts only — skips pairing/Screen-Time onboarding. DEBUG-only:
-            // these must NEVER appear in a public/Release build.
+            // Single Device Mode (demo purpose only) — runs the REAL onboarding on one phone,
+            // then exposes a P/K float to test both roles. DEBUG-only: never in a public build.
             #if DEBUG
-            demoFooterSection
+            singleDeviceFooter
             #endif
 
             Spacer()
@@ -57,33 +59,20 @@ struct ModeSelectStep: View {
         .background(Color.evSurface)
     }
 
-    /// English-only copy; cards below match `selectionCard` so layout feels like the primary choices.
-    private var demoFooterSection: some View {
+    /// Demo purpose only — one card that runs the full real onboarding on a single device.
+    private var singleDeviceFooter: some View {
         VStack(alignment: .center, spacing: Spacing.lg) {
-            Text("Demo only — skips pairing")
+            Text("Demo only")
                 .font(.evCaption)
                 .foregroundStyle(Color.evOutline)
                 .multilineTextAlignment(.center)
 
-            VStack(spacing: Spacing.lg) {
-                selectionCard(
-                    title: "Parent (demo)",
-                    description: "Jump to parent shell without pairing.",
-                    icon: "person.fill.checkmark"
-                ) { onDemoJump(.parent) }
-
-                selectionCard(
-                    title: "Child (demo)",
-                    description: "Jump to child shell without pairing.",
-                    icon: "person.fill"
-                ) { onDemoJump(.child) }
-            }
+            selectionCard(
+                title: "Single Device Mode",
+                description: "One phone: run the full real setup, then switch between parent and kid with the P/K button.",
+                icon: "iphone"
+            ) { onSingleDevice() }
             .padding(.horizontal, Spacing.xl)
-
-            Text("Use Parent / Child buttons above for a real setup.")
-                .font(.evCaption)
-                .foregroundStyle(Color.evOnSurfaceVariant)
-                .multilineTextAlignment(.center)
         }
         .padding(.top, Spacing.section)
     }
