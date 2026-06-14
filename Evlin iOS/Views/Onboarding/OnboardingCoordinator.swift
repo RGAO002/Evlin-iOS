@@ -163,23 +163,21 @@ struct OnboardingCoordinator: View {
     /// this is the only role indicator).
     @ViewBuilder private var singleDeviceBanner: some View {
         let isKid = appMode == "child"
-        HStack(spacing: 6) {
+        HStack(spacing: 4) {
             Image(systemName: isKid ? "figure.child" : "person.fill")
-                .font(.system(size: 12, weight: .semibold))
-            Text(isKid ? "Setting up the kid side" : "Setting up the parent side")
-                .font(.system(size: 12, weight: .semibold))
+                .font(.system(size: 10, weight: .bold))
+            Text(isKid ? "KID" : "PARENT")
+                .font(.system(size: 10, weight: .bold))
         }
         .foregroundStyle(.white)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
         .background(
             Capsule().fill(isKid
                 ? Color(red: 0xA6/255, green: 0x44/255, blue: 0x3E/255)   // kid = brick red
                 : Color(red: 0x04/255, green: 0x16/255, blue: 0x27/255))  // parent = navy
         )
-        .padding(.vertical, 8)
-        .frame(maxWidth: .infinity, alignment: .center)
-        .background(.ultraThinMaterial)   // subtle strip so the pill reads as its own top bar
+        .shadow(color: .black.opacity(0.18), radius: 3, y: 1)
         .allowsHitTesting(false)
     }
 
@@ -237,11 +235,15 @@ struct OnboardingCoordinator: View {
                     // step (spec §7.4); v1 lands on the code-entry step.
                     step = useV2Flow ? .parentPairScan : .parentPairingCode
                 }
-                // Single-device role banner as a TOP INSET (not a ZStack overlay) so it
-                // reserves its own strip and pushes the screen content down instead of
-                // covering it.
-                .safeAreaInset(edge: .top, spacing: 0) {
-                    if singleDevice { singleDeviceBanner }
+                // Single-device role tag: a small floating pill in the TOP-LEADING corner
+                // (ladybug is top-trailing, title is centered) so it doesn't shrink the screen
+                // or cover the screen's own text.
+                .overlay(alignment: .topLeading) {
+                    if singleDevice {
+                        singleDeviceBanner
+                            .padding(.leading, 12)
+                            .padding(.top, 4)
+                    }
                 }
                 #endif
 
