@@ -26,6 +26,10 @@ struct ProfileView: View {
 
     @State private var tasks: [TaskItem] = []
     @State private var devices: [DeviceItem] = []
+    @State private var rules: [RuleItem] = []
+    @State private var editingRule: RuleItem? = nil
+    @State private var showDSTEditor = false
+    @State private var dailyLimitMinutes: Int = 120
     @State private var showProfileMenu = false
     @State private var showEditProfile = false
     @State private var showDeleteConfirm = false
@@ -106,6 +110,11 @@ struct ProfileView: View {
             timePct: child.timePct,
             subtitle: localSubtitle.isEmpty ? child.subtitle : localSubtitle
         )
+    }
+
+    /// Format minutes into a human-readable limit string (same logic as ProfileMockData).
+    private func formatLimit(_ minutes: Int) -> String {
+        ProfileMockData.formatLimit(minutes)
     }
 
     var body: some View {
@@ -446,6 +455,12 @@ struct ProfileView: View {
             if localAge == 0    { localAge = child.age }
             if localSubtitle.isEmpty { localSubtitle = child.subtitle }
             if localAvatarURL == nil { localAvatarURL = child.avatarURL }
+
+            // Per-child daily screen time limit — loaded from UserDefaults,
+            // default 120 min (2h). Seeds the rules detail + summary "left today".
+            let storedLimit = UserDefaults.standard.integer(forKey: "evlin.dailyLimitMin.\(child.id)")
+            dailyLimitMinutes = storedLimit > 0 ? storedLimit : 120
+            rules = ProfileMockData.rules(for: child.id, dailyLimitMinutes: dailyLimitMinutes)
 
             // Tasks: backend when this child owns the paired device;
             // otherwise an honest "No tasks yet" empty state (no more
@@ -980,10 +995,6 @@ struct ProfileView: View {
     //     }
     // }
 
-    /// HP-3/HP-4: rules used to be a pure fixture (same three rows for every
-    /// child) with @State-only add/edit/delete/toggle — there is no rules
-    /// backend. The section header stays (so the layout doesn't jump) but the
-    /// content is an honest coming-soon state with no edit affordances.
     private var activeRulesSection: some View {
         VStack(spacing: 0) {
             Button {
@@ -996,6 +1007,11 @@ struct ProfileView: View {
                         .font(.custom("Manrope", size: 16).weight(.heavy))
                         .tracking(-0.16)
                         .foregroundStyle(Color.evOnSurface)
+                    EvlinPill(
+                        text: "\(rules.filter(\.on).count)/\(rules.count)",
+                        tone: .success,
+                        size: .xs
+                    )
                     Spacer()
                     Image(systemName: "chevron.down")
                         .font(.system(size: 14, weight: .semibold))
@@ -1011,12 +1027,27 @@ struct ProfileView: View {
             .buttonStyle(.plain)
 
             if rulesExpanded {
-                Text("Rules are coming soon.")
-                    .font(.custom("Inter", size: 12))
-                    .foregroundStyle(Color.evOnSurfaceVariant)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, 14)
+                VStack(spacing: 0) {
+                    ForEach($rules) { $rule in
+                        RuleRow(iconSystemName: rule.iconSystemName,
+                                title: rule.title, detail: rule.detail,
+                                isOn: $rule.on, tone: rule.tone,
+                                onEdit: {
+                                    if rule.id == "screen" {
+                                        showDSTEditor = true
+                                    }
+                                    // Downtime/Bedtime: pencil is no-op for now
+                                    // (no backend editor yet — only DST has a UI).
+                                })
+                            .padding(.horizontal, 14)
+                            .overlay(
+                                Rectangle()
+                                    .fill(Color.evOutlineVariant.opacity(0.4))
+                                    .frame(height: 1),
+                                alignment: .bottom
+                            )
+                    }
+                }
             }
         }
         .background(
@@ -1027,6 +1058,15 @@ struct ProfileView: View {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .stroke(Color.evOutlineVariant.opacity(0.4), lineWidth: 1)
         )
+        .sheet(isPresented: $showDSTEditor) {
+            DailyScreenTimeEditor(currentMinutes: dailyLimitMinutes) { newMinutes in
+                dailyLimitMinutes = newMinutes
+                UserDefaults.standard.set(newMinutes, forKey: "evlin.dailyLimitMin.\(child.id)")
+                if let i = rules.firstIndex(where: { $0.id == "screen" }) {
+                    rules[i].detail = "\(formatLimit(newMinutes)) limit per day"
+                }
+            }
+        }
     }
 
     private var summaryCard: some View {
@@ -1048,12 +1088,12 @@ struct ProfileView: View {
                         ZStack(alignment: .leading) {
                             Capsule().fill(Color.evSecondaryContainer).frame(height: 5)
                             Capsule().fill(Color.evSecondary)
-                                .frame(width: max(6, geo.size.width * child.timePct), height: 5)
+                                .frame(width: max(6, geo.size.width * 1.0), height: 5)
                         }
                     }
                     .frame(height: 5)
                     HStack(spacing: 4) {
-                        Text(child.timeLeft)
+                        Text(formatLimit(dailyLimitMinutes))
                             .font(.custom("Inter", size: 11).weight(.heavy))
                             .foregroundStyle(Color.evSecondary)
                         Text("left today")

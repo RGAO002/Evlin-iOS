@@ -76,18 +76,29 @@ enum ProfileMockData {
     /// BigKid backend.
     static var runtimeTasks: [String: [TaskItem]] = [:]
 
-    static func rules(for childId: String) -> [RuleItem] {
+    static func rules(for childId: String, dailyLimitMinutes: Int = 120) -> [RuleItem] {
         [
-            .init(id: "screen", iconSystemName: "display",
-                  title: "Daily Screen Time", detail: "1h limit per day",
+            .init(id: "screen", iconSystemName: "timer",
+                  title: "Daily Screen Time",
+                  detail: "\(ProfileMockData.formatLimit(dailyLimitMinutes)) limit per day",
                   on: true, tone: .primary),
-            .init(id: "bed", iconSystemName: "moon",
-                  title: "Bedtime", detail: "8:00 PM Sharp",
+            .init(id: "downtime", iconSystemName: "moon",
+                  title: "Downtime", detail: "8:00 PM – 7:00 AM",
                   on: true, tone: .tertiary),
-            .init(id: "chores", iconSystemName: "sun.max",
-                  title: "Morning Chores", detail: "Mandatory sequence",
-                  on: false, tone: .neutral),
+            .init(id: "bed", iconSystemName: "moon.fill",
+                  title: "Bedtime", detail: "8:00 PM",
+                  on: true, tone: .tertiary),
         ]
+    }
+
+    /// Format minutes into a human-readable limit string.
+    /// 15 → "15m", 90 → "1h 30m", 120 → "2h", 180 → "3h"
+    static func formatLimit(_ minutes: Int) -> String {
+        let h = minutes / 60
+        let m = minutes % 60
+        if h == 0 { return "\(m)m" }
+        if m == 0 { return "\(h)h" }
+        return "\(h)h \(m)m"
     }
 
     /// Reads from `runtimeTasks`, seeding from `defaultTasks` on first
