@@ -393,6 +393,10 @@ struct ChildShowCodeStep: View {
     /// Advance to the "linked" screen once a parent consumes the code.
     let onConnected: () -> Void
     var onBack: (() -> Void)? = nil
+    /// Single Device Mode: there is no SECOND phone to scan the code, so polling pairing-status
+    /// would wait forever. When set, show a manual "continue → become the parent" button instead
+    /// (the coordinator switches THIS device to the parent side to consume the code).
+    var onSingleDeviceContinue: (() -> Void)? = nil
 
     @State private var creating = false
     @State private var errorText: String?
@@ -461,6 +465,12 @@ struct ChildShowCodeStep: View {
                         }
                         .frame(maxWidth: .infinity)
                         .padding(.top, 2)
+                    } else if let sdc = onSingleDeviceContinue, !pairingCode.isEmpty {
+                        // Single device: no second phone to scan — there's nothing to wait for.
+                        // Become the parent on THIS phone to enter the code.
+                        OnboardingV2PrimaryButton("Continue — set up the parent side",
+                                                  role: .child, action: sdc)
+                            .padding(.top, 4)
                     } else {
                         // Live "waiting for parent to scan" pulse cue.
                         HStack(spacing: 8) {

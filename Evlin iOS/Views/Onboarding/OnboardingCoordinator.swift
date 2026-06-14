@@ -754,12 +754,12 @@ struct OnboardingCoordinator: View {
                     // success or an error string for inline display.
                     createFamily: { await createKidFamily() },
                     pairingCode: childPairingCode,
-                    onConnected: {
-                        // Single device: kid has the code → become the parent and pair.
-                        if singleDevice { singleDeviceEnterParentPhase() }
-                        else { step = .childConnected }
-                    },
-                    onBack: { step = .childProfile }
+                    // Normal two-device flow: a parent scanned the code → advance.
+                    onConnected: { step = .childConnected },
+                    onBack: { step = .childProfile },
+                    // Single device: no parent phone to scan — the kid taps "continue" and THIS
+                    // device becomes the parent to consume the code.
+                    onSingleDeviceContinue: singleDevice ? { singleDeviceEnterParentPhase() } : nil
                 )
 
             case .childConnected:
