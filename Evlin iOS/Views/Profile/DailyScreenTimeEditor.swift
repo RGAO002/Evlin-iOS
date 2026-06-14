@@ -125,6 +125,10 @@ struct DailyScreenTimeEditor: View {
         .onAppear {
             minutes = Double(currentMinutes)
         }
+        // Half-height sheet (the slider + notice fit comfortably); draggable
+        // up to full if needed.
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
     }
 }
 
