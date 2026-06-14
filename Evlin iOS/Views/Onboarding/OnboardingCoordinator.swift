@@ -177,8 +177,9 @@ struct OnboardingCoordinator: View {
                 ? Color(red: 0xA6/255, green: 0x44/255, blue: 0x3E/255)   // kid = brick red
                 : Color(red: 0x04/255, green: 0x16/255, blue: 0x27/255))  // parent = navy
         )
-        .padding(.top, 8)
+        .padding(.vertical, 8)
         .frame(maxWidth: .infinity, alignment: .center)
+        .background(.ultraThinMaterial)   // subtle strip so the pill reads as its own top bar
         .allowsHitTesting(false)
     }
 
@@ -236,14 +237,13 @@ struct OnboardingCoordinator: View {
                     // step (spec §7.4); v1 lands on the code-entry step.
                     step = useV2Flow ? .parentPairScan : .parentPairingCode
                 }
+                // Single-device role banner as a TOP INSET (not a ZStack overlay) so it
+                // reserves its own strip and pushes the screen content down instead of
+                // covering it.
+                .safeAreaInset(edge: .top, spacing: 0) {
+                    if singleDevice { singleDeviceBanner }
+                }
                 #endif
-
-            #if DEBUG
-            if singleDevice {
-                singleDeviceBanner
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            }
-            #endif
 
             #if DEBUG
             // Debug escape hatch — always available during onboarding
