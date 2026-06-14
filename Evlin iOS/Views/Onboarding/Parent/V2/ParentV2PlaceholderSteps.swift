@@ -674,10 +674,13 @@ struct ParentWaitingForKidStep: View {
                     // Be stricter than the backend boolean so the parent never
                     // sees "Send block" until the kid has granted Screen Time
                     // and at least one real lockable app is available.
-                    if r.ready_for_first_block,
-                       r.screen_time_granted,
-                       r.first_block_app != nil,
-                       r.lockable_app_count > 0 {
+                    // Advance when the kid explicitly signals "All set" (reached the
+                    // All-set screen) — the reliable path, esp. on Simulator where
+                    // Screen-Time auth can't succeed — OR when the stricter
+                    // Screen-Time + lockable-app readiness lands.
+                    if (r.all_set ?? false)
+                        || (r.ready_for_first_block && r.screen_time_granted
+                            && r.first_block_app != nil && r.lockable_app_count > 0) {
                         onReady(r)
                         return
                     }

@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct ChildReadyStep: View {
+    @EnvironmentObject var apiClient: APIClient
     @AppStorage("onboardingComplete") private var onboardingComplete = false
 
     /// From child pairing (`EnterPairingCodeStep`); re-persist before leaving onboarding so post-onboarding doesn’t briefly miss `evlin.childDeviceID`.
@@ -61,6 +62,14 @@ struct ChildReadyStep: View {
         .padding(Spacing.xl)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.evSurface)
+        .task {
+            // Tell the backend the kid reached "All set!" so the parent's
+            // waiting-for-kid screen advances on this explicit signal (rather
+            // than only on the stricter, Simulator-unreliable readiness checks).
+            if let id = childDeviceID {
+                await apiClient.markChildAllSet(childDeviceID: id)
+            }
+        }
     }
 
     /// Mirror `EnterPairingCodeStep` success path — covers edge cases where UserDefaults lagged vs coordinator state.

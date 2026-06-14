@@ -1314,6 +1314,9 @@ struct ChildReadinessDTO: Codable, Sendable, Equatable {
     let lockable_app_count: Int
     let first_block_app: App?
     let ready_for_first_block: Bool
+    /// True once the kid reached the "All set!" screen (POST /child-all-set).
+    /// Optional so older responses without the field still decode.
+    let all_set: Bool?
 }
 
 struct AvatarUploadResponseDTO: Codable, Sendable, Equatable {
@@ -1958,6 +1961,20 @@ extension APIClient {
         try await authedJSON(
             path: "/family/onboarding/child-readiness?child_device_id=\(childDeviceID.uuidString)",
             method: "GET")
+    }
+
+    /// POST /family/onboarding/child-all-set — the kid reports it reached the
+    /// "All set!" screen so the parent's waiting-for-kid screen advances.
+    /// Unauthed (the kid device has no session); best-effort fire-and-forget.
+    func markChildAllSet(childDeviceID: UUID) async {
+        guard let url = URL(string: "\(baseURL)/family/onboarding/child-all-set") else { return }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.timeoutInterval = 12
+        req.httpBody = try? JSONSerialization.data(
+            withJSONObject: ["child_device_id": childDeviceID.uuidString])
+        _ = try? await URLSession.shared.data(for: req)
     }
 
     /// PUT /me/profile — rename + update the parent's emoji/preset avatar.
