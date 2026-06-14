@@ -14,17 +14,26 @@ struct DeviceAppsSheet: View {
     let childId: String
     var onClose: () -> Void = {}
     /// Preview-only seed. Runtime callers (ContentView's `.deviceDetail`
-    /// route) leave this nil and get the coming-soon placeholder.
+    /// route) leave this nil and trigger the real catalog fetch.
     var fixtureApps: [DeviceAppItem]? = nil
+
+    @EnvironmentObject private var apiClient: APIClient
+    @AppStorage("evlin.childDeviceID") private var pairedChildID: String = ""
 
     @State private var apps: [DeviceAppItem] = []
     @State private var editingLimitFor: String? = nil
+    @State private var isLoading = false
+    @State private var loadFailed = false
 
     var body: some View {
         VStack(spacing: 0) {
             header
-            if apps.isEmpty {
-                comingSoonPlaceholder
+            if isLoading && apps.isEmpty {
+                Spacer()
+                ProgressView()
+                Spacer()
+            } else if apps.isEmpty {
+                emptyPlaceholder
             } else {
                 ScrollView {
                     VStack(spacing: 0) {
@@ -58,21 +67,49 @@ struct DeviceAppsSheet: View {
         .toolbar(.hidden, for: .navigationBar)
         .enableSwipeBack()
         .onAppear {
-            if let fixtureApps { apps = fixtureApps }
+            if let fixtureApps {
+                apps = fixtureApps
+                return
+            }
+            guard apps.isEmpty, let cid = UUID(uuidString: pairedChildID) else { return }
+            isLoading = true
+            Task {
+                do {
+                    let targets = try await apiClient.fetchLazyTagCatalogTargets(childDeviceID: cid)
+                    apps = targets.filter { $0.type == .app }.map { t in
+                        DeviceAppItem(
+                            id: t.aliasKey.uuidString,
+                            name: t.displayName,
+                            iconSystemName: "app.fill",
+                            brandColor: Color.evPrimary,
+                            bgColor: Color.evPrimaryContainer,
+                            enabled: true,
+                            usedMin: 0,
+                            limitMin: 60,
+                            artworkURL: t.artworkURL
+                        )
+                    }
+                } catch {
+                    loadFailed = true
+                }
+                isLoading = false
+            }
         }
     }
 
-    /// Honest runtime state — per-app limits aren't backend-wired yet.
-    private var comingSoonPlaceholder: some View {
+    /// Empty state: honest message for "no apps yet" vs load failure.
+    private var emptyPlaceholder: some View {
         VStack(spacing: 14) {
             Spacer()
-            Image(systemName: "hourglass")
+            Image(systemName: loadFailed ? "wifi.slash" : "app.dashed")
                 .font(.system(size: 36, weight: .light))
                 .foregroundStyle(Color.evOnSurfaceVariant)
-            Text("App limits coming soon")
+            Text(loadFailed ? "Couldn't load apps" : "No apps added yet")
                 .font(.custom("Manrope", size: 16).weight(.heavy))
                 .foregroundStyle(Color.evOnSurface)
-            Text("Per-app limits for \(device.name) aren't connected to real usage yet.")
+            Text(loadFailed
+                 ? "Check your connection and try again."
+                 : "Apps captured on \(device.name) will show up here.")
                 .font(.custom("Inter", size: 13))
                 .foregroundStyle(Color.evOnSurfaceVariant)
                 .multilineTextAlignment(.center)
@@ -120,14 +157,38 @@ struct DeviceAppsSheet: View {
     private func appRow(_ app: DeviceAppItem) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 14) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(app.bgColor)
-                    Image(systemName: app.iconSystemName)
-                        .font(.system(size: 20, weight: .medium))
-                        .foregroundStyle(app.brandColor)
+                Group {
+                    if let artworkURL = app.artworkURL {
+                        AsyncImage(url: artworkURL) { phase in
+                            switch phase {
+                            case .success(let image):
+                                image
+                                    .resizable()
+                                    .scaledToFill()
+                            default:
+                                // While loading or on failure, fall back to SF symbol
+                                ZStack {
+                                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                        .fill(app.bgColor)
+                                    Image(systemName: app.iconSystemName)
+                                        .font(.system(size: 20, weight: .medium))
+                                        .foregroundStyle(app.brandColor)
+                                }
+                            }
+                        }
+                        .frame(width: 40, height: 40)
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    } else {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .fill(app.bgColor)
+                            Image(systemName: app.iconSystemName)
+                                .font(.system(size: 20, weight: .medium))
+                                .foregroundStyle(app.brandColor)
+                        }
+                        .frame(width: 40, height: 40)
+                    }
                 }
-                .frame(width: 40, height: 40)
                 .overlay(
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
                         .stroke(Color.black.opacity(0.06), lineWidth: 1)

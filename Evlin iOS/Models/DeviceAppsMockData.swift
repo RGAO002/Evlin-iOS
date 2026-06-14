@@ -10,6 +10,7 @@ struct DeviceAppItem: Identifiable, Hashable {
     var enabled: Bool = true
     var usedMin: Int        // minutes used today
     var limitMin: Int       // current limit
+    var artworkURL: URL? = nil
 }
 
 enum DeviceAppsMockData {

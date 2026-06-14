@@ -117,6 +117,17 @@ struct ProfileView: View {
         ProfileMockData.formatLimit(minutes)
     }
 
+    /// True when the Daily Screen Time rule is toggled ON.
+    private var dailyLimitOn: Bool {
+        rules.first(where: { $0.id == "screen" })?.on ?? true
+    }
+
+    /// The "screen time remaining" text used in both the summary card and the
+    /// Enrolled Devices row. Shows the daily limit when the rule is ON; "∞" when OFF.
+    private var screenTimeRemainingText: String {
+        dailyLimitOn ? formatLimit(dailyLimitMinutes) : "∞"
+    }
+
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
         VStack(spacing: 0) {
@@ -922,8 +933,8 @@ struct ProfileView: View {
                                 name: d.name,
                                 detail: d.detail,
                                 locked: localStatus != .unlocked,
-                                timeLeft: child.timeLeft,
-                                timePct: child.timePct,
+                                timeLeft: screenTimeRemainingText,
+                                timePct: 1.0,
                                 isLast: idx == devices.count - 1,
                                 onPress: { onOpenDevice(d) }
                             )
@@ -1095,8 +1106,7 @@ struct ProfileView: View {
                     HStack(spacing: 4) {
                         // Daily Screen Time toggle ON → the limit applies;
                         // OFF → unlimited, shown as the infinity symbol.
-                        Text((rules.first(where: { $0.id == "screen" })?.on ?? true)
-                             ? formatLimit(dailyLimitMinutes) : "∞")
+                        Text(screenTimeRemainingText)
                             .font(.custom("Inter", size: 11).weight(.heavy))
                             .foregroundStyle(Color.evSecondary)
                         Text("left today")
