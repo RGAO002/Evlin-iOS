@@ -158,6 +158,30 @@ struct OnboardingCoordinator: View {
         SingleDeviceSession.shared.isEnabled && !onboardingComplete
     }
 
+    /// Single Device Mode top banner — tells the tester which role this phone is currently
+    /// playing (the P/K float only appears AFTER onboarding finishes, so during the interleave
+    /// this is the only role indicator).
+    @ViewBuilder private var singleDeviceBanner: some View {
+        let isKid = appMode == "child"
+        HStack(spacing: 6) {
+            Image(systemName: isKid ? "figure.child" : "person.fill")
+                .font(.system(size: 12, weight: .semibold))
+            Text(isKid ? "Setting up the kid side" : "Setting up the parent side")
+                .font(.system(size: 12, weight: .semibold))
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(
+            Capsule().fill(isKid
+                ? Color(red: 0xA6/255, green: 0x44/255, blue: 0x3E/255)   // kid = brick red
+                : Color(red: 0x04/255, green: 0x16/255, blue: 0x27/255))  // parent = navy
+        )
+        .padding(.top, 8)
+        .frame(maxWidth: .infinity, alignment: .center)
+        .allowsHitTesting(false)
+    }
+
     /// Entry from the ModeSelect "Single Device Mode" card: enable the flag + start the real v2
     /// kid chain. The interleave (kid create → parent pair → kid permit → parent payoff) is
     /// driven by `singleDevice` branches at each boundary below — no new screens.
@@ -213,6 +237,13 @@ struct OnboardingCoordinator: View {
                     step = useV2Flow ? .parentPairScan : .parentPairingCode
                 }
                 #endif
+
+            #if DEBUG
+            if singleDevice {
+                singleDeviceBanner
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            }
+            #endif
 
             #if DEBUG
             // Debug escape hatch — always available during onboarding
