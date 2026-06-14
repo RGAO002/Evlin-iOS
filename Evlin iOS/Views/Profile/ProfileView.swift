@@ -1093,7 +1093,10 @@ struct ProfileView: View {
                     }
                     .frame(height: 5)
                     HStack(spacing: 4) {
-                        Text(formatLimit(dailyLimitMinutes))
+                        // Daily Screen Time toggle ON → the limit applies;
+                        // OFF → unlimited, shown as the infinity symbol.
+                        Text((rules.first(where: { $0.id == "screen" })?.on ?? true)
+                             ? formatLimit(dailyLimitMinutes) : "∞")
                             .font(.custom("Inter", size: 11).weight(.heavy))
                             .foregroundStyle(Color.evSecondary)
                         Text("left today")
