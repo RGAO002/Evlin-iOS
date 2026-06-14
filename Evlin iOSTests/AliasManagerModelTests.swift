@@ -61,9 +61,9 @@ final class AliasManagerModelTests: XCTestCase {
         await model.load()
 
         XCTAssertNotNil(model.errorMessage)
-        // Rows are wiped on a failed load (load resets rows in the error path via
-        // the defer). The spec says "keep prior state" on MUTATION errors, not load
-        // errors. See the mutation tests below for that behavior.
+        // Rows are preserved on a failed load — the catch block only sets
+        // errorMessage; rows is not touched. See the mutation tests below
+        // for the same preservation behavior on mutate errors.
     }
 
     // MARK: - childDevices

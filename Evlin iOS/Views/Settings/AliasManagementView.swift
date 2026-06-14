@@ -138,13 +138,19 @@ private struct AliasAppListScreen: View {
             }
         }
         // Device picker — shown when the family has more than one child device.
-        .sheet(isPresented: $showDevicePickerSheet) {
+        // NOTE: the button sets showDevicePickerSheet = false only; showAddAppSheet
+        // is flipped in the sheet's .onDisappear so both sheet animations do not
+        // fire simultaneously (which can drop the second sheet on iOS 17).
+        .sheet(isPresented: $showDevicePickerSheet, onDismiss: {
+            if addAppTargetDeviceID != nil {
+                showAddAppSheet = true
+            }
+        }) {
             NavigationStack {
                 List(model.childDevices) { device in
                     Button(device.displayName) {
                         addAppTargetDeviceID = device.childDeviceID
                         showDevicePickerSheet = false
-                        showAddAppSheet = true
                     }
                 }
                 .navigationTitle("Choose kid's device")
@@ -286,7 +292,9 @@ private struct AliasAppListScreen: View {
                     addAppTargetDeviceID = devices[0].childDeviceID
                     showAddAppSheet = true
                 } else {
-                    // Multiple devices — show a picker first.
+                    // Multiple devices — show a picker first. Clear any prior
+                    // selection so cancelling the picker won't trigger AddApp.
+                    addAppTargetDeviceID = nil
                     showDevicePickerSheet = true
                 }
             } label: {
