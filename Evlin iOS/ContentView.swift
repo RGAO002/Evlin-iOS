@@ -30,10 +30,11 @@ struct ContentView: View {
     @AppStorage("onboardingComplete") private var onboardingComplete = false
     @AppStorage("appMode") private var appMode: String = ""
 
-    /// Draggable Parent / Child mode pill (`FloatingModeToggle`). Shipped in **all** builds —
-    /// not DEBUG-only — whenever onboarding finished and shell is Parent or Child.
+    /// Draggable Parent / Child mode pill (`FloatingModeToggle`). Shown ONLY in Single Device
+    /// Mode (demo): the flag is set AND all three real ids exist. A normal real-parent / real-kid
+    /// device never sets the flag, so the float never appears — the safety invariant.
     private var showsSingleDeviceModesToggle: Bool {
-        onboardingComplete && (appMode == "parent" || appMode == "child")
+        onboardingComplete && SingleDeviceSession.shared.isActive
     }
 
     var body: some View {
@@ -71,21 +72,6 @@ struct ContentView: View {
             if showsSingleDeviceModesToggle {
                 FloatingModeToggle()
             }
-
-            #if DEBUG
-            // Parent-side BigKid debug — `/api/v1/parent/*` harness. Ships only in Debug.
-            if onboardingComplete && appMode == "parent" {
-                VStack {
-                    HStack {
-                        ParentBigKidDebugButton()
-                            .padding(.leading, 12)
-                            .padding(.top, 8)
-                        Spacer()
-                    }
-                    Spacer()
-                }
-            }
-            #endif
         }
     }
 }
