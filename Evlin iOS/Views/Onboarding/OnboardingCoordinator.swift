@@ -185,6 +185,10 @@ struct OnboardingCoordinator: View {
     /// kid chain. The interleave (kid create → parent pair → kid permit → parent payoff) is
     /// driven by `singleDevice` branches at each boundary below — no new screens.
     private func startSingleDeviceFlow() {
+        // Fresh demo identity each run: signs out any prior session + mints a NEW
+        // email/password/install id, so we never reuse a stale (e.g. old bad-domain) demo email
+        // and /family/pair never 409s on a recycled parent account.
+        SingleDeviceSession.shared.resetForNewRun(auth: auth)
         singleDevice = true
         SingleDeviceSession.shared.enable()
         useV2Flow = true
@@ -236,14 +240,15 @@ struct OnboardingCoordinator: View {
                     // step (spec §7.4); v1 lands on the code-entry step.
                     step = useV2Flow ? .parentPairScan : .parentPairingCode
                 }
-                // Single-device role tag: a small floating pill in the TOP-LEADING corner
-                // (ladybug is top-trailing, title is centered) so it doesn't shrink the screen
-                // or cover the screen's own text.
-                .overlay(alignment: .topLeading) {
+                // Single-device role tag: a small centered pill in a thin top inset. Inset (not
+                // overlay) so it never covers the screen's own title/text; compact pill (not a
+                // full-width bar) so it barely takes any height.
+                .safeAreaInset(edge: .top, spacing: 0) {
                     if singleDevice {
                         singleDeviceBanner
-                            .padding(.leading, 12)
-                            .padding(.top, 4)
+                            .frame(maxWidth: .infinity)
+                            .padding(.top, 2)
+                            .padding(.bottom, 2)
                     }
                 }
                 #endif

@@ -64,6 +64,8 @@ final class SingleDeviceSession {
     private let kStage = "evlin.singleDevice.stage"
     private var demoEmailRaw: String { d.string(forKey: kEmail) ?? "" }
     private func id(_ k: String) -> String { (d.string(forKey: k) ?? "").trimmingCharacters(in: .whitespaces) }
-    private static func mintDemoEmail() -> String { "demo+\(UUID().uuidString.prefix(8).lowercased())@evlin.test" }
+    // NOT @evlin.test — `.test` is an RFC 6761 reserved domain the backend email validator
+    // rejects (422). A normal non-reserved domain authenticates fine.
+    private static func mintDemoEmail() -> String { "demo+\(UUID().uuidString.prefix(8).lowercased())@evlin.app" }
     private static func mintDemoPassword() -> String { "Demo-" + UUID().uuidString.prefix(12) } // ≥8 for /auth/email
 }
