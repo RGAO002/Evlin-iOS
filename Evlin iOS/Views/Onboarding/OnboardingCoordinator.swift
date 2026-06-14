@@ -689,7 +689,8 @@ struct OnboardingCoordinator: View {
                         firstBlockLanded = landed
                         step = .parentItWorks
                     },
-                    onBack: { step = .parentWaitingForKid }
+                    onBack: { step = .parentWaitingForKid },
+                    singleDevice: singleDevice
                 )
 
             case .parentItWorks:

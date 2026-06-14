@@ -796,6 +796,10 @@ struct ParentFirstActionsStep: View {
     /// didn't.
     let onContinue: (_ landed: Bool) -> Void
     var onBack: (() -> Void)? = nil
+    /// Single Device Mode: the kid CommandPoller is stopped while this device is in parent mode,
+    /// so the inline ≤30s ack-poll can only ever time out. Under this flag we skip the dead-wait
+    /// and tell the tester to switch to the K side to watch the (already-queued) lock apply.
+    var singleDevice: Bool = false
 
     @State private var phase: FirstActionPhase = .idle
     @State private var blockCommandID: UUID?
@@ -820,7 +824,9 @@ struct ParentFirstActionsStep: View {
             stepIndex: 10,
             stepTotal: parentTotal,
             title: "Send your first block",
-            subtitle: FirstActionsLogic.payoffSubtitle(phase: phase, kidName: kid),
+            subtitle: (singleDevice && phase == .timedOut)
+                ? "Sent! Tap the K button to become \(kid) and watch \(blockAppName) lock — then tap P to come back and continue."
+                : FirstActionsLogic.payoffSubtitle(phase: phase, kidName: kid),
             dotsCount: parentTotal,
             dotsCurrent: 9,
             content: {
@@ -944,6 +950,12 @@ struct ParentFirstActionsStep: View {
                 durationMinutes: 5
             )
             blockCommandID = cmd
+            if singleDevice {
+                // Kid poller is off in parent mode → the ack-poll can only time out. Skip the
+                // 30s dead-wait; the block is queued and applies when the tester switches to K.
+                phase = .timedOut
+                return
+            }
             phase = .waitingForKid
             startBlockPoll(commandID: cmd)
         } catch {
