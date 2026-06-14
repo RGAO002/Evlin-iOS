@@ -101,6 +101,7 @@ final class FamilyStore {
         self.parents = me.family?.members ?? []
         self.children = me.children
         self.parentDevices = me.parent_devices
+        backfillPairedChildDeviceIfMissing()
     }
 
     private func apply(_ fam: FamilyDTO) {
@@ -108,6 +109,25 @@ final class FamilyStore {
         self.parents = fam.family.members
         self.children = fam.children
         self.parentDevices = fam.parent_devices
+        backfillPairedChildDeviceIfMissing()
+    }
+
+    /// Returning-parent recovery: after a fresh login the local
+    /// `evlin.childDeviceID` is empty, so Home prompts "pair the kid's device"
+    /// even though the backend aggregate already carries the paired child device
+    /// (and the lock-state / CommandPoller, which read that key, stay idle).
+    /// Re-derive the kid device id (+ family id) from the aggregate when the
+    /// local value is missing — never clobber an explicit pairing on this device.
+    private func backfillPairedChildDeviceIfMissing() {
+        let key = "evlin.childDeviceID"
+        let existing = UserDefaults.standard.string(forKey: key) ?? ""
+        guard existing.isEmpty,
+              let dev = children.first(where: { !$0.devices.isEmpty })?.devices.first
+        else { return }
+        UserDefaults.standard.set(dev.device_id, forKey: key)
+        if let famID = family?.id, !famID.isEmpty {
+            UserDefaults.standard.set(famID, forKey: "evlin.familyID")
+        }
     }
 
     /// Look up a child by its backend id.

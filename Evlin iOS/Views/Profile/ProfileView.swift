@@ -58,9 +58,20 @@ struct ProfileView: View {
     @State private var addError: String? = nil
     @State private var pollTask: Task<Void, Never>? = nil
     private var backendChildID: UUID? {
-        guard familyStore.ownsPairedDevice(childId: child.id,
-                                           pairedDeviceID: pairedChildID) else { return nil }
-        return UUID(uuidString: pairedChildID)
+        // Prefer the locally-paired id when it belongs to THIS child (multi-child
+        // disambiguation). Fall back to this child's device from the backend
+        // family aggregate so a fresh login — where the local `evlin.childDeviceID`
+        // is empty — still resolves the already-paired device instead of wrongly
+        // prompting "pair the kid's device".
+        if familyStore.ownsPairedDevice(childId: child.id, pairedDeviceID: pairedChildID),
+           let id = UUID(uuidString: pairedChildID) {
+            return id
+        }
+        if let dev = familyStore.child(byId: child.id)?.devices.first,
+           let id = UUID(uuidString: dev.device_id) {
+            return id
+        }
+        return nil
     }
     private var bigKidParent: BigKidParentClient? {
         guard backendChildID != nil else { return nil }
