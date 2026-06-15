@@ -69,6 +69,17 @@ final class NotificationStatusMonitor: ObservableObject {
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try? JSONSerialization.data(withJSONObject: body)
-        _ = try? await URLSession.shared.data(for: req)
+        do {
+            let (_, response) = try await URLSession.shared.data(for: req)
+            #if DEBUG
+            if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+                print("NotificationStatusMonitor report failed: HTTP \(http.statusCode)")
+            }
+            #endif
+        } catch {
+            #if DEBUG
+            print("NotificationStatusMonitor report failed: \(error.localizedDescription)")
+            #endif
+        }
     }
 }

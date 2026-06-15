@@ -16,6 +16,13 @@ struct GrantPermissionStep: View {
     @State private var deletionProtectionOn = true
     @State private var errorText: String?
 
+    /// All THREE permissions must be on before the kid can continue: Screen Time
+    /// authorization, notifications allowed, and deletion protection kept on.
+    /// (Previously only Screen Time gated Continue.)
+    private var allPermissionsGranted: Bool {
+        granted && notificationRequested && deletionProtectionOn
+    }
+
     var body: some View {
         VStack(spacing: Spacing.lg) {
             Spacer()
@@ -103,8 +110,8 @@ struct GrantPermissionStep: View {
                 ScreenTimeManager.shared.setDeletionProtectionEnabled(deletionProtectionOn)
                 onContinue()
             }
-            .opacity(granted ? 1 : 0.5)
-            .disabled(!granted)
+            .opacity(allPermissionsGranted ? 1 : 0.5)
+            .disabled(!allPermissionsGranted)
         }
         .padding(Spacing.xl)
         .frame(maxWidth: .infinity, maxHeight: .infinity)

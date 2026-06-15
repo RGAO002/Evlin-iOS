@@ -1,5 +1,14 @@
 import SwiftUI
 
+enum ProfilePresentation {
+    static let kidSpaceEditProfileLabel = "Edit Profile"
+    static let kidSpaceDeleteProfileLabel = "Delete Profile"
+    static let kidSpaceOverflowMenuLabels = [
+        kidSpaceEditProfileLabel,
+        kidSpaceDeleteProfileLabel,
+    ]
+}
+
 struct ProfileView: View {
     let child: ChildProfile
     var initialTaskId: Int? = nil
@@ -136,34 +145,12 @@ struct ProfileView: View {
                     Button {
                         showEditProfile = true
                     } label: {
-                        Label("Edit Profile", systemImage: "pencil")
+                        Label(ProfilePresentation.kidSpaceEditProfileLabel, systemImage: "pencil")
                     }
-                    #if DEBUG
-                    Button {
-                        reflectionStore.simulateAssignment(childId: child.id)
-                    } label: {
-                        Label("Simulate reflection assigned", systemImage: "figure.mind.and.body")
-                    }
-                    Button {
-                        reflectionStore.simulateCompletion(childId: child.id)
-                    } label: {
-                        Label("Simulate reflection complete", systemImage: "checkmark.seal")
-                    }
-                    Button {
-                        reflectionStore.simulateNudge(childId: child.id)
-                    } label: {
-                        Label("Simulate kid nudge", systemImage: "hand.point.up.left.fill")
-                    }
-                    Button {
-                        reflectionStore.clear(childId: child.id)
-                    } label: {
-                        Label("Clear reflection state", systemImage: "xmark.circle")
-                    }
-                    #endif
                     Button(role: .destructive) {
                         showDeleteConfirm = true
                     } label: {
-                        Label("Delete Profile", systemImage: "trash")
+                        Label(ProfilePresentation.kidSpaceDeleteProfileLabel, systemImage: "trash")
                     }
                 } label: {
                     Image(systemName: "ellipsis")

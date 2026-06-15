@@ -4,7 +4,7 @@ enum ReflectionLockRecordFactory {
     static func make(rid: UUID, expiresAt: Date, childID: UUID) -> ShieldRecord {
         ShieldRecord(
             recordKey: "all:reflection:\(rid.uuidString)",
-            tier: .all, targetKey: "reflection:\(rid.uuidString)",
+            tier: .allApps, targetKey: "reflection:\(rid.uuidString)",
             displayName: "Reflection lock", lastCommandID: UUID(),
             appTokens: [], categoryTokens: [], webDomainTokens: [],
             appliesToAll: true, issuedAt: Date(), expiresAt: expiresAt,

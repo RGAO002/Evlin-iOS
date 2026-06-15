@@ -167,10 +167,31 @@ enum LockSetupRecoveryPlanner {
         backend: LockSetupCatalogPresentationModel
     ) -> [LockListCategoryEntry] {
         localCategories.filter { category in
-            !backend.categoryRows.contains { row in
-                row.title.caseInsensitiveCompare(category.displayName) == .orderedSame
+            let localDisplayName = canonicalCategoryDisplayName(for: category)
+            return !backend.categoryRows.contains { row in
+                row.title.caseInsensitiveCompare(localDisplayName) == .orderedSame
             }
         }
+    }
+
+    static func uploadCategory(
+        category: LockListCategoryEntry,
+        tokenDataBase64: String,
+        sourceDeviceID: UUID?
+    ) -> ChildAppCatalogUploadApp {
+        let suggestion = AppleScreenTimeCategorySuggestions.exactMatch(for: category.name)
+        let displayName = suggestion?.displayName ?? category.displayName
+        let semanticKey = suggestion?.semanticKey ?? category.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return PendingCategoryRow(
+            semanticKey: semanticKey,
+            displayName: displayName,
+            tokenBase64: tokenDataBase64
+        ).makeUploadCategory(sourceDeviceID: sourceDeviceID)
+    }
+
+    private static func canonicalCategoryDisplayName(for category: LockListCategoryEntry) -> String {
+        AppleScreenTimeCategorySuggestions.exactMatch(for: category.name)?.displayName
+            ?? category.displayName
     }
 }
 
@@ -437,22 +458,22 @@ struct LockListManagerView: View {
                     guard let token = LocalAliasStore.shared.categoryToken(forName: category.name),
                           let blob = try? AppCatalogBlobEncoder.base64(token),
                           !blob.isEmpty else { continue }
-                    uploads.append(ChildAppCatalogUploadApp(
-                        aliasKey: nil,
-                        displayName: category.displayName,
-                        tokenKind: "category",
-                        bundleID: nil,
-                        aliases: [category.name],
-                        tokenAvailable: true,
+                    uploads.append(LockSetupRecoveryPlanner.uploadCategory(
+                        category: category,
                         tokenDataBase64: blob,
                         sourceDeviceID: childDeviceID
                     ))
                 }
                 if !uploads.isEmpty {
-                    _ = try await apiClient.mergeChildAppCatalog(deviceID: childDeviceID, apps: uploads)
-                    let refreshed = try await apiClient.fetchChildLockSetupCatalog(deviceID: childDeviceID)
-                    model.apply(catalog: refreshed)
-                    syncBanner = nil
+                    do {
+                        _ = try await apiClient.mergeChildAppCatalog(deviceID: childDeviceID, apps: uploads)
+                        let refreshed = try await apiClient.fetchChildLockSetupCatalog(deviceID: childDeviceID)
+                        model.apply(catalog: refreshed)
+                        syncBanner = nil
+                    } catch {
+                        model.apply(catalog: first)
+                        syncBanner = "Loaded Evlin lock setup. Some local tags couldn’t sync: \(error.localizedDescription)."
+                    }
                     return
                 }
             }
@@ -584,15 +605,20 @@ struct LockListManagerView: View {
         HStack(spacing: 12) {
             NameWithIcon(name: row.title, kind: kind, artworkURL: row.artworkURL, titleFont: .body)
                 .foregroundStyle(Color.evOnSurface)
-            VStack(alignment: .leading, spacing: 2) {
-                if let subtitle = row.subtitle, !subtitle.isEmpty {
-                    Text(subtitle)
-                        .font(.caption)
-                        .foregroundStyle(Color.evOnSurfaceVariant)
-                        .lineLimit(2)
-                }
+                .lineLimit(1)
+                .layoutPriority(1)
+
+            Spacer(minLength: 12)
+
+            if let subtitle = row.subtitle, !subtitle.isEmpty {
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(Color.evOnSurfaceVariant)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .multilineTextAlignment(.trailing)
+                    .frame(maxWidth: 190, alignment: .trailing)
             }
-            Spacer(minLength: 0)
 
             if canEdit, let onEdit {
                 Button(action: onEdit) {

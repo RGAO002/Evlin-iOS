@@ -27,7 +27,7 @@ struct TaskDetailSheet: View {
         case .bypass:
             return ("Bypass requested", EvlinAddPalette.bypassTone, EvlinAddPalette.bypass.opacity(0.10))
         case .pending:
-            return ("Waiting on student", Color.evOnSurfaceVariant, Color.evSurfaceContainerLow)
+            return ("Waiting on kid's submission", Color.evOnSurfaceVariant, Color.evSurfaceContainerLow)
         }
     }
 

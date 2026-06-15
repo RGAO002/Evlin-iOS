@@ -62,6 +62,7 @@ enum OnboardingStep: Equatable {
     case childConsentDisclosure  // mockup 8: "What Evlin can see"
     case childAllowNotifications // mockup 10: "Allow notifications"
     case childLockableHub        // mockup 12: "Choose what Evlin can lock"
+    case childSafetyLock         // mockup 14 (MOVED to kid): set the Screen Time passcode ON the kid's phone
 }
 
 struct OnboardingCoordinator: View {
@@ -157,6 +158,7 @@ struct OnboardingCoordinator: View {
     /// across runs to drive the home-screen float, so reading it here would light up the role pill
     /// + interleave before the card is even tapped. Drives the role pill + every interleave branch.
     @State private var singleDevice = false
+    @State private var sdDiag = ""   // temp on-screen debug for the single-device flow
 
     /// Single Device Mode top banner — tells the tester which role this phone is currently
     /// playing (the P/K float only appears AFTER onboarding finishes, so during the interleave
@@ -166,7 +168,7 @@ struct OnboardingCoordinator: View {
         HStack(spacing: 4) {
             Image(systemName: isKid ? "figure.child" : "person.fill")
                 .font(.system(size: 10, weight: .bold))
-            Text(isKid ? "KID" : "PARENT")
+            Text("\(isKid ? "KID" : "PARENT") · \(String(describing: step))\(sdDiag.isEmpty ? "" : " · \(sdDiag)")")
                 .font(.system(size: 10, weight: .bold))
         }
         .foregroundStyle(.white)
@@ -207,6 +209,24 @@ struct OnboardingCoordinator: View {
             await auth?.signInDemoAccount()
             appMode = "parent"
             step = .parentProfile
+        }
+    }
+
+    /// Single device: we already KNOW the kid's pairing code, so pair programmatically and skip
+    /// the scan screen entirely (avoids the flaky auto-submit + the dead camera). On failure the
+    /// real error shows in the debug pill so we can tell 409 / expired / network apart.
+    private func singleDevicePairAndContinue() {
+        SingleDeviceSession.shared.stage = .parentPair
+        sdDiag = "pairing…"
+        Task { @MainActor in
+            let err = await pairWithKidCode(childPairingCode)
+            if let err {
+                sdDiag = "pairErr:\(err)"
+            } else {
+                sdDiag = ""
+                SingleDeviceSession.shared.stage = .kidPermit
+                step = .parentConnected
+            }
         }
     }
 
@@ -555,13 +575,15 @@ struct OnboardingCoordinator: View {
                     onEnter: {
                         // onboardingComplete flipped inside ChildReadyStep; appMode already set
                     },
-                    // Single device: kid all-set on THIS phone → become the parent for the payoff
-                    // (readiness poll succeeds immediately → first block → reflection → done).
-                    // Crucially this does NOT finish onboarding (that would unmount the coordinator).
+                    // Single device: the kid finished the REAL setup (Screen Time grant + picked
+                    // apps) on THIS phone, so we're done. Skip the parent payoff tail
+                    // (waiting/passcode/first-block) — it relies on a cross-device readiness poll
+                    // that just spins on one phone — and drop straight into the parent app. The
+                    // P/K ball + chat let the tester send a real lock from here.
                     onSingleDeviceContinue: singleDevice ? {
-                        SingleDeviceSession.shared.stage = .parentPayoff
+                        SingleDeviceSession.shared.stage = .done
                         appMode = "parent"
-                        step = .parentWaitingForKid
+                        onboardingComplete = true
                     } : nil
                 )
 
@@ -594,7 +616,8 @@ struct OnboardingCoordinator: View {
                     apiClient: apiClient,
                     // Single device always starts a new family (the kid created it) → skip the
                     // new-or-join chooser and go straight to pairing.
-                    onSaved: { step = singleDevice ? .parentPairScan : .parentNewOrJoin },
+                    // Single device: pair programmatically with the known code (no scan screen).
+                    onSaved: { singleDevice ? singleDevicePairAndContinue() : (step = .parentNewOrJoin) },
                     onBack: { step = .parentSignIn }
                 )
 
@@ -642,9 +665,7 @@ struct OnboardingCoordinator: View {
                     onPaired: { code in await pairWithKidCode(code) },
                     pairedSucceeded: pairedChildDeviceID != nil,
                     onAdvance: { step = .parentConnected },
-                    onBack: { step = .parentNewOrJoin },
-                    // Single device: prefill the code the kid just generated on this same phone.
-                    initialCode: singleDevice ? childPairingCode : ""
+                    onBack: { step = .parentNewOrJoin }
                 )
 
             case .parentConnected:
@@ -667,16 +688,34 @@ struct OnboardingCoordinator: View {
                 )
 
             case .parentWaitingForKid:
-                ParentWaitingForKidStep(
-                    apiClient: apiClient,
-                    childDeviceID: pairedChildDeviceID ?? childDeviceID,
-                    kidName: kidName,
-                    onReady: { r in
-                        firstBlockApp = r.first_block_app
-                        step = .parentSetPasscode
-                    },
-                    onBack: { step = .parentConnected }
-                )
+                if singleDevice {
+                    // Single device: the kid already did the REAL setup on THIS phone, so the
+                    // cross-device readiness poll just spins here forever. Don't wait — finish
+                    // onboarding and drop into the parent app (P/K ball + chat send a real lock
+                    // from there). Safety net: no single-device path should reach this screen
+                    // (childReady now completes onboarding directly), but if one does, never hang.
+                    Color.evSurface
+                        .ignoresSafeArea()
+                        .onAppear {
+                            SingleDeviceSession.shared.stage = .done
+                            appMode = "parent"
+                            onboardingComplete = true
+                        }
+                } else {
+                    ParentWaitingForKidStep(
+                        apiClient: apiClient,
+                        childDeviceID: pairedChildDeviceID ?? childDeviceID,
+                        kidName: kidName,
+                        onReady: { r in
+                            // The kid's safety lock (Screen Time passcode) moved to the KID
+                            // chain, so the parent no longer sets a passcode here — once the kid
+                            // signals "All set" the parent goes straight to the first-block test.
+                            firstBlockApp = r.first_block_app
+                            step = .parentFirstActions
+                        },
+                        onBack: { step = .parentConnected }
+                    )
+                }
 
             case .parentSetPasscode:
                 ParentSetPasscodeV2Step(
@@ -797,8 +836,24 @@ struct OnboardingCoordinator: View {
                 ChildLockableHubStep(
                     familyID: familyID,
                     childDeviceID: childDeviceID,
-                    onContinue: { step = .childReady },
+                    onContinue: { step = .childSafetyLock },
                     onBack: { step = .childGrantPermission }
+                )
+
+            case .childSafetyLock:
+                // MOVED from the parent chain: the Screen Time passcode is set ON the
+                // kid's phone (it's what stops the kid disabling Evlin), so it's the
+                // last kid step before "All set!". Reuses the passcode screen with
+                // kid theming/copy. Parent just waits for the kid's All-set signal.
+                ParentSetPasscodeV2Step(
+                    kidName: kidName,
+                    onContinue: { step = .childReady },
+                    onBack: { step = .childLockableHub },
+                    role: .child,
+                    phase: "5 · Safety",
+                    stepIndex: 10,
+                    dotsCurrent: 9,
+                    total: 11   // childTotal (private to ChildV2PlaceholderSteps.swift)
                 )
             }
         }
@@ -864,11 +919,14 @@ struct OnboardingCoordinator: View {
     private func pairWithKidCode(_ code: String) async -> String? {
         let trimmed = code.filter(\.isNumber)
         guard trimmed.count == 6 else { return "Enter the 6-digit code." }
+        recordPairDiagnostic("pair:start")
         do {
+            recordPairDiagnostic("pair:before-api")
             let r = try await apiClient.pairFamily(
                 code: trimmed,
                 deviceLabel: UIDevice.current.name
             )
+            recordPairDiagnostic("pair:api-ok")
             // Thread state.
             familyID = r.family_id
             parentDeviceID = r.parent_device_id
@@ -876,22 +934,32 @@ struct OnboardingCoordinator: View {
             childDeviceID = r.child_device_id
             pairingCode = trimmed
             protectionMode = r.protection_mode
+            kidName = "your kid"
+            recordPairDiagnostic("pair:state-set")
 
             // Persist the same keys the rest of the app reads (chat queueing,
             // BigKid panel, poller) — identical to legacy PairingCodeStep.
             UserDefaults.standard.set(r.family_id.uuidString, forKey: "evlin.familyID")
             UserDefaults.standard.set(r.parent_device_id.uuidString, forKey: "evlin.parentDeviceID")
             UserDefaults.standard.set(r.child_device_id.uuidString, forKey: "evlin.childDeviceID")
+            recordPairDiagnostic("pair:defaults-set")
 
-            // Refresh the family aggregate, then resolve the kid's display name
-            // for the connected screen. The pair response carries only ids, so
-            // the name comes from GET /me/profile (FamilyStore) — the child the
-            // consumed code belonged to. Fall back to "your kid" if the device
-            // isn't yet projected (e.g. before the kid finishes their profile).
-            await familyStore.load()
-            kidName = resolvedKidName(forChildDeviceID: r.child_device_id)
+            // Do not block the pair-screen transition on the family aggregate.
+            // `FamilyStore.load()` performs more authed network work
+            // (/me/profile + lock-state). If that refresh stalls or refreshes
+            // auth, the scanner screen appears frozen even though pairing already
+            // succeeded. Advance first; refresh the display name best-effort.
+            let pairedID = r.child_device_id
+            Task { @MainActor in
+                recordPairDiagnostic("pair:family-load-start")
+                await familyStore.load()
+                kidName = resolvedKidName(forChildDeviceID: pairedID)
+                recordPairDiagnostic("pair:family-load-done")
+            }
+            recordPairDiagnostic("pair:return-success")
             return nil
         } catch let APIError.serverError(status) {
+            recordPairDiagnostic("pair:server-error-\(status)")
             switch status {
             case 404: return "That code wasn't found. Double-check the 6 digits."
             case 400: return "That code has expired or was already used. Ask your kid for a fresh one."
@@ -899,8 +967,17 @@ struct OnboardingCoordinator: View {
             default:  return "Couldn't pair (error \(status)). Try again."
             }
         } catch {
+            recordPairDiagnostic("pair:error-\(String(describing: error))")
             return "Network error. Check your connection and try again."
         }
+    }
+
+    @MainActor
+    private func recordPairDiagnostic(_ message: String) {
+        UserDefaults.standard.set(message, forKey: "evlin.onboardingPairDiag")
+        #if DEBUG
+        print("[OnboardingPair] \(message)")
+        #endif
     }
 
     /// KID side: mints the family via POST /family/create, threads the bound

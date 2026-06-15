@@ -169,15 +169,15 @@ enum AppControlRouter {
         // Force-confirmation options (block_now / shield_anyway) always resend
         // with the backend-provided tokens — that's the contract the seam reads.
         if !option.forceConfirmations.isEmpty {
-            return .resendForceConfirmations(option.forceConfirmations)
+            return .resendForceConfirmations(scopedForceConfirmations(option.forceConfirmations, card: card))
         }
         switch option.action {
         case "block_now":
-            // Defensive: backend normally ships force_confirmations=["block_now"];
+            // Defensive: backend normally ships force_confirmations.
             // if a deploy omitted them, resend the token explicitly.
-            return .resendForceConfirmations(["block_now"])
+            return .resendForceConfirmations(["\(card.kind.rawValue):block_now"])
         case "shield_anyway":
-            return .resendForceConfirmations(["shield_anyway"])
+            return .resendForceConfirmations(["\(card.kind.rawValue):shield_anyway"])
         case "open_lazy_tag":
             return .openLazyTag(target: card.targetDisplay, kind: aliasKind(for: card.targetKind))
         case "open_app_search":
@@ -205,8 +205,9 @@ enum AppControlRouter {
             // The candidate display is now the unambiguous app name. Confirm it
             // first so the next turn resolves through the family dictionary
             // instead of re-opening the same disambiguation / legacy lazy-tag path.
+            let commandDisplay = commandDisplayName(for: candidate.display)
             return .confirmAppAndResend(
-                candidateDisplay: candidate.display,
+                candidateDisplay: commandDisplay,
                 bundleID: candidate.bundleID,
                 artworkURL: candidate.artworkURL
             )
@@ -226,7 +227,7 @@ enum AppControlRouter {
         with candidateDisplay: String
     ) -> String {
         let trimmedOriginal = original.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmedCandidate = candidateDisplay.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedCandidate = commandDisplayName(for: candidateDisplay)
         let trimmedTarget = targetDisplay.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedOriginal.isEmpty, !trimmedCandidate.isEmpty else {
             return trimmedCandidate
@@ -246,5 +247,31 @@ enum AppControlRouter {
 
     static func aliasKind(for targetKind: String) -> AliasKind {
         targetKind == "category" ? .category : .app
+    }
+
+    private static func scopedForceConfirmations(
+        _ tokens: [String],
+        card: AppControlCardModel
+    ) -> [String] {
+        tokens.map { token in
+            let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.contains(":"),
+                  trimmed == "block_now" || trimmed == "shield_anyway"
+            else { return trimmed }
+            return "\(card.kind.rawValue):\(trimmed)"
+        }
+    }
+
+    private static func commandDisplayName(for display: String) -> String {
+        let trimmed = display.trimmingCharacters(in: .whitespacesAndNewlines)
+        for separator in [" - ", " – ", " — "] {
+            if let range = trimmed.range(of: separator) {
+                let prefix = trimmed[..<range.lowerBound].trimmingCharacters(in: .whitespacesAndNewlines)
+                if !prefix.isEmpty {
+                    return String(prefix)
+                }
+            }
+        }
+        return trimmed
     }
 }

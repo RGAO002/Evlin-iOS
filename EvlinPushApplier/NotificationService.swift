@@ -150,7 +150,7 @@ enum NSELockApplier {
         case .exactApp: targetKey = exactAppTargetKey(cmd.target)
         case .savedList: targetKey = cmd.target.listID?.uuidString ?? "?"
         case .category: targetKey = (categoryLookupName(cmd.target) ?? "?").lowercased()
-        case .all: targetKey = "all"
+        case .all, .allApps: targetKey = "all"
         }
         return ShieldRecord.makeRecordKey(tier: tier, targetKey: targetKey)
     }
@@ -185,7 +185,7 @@ enum NSELockApplier {
             categoryTokens = [token]
             targetKey = hint.lowercased()
             displayName = cmd.target.targetDisplay ?? hint.capitalized
-        case .all:
+        case .all, .allApps:
             targetKey = "all"
             appliesToAll = true
             displayName = "All Apps"

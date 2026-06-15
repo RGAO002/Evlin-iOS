@@ -69,6 +69,18 @@ enum CapturePathValidator {
     }
 }
 
+enum AddTargetPickerConfiguration {
+    /// Use category expansion even in Add App. iOS can collapse a single-app
+    /// category/search result into a category token; expansion gives us the
+    /// contained ApplicationToken when the system is willing to expose it.
+    static func includeEntireCategory(for mode: AddTargetMode) -> Bool {
+        switch mode {
+        case .app, .category:
+            return true
+        }
+    }
+}
+
 /// Encodes FamilyControls tokens/selections with the same JSON configuration
 /// used by LocalAliasStore's token helpers, then wraps the bytes as base64.
 enum AppCatalogBlobEncoder {
@@ -108,6 +120,116 @@ struct CatalogSearchResult: Equatable, Identifiable, Sendable {
 
     var id: String {
         bundleID ?? canonicalName.lowercased()
+    }
+}
+
+struct AppleScreenTimeCategorySuggestion: Equatable, Identifiable, Sendable {
+    let semanticKey: String
+    let displayName: String
+    let aliases: [String]
+
+    var id: String { semanticKey }
+
+    static let social = AppleScreenTimeCategorySuggestion(
+        semanticKey: "social",
+        displayName: "Social",
+        aliases: ["social", "social networking", "social media", "社交"]
+    )
+    static let games = AppleScreenTimeCategorySuggestion(
+        semanticKey: "games",
+        displayName: "Games",
+        aliases: ["games", "game", "游戏", "遊戲"]
+    )
+    static let entertainment = AppleScreenTimeCategorySuggestion(
+        semanticKey: "entertainment",
+        displayName: "Entertainment",
+        aliases: ["entertainment", "entertain", "streaming", "tv", "video", "娱乐", "娛樂"]
+    )
+    static let creativity = AppleScreenTimeCategorySuggestion(
+        semanticKey: "creativity",
+        displayName: "Creativity",
+        aliases: ["creativity", "creative", "photo", "video editing", "design", "创意", "創意"]
+    )
+    static let productivityAndFinance = AppleScreenTimeCategorySuggestion(
+        semanticKey: "productivity",
+        displayName: "Productivity & Finance",
+        aliases: ["productivity", "finance", "productivity & finance", "效率", "生产力", "生產力", "财务", "財務"]
+    )
+    static let education = AppleScreenTimeCategorySuggestion(
+        semanticKey: "education",
+        displayName: "Education",
+        aliases: ["education", "learning", "school", "study", "教育", "学习", "學習"]
+    )
+    static let informationAndReading = AppleScreenTimeCategorySuggestion(
+        semanticKey: "reading",
+        displayName: "Information & Reading",
+        aliases: ["information", "reading", "information & reading", "books", "news", "reference", "信息", "资讯", "資訊", "阅读", "閱讀", "图书", "圖書"]
+    )
+    static let healthAndFitness = AppleScreenTimeCategorySuggestion(
+        semanticKey: "health",
+        displayName: "Health & Fitness",
+        aliases: ["health", "fitness", "health & fitness", "wellness", "健康", "健身"]
+    )
+    static let shoppingAndFood = AppleScreenTimeCategorySuggestion(
+        semanticKey: "shopping",
+        displayName: "Shopping & Food",
+        aliases: ["shopping", "food", "shopping & food", "delivery", "购物", "購物", "美食", "外卖", "外賣"]
+    )
+    static let travel = AppleScreenTimeCategorySuggestion(
+        semanticKey: "travel",
+        displayName: "Travel",
+        aliases: ["travel", "navigation", "maps", "交通", "旅行", "导航", "導航"]
+    )
+    static let utilities = AppleScreenTimeCategorySuggestion(
+        semanticKey: "utilities",
+        displayName: "Utilities",
+        aliases: ["utilities", "utility", "tools", "工具", "实用工具", "實用工具"]
+    )
+    static let other = AppleScreenTimeCategorySuggestion(
+        semanticKey: "other",
+        displayName: "Other",
+        aliases: ["other", "misc", "miscellaneous", "其他"]
+    )
+}
+
+enum AppleScreenTimeCategorySuggestions {
+    static let all: [AppleScreenTimeCategorySuggestion] = [
+        .social,
+        .games,
+        .entertainment,
+        .creativity,
+        .productivityAndFinance,
+        .education,
+        .informationAndReading,
+        .healthAndFitness,
+        .shoppingAndFood,
+        .travel,
+        .utilities,
+        .other,
+    ]
+
+    static func matches(for query: String) -> [AppleScreenTimeCategorySuggestion] {
+        let normalized = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty, normalized != "category" else { return all }
+        return all.filter { suggestion in
+            suggestion.displayName.lowercased().contains(normalized)
+                || suggestion.semanticKey.contains(normalized)
+                || suggestion.aliases.contains { $0.lowercased().contains(normalized) }
+        }
+    }
+
+    static func visibleCapsules(for query: String) -> [AppleScreenTimeCategorySuggestion] {
+        all
+    }
+
+    static func exactMatch(for value: String) -> AppleScreenTimeCategorySuggestion? {
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty else { return nil }
+        return all.first { suggestion in
+            suggestion.displayName.lowercased() == normalized
+                || suggestion.semanticKey.lowercased() == normalized
+                || suggestion.aliases.contains { $0.lowercased() == normalized }
+        }
     }
 }
 
@@ -233,7 +355,7 @@ struct PendingAppRow: Identifiable, Equatable, Sendable {
 /// Apple category.
 struct PendingCategoryRow: Identifiable, Equatable, Sendable {
     let id: UUID
-    let semanticKey: String
+    var semanticKey: String
     var displayName: String
     let tokenBase64: String
 
@@ -246,6 +368,20 @@ struct PendingCategoryRow: Identifiable, Equatable, Sendable {
 
     var isNamedCategory: Bool {
         !displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    static func initialDisplayName(pickerLabel: String?) -> String {
+        pickerLabel?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    mutating func applySuggestion(_ suggestion: AppleScreenTimeCategorySuggestion) {
+        semanticKey = suggestion.semanticKey
+        displayName = suggestion.displayName
+    }
+
+    func matchesSuggestion(_ suggestion: AppleScreenTimeCategorySuggestion) -> Bool {
+        semanticKey == suggestion.semanticKey
+            && displayName.trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare(suggestion.displayName) == .orderedSame
     }
 
     func makeUploadCategory(sourceDeviceID: UUID?) -> ChildAppCatalogUploadApp {

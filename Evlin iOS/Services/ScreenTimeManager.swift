@@ -11,6 +11,19 @@ class ScreenTimeManager: ObservableObject {
 
     static let deletionProtectionDefaultsKey = "evlin.deletionProtectionEnabled"
 
+    enum DeletionProtectionApplyPlan: Equatable {
+        case setDenyAppRemoval(Bool?)
+        case clearAllSettingsThenReapplyActiveLocks
+    }
+
+    static func deletionRestrictionValue(for enabled: Bool) -> Bool? {
+        enabled ? true : nil
+    }
+
+    static func deletionProtectionApplyPlan(for enabled: Bool) -> DeletionProtectionApplyPlan {
+        enabled ? .setDenyAppRemoval(true) : .clearAllSettingsThenReapplyActiveLocks
+    }
+
     // MARK: - Published state
 
     @Published var isAuthorized: Bool = false
@@ -35,7 +48,7 @@ class ScreenTimeManager: ObservableObject {
         isAuthorized = AuthorizationCenter.shared.authorizationStatus == .approved
         let persistedDeletion = UserDefaults.standard.object(forKey: Self.deletionProtectionDefaultsKey) as? Bool ?? true
         deletionProtectionEnabled = persistedDeletion
-        store.application.denyAppRemoval = persistedDeletion
+        applyDeletionProtectionToManagedSettings(persistedDeletion)
 
         // Restore saved selection. Older builds persisted with `includeEntireCategory: false`,
         // so when we hydrate we copy tokens into a fresh selection that has the flag set —
@@ -209,12 +222,12 @@ class ScreenTimeManager: ObservableObject {
     /// User preference for `ManagedSettingsStore.application.denyAppRemoval`. Default ON.
     func setDeletionProtectionEnabled(_ enabled: Bool) {
         guard deletionProtectionEnabled != enabled else {
-            syncDeletionProtectionToManagedSettings()
+            applyDeletionProtectionToManagedSettings(enabled)
             return
         }
         deletionProtectionEnabled = enabled
         UserDefaults.standard.set(enabled, forKey: Self.deletionProtectionDefaultsKey)
-        store.application.denyAppRemoval = enabled
+        applyDeletionProtectionToManagedSettings(enabled)
     }
 
     /// Re-apply persisted preference to Managed Settings (called on launch, foreground, after unlock-all).
@@ -223,12 +236,25 @@ class ScreenTimeManager: ObservableObject {
         if persisted != deletionProtectionEnabled {
             deletionProtectionEnabled = persisted
         }
-        store.application.denyAppRemoval = persisted
+        applyDeletionProtectionToManagedSettings(persisted)
     }
 
     /// Backward-compatible name — applies current preference only.
     func enableDeletionProtection() {
         syncDeletionProtectionToManagedSettings()
+    }
+
+    private func applyDeletionProtectionToManagedSettings(_ enabled: Bool) {
+        switch Self.deletionProtectionApplyPlan(for: enabled) {
+        case .setDenyAppRemoval(let value):
+            store.application.denyAppRemoval = value
+        case .clearAllSettingsThenReapplyActiveLocks:
+            store.application.denyAppRemoval = nil
+            ManagedSettingsStore().clearAllSettings()
+            Task {
+                await ActiveLockStore.shared.reapplyCurrentRestrictions()
+            }
+        }
     }
 
     /// Clear only lock-related settings. Do not call `clearAllSettings()` here:

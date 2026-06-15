@@ -8,7 +8,7 @@ import CryptoKit
 /// merges; different (tier, targetKey) coexist even if they cover the same app.
 /// See spec §3.1 and §3.2.
 struct ShieldRecord: Codable, Sendable {
-    /// "exactApp:<b64>" | "savedList:<listID>" | "category:social" | "all"
+    /// "exactApp:<b64>" | "savedList:<listID>" | "category:social" | "allApps:<target>" | "all"
     /// Stable. Merge target.
     let recordKey: String
 
@@ -28,6 +28,7 @@ struct ShieldRecord: Codable, Sendable {
     /// - exactApp: appTokens has 1 token; categoryTokens / webDomainTokens empty
     /// - savedList: any of the three may be non-empty
     /// - category: categoryTokens has 1 token
+    /// - allApps: all three empty; appliesToAll = true; web domain categories stay unset
     /// - all: all three empty; appliesToAll = true
     var appTokens: Set<ApplicationToken>
     var categoryTokens: Set<ActivityCategoryToken>
@@ -47,6 +48,7 @@ struct ShieldRecord: Codable, Sendable {
     static func makeRecordKey(tier: ShieldTier, targetKey: String) -> String {
         switch tier {
         case .all: return "all"
+        case .allApps: return "allApps:\(targetKey)"
         case .exactApp: return "exactApp:\(targetKey)"
         case .savedList: return "savedList:\(targetKey)"
         case .category: return "category:\(targetKey)"
@@ -56,6 +58,7 @@ struct ShieldRecord: Codable, Sendable {
     /// Extract tier from a recordKey.
     static func tierFromRecordKey(_ key: String) -> ShieldTier? {
         if key == "all" { return .all }
+        if key.hasPrefix("allApps:") { return .allApps }
         if key.hasPrefix("exactApp:") { return .exactApp }
         if key.hasPrefix("savedList:") { return .savedList }
         if key.hasPrefix("category:") { return .category }
@@ -68,6 +71,34 @@ struct ShieldRecord: Codable, Sendable {
         let data = recordKey.data(using: .utf8) ?? Data()
         let hash = sha256(data).prefix(16).map { String(format: "%02x", $0) }.joined()
         return "evlin.shield.\(hash)"
+    }
+
+    var isFullWebBroadShield: Bool {
+        appliesToAll && tier == .all
+    }
+
+    func normalizedForCurrentSchema() -> (record: ShieldRecord, migrated: Bool) {
+        guard tier == .all, recordKey.hasPrefix("all:reflection:") else {
+            return (self, false)
+        }
+        return (
+            ShieldRecord(
+                recordKey: recordKey,
+                tier: .allApps,
+                targetKey: targetKey,
+                displayName: displayName,
+                lastCommandID: lastCommandID,
+                appTokens: appTokens,
+                categoryTokens: categoryTokens,
+                webDomainTokens: [],
+                appliesToAll: true,
+                issuedAt: issuedAt,
+                expiresAt: expiresAt,
+                originalRequest: originalRequest,
+                targetChildID: targetChildID
+            ),
+            true
+        )
     }
 }
 

@@ -7,6 +7,26 @@ enum DeviceModelMap {
     /// Curated subset; extend as new hardware ships. The raw id is always a
     /// safe fallback for anything not listed.
     static let names: [String: String] = [
+        // Older hardware first — kids are frequently handed down an aging phone
+        // (iPhone 8 / X / XR / XS era), so these must resolve to a friendly name
+        // and not leak the raw "iPhoneN,M" identifier into the Enrolled Devices row.
+        "iPhone8,1": "iPhone 6s",
+        "iPhone8,2": "iPhone 6s Plus",
+        "iPhone8,4": "iPhone SE (1st generation)",
+        "iPhone9,1": "iPhone 7",
+        "iPhone9,3": "iPhone 7",
+        "iPhone9,2": "iPhone 7 Plus",
+        "iPhone9,4": "iPhone 7 Plus",
+        "iPhone10,1": "iPhone 8",
+        "iPhone10,4": "iPhone 8",
+        "iPhone10,2": "iPhone 8 Plus",
+        "iPhone10,5": "iPhone 8 Plus",
+        "iPhone10,3": "iPhone X",
+        "iPhone10,6": "iPhone X",
+        "iPhone11,2": "iPhone XS",
+        "iPhone11,4": "iPhone XS Max",
+        "iPhone11,6": "iPhone XS Max",
+        "iPhone11,8": "iPhone XR",
         "iPhone12,1": "iPhone 11",
         "iPhone12,3": "iPhone 11 Pro",
         "iPhone12,5": "iPhone 11 Pro Max",

@@ -3,6 +3,7 @@ import FamilyControls
 import ManagedSettings
 import DeviceActivity
 import AVFoundation
+import UserNotifications
 
 /// Pure, testable mapping for child create/edit/delete. Kept free of SwiftUI
 /// so it can be unit-tested without a view host. The view layer (below) calls
@@ -42,10 +43,101 @@ enum ChildCRUDMapper {
     }
 }
 
+enum ParentSettingsPresentation {
+    enum NotificationPermissionAction: Equatable {
+        case requestAuthorization
+        case openSystemSettings
+        case setLocalPreference
+        case refreshStatus
+    }
+
+    static let defaultNotificationToggleIDs = [
+        "kid_requests",
+        "reflection_completions",
+        "kid_nudges",
+    ]
+
+    static let parentPushMasterMuteType = "*"
+
+    static let parentAccentHexOptions = [
+        "#24324A",
+        "#2E7D32",
+        "#7C6FF7",
+        "#EF6C00",
+        "#0F766E",
+        "#BE185D",
+        "#2563EB",
+        "#6B7280",
+    ]
+
+    static let parentProfileHeroAccentHexOptions = parentAccentHexOptions
+
+    static let childProfileHeroAccentHexOptions = parentProfileHeroAccentHexOptions
+
+    static func versionDisplay(shortVersion: String?, build: String?) -> String {
+        let version = shortVersion?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !version.isEmpty else { return "—" }
+
+        let buildNumber = build?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return buildNumber.isEmpty ? version : "\(version) (\(buildNumber))"
+    }
+
+    static func childrenDevicesSummary(childCount: Int, deviceCount: Int) -> String {
+        let childCopy = "\(childCount) \(childCount == 1 ? "child" : "children")"
+        let deviceCopy = "\(deviceCount) \(deviceCount == 1 ? "child device" : "child devices")"
+        return "\(childCopy) · \(deviceCopy)"
+    }
+
+    static func coParentValue(coParentCount: Int) -> String {
+        guard coParentCount > 0 else { return "None" }
+        return "\(coParentCount) adults"
+    }
+
+    static func parentRootAvatarURL(_ signedURL: String?) -> String? {
+        signedURL?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+    }
+
+    static func childSettingsAvatarURL(_ signedURL: String?) -> String? {
+        signedURL?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+    }
+
+    static func notificationStatusCopy(_ status: UNAuthorizationStatus) -> String {
+        switch status {
+        case .authorized: return "Allowed"
+        case .denied: return "Off"
+        case .notDetermined: return "Not Asked Yet"
+        case .provisional: return "Provisional"
+        case .ephemeral: return "Temporary"
+        @unknown default: return "Unknown"
+        }
+    }
+
+    static func notificationPermissionAction(
+        status: UNAuthorizationStatus,
+        wantsEnabled: Bool
+    ) -> NotificationPermissionAction {
+        if wantsEnabled {
+            switch status {
+            case .notDetermined:
+                return .requestAuthorization
+            case .denied:
+                return .openSystemSettings
+            case .authorized, .provisional, .ephemeral:
+                return .setLocalPreference
+            @unknown default:
+                return .refreshStatus
+            }
+        }
+
+        return .openSystemSettings
+    }
+}
+
 struct HomeSettingsSheet: View {
     @EnvironmentObject var apiClient: APIClient
     @EnvironmentObject var screenTimeManager: ScreenTimeManager
     @Environment(FamilyStore.self) private var familyStore
+    @Environment(\.scenePhase) private var scenePhase
     var onClose: () -> Void
 
     @AppStorage("parentName") private var parentName: String = ""
@@ -72,13 +164,40 @@ struct HomeSettingsSheet: View {
     @State private var parentNameAtOpen: String = ""
     @State private var parentNameError: String? = nil
     @State private var isSavingParentName: Bool = false
+    @State private var parentPickedAvatar: UIImage? = nil
+    @State private var parentAvatarURL: String? = nil
+    @State private var parentAvatarError: String? = nil
+    @State private var isUploadingParentAvatar = false
+    @State private var selectedParentAccentHex = ParentSettingsPresentation.parentAccentHexOptions[0]
+    @State private var parentAccentError: String? = nil
+    @State private var isSavingParentAccent = false
+    @State private var childPickedAvatarByID: [String: UIImage] = [:]
+    @State private var childAvatarURLByID: [String: String] = [:]
+    @State private var childAvatarErrorByID: [String: String] = [:]
+    @State private var uploadingChildAvatarIDs: Set<String> = []
+    @State private var selectedChildAccentHexByID: [String: String] = [:]
+    @State private var childAccentErrorByID: [String: String] = [:]
+    @State private var savingChildAccentIDs: Set<String> = []
     @State private var isPickerPresented = false
     @State private var showPINGate = false
     @State private var showAddApp = false
     @State private var showAddList = false
     @State private var showLockListGate = false
     @State private var showLockListManager = false
+    @State private var showAddChildPairing = false
+    @State private var showParentProfileMenu = false
+    @State private var showDebugSettings = false
+    @State private var showNotificationsMenu = false
+    @State private var addChildPairingKidName = ""
+    @State private var notificationAuthorizationStatus: UNAuthorizationStatus = .notDetermined
+    @State private var pendingNotificationSystemSettingsIntent: Bool? = nil
     @State private var pendingGatedAction: GatedAction?
+
+    @AppStorage("evlin.settings.notifications.enabled") private var notifyPushEnabled: Bool = true
+    @AppStorage("evlin.settings.notifications.kidRequests") private var notifyKidRequests: Bool = true
+    @AppStorage("evlin.settings.notifications.reflectionCompletions") private var notifyReflectionCompletions: Bool = true
+    @AppStorage("evlin.settings.notifications.kidNudges") private var notifyKidNudges: Bool = true
+    @AppStorage("evlin.settings.notifications.weeklySummary") private var notifyWeeklySummary: Bool = false
 
     @AppStorage("evlin.protectionMode") private var savedProtectionMode: String = "std"
 
@@ -97,686 +216,38 @@ struct HomeSettingsSheet: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("Children") {
-                    ForEach(children) { c in
-                        Button { editing = c } label: {
-                            HStack(spacing: 12) {
-                                EvlinAvatarView(url: c.avatarURL, name: c.name, size: 36)
-                                VStack(alignment: .leading, spacing: 1) {
-                                    Text(c.name)
-                                        .font(.custom("Manrope", size: 14).weight(.bold))
-                                        .foregroundStyle(Color.evOnSurface)
-                                    Text("Age \(c.age)")
-                                        .font(.custom("Inter", size: 12))
-                                        .foregroundStyle(Color.evOnSurfaceVariant)
-                                }
-                                Spacer()
-                                Image(systemName: "chevron.right")
-                                    .font(.system(size: 12, weight: .semibold))
-                                    .foregroundStyle(Color.evOutline)
-                            }
-                        }
-                    }
-                    .onDelete { offsets in
-                        let toDelete = offsets.map { children[$0] }
-                        Task { await deleteChildren(toDelete) }
-                    }
-
-                    Button { adding = true } label: {
-                        Label("Add child", systemImage: "plus.circle.fill")
-                            .foregroundStyle(Color.evPrimary)
-                    }
-
-                    LabeledContent("Parent name") {
-                        TextField("", text: $parentName)
-                            .multilineTextAlignment(.trailing)
-                            .textFieldStyle(.plain)
-                            // HP-14: the @AppStorage write alone is dead —
-                            // HomeView prefers the server display_name, so
-                            // commit edits to the backend.
-                            .onSubmit { Task { _ = await saveParentNameIfChanged() } }
-                    }
-
-                    if let parentNameError {
-                        Text(parentNameError)
-                            .font(.caption)
-                            .foregroundStyle(Color.evError)
-                    }
-
-                    if let childOpError {
-                        Text(childOpError)
-                            .font(.caption)
-                            .foregroundStyle(Color.evError)
-                    }
-                }
+                settingsRootContent
 
                 #if DEBUG
-                if false {
-                Section("Connection") {
-                    #if DEBUG
-                    // Dev-only quick-swap. Production builds (DEBUG not
-                    // defined) hide this entirely so users never see the
-                    // local IP. Tapping a segment writes the corresponding
-                    // preset into both serverURL (the live text field) and
-                    // APIClient.baseURL via saveServerURL.
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Backend Preset")
-                            .font(.custom("Inter", size: 11).weight(.bold))
-                            .tracking(1.2)
-                            .textCase(.uppercase)
-                            .foregroundStyle(Color.evOutline)
-                        Picker("Backend", selection: $serverURL) {
-                            Text("Local").tag(APIClient.localDevURL)
-                            Text("Production").tag(APIClient.defaultURL)
-                        }
-                        .pickerStyle(.segmented)
-                        .onChange(of: serverURL) { oldValue, newValue in
-                            // Only persist when the new value matches one of
-                            // the two presets — otherwise the free-text
-                            // field below would re-fire this on every
-                            // keystroke. The custom-URL flow has its own
-                            // explicit Save button.
-                            let isPreset = newValue == APIClient.localDevURL
-                                || newValue == APIClient.defaultURL
-                            guard isPreset else { return }
-                            apiClient.saveServerURL(newValue)
-
-                            // Safety net for backend swap mid-session.
-                            // Pairing IDs are backend-scoped — Render's
-                            // family_id won't exist in Local's DB and vice
-                            // versa. Wipe pairing-related UserDefaults and
-                            // force onboarding to re-run so the next
-                            // /family/pair fresh-writes IDs for the new
-                            // backend. Without this clear, chat would keep
-                            // hitting "No child device is paired" after a
-                            // switch because the cached IDs are orphaned.
-                            //
-                            // Only fires when actually CHANGING backends —
-                            // initial onAppear-driven population (where
-                            // oldValue == newValue) is skipped.
-                            guard !oldValue.isEmpty, oldValue != newValue else { return }
-                            UserDefaults.standard.removeObject(forKey: "evlin.familyID")
-                            UserDefaults.standard.removeObject(forKey: "evlin.parentDeviceID")
-                            UserDefaults.standard.removeObject(forKey: "evlin.childDeviceID")
-                            UserDefaults.standard.set(false, forKey: "onboardingComplete")
-                            UserDefaults.standard.set("", forKey: "appMode")
-                        }
-                    }
-                    #endif
-
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Server URL")
-                            .font(.custom("Inter", size: 11).weight(.bold))
-                            .tracking(1.2)
-                            .textCase(.uppercase)
-                            .foregroundStyle(Color.evOutline)
-                        TextField("http://192.168.1.x:8000/api/v1", text: $serverURL)
-                            .autocorrectionDisabled()
-                            .textInputAutocapitalization(.never)
-                            .keyboardType(.URL)
-                    }
-
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Child Name")
-                            .font(.custom("Inter", size: 11).weight(.bold))
-                            .tracking(1.2)
-                            .textCase(.uppercase)
-                            .foregroundStyle(Color.evOutline)
-                        TextField("Child's name", text: $childName)
-                    }
-
-                    if !familyID.isEmpty {
-                        idRow(title: "Family ID", value: familyID)
-                    }
-
-                    if !parentDeviceID.isEmpty {
-                        idRow(title: "Parent Device ID", value: parentDeviceID)
-                    }
-
-                    if !childDeviceID.isEmpty {
-                        idRow(title: "Child Device ID", value: childDeviceID)
-                    }
-                }
-                }
-                #endif
-
-                Section("Screen Time") {
-                    HStack {
-                        Text("Authorization")
-                        Spacer()
-                        if screenTimeManager.isAuthorized {
-                            Label("Authorized", systemImage: "checkmark.circle.fill")
-                                .foregroundStyle(Color.evSecondary)
-                        } else {
-                            Button("Authorize") {
-                                Task { await screenTimeManager.requestScreenTimeAuthorization() }
-                            }
-                        }
-                    }
-
-                    Text(
-                        savedProtectionMode == "max"
-                            ? "Mode: Maximum — Screen Time authorization uses the child's Apple ID on this phone."
-                            : "Mode: Standard — authorization is tied to this Apple ID."
-                    )
-                    .font(.caption)
-                    .foregroundStyle(Color.evOutline)
-
-                    if let authErr = screenTimeManager.errorMessage, !authErr.isEmpty {
-                        Text(authErr)
-                            .font(.caption)
-                            .foregroundStyle(Color.evError)
-                    }
-
+                Section("Developer") {
                     Button {
-                        Task { await screenTimeManager.openScreenTimeSettings() }
+                        showDebugSettings = true
                     } label: {
-                        Label("Screen Time Settings", systemImage: "gearshape")
-                    }
-
-                    Toggle(isOn: Binding(
-                        get: { screenTimeManager.deletionProtectionEnabled },
-                        set: { screenTimeManager.setDeletionProtectionEnabled($0) }
-                    )) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Prevent deleting apps")
-                            Text("Uses Screen Time. When ON, uninstalling Evlin — and usually other apps — is blocked.")
-                                .font(.caption)
-                                .foregroundStyle(Color.evOutline)
-                        }
-                    }
-
-                    #if DEBUG
-                    if false {
-                    let appCount = screenTimeManager.selectedApps.applicationTokens.count
-                    let catCount = screenTimeManager.selectedApps.categoryTokens.count
-
-                    Button {
-                        isPickerPresented = true
-                    } label: {
-                        HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Managed Apps & Categories")
-                                    .foregroundStyle(Color.evOnSurface)
-                                if appCount > 0 || catCount > 0 {
-                                    Text("\(appCount) apps, \(catCount) categories")
-                                        .font(.caption)
-                                        .foregroundStyle(Color.evOutline)
-                                } else {
-                                    Text("Nothing selected yet")
-                                        .font(.caption)
-                                        .foregroundStyle(Color.evOutline)
-                                }
-                            }
-                            Spacer()
-                            Image(systemName: "chevron.right")
-                                .font(.caption)
-                                .foregroundStyle(Color.evOutline)
-                        }
-                    }
-
-                    Button {
-                        showLockListGate = true
-                    } label: {
-                        Label("App Controls", systemImage: "slider.horizontal.3")
-                    }
-
-                    Button {
-                        pendingGatedAction = .addApp
-                        showPINGate = true
-                    } label: {
-                        Label("Add app", systemImage: "plus.app")
-                    }
-
-                    Button {
-                        pendingGatedAction = .addList
-                        showPINGate = true
-                    } label: {
-                        Label("Add list", systemImage: "rectangle.stack.badge.plus")
-                    }
-
-                    Text("Tip: tap a category row's header (e.g. \"Games\") to lock the whole group, or tap individual apps to lock just those.")
-                        .font(.caption)
-                        .foregroundStyle(Color.evOutline)
-
-                    ManagedActivitySelectionDiagnostics(selection: screenTimeManager.selectedApps)
-
-                    NavigationLink {
-                        LabelTokenInspectorView()
-                    } label: {
-                        Label("Label(token) snapshot test", systemImage: "rectangle.and.text.magnifyingglass")
-                    }
-
-                    NavigationLink {
-                        ShieldHarvestProbeView()
-                    } label: {
-                        Label("ShieldConfig harvest (E1)", systemImage: "lock.doc")
-                    }
-
-                    NavigationLink {
-                        DeviceActivityReportMetadataProbeView()
-                    } label: {
-                        Label("DeviceActivityReport metadata test", systemImage: "chart.bar.doc.horizontal")
-                    }
-
-                    NavigationLink {
-                        LockActivityReviewScreen()
-                    } label: {
-                        Label("Lock activity review", systemImage: "clock.arrow.circlepath")
-                    }
-
-                    NavigationLink {
-                        TokenScreenshotImportView()
-                    } label: {
-                        Label("Auto-tag via screenshots", systemImage: "camera.viewfinder")
-                    }
-
-                    NavigationLink {
-                        TokenPickerProbeView()
-                    } label: {
-                        Label("Lazy-tag picker test", systemImage: "tag")
-                    }
-
-                    NavigationLink {
-                        AliasManagementView()
-                    } label: {
-                        Label("Manage aliases", systemImage: "tag.fill")
-                    }
-
-                    NavigationLink {
-                        AliasLibraryInspectorView()
-                    } label: {
-                        Label("Alias library (after hydrate)", systemImage: "books.vertical")
-                    }
-
-                    NavigationLink {
-                        AliasE2ETestView()
-                    } label: {
-                        Label("Alias E2E test (start here)", systemImage: "checkmark.seal")
-                    }
-
-                    NavigationLink {
-                        QrSpikeDebugView()
-                    } label: {
-                        Label("QR-over-pixel DAR spike", systemImage: "qrcode.viewfinder")
-                    }
-
-                    NavigationLink {
-                        ChildAppCatalogDebugView()
-                    } label: {
-                        Label("Child app catalog cross-device test", systemImage: "iphone.gen3.radiowaves.left.and.right")
-                    }
-
-                    NavigationLink {
-                        ChildPickerSpikeView()
-                    } label: {
-                        Label(".child parent picker spike", systemImage: "person.2.badge.gearshape")
-                    }
-
-                    if appCount > 0 || catCount > 0 {
-                        Button {
-                            screenTimeManager.shieldApps()
-                        } label: {
-                            Label("Lock Selected Apps", systemImage: "lock.fill")
-                                .foregroundStyle(Color.evError)
-                        }
-                    }
-
-                    Button {
-                        screenTimeManager.clearAllShields()
-                    } label: {
-                        Label("Unlock All Apps", systemImage: "lock.open.fill")
-                            .foregroundStyle(Color.evSecondary)
-                    }
-
-                    // Nuclear reset — only use this when ActiveLockStore + the
-                    // ManagedSettings store have desynced (e.g. "lock IG" does
-                    // nothing but "lock FB" then locks both). Wipes every code
-                    // path that could write to the shield/block state:
-                    //   1. ManagedSettings.store.clearAllSettings() — Apple's
-                    //      official "drop every policy on this device" hammer
-                    //   2. ActiveLockStore.shieldRecords + blockRecords
-                    //   3. DeviceActivityCenter.stopMonitoring(.all) — kills
-                    //      every scheduled intervalDidEnd callback, so no
-                    //      ghost record can be re-applied later
-                    //   4. App Group UserDefaults — every evlin.* key
-                    //   5. Re-enable deletion protection (clearAllSettings
-                    //      drops application.denyAppRemoval too, which we
-                    //      MUST put back so the user can't accidentally
-                    //      uninstall Evlin and lose enforcement)
-                    Button(role: .destructive) {
-                        Task { await nuclearReset() }
-                    } label: {
-                        Label("Nuclear Reset (lock state)", systemImage: "exclamationmark.triangle.fill")
-                            .foregroundStyle(Color.evError)
-                    }
-                    }
-                    #endif
-                }
-
-                Section("App Controls") {
-                    Button {
-                        showLockListGate = true
-                    } label: {
-                        Label("App Controls", systemImage: "slider.horizontal.3")
-                    }
-
-                    NavigationLink {
-                        AliasManagementView()
-                    } label: {
-                        Label("Manage aliases", systemImage: "tag.fill")
-                    }
-
-                    // Plan 5 — owner mints/approves/revokes co-parent invites.
-                    NavigationLink {
-                        OwnerInviteApprovalView()
-                            .environmentObject(apiClient)
-                    } label: {
-                        Label("Co-parents", systemImage: "person.2.badge.gearshape")
-                    }
-                }
-
-                #if DEBUG
-                if false {
-                Section("Camera & Photos") {
-                    HStack(spacing: 12) {
-                        Image(systemName: "camera.fill")
-                            .foregroundStyle(Color.evOutline)
-                            .frame(width: 24)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Camera")
-                                .foregroundStyle(Color.evOnSurface)
-                            Text(cameraStatusText)
-                                .font(.caption)
-                                .foregroundStyle(Color.evOutline)
-                        }
-                        Spacer()
-                    }
-                    Group {
-                        if cameraIsAuthorized {
-                            Text("Ready for task evidence and profile photos.")
-                                .font(.caption)
-                                .foregroundStyle(Color.evSecondary)
-                        } else {
-                            Button(cameraPermissionActionTitle) {
-                                handleCameraPermissionTap()
-                            }
-                        }
-                    }
-                    .id(cameraPermissionFreshness)
-
-                    Text("Camera is used when your child submits task photos or evidence.")
-                        .font(.caption)
-                        .foregroundStyle(Color.evOutline)
-
-                    Button {
-                        if let url = URL(string: UIApplication.openSettingsURLString) {
-                            UIApplication.shared.open(url)
-                        }
-                    } label: {
-                        Label("Open Evlin Settings", systemImage: "slider.horizontal.3")
-                    }
-
-                    Label("Choosing photos may offer limited-library access instead of full Photos permission.", systemImage: "photo.on.rectangle.angled")
-                        .font(.caption)
-                        .foregroundStyle(Color.evOutline)
-                }
-                }
-                #endif
-
-                #if DEBUG
-                if false {
-                Section("Device Status") {
-                    HStack {
-                        Text("Lock State")
-                        Spacer()
-                        Text(screenTimeManager.isUnlocked ? "Unlocked" : "Locked")
-                            .foregroundStyle(screenTimeManager.isUnlocked ? Color.evSecondary : Color.evError)
-                    }
-                }
-                }
-                #endif
-
-                Section("Chat") {
-                    Button(role: .destructive) {
-                        UserDefaults.standard.removeObject(forKey: "evlin_chat_history")
-                        NotificationCenter.default.post(name: .evlinClearChat, object: nil)
-                    } label: {
-                        Label("Clear Chat History", systemImage: "trash")
-                    }
-                }
-
-                #if DEBUG
-                if false {
-                // Diagnostic: last DeviceActivitySchedule attempt. If a timed
-                // shield isn't auto-releasing, this surfaces the exact reason
-                // (auth missing, interval invalid, monitoring limit hit, etc.).
-                // ActionExecutor writes this on every shield/block schedule.
-                Section {
-                    let lastResult = UserDefaults(suiteName: "group.com.evlin.ios")?
-                        .string(forKey: "evlin.lastScheduleResult")
-                        ?? "(no schedule attempted yet — set a timed lock first)"
-                    Text(lastResult)
-                        .font(.system(size: 12, design: .monospaced))
-                        .foregroundStyle(lastResult.contains("FAILED") ? Color.red : Color.evOnSurface)
-                        .textSelection(.enabled)
-                } header: {
-                    Text("Last Auto-Unshield Schedule")
-                } footer: {
-                    Text("Should say 'schedule_ok' after every timed lock. If 'FAILED', the auto-unlock won't fire — copy the error and tell us.")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                }
-
-                // Diagnostic: did the reflection-lockdown DAM auto-removal fail to
-                // schedule? The ReflectionLockApplier records the error here instead
-                // of swallowing it — a failed schedule means no OS timer, so the
-                // lock could outlive its lease.
-                Section {
-                    let failure = UserDefaults(suiteName: "group.com.evlin.ios")?
-                        .string(forKey: "evlin.reflectionLockScheduleFailure") ?? "none"
-                    Text(failure)
-                        .font(.system(size: 12, design: .monospaced))
-                        .foregroundStyle(failure == "none" ? Color.evOnSurface : Color.red)
-                        .textSelection(.enabled)
-                } header: {
-                    Text("Reflection lock schedule")
-                } footer: {
-                    Text("'none' is healthy. A line here means the reflection lock's auto-removal failed to schedule — copy it and tell us.")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                }
-
-                // Diagnostic: did the DeviceActivityMonitor extension actually
-                // fire when the interval ended? Written by the extension itself
-                // (see EvlinDeviceActivityMonitor). If the schedule says ok but
-                // this is empty after expiresAt, iOS isn't dispatching the
-                // callback — likely an extension-install / auth issue.
-                Section {
-                    let lastFired = UserDefaults(suiteName: "group.com.evlin.ios")?
-                        .string(forKey: "evlin.lastIntervalDidEnd")
-                        ?? "(extension never fired since launch)"
-                    Text(lastFired)
-                        .font(.system(size: 12, design: .monospaced))
-                        .foregroundStyle(lastFired.contains("shieldRemoved=false") ? Color.orange : Color.evOnSurface)
-                        .textSelection(.enabled)
-                } header: {
-                    Text("Last Extension Fire")
-                } footer: {
-                    Text("After a timed lock expires this should update within 1-2 min. If empty long after expiresAt, the extension isn't being woken — check that EvlinDeviceActivityMonitor is signed and installed.")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                }
-
-                // Diagnostic: every recomputeAndApply() call writes here, both
-                // from the main app (ActiveLockStore.sweepExpired path) AND
-                // from any code path that mutates shields/blocks. If a timed
-                // shield's expiry passes and this stamp is FRESHER than the
-                // shield's expiresAt with apps=0, then the main app already
-                // cleared store.shield.applications — meaning the OS just
-                // hasn't propagated the ManagedSettings mutation yet.
-                Section {
-                    let lastRecompute = UserDefaults(suiteName: "group.com.evlin.ios")?
-                        .string(forKey: "evlin.lastRecompute")
-                        ?? "(no recompute since install)"
-                    Text(lastRecompute)
-                        .font(.system(size: 12, design: .monospaced))
-                        .foregroundStyle(Color.evOnSurface)
-                        .textSelection(.enabled)
-                } header: {
-                    Text("Last Recompute")
-                } footer: {
-                    Text("Shows what ActiveLockStore last pushed to ManagedSettings. apps=0 means shield.applications was set to nil. If you see apps=0 but Apple is still shielding an app, the OS hasn't propagated the mutation yet.")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                }
-                }
-                #endif
-
-                #if DEBUG
-                if false {
-                Section("Mode") {
-                    HStack {
-                        Text("Current Mode")
-                        Spacer()
-                        Text(appMode == "parent" ? "Parent" : "Child")
-                            .foregroundStyle(Color.evPrimary)
-                    }
-
-                    Button(role: .destructive) {
-                        appMode = "setup"
-                        onClose()
-                    } label: {
-                        Label("Switch Device Mode", systemImage: "arrow.triangle.2.circlepath")
-                    }
-
-                    if appMode == "parent" {
-                        Button {
-                            EvlinDemoShortcuts.seedPlaceholderChildUUIDIfMissing()
-                            appMode = "child"
-                            onClose()
-                        } label: {
-                            Label("Switch to Child Mode", systemImage: "figure.child")
-                        }
-                    } else if appMode == "child" {
-                        Button {
-                            appMode = "parent"
-                            onClose()
-                        } label: {
-                            Label("Switch to Parent Mode", systemImage: "person.fill")
-                        }
-                    }
-
-                    Button(role: .destructive) {
-                        screenTimeManager.clearAllShields()
-                        UserDefaults.standard.removeObject(forKey: "onboardingComplete")
-                        UserDefaults.standard.removeObject(forKey: "appMode")
-                        UserDefaults.standard.removeObject(forKey: "childId")
-                        UserDefaults.standard.removeObject(forKey: "childName")
-                        UserDefaults.standard.removeObject(forKey: "targetChildId")
-                        UserDefaults.standard.removeObject(forKey: "evlin.familyID")
-                        UserDefaults.standard.removeObject(forKey: "evlin.parentDeviceID")
-                        UserDefaults.standard.removeObject(forKey: "evlin.childDeviceID")
-                        UserDefaults.standard.removeObject(forKey: "evlin_chat_history")
-                        UserDefaults.standard.removeObject(forKey: "serverURL")
-                        EvlinDemoShortcuts.clearFlag()
-                        NotificationCenter.default.post(name: .evlinClearChat, object: nil)
-                        appMode = ""
-                        onClose()
-                    } label: {
-                        Label("Reset Everything (Re-run Onboarding)", systemImage: "arrow.counterclockwise")
-                    }
-                }
-                }
-                #endif
-
-                Section("About") {
-                    LabeledContent("Version", value: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—")
-                }
-
-                #if DEBUG
-                Section("Debug") {
-                    NavigationLink {
-                        debugSettingsMenu
-                    } label: {
-                        Label("Diagnostics & experiments", systemImage: "ladybug")
-                    }
-
-                    Text("Developer-only tools. Hidden from TestFlight and release builds.")
-                        .font(.caption)
-                        .foregroundStyle(Color.evOnSurfaceVariant)
-                }
-                #endif
-
-                #if DEBUG
-                if false {
-                Section("Developer Tools") {
-                    NavigationLink {
-                        SpikeView()
-                    } label: {
-                        Label("Diagnostics & Spike Tests", systemImage: "wrench.and.screwdriver")
-                    }
-
-                    Text("One-device setup, backend checks, auth checks, and explicit hard-block experiments. Hidden in release builds.")
-                        .font(.caption)
-                        .foregroundStyle(Color.evOnSurfaceVariant)
-                }
-                }
-                #endif
-
-                #if DEBUG
-                if false {
-                Section {
-                    if let famID = UUID(uuidString: familyID) {
-                        Picker("Protection Mode", selection: $protectionMode) {
-                            Text("Standard (.individual)").tag("std")
-                            Text("Maximum (.child)").tag("max")
-                        }
-                        .pickerStyle(.segmented)
-                        .onChange(of: protectionMode) { old, new in
-                            Task {
-                                do {
-                                    try await apiClient.setProtectionMode(familyID: famID, mode: new)
-                                    await MainActor.run {
-                                        protectionModeStatus = "✅ Set to \(new.uppercased())"
-                                        UserDefaults.standard.set(new, forKey: "evlin.protectionMode")
-                                    }
-                                } catch {
-                                    await MainActor.run {
-                                        protectionMode = old
-                                        UserDefaults.standard.set(old, forKey: "evlin.protectionMode")
-                                        protectionModeStatus = "⚠️ Failed: \(error.localizedDescription)"
-                                    }
-                                }
-                            }
-                        }
-                        if !protectionModeStatus.isEmpty {
-                            Text(protectionModeStatus)
-                                .font(.caption)
-                                .foregroundStyle(Color.evOnSurfaceVariant)
-                        }
-                        Text(
-                            """
-                            Backend policy: Standard limits certain lock actions; Maximum enables broader blocks. \
-                            This also drives which Screen Time authorization type applies on this phone (Settings → Screen Time → Authorize).
-                            """
+                        settingsRow(
+                            title: "Developer Tools",
+                            subtitle: "IDs, environment, test notifications",
+                            systemImage: "hammer",
+                            pill: "DEBUG",
+                            pillTone: .warning,
+                            accent: .evPrimary
                         )
+                    }
+
+                    Text("This entry is visible only in development builds. Production hides it entirely.")
                         .font(.caption)
                         .foregroundStyle(Color.evOnSurfaceVariant)
-                    } else {
-                        Text("Pair a device first — we need a family id to sync protection mode.")
-                            .font(.caption)
-                            .foregroundStyle(Color.evOnSurfaceVariant)
-                    }
-                } header: {
-                    Text("Protection Mode")
-                }
                 }
                 #endif
 
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
+            .navigationDestination(isPresented: $showParentProfileMenu) {
+                parentProfileMenu
+            }
+            .navigationDestination(isPresented: $showNotificationsMenu) {
+                notificationsMenu
+            }
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") {
@@ -793,20 +264,6 @@ struct HomeSettingsSheet: View {
                         }
                     }
                 }
-            }
-            .familyActivityPicker(
-                isPresented: $isPickerPresented,
-                selection: $screenTimeManager.selectedApps
-            )
-            .onChange(of: isPickerPresented) { _, open in
-                // `FamilyActivitySelection` equality can ignore picker-only metadata deltas; always
-                // persist when the sheet closes so `LocalAliasStore` + label snapshots refresh.
-                if !open {
-                    screenTimeManager.saveSelection()
-                }
-            }
-            .onChange(of: screenTimeManager.selectedApps) { _, _ in
-                screenTimeManager.saveSelection()
             }
             .onAppear {
                 // Seed the editable children list from the live FamilyStore
@@ -826,7 +283,13 @@ struct HomeSettingsSheet: View {
                 }
                 parentNameAtOpen = parentName
                 serverURL = apiClient.baseURL
+                seedParentProfilePresentation()
                 screenTimeManager.refreshAuthorizationStatus()
+                refreshNotificationAuthorizationStatus()
+                Task {
+                    await refreshParentNotificationPreferences()
+                    AppDelegate.uploadCachedAPNsTokenIfPossible(using: apiClient)
+                }
                 // Sync DEBUG protection-mode picker from backend so the
                 // segmented control reflects truth, not the @State default.
                 if let famID = UUID(uuidString: familyID) {
@@ -840,6 +303,12 @@ struct HomeSettingsSheet: View {
                     }
                 }
             }
+            .onChange(of: scenePhase) { _, newPhase in
+                guard newPhase == .active else { return }
+                Task {
+                    await reconcileNotificationStateAfterSystemSettings()
+                }
+            }
             .sheet(item: $editing) { child in
                 ChildEditSheet(child: child) { name, age in
                     Task { await saveEditedChild(id: child.id, name: name, age: age) }
@@ -849,6 +318,27 @@ struct HomeSettingsSheet: View {
                 ChildEditSheet(child: nil) { name, age in
                     Task { await addChild(name: name, age: age) }
                 }
+            }
+            #if DEBUG
+            .sheet(isPresented: $showDebugSettings) {
+                NavigationStack {
+                    debugSettingsMenu
+                }
+            }
+            #endif
+            .fullScreenCover(isPresented: $showAddChildPairing) {
+                SettingsAddChildPairingFlow(
+                    kidName: addChildPairingKidName,
+                    onPair: { code in await pairAdditionalChild(code) },
+                    onDone: {
+                        showAddChildPairing = false
+                        addChildPairingKidName = ""
+                    },
+                    onCancel: {
+                        showAddChildPairing = false
+                        addChildPairingKidName = ""
+                    }
+                )
             }
             .sheet(isPresented: $showPINGate) {
                 EvlinPINGateView(
@@ -931,6 +421,1180 @@ struct HomeSettingsSheet: View {
             }
         }
         .preferredColorScheme(.light)
+    }
+
+    @ViewBuilder
+    private var settingsRootContent: some View {
+        Section {
+            Button {
+                showParentProfileMenu = true
+            } label: {
+                settingsProfileCard(
+                    title: parentDisplayName,
+                    subtitle: "Parent account · \(familyDisplayName)",
+                    initials: parentInitials,
+                    avatarURL: ParentSettingsPresentation.parentRootAvatarURL(parentAvatarURL)
+                )
+                .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.plain)
+        }
+        .listRowBackground(Color.clear)
+        .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 8, trailing: 0))
+
+        Section("Family") {
+            NavigationLink {
+                childrenDevicesMenu
+            } label: {
+                settingsRow(
+                    title: "Children & Devices",
+                    subtitle: childrenDevicesSummary,
+                    systemImage: "person",
+                    value: "\(children.count) \(children.count == 1 ? "child" : "children")",
+                    accent: .evPrimary
+                )
+            }
+
+            NavigationLink {
+                AliasManagementView()
+                    .environmentObject(apiClient)
+            } label: {
+                settingsRow(
+                    title: "Manage Aliases",
+                    subtitle: "Family app names and command phrases",
+                    systemImage: "tag",
+                    value: "Apps",
+                    accent: .evPrimary
+                )
+            }
+
+            NavigationLink {
+                coParentsMenu
+            } label: {
+                settingsRow(
+                    title: "Co-parents",
+                    subtitle: coParentSummary,
+                    systemImage: "person.2",
+                    value: coParentValue,
+                    accent: .evSecondary
+                )
+            }
+
+            Button {
+                showAddChildPairing = true
+            } label: {
+                settingsRow(
+                    title: "Add Child",
+                    subtitle: "Scan the new child's first device",
+                    systemImage: "plus",
+                    accent: .evPrimary
+                )
+            }
+        }
+
+        Section("Notifications") {
+            settingsNavigableToggleRow(
+                title: "Push Notifications",
+                subtitle: notificationRootSubtitle,
+                systemImage: "bell",
+                isOn: notificationPermissionBinding,
+                accent: .evSecondary,
+                navigate: { showNotificationsMenu = true }
+            )
+        }
+
+        Section("About") {
+            settingsRow(
+                title: "Version",
+                subtitle: "",
+                systemImage: "info.circle",
+                value: appVersionDisplay,
+                accent: .evPrimary
+            )
+
+            NavigationLink {
+                privacyTermsMenu
+            } label: {
+                settingsRow(
+                    title: "Privacy & Terms",
+                    subtitle: "Policies and service terms",
+                    systemImage: "shield",
+                    accent: .evPrimary
+                )
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var childrenDevicesMenu: some View {
+        Form {
+            settingsHeroNote(
+                title: "Family devices are scoped by child.",
+                message: "Choose which kid/device you are managing. App lists and controls live under the child device, not on the parent phone."
+            )
+
+            Section("Children") {
+                if children.isEmpty {
+                    Text("No children yet.")
+                        .foregroundStyle(Color.evOnSurfaceVariant)
+                }
+
+                ForEach(children) { child in
+                    NavigationLink {
+                        childDetailMenu(child)
+                    } label: {
+                        settingsChildRow(child)
+                    }
+                }
+                .onDelete { offsets in
+                    let toDelete = offsets.map { children[$0] }
+                    Task { await deleteChildren(toDelete) }
+                }
+
+                if let childOpError {
+                    Text(childOpError)
+                        .font(.caption)
+                        .foregroundStyle(Color.evError)
+                }
+            }
+
+            Section("Setup") {
+                Button {
+                    showAddChildPairing = true
+                } label: {
+                    settingsRow(
+                        title: "Add Child",
+                        subtitle: "Scan the new child's first device",
+                        systemImage: "qrcode.viewfinder",
+                        accent: .evPrimary
+                    )
+                }
+            }
+        }
+        .navigationTitle("Children & Devices")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    @ViewBuilder
+    private var notificationsMenu: some View {
+        Form {
+            settingsHeroNote(
+                title: "Parent-side permission.",
+                message: "This replaces Screen Time on the parent phone. The parent mainly needs APNs readiness for kid requests, completions, and alerts."
+            )
+
+            Section("Permission") {
+                settingsToggleRow(
+                    title: "Push Notifications",
+                    subtitle: "System permission for parent alerts",
+                    systemImage: "bell",
+                    isOn: notificationPermissionBinding,
+                    accent: .evSecondary
+                )
+
+                Button {
+                    Task { await handleNotificationPermissionTap() }
+                } label: {
+                    settingsRow(
+                        title: notificationActionTitle,
+                        subtitle: "Banners, sounds, badges",
+                        systemImage: "gearshape",
+                        accent: .evPrimary
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+
+            Section {
+                Toggle(isOn: $notifyKidRequests) {
+                    settingsRow(
+                        title: "Kid requests",
+                        subtitle: "Bypass requests, help requests",
+                        systemImage: "bell",
+                        accent: .evSecondary
+                    )
+                }
+                Toggle(isOn: $notifyReflectionCompletions) {
+                    settingsRow(
+                        title: "Reflection completions",
+                        subtitle: "Notify when a kid finishes",
+                        systemImage: "checkmark.circle",
+                        accent: .evSecondary
+                    )
+                }
+                Toggle(isOn: $notifyKidNudges) {
+                    settingsRow(
+                        title: "Nudges from kid device",
+                        subtitle: "Kid asks parent to review",
+                        systemImage: "hand.raised",
+                        accent: .evSecondary
+                    )
+                }
+                Toggle(isOn: $notifyWeeklySummary) {
+                    settingsRow(
+                        title: "Weekly summary",
+                        subtitle: "Optional progress digest",
+                        systemImage: "calendar",
+                        accent: .evPrimary
+                    )
+                }
+            } header: {
+                Text("Alert Types")
+            } footer: {
+                Text("These switches are local presentation settings for now; backend routing preferences can be wired here when the endpoint exists.")
+            }
+        }
+        .navigationTitle("Notifications")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    @ViewBuilder
+    private var coParentsMenu: some View {
+        Form {
+            settingsHeroNote(
+                title: "Family-level access belongs here.",
+                message: "Co-parents are not connected to app controls. They manage people, alerts, approvals, and family visibility."
+            )
+
+            Section("Parents") {
+                if coParents.isEmpty {
+                    settingsRow(
+                        title: "No co-parents yet",
+                        subtitle: "Invite another parent or caregiver when needed",
+                        systemImage: "person.2",
+                        value: "None",
+                        accent: .evSecondary
+                    )
+                }
+
+                ForEach(coParents) { parent in
+                    settingsRow(
+                        title: parent.display_name,
+                        subtitle: "Co-parent",
+                        systemImage: "person.2",
+                        accent: .evSecondary
+                    )
+                }
+
+                NavigationLink {
+                    OwnerInviteApprovalView()
+                        .environmentObject(apiClient)
+                } label: {
+                    settingsRow(
+                        title: "Invite Co-parent",
+                        subtitle: "Create and share an invite code",
+                        systemImage: "plus",
+                        accent: .evPrimary
+                    )
+                }
+            }
+
+            Section {
+                settingsRow(title: "Can receive kid requests", subtitle: "Family notification access", systemImage: "checkmark.circle", value: "On", accent: .evSecondary)
+                settingsRow(title: "Can approve tasks", subtitle: "Approval permissions", systemImage: "checkmark.circle", value: "On", accent: .evSecondary)
+            } header: {
+                Text("Permissions")
+            } footer: {
+                Text("Permission editing is not wired yet; current rows describe the intended family-level model.")
+            }
+        }
+        .navigationTitle("Co-parents")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    @ViewBuilder
+    private var parentProfileMenu: some View {
+        Form {
+            Section {
+                parentProfileHero
+            }
+            .listRowBackground(Color.clear)
+        .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 8, trailing: 0))
+
+            Section("Profile") {
+                HStack(spacing: 12) {
+                    settingsIconChip("pencil", accent: .evPrimary)
+                    Text("Display Name")
+                        .font(.custom("Inter", size: 15).weight(.semibold))
+                        .foregroundStyle(Color.evOnSurface)
+                    Spacer()
+                    TextField("Parent name", text: $parentName)
+                        .font(.custom("Inter", size: 13).weight(.medium))
+                        .foregroundStyle(Color.evOnSurfaceVariant)
+                        .multilineTextAlignment(.trailing)
+                        .textFieldStyle(.plain)
+                        .onSubmit { Task { _ = await saveParentNameIfChanged() } }
+                }
+                .padding(.vertical, 4)
+
+                settingsRow(
+                    title: "Email",
+                    subtitle: "Not exposed by current profile payload",
+                    systemImage: "at",
+                    value: "Not wired",
+                    accent: .evPrimary
+                )
+
+                if let parentNameError {
+                    Text(parentNameError)
+                        .font(.caption)
+                        .foregroundStyle(Color.evError)
+                }
+            }
+
+            Section("Session") {
+                NavigationLink {
+                    signOutMenu
+                } label: {
+                    settingsRow(
+                        title: "Sign Out",
+                        subtitle: "Remove this parent session from this device",
+                        systemImage: "rectangle.portrait.and.arrow.right",
+                        accent: .evError,
+                        danger: true
+                    )
+                }
+            }
+        }
+        .navigationTitle("Parent Profile")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    @ViewBuilder
+    private var signOutMenu: some View {
+        Form {
+            settingsHeroNote(
+                title: "Sign out of this parent phone?",
+                message: "Family data stays in the account. This device stops receiving parent notifications until signed in again."
+            )
+
+            Section("Confirm") {
+                Button(role: .destructive) {
+                    performSignOut()
+                } label: {
+                    settingsRow(
+                        title: "Sign Out",
+                        subtitle: "Return this device to onboarding",
+                        systemImage: "rectangle.portrait.and.arrow.right",
+                        accent: .evError,
+                        danger: true
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .navigationTitle("Sign Out")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    @ViewBuilder
+    private var aboutMenu: some View {
+        Form {
+            Section("App") {
+                settingsRow(
+                    title: "Version",
+                    subtitle: "CFBundleShortVersionString + CFBundleVersion",
+                    systemImage: "info.circle",
+                    value: appVersionDisplay,
+                    accent: .evPrimary
+                )
+                settingsRow(
+                    title: "Build Source",
+                    subtitle: "Read from app bundle at runtime",
+                    systemImage: "checkmark.seal",
+                    value: "Xcode",
+                    accent: .evSecondary
+                )
+            }
+
+            Section("Legal") {
+                NavigationLink {
+                    placeholderMenu(
+                        title: "Privacy Policy",
+                        message: "The in-app privacy policy page is not wired yet."
+                    )
+                } label: {
+                    settingsRow(title: "Privacy Policy", subtitle: "Coming soon", systemImage: "hand.raised", accent: .evPrimary)
+                }
+                NavigationLink {
+                    placeholderMenu(
+                        title: "Terms of Service",
+                        message: "The in-app terms page is not wired yet."
+                    )
+                } label: {
+                    settingsRow(title: "Terms of Service", subtitle: "Coming soon", systemImage: "doc.text", accent: .evPrimary)
+                }
+            }
+        }
+        .navigationTitle("About")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    @ViewBuilder
+    private var privacyTermsMenu: some View {
+        Form {
+            Section("Legal") {
+                NavigationLink {
+                    placeholderMenu(
+                        title: "Privacy Policy",
+                        message: "The in-app privacy policy page is not wired yet."
+                    )
+                } label: {
+                    settingsRow(title: "Privacy Policy", subtitle: "Coming soon", systemImage: "hand.raised", accent: .evPrimary)
+                }
+                NavigationLink {
+                    placeholderMenu(
+                        title: "Terms of Service",
+                        message: "The in-app terms page is not wired yet."
+                    )
+                } label: {
+                    settingsRow(title: "Terms of Service", subtitle: "Coming soon", systemImage: "doc.text", accent: .evPrimary)
+                }
+            }
+        }
+        .navigationTitle("Privacy & Terms")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private func placeholderMenu(title: String, message: String) -> some View {
+        Form {
+            settingsHeroNote(title: title, message: message)
+        }
+        .navigationTitle(title)
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private func childDetailMenu(_ child: ChildProfile) -> some View {
+        let displayChild = currentChild(for: child)
+        return Form {
+            Section {
+                childProfileHero(displayChild)
+            }
+            .listRowBackground(Color.clear)
+            .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 8, trailing: 0))
+
+            Section("Devices") {
+                let devices = backendChild(for: displayChild)?.devices ?? []
+                if devices.isEmpty {
+                    settingsRow(
+                        title: "No devices enrolled yet",
+                        subtitle: "Use Add Child when the first kid device is ready",
+                        systemImage: "iphone.slash",
+                        accent: .evOutline,
+                        disabled: true
+                    )
+                }
+                ForEach(devices) { device in
+                    NavigationLink {
+                        deviceDetailMenu(child: displayChild, device: device)
+                    } label: {
+                        settingsRow(
+                            title: deviceDisplayName(device),
+                            subtitle: deviceStatusLine(device),
+                            systemImage: deviceIcon(device),
+                            value: device.is_self ? "Primary" : deviceKind(device),
+                            accent: device.online ? .evSecondary : .evOutline
+                        )
+                    }
+                }
+            }
+
+            Section("Profile") {
+                Button {
+                    editing = displayChild
+                } label: {
+                    settingsRow(
+                        title: "Child Profile",
+                        subtitle: "Name, age, avatar",
+                        systemImage: "person",
+                        accent: .evPrimary
+                    )
+                }
+                .buttonStyle(.plain)
+
+                settingsRow(
+                    title: "Add Device for \(displayChild.name)",
+                    subtitle: "Available from the child profile flow",
+                    systemImage: "plus",
+                    value: "Profile",
+                    accent: .evOutline,
+                    disabled: true
+                )
+            }
+        }
+        .navigationTitle(displayChild.name)
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private func deviceDetailMenu(child: ChildProfile, device: EnrolledDeviceDTO) -> some View {
+        Form {
+            settingsHeroNote(
+                title: deviceDisplayName(device),
+                message: "Device-level state. App inventory belongs here because it comes from the kid device, not the parent phone."
+            )
+
+            #if DEBUG
+            Section("Status") {
+                settingsRow(
+                    title: "Connection",
+                    subtitle: device.last_seen_at.map { "Last seen \($0)" } ?? "Last heartbeat not available",
+                    systemImage: device.online ? "dot.radiowaves.left.and.right" : "wifi.slash",
+                    pill: device.online ? "Online" : "Offline",
+                    pillTone: device.online ? .success : .warning,
+                    accent: device.online ? .evSecondary : .evOutline
+                )
+                settingsRow(
+                    title: "Kid App Notifications",
+                    subtitle: "Requests and completion events can reach parent",
+                    systemImage: "bell",
+                    pill: "Ready",
+                    pillTone: .success,
+                    accent: .evSecondary
+                )
+            }
+            #endif
+
+            Section("Device Inventory") {
+                settingsRow(
+                    title: "Registered Apps",
+                    subtitle: "Synced from child device, read-only here",
+                    systemImage: "square.grid.2x2",
+                    value: "Not wired",
+                    accent: .evOutline,
+                    disabled: true
+                )
+                settingsRow(
+                    title: "Saved Lists",
+                    subtitle: "Created or confirmed from kid-device catalog",
+                    systemImage: "list.bullet.rectangle",
+                    value: "Not wired",
+                    accent: .evOutline,
+                    disabled: true
+                )
+            }
+        }
+        .navigationTitle("Child Device")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private var appVersionDisplay: String {
+        ParentSettingsPresentation.versionDisplay(
+            shortVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String,
+            build: Bundle.main.infoDictionary?["CFBundleVersion"] as? String
+        )
+    }
+
+    private var childrenDevicesSummary: String {
+        ParentSettingsPresentation.childrenDevicesSummary(
+            childCount: children.count,
+            deviceCount: familyStore.children.reduce(0) { $0 + $1.devices.count }
+        )
+    }
+
+    private var coParents: [ParentMemberDTO] {
+        familyStore.parents.filter { !$0.is_owner }
+    }
+
+    private var coParentSummary: String {
+        guard !coParents.isEmpty else { return "Invite another parent or caregiver" }
+        return "Manage family-level access"
+    }
+
+    private var coParentValue: String {
+        ParentSettingsPresentation.coParentValue(coParentCount: coParents.count)
+    }
+
+    private var notificationActionTitle: String {
+        "Notification Settings"
+    }
+
+    private var notificationRootSubtitle: String {
+        "\(notificationEffectiveStatusCopy) · kid requests, completions, alerts"
+    }
+
+    private var notificationPermissionBinding: Binding<Bool> {
+        Binding(
+            get: { notificationsEffectivelyEnabled },
+            set: { wantsEnabled in
+                Task {
+                    await setNotificationPermissionIntent(enabled: wantsEnabled)
+                }
+            }
+        )
+    }
+
+    private var notificationsEffectivelyEnabled: Bool {
+        notifyPushEnabled && notificationAuthorizationStatus.isParentSettingsEnabled
+    }
+
+    private var notificationEffectiveStatusCopy: String {
+        guard notifyPushEnabled else { return "Off" }
+        return ParentSettingsPresentation.notificationStatusCopy(notificationAuthorizationStatus)
+    }
+
+    private var familyDisplayName: String {
+        familyStore.family?.display_name.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "Family"
+    }
+
+    private var parentDisplayName: String {
+        parentName.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+            ?? familyStore.selfParent?.display_name.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+            ?? "Parent"
+    }
+
+    private var parentInitials: String {
+        initials(from: parentDisplayName)
+    }
+
+    private var parentEmailDisplay: String {
+        "Email not exposed yet"
+    }
+
+    private var parentAccentColor: Color {
+        color(fromHexString: selectedParentAccentHex) ?? .evPrimary
+    }
+
+    private enum SettingsPillTone {
+        case success
+        case neutral
+        case warning
+    }
+
+    private func settingsRow(
+        title: String,
+        subtitle: String,
+        systemImage: String,
+        value: String? = nil,
+        pill: String? = nil,
+        pillTone: SettingsPillTone = .neutral,
+        accent: Color = .evPrimary,
+        danger: Bool = false,
+        disabled: Bool = false
+    ) -> some View {
+        HStack(spacing: 12) {
+            settingsIconChip(systemImage, accent: accent, disabled: disabled)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.custom("Inter", size: 15).weight(.semibold))
+                    .foregroundStyle(disabled ? Color.evOutline : (danger ? Color.evError : Color.evOnSurface))
+                if !subtitle.isEmpty {
+                    Text(subtitle)
+                        .font(.custom("Inter", size: 12))
+                        .foregroundStyle(Color.evOnSurfaceVariant)
+                        .lineLimit(2)
+                }
+            }
+            Spacer(minLength: 10)
+            if let value, !value.isEmpty {
+                Text(value)
+                    .font(.custom("Inter", size: 13).weight(.medium))
+                    .foregroundStyle(disabled ? Color.evOutline : Color.evOnSurfaceVariant)
+                    .multilineTextAlignment(.trailing)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.82)
+            }
+            if let pill, !pill.isEmpty {
+                settingsPill(pill, tone: pillTone)
+            }
+        }
+        .padding(.vertical, 4)
+        .opacity(disabled ? 0.72 : 1)
+    }
+
+    private func settingsToggleRow(
+        title: String,
+        subtitle: String,
+        systemImage: String,
+        isOn: Binding<Bool>,
+        accent: Color = .evPrimary
+    ) -> some View {
+        HStack(spacing: 12) {
+            settingsIconChip(systemImage, accent: accent)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.custom("Inter", size: 15).weight(.semibold))
+                    .foregroundStyle(Color.evOnSurface)
+                Text(subtitle)
+                    .font(.custom("Inter", size: 12))
+                    .foregroundStyle(Color.evOnSurfaceVariant)
+                    .lineLimit(2)
+            }
+            Spacer(minLength: 10)
+            Toggle("", isOn: isOn)
+                .labelsHidden()
+                .tint(Color.evSecondary)
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func settingsNavigableToggleRow(
+        title: String,
+        subtitle: String,
+        systemImage: String,
+        isOn: Binding<Bool>,
+        accent: Color = .evPrimary,
+        navigate: @escaping () -> Void
+    ) -> some View {
+        HStack(spacing: 12) {
+            Button(action: navigate) {
+                HStack(spacing: 12) {
+                    settingsIconChip(systemImage, accent: accent)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(title)
+                            .font(.custom("Inter", size: 15).weight(.semibold))
+                            .foregroundStyle(Color.evOnSurface)
+                        if !subtitle.isEmpty {
+                            Text(subtitle)
+                                .font(.custom("Inter", size: 12))
+                                .foregroundStyle(Color.evOnSurfaceVariant)
+                                .lineLimit(2)
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            Toggle("", isOn: isOn)
+                .labelsHidden()
+                .tint(Color.evSecondary)
+                .fixedSize()
+
+            Button(action: navigate) {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Color.evOutline)
+                    .frame(width: 18, height: 34)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func settingsIconChip(_ systemImage: String, accent: Color, disabled: Bool = false) -> some View {
+        Image(systemName: systemImage)
+            .font(.system(size: 16, weight: .semibold))
+            .foregroundStyle(disabled ? Color.evOutline : accent)
+            .frame(width: 34, height: 34)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill((disabled ? Color.evSurfaceContainerHigh : accent.opacity(0.12)))
+            )
+    }
+
+    private func settingsChildRow(_ child: ChildProfile) -> some View {
+        HStack(spacing: 12) {
+            childAvatarView(child, size: 34)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(child.name)
+                    .font(.custom("Inter", size: 15).weight(.semibold))
+                    .foregroundStyle(Color.evOnSurface)
+                Text(childDeviceSummary(for: child))
+                    .font(.custom("Inter", size: 12))
+                    .foregroundStyle(Color.evOnSurfaceVariant)
+                    .lineLimit(2)
+            }
+            Spacer(minLength: 10)
+            Text(childDeviceValue(for: child))
+                .font(.custom("Inter", size: 13).weight(.medium))
+                .foregroundStyle(Color.evOnSurfaceVariant)
+                .multilineTextAlignment(.trailing)
+                .lineLimit(1)
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func childAvatarView(_ child: ChildProfile, size: CGFloat) -> some View {
+        let url = childAvatarURL(for: child)
+        return Group {
+            if let url {
+                EvlinAvatarView(url: url, name: child.name, size: size)
+            } else {
+                Text(child.initial)
+                    .font(.custom("Manrope", size: size * 0.36).weight(.bold))
+                    .foregroundStyle(Color.evOnPrimary)
+                    .frame(width: size, height: size)
+                    .background(Circle().fill(childAccentColor(for: child)))
+            }
+        }
+    }
+
+    private func settingsPill(_ text: String, tone: SettingsPillTone) -> some View {
+        let colors = pillColors(tone)
+        return Text(text)
+            .font(.custom("Inter", size: 12).weight(.semibold))
+            .foregroundStyle(colors.foreground)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(Capsule().fill(colors.background))
+            .lineLimit(1)
+            .minimumScaleFactor(0.8)
+    }
+
+    private func pillColors(_ tone: SettingsPillTone) -> (foreground: Color, background: Color) {
+        switch tone {
+        case .success:
+            return (.evSecondary, .evSecondaryContainer.opacity(0.65))
+        case .warning:
+            return (.evPrimary, .evTertiaryContainer.opacity(0.65))
+        case .neutral:
+            return (.evOutline, .evSurfaceContainerHigh)
+        }
+    }
+
+    private func settingsProfileCard(
+        title: String,
+        subtitle: String,
+        initials: String,
+        avatarURL: String? = nil,
+        accent: Color = .evPrimary
+    ) -> some View {
+        HStack(spacing: 12) {
+            if let avatarURL {
+                EvlinAvatarView(url: avatarURL, name: initials, size: 46)
+            } else {
+                Text(initials)
+                    .font(.custom("Manrope", size: 16).weight(.bold))
+                    .foregroundStyle(Color.evOnPrimary)
+                    .frame(width: 46, height: 46)
+                    .background(Circle().fill(accent))
+            }
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.custom("Manrope", size: 16).weight(.bold))
+                    .foregroundStyle(Color.evOnSurface)
+                Text(subtitle)
+                    .font(.custom("Inter", size: 12))
+                    .foregroundStyle(Color.evOnSurfaceVariant)
+                    .lineLimit(2)
+            }
+            Spacer(minLength: 12)
+            Image(systemName: "chevron.right")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(Color.evOutline)
+        }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.evSurfaceContainerLowest)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color.evOutlineVariant.opacity(0.7), lineWidth: 1)
+        )
+    }
+
+    private var parentProfileHero: some View {
+        VStack(spacing: 0) {
+            VStack(spacing: 12) {
+                OnboardingV2PhotoAvatarPicker(
+                    name: parentDisplayName,
+                    pickedImage: $parentPickedAvatar,
+                    size: 88,
+                    accent: parentAccentColor,
+                    existingImageURL: parentAvatarURL,
+                    badgeSystemImage: "camera.fill"
+                )
+                .disabled(isUploadingParentAvatar)
+
+                VStack(spacing: 3) {
+                    Text(parentDisplayName)
+                        .font(.custom("Manrope", size: 18).weight(.bold))
+                        .foregroundStyle(Color.evOnSurface)
+                    Text(parentEmailDisplay)
+                        .font(.custom("Inter", size: 12))
+                        .foregroundStyle(Color.evOnSurfaceVariant)
+                }
+            }
+
+            Divider()
+                .background(Color.evOutlineVariant.opacity(0.7))
+                .padding(.top, 14)
+                .padding(.bottom, 14)
+
+            accentColorPicker
+
+            if isUploadingParentAvatar {
+                ProgressView("Uploading photo...")
+                    .font(.custom("Inter", size: 12))
+                    .padding(.top, 12)
+            }
+
+            if let parentAvatarError {
+                Text(parentAvatarError)
+                    .font(.caption)
+                    .foregroundStyle(Color.evError)
+                    .multilineTextAlignment(.center)
+                    .padding(.top, 12)
+            }
+
+            if let parentAccentError {
+                Text(parentAccentError)
+                    .font(.caption)
+                    .foregroundStyle(Color.evError)
+                    .multilineTextAlignment(.center)
+                    .padding(.top, 12)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 20)
+        .padding(.horizontal, 16)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color.evSurfaceContainerLowest)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(Color.evOutlineVariant.opacity(0.7), lineWidth: 1)
+        )
+        .onChange(of: parentPickedAvatar) { _, newValue in
+            guard let newValue else { return }
+            Task { await uploadParentAvatar(newValue) }
+        }
+    }
+
+    private func childProfileHero(_ child: ChildProfile) -> some View {
+        VStack(spacing: 0) {
+            VStack(spacing: 12) {
+                OnboardingV2PhotoAvatarPicker(
+                    name: child.name,
+                    pickedImage: childPickedAvatarBinding(for: child),
+                    size: 88,
+                    accent: childAccentColor(for: child),
+                    existingImageURL: childAvatarURL(for: child),
+                    badgeSystemImage: "camera.fill"
+                )
+                .disabled(uploadingChildAvatarIDs.contains(child.id))
+
+                VStack(spacing: 3) {
+                    Text(child.name)
+                        .font(.custom("Manrope", size: 18).weight(.bold))
+                        .foregroundStyle(Color.evOnSurface)
+                    Text("Age \(child.age) · \(childDeviceValue(for: child))")
+                        .font(.custom("Inter", size: 12))
+                        .foregroundStyle(Color.evOnSurfaceVariant)
+                }
+            }
+
+            Divider()
+                .background(Color.evOutlineVariant.opacity(0.7))
+                .padding(.top, 14)
+                .padding(.bottom, 14)
+
+            profileAccentColorPicker(
+                options: ParentSettingsPresentation.childProfileHeroAccentHexOptions,
+                selectedHex: selectedChildAccentHex(for: child),
+                isSaving: savingChildAccentIDs.contains(child.id),
+                accessibilityPrefix: "Choose child accent color"
+            ) { hex in
+                Task { await selectChildAccent(hex, for: child) }
+            }
+
+            if uploadingChildAvatarIDs.contains(child.id) {
+                ProgressView("Uploading photo...")
+                    .font(.custom("Inter", size: 12))
+                    .padding(.top, 12)
+            }
+
+            if let error = childAvatarErrorByID[child.id] {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(Color.evError)
+                    .multilineTextAlignment(.center)
+                    .padding(.top, 12)
+            }
+
+            if let error = childAccentErrorByID[child.id] {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(Color.evError)
+                    .multilineTextAlignment(.center)
+                    .padding(.top, 12)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 20)
+        .padding(.horizontal, 16)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color.evSurfaceContainerLowest)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(Color.evOutlineVariant.opacity(0.7), lineWidth: 1)
+        )
+    }
+
+    private var accentColorPicker: some View {
+        profileAccentColorPicker(
+            options: ParentSettingsPresentation.parentProfileHeroAccentHexOptions,
+            selectedHex: selectedParentAccentHex,
+            isSaving: isSavingParentAccent,
+            accessibilityPrefix: "Choose accent color"
+        ) { hex in
+            Task { await selectParentAccent(hex) }
+        }
+    }
+
+    private func profileAccentColorPicker(
+        options: [String],
+        selectedHex: String,
+        isSaving: Bool,
+        accessibilityPrefix: String,
+        onSelect: @escaping (String) -> Void
+    ) -> some View {
+        VStack(spacing: 9) {
+            Text("Accent Color")
+                .font(.custom("Inter", size: 12).weight(.semibold))
+                .foregroundStyle(Color.evOutline)
+            HStack(spacing: 7) {
+                ForEach(options, id: \.self) { hex in
+                    Button {
+                        onSelect(hex)
+                    } label: {
+                        accentSwatch(hex, selectedHex: selectedHex)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isSaving)
+                    .accessibilityLabel("\(accessibilityPrefix) \(hex)")
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .center)
+        }
+    }
+
+    private func accentSwatch(_ hex: String, selectedHex: String) -> some View {
+        let selected = hex.caseInsensitiveCompare(selectedHex) == .orderedSame
+        return ZStack {
+            Circle()
+                .fill(color(fromHexString: hex) ?? .evPrimary)
+                .frame(width: 24, height: 24)
+            if selected {
+                Image(systemName: "checkmark")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(Color.white)
+            }
+        }
+        .frame(width: 28, height: 28)
+        .overlay(
+            Circle()
+                .stroke(selected ? Color.evOnSurface : Color.evOutlineVariant, lineWidth: selected ? 2 : 1)
+        )
+    }
+
+    private func settingsHeroNote(title: String, message: String) -> some View {
+        Section {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(title)
+                    .font(.custom("Manrope", size: 15).weight(.bold))
+                    .foregroundStyle(Color.evOnSurface)
+                Text(message)
+                    .font(.custom("Inter", size: 13))
+                    .foregroundStyle(Color.evOnSurfaceVariant)
+            }
+            .padding(.vertical, 4)
+        }
+    }
+
+    private func childDeviceSummary(for child: ChildProfile) -> String {
+        let deviceCount = backendChild(for: child)?.devices.count ?? 0
+        if deviceCount == 0 {
+            return "Age \(child.age) · no child devices"
+        }
+        let labels = (backendChild(for: child)?.devices ?? [])
+            .prefix(2)
+            .map(deviceDisplayName)
+            .joined(separator: " · ")
+        return "Age \(child.age) · \(labels.isEmpty ? childDeviceValue(for: child) : labels)"
+    }
+
+    private func childDeviceValue(for child: ChildProfile) -> String {
+        let deviceCount = backendChild(for: child)?.devices.count ?? 0
+        return "\(deviceCount) \(deviceCount == 1 ? "device" : "devices")"
+    }
+
+    private func currentChild(for child: ChildProfile) -> ChildProfile {
+        children.first(where: { $0.id == child.id }) ?? familyStore.childProfiles.first(where: { $0.id == child.id }) ?? child
+    }
+
+    private func childAvatarURL(for child: ChildProfile) -> String? {
+        ParentSettingsPresentation.childSettingsAvatarURL(
+            childAvatarURLByID[child.id] ?? currentChild(for: child).avatarURL
+        )
+    }
+
+    private func selectedChildAccentHex(for child: ChildProfile) -> String {
+        if let selected = selectedChildAccentHexByID[child.id] {
+            return selected
+        }
+        if let serverHex = backendChild(for: child)?.avatar.color,
+           let normalized = normalizedHex(serverHex),
+           ParentSettingsPresentation.childProfileHeroAccentHexOptions.contains(normalized) {
+            return normalized
+        }
+        return ParentSettingsPresentation.childProfileHeroAccentHexOptions[0]
+    }
+
+    private func childAccentColor(for child: ChildProfile) -> Color {
+        color(fromHexString: selectedChildAccentHex(for: child)) ?? currentChild(for: child).accentColor
+    }
+
+    private func childPickedAvatarBinding(for child: ChildProfile) -> Binding<UIImage?> {
+        Binding(
+            get: { childPickedAvatarByID[child.id] },
+            set: { newValue in
+                childPickedAvatarByID[child.id] = newValue
+                guard let newValue else { return }
+                Task { await uploadChildAvatar(newValue, for: child) }
+            }
+        )
+    }
+
+    private func childDeviceIcon(for child: ChildProfile) -> String {
+        let deviceCount = backendChild(for: child)?.devices.count ?? 0
+        return deviceCount > 1 ? "ipad.and.iphone" : "iphone"
+    }
+
+    private func backendChild(for child: ChildProfile) -> ChildDTO? {
+        familyStore.child(byId: child.id)
+    }
+
+    private func deviceDisplayName(_ device: EnrolledDeviceDTO) -> String {
+        device.label?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+            ?? device.display?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+            ?? device.device_model?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+            ?? "Child Device"
+    }
+
+    private func deviceStatusLine(_ device: EnrolledDeviceDTO) -> String {
+        let state = device.online ? "Online" : "Offline"
+        guard let lastSeen = device.last_seen_at?.trimmingCharacters(in: .whitespacesAndNewlines), !lastSeen.isEmpty else {
+            return "\(state) · last heartbeat unavailable"
+        }
+        return "\(state) · last seen \(lastSeen)"
+    }
+
+    private func deviceKind(_ device: EnrolledDeviceDTO) -> String {
+        let platform = device.platform?.uppercased()
+        return platform?.nilIfEmpty ?? (device.mode == "child" ? "Kid" : "Parent")
+    }
+
+    private func deviceIcon(_ device: EnrolledDeviceDTO) -> String {
+        let display = [device.display, device.label, device.device_model]
+            .compactMap { $0?.lowercased() }
+            .joined(separator: " ")
+        if display.contains("ipad") { return "ipad" }
+        return "iphone"
+    }
+
+    private func initials(from name: String) -> String {
+        let parts = name
+            .split(whereSeparator: { $0.isWhitespace || $0 == "-" })
+            .compactMap { $0.first }
+            .prefix(2)
+        let value = parts.map(String.init).joined().uppercased()
+        return value.isEmpty ? "P" : value
     }
 
     @ViewBuilder
@@ -1243,8 +1907,22 @@ struct HomeSettingsSheet: View {
                 }
             }
         }
-        .navigationTitle("Debug")
+        .navigationTitle("Developer Tools")
         .navigationBarTitleDisplayMode(.inline)
+        .familyActivityPicker(
+            isPresented: $isPickerPresented,
+            selection: $screenTimeManager.selectedApps
+        )
+        .onChange(of: isPickerPresented) { _, open in
+            // `FamilyActivitySelection` equality can ignore picker-only metadata deltas; always
+            // persist when the sheet closes so `LocalAliasStore` + label snapshots refresh.
+            if !open {
+                screenTimeManager.saveSelection()
+            }
+        }
+        .onChange(of: screenTimeManager.selectedApps) { _, _ in
+            screenTimeManager.saveSelection()
+        }
     }
 
     @ViewBuilder
@@ -1345,9 +2023,297 @@ struct HomeSettingsSheet: View {
             }
         default:
             if let url = URL(string: UIApplication.openSettingsURLString) {
-                UIApplication.shared.open(url)
+                Task { await UIApplication.shared.open(url) }
             }
         }
+    }
+
+    private func refreshNotificationAuthorizationStatus() {
+        UNUserNotificationCenter.current().getNotificationSettings { settings in
+            DispatchQueue.main.async {
+                notificationAuthorizationStatus = settings.authorizationStatus
+            }
+        }
+    }
+
+    private func currentNotificationAuthorizationStatus() async -> UNAuthorizationStatus {
+        await withCheckedContinuation { continuation in
+            UNUserNotificationCenter.current().getNotificationSettings { settings in
+                continuation.resume(returning: settings.authorizationStatus)
+            }
+        }
+    }
+
+    @MainActor
+    private func reconcileNotificationStateAfterSystemSettings() async {
+        let status = await currentNotificationAuthorizationStatus()
+        notificationAuthorizationStatus = status
+        guard pendingNotificationSystemSettingsIntent != nil else { return }
+        pendingNotificationSystemSettingsIntent = nil
+
+        let systemEnabled = status.isParentSettingsEnabled
+        if await setParentPushPreference(enabled: systemEnabled),
+           systemEnabled {
+            UIApplication.shared.registerForRemoteNotifications()
+        }
+    }
+
+    @MainActor
+    private func setNotificationPermissionIntent(enabled: Bool) async {
+        let currentStatus = await currentNotificationAuthorizationStatus()
+        notificationAuthorizationStatus = currentStatus
+        switch ParentSettingsPresentation.notificationPermissionAction(
+            status: currentStatus,
+            wantsEnabled: enabled
+        ) {
+        case .requestAuthorization:
+            let granted = await requestNotificationAuthorization()
+            if granted {
+                _ = await setParentPushPreference(enabled: true)
+            } else {
+                notifyPushEnabled = false
+            }
+        case .openSystemSettings:
+            pendingNotificationSystemSettingsIntent = enabled
+            await openIOSNotificationSettings()
+        case .setLocalPreference:
+            if await setParentPushPreference(enabled: enabled),
+               enabled,
+               notificationAuthorizationStatus.isParentSettingsEnabled {
+                UIApplication.shared.registerForRemoteNotifications()
+            }
+            refreshNotificationAuthorizationStatus()
+        case .refreshStatus:
+            refreshNotificationAuthorizationStatus()
+        }
+    }
+
+    @MainActor
+    private func handleNotificationPermissionTap() async {
+        await openIOSNotificationSettings()
+        refreshNotificationAuthorizationStatus()
+    }
+
+    @MainActor
+    private func openIOSNotificationSettings() async {
+        if #available(iOS 16.0, *),
+           let url = URL(string: UIApplication.openNotificationSettingsURLString) {
+            await UIApplication.shared.open(url)
+            return
+        }
+        guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+        await UIApplication.shared.open(url)
+    }
+
+    @MainActor
+    private func refreshParentNotificationPreferences() async {
+        guard let prefs = try? await apiClient.fetchNotificationPreferences() else { return }
+        notifyPushEnabled = !prefs.muted_types.contains(ParentSettingsPresentation.parentPushMasterMuteType)
+    }
+
+    @MainActor
+    private func setParentPushPreference(enabled: Bool) async -> Bool {
+        let previous = notifyPushEnabled
+        notifyPushEnabled = enabled
+
+        do {
+            let prefs = try await apiClient.fetchNotificationPreferences()
+            var mutedTypes = Set(prefs.muted_types)
+            if enabled {
+                mutedTypes.remove(ParentSettingsPresentation.parentPushMasterMuteType)
+            } else {
+                mutedTypes.insert(ParentSettingsPresentation.parentPushMasterMuteType)
+            }
+            let updated = try await apiClient.updateNotificationPreferences(
+                UpdateNotificationPreferencesBody(
+                    quiet_hours_start: nil,
+                    quiet_hours_end: nil,
+                    digest_enabled: nil,
+                    muted_types: Array(mutedTypes).sorted()
+                )
+            )
+            notifyPushEnabled = !updated.muted_types.contains(ParentSettingsPresentation.parentPushMasterMuteType)
+            AppDelegate.uploadCachedAPNsTokenIfPossible(using: apiClient)
+            return true
+        } catch {
+            notifyPushEnabled = previous
+            return false
+        }
+    }
+
+    @MainActor
+    @discardableResult
+    private func requestNotificationAuthorization() async -> Bool {
+        let granted = (try? await UNUserNotificationCenter.current()
+            .requestAuthorization(options: [.alert, .sound, .badge])) ?? false
+
+        if granted {
+            UIApplication.shared.registerForRemoteNotifications()
+        }
+
+        refreshNotificationAuthorizationStatus()
+        return granted
+    }
+
+    private func seedParentProfilePresentation() {
+        parentAvatarURL = familyStore.selfParent?.avatar.signed_url
+
+        if let serverHex = familyStore.selfParent?.avatar.color,
+           let normalized = normalizedHex(serverHex),
+           ParentSettingsPresentation.parentAccentHexOptions.contains(normalized) {
+            selectedParentAccentHex = normalized
+        }
+    }
+
+    @MainActor
+    private func selectParentAccent(_ hex: String) async {
+        guard let normalized = normalizedHex(hex) else { return }
+        guard normalized.caseInsensitiveCompare(selectedParentAccentHex) != .orderedSame else { return }
+        guard !isSavingParentAccent else { return }
+
+        let previous = selectedParentAccentHex
+        selectedParentAccentHex = normalized
+        isSavingParentAccent = true
+        defer { isSavingParentAccent = false }
+
+        do {
+            _ = try await apiClient.updateParentProfile(
+                UpdateParentProfileBody(
+                    display_name: nil,
+                    avatar_kind: nil,
+                    avatar_value: nil,
+                    avatar_color: normalized
+                )
+            )
+            await familyStore.refresh()
+            seedParentProfilePresentation()
+            parentAccentError = nil
+        } catch {
+            selectedParentAccentHex = previous
+            parentAccentError = "Couldn't save accent color. \(error.localizedDescription)"
+        }
+    }
+
+    @MainActor
+    private func uploadParentAvatar(_ image: UIImage) async {
+        guard !isUploadingParentAvatar else { return }
+        guard let data = evlinAvatarJPEG(image) else {
+            parentAvatarError = "Couldn't prepare that photo."
+            return
+        }
+
+        isUploadingParentAvatar = true
+        defer { isUploadingParentAvatar = false }
+
+        do {
+            let response: APIClient.AvatarUploadResponse = try await apiClient.uploadParentAvatar(jpegData: data)
+            parentAvatarURL = response.signed_url
+            await familyStore.refresh()
+            parentAvatarURL = familyStore.selfParent?.avatar.signed_url ?? response.signed_url
+            parentAvatarError = nil
+        } catch {
+            parentAvatarError = "Couldn't upload photo. \(error.localizedDescription)"
+        }
+    }
+
+    @MainActor
+    private func selectChildAccent(_ hex: String, for child: ChildProfile) async {
+        guard let normalized = normalizedHex(hex) else { return }
+        guard normalized.caseInsensitiveCompare(selectedChildAccentHex(for: child)) != .orderedSame else { return }
+        guard !savingChildAccentIDs.contains(child.id) else { return }
+
+        let previous = selectedChildAccentHexByID[child.id]
+        selectedChildAccentHexByID[child.id] = normalized
+        savingChildAccentIDs.insert(child.id)
+        defer { savingChildAccentIDs.remove(child.id) }
+
+        do {
+            _ = try await apiClient.updateChild(
+                id: child.id,
+                UpdateChildBody(
+                    display_name: nil,
+                    birth_year: nil,
+                    gender: nil,
+                    avatar_kind: nil,
+                    avatar_value: nil,
+                    avatar_color: normalized
+                )
+            )
+            await familyStore.refresh()
+            children = familyStore.childProfiles
+            if let refreshedHex = backendChild(for: child)?.avatar.color,
+               let normalizedRefreshed = normalizedHex(refreshedHex) {
+                selectedChildAccentHexByID[child.id] = normalizedRefreshed
+            }
+            childAccentErrorByID[child.id] = nil
+        } catch {
+            if let previous {
+                selectedChildAccentHexByID[child.id] = previous
+            } else {
+                selectedChildAccentHexByID.removeValue(forKey: child.id)
+            }
+            childAccentErrorByID[child.id] = "Couldn't save accent color. \(error.localizedDescription)"
+        }
+    }
+
+    @MainActor
+    private func uploadChildAvatar(_ image: UIImage, for child: ChildProfile) async {
+        guard !uploadingChildAvatarIDs.contains(child.id) else { return }
+        guard let data = evlinAvatarJPEG(image) else {
+            childAvatarErrorByID[child.id] = "Couldn't prepare that photo."
+            return
+        }
+
+        uploadingChildAvatarIDs.insert(child.id)
+        defer { uploadingChildAvatarIDs.remove(child.id) }
+
+        do {
+            let signedURL = try await apiClient.uploadChildAvatar(childId: child.id, jpegData: data)
+            if let signedURL {
+                childAvatarURLByID[child.id] = signedURL
+            }
+            await familyStore.refresh()
+            children = familyStore.childProfiles
+            if let refreshed = familyStore.childProfiles.first(where: { $0.id == child.id })?.avatarURL ?? signedURL {
+                childAvatarURLByID[child.id] = refreshed
+            }
+            childAvatarErrorByID[child.id] = nil
+        } catch {
+            childAvatarErrorByID[child.id] = "Couldn't upload photo. \(error.localizedDescription)"
+        }
+    }
+
+    private func performSignOut() {
+        KeychainStore.shared.clear()
+        let defaults = UserDefaults.standard
+        defaults.set(false, forKey: "onboardingComplete")
+        defaults.set("", forKey: "appMode")
+        defaults.removeObject(forKey: "evlin.familyID")
+        defaults.removeObject(forKey: "evlin.parentDeviceID")
+        defaults.removeObject(forKey: "evlin.childDeviceID")
+        defaults.removeObject(forKey: "parentName")
+        defaults.removeObject(forKey: "childName")
+        defaults.removeObject(forKey: "targetChildId")
+        NotificationCenter.default.post(name: .evlinSessionSignedOut, object: nil)
+        onClose()
+    }
+
+    private func color(fromHexString hex: String) -> Color? {
+        guard let normalized = normalizedHex(hex) else { return nil }
+        let raw = String(normalized.dropFirst())
+        guard let value = UInt32(raw, radix: 16) else { return nil }
+        return Color(
+            red: Double((value >> 16) & 0xFF) / 255.0,
+            green: Double((value >> 8) & 0xFF) / 255.0,
+            blue: Double(value & 0xFF) / 255.0
+        )
+    }
+
+    private func normalizedHex(_ hex: String) -> String? {
+        var s = hex.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        if s.hasPrefix("#") { s.removeFirst() }
+        guard s.count == 6, UInt32(s, radix: 16) != nil else { return nil }
+        return "#\(s)"
     }
 
     @ViewBuilder
@@ -1451,6 +2417,45 @@ struct HomeSettingsSheet: View {
         children = familyStore.childProfiles                // truth wins; failed delete stays
     }
 
+    @MainActor
+    private func pairAdditionalChild(_ code: String) async -> String? {
+        let trimmed = code.filter(\.isNumber)
+        guard trimmed.count == 6 else { return "Enter the 6-digit code." }
+        do {
+            let response = try await apiClient.pairFamily(
+                code: trimmed,
+                deviceLabel: UIDevice.current.name,
+                protectionMode: savedProtectionMode
+            )
+            UserDefaults.standard.set(response.family_id.uuidString, forKey: "evlin.familyID")
+            UserDefaults.standard.set(response.parent_device_id.uuidString, forKey: "evlin.parentDeviceID")
+            UserDefaults.standard.set(response.child_device_id.uuidString, forKey: "evlin.childDeviceID")
+            familyID = response.family_id.uuidString
+            parentDeviceID = response.parent_device_id.uuidString
+            childDeviceID = response.child_device_id.uuidString
+
+            await familyStore.refresh()
+            children = familyStore.childProfiles
+            if let matched = familyStore.children.first(where: { child in
+                child.devices.contains { UUID(uuidString: $0.device_id) == response.child_device_id }
+            }) {
+                addChildPairingKidName = matched.display_name
+            } else {
+                addChildPairingKidName = "your kid"
+            }
+            return nil
+        } catch let APIError.serverError(status) {
+            switch status {
+            case 404: return "That code wasn't found. Double-check the 6 digits."
+            case 400: return "That code has expired or was already used. Ask your kid for a fresh one."
+            case 409: return "This account is already in a different family."
+            default:  return "Couldn't pair (error \(status)). Try again."
+            }
+        } catch {
+            return "Network error. Check your connection and try again."
+        }
+    }
+
     /// Nuclear reset — wipes every layer that holds lock state. See the
     /// Button comment above for rationale. Idempotent: safe to call when
     /// nothing is locked. Async because ActiveLockStore is an actor.
@@ -1497,6 +2502,82 @@ struct HomeSettingsSheet: View {
             screenTimeManager.isUnlocked = true
             NotificationCenter.default.post(name: .evlinLockStateChanged, object: false)
         }
+    }
+}
+
+private extension String {
+    var nilIfEmpty: String? {
+        isEmpty ? nil : self
+    }
+}
+
+private extension UNAuthorizationStatus {
+    var isParentSettingsEnabled: Bool {
+        switch self {
+        case .authorized, .provisional, .ephemeral:
+            return true
+        case .denied, .notDetermined:
+            return false
+        @unknown default:
+            return false
+        }
+    }
+}
+
+private struct SettingsAddChildPairingFlow: View {
+    let kidName: String
+    let onPair: (String) async -> String?
+    let onDone: () -> Void
+    let onCancel: () -> Void
+
+    @State private var paired = false
+
+    private var displayName: String {
+        let trimmed = kidName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "your kid" : trimmed
+    }
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if paired {
+                    VStack(spacing: 18) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 64, weight: .semibold))
+                            .foregroundStyle(Color.evSecondary)
+                        Text("Linked")
+                            .font(.custom("Manrope", size: 28).weight(.heavy))
+                            .foregroundStyle(Color.evOnSurface)
+                        Text("Connected to \(displayName).")
+                            .font(.custom("Inter", size: 15))
+                            .foregroundStyle(Color.evOnSurfaceVariant)
+                            .multilineTextAlignment(.center)
+                        Button("Done") {
+                            onDone()
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .padding()
+                    .background(Color.evSurface)
+                } else {
+                    ParentPairScanStep(
+                        onPaired: onPair,
+                        pairedSucceeded: false,
+                        onAdvance: { paired = true },
+                        onBack: onCancel
+                    )
+                }
+            }
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button(paired ? "Done" : "Cancel") {
+                        paired ? onDone() : onCancel()
+                    }
+                }
+            }
+        }
+        .preferredColorScheme(.light)
     }
 }
 

@@ -15,6 +15,8 @@ struct OnboardingV2PhotoAvatarPicker: View {
     @Binding var pickedImage: UIImage?
     var size: CGFloat = 66
     var accent: Color = OnboardingV2Theme.Palette.primary
+    var existingImageURL: String? = nil
+    var badgeSystemImage: String = "plus"
 
     @State private var showDialog = false
     @State private var showCamera = false
@@ -37,11 +39,11 @@ struct OnboardingV2PhotoAvatarPicker: View {
                             .clipShape(Circle())
                     } else {
                         // Reuse the exact Home initials fallback (letter avatar).
-                        EvlinAvatarView(url: nil, name: name.isEmpty ? "?" : name, size: size)
+                        EvlinAvatarView(url: existingImageURL, name: name.isEmpty ? "?" : name, size: size)
                     }
                 }
-                // "+" add badge.
-                Image(systemName: "plus")
+                // Small action badge; onboarding uses plus, settings uses camera.
+                Image(systemName: badgeSystemImage)
                     .font(.system(size: size * 0.18, weight: .bold))
                     .foregroundStyle(OnboardingV2Theme.Palette.onPrimary)
                     .frame(width: size * 0.36, height: size * 0.36)

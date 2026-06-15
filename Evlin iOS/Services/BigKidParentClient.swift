@@ -47,6 +47,19 @@ final class BigKidParentClient {
         return try await postJSON("/parent/task", body: body)
     }
 
+    func updateTask(
+        taskId: UUID, title: String, description: String,
+        category: BigKidTaskCategory, due: String?
+    ) async throws -> BigKidTask {
+        var body: [String: Any] = [
+            "title": title,
+            "description": description,
+            "category": category.rawValue,
+        ]
+        if let due, !due.isEmpty { body["due"] = due }
+        return try await patchJSON("/parent/task/\(taskId.uuidString)", body: body)
+    }
+
     func reviewTask(
         taskId: UUID, decision: TaskReviewDecision, redoReason: String? = nil
     ) async throws -> BigKidTask {
@@ -96,6 +109,11 @@ final class BigKidParentClient {
 
     private func postJSON<T: Decodable>(_ path: String, body: [String: Any]) async throws -> T {
         let req = try makeJSONRequest(path: path, method: "POST", body: body)
+        return try await perform(req)
+    }
+
+    private func patchJSON<T: Decodable>(_ path: String, body: [String: Any]) async throws -> T {
+        let req = try makeJSONRequest(path: path, method: "PATCH", body: body)
         return try await perform(req)
     }
 

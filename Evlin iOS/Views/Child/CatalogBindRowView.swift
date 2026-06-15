@@ -47,22 +47,14 @@ struct CatalogBindRowView: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
                 Label(token)
-                    .labelStyle(.iconOnly)
-                    .font(.title2)
-                Text("Which app is this?")
-                    .font(.subheadline.weight(.medium))
+                    .labelStyle(.titleAndIcon)
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
                 Spacer(minLength: 8)
-                Text("icon only")
-                    .font(.caption2.weight(.bold))
-                    .textCase(.uppercase)
-                    .foregroundStyle(.secondary)
             }
 
-            Text("Evlin can show the icon but can't read the name. Match it to the App Store so a parent can lock it by name later.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            TextField("Match it to the App Store, e.g. TikTok", text: $query)
+            TextField("Search matching App Store app, e.g. TikTok", text: $query)
                 .textFieldStyle(.roundedBorder)
                 .autocorrectionDisabled()
                 .textInputAutocapitalization(.never)

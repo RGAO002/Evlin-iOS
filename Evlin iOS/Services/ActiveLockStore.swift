@@ -33,6 +33,7 @@ actor ActiveLockStore {
     /// `force_confirmations: ["B1"]` in the request.
     @discardableResult
     func addShield(_ new: ShieldRecord, force: Bool = false) -> AddShieldResult {
+        let new = normalizeShieldRecord(new).record
         if let existing = shieldRecords[new.recordKey], !force {
             return mergeShield(existing: existing, new: new)
         }
@@ -101,6 +102,10 @@ actor ActiveLockStore {
 
     func allCurrent() -> (shields: [ShieldRecord], blocks: [BlockRecord]) {
         (Array(shieldRecords.values), Array(blockRecords.values))
+    }
+
+    func reapplyCurrentRestrictions() {
+        recomputeAndApply()
     }
 
     func effectiveState(for query: AppQuery) -> EffectiveState {
@@ -185,7 +190,7 @@ actor ActiveLockStore {
 
     private func shieldCovers(_ record: ShieldRecord, query: AppQuery) -> Bool {
         switch record.tier {
-        case .all:
+        case .all, .allApps:
             return true
         case .exactApp:
             if let t = query.token, record.appTokens.contains(t) { return true }
@@ -210,15 +215,15 @@ actor ActiveLockStore {
             if other.recordKey == removed.recordKey { return false }
             switch removed.tier {
             case .exactApp:
-                return !other.appTokens.isDisjoint(with: removed.appTokens) || other.tier == .all
+                return !other.appTokens.isDisjoint(with: removed.appTokens) || other.appliesToAll
             case .savedList:
                 return !other.appTokens.isDisjoint(with: removed.appTokens) ||
                        !other.categoryTokens.isDisjoint(with: removed.categoryTokens) ||
-                       other.tier == .all
+                       other.appliesToAll
             case .category:
                 return (other.tier == .category && other.targetKey == removed.targetKey) ||
-                       other.tier == .all
-            case .all:
+                       other.appliesToAll
+            case .all, .allApps:
                 return false
             }
         }
@@ -236,13 +241,24 @@ actor ActiveLockStore {
         let blockedApps = Set(blockRecords.values.map { ManagedSettings.Application(bundleIdentifier: $0.bundleID) })
         store.application.blockedApplications = blockedApps.isEmpty ? nil : blockedApps
 
-        // Check for 'all' tier — if any, shield everything
-        if shieldRecords.values.contains(where: { $0.appliesToAll }) {
+        // Check for broad app shields. Parent all-locks still block all web
+        // domains; reflection all-app locks leave web domains available so
+        // embedded YouTube reflection videos can load.
+        let broadRecords = shieldRecords.values.filter(\.appliesToAll)
+        if !broadRecords.isEmpty {
+            let includesFullWebShield = broadRecords.contains(where: { $0.tier == .all })
+            let allWebTokens = Set(shieldRecords.values.flatMap(\.webDomainTokens))
             store.shield.applicationCategories = .all()
-            store.shield.webDomainCategories = .all()
             store.shield.applications = nil
-            store.shield.webDomains = nil
-            writeRecomputeDiag(branch: "all", appTokens: 0, catTokens: 0, webTokens: 0)
+            if includesFullWebShield {
+                store.shield.webDomainCategories = .all()
+                store.shield.webDomains = nil
+                writeRecomputeDiag(branch: "all", appTokens: 0, catTokens: 0, webTokens: 0)
+            } else {
+                store.shield.webDomainCategories = nil
+                store.shield.webDomains = allWebTokens.isEmpty ? nil : allWebTokens
+                writeRecomputeDiag(branch: "all_apps_only", appTokens: 0, catTokens: 0, webTokens: allWebTokens.count)
+            }
             return
         }
 
@@ -293,13 +309,22 @@ actor ActiveLockStore {
     private func restore() {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
+        var migrated = false
         if let data = defaults?.data(forKey: shieldsKey) {
             if let decoded = try? decoder.decode([String: ShieldRecord].self, from: data) {
-                shieldRecords = decoded
+                shieldRecords = decoded.mapValues { record in
+                    let normalized = normalizeShieldRecord(record)
+                    migrated = migrated || normalized.migrated
+                    return normalized.record
+                }
             } else if let decoded = try? PropertyListDecoder().decode([String: ShieldRecord].self, from: data) {
-                shieldRecords = decoded
-                // One-shot migrate legacy plist payloads to JSON.
-                persist()
+                shieldRecords = decoded.mapValues { record in
+                    let normalized = normalizeShieldRecord(record)
+                    migrated = migrated || normalized.migrated
+                    return normalized.record
+                }
+                // One-shot migrate legacy plist payloads to JSON after blocks restore below.
+                migrated = true
             }
         }
         if let data = defaults?.data(forKey: blocksKey) {
@@ -307,14 +332,18 @@ actor ActiveLockStore {
                 blockRecords = decoded
             } else if let decoded = try? PropertyListDecoder().decode([String: BlockRecord].self, from: data) {
                 blockRecords = decoded
-                persist()
+                migrated = true
             }
         }
         let expired = purgeExpiredRecords()
-        if !expired.shields.isEmpty || !expired.blocks.isEmpty {
+        if migrated || !expired.shields.isEmpty || !expired.blocks.isEmpty {
             persist()
         }
         recomputeAndApply()
+    }
+
+    private func normalizeShieldRecord(_ record: ShieldRecord) -> (record: ShieldRecord, migrated: Bool) {
+        record.normalizedForCurrentSchema()
     }
 
     @discardableResult

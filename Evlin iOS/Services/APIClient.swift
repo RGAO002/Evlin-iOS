@@ -1320,6 +1320,7 @@ struct ChildReadinessDTO: Codable, Sendable, Equatable {
 }
 
 struct AvatarUploadResponseDTO: Codable, Sendable, Equatable {
+    let signed_url: String?
     let avatar_url: String?
 }
 
@@ -1915,6 +1916,20 @@ struct UpdateChildBody: Codable {
     var avatar_color: String?
 }
 
+struct NotificationPreferencesDTO: Codable, Sendable, Equatable {
+    var quiet_hours_start: Int?
+    var quiet_hours_end: Int?
+    var digest_enabled: Bool
+    var muted_types: [String]
+}
+
+struct UpdateNotificationPreferencesBody: Codable {
+    var quiet_hours_start: Int?
+    var quiet_hours_end: Int?
+    var digest_enabled: Bool?
+    var muted_types: [String]?
+}
+
 extension APIClient {
     /// Runs an authed JSON request through the single-flight-refresh layer and
     /// decodes the response. Throws `APIError.serverError` on a non-2xx status.
@@ -1961,6 +1976,16 @@ extension APIClient {
         try await authedJSON(
             path: "/family/onboarding/child-readiness?child_device_id=\(childDeviceID.uuidString)",
             method: "GET")
+    }
+
+    func fetchNotificationPreferences() async throws -> NotificationPreferencesDTO {
+        try await authedJSON(path: "/me/notification-preferences", method: "GET")
+    }
+
+    @discardableResult
+    func updateNotificationPreferences(_ body: UpdateNotificationPreferencesBody) async throws -> NotificationPreferencesDTO {
+        let payload = try JSONEncoder().encode(body)
+        return try await authedJSON(path: "/me/notification-preferences", method: "PUT", jsonBody: payload)
     }
 
     /// POST /family/onboarding/child-all-set — the kid reports it reached the
@@ -2180,37 +2205,20 @@ extension APIClient {
         }
     }
 
-    /// Multipart upload of a parent avatar photo. Returns the fresh signed URL.
-    func uploadParentAvatar(jpegData: Data) async throws -> String? {
-        try await uploadAvatar(path: "/me/avatar", jpegData: jpegData)
-    }
-
-    /// Multipart upload of a child avatar photo. Returns the fresh signed URL.
+    /// POST /family/children/{id}/avatar — parent-side upload of a child avatar
+    /// photo. Returns the fresh signed URL so Settings can update immediately.
     func uploadChildAvatar(childId: String, jpegData: Data) async throws -> String? {
-        try await uploadAvatar(path: "/family/children/\(childId)/avatar", jpegData: jpegData)
-    }
-
-    private func uploadAvatar(path: String, jpegData: Data) async throws -> String? {
-        let boundary = "evlin-\(UUID().uuidString)"
-        var body = Data()
-        body.append("--\(boundary)\r\n".data(using: .utf8)!)
-        body.append("Content-Disposition: form-data; name=\"file\"; filename=\"avatar.jpg\"\r\n".data(using: .utf8)!)
-        body.append("Content-Type: image/jpeg\r\n\r\n".data(using: .utf8)!)
-        body.append(jpegData)
-        body.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
-
-        var req = authedRequest(path: path, method: "POST")
-        // Override the default application/json the authed builder sets — the
-        // multipart Content-Type MUST carry the boundary or the backend can't
-        // parse the form-data part.
-        req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
-        req.httpBody = body
-
-        let (data, http) = try await authedData(for: req)
-        guard (200..<300).contains(http.statusCode) else {
-            throw APIError.serverError(http.statusCode)
-        }
-        return try JSONDecoder().decode(AvatarUploadResponseDTO.self, from: data).avatar_url
+        let body: [String: Any] = [
+            "image_base64": jpegData.base64EncodedString(),
+            "content_type": "image/jpeg",
+        ]
+        let payload = try JSONSerialization.data(withJSONObject: body)
+        let decoded: AvatarUploadResponseDTO = try await authedJSON(
+            path: "/family/children/\(childId)/avatar",
+            method: "POST",
+            jsonBody: payload
+        )
+        return decoded.signed_url ?? decoded.avatar_url
     }
 }
 

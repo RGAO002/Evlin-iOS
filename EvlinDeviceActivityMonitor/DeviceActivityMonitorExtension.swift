@@ -97,10 +97,15 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         // (the previous `store.shield.applications` write may not have
         // propagated, or sweepExpired set it from an actor thread that
         // springboard hasn't picked up yet). Idempotent recompute is safe.
+        var migrated = false
         let shields: [String: ShieldRecord] = {
             guard let data = defaults?.data(forKey: shieldsKey),
                   let decoded = decodeShields(from: data) else { return [:] }
-            return decoded
+            return decoded.mapValues { record in
+                let normalized = record.normalizedForCurrentSchema()
+                migrated = migrated || normalized.migrated
+                return normalized.record
+            }
         }()
 
         let targetKey = shields.keys.first(where: { key in
@@ -120,6 +125,9 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         } else {
             // Dict already swept by main app — still recompute to ensure
             // the store reflects the current (possibly empty) record set.
+            if migrated, let updated = encodeShields(mutated) {
+                defaults?.set(updated, forKey: shieldsKey)
+            }
             removedRecord = false
         }
 
@@ -135,11 +143,19 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         let blockedApps = Set(blocks.values.map { ManagedSettings.Application(bundleIdentifier: $0.bundleID) })
         store.application.blockedApplications = blockedApps.isEmpty ? nil : blockedApps
 
-        if mutated.values.contains(where: { $0.appliesToAll }) {
+        let broadRecords = mutated.values.filter(\.appliesToAll)
+        if !broadRecords.isEmpty {
+            let includesFullWebShield = broadRecords.contains(where: \.isFullWebBroadShield)
+            let allWeb = Set(mutated.values.flatMap(\.webDomainTokens))
             store.shield.applicationCategories = .all()
-            store.shield.webDomainCategories = .all()
             store.shield.applications = nil
-            store.shield.webDomains = nil
+            if includesFullWebShield {
+                store.shield.webDomainCategories = .all()
+                store.shield.webDomains = nil
+            } else {
+                store.shield.webDomainCategories = nil
+                store.shield.webDomains = allWeb.isEmpty ? nil : allWeb
+            }
         } else {
             let allApp = Set(mutated.values.flatMap(\.appTokens))
             let allCat = Set(mutated.values.flatMap(\.categoryTokens))

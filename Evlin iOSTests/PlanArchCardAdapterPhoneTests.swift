@@ -177,4 +177,26 @@ extension PlanArchCardAdapterPhoneTests {
         XCTAssertNotNil(U1ExpiryParser.date(from: "2026-06-12T21:08:59.433611Z"))
         XCTAssertNotNil(U1ExpiryParser.date(from: "2026-06-12T21:08:59Z"))
     }
+
+    func testU1PermanentSubtitleDoesNotExposeDebugCopy() {
+        let entry = U1ShieldEntry(index: 0, kind: "app", displayName: "Facebook",
+                                  expiresAtISO: nil, stale: false)
+
+        let subtitle = U1SubtitleFormatter.subtitle(for: entry)
+
+        XCTAssertEqual(subtitle, "App · Permanent — manual unlock only")
+        XCTAssertFalse(subtitle.localizedCaseInsensitiveContains("debug"))
+        XCTAssertFalse(subtitle.localizedCaseInsensitiveContains("expires_at_iso"))
+    }
+
+    func testU1BadExpirySubtitleDoesNotExposeDebugCopy() {
+        let entry = U1ShieldEntry(index: 0, kind: "app", displayName: "Facebook",
+                                  expiresAtISO: "not-a-date", stale: false)
+
+        let subtitle = U1SubtitleFormatter.subtitle(for: entry)
+
+        XCTAssertEqual(subtitle, "App · Permanent — manual unlock only")
+        XCTAssertFalse(subtitle.localizedCaseInsensitiveContains("debug"))
+        XCTAssertFalse(subtitle.localizedCaseInsensitiveContains("expires_at_iso"))
+    }
 }

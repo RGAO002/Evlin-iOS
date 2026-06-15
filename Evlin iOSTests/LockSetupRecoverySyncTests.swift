@@ -61,4 +61,37 @@ final class LockSetupRecoverySyncTests: XCTestCase {
         XCTAssertEqual(upload.displayName, "Instagram")
         XCTAssertEqual(upload.bundleID, "com.burbn.instagram")
     }
+
+    func test_localRecoveryTreatsSemanticCategoryAliasAsExistingCanonicalCategory() {
+        let backend = LockSetupCatalogPresentationModel(
+            apps: [],
+            categories: [
+                .init(
+                    aliasKey: UUID(),
+                    type: .category,
+                    displayName: "Productivity & Finance",
+                    aliases: ["productivity"]
+                )
+            ],
+            lists: []
+        )
+        let localCategories = [
+            LockListCategoryEntry(name: "productivity")
+        ]
+
+        let missing = LockSetupRecoveryPlanner.missingLocalCategories(localCategories, backend: backend)
+
+        XCTAssertTrue(missing.isEmpty)
+    }
+
+    func test_localRecoveryCategoryUploadUsesCanonicalAppleCategoryName() {
+        let upload = LockSetupRecoveryPlanner.uploadCategory(
+            category: LockListCategoryEntry(name: "reading"),
+            tokenDataBase64: "UkVBRElORw==",
+            sourceDeviceID: UUID()
+        )
+
+        XCTAssertEqual(upload.displayName, "Information & Reading")
+        XCTAssertEqual(upload.aliases, ["Information & Reading", "reading"])
+    }
 }

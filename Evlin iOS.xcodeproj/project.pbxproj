@@ -12,6 +12,7 @@
 		98E7AC3E3A82001474F400B2 /* EvlinShieldConfig.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = B3AFAF3FD8F59E0CE4C28632 /* EvlinShieldConfig.appex */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		B600D63B2FDB4C5F000E60E6 /* EvlinPushApplier.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = B600D6342FDB4C5F000E60E6 /* EvlinPushApplier.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		B6370B212FD1EEF1006D3648 /* Sentry in Frameworks */ = {isa = PBXBuildFile; productRef = B6370B202FD1EEF1006D3648 /* Sentry */; };
+		B65D5C622FDE259F00CAAACA /* GoogleSignIn in Frameworks */ = {isa = PBXBuildFile; productRef = B65D5C612FDE259F00CAAACA /* GoogleSignIn */; };
 		B6CD8CCD2FA1981D00FD6C13 /* YouTubePlayerKit in Frameworks */ = {isa = PBXBuildFile; productRef = B6CD8CCC2FA1981D00FD6C13 /* YouTubePlayerKit */; };
 		B6DA0F46F9B04EB7F720FB2C /* DeviceActivity.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B6FA97342F81C6A000DA619E /* DeviceActivity.framework */; };
 		B6DAA529E2C458B05AA98DA9 /* EvlinDeviceActivityReport.appex in Embed ExtensionKit Extensions */ = {isa = PBXBuildFile; fileRef = B6DA38FBB53DCE8A672F032D /* EvlinDeviceActivityReport.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
@@ -231,6 +232,7 @@
 			files = (
 				B6CD8CCD2FA1981D00FD6C13 /* YouTubePlayerKit in Frameworks */,
 				B6370B212FD1EEF1006D3648 /* Sentry in Frameworks */,
+				B65D5C622FDE259F00CAAACA /* GoogleSignIn in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -407,6 +409,7 @@
 			packageProductDependencies = (
 				B6CD8CCC2FA1981D00FD6C13 /* YouTubePlayerKit */,
 				B6370B202FD1EEF1006D3648 /* Sentry */,
+				B65D5C612FDE259F00CAAACA /* GoogleSignIn */,
 			);
 			productName = "Evlin iOS";
 			productReference = B6FA97202F81BB9400DA619E /* Evlin iOS.app */;
@@ -472,6 +475,7 @@
 			packageReferences = (
 				B6CD8CCB2FA1981D00FD6C13 /* XCRemoteSwiftPackageReference "YouTubePlayerKit" */,
 				B6370B1F2FD1EEF1006D3648 /* XCRemoteSwiftPackageReference "sentry-cocoa" */,
+				B65D5C602FDE259F00CAAACA /* XCRemoteSwiftPackageReference "GoogleSignIn-iOS" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = B6FA97212F81BB9400DA619E /* Products */;
@@ -614,9 +618,12 @@
 			buildSettings = {
 				CLANG_ENABLE_OBJC_WEAK = NO;
 				CODE_SIGN_ENTITLEMENTS = EvlinShieldConfig/EvlinShieldConfig.entitlements;
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 5;
-				DEVELOPMENT_TEAM = D9FM36P37F;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "iPhone Distribution";
+				CODE_SIGN_STYLE = Manual;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				"DEVELOPMENT_TEAM[sdk=iphoneos*]" = D9FM36P37F;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = EvlinShieldConfig/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
@@ -625,9 +632,11 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 1.0;
+				MARKETING_VERSION = 1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = "com.evlin.Evlin-iOS.EvlinShieldConfig";
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				"PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]" = "Evlin SC iOS AppStore";
 				SDKROOT = iphoneos;
 				SKIP_INSTALL = YES;
 				SWIFT_VERSION = 5.0;
@@ -641,9 +650,12 @@
 			buildSettings = {
 				CLANG_ENABLE_OBJC_WEAK = NO;
 				CODE_SIGN_ENTITLEMENTS = EvlinShieldConfig/EvlinShieldConfig.entitlements;
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 5;
-				DEVELOPMENT_TEAM = D9FM36P37F;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "iPhone Distribution";
+				CODE_SIGN_STYLE = Manual;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				"DEVELOPMENT_TEAM[sdk=iphoneos*]" = D9FM36P37F;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = EvlinShieldConfig/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
@@ -652,9 +664,11 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 1.0;
+				MARKETING_VERSION = 1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = "com.evlin.Evlin-iOS.EvlinShieldConfig";
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				"PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]" = "Evlin SC iOS AppStore";
 				SDKROOT = iphoneos;
 				SKIP_INSTALL = YES;
 				SWIFT_VERSION = 5.0;
@@ -667,9 +681,11 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = EvlinPushApplier/EvlinPushApplier.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
-				CODE_SIGN_STYLE = Automatic;
+				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "iPhone Distribution";
+				CODE_SIGN_STYLE = Manual;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = D9FM36P37F;
+				DEVELOPMENT_TEAM = "";
+				"DEVELOPMENT_TEAM[sdk=iphoneos*]" = D9FM36P37F;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = EvlinPushApplier/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = EvlinPushApplier;
@@ -679,10 +695,11 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 1.0;
+				MARKETING_VERSION = 1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = "com.evlin.Evlin-iOS.EvlinPushApplier";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
+				"PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]" = "Evlin PA iOS AppStore";
 				SKIP_INSTALL = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
@@ -698,9 +715,11 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = EvlinPushApplier/EvlinPushApplier.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
-				CODE_SIGN_STYLE = Automatic;
+				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "iPhone Distribution";
+				CODE_SIGN_STYLE = Manual;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
+				"DEVELOPMENT_TEAM[sdk=iphoneos*]" = D9FM36P37F;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = EvlinPushApplier/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = EvlinPushApplier;
@@ -710,10 +729,11 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 1.0;
+				MARKETING_VERSION = 1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = "com.evlin.Evlin-iOS.EvlinPushApplier";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
+				"PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]" = "Evlin PA iOS AppStore";
 				SKIP_INSTALL = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
@@ -730,7 +750,7 @@
 				CODE_SIGN_ENTITLEMENTS = EvlinDeviceActivityReport/EvlinDeviceActivityReportRelease.entitlements;
 				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "iPhone Distribution";
 				CODE_SIGN_STYLE = Manual;
-				CURRENT_PROJECT_VERSION = 5;
+				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
 				"DEVELOPMENT_TEAM[sdk=iphoneos*]" = D9FM36P37F;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -743,7 +763,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 1.0;
+				MARKETING_VERSION = 1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = "com.evlin.Evlin-iOS.EvlinDeviceActivityReport";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
@@ -764,7 +784,7 @@
 				CODE_SIGN_ENTITLEMENTS = EvlinDeviceActivityReport/EvlinDeviceActivityReport.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 5;
+				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = D9FM36P37F;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = EvlinDeviceActivityReport/Info.plist;
@@ -776,7 +796,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 1.0;
+				MARKETING_VERSION = 1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = "com.evlin.Evlin-iOS.EvlinDeviceActivityReport";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
@@ -962,9 +982,11 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = "Evlin iOS/Evlin iOS.entitlements";
 				CODE_SIGN_IDENTITY = "Apple Development";
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 5;
-				DEVELOPMENT_TEAM = D9FM36P37F;
+				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "iPhone Distribution";
+				CODE_SIGN_STYLE = Manual;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				"DEVELOPMENT_TEAM[sdk=iphoneos*]" = D9FM36P37F;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Evlin-iOS-Info.plist";
@@ -980,10 +1002,11 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0;
+				MARKETING_VERSION = 1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = "com.evlin.Evlin-iOS";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
+				"PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]" = "Evlin iOS AppStore";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
@@ -1003,7 +1026,7 @@
 				CODE_SIGN_IDENTITY = "Apple Development";
 				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "iPhone Distribution";
 				CODE_SIGN_STYLE = Manual;
-				CURRENT_PROJECT_VERSION = 5;
+				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
 				"DEVELOPMENT_TEAM[sdk=iphoneos*]" = D9FM36P37F;
 				ENABLE_PREVIEWS = YES;
@@ -1021,7 +1044,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0;
+				MARKETING_VERSION = 1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = "com.evlin.Evlin-iOS";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
@@ -1041,9 +1064,11 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = EvlinDeviceActivityMonitor/EvlinDeviceActivityMonitor.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 5;
-				DEVELOPMENT_TEAM = D9FM36P37F;
+				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "iPhone Distribution";
+				CODE_SIGN_STYLE = Manual;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				"DEVELOPMENT_TEAM[sdk=iphoneos*]" = D9FM36P37F;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = EvlinDeviceActivityMonitor/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = EvlinDeviceActivityMonitor;
@@ -1054,10 +1079,11 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 1.0;
+				MARKETING_VERSION = 1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = "com.evlin.Evlin-iOS.EvlinDeviceActivityMonitor";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
+				"PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]" = "Evlin DAM iOS AppStore";
 				SKIP_INSTALL = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
@@ -1072,9 +1098,10 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = EvlinDeviceActivityMonitor/EvlinDeviceActivityMonitor.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
 				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "iPhone Distribution";
 				CODE_SIGN_STYLE = Manual;
-				CURRENT_PROJECT_VERSION = 5;
+				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
 				"DEVELOPMENT_TEAM[sdk=iphoneos*]" = D9FM36P37F;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -1087,7 +1114,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 1.0;
+				MARKETING_VERSION = 1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = "com.evlin.Evlin-iOS.EvlinDeviceActivityMonitor";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
@@ -1179,6 +1206,14 @@
 				minimumVersion = 9.16.1;
 			};
 		};
+		B65D5C602FDE259F00CAAACA /* XCRemoteSwiftPackageReference "GoogleSignIn-iOS" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/google/GoogleSignIn-iOS";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 9.1.0;
+			};
+		};
 		B6CD8CCB2FA1981D00FD6C13 /* XCRemoteSwiftPackageReference "YouTubePlayerKit" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/SvenTiigi/YouTubePlayerKit";
@@ -1194,6 +1229,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = B6370B1F2FD1EEF1006D3648 /* XCRemoteSwiftPackageReference "sentry-cocoa" */;
 			productName = Sentry;
+		};
+		B65D5C612FDE259F00CAAACA /* GoogleSignIn */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = B65D5C602FDE259F00CAAACA /* XCRemoteSwiftPackageReference "GoogleSignIn-iOS" */;
+			productName = GoogleSignIn;
 		};
 		B6CD8CCC2FA1981D00FD6C13 /* YouTubePlayerKit */ = {
 			isa = XCSwiftPackageProductDependency;

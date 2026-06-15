@@ -65,6 +65,18 @@ final class ReflectionLockApplierTests: XCTestCase {
 
     // MARK: - apply
 
+    func test_reflection_record_locks_apps_without_web_domain_category() {
+        let record = ReflectionLockRecordFactory.make(
+            rid: UUID(),
+            expiresAt: Date().addingTimeInterval(60),
+            childID: UUID()
+        )
+
+        XCTAssertEqual(record.tier.rawValue, "allApps")
+        XCTAssertTrue(record.appliesToAll)
+        XCTAssertTrue(record.webDomainTokens.isEmpty)
+    }
+
     func test_apply_active_pending_creates_record_and_schedules() async {
         let store = ActiveLockStore()
         let spy = LockSchedulerSpy()

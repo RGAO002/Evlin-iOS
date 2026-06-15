@@ -46,7 +46,9 @@ struct AddAppFlowView: View {
     private var canAttemptSave: Bool {
         uploading == false
             && counts.webDomainTokens == 0
-            && (mode == .app ? pendingRows.isEmpty == false : pendingCategoryRows.isEmpty == false)
+            && (mode == .app
+                ? pendingRows.isEmpty == false
+                : pendingCategoryRows.isEmpty == false && pendingCategoryRows.allSatisfy(\.isNamedCategory))
     }
 
     init(
@@ -192,7 +194,7 @@ struct AddAppFlowView: View {
             Text("Name what you selected")
                 .font(.headline)
                 .foregroundStyle(Color.evOnSurface)
-            Text("We know this is annoying. iOS lets Evlin display the icon and name, but does not let us read the text. Please type the same name you see here so Evlin can remember it.")
+            Text("Evlin can show the iOS app label, but it cannot read that text. Search the dropdown and choose the matching App Store result.")
                 .font(.subheadline)
                 .foregroundStyle(Color.evOnSurfaceVariant)
                 .fixedSize(horizontal: false, vertical: true)
@@ -214,10 +216,10 @@ struct AddAppFlowView: View {
 
     private var categoriesCard: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Name what you selected")
+            Text("Select the category")
                 .font(.headline)
                 .foregroundStyle(Color.evOnSurface)
-            Text("We know this is annoying. iOS lets Evlin display the icon and name, but does not let us read the text. Please type the same name you see here so Evlin can remember it.")
+            Text("Tap the Apple Screen Time category that matches the label above.")
                 .font(.subheadline)
                 .foregroundStyle(Color.evOnSurfaceVariant)
                 .fixedSize(horizontal: false, vertical: true)
@@ -271,9 +273,9 @@ struct AddAppFlowView: View {
     private var selectionSummary: String {
         switch mode {
         case .app:
-            "\(pendingRows.count) apps ready · \(counts.categoryTokens) ignored categories · \(counts.webDomainTokens) websites"
+            return "\(pendingRows.count) apps ready · \(counts.categoryTokens) ignored categories · \(counts.webDomainTokens) websites"
         case .category:
-            "\(pendingCategoryRows.count) categories ready · \(counts.applicationTokens) ignored apps · \(counts.webDomainTokens) websites"
+            return "\(pendingCategoryRows.count) categories ready · \(counts.applicationTokens) ignored apps · \(counts.webDomainTokens) websites"
         }
     }
 
@@ -327,7 +329,9 @@ struct AddAppFlowView: View {
         from selection: FamilyActivitySelection,
         mode: AddTargetMode
     ) -> FamilyActivitySelection {
-        var draft = FamilyActivitySelection(includeEntireCategory: mode == .category)
+        var draft = FamilyActivitySelection(
+            includeEntireCategory: AddTargetPickerConfiguration.includeEntireCategory(for: mode)
+        )
         draft.applicationTokens = selection.applicationTokens
         draft.categoryTokens = selection.categoryTokens
         draft.webDomainTokens = selection.webDomainTokens
@@ -404,7 +408,7 @@ struct AddAppFlowView: View {
             let semantic = SemanticCategoryAliasSync.semanticAliasKey(forPickerLabel: pickerName)
                 ?? pickerName?.lowercased()
                 ?? "category"
-            let display = pickerName?.isEmpty == false ? pickerName! : NameWithIcon.displayName(semantic)
+            let display = PendingCategoryRow.initialDisplayName(pickerLabel: pickerName)
             return (token, blob, semantic, display)
         }
         .sorted { $0.2 < $1.2 }
@@ -463,7 +467,7 @@ struct AddAppFlowView: View {
     @MainActor
     private func upload() async {
         let savedAppRows: [PendingAppRow]
-        if mode == .app {
+        if mode == .app, pendingRows.isEmpty == false {
             var model = CaptureSheetModel(rows: pendingRows)
             model.attemptSave()
             guard model.isPresented == false else {
@@ -486,9 +490,10 @@ struct AddAppFlowView: View {
                 guard let upload = row.makeUploadApp(sourceDeviceID: childDeviceID) else { return nil }
                 return (row, upload)
             }
+        let shouldUploadCategories = mode == .category
         let categoryPairs: [(row: PendingCategoryRow, upload: ChildAppCatalogUploadApp)] =
-            mode == .category ? pendingCategoryRows.map { ($0, $0.makeUploadCategory(sourceDeviceID: childDeviceID)) } : []
-        if mode == .category {
+            shouldUploadCategories ? pendingCategoryRows.map { ($0, $0.makeUploadCategory(sourceDeviceID: childDeviceID)) } : []
+        if shouldUploadCategories {
             let blankCategories = pendingCategoryRows.filter { !$0.isNamedCategory }
             guard blankCategories.isEmpty else {
                 saveBanner = "Name every category before saving."
@@ -496,7 +501,7 @@ struct AddAppFlowView: View {
             }
         }
         let appPairsForUpload = mode == .app ? appPairs : []
-        let categoryPairsForUpload = mode == .category ? categoryPairs : []
+        let categoryPairsForUpload = shouldUploadCategories ? categoryPairs : []
         let uploadRows = appPairsForUpload.map(\.upload) + categoryPairsForUpload.map(\.upload)
         guard !uploadRows.isEmpty else {
             saveBanner = mode == .app ? "Pick at least one app first." : "Pick at least one category first."
@@ -646,6 +651,10 @@ private struct CategoryBindRowView: View {
     let token: ActivityCategoryToken
     @Binding var row: PendingCategoryRow
 
+    private var suggestions: [AppleScreenTimeCategorySuggestion] {
+        AppleScreenTimeCategorySuggestions.visibleCapsules(for: row.displayName)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Label(token)
@@ -654,16 +663,45 @@ private struct CategoryBindRowView: View {
                 .padding(12)
                 .background(Color.evSurfaceContainerLow, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
 
-            TextField("Type the category name you see above", text: $row.displayName)
-                .textInputAutocapitalization(.words)
-                .autocorrectionDisabled()
-                .padding(.horizontal, 12)
-                .padding(.vertical, 11)
-                .background(Color.evSurfaceContainerLowest, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(Color.evOutlineVariant, lineWidth: 1.5)
+            if !suggestions.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Suggestions")
+                        .font(.caption2.weight(.bold))
+                        .textCase(.uppercase)
+                        .foregroundStyle(Color.evOnSurfaceVariant)
+
+                    LazyVGrid(
+                        columns: [GridItem(.adaptive(minimum: 128), spacing: 8, alignment: .leading)],
+                        alignment: .leading,
+                        spacing: 8
+                    ) {
+                        ForEach(suggestions) { suggestion in
+                            let selected = row.matchesSuggestion(suggestion)
+                            Button {
+                                row.applySuggestion(suggestion)
+                            } label: {
+                                Text(suggestion.displayName)
+                                    .font(.caption.weight(.semibold))
+                                    .lineLimit(2)
+                                    .multilineTextAlignment(.center)
+                                    .foregroundStyle(selected ? Color.white : Color.evPrimary)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 8)
+                                    .frame(maxWidth: .infinity, minHeight: 34)
+                                    .background(
+                                        selected ? Color.evPrimary : Color.evPrimaryContainer,
+                                        in: Capsule()
+                                    )
+                                    .overlay {
+                                        Capsule()
+                                            .stroke(selected ? Color.evPrimary : Color.evOutlineVariant, lineWidth: 1)
+                                    }
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
                 }
+            }
         }
         .padding(12)
         .background(Color.evSurfaceContainerLow, in: RoundedRectangle(cornerRadius: 14, style: .continuous))

@@ -41,7 +41,7 @@ private enum CalendarConfirmState: Equatable { case idle, working, confirmed, fa
 struct EventTargetCardView: View {
     let payload: PlanArchCardPayload
     let childName: String
-    let onConfirm: (_ token: String) async -> Bool
+    let onConfirm: (_ token: String) async -> String?
     let onPickEvent: (_ continuationToken: String, _ eventId: String, _ occurrenceStart: String) -> Void
     let onResolveTarget: (_ continuationToken: String, _ ids: [String]) -> Void
     let onReflection: (_ approve: Bool, _ note: String) async -> Void
@@ -49,6 +49,7 @@ struct EventTargetCardView: View {
     let onSkip: () -> Void
 
     @State private var confirmState: CalendarConfirmState = .idle
+    @State private var confirmErrorText: String?
 
     private var detail: EventTargetDetail { EventTargetDetail(payload.detail) }
 
@@ -238,7 +239,7 @@ struct EventTargetCardView: View {
         default:
             VStack(alignment: .leading, spacing: 8) {
                 if confirmState == .failed {
-                    Text("Couldn't save — try again.")
+                    Text(confirmErrorText ?? "Couldn't save — try again.")
                         .font(.caption).foregroundStyle(Color.evError)
                 }
                 HStack(spacing: 10) {
@@ -247,8 +248,13 @@ struct EventTargetCardView: View {
                                   enabled: !token.isEmpty) {
                         Task {
                             confirmState = .working
-                            let ok = await onConfirm(token)
-                            confirmState = ok ? .confirmed : .failed
+                            confirmErrorText = nil
+                            if let error = await onConfirm(token) {
+                                confirmErrorText = error
+                                confirmState = .failed
+                            } else {
+                                confirmState = .confirmed
+                            }
                         }
                     }
                 }

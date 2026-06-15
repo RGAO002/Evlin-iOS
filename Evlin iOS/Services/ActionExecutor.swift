@@ -392,7 +392,7 @@ final class ActionExecutor: @unchecked Sendable {
             categoryTokens = [tok]
             targetKey = hint.lowercased()
             displayName = cmd.target.targetDisplay ?? hint.capitalized
-        case .all:
+        case .all, .allApps:
             targetKey = "all"
             appliesToAll = true
             displayName = "All Apps"
@@ -512,6 +512,8 @@ final class ActionExecutor: @unchecked Sendable {
             return await removeExplicit(tier: .category, targetKey: hint.lowercased())
         case .all:
             return await removeExplicit(tier: .all, targetKey: "all")
+        case .allApps:
+            return await removeExplicit(tier: .allApps, targetKey: "all")
         case .exactApp:
             guard let resolved = try? resolveExactApp(from: cmd.target, requireActiveToken: false) else {
                 return .failed(.applicationNotConfigured(resolveExactAppFailureReference(from: cmd.target)))
@@ -630,7 +632,7 @@ final class ActionExecutor: @unchecked Sendable {
         // `unshield list 1` would falsely claim list 2 might still cover it.
         let eff: AckEffectiveState
         switch tier {
-        case .all:
+        case .all, .allApps:
             // After removing the broadest possible shield, there is nothing
             // specific to "still cover" — effective state is trivially empty.
             eff = AckEffectiveState(isBlocked: false, shieldsCovering: [], possibleSavedListCoverage: false)
@@ -665,7 +667,7 @@ final class ActionExecutor: @unchecked Sendable {
             for _ in removed.record.categoryTokens {
                 let s = await ActiveLockStore.shared.effectiveState(for: AppQuery())
                 // `all`-tier always matches AppQuery(). This catches the edge case.
-                for r in s.stillCovered where r.tier == .all { union[r.recordKey] = r }
+                for r in s.stillCovered where r.appliesToAll { union[r.recordKey] = r }
             }
             eff = effectiveStateFrom(
                 Array(union.values),

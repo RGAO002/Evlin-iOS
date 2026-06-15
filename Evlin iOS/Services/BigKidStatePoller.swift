@@ -26,6 +26,9 @@ final class BigKidStatePoller: ObservableObject {
 
     private let client: BigKidAPIClient
     private let state: BigKidState
+    private let fetchState: () async throws -> ChildStateResponse
+    private let reconcileReflectionLock: (ChildStateResponse) async -> Void
+    private let applySnapshot: (ChildStateResponse, BigKidState) -> Void
     private var task: Task<Void, Never>?
     private var invalidationObserver: NSObjectProtocol?
 
@@ -46,6 +49,32 @@ final class BigKidStatePoller: ObservableObject {
     init(client: BigKidAPIClient, state: BigKidState) {
         self.client = client
         self.state = state
+        self.fetchState = { try await client.fetchState() }
+        let reflectionLockApplier = self.reflectionLockApplier
+        self.reconcileReflectionLock = { snapshot in
+            if let raw = UserDefaults.standard.string(forKey: CommandPoller.childDeviceIDDefaultsKey),
+               let childID = UUID(uuidString: raw) {
+                await reflectionLockApplier.reconcile(snapshot: snapshot, childID: childID)
+            }
+        }
+        self.applySnapshot = { snapshot, state in
+            state.apply(snapshot)
+        }
+    }
+
+    init(
+        state: BigKidState,
+        fetchState: @escaping () async throws -> ChildStateResponse,
+        reconcileReflectionLock: @escaping (ChildStateResponse) async -> Void,
+        applySnapshot: @escaping (ChildStateResponse, BigKidState) -> Void = { snapshot, state in
+            state.apply(snapshot)
+        }
+    ) {
+        self.client = BigKidAPIClient(baseURL: URL(string: "https://example.invalid")!, childId: UUID())
+        self.state = state
+        self.fetchState = fetchState
+        self.reconcileReflectionLock = reconcileReflectionLock
+        self.applySnapshot = applySnapshot
     }
 
     deinit {
@@ -92,12 +121,9 @@ final class BigKidStatePoller: ObservableObject {
 
     private func fetchOnce() async {
         do {
-            let snapshot = try await client.fetchState()
-            state.apply(snapshot)
-            if let raw = UserDefaults.standard.string(forKey: CommandPoller.childDeviceIDDefaultsKey),
-               let childID = UUID(uuidString: raw) {
-                await reflectionLockApplier.reconcile(snapshot: snapshot, childID: childID)
-            }
+            let snapshot = try await fetchState()
+            await reconcileReflectionLock(snapshot)
+            applySnapshot(snapshot, state)
             lastFetchedAt = Date()
             lastError = nil
         } catch {

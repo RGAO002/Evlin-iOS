@@ -227,6 +227,68 @@ final class ActiveLockStoreTests: XCTestCase {
 
     // MARK: - Reflection lock coexistence (dedicated-key design)
 
+    func test_app_only_all_record_does_not_apply_all_web_domain_category() async throws {
+        let store = ActiveLockStore()
+        guard let allApps = ShieldTier(rawValue: "allApps") else {
+            XCTFail("ShieldTier must support app-only all locks")
+            return
+        }
+        let record = ShieldRecord(
+            recordKey: "allApps:reflection:\(UUID().uuidString)",
+            tier: allApps,
+            targetKey: "reflection",
+            displayName: "Reflection lock",
+            lastCommandID: UUID(),
+            appTokens: [],
+            categoryTokens: [],
+            webDomainTokens: [],
+            appliesToAll: true,
+            issuedAt: Date(),
+            expiresAt: Date().addingTimeInterval(60),
+            originalRequest: "reflection lockdown",
+            targetChildID: UUID()
+        )
+
+        _ = await store.addShield(record)
+
+        let diag = UserDefaults(suiteName: "group.com.evlin.ios")?
+            .string(forKey: "evlin.lastRecompute")
+        XCTAssertTrue(diag?.contains("branch=all_apps_only") == true, diag ?? "missing diag")
+    }
+
+    func test_legacy_reflection_all_record_is_migrated_to_app_only() async {
+        let store = ActiveLockStore()
+        let rid = UUID()
+        let legacy = Self.makeAllRecord(recordKey: "all:reflection:\(rid.uuidString)", minutes: 20)
+
+        _ = await store.addShield(legacy)
+
+        let current = await store.allCurrent().shields
+        XCTAssertEqual(current.first?.tier, .allApps)
+        XCTAssertEqual(current.first?.recordKey, legacy.recordKey)
+        let diag = UserDefaults(suiteName: "group.com.evlin.ios")?
+            .string(forKey: "evlin.lastRecompute")
+        XCTAssertTrue(diag?.contains("branch=all_apps_only") == true, diag ?? "missing diag")
+    }
+
+    func test_restore_migrates_legacy_reflection_all_record_to_app_only() async throws {
+        let rid = UUID()
+        let legacy = Self.makeAllRecord(recordKey: "all:reflection:\(rid.uuidString)", minutes: 20)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode([legacy.recordKey: legacy])
+        UserDefaults(suiteName: "group.com.evlin.ios")?.set(data, forKey: "evlin.shieldRecords")
+
+        let store = ActiveLockStore()
+
+        let current = await store.allCurrent().shields
+        XCTAssertEqual(current.first?.tier, .allApps)
+        XCTAssertEqual(current.first?.recordKey, legacy.recordKey)
+        let diag = UserDefaults(suiteName: "group.com.evlin.ios")?
+            .string(forKey: "evlin.lastRecompute")
+        XCTAssertTrue(diag?.contains("branch=all_apps_only") == true, diag ?? "missing diag")
+    }
+
     func test_reflection_all_record_coexists_and_removes_independently_of_parent_all() async {
         let store = ActiveLockStore()
         let parentAll = Self.makeAllRecord(recordKey: "all", minutes: nil)               // permanent parent all-lock

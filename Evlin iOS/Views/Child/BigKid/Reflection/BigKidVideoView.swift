@@ -1,6 +1,44 @@
 import Combine
+import ManagedSettings
 import SwiftUI
 import WebKit
+
+enum ReflectionVideoWebAccess {
+    static let appGroup = "group.com.evlin.ios"
+    static let diagnosticKey = "evlin.reflectionVideoWebAccessRepair"
+
+    static func allowPlaybackInEmbeddedWebView() {
+        let store = ManagedSettingsStore()
+        store.shield.webDomainCategories = nil
+        store.shield.webDomains = nil
+
+        let ts = ISO8601DateFormatter().string(from: Date())
+        UserDefaults(suiteName: appGroup)?.set(
+            "\(ts) cleared webDomainCategories/webDomains for reflection video",
+            forKey: diagnosticKey
+        )
+    }
+
+    static func embedURL(videoId: String, identityURL: URL) -> URL? {
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = "www.youtube-nocookie.com"
+        components.path = "/embed/\(videoId)"
+        components.queryItems = [
+            URLQueryItem(name: "autoplay", value: "1"),
+            URLQueryItem(name: "controls", value: "0"),
+            URLQueryItem(name: "disablekb", value: "1"),
+            URLQueryItem(name: "fs", value: "0"),
+            URLQueryItem(name: "playsinline", value: "1"),
+            URLQueryItem(name: "rel", value: "0"),
+            URLQueryItem(name: "modestbranding", value: "1"),
+            URLQueryItem(name: "enablejsapi", value: "1"),
+            URLQueryItem(name: "origin", value: identityURL.absoluteString),
+            URLQueryItem(name: "widget_referrer", value: identityURL.absoluteString),
+        ]
+        return components.url
+    }
+}
 
 /// Reflection step 1 — kid watches the assigned YouTube video.
 ///
@@ -67,6 +105,9 @@ struct BigKidVideoView: View {
         .padding(.horizontal, EvlinKidMetrics.Padding.screenH)
         .padding(.bottom, 30)
         .background(EvlinKidColors.surface.ignoresSafeArea())
+        .onAppear {
+            ReflectionVideoWebAccess.allowPlaybackInEmbeddedWebView()
+        }
     }
 
     /// Ships in all builds for investor / TestFlight demos; clearly labeled — not meant for prod kid UX.
@@ -235,8 +276,9 @@ struct VideoEmbedView: UIViewRepresentable {
     }
 
     private func load(into webView: WKWebView) {
+        ReflectionVideoWebAccess.allowPlaybackInEmbeddedWebView()
         let identityURL = clientIdentityURL
-        guard let embedURL = embedURL(identityURL: identityURL) else { return }
+        guard let embedURL = ReflectionVideoWebAccess.embedURL(videoId: videoId, identityURL: identityURL) else { return }
         var request = URLRequest(url: embedURL)
         request.setValue(identityURL.absoluteString, forHTTPHeaderField: "Referer")
         webView.load(request)
@@ -247,26 +289,6 @@ struct VideoEmbedView: UIViewRepresentable {
         components.scheme = "https"
         components.host = Bundle.main.bundleIdentifier?.lowercased() ?? "com.evlin.evlin-ios"
         return components.url ?? URL(string: "https://com.evlin.evlin-ios")!
-    }
-
-    private func embedURL(identityURL: URL) -> URL? {
-        var components = URLComponents()
-        components.scheme = "https"
-        components.host = "www.youtube.com"
-        components.path = "/embed/\(videoId)"
-        components.queryItems = [
-            URLQueryItem(name: "autoplay", value: "1"),
-            URLQueryItem(name: "controls", value: "0"),
-            URLQueryItem(name: "disablekb", value: "1"),
-            URLQueryItem(name: "fs", value: "0"),
-            URLQueryItem(name: "playsinline", value: "1"),
-            URLQueryItem(name: "rel", value: "0"),
-            URLQueryItem(name: "modestbranding", value: "1"),
-            URLQueryItem(name: "enablejsapi", value: "1"),
-            URLQueryItem(name: "origin", value: identityURL.absoluteString),
-            URLQueryItem(name: "widget_referrer", value: identityURL.absoluteString),
-        ]
-        return components.url
     }
 
     /// JS injected into the YouTube embed page at document-end. Two jobs:

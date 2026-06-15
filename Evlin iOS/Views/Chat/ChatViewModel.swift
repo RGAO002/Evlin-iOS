@@ -2305,18 +2305,20 @@ class ChatViewModel: ObservableObject {
         }
     }
 
-    /// Returns true on success so the card shows "✓ Added" IN PLACE — no dismiss,
-    /// no new card (finding D). expired → clear + notice; other error → false so the
-    /// card surfaces an inline retry.
-    func handleEventConfirm(_ token: String) async -> Bool {
+    /// Returns nil on success so the card shows "✓ Added" IN PLACE — no dismiss,
+    /// no new card (finding D). Returns a user-visible error string on failure.
+    /// expired → clear + notice; other errors stay inline on the card.
+    func handleEventConfirm(_ token: String) async -> String? {
         do {
             _ = try await agentClient().eventExec(token: token)
-            return true
+            return nil
         } catch AgentClient.AgentTargetError.expired {
             await expireEventCard()
-            return false
+            return "This calendar action expired. Try again."
+        } catch let error as LocalizedError {
+            return error.errorDescription ?? "Couldn't save — try again."
         } catch {
-            return false
+            return error.localizedDescription
         }
     }
 

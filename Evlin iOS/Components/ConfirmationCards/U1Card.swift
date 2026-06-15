@@ -157,9 +157,12 @@ struct U1Card: View {
     }
 
     private func subtitle(for entry: U1ShieldEntry) -> String {
-        // Highest-priority subtitle: hard-disabled row explains why it
-        // can't be tapped. Skip the kind/expiry breadcrumbs entirely —
-        // they don't matter when the row isn't actionable.
+        U1SubtitleFormatter.subtitle(for: entry)
+    }
+}
+
+enum U1SubtitleFormatter {
+    static func subtitle(for entry: U1ShieldEntry) -> String {
         if entry.coveredByAll {
             return "Covered by All Apps shield"
         }
@@ -180,18 +183,10 @@ struct U1Card: View {
         // shields none ever will. Make the permanence explicit.
         let expiry: String = {
             guard let iso = entry.expiresAtISO else {
-                #if DEBUG
-                return "Permanent — manual unlock only · debug: no expires_at_iso"
-                #else
                 return "Permanent — manual unlock only"
-                #endif
             }
             guard let date = U1ExpiryParser.date(from: iso) else {
-                #if DEBUG
-                return "Permanent — manual unlock only · debug: bad expires_at_iso \(iso)"
-                #else
                 return "Permanent — manual unlock only"
-                #endif
             }
             let f = DateFormatter()
             f.dateStyle = .none

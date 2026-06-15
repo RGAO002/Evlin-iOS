@@ -171,7 +171,23 @@ extension AgentClient {
 
     /// Sends a built request. Returns the optional follow-up card; throws
     /// AgentTargetError.expired on HTTP 410 so the caller can clear + show "expired".
-    enum AgentTargetError: Error { case expired, server(Int) }
+    enum AgentTargetError: LocalizedError {
+        case expired
+        case server(Int, String)
+
+        var errorDescription: String? {
+            switch self {
+            case .expired:
+                return "This calendar action expired. Try again."
+            case .server(let code, let detail):
+                let clean = detail.trimmingCharacters(in: .whitespacesAndNewlines)
+                if clean.isEmpty {
+                    return "Server error \(code)."
+                }
+                return "Server error \(code): \(clean.prefix(160))"
+            }
+        }
+    }
 
     func sendCardRequest(_ req: URLRequest) async throws -> AgentCardResponse {
         // The agent endpoints require get_current_account. Raw URLSession requests
@@ -186,7 +202,12 @@ extension AgentClient {
         let (data, http) = try await APIClient().authedData(for: authed)
         let code = http.statusCode
         if code == 410 { throw AgentTargetError.expired }
-        guard code == 200 else { throw AgentTargetError.server(code) }
+        guard code == 200 else {
+            throw AgentTargetError.server(
+                code,
+                String(data: data, encoding: .utf8) ?? ""
+            )
+        }
         return (try? JSONDecoder().decode(AgentCardResponse.self, from: data))
             ?? AgentCardResponse(card_payloads: nil, ok: true)
     }

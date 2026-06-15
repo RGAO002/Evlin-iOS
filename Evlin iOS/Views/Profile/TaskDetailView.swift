@@ -93,13 +93,7 @@ struct TaskDetailView: View {
                 EditTaskForm(
                     task: activeEdit,
                     onSave: { updated in
-                        // Local-only update; the backend poll re-syncs the
-                        // authoritative row. (ProfileMockData is no longer a
-                        // runtime store — tasks only exist for backend-backed
-                        // children, see `reloadTask`.)
-                        task = updated
-                        editingTask = nil
-                        reloadTask()
+                        saveEdit(updated)
                     },
                     onDelete: {
                         // If this task lives in the BigKid backend (paired
@@ -232,6 +226,45 @@ struct TaskDetailView: View {
         var copy = t
         copy.state = .pending
         task = copy
+    }
+
+    private func saveEdit(_ updated: TaskItem) {
+        if let backendID = updated.backendID, let client = bigKidParent {
+            task = updated
+            editingTask = nil
+            Task {
+                do {
+                    _ = try await client.updateTask(
+                        taskId: backendID,
+                        title: updated.title,
+                        description: updated.description ?? "",
+                        category: backendCategory(for: updated.category),
+                        due: updated.dueLabel
+                    )
+                    reloadTask()
+                } catch {
+                    await MainActor.run {
+                        backendError = "edit failed: \(error.localizedDescription)"
+                    }
+                    reloadTask()
+                }
+            }
+            return
+        }
+
+        task = updated
+        editingTask = nil
+    }
+
+    private func backendCategory(for category: String?) -> BigKidTaskCategory {
+        switch (category ?? "Chore").lowercased() {
+        case "homework":
+            return .homework
+        case "self-care", "routine", "reading":
+            return .selfCare
+        default:
+            return .chores
+        }
     }
 
     // MARK: - Fallback

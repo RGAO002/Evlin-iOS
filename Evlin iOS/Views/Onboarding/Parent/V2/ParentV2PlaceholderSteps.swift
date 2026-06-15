@@ -151,11 +151,10 @@ struct ParentSignInStep: View {
                 if let onBack { OnboardingV2BackLink(action: onBack) }
             }
         )
-        .onAppear {
-            // A returning parent whose Keychain session was restored is already
-            // signed in — skip straight ahead.
-            if auth?.account != nil { onSignedIn() }
-        }
+        // Deliberately NO auto-skip on a restored Keychain session. The sign-in
+        // screen must ALWAYS be shown so the parent re-picks a method (Apple /
+        // Google) every time. A silently-restored session was skipping this
+        // screen and could leave the rest of the flow on a stale session.
     }
 
     @MainActor
@@ -451,24 +450,9 @@ struct ParentPairScanStep: View {
     let onAdvance: () -> Void
     var onBack: (() -> Void)? = nil
 
-    @State private var code: String
+    @State private var code = ""
     @State private var busy = false
     @State private var errorText: String?
-
-    /// `initialCode` prefills the 6-digit field — Single Device Mode passes the code the
-    /// kid just generated so the tester doesn't read it off their own screen. Defaults to
-    /// empty, so normal two-device pairing is unchanged.
-    init(onPaired: @escaping (String) async -> String?,
-         pairedSucceeded: Bool,
-         onAdvance: @escaping () -> Void,
-         onBack: (() -> Void)? = nil,
-         initialCode: String = "") {
-        self.onPaired = onPaired
-        self.pairedSucceeded = pairedSucceeded
-        self.onAdvance = onAdvance
-        self.onBack = onBack
-        _code = State(initialValue: initialCode)
-    }
 
     var body: some View {
         OnboardingV2ScreenContainer(
@@ -498,10 +482,7 @@ struct ParentPairScanStep: View {
 
                     // The REAL path: type the kid's 6-digit code.
                     OnboardingV2CodeField(code: $code)
-                        // `initial: true` so a PREFILLED code (Single Device Mode seeds the kid's
-                        // code) auto-submits on appear — otherwise onChange never fires for the
-                        // seeded value and the tester is stuck with nothing happening.
-                        .onChange(of: code, initial: true) { _, newValue in
+                        .onChange(of: code) { _, newValue in
                             let digits = newValue.filter(\.isNumber)
                             if digits != newValue { code = digits }
                             if digits.count > 6 { code = String(digits.prefix(6)) }
@@ -689,16 +670,14 @@ struct ParentWaitingForKidStep: View {
             while !Task.isCancelled {
                 if let r = try? await apiClient.fetchChildReadiness(childDeviceID: id) {
                     status = r
-                    // Be stricter than the backend boolean so the parent never
-                    // sees "Send block" until the kid has granted Screen Time
-                    // and at least one real lockable app is available.
-                    // Advance when the kid explicitly signals "All set" (reached the
-                    // All-set screen) — the reliable path, esp. on Simulator where
-                    // Screen-Time auth can't succeed — OR when the stricter
-                    // Screen-Time + lockable-app readiness lands.
-                    if (r.all_set ?? false)
-                        || (r.ready_for_first_block && r.screen_time_granted
-                            && r.first_block_app != nil && r.lockable_app_count > 0) {
+                    // Gate ONLY on the kid's explicit "All set!" signal (the kid posts it
+                    // when it reaches the All-set screen — AFTER granting Screen Time,
+                    // picking apps, and setting the safety passcode). Deliberately NOT the
+                    // looser readiness booleans: on a REUSED kid device those are already
+                    // true from a prior run, which would end the parent's wait before the
+                    // kid finishes this round. The backend resets `all_set` when the kid
+                    // starts a fresh onboarding (POST /family/create), so this is per-run.
+                    if r.all_set ?? false {
                         onReady(r)
                         return
                     }
@@ -717,22 +696,37 @@ struct ParentSetPasscodeV2Step: View {
     let kidName: String
     let onContinue: () -> Void
     var onBack: (() -> Void)? = nil
+    // Reusable on the KID chain too: the Screen Time passcode is set ON the kid's
+    // phone (it's what stops the kid turning Evlin off), so this screen now also
+    // appears in the kid flow with kid theming/copy. Defaults keep the legacy
+    // parent-side call sites compiling unchanged.
+    var role: OnboardingV2Role = .parent
+    var phase: String = "5 · Parent finish"
+    var stepIndex: Int = 9
+    var dotsCurrent: Int = 8
+    var total: Int = parentTotal
 
     private var kid: String {
         let trimmed = kidName.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? "your kid" : trimmed
     }
 
+    private var subtitleText: String {
+        role == .child
+            ? "Set a Screen Time passcode on this phone — it stops Evlin from being turned off."
+            : "Set a Screen Time passcode \(kid) doesn't know — it stops them turning Evlin off."
+    }
+
     var body: some View {
         OnboardingV2ScreenContainer(
-            role: .parent,
-            phase: "5 · Parent finish",
-            stepIndex: 9,
-            stepTotal: parentTotal,
+            role: role,
+            phase: phase,
+            stepIndex: stepIndex,
+            stepTotal: total,
             title: "One safety lock",
-            subtitle: "Set a Screen Time passcode \(kid) doesn't know — it stops them turning Evlin off.",
-            dotsCount: parentTotal,
-            dotsCurrent: 8,
+            subtitle: subtitleText,
+            dotsCount: total,
+            dotsCurrent: dotsCurrent,
             content: {
                 VStack(alignment: .leading, spacing: Spacing.lg) {
                     OnboardingV2NumberedStep(number: 1, text: "Open Settings → Screen Time")
@@ -743,7 +737,7 @@ struct ParentSetPasscodeV2Step: View {
             footer: {
                 // P1: the primary deep-links OUT to Settings and does NOT
                 // advance the step — only "I've set it" continues the chain.
-                OnboardingV2PrimaryButton("Open Screen Time settings", role: .parent,
+                OnboardingV2PrimaryButton("Open Screen Time settings", role: role,
                                           action: openScreenTimeSettings)
                 OnboardingV2SecondaryButton("I've set it", action: onContinue)
                 if let onBack { OnboardingV2BackLink(action: onBack) }

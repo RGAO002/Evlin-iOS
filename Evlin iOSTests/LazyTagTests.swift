@@ -310,7 +310,7 @@ final class LazyTagCatalogModelTests: XCTestCase {
         let blockOption = model.options.first { $0.action == "block_now" }!
         XCTAssertEqual(
             AppControlRouter.route(option: blockOption, card: model),
-            .resendForceConfirmations(["block_now"])
+            .resendForceConfirmations(["single_app_shield_advice:block_now"])
         )
     }
 
@@ -322,7 +322,7 @@ final class LazyTagCatalogModelTests: XCTestCase {
         let shieldOption = model.options.first { $0.action == "shield_anyway" }!
         XCTAssertEqual(
             AppControlRouter.route(option: shieldOption, card: model),
-            .resendForceConfirmations(["shield_anyway"])
+            .resendForceConfirmations(["single_app_shield_advice:shield_anyway"])
         )
     }
 
@@ -459,6 +459,43 @@ final class LazyTagCatalogModelTests: XCTestCase {
         )
     }
 
+    func test_appControlRouting_appStoreCandidateStripsStoreSubtitleBeforeReplay() {
+        let payload: [String: Any] = [
+            "card_id": "app_store_disambiguation",
+            "type": "app_store_disambiguation",
+            "title": "Which app do you mean?",
+            "body": "I found a few apps.",
+            "target_display": "ttok",
+            "target_kind": "app",
+            "options": [],
+            "candidates": [
+                [
+                    "display": "TikTok - Videos, Shop & LIVE",
+                    "bundle_id": "com.zhiliaoapp.musically",
+                    "target_type": "app",
+                ],
+            ],
+        ]
+        let model = AppControlCardModel.parse(cardID: "app_store_disambiguation", payload: payload)!
+
+        XCTAssertEqual(
+            AppControlRouter.route(candidate: model.candidates[0], card: model),
+            .confirmAppAndResend(
+                candidateDisplay: "TikTok",
+                bundleID: "com.zhiliaoapp.musically",
+                artworkURL: nil
+            )
+        )
+        XCTAssertEqual(
+            AppControlRouter.rewriteOriginalCommand(
+                "lock ttok",
+                replacing: "ttok",
+                with: "TikTok - Videos, Shop & LIVE"
+            ),
+            "lock TikTok"
+        )
+    }
+
     func test_appControlRouting_openAppSearchOptionUsesOriginalTarget() {
         let payload: [String: Any] = [
             "card_id": "app_store_disambiguation",
@@ -495,6 +532,14 @@ final class LazyTagCatalogModelTests: XCTestCase {
                 with: "Instagram"
             ),
             "lock Instagram"
+        )
+        XCTAssertEqual(
+            AppControlRouter.rewriteOriginalCommand(
+                "shield map",
+                replacing: "map",
+                with: "Google Maps"
+            ),
+            "shield Google Maps"
         )
     }
 
@@ -616,7 +661,7 @@ final class LazyTagCatalogModelTests: XCTestCase {
         let shield = model.options.first { $0.action == "shield_anyway" }!
         XCTAssertEqual(
             AppControlRouter.route(option: shield, card: model),
-            .resendForceConfirmations(["shield_anyway"])
+            .resendForceConfirmations(["category_shield_offer:shield_anyway"])
         )
     }
 

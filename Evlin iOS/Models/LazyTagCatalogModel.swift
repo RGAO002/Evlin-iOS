@@ -305,7 +305,7 @@ enum AddTargetFlowRules {
                 )
             }
             if categoryCount > 0 {
-                return .init(action: .reject, warning: "Expand categories or search to select individual apps.")
+                return .init(action: .reject, warning: "That is a category selection. Search for the app and select the app row itself.")
             }
             if webDomainCount > 0 {
                 return .init(action: .reject, warning: "Websites are not supported here.")
