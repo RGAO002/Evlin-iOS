@@ -77,6 +77,23 @@ class APIClient: ObservableObject {
         }
         #else
         let fallbackURL = Self.defaultURL
+        // A production (Release / TestFlight) build must NEVER talk to a
+        // LAN/loopback dev backend. If a stale dev URL is persisted from a
+        // former dev build on this same install, drop it so we fall back to
+        // the Render default — otherwise the public build silently hits an
+        // unreachable Mac (or shows that dev backend's data). Production is
+        // always HTTPS to Render, so any http:// / localhost / private-IP /
+        // .local host is, by definition, a dev backend.
+        if !saved.isEmpty,
+           saved.hasPrefix("http://")
+            || saved.contains("localhost")
+            || saved.contains("127.0.0.1")
+            || saved.contains("192.168.")
+            || saved.contains("10.0.")
+            || saved.contains(".local") {
+            saved = ""
+            UserDefaults.standard.removeObject(forKey: "serverURL")
+        }
         #endif
         let useSaved = !saved.isEmpty
         var raw = baseURL.isEmpty
