@@ -2,11 +2,24 @@ import CryptoKit
 import Foundation
 import Security
 
-/// Evlin-managed edit-gate PIN, stored in the Keychain. This is deliberately
-/// PIN-only: the kid's own biometric identity is enrolled on this device.
+/// Evlin-managed edit-gate PIN. The raw PIN is never persisted — only
+/// `salt || sha256(salt || pinBytes)` is stored.
 ///
-/// The Keychain value is `salt || sha256(salt || pinBytes)`. The raw PIN is
-/// never persisted.
+/// Storage lives in the **App Group container** (`group.com.evlin.ios`), not the
+/// keychain. Rationale: the keychain's access group is derived from the signing
+/// team prefix (`$(AppIdentifierPrefix)`), so during development — simulator
+/// ad-hoc signing, or a team-id flip — every build reads a *different* keychain
+/// partition and the previously-set PIN looks gone, forcing a re-create on each
+/// recompile. The App Group container is keyed by group id, so it survives
+/// rebuilds and reinstalls regardless of signing. A deliberate `clear()` (called
+/// by the kid-side Sign out teardown) still wipes it, so signing out and coming
+/// back correctly requires setting the PIN again.
+///
+/// Security trade-off vs keychain: the salted hash now sits in the App Group
+/// (readable by the app's own extensions; included in device backups) rather
+/// than encrypted keychain storage. This is acceptable for a *local* edit-gate
+/// whose realistic bypass — a factory reset — is already easier than extracting
+/// and brute-forcing the salted digest. It is NOT a credential store.
 nonisolated final class EvlinPINStore {
     static let shared = EvlinPINStore(account: "evlin.editGatePIN")
 
@@ -18,7 +31,7 @@ nonisolated final class EvlinPINStore {
     static let minLength = 4
     static let maxLength = 8
 
-    private let service = "com.evlin.ios.pin"
+    private static let appGroup = "group.com.evlin.ios"
     private let account: String
     private let saltLength = 16
 
@@ -48,7 +61,7 @@ nonisolated final class EvlinPINStore {
             throw PINError.keychainFailure(status)
         }
 
-        try writeBlob(salt + Self.hash(salt: salt, pin: digits))
+        writeBlob(salt + Self.hash(salt: salt, pin: digits))
     }
 
     func verify(_ pin: String) -> Bool {
@@ -65,9 +78,10 @@ nonisolated final class EvlinPINStore {
         return Data(storedHash) == computedHash
     }
 
-    /// Destructive removal for tests and future parent re-auth recovery.
+    /// Destructive removal for the Sign out teardown, tests, and future
+    /// parent re-auth recovery.
     func clear() {
-        SecItemDelete(baseQuery() as CFDictionary)
+        defaults.removeObject(forKey: storageKey)
     }
 
     /// Test-only hook used to confirm independent salts produce different blobs.
@@ -89,37 +103,22 @@ nonisolated final class EvlinPINStore {
         return Data(SHA256.hash(data: input))
     }
 
-    private func writeBlob(_ data: Data) throws {
-        var query = baseQuery()
-        SecItemDelete(query as CFDictionary)
+    // MARK: - Persistence (App Group container)
 
-        query[kSecValueData as String] = data
-        query[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+    /// Shared App Group defaults. Falls back to `.standard` if the group suite
+    /// is unavailable (e.g. a test host without the entitlement) — still keyed
+    /// per account, so behaviour and isolation are unchanged.
+    private var defaults: UserDefaults {
+        UserDefaults(suiteName: Self.appGroup) ?? .standard
+    }
 
-        let status = SecItemAdd(query as CFDictionary, nil)
-        guard status == errSecSuccess else {
-            throw PINError.keychainFailure(status)
-        }
+    private var storageKey: String { "evlin.pinblob.\(account)" }
+
+    private func writeBlob(_ data: Data) {
+        defaults.set(data, forKey: storageKey)
     }
 
     private func readBlob() -> Data? {
-        var query = baseQuery()
-        query[kSecReturnData as String] = true
-        query[kSecMatchLimit as String] = kSecMatchLimitOne
-
-        var output: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &output)
-        guard status == errSecSuccess else {
-            return nil
-        }
-        return output as? Data
-    }
-
-    private func baseQuery() -> [String: Any] {
-        [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-        ]
+        defaults.data(forKey: storageKey)
     }
 }

@@ -1,6 +1,18 @@
 import SwiftUI
 import UserNotifications
 
+enum ParentControlsPresentation {
+    enum AppearAction: Equatable {
+        case syncDeletionProtection
+        case refreshNotificationStatus
+    }
+
+    static let appearActions: [AppearAction] = [
+        .syncDeletionProtection,
+        .refreshNotificationStatus,
+    ]
+}
+
 /// PIN-gated "Parent controls" hub on the kid device. Drills into the existing
 /// LockListManagerView, exposes Screen Time / Notifications / delete-protection /
 /// read-only device info, and a local-reset Sign out. No backend calls.
@@ -29,7 +41,8 @@ struct ParentControlsView: View {
                 Section {
                     Button { showLockList = true } label: {
                         rowLabel(icon: "square.grid.2x2.fill", title: "Locked apps & lists",
-                                 subtitle: "Choose what Evlin can lock", trailingChevron: true)
+                                 subtitle: "Choose what Evlin can lock", trailingChevron: true,
+                                 badgeColor: EvlinKidColors.green700)
                     }
                 }
 
@@ -59,8 +72,8 @@ struct ParentControlsView: View {
                 Section("Protection") {
                     Toggle(isOn: deletionBinding) {
                         VStack(alignment: .leading, spacing: 3) {
-                            Text("Stop deleting Evlin").font(.system(size: 15))
-                            Text("This also stops deleting any other app on this phone.")
+                            Text("Prevent deleting Evlin").font(.system(size: 15))
+                            Text("This also prevents deleting any other apps on this phone.")
                                 .font(.system(size: 12)).foregroundStyle(.secondary)
                             if !screenTime.isAuthorized {
                                 Text("Turn on Screen Time access first.")
@@ -90,7 +103,16 @@ struct ParentControlsView: View {
                     Button("Done") { onClose() }
                 }
             }
-            .task { await refreshNotifStatus() }
+            .task {
+                for action in ParentControlsPresentation.appearActions {
+                    switch action {
+                    case .syncDeletionProtection:
+                        screenTime.syncDeletionProtectionToManagedSettings()
+                    case .refreshNotificationStatus:
+                        await refreshNotifStatus()
+                    }
+                }
+            }
             .fullScreenCover(isPresented: $showLockList) {
                 NavigationStack {
                     LockListManagerView(familyID: familyID, childDeviceID: childDeviceID, mode: .settings)
@@ -110,15 +132,23 @@ struct ParentControlsView: View {
         }
     }
 
-    private func rowLabel(icon: String, title: String, subtitle: String? = nil, trailingChevron: Bool = false) -> some View {
+    private func rowLabel(icon: String, title: String, subtitle: String? = nil, trailingChevron: Bool = false, badgeColor: Color? = nil) -> some View {
         HStack(spacing: 12) {
-            Image(systemName: icon).font(.system(size: 18)).frame(width: 26)
-                .foregroundStyle(.secondary)
+            if let badgeColor {
+                Image(systemName: icon)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 28, height: 28)
+                    .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(badgeColor))
+            } else {
+                Image(systemName: icon).font(.system(size: 18)).frame(width: 26)
+                    .foregroundStyle(.secondary)
+            }
             VStack(alignment: .leading, spacing: 2) {
                 Text(title).font(.system(size: 15)).foregroundStyle(.primary)
                 if let subtitle { Text(subtitle).font(.system(size: 12)).foregroundStyle(.secondary) }
             }
-            if trailingChevron { Spacer(); Image(systemName: "chevron.right").font(.system(size: 13)).foregroundStyle(.tertiary) }
+            if trailingChevron { Spacer(); Image(systemName: "chevron.right").font(.system(size: 13, weight: .semibold)).foregroundStyle(.secondary) }
         }
     }
 

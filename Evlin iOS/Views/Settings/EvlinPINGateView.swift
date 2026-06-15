@@ -83,14 +83,19 @@ struct EvlinPINGateView: View {
     }
 
     private var dots: some View {
+        // No fixed placeholder circles: render one filled dot per entered digit,
+        // centered, so the row grows symmetrically out from the middle as the
+        // parent types. New dots spring in; deletes spring out.
         HStack(spacing: 14) {
-            ForEach(0..<maxLen, id: \.self) { i in
+            ForEach(Array(0..<pin.count), id: \.self) { _ in
                 Circle()
-                    .fill(i < pin.count ? EvlinKidColors.green700 : Color.clear)
-                    .overlay(Circle().stroke(EvlinKidColors.ink3.opacity(0.4), lineWidth: i < pin.count ? 0 : 1.5))
-                    .frame(width: 13, height: 13)
+                    .fill(EvlinKidColors.green700)
+                    .frame(width: 14, height: 14)
+                    .transition(.scale.combined(with: .opacity))
             }
         }
+        .frame(minHeight: 14)
+        .animation(.spring(response: 0.28, dampingFraction: 0.7), value: pin.count)
     }
 
     private var keypad: some View {
@@ -109,10 +114,8 @@ struct EvlinPINGateView: View {
             Button { if !pin.isEmpty { pin.removeLast(); error = nil } } label: {
                 Image(systemName: "delete.left")
                     .font(.system(size: 22, weight: .medium))
-                    .foregroundStyle(EvlinKidColors.ink3)
-                    .frame(maxWidth: .infinity, minHeight: 56)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(KeypadKeyStyle(restingFill: .clear, restingText: EvlinKidColors.ink3))
         case "done":
             Button { if canSubmit { submit() } } label: {
                 Image(systemName: "checkmark")
@@ -127,11 +130,8 @@ struct EvlinPINGateView: View {
             Button { tapDigit(key) } label: {
                 Text(key)
                     .font(.system(size: 24, weight: .semibold))
-                    .foregroundStyle(EvlinKidColors.ink)
-                    .frame(maxWidth: .infinity, minHeight: 56)
-                    .background(RoundedRectangle(cornerRadius: 12).fill(Color.white))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(KeypadKeyStyle())
         }
     }
 
@@ -168,5 +168,38 @@ struct EvlinPINGateView: View {
         pin = ""
         shake = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { shake = false }
+    }
+}
+
+/// Numeric-keypad key: flat at rest, and while pressed it fills with the same
+/// dark green as the PIN dots (`green700`), flips its glyph white, scales down,
+/// and gains a top-edge inner shadow — so a tap reads as "colour + sink in".
+private struct KeypadKeyStyle: ButtonStyle {
+    var restingFill: Color = .white
+    var restingText: Color = EvlinKidColors.ink
+
+    func makeBody(configuration: Configuration) -> some View {
+        let pressed = configuration.isPressed
+        return configuration.label
+            .foregroundStyle(pressed ? Color.white : restingText)
+            .frame(maxWidth: .infinity, minHeight: 56)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(pressed ? EvlinKidColors.green700 : restingFill)
+            )
+            .overlay(
+                // Top-edge inner darkening that only shows while held, so the
+                // key looks recessed rather than flat-tinted.
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: [Color.black.opacity(pressed ? 0.22 : 0), .clear],
+                            startPoint: .top, endPoint: .center
+                        )
+                    )
+                    .allowsHitTesting(false)
+            )
+            .scaleEffect(pressed ? 0.92 : 1)
+            .animation(.easeOut(duration: 0.10), value: pressed)
     }
 }
