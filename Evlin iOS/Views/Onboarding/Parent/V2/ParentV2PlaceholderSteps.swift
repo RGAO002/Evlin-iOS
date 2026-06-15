@@ -1109,6 +1109,74 @@ struct ParentTryReflectionStep: View {
     }
 }
 
+// MARK: - 12 · Set the Parent PIN (final — critical)
+
+/// Final onboarding screen. The kid-device "Parent Controls" hub is PIN-gated,
+/// but `EvlinPINGateView` CREATES the PIN on first open with no auth
+/// (`isFirstRun = !store.isSet()`) — so whoever opens it first owns it. If the
+/// parent doesn't claim the PIN now, the child can open Parent Controls on
+/// their own phone, set their OWN PIN, and then switch off app blocking +
+/// delete-protection + sign out — locking the parent out entirely. This screen
+/// makes that stakes explicit before setup completes.
+struct ParentSetParentPINStep: View {
+    let kidName: String
+    var singleDevice: Bool = false
+    let onContinue: () -> Void
+    var onBack: (() -> Void)? = nil
+
+    private var kid: String {
+        let t = kidName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return t.isEmpty ? "your child" : t
+    }
+
+    private var howText: String {
+        singleDevice
+            ? "After you tap Done, use the Parent / Kid toggle to switch to the kid side, open Parent Controls, and create your PIN."
+            : "On \(kid)'s phone, open Evlin → tap Parent Controls → create your PIN. Do this before you hand the phone back."
+    }
+
+    var body: some View {
+        OnboardingV2ScreenContainer(
+            role: .parent,
+            phase: "5 · Parent finish",
+            stepIndex: 12,
+            stepTotal: parentTotal,
+            title: "Set your Parent PIN now",
+            subtitle: "This is the most important step — please don't skip it.",
+            content: {
+                VStack(alignment: .leading, spacing: Spacing.lg) {
+                    OnboardingV2Card {
+                        VStack(alignment: .leading, spacing: Spacing.sm) {
+                            HStack(spacing: Spacing.sm) {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .foregroundStyle(OnboardingV2Theme.Palette.error)
+                                Text("If you skip this")
+                                    .font(OnboardingV2Theme.Typography.bodyStrong)
+                                    .foregroundStyle(OnboardingV2Theme.Palette.onSurface)
+                            }
+                            Text("\(kid) can open Parent Controls on their phone and set the PIN themselves — then turn off app blocking, switch off delete-protection, remove Evlin, and lock you out.")
+                                .onboardingV2BodyXS()
+                        }
+                    }
+                    OnboardingV2Card {
+                        VStack(alignment: .leading, spacing: Spacing.sm) {
+                            Text("Do this now")
+                                .font(OnboardingV2Theme.Typography.bodyStrong)
+                                .foregroundStyle(OnboardingV2Theme.Palette.onSurface)
+                            Text(howText)
+                                .onboardingV2BodyXS()
+                        }
+                    }
+                }
+            },
+            footer: {
+                OnboardingV2PrimaryButton("Done", role: .parent, action: onContinue)
+                if let onBack { OnboardingV2BackLink(action: onBack) }
+            }
+        )
+    }
+}
+
 // MARK: - 11 · It works
 
 /// Mockup M[16].parent — "Sent ✓": a receipt card for the landed block, with an
