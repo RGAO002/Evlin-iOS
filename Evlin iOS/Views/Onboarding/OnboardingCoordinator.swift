@@ -260,6 +260,7 @@ struct OnboardingCoordinator: View {
                     // step (spec §7.4); v1 lands on the code-entry step.
                     step = useV2Flow ? .parentPairScan : .parentPairingCode
                 }
+                #endif
                 // Single-device role tag: a small centered pill in a thin top inset. Inset (not
                 // overlay) so it never covers the screen's own title/text; compact pill (not a
                 // full-width bar) so it barely takes any height.
@@ -271,7 +272,6 @@ struct OnboardingCoordinator: View {
                             .padding(.bottom, 2)
                     }
                 }
-                #endif
 
             #if DEBUG
             // Debug escape hatch — always available during onboarding

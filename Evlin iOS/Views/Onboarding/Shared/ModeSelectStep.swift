@@ -46,11 +46,12 @@ struct ModeSelectStep: View {
             }
             .padding(.horizontal, Spacing.xl)
 
-            // Single Device Mode (demo purpose only) — runs the REAL onboarding on one phone,
-            // then exposes a P/K float to test both roles. DEBUG-only: never in a public build.
-            #if DEBUG
+            // Single Device Mode — runs the REAL onboarding on one phone, then
+            // exposes a P/K float to test both roles. Available in ALL builds
+            // (many testers have just one device). The float itself stays gated
+            // at runtime by SingleDeviceSession.isActive, so a real single-role
+            // device never shows it — the safety invariant is preserved.
             singleDeviceFooter
-            #endif
 
             Spacer()
         }
