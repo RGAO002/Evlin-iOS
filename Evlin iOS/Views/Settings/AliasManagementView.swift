@@ -44,8 +44,6 @@ private struct AliasAppListScreen: View {
     @State private var renameOldAlias = ""
     @State private var renamedAlias = ""
     @State private var showAddAppSheet = false
-    @State private var showDevicePickerSheet = false
-    @State private var addAppTargetDeviceID: UUID?
 
     init(familyID: UUID, client: AppAliasManagingClient) {
         _model = StateObject(wrappedValue: AliasManagerModel(familyID: familyID, client: client))
@@ -120,47 +118,12 @@ private struct AliasAppListScreen: View {
         } message: {
             Text("Rename this chat alias for the selected app.")
         }
-        // Add app on kid device (lock-enable flow)
+        // "Add on kid's phone": apps can only be captured on the child's
+        // device (iOS keeps app tokens device-local), so opening the picker on
+        // the PARENT's phone shows a blank/non-working screen. Teach the parent
+        // how to do it on the kid's phone instead.
         .sheet(isPresented: $showAddAppSheet) {
-            if let deviceID = addAppTargetDeviceID {
-                NavigationStack {
-                    AddAppFlowView(
-                        childDeviceID: deviceID,
-                        mode: .app,
-                        onSaved: { _ in showAddAppSheet = false }
-                    )
-                    .toolbar {
-                        ToolbarItem(placement: .cancellationAction) {
-                            Button("Cancel") { showAddAppSheet = false }
-                        }
-                    }
-                }
-            }
-        }
-        // Device picker — shown when the family has more than one child device.
-        // NOTE: the button sets showDevicePickerSheet = false only; showAddAppSheet
-        // is flipped in the sheet's .onDisappear so both sheet animations do not
-        // fire simultaneously (which can drop the second sheet on iOS 17).
-        .sheet(isPresented: $showDevicePickerSheet, onDismiss: {
-            if addAppTargetDeviceID != nil {
-                showAddAppSheet = true
-            }
-        }) {
-            NavigationStack {
-                List(model.childDevices) { device in
-                    Button(device.displayName) {
-                        addAppTargetDeviceID = device.childDeviceID
-                        showDevicePickerSheet = false
-                    }
-                }
-                .navigationTitle("Choose kid's device")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button("Cancel") { showDevicePickerSheet = false }
-                    }
-                }
-            }
+            addOnKidPhoneInstructions
         }
     }
 
@@ -287,16 +250,7 @@ private struct AliasAppListScreen: View {
                 .accessibilityHint("No kid device is paired with this family.")
         } else {
             Button {
-                if devices.count == 1 {
-                    // Single device — go straight to AddAppFlowView.
-                    addAppTargetDeviceID = devices[0].childDeviceID
-                    showAddAppSheet = true
-                } else {
-                    // Multiple devices — show a picker first. Clear any prior
-                    // selection so cancelling the picker won't trigger AddApp.
-                    addAppTargetDeviceID = nil
-                    showDevicePickerSheet = true
-                }
+                showAddAppSheet = true
             } label: {
                 Text("Add on kid's phone")
                     .font(.evLabelLarge)
@@ -312,6 +266,71 @@ private struct AliasAppListScreen: View {
                     )
             }
             .buttonStyle(.plain)
+        }
+    }
+
+    // MARK: - "Add on kid's phone" instructions
+
+    private var addOnKidPhoneInstructions: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: Spacing.lg) {
+                    HStack(alignment: .top, spacing: Spacing.md) {
+                        Image(systemName: "iphone.and.arrow.forward")
+                            .font(.system(size: 26, weight: .semibold))
+                            .foregroundStyle(Color.evPrimary)
+                        Text("New apps are added from your child's phone")
+                            .font(.evHeadlineSmall)
+                            .foregroundStyle(Color.evOnSurface)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    Text("iOS keeps each app's identity on the device it's installed on, so Evlin has to capture it there first.")
+                        .font(.evBodyMedium)
+                        .foregroundStyle(Color.evOnSurfaceVariant)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    VStack(alignment: .leading, spacing: Spacing.md) {
+                        instructionStep(1, "Pick up your child's phone and open **Evlin**.")
+                        instructionStep(2, "On the home screen, tap **Parent controls**.")
+                        instructionStep(3, "Enter your **parent PIN**.")
+                        instructionStep(4, "Tap **App Controls**.")
+                        instructionStep(5, "Follow the on-screen steps there to add the app.")
+                    }
+                    .padding(.top, Spacing.sm)
+
+                    Text("Back here, pull down to refresh. Once an app is added you can lock it, **set a per-app daily time limit**, and see how much it's used.")
+                        .font(.evBodySmall)
+                        .foregroundStyle(Color.evOnSurfaceVariant)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, Spacing.sm)
+                }
+                .padding(Spacing.lg)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .background(Color.evSurface)
+            .navigationTitle("Add an app")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { showAddAppSheet = false }
+                }
+            }
+        }
+    }
+
+    private func instructionStep(_ number: Int, _ text: LocalizedStringKey) -> some View {
+        HStack(alignment: .top, spacing: Spacing.md) {
+            Text("\(number)")
+                .font(.evLabelLarge)
+                .foregroundStyle(Color.evOnPrimary)
+                .frame(width: 26, height: 26)
+                .background(Circle().fill(Color.evPrimary))
+            Text(text)
+                .font(.evBodyMedium)
+                .foregroundStyle(Color.evOnSurface)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
