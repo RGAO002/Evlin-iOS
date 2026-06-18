@@ -1,5 +1,10 @@
 import SwiftUI
 
+private struct ChatScrollBottomKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
+
 struct ChatView: View {
     @EnvironmentObject var apiClient: APIClient
     @Environment(ParentReflectionFixtureStore.self) private var reflectionStore
@@ -9,6 +14,10 @@ struct ChatView: View {
     var isPreview = false
     var activeChild: ChildProfile? = nil
     private let bottomAnchorID = "chat-bottom-anchor"
+    @State private var viewportHeight: CGFloat = 0
+    /// How far the content bottom sits below the viewport (>0 means scrolled up).
+    @State private var scrollBottomDistance: CGFloat = 0
+    private var isAtBottom: Bool { scrollBottomDistance < 120 }
 
     /// Map `viewModel.childName` back to a `ChildProfile.id` so we can
     /// clear / reset the parent-side reflection fixture store when the
@@ -77,6 +86,10 @@ struct ChatView: View {
                     ) {
                         keyboardOverlapHeight = 0
                     }
+                }
+                .onAppear { viewportHeight = geometry.size.height }
+                .onChange(of: geometry.size.height) { _, newHeight in
+                    viewportHeight = newHeight
                 }
         }
     }
@@ -364,6 +377,14 @@ struct ChatView: View {
                     .padding(.horizontal, Spacing.xl)
                     .padding(.top, Spacing.md)
                     .padding(.bottom, Self.messageListBottomPadding(keyboardOverlap: keyboardOverlapHeight))
+                    .background(
+                        GeometryReader { g in
+                            Color.clear.preference(
+                                key: ChatScrollBottomKey.self,
+                                value: g.frame(in: .named("chatScroll")).maxY
+                            )
+                        }
+                    )
                 }
                 .onAppear {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
@@ -382,11 +403,26 @@ struct ChatView: View {
                 .onChange(of: viewModel.currentAppControlCard?.kind) { _, _ in
                     withAnimation { proxy.scrollTo(bottomAnchorID, anchor: .bottom) }
                 }
-                // Keyboard show/hide: keep the latest message pinned above the
-                // keyboard (the bottom padding now grows with keyboardOverlapHeight).
-                .onChange(of: keyboardOverlapHeight) { _, _ in
-                    withAnimation { proxy.scrollTo(bottomAnchorID, anchor: .bottom) }
+                // Keyboard show: only follow to the bottom if the user was
+                // already there — otherwise preserve their scroll position so
+                // the content simply lifts with the keyboard. Deferred so the
+                // grown bottom padding lays out before we scroll.
+                .onChange(of: keyboardOverlapHeight) { _, newOverlap in
+                    guard newOverlap > 0, isAtBottom else { return }
+                    DispatchQueue.main.async {
+                        withAnimation { proxy.scrollTo(bottomAnchorID, anchor: .bottom) }
+                    }
                 }
+                .coordinateSpace(name: "chatScroll")
+                .onPreferenceChange(ChatScrollBottomKey.self) { contentMaxY in
+                    scrollBottomDistance = max(0, contentMaxY - viewportHeight)
+                }
+                .overlay(alignment: .bottomTrailing) {
+                    if !isAtBottom {
+                        scrollToBottomButton(proxy)
+                    }
+                }
+                .animation(.easeInOut(duration: 0.18), value: isAtBottom)
             }
 
             composerPanel
@@ -480,6 +516,26 @@ struct ChatView: View {
             }
         }
         .padding(.top, Spacing.md)
+    }
+
+    /// Floating "jump to latest" affordance, shown only when scrolled up. Sits
+    /// just above the composer, which itself floats above the keyboard.
+    private func scrollToBottomButton(_ proxy: ScrollViewProxy) -> some View {
+        Button {
+            withAnimation { proxy.scrollTo(bottomAnchorID, anchor: .bottom) }
+        } label: {
+            Image(systemName: "chevron.down")
+                .font(.system(size: 16, weight: .bold))
+                .foregroundStyle(Color.evPrimary)
+                .frame(width: 40, height: 40)
+                .background(Circle().fill(Color.evSurfaceContainerLowest))
+                .overlay(Circle().stroke(Color.evOutlineVariant.opacity(0.6), lineWidth: 0.5))
+                .shadow(color: Color.black.opacity(0.12), radius: 8, y: 3)
+        }
+        .buttonStyle(.plain)
+        .padding(.trailing, Spacing.xl)
+        .padding(.bottom, Self.composerBottomInset(keyboardOverlap: keyboardOverlapHeight) + 156)
+        .transition(.scale.combined(with: .opacity))
     }
 
     static func composerBottomInset(
