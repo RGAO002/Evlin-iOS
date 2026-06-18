@@ -363,7 +363,7 @@ struct ChatView: View {
                     }
                     .padding(.horizontal, Spacing.xl)
                     .padding(.top, Spacing.md)
-                    .padding(.bottom, Self.messageListBottomPadding())
+                    .padding(.bottom, Self.messageListBottomPadding(keyboardOverlap: keyboardOverlapHeight))
                 }
                 .onAppear {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
@@ -380,6 +380,11 @@ struct ChatView: View {
                     withAnimation { proxy.scrollTo(bottomAnchorID, anchor: .bottom) }
                 }
                 .onChange(of: viewModel.currentAppControlCard?.kind) { _, _ in
+                    withAnimation { proxy.scrollTo(bottomAnchorID, anchor: .bottom) }
+                }
+                // Keyboard show/hide: keep the latest message pinned above the
+                // keyboard (the bottom padding now grows with keyboardOverlapHeight).
+                .onChange(of: keyboardOverlapHeight) { _, _ in
                     withAnimation { proxy.scrollTo(bottomAnchorID, anchor: .bottom) }
                 }
             }
@@ -485,11 +490,16 @@ struct ChatView: View {
     }
 
     static func messageListBottomPadding(
+        keyboardOverlap: CGFloat = 0,
         composerPanelHeight: CGFloat = 148,
         tabInset: CGFloat = EvlinTabBar.visibleHeight,
         extraClearance: CGFloat = 28
     ) -> CGFloat {
-        composerPanelHeight + tabInset + extraClearance
+        // Grow with the keyboard so the last message clears the composer — which
+        // itself lifts above the keyboard via the same max(tabInset,
+        // keyboardOverlap) in composerBottomInset. Without this the keyboard
+        // hides the bottom messages.
+        composerPanelHeight + max(tabInset, keyboardOverlap) + extraClearance
     }
 
     static func keyboardOverlap(keyboardFrameEnd: CGRect, viewFrame: CGRect) -> CGFloat {
