@@ -1282,7 +1282,8 @@ class ChatViewModel: ObservableObject {
                                 artworkURL: resp.artworkURL
                             ),
                             effective: resp.effectiveState,
-                            messageID: messageID
+                            messageID: messageID,
+                            targetKind: Self.receiptTargetKind(from: resp.targetType)
                         )
                         return true
                     case "confirmed_fallback":
@@ -1367,10 +1368,28 @@ class ChatViewModel: ObservableObject {
     }
 
     @MainActor
-    private func applyReceipt(_ state: ReceiptState, effective: AckEffectiveState?, messageID: UUID) {
+    private func applyReceipt(
+        _ state: ReceiptState,
+        effective: AckEffectiveState?,
+        messageID: UUID,
+        targetKind: NameIconKind? = nil
+    ) {
         guard let idx = messages.firstIndex(where: { $0.id == messageID }) else { return }
         messages[idx].receiptState = state
         messages[idx].receiptEffectiveState = effective
+        if let targetKind {
+            messages[idx].receiptTargetKind = targetKind
+        }
+    }
+
+    /// Map the backend ack `target_type` to the receipt icon kind.
+    static func receiptTargetKind(from targetType: String?) -> NameIconKind {
+        switch targetType?.lowercased() {
+        case "category": return .category
+        case "list":     return .savedList
+        case "all":      return .all
+        default:         return .app
+        }
     }
 
     @MainActor

@@ -142,6 +142,10 @@ struct ChatMessage: Identifiable, Codable {
     var commandID: UUID? = nil
     var receiptState: ReceiptState? = nil
     var receiptEffectiveState: AckEffectiveState? = nil
+    /// Target kind of the locked thing (app/category/list/all), so the receipt
+    /// card renders a category/list glyph instead of an app artwork. Optional &
+    /// defaulted so older persisted messages decode unchanged.
+    var receiptTargetKind: NameIconKind? = nil
 
     // Agent envelope (Phase D/E — global AI copilot).
     // When AGENT_ENABLED=1, /parent/chat may return staged proposals

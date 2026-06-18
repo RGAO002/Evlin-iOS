@@ -121,6 +121,9 @@ enum ReceiptCardCopyModel {
 struct ReceiptCard: View {
     let state: ReceiptState
     let effectiveState: AckEffectiveState?
+    /// Icon kind for the confirmed target. Categories/lists must NOT render an
+    /// app artwork (a by-name iTunes lookup of "Games" returns a random game).
+    var targetKind: NameIconKind = .app
     var onRequestUnlock: ((ReceiptUnlockTarget) -> Void)? = nil
     /// Task 11 — "Block instead": escalate the still-covered target to a
     /// permanent bundle-id block via the existing block route. Optional so
@@ -258,8 +261,10 @@ struct ReceiptCard: View {
                 HStack(spacing: 8) {
                     NameWithIcon(
                         name: name,
-                        kind: .app,
-                        artworkURL: artworkURL,
+                        kind: targetKind,
+                        // Only apps carry artwork; a category/list passing an
+                        // app artwork would defeat the icon fix.
+                        artworkURL: targetKind == .app ? artworkURL : nil,
                         titleFont: .subheadline.weight(.medium)
                     )
                     Spacer()

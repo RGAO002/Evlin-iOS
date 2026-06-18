@@ -10,7 +10,7 @@ import ManagedSettings
 /// Why a helper: ApplicationToken is opaque; only `Label(token)` can
 /// render Apple's icon, and only `.labelStyle(.iconOnly)` strips the
 /// ignored-style text part. Centralizes that two-step dance.
-enum NameIconKind {
+enum NameIconKind: String, Codable {
     case app
     case category
     case savedList
@@ -78,6 +78,29 @@ struct NameWithIcon: View {
         return name.prefix(1).uppercased() + name.dropFirst()
     }
 
+    /// Map an iOS Screen Time category display name to a representative SF
+    /// Symbol. Used on the parent device, which can't render Apple's category
+    /// glyph (no captured token). Falls back to a generic grid.
+    static func categorySymbol(for name: String) -> String {
+        let n = name.lowercased()
+        if n.contains("game") { return "gamecontroller.fill" }
+        if n.contains("social") { return "person.2.fill" }
+        if n.contains("entertain") { return "play.tv.fill" }
+        if n.contains("educat") { return "graduationcap.fill" }
+        if n.contains("creativ") { return "paintbrush.fill" }
+        if n.contains("productiv") || n.contains("finance") { return "checklist" }
+        if n.contains("health") || n.contains("fitness") { return "heart.fill" }
+        if n.contains("music") { return "music.note" }
+        if n.contains("news") { return "newspaper.fill" }
+        if n.contains("photo") || n.contains("video") { return "photo.fill" }
+        if n.contains("shop") || n.contains("food") { return "cart.fill" }
+        if n.contains("travel") { return "airplane" }
+        if n.contains("read") || n.contains("information") || n.contains("book") { return "book.fill" }
+        if n.contains("sport") { return "sportscourt.fill" }
+        if n.contains("utilit") { return "wrench.and.screwdriver.fill" }
+        return "square.grid.2x2.fill"
+    }
+
     /// MUST stay in sync with backend's `BUILTIN_ALIASES`. Adding here
     /// without the backend (or vice versa) means the chat bubble and
     /// the receipt card disagree on whether to say "Ig" or "Instagram".
@@ -120,7 +143,11 @@ struct NameWithIcon: View {
             if let token = LocalAliasStore.shared.categoryToken(forName: name) {
                 Label(token).labelStyle(.iconOnly)
             } else {
-                Image(systemName: "square.grid.2x2.fill")
+                // Parent device has no captured category token, so Apple's
+                // colored category glyph isn't renderable — pick a meaningful
+                // SF Symbol by category name (Games → gamecontroller) instead of
+                // a generic grid (and never an app artwork).
+                Image(systemName: NameWithIcon.categorySymbol(for: name))
                     .foregroundStyle(Color.evOutline)
             }
         case .savedList:

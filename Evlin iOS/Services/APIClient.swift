@@ -497,6 +497,9 @@ struct AckStatusResponse: Decodable, Sendable {
     let displayName: String?
     let bundleID: String?
     let artworkURL: URL?
+    /// "app" | "category" | "list" | "all" — drives the receipt's icon so a
+    /// category lock shows a category glyph, not an app artwork resolved by name.
+    let targetType: String?
     let category: String?
     let origRequest: String?
     let effectiveState: AckEffectiveState?
@@ -513,6 +516,7 @@ struct AckStatusResponse: Decodable, Sendable {
         case displayName
         case bundleID = "bundle_id"
         case artworkURL = "artwork_url"
+        case targetType = "target_type"
         case category
         case origRequest
         case effectiveState

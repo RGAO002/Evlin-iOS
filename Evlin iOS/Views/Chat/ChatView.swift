@@ -157,6 +157,7 @@ struct ChatView: View {
                                     ReceiptCard(
                                         state: receipt,
                                         effectiveState: message.receiptEffectiveState,
+                                        targetKind: message.receiptTargetKind ?? .app,
                                         onRequestUnlock: { target in
                                             viewModel.requestUnlock(target)
                                         },
