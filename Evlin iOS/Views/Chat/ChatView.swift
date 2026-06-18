@@ -95,8 +95,8 @@ struct ChatView: View {
     }
 
     private var content: some View {
-        ZStack(alignment: .bottom) {
-            ScrollViewReader { proxy in
+        ScrollViewReader { proxy in
+            ZStack(alignment: .bottom) {
                 ScrollView {
                     LazyVStack(spacing: Spacing.xxxl) {
                         editorialHeader
@@ -403,13 +403,14 @@ struct ChatView: View {
                 .onChange(of: viewModel.currentAppControlCard?.kind) { _, _ in
                     withAnimation { proxy.scrollTo(bottomAnchorID, anchor: .bottom) }
                 }
-                // Keyboard show: only follow to the bottom if the user was
-                // already there — otherwise preserve their scroll position so
-                // the content simply lifts with the keyboard. Deferred so the
-                // grown bottom padding lays out before we scroll.
-                .onChange(of: keyboardOverlapHeight) { _, newOverlap in
-                    guard newOverlap > 0, isAtBottom else { return }
-                    DispatchQueue.main.async {
+                // Keyboard show: re-pin to the bottom only when the user was
+                // already there, so the latest message stays visible above the
+                // keyboard. keyboardOverlapHeight reads ~0 here (native keyboard
+                // avoidance already resized the view), so we trigger off the real
+                // notification and wait a beat for the resize to settle.
+                .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
+                    guard isAtBottom else { return }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                         withAnimation { proxy.scrollTo(bottomAnchorID, anchor: .bottom) }
                     }
                 }
@@ -417,17 +418,19 @@ struct ChatView: View {
                 .onPreferenceChange(ChatScrollBottomKey.self) { contentMaxY in
                     scrollBottomDistance = max(0, contentMaxY - viewportHeight)
                 }
-                .overlay(alignment: .bottomTrailing) {
-                    if !isAtBottom {
-                        scrollToBottomButton(proxy)
-                    }
-                }
-                .animation(.easeInOut(duration: 0.18), value: isAtBottom)
-            }
 
-            composerPanel
-                .background(Color.evSurfaceContainer)
-                .padding(.bottom, Self.composerBottomInset(keyboardOverlap: keyboardOverlapHeight))
+                composerPanel
+                    .background(Color.evSurfaceContainer)
+                    .padding(.bottom, Self.composerBottomInset(keyboardOverlap: keyboardOverlapHeight))
+
+                // Floating "jump to latest", layered above the composer so it is
+                // never hidden behind it.
+                if !isAtBottom {
+                    scrollToBottomButton(proxy)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                }
+            }
+            .animation(.easeInOut(duration: 0.18), value: isAtBottom)
         }
         .background(Color.evSurfaceContainerLow)
         .onAppear {
