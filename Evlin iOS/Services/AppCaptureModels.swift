@@ -412,3 +412,19 @@ struct PendingCategoryRow: Identifiable, Equatable, Sendable {
         return out
     }
 }
+
+/// Validates the App Controls v2 combined FamilyActivityPicker selection, which
+/// keeps BOTH apps and categories (unlike the single-mode `CapturePathValidator`).
+/// Rules: empty → invalid; any web domains → invalid; apps and/or categories → valid.
+enum CombinedPickerValidator {
+    struct Result: Equatable { let isValid: Bool; let reason: Reason? }
+    enum Reason: String, Equatable {
+        case empty = "Pick at least one app or category."
+        case webNotSupported = "Websites aren't supported here. Remove website selections."
+    }
+    static func validate(_ c: SelectionCounts) -> Result {
+        if c.webDomainTokens > 0 { return Result(isValid: false, reason: .webNotSupported) }
+        if c.applicationTokens == 0 && c.categoryTokens == 0 { return Result(isValid: false, reason: .empty) }
+        return Result(isValid: true, reason: nil)
+    }
+}
