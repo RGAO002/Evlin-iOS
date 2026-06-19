@@ -1,5 +1,6 @@
 import SwiftUI
 import UserNotifications
+import FamilyControls
 
 // Onboarding v2 — KID screens (real UI).
 //
@@ -704,22 +705,98 @@ struct ChildLockableHubStep: View {
     let onContinue: () -> Void
     var onBack: (() -> Void)? = nil
 
+    // Picker-first, save-only (Task 2.2). The ONLY source of truth is
+    // `DefaultLockGroupStore` — the picker's onSave writes the group blob, the
+    // optional App Controls entry reads/writes the same store, and the summary
+    // reads it. We bump `refreshTick` after a save so the summary counts (read
+    // fresh from the store each render) recompute. NO lock fires here: Continue
+    // simply calls `onContinue()` — saving the group blob is the entire effect.
+    @State private var showPicker = false
+    @State private var showAppControls = false
+    @State private var refreshTick = 0
+
     var body: some View {
-        if let familyID, let childDeviceID {
-            LockListManagerView(
-                familyID: familyID,
-                childDeviceID: childDeviceID,
-                mode: .onboarding,
-                onCompleted: onContinue
-            )
-            .environmentObject(apiClient)
-            .safeAreaInset(edge: .top) {
-                if let onBack {
-                    ChildOnboardingV2BackLink(action: onBack)
-                        .padding(.horizontal, 16)
-                        .padding(.top, 8)
-                        .background(Color.evSurface)
+        if familyID != nil, let childDeviceID {
+            // `refreshTick` is read here so a post-save bump re-runs `body`, which
+            // re-reads `DefaultLockGroupStore.load()` for the live counts.
+            let _ = refreshTick
+            let selection = DefaultLockGroupStore.load()
+            let appCount = selection.applicationTokens.count
+            let categoryCount = selection.categoryTokens.count
+            let hasSelection = appCount > 0 || categoryCount > 0
+
+            OnboardingV2ScreenContainer(
+                embeddedRole: .child,
+                phase: "4 · Lockable",
+                stepIndex: 10,
+                stepTotal: childTotal,
+                title: "Choose what Evlin can lock",
+                subtitle: "Pick the apps & categories Evlin can lock later. You can change this any time.",
+                content: {
+                    VStack(spacing: 12) {
+                        // Primary action — open the combined apps + categories picker.
+                        OnboardingV2PrimaryButton("Pick apps & categories",
+                                                  systemImage: "square.grid.2x2",
+                                                  role: .child) {
+                            showPicker = true
+                        }
+
+                        // Summary card — live counts read fresh from the store.
+                        OnboardingV2Card {
+                            HStack(spacing: 10) {
+                                Image(systemName: hasSelection ? "checkmark.circle.fill" : "square.dashed")
+                                    .font(.system(size: 18, weight: .semibold))
+                                    .foregroundStyle(hasSelection ? OnboardingV2Theme.Palette.secondary
+                                                                  : OnboardingV2Theme.Palette.onSurfaceVariant)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    if hasSelection {
+                                        Text("\(appCount) app\(appCount == 1 ? "" : "s") · \(categoryCount) categor\(categoryCount == 1 ? "y" : "ies") selected")
+                                            .font(.system(size: 14, weight: .semibold))
+                                            .foregroundStyle(OnboardingV2Theme.Palette.onSurface)
+                                    } else {
+                                        Text("Nothing selected yet")
+                                            .font(.system(size: 14, weight: .semibold))
+                                            .foregroundStyle(OnboardingV2Theme.Palette.onSurface)
+                                        Text("Tap \u{201C}Pick apps & categories\u{201D} to choose.")
+                                            .onboardingV2BodyXS()
+                                    }
+                                }
+                                Spacer(minLength: 0)
+                            }
+                            .frame(maxWidth: .infinity)
+                        }
+
+                        // Optional, lower-emphasis entry — name apps (App Controls v2).
+                        OnboardingV2SecondaryButton("Name apps (optional)",
+                                                    systemImage: "textformat") {
+                            showAppControls = true
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+                },
+                footer: {
+                    OnboardingV2PrimaryButton("Continue", role: .child, action: onContinue)
+                    if let onBack { ChildOnboardingV2BackLink(action: onBack) }
                 }
+            )
+            // The combined picker — keeps both apps + categories, validates on save.
+            // onSave is the ONLY writer of the group blob from this step.
+            .sheet(isPresented: $showPicker) {
+                CombinedPickerSheet(
+                    initialSelection: DefaultLockGroupStore.load(),
+                    onSave: { sel in
+                        DefaultLockGroupStore.save(sel)
+                        refreshTick += 1   // recompute summary counts on next render
+                        showPicker = false
+                    },
+                    onCancel: { showPicker = false }
+                )
+            }
+            // Optional naming entry — reads/writes the SAME store. Bump the tick on
+            // dismiss so any naming-side changes are reflected in the summary.
+            .sheet(isPresented: $showAppControls, onDismiss: { refreshTick += 1 }) {
+                AppControlsV2View(childDeviceID: childDeviceID)
+                    .environmentObject(apiClient)
             }
         } else {
             OnboardingV2ScreenContainer(
