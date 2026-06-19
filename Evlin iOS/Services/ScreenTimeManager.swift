@@ -28,9 +28,12 @@ class ScreenTimeManager: ObservableObject {
 
     @Published var isAuthorized: Bool = false
     @Published var isUnlocked: Bool = false
-    /// `includeEntireCategory: true` is what makes the picker record a category-row tap as
-    /// `categoryTokens` instead of expanding into individual app tokens. Without it,
-    /// `shieldApps()` never sees any category tokens and the "lock by category" path is dead.
+    /// This legacy store keeps `includeEntireCategory: true` only for its OWN older capture
+    /// path. It is NOT globally required for category locking. Verified on-device: the App
+    /// Controls v2 combined picker uses `includeEntireCategory: false` and category locking
+    /// still works (category-only selection → applicationTokens empty, categoryTokens ≥ 1, and
+    /// the category shield applies). With `false`, a category-row tap is recorded as a
+    /// `categoryToken` (not expanded into app tokens), keeping app vs category buckets disjoint.
     @Published var selectedApps = FamilyActivitySelection(includeEntireCategory: true)
     @Published var errorMessage: String?
     /// Mirrors `ManagedSettingsStore.application.denyAppRemoval` intent; persists across launches.
