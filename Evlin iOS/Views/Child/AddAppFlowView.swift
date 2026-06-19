@@ -651,8 +651,14 @@ private struct CategoryBindRowView: View {
     let token: ActivityCategoryToken
     @Binding var row: PendingCategoryRow
 
-    private var suggestions: [AppleScreenTimeCategorySuggestion] {
+    /// Map the row's current state onto the panel's stateless `selectedKey` while
+    /// preserving the exact `matchesSuggestion` semantics (semanticKey AND
+    /// case-insensitive displayName). The capsule lights up only for a suggestion
+    /// the row truly matches — never on semantic key alone.
+    private var selectedKey: String? {
         AppleScreenTimeCategorySuggestions.visibleCapsules(for: row.displayName)
+            .first { row.matchesSuggestion($0) }?
+            .semanticKey
     }
 
     var body: some View {
@@ -663,45 +669,13 @@ private struct CategoryBindRowView: View {
                 .padding(12)
                 .background(Color.evSurfaceContainerLow, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
 
-            if !suggestions.isEmpty {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Suggestions")
-                        .font(.caption2.weight(.bold))
-                        .textCase(.uppercase)
-                        .foregroundStyle(Color.evOnSurfaceVariant)
-
-                    LazyVGrid(
-                        columns: [GridItem(.adaptive(minimum: 128), spacing: 8, alignment: .leading)],
-                        alignment: .leading,
-                        spacing: 8
-                    ) {
-                        ForEach(suggestions) { suggestion in
-                            let selected = row.matchesSuggestion(suggestion)
-                            Button {
-                                row.applySuggestion(suggestion)
-                            } label: {
-                                Text(suggestion.displayName)
-                                    .font(.caption.weight(.semibold))
-                                    .lineLimit(2)
-                                    .multilineTextAlignment(.center)
-                                    .foregroundStyle(selected ? Color.white : Color.evPrimary)
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 8)
-                                    .frame(maxWidth: .infinity, minHeight: 34)
-                                    .background(
-                                        selected ? Color.evPrimary : Color.evPrimaryContainer,
-                                        in: Capsule()
-                                    )
-                                    .overlay {
-                                        Capsule()
-                                            .stroke(selected ? Color.evPrimary : Color.evOutlineVariant, lineWidth: 1)
-                                    }
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
+            CategoryTagPanel(
+                name: row.displayName,
+                selectedKey: selectedKey,
+                onPick: { suggestion in
+                    row.applySuggestion(suggestion)
                 }
-            }
+            )
         }
         .padding(12)
         .background(Color.evSurfaceContainerLow, in: RoundedRectangle(cornerRadius: 14, style: .continuous))

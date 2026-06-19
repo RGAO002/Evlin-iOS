@@ -15,10 +15,6 @@ struct CatalogBindRowView: View {
     let apiClient: APIClient
     var isHighlighted: Bool = false
 
-    @State private var query = ""
-    @State private var results: [CatalogSearchResult] = []
-    @State private var searching = false
-    @State private var searchTask: Task<Void, Never>?
     @State private var inlineError: String?
 
     var body: some View {
@@ -39,9 +35,6 @@ struct CatalogBindRowView: View {
                 .stroke(isHighlighted ? Color.orange.opacity(0.6) : Color.clear, lineWidth: 1)
         }
         .padding(.vertical, 6)
-        .onDisappear {
-            searchTask?.cancel()
-        }
     }
 
     private var namingBody: some View {
@@ -55,55 +48,30 @@ struct CatalogBindRowView: View {
                 Spacer(minLength: 8)
             }
 
-            TextField("Search matching App Store app, e.g. TikTok", text: $query)
-                .textFieldStyle(.roundedBorder)
-                .autocorrectionDisabled()
-                .textInputAutocapitalization(.never)
-                .onChange(of: query) { _, newValue in
-                    scheduleSearch(newValue)
-                }
-
-            if searching {
-                ProgressView()
-                    .controlSize(.small)
-            }
-
-            if let inlineError {
-                InlineCaptureError(message: inlineError)
-            }
-
-            ForEach(results) { result in
-                Button {
+            AppStoreBindPanel(
+                appName: appLabelText,
+                apiClient: apiClient,
+                onPick: { result in
                     // Picking the matching App Store result IS the confirmation —
                     // the parent has been looking at Label(token) (shown above) the
                     // whole time they searched. No separate "yes these match" tap.
                     row.bind(result)
                     row.confirm()
-                    query = result.canonicalName
-                    results = []
                     inlineError = nil
-                } label: {
-                    CatalogCandidateRow(result: result)
-                }
-                .buttonStyle(.plain)
-            }
-
-            if query.trimmingCharacters(in: .whitespacesAndNewlines).count >= 2,
-               searching == false,
-               results.isEmpty {
-                Button("No App Store match - save manually") {
-                    let manualName = query.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard manualName.isEmpty == false else {
-                        inlineError = "Type a name before saving manually."
-                        return
-                    }
+                },
+                onManual: { manualName in
                     row.bind(CatalogSearchResult(canonicalName: manualName, bundleID: nil, aliases: []))
                     row.confirm()
                     inlineError = nil
                 }
-                .font(.caption.weight(.semibold))
-            }
+            )
         }
+    }
+
+    /// The iOS label is not readable as text, so the unified copy refers to the
+    /// app generically. Kept here so the panel's copy reads naturally.
+    private var appLabelText: String {
+        "this app"
     }
 
     @ViewBuilder
@@ -197,74 +165,7 @@ struct CatalogBindRowView: View {
             tokenBase64: row.tokenBase64,
             tokenAvailable: row.tokenAvailable
         )
-        query = ""
-        results = []
         inlineError = nil
-    }
-
-    private func scheduleSearch(_ text: String) {
-        searchTask?.cancel()
-        let q = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard q.count >= 2 else {
-            results = []
-            searching = false
-            return
-        }
-
-        searchTask = Task {
-            try? await Task.sleep(nanoseconds: 250_000_000)
-            if Task.isCancelled { return }
-            await MainActor.run {
-                searching = true
-            }
-            let dtos = (try? await apiClient.catalogSearch(q: q)) ?? []
-            if Task.isCancelled { return }
-            await MainActor.run {
-                results = dtos.map(\.result)
-                searching = false
-            }
-        }
-    }
-}
-
-private struct CatalogCandidateRow: View {
-    let result: CatalogSearchResult
-    var compact = false
-
-    var body: some View {
-        HStack(spacing: 10) {
-            CatalogArtworkView(result: result, size: compact ? 30 : 34)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(result.canonicalName)
-                    .font(compact ? .caption.weight(.semibold) : .subheadline.weight(.semibold))
-                    .foregroundStyle(.primary)
-                if let bundleID = result.bundleID {
-                    Text(bundleID)
-                        .font(.caption2.monospaced())
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                } else {
-                    Text("Manual")
-                        .font(.caption2.weight(.bold))
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            Spacer(minLength: 0)
-
-            if result.bundleID != nil {
-                Text("match")
-                    .font(.caption2.weight(.bold))
-                    .foregroundStyle(.green)
-            } else {
-                Text("Manual")
-                    .font(.caption2.weight(.bold))
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .padding(compact ? 0 : 10)
-        .background(compact ? Color.clear : Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 }
 
