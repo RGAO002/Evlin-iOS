@@ -603,22 +603,27 @@ struct LockListManagerView: View {
         onDelete: @escaping () -> Void
     ) -> some View {
         HStack(spacing: 12) {
-            NameWithIcon(name: row.title, kind: kind, artworkURL: row.artworkURL, titleFont: .body)
-                .foregroundStyle(Color.evOnSurface)
-                .lineLimit(1)
-                .layoutPriority(1)
+            VStack(alignment: .leading, spacing: 3) {
+                NameWithIcon(name: row.title, kind: kind, artworkURL: row.artworkURL, titleFont: .body)
+                    .foregroundStyle(Color.evOnSurface)
+                    .lineLimit(1)
+
+                // Bundle id on its own line under the name. Inline, a long app name
+                // ("TikTok - Videos, Shop & LIVE") starved the id down to a single
+                // truncated "c". The 32pt indent (icon 24 + HStack spacing 8) aligns
+                // it under the name rather than the icon.
+                if let subtitle = row.subtitle, !subtitle.isEmpty {
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundStyle(Color.evOnSurfaceVariant)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .padding(.leading, 32)
+                }
+            }
+            .layoutPriority(1)
 
             Spacer(minLength: 12)
-
-            if let subtitle = row.subtitle, !subtitle.isEmpty {
-                Text(subtitle)
-                    .font(.caption)
-                    .foregroundStyle(Color.evOnSurfaceVariant)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .multilineTextAlignment(.trailing)
-                    .frame(maxWidth: 190, alignment: .trailing)
-            }
 
             if canEdit, let onEdit {
                 Button(action: onEdit) {

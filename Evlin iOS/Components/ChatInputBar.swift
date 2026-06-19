@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ChatInputBar: View {
     @Binding var text: String
+    var isFocused: FocusState<Bool>.Binding?
     var onSend: () -> Void
 
     var body: some View {
@@ -10,12 +11,7 @@ struct ChatInputBar: View {
                 .font(.system(size: 16, weight: .regular))
                 .foregroundStyle(Color.evSecondary)
 
-            TextField("Ask about the strategy...", text: $text, axis: .vertical)
-                .font(.custom("Inter", size: 14))
-                .foregroundStyle(Color.evOnSurface)
-                .lineLimit(1...4)
-                .submitLabel(.send)
-                .onSubmit(onSend)
+            inputField
 
             Button(action: onSend) {
                 Image(systemName: "arrow.up")
@@ -43,5 +39,24 @@ struct ChatInputBar: View {
         )
         .padding(.horizontal, 16)
         .padding(.bottom, 8)
+    }
+
+    @ViewBuilder
+    private var inputField: some View {
+        if let isFocused {
+            baseInputField
+                .focused(isFocused)
+        } else {
+            baseInputField
+        }
+    }
+
+    private var baseInputField: some View {
+        TextField("Ask about the strategy...", text: $text, axis: .vertical)
+            .font(.custom("Inter", size: 14))
+            .foregroundStyle(Color.evOnSurface)
+            .lineLimit(1...4)
+            .submitLabel(.send)
+            .onSubmit(onSend)
     }
 }

@@ -75,6 +75,7 @@ struct Evlin_iOSApp: App {
                 }
                 .simultaneousGesture(
                     TapGesture().onEnded {
+                        guard KeyboardDismissGate.shouldDismissKeyboardForRootTap() else { return }
                         UIApplication.shared.sendAction(
                             #selector(UIResponder.resignFirstResponder),
                             to: nil, from: nil, for: nil

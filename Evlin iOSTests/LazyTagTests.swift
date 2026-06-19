@@ -80,6 +80,14 @@ final class LazyTagCatalogModelTests: XCTestCase {
         XCTAssertNil(presentation.informMessage)
     }
 
+    func test_appStoreSearchRunsLiveAfterTwoCharactersWithAppMatchDebounce() {
+        XCTAssertFalse(AppStoreSearchPresentation.shouldRunLiveSearch(for: ""))
+        XCTAssertFalse(AppStoreSearchPresentation.shouldRunLiveSearch(for: "x"))
+        XCTAssertTrue(AppStoreSearchPresentation.shouldRunLiveSearch(for: "ig"))
+        XCTAssertTrue(AppStoreSearchPresentation.shouldRunLiveSearch(for: "抖音"))
+        XCTAssertEqual(AppStoreSearchPresentation.liveSearchDebounceNanoseconds, 250_000_000)
+    }
+
     // MARK: - Lock-setup save rules (Task 10, Step 3)
 
     func test_reservedCategoryWords_includeCanonicalKeys() {

@@ -1,8 +1,13 @@
 import SwiftUI
+import FamilyControls
 import ManagedSettings
 
 struct CommandDeliveryDiagnosticsView: View {
     @State private var refreshTick: Int = 0
+    @State private var sepSelection = FamilyActivitySelection(includeEntireCategory: false)
+    @State private var sepShowPicker = false
+    @State private var sepShieldStatus = "—"
+    private let sepStore = ManagedSettingsStore(named: .init("evlin.sep.test"))
 
     var body: some View {
         List {
@@ -35,6 +40,7 @@ struct CommandDeliveryDiagnosticsView: View {
 
             heartbeatHistorySection
             nseSpikeSection
+            pickerSeparationSection
         }
         .navigationTitle("Command Delivery")
         .toolbar {
@@ -42,11 +48,71 @@ struct CommandDeliveryDiagnosticsView: View {
                 refreshTick += 1
             }
         }
+        .familyActivityPicker(isPresented: $sepShowPicker, selection: $sepSelection)
         .task {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
                 refreshTick += 1
             }
+        }
+    }
+
+    /// Debug-only acceptance gate for the App Controls v2 redesign. The whole
+    /// "app vs category clean separation" rests on a combined picker opened with
+    /// `includeEntireCategory: false` keeping app/category tokens in disjoint
+    /// buckets. `ScreenTimeManager`'s comment claims the opposite, so this must be
+    /// settled on a real authorized device before building on it. Uses an isolated
+    /// named store so the shield test never touches the real lock.
+    @ViewBuilder
+    private var pickerSeparationSection: some View {
+        Section {
+            Button("Open picker (includeEntireCategory = false)") {
+                sepShowPicker = true
+            }
+            Button(role: .destructive) {
+                sepSelection = FamilyActivitySelection(includeEntireCategory: false)
+                sepShieldStatus = "—"
+            } label: {
+                Text("Reset selection")
+            }
+
+            sepRow("includeEntireCategory", sepSelection.includeEntireCategory ? "true  ⚠️" : "false")
+            sepRow("applicationTokens", "\(sepSelection.applicationTokens.count)")
+            sepRow("categoryTokens", "\(sepSelection.categoryTokens.count)")
+            sepRow("webDomainTokens", "\(sepSelection.webDomainTokens.count)")
+
+            Button("Shield current selection") {
+                sepStore.shield.applicationCategories = sepSelection.categoryTokens.isEmpty
+                    ? nil
+                    : .specific(sepSelection.categoryTokens)
+                sepStore.shield.applications = sepSelection.applicationTokens.isEmpty
+                    ? nil
+                    : sepSelection.applicationTokens
+                sepShieldStatus = "Shielded \(sepSelection.categoryTokens.count) categories + \(sepSelection.applicationTokens.count) apps. Now open an app in that category — it should be blocked."
+            }
+            Button(role: .destructive) {
+                sepStore.clearAllSettings()
+                sepShieldStatus = "Cleared all shields."
+            } label: {
+                Text("Unshield (clear)")
+            }
+            Text(sepShieldStatus)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        } header: {
+            Text("Picker separation test (includeEntireCategory = false)")
+        } footer: {
+            Text("Run three times: (a) one category only, (b) one app only, (c) one app + one category. PASS = the category-only run gives applicationTokens = 0 and categoryTokens ≥ 1 (buckets disjoint, no expansion), AND shielding a category actually blocks its apps. Both true → the App Controls v2 separation design is safe.")
+        }
+    }
+
+    private func sepRow(_ key: String, _ value: String) -> some View {
+        HStack {
+            Text(key)
+            Spacer(minLength: 8)
+            Text(value)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
         }
     }
 

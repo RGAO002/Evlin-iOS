@@ -44,6 +44,14 @@ struct AppStoreSearchRequest: Identifiable, Sendable, Equatable {
     let originalMessage: String
 }
 
+enum AppStoreSearchPresentation {
+    static let liveSearchDebounceNanoseconds: UInt64 = 250_000_000
+
+    static func shouldRunLiveSearch(for query: String) -> Bool {
+        query.trimmingCharacters(in: .whitespacesAndNewlines).count >= 2
+    }
+}
+
 struct AppStoreSearchPickerView: View {
     let request: AppStoreSearchRequest
     let onSelect: (CatalogSearchResultDTO, AppStoreSearchRequest) -> Void
@@ -54,6 +62,7 @@ struct AppStoreSearchPickerView: View {
     @State private var results: [CatalogSearchResultDTO] = []
     @State private var isLoading = false
     @State private var errorMessage: String?
+    @State private var searchTask: Task<Void, Never>?
 
     private let apiClient: APIClient
 
@@ -103,13 +112,17 @@ struct AppStoreSearchPickerView: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") {
+                        searchTask?.cancel()
                         onCancel()
                         dismiss()
                     }
                 }
             }
             .task {
-                await runSearch()
+                await runSearch(for: query)
+            }
+            .onDisappear {
+                searchTask?.cancel()
             }
         }
     }
@@ -147,11 +160,14 @@ struct AppStoreSearchPickerView: View {
                 .font(.custom("Inter", size: 14))
                 .textInputAutocapitalization(.words)
                 .submitLabel(.search)
+                .onChange(of: query) { _, newValue in
+                    scheduleSearch(newValue)
+                }
                 .onSubmit {
-                    Task { await runSearch() }
+                    runSearchNow()
                 }
             Button("Search") {
-                Task { await runSearch() }
+                runSearchNow()
             }
             .font(.custom("Inter", size: 12).weight(.bold))
             .disabled(query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isLoading)
@@ -248,15 +264,47 @@ struct AppStoreSearchPickerView: View {
             .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
+    private func scheduleSearch(_ text: String) {
+        searchTask?.cancel()
+        guard AppStoreSearchPresentation.shouldRunLiveSearch(for: text) else {
+            results = []
+            errorMessage = nil
+            isLoading = false
+            return
+        }
+
+        let q = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        searchTask = Task {
+            try? await Task.sleep(nanoseconds: AppStoreSearchPresentation.liveSearchDebounceNanoseconds)
+            if Task.isCancelled { return }
+            await runSearch(for: q)
+        }
+    }
+
+    private func runSearchNow() {
+        searchTask?.cancel()
+        Task { await runSearch(for: query) }
+    }
+
     @MainActor
-    private func runSearch() async {
-        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+    private func runSearch(for rawQuery: String) async {
+        let trimmed = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard AppStoreSearchPresentation.shouldRunLiveSearch(for: trimmed) else {
+            results = []
+            errorMessage = nil
+            isLoading = false
+            return
+        }
         isLoading = true
         errorMessage = nil
         do {
-            results = try await apiClient.catalogSearch(q: trimmed)
+            let nextResults = try await apiClient.catalogSearch(q: trimmed)
+            guard !Task.isCancelled else { return }
+            guard trimmed == query.trimmingCharacters(in: .whitespacesAndNewlines) else { return }
+            results = nextResults
         } catch {
+            guard !Task.isCancelled else { return }
+            guard trimmed == query.trimmingCharacters(in: .whitespacesAndNewlines) else { return }
             results = []
             errorMessage = "Could not search App Store. Check connection and try again."
         }

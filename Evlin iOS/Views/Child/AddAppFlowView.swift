@@ -194,7 +194,7 @@ struct AddAppFlowView: View {
             Text("Name what you selected")
                 .font(.headline)
                 .foregroundStyle(Color.evOnSurface)
-            Text("Evlin can show the iOS app label, but it cannot read that text. Search the dropdown and choose the matching App Store result.")
+            Text("We know this is a hassle, but Apple won't let Evlin read app names. Search the dropdown and choose the matching App Store result — you only have to do this once.")
                 .font(.subheadline)
                 .foregroundStyle(Color.evOnSurfaceVariant)
                 .fixedSize(horizontal: false, vertical: true)

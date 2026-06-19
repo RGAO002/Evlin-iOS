@@ -29,6 +29,10 @@ final class BigKidAPIClient: ObservableObject {
     func submitEvidence(taskId: UUID, photos: [Data], note: String?) async throws -> BigKidTask {
         precondition(!photos.isEmpty, "submitEvidence requires at least one photo")
         var req = try makeRequest(path: "/child/task/\(taskId)/evidence", method: "POST")
+        // Photo uploads are far heavier than the JSON calls makeRequest's 20s
+        // default targets. Even downscaled, a multi-photo multipart body over a
+        // weak cellular link needs more headroom before timing out.
+        req.timeoutInterval = 60
         let boundary = UUID().uuidString
         req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         req.httpBody = Self.multipartBody(boundary: boundary, photos: photos, note: note)

@@ -619,11 +619,9 @@
 				CLANG_ENABLE_OBJC_WEAK = NO;
 				CODE_SIGN_ENTITLEMENTS = EvlinShieldConfig/EvlinShieldConfig.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
-				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "iPhone Distribution";
-				CODE_SIGN_STYLE = Manual;
-				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
-				"DEVELOPMENT_TEAM[sdk=iphoneos*]" = D9FM36P37F;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 2;
+				DEVELOPMENT_TEAM = D9FM36P37F;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = EvlinShieldConfig/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
@@ -636,7 +634,6 @@
 				PRODUCT_BUNDLE_IDENTIFIER = "com.evlin.Evlin-iOS.EvlinShieldConfig";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
-				"PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]" = "Evlin SC iOS AppStore";
 				SDKROOT = iphoneos;
 				SKIP_INSTALL = YES;
 				SWIFT_VERSION = 5.0;
@@ -651,11 +648,9 @@
 				CLANG_ENABLE_OBJC_WEAK = NO;
 				CODE_SIGN_ENTITLEMENTS = EvlinShieldConfig/EvlinShieldConfig.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
-				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "iPhone Distribution";
-				CODE_SIGN_STYLE = Manual;
-				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
-				"DEVELOPMENT_TEAM[sdk=iphoneos*]" = D9FM36P37F;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 2;
+				DEVELOPMENT_TEAM = D9FM36P37F;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = EvlinShieldConfig/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
@@ -668,7 +663,6 @@
 				PRODUCT_BUNDLE_IDENTIFIER = "com.evlin.Evlin-iOS.EvlinShieldConfig";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
-				"PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]" = "Evlin SC iOS AppStore";
 				SDKROOT = iphoneos;
 				SKIP_INSTALL = YES;
 				SWIFT_VERSION = 5.0;
@@ -681,11 +675,9 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = EvlinPushApplier/EvlinPushApplier.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
-				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "iPhone Distribution";
-				CODE_SIGN_STYLE = Manual;
-				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
-				"DEVELOPMENT_TEAM[sdk=iphoneos*]" = D9FM36P37F;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 2;
+				DEVELOPMENT_TEAM = D9FM36P37F;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = EvlinPushApplier/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = EvlinPushApplier;
@@ -699,7 +691,6 @@
 				PRODUCT_BUNDLE_IDENTIFIER = "com.evlin.Evlin-iOS.EvlinPushApplier";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
-				"PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]" = "Evlin PA iOS AppStore";
 				SKIP_INSTALL = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
@@ -715,11 +706,9 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = EvlinPushApplier/EvlinPushApplier.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
-				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "iPhone Distribution";
-				CODE_SIGN_STYLE = Manual;
-				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
-				"DEVELOPMENT_TEAM[sdk=iphoneos*]" = D9FM36P37F;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 2;
+				DEVELOPMENT_TEAM = D9FM36P37F;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = EvlinPushApplier/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = EvlinPushApplier;
@@ -733,7 +722,6 @@
 				PRODUCT_BUNDLE_IDENTIFIER = "com.evlin.Evlin-iOS.EvlinPushApplier";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
-				"PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]" = "Evlin PA iOS AppStore";
 				SKIP_INSTALL = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
@@ -750,7 +738,7 @@
 				CODE_SIGN_ENTITLEMENTS = EvlinDeviceActivityReport/EvlinDeviceActivityReportRelease.entitlements;
 				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "iPhone Distribution";
 				CODE_SIGN_STYLE = Manual;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEVELOPMENT_TEAM = "";
 				"DEVELOPMENT_TEAM[sdk=iphoneos*]" = D9FM36P37F;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -784,7 +772,7 @@
 				CODE_SIGN_ENTITLEMENTS = EvlinDeviceActivityReport/EvlinDeviceActivityReport.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEVELOPMENT_TEAM = D9FM36P37F;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = EvlinDeviceActivityReport/Info.plist;
@@ -982,11 +970,9 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = "Evlin iOS/Evlin iOS.entitlements";
 				CODE_SIGN_IDENTITY = "Apple Development";
-				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "iPhone Distribution";
-				CODE_SIGN_STYLE = Manual;
-				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
-				"DEVELOPMENT_TEAM[sdk=iphoneos*]" = D9FM36P37F;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 2;
+				DEVELOPMENT_TEAM = D9FM36P37F;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Evlin-iOS-Info.plist";
@@ -1006,7 +992,6 @@
 				PRODUCT_BUNDLE_IDENTIFIER = "com.evlin.Evlin-iOS";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
-				"PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]" = "Evlin iOS AppStore";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
@@ -1024,11 +1009,9 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = "Evlin iOS/Evlin iOS.entitlements";
 				CODE_SIGN_IDENTITY = "Apple Development";
-				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "iPhone Distribution";
-				CODE_SIGN_STYLE = Manual;
-				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
-				"DEVELOPMENT_TEAM[sdk=iphoneos*]" = D9FM36P37F;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 2;
+				DEVELOPMENT_TEAM = D9FM36P37F;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Evlin-iOS-Info.plist";
@@ -1048,7 +1031,6 @@
 				PRODUCT_BUNDLE_IDENTIFIER = "com.evlin.Evlin-iOS";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
-				"PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]" = "Evlin iOS AppStore";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
@@ -1064,11 +1046,9 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = EvlinDeviceActivityMonitor/EvlinDeviceActivityMonitor.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
-				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "iPhone Distribution";
-				CODE_SIGN_STYLE = Manual;
-				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
-				"DEVELOPMENT_TEAM[sdk=iphoneos*]" = D9FM36P37F;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 2;
+				DEVELOPMENT_TEAM = D9FM36P37F;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = EvlinDeviceActivityMonitor/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = EvlinDeviceActivityMonitor;
@@ -1083,7 +1063,6 @@
 				PRODUCT_BUNDLE_IDENTIFIER = "com.evlin.Evlin-iOS.EvlinDeviceActivityMonitor";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
-				"PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]" = "Evlin DAM iOS AppStore";
 				SKIP_INSTALL = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
@@ -1099,11 +1078,9 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = EvlinDeviceActivityMonitor/EvlinDeviceActivityMonitor.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
-				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "iPhone Distribution";
-				CODE_SIGN_STYLE = Manual;
-				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
-				"DEVELOPMENT_TEAM[sdk=iphoneos*]" = D9FM36P37F;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 2;
+				DEVELOPMENT_TEAM = D9FM36P37F;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = EvlinDeviceActivityMonitor/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = EvlinDeviceActivityMonitor;
@@ -1118,7 +1095,6 @@
 				PRODUCT_BUNDLE_IDENTIFIER = "com.evlin.Evlin-iOS.EvlinDeviceActivityMonitor";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
-				"PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]" = "Evlin DAM iOS AppStore";
 				SKIP_INSTALL = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;

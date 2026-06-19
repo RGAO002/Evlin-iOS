@@ -1,8 +1,127 @@
 import SwiftUI
+import Combine
 
-private struct ChatScrollBottomKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+private final class ChatScrollController: ObservableObject {
+    var onBottomDistanceChange: ((CGFloat) -> Void)?
+    private weak var scrollView: UIScrollView?
+    private var observations: [NSKeyValueObservation] = []
+
+    func attach(to scrollView: UIScrollView?) {
+        guard let scrollView else { return }
+        if scrollView !== self.scrollView {
+            self.scrollView = scrollView
+            observations = [
+                scrollView.observe(\.contentOffset, options: [.new]) { [weak self] _, _ in
+                    self?.reportOnMain()
+                },
+                scrollView.observe(\.contentSize, options: [.new]) { [weak self] _, _ in
+                    self?.reportOnMain()
+                },
+                scrollView.observe(\.bounds, options: [.new]) { [weak self] _, _ in
+                    self?.reportOnMain()
+                }
+            ]
+        }
+        report()
+    }
+
+    func scrollToBottom(animated: Bool) {
+        let delays = ChatView.scrollToBottomSettleDelays(animated: animated)
+        for (index, delay) in delays.enumerated() {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self, let scrollView = self.scrollView else { return }
+                self.scrollToBottomOnce(
+                    in: scrollView,
+                    animated: animated && index == 0
+                )
+            }
+        }
+    }
+
+    private func scrollToBottomOnce(in scrollView: UIScrollView, animated: Bool) {
+        scrollView.layoutIfNeeded()
+        let targetY = ChatView.scrollTargetOffsetY(
+            contentSizeHeight: scrollView.contentSize.height,
+            viewportHeight: scrollView.bounds.height,
+            adjustedTopInset: scrollView.adjustedContentInset.top,
+            adjustedBottomInset: scrollView.adjustedContentInset.bottom
+        )
+        guard abs(targetY - scrollView.contentOffset.y) > 0.5 else { return }
+        let previousKeyboardDismissMode = scrollView.keyboardDismissMode
+        scrollView.keyboardDismissMode = .none
+        let restoreKeyboardDismissMode = {
+            scrollView.keyboardDismissMode = previousKeyboardDismissMode
+        }
+        if animated {
+            UIView.animate(
+                withDuration: 0.25,
+                delay: 0,
+                options: [.curveEaseOut, .beginFromCurrentState, .allowUserInteraction]
+            ) {
+                scrollView.setContentOffset(
+                    CGPoint(x: scrollView.contentOffset.x, y: targetY),
+                    animated: false
+                )
+            } completion: { _ in
+                restoreKeyboardDismissMode()
+            }
+        } else {
+            scrollView.setContentOffset(
+                CGPoint(x: scrollView.contentOffset.x, y: targetY),
+                animated: false
+            )
+            restoreKeyboardDismissMode()
+        }
+    }
+
+    private func reportOnMain() {
+        DispatchQueue.main.async { [weak self] in
+            self?.report()
+        }
+    }
+
+    private func report() {
+        guard let scrollView else { return }
+        onBottomDistanceChange?(
+            ChatView.scrollBottomDistance(
+                contentOffsetY: scrollView.contentOffset.y,
+                contentSizeHeight: scrollView.contentSize.height,
+                viewportHeight: scrollView.bounds.height,
+                adjustedBottomInset: scrollView.adjustedContentInset.bottom
+            )
+        )
+    }
+}
+
+private struct ChatScrollMetricsObserver: UIViewRepresentable {
+    @ObservedObject var controller: ChatScrollController
+    let onBottomDistanceChange: (CGFloat) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeUIView(context: Context) -> UIView {
+        UIView(frame: .zero)
+    }
+
+    func updateUIView(_ view: UIView, context: Context) {
+        controller.onBottomDistanceChange = onBottomDistanceChange
+        DispatchQueue.main.async {
+            controller.attach(to: view.enclosingScrollView)
+        }
+    }
+
+    final class Coordinator {}
+}
+
+private extension UIView {
+    var enclosingScrollView: UIScrollView? {
+        if let scrollView = self as? UIScrollView {
+            return scrollView
+        }
+        return superview?.enclosingScrollView
+    }
 }
 
 struct ChatView: View {
@@ -10,14 +129,17 @@ struct ChatView: View {
     @Environment(ParentReflectionFixtureStore.self) private var reflectionStore
     @Environment(FamilyStore.self) private var familyStore
     @StateObject private var viewModel = ChatViewModel()
+    @StateObject private var scrollController = ChatScrollController()
     @State private var keyboardOverlapHeight: CGFloat = 0
+    @FocusState private var isComposerFocused: Bool
     var isPreview = false
     var activeChild: ChildProfile? = nil
     private let bottomAnchorID = "chat-bottom-anchor"
-    @State private var viewportHeight: CGFloat = 0
     /// How far the content bottom sits below the viewport (>0 means scrolled up).
     @State private var scrollBottomDistance: CGFloat = 0
-    private var isAtBottom: Bool { scrollBottomDistance < 120 }
+    private var isAtBottom: Bool {
+        !Self.shouldShowScrollToBottomButton(bottomDistance: scrollBottomDistance)
+    }
 
     /// Map `viewModel.childName` back to a `ChildProfile.id` so we can
     /// clear / reset the parent-side reflection fixture store when the
@@ -87,352 +209,330 @@ struct ChatView: View {
                         keyboardOverlapHeight = 0
                     }
                 }
-                .onAppear { viewportHeight = geometry.size.height }
-                .onChange(of: geometry.size.height) { _, newHeight in
-                    viewportHeight = newHeight
-                }
         }
     }
 
     private var content: some View {
-        ScrollViewReader { proxy in
-            ZStack(alignment: .bottom) {
-                ScrollView {
-                    LazyVStack(spacing: Spacing.xxxl) {
-                        editorialHeader
+        ZStack(alignment: .bottom) {
+            ScrollView {
+                ChatScrollMetricsObserver(controller: scrollController) { distance in
+                    scrollBottomDistance = distance
+                }
+                .frame(width: 0, height: 0)
 
-                        ForEach(viewModel.messages) { message in
-                            VStack(alignment: message.role == .parent ? .trailing : .leading, spacing: Spacing.xl) {
-                                // Lock confirmation card
-                                if let mins = message.lockMinutes, let name = message.lockChildName {
-                                    LockConfirmationCard(minutes: mins, childName: name)
-                                }
+                LazyVStack(spacing: Spacing.xxxl) {
+                    editorialHeader
 
-                                // Strategy artifact card (Task 20)
-                                if message.isStrategyArtifact, message.role == .agent {
-                                    StrategyCard(data: StrategyCardData(
-                                        title: message.strategyTitle ?? "",
-                                        status: message.strategyStatus ?? "",
-                                        category: message.strategyCategory ?? "",
-                                        videoLabel: message.strategyVideoLabel ?? "",
-                                        videoDuration: message.strategyVideoDuration ?? "",
-                                        tip: message.strategyTip ?? "",
-                                        videoId: message.videoId,
-                                        videoThumbnail: message.videoThumbnail
-                                    ))
-                                }
+                    ForEach(viewModel.messages) { message in
+                        VStack(alignment: message.role == .parent ? .trailing : .leading, spacing: Spacing.xl) {
+                            // Lock confirmation card
+                            if let mins = message.lockMinutes, let name = message.lockChildName {
+                                LockConfirmationCard(minutes: mins, childName: name)
+                            }
 
-                                // Chat bubble (skip for strategy-only messages with empty content)
-                                if !message.content.isEmpty {
-                                    ChatBubble(
-                                        content: message.content,
-                                        role: message.role,
-                                        timestamp: message.timestamp,
-                                        debugTurnID: message.debugTurnID
+                            // Strategy artifact card (Task 20)
+                            if message.isStrategyArtifact, message.role == .agent {
+                                StrategyCard(data: StrategyCardData(
+                                    title: message.strategyTitle ?? "",
+                                    status: message.strategyStatus ?? "",
+                                    category: message.strategyCategory ?? "",
+                                    videoLabel: message.strategyVideoLabel ?? "",
+                                    videoDuration: message.strategyVideoDuration ?? "",
+                                    tip: message.strategyTip ?? "",
+                                    videoId: message.videoId,
+                                    videoThumbnail: message.videoThumbnail
+                                ))
+                            }
+
+                            // Chat bubble (skip for strategy-only messages with empty content)
+                            if !message.content.isEmpty {
+                                ChatBubble(
+                                    content: message.content,
+                                    role: message.role,
+                                    timestamp: message.timestamp,
+                                    debugTurnID: message.debugTurnID
+                                )
+                            }
+
+                            // Safety status card + follow-up
+                            if message.isSafetyCard == true {
+                                SafetyStatusCard(childName: viewModel.childName)
+                                SafetyActionButtons()
+                            }
+
+                            // Video recommendation card
+                            if let title = message.videoTitle, let thumb = message.videoThumbnail, let vid = message.videoId {
+                                VideoRecommendationCard(
+                                    video: RecommendedVideo(
+                                        title: title,
+                                        description: message.videoDescription ?? "",
+                                        thumbnail: thumb,
+                                        videoId: vid
                                     )
-                                }
+                                )
+                            }
 
-                                // Safety status card + follow-up
-                                if message.isSafetyCard == true {
-                                    SafetyStatusCard(childName: viewModel.childName)
-                                    SafetyActionButtons()
-                                }
+                            // Receipt card — shows pending spinner then flips
+                            // to success/failure + honest effective-state line
+                            // when the child acks. See plan Phase 8.
+                            if message.role == .agent, let receipt = message.receiptState {
+                                ReceiptCard(
+                                    state: receipt,
+                                    effectiveState: message.receiptEffectiveState,
+                                    targetKind: message.receiptTargetKind ?? .app,
+                                    onRequestUnlock: { target in
+                                        viewModel.requestUnlock(target)
+                                    },
+                                    onRequestBlock: { target in
+                                        viewModel.requestBlock(target)
+                                    }
+                                )
+                            }
 
-                                // Video recommendation card
-                                if let title = message.videoTitle, let thumb = message.videoThumbnail, let vid = message.videoId {
-                                    VideoRecommendationCard(
-                                        video: RecommendedVideo(
-                                            title: title,
-                                            description: message.videoDescription ?? "",
-                                            thumbnail: thumb,
-                                            videoId: vid
+                            // Agent envelope (Phase E) — staged proposals
+                            // for parent confirmation, and executed receipts
+                            // with 60s Undo countdown. Empty arrays render
+                            // nothing.
+                            if message.role == .agent,
+                               let proposals = message.proposals, !proposals.isEmpty {
+                                VStack(spacing: 10) {
+                                    ForEach(proposals, id: \.token) { p in
+                                        ProposalCard(
+                                            proposal: p,
+                                            onConfirm: { await viewModel.confirmProposal(p) },
+                                            onSkip: { viewModel.skipProposal(p) },
+                                            rowAliasMissTargets: viewModel.rowAliasMissTargets(for: p),
+                                            onTagRow: { idx in viewModel.beginLazyTag(for: p, rowIndex: idx) }
                                         )
-                                    )
-                                }
-
-                                // Receipt card — shows pending spinner then flips
-                                // to success/failure + honest effective-state line
-                                // when the child acks. See plan Phase 8.
-                                if message.role == .agent, let receipt = message.receiptState {
-                                    ReceiptCard(
-                                        state: receipt,
-                                        effectiveState: message.receiptEffectiveState,
-                                        targetKind: message.receiptTargetKind ?? .app,
-                                        onRequestUnlock: { target in
-                                            viewModel.requestUnlock(target)
-                                        },
-                                        onRequestBlock: { target in
-                                            viewModel.requestBlock(target)
-                                        }
-                                    )
-                                }
-
-                                // Agent envelope (Phase E) — staged proposals
-                                // for parent confirmation, and executed receipts
-                                // with 60s Undo countdown. Empty arrays render
-                                // nothing.
-                                if message.role == .agent,
-                                   let proposals = message.proposals, !proposals.isEmpty {
-                                    VStack(spacing: 10) {
-                                        ForEach(proposals, id: \.token) { p in
-                                            ProposalCard(
-                                                proposal: p,
-                                                onConfirm: { await viewModel.confirmProposal(p) },
-                                                onSkip: { viewModel.skipProposal(p) },
-                                                rowAliasMissTargets: viewModel.rowAliasMissTargets(for: p),
-                                                onTagRow: { idx in viewModel.beginLazyTag(for: p, rowIndex: idx) }
-                                            )
-                                        }
-                                    }
-                                }
-                                if message.role == .agent,
-                                   let receipts = message.receipts, !receipts.isEmpty {
-                                    VStack(spacing: 8) {
-                                        ForEach(receipts, id: \.summary) { r in
-                                            ReceiptBubble(receipt: r, onUndo: { token in
-                                                await viewModel.undoReceipt(token: token)
-                                            })
-                                        }
-                                    }
-                                }
-
-                                // BigKid: reflection essay submitted → parent approves in-chat
-                                if message.role == .agent,
-                                   let reflection = message.reflectionSubmissionReview {
-                                    ReflectionSubmissionReviewCard(
-                                        childName: viewModel.childName,
-                                        writingPrompt: reflection.writingPrompt,
-                                        essayText: reflection.essayText,
-                                        submittedAt: reflection.submittedAt,
-                                        topicLabel: reflection.topicLabel,
-                                        stepsCompleted: reflection.stepsCompleted,
-                                        status: reflection.status,
-                                        onApprove: { note in
-                                            await viewModel.approveReflectionSubmissionFromChat(
-                                                messageId: message.id,
-                                                reflectionId: reflection.reflectionId,
-                                                parentNoteTrimmed: note
-                                            )
-                                            // Parent approved → the
-                                            // reflection is done. Clear
-                                            // the home/profile under-
-                                            // reflection card right
-                                            // away. (Backend poll will
-                                            // eventually agree, but the
-                                            // UI shouldn't have to wait
-                                            // for it.)
-                                            if let childId = matchedChildId {
-                                                reflectionStore.clear(childId: childId)
-                                            }
-                                        },
-                                        onRedo: { typedNote in
-                                            // "Write again" routes through the SAME
-                                            // backend path as the Step-3 "Request
-                                            // redo" button. The card forwards the
-                                            // parent's typed message (already
-                                            // trimmed); the VM substitutes the
-                                            // default coaching string only when
-                                            // it's empty.
-                                            let effectiveNote = typedNote.isEmpty
-                                                ? ReflectionParentNoteFallback.redoTakeAnotherLook
-                                                : typedNote
-                                            await viewModel.requestRedoReflectionFromChat(
-                                                messageId: message.id,
-                                                reflectionId: reflection.reflectionId,
-                                                parentNoteTrimmed: typedNote
-                                            )
-                                            if let childId = matchedChildId {
-                                                reflectionStore.applyParentRedoLocally(
-                                                    childId: childId,
-                                                    redoNote: effectiveNote
-                                                )
-                                            }
-                                        }
-                                    )
-                                }
-
-                                // Strategy-agent T11.12 — 👍/👎 feedback row under each
-                                // agent bubble that has visible content.
-                                if message.role == .agent, !message.content.isEmpty {
-                                    AssistantFeedbackButtons(messageId: message.id.uuidString) { rating in
-                                        Task {
-                                            await viewModel.sendFeedback(
-                                                messageId: message.id.uuidString,
-                                                rating: rating
-                                            )
-                                        }
                                     }
                                 }
                             }
-                            .id(message.id)
-                        }
+                            if message.role == .agent,
+                               let receipts = message.receipts, !receipts.isEmpty {
+                                VStack(spacing: 8) {
+                                    ForEach(receipts, id: \.summary) { r in
+                                        ReceiptBubble(receipt: r, onUndo: { token in
+                                            await viewModel.undoReceipt(token: token)
+                                        })
+                                    }
+                                }
+                            }
 
-                        if viewModel.isThinking {
-                            thinkingIndicator
-                        }
+                            // BigKid: reflection essay submitted → parent approves in-chat
+                            if message.role == .agent,
+                               let reflection = message.reflectionSubmissionReview {
+                                ReflectionSubmissionReviewCard(
+                                    childName: viewModel.childName,
+                                    writingPrompt: reflection.writingPrompt,
+                                    essayText: reflection.essayText,
+                                    submittedAt: reflection.submittedAt,
+                                    topicLabel: reflection.topicLabel,
+                                    stepsCompleted: reflection.stepsCompleted,
+                                    status: reflection.status,
+                                    onApprove: { note in
+                                        await viewModel.approveReflectionSubmissionFromChat(
+                                            messageId: message.id,
+                                            reflectionId: reflection.reflectionId,
+                                            parentNoteTrimmed: note
+                                        )
+                                        // Parent approved → the
+                                        // reflection is done. Clear
+                                        // the home/profile under-
+                                        // reflection card right
+                                        // away. (Backend poll will
+                                        // eventually agree, but the
+                                        // UI shouldn't have to wait
+                                        // for it.)
+                                        if let childId = matchedChildId {
+                                            reflectionStore.clear(childId: childId)
+                                        }
+                                    },
+                                    onRedo: { typedNote in
+                                        // "Write again" routes through the SAME
+                                        // backend path as the Step-3 "Request
+                                        // redo" button. The card forwards the
+                                        // parent's typed message (already
+                                        // trimmed); the VM substitutes the
+                                        // default coaching string only when
+                                        // it's empty.
+                                        let effectiveNote = typedNote.isEmpty
+                                            ? ReflectionParentNoteFallback.redoTakeAnotherLook
+                                            : typedNote
+                                        await viewModel.requestRedoReflectionFromChat(
+                                            messageId: message.id,
+                                            reflectionId: reflection.reflectionId,
+                                            parentNoteTrimmed: typedNote
+                                        )
+                                        if let childId = matchedChildId {
+                                            reflectionStore.applyParentRedoLocally(
+                                                childId: childId,
+                                                redoNote: effectiveNote
+                                            )
+                                        }
+                                    }
+                                )
+                            }
 
-                        // Confirmation card (Phase 9) — rendered below the message list.
-                        if let (cardID, context, handlers) = viewModel.currentCard {
+                            // Strategy-agent T11.12 — 👍/👎 feedback row under each
+                            // agent bubble that has visible content.
+                            if message.role == .agent, !message.content.isEmpty {
+                                AssistantFeedbackButtons(messageId: message.id.uuidString) { rating in
+                                    Task {
+                                        await viewModel.sendFeedback(
+                                            messageId: message.id.uuidString,
+                                            rating: rating
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        .id(message.id)
+                    }
+
+                    if viewModel.isThinking {
+                        thinkingIndicator
+                    }
+
+                    // Confirmation card (Phase 9) — rendered below the message list.
+                    if let (cardID, context, handlers) = viewModel.currentCard {
+                        VStack(spacing: Spacing.sm) {
+                            CardDispatcher(cardID: cardID, context: context, handlers: handlers)
+                            reinterpretButton
+                        }
+                        .padding(.top, Spacing.md)
+                        .transition(.opacity.combined(with: .scale))
+                    }
+
+                    // Task 11 — deterministic app-control card (single_app_shield_advice,
+                    // shield_token_missing, disambiguation, …). Rendered SEPARATELY from
+                    // the Brain card path above; buttons re-dispatch via force_confirmations
+                    // or open the lazy-tag picker / dictionary flows.
+                    if let appControlCard = viewModel.currentAppControlCard {
+                        VStack(spacing: Spacing.sm) {
+                            AppControlCard(
+                                model: appControlCard,
+                                onOption: { option in viewModel.handleAppControlOption(option) },
+                                onCandidate: { candidate in viewModel.handleAppControlCandidate(candidate) },
+                                onCancel: { viewModel.dismissAppControlCard() }
+                            )
+                            reinterpretButton
+                        }
+                        .padding(.top, Spacing.md)
+                        .transition(.opacity.combined(with: .scale))
+                    }
+
+                    // Plan-arch card (AGENT_PLAN_ARCH=1) — typed CardPayload
+                    // from the new orchestrator. Phase 2A dispatches through
+                    // PlanArchCardAdapter → CardDispatcher (polished cards).
+                    // Falls back to PlanArchCardView for unknown / future kinds.
+                    if let planArchCard = viewModel.pendingPlanArchCard {
+                        // Strategy-agent T11.12 — question.<style> card path.
+                        if let qcard = QuestionCardAdapter.parse(planArchCard) {
                             VStack(spacing: Spacing.sm) {
-                                CardDispatcher(cardID: cardID, context: context, handlers: handlers)
+                                QuestionCardView(
+                                    card: qcard,
+                                    onAnswer: { body in
+                                        Task { await viewModel.sendAnswer(body) }
+                                    },
+                                    onCancel: {
+                                        viewModel.pendingPlanArchCard = nil
+                                    }
+                                )
                                 reinterpretButton
                             }
                             .padding(.top, Spacing.md)
                             .transition(.opacity.combined(with: .scale))
-                        }
-
-                        // Task 11 — deterministic app-control card (single_app_shield_advice,
-                        // shield_token_missing, disambiguation, …). Rendered SEPARATELY from
-                        // the Brain card path above; buttons re-dispatch via force_confirmations
-                        // or open the lazy-tag picker / dictionary flows.
-                        if let appControlCard = viewModel.currentAppControlCard {
+                        } else if planArchCard.kind.hasPrefix("event.")
+                                    || planArchCard.kind.hasPrefix("target.") {
                             VStack(spacing: Spacing.sm) {
-                                AppControlCard(
-                                    model: appControlCard,
-                                    onOption: { option in viewModel.handleAppControlOption(option) },
-                                    onCandidate: { candidate in viewModel.handleAppControlCandidate(candidate) },
-                                    onCancel: { viewModel.dismissAppControlCard() }
+                                EventTargetCardView(
+                                    payload: planArchCard,
+                                    childName: viewModel.childName,
+                                    onConfirm: { token in
+                                        await viewModel.handleEventConfirm(token) },
+                                    onPickEvent: { ct, eid, occ in
+                                        Task { await viewModel.handleEventSelect(ct, eid, occ) } },
+                                    onResolveTarget: { ct, ids in
+                                        Task { await viewModel.handleResolveTarget(ct, ids) } },
+                                    onReflection: { approve, note in
+                                        await viewModel.handleReflectionReview(planArchCard, approve: approve, note: note) },
+                                    onScope: { ct in
+                                        Task { await viewModel.handleEventScope(ct) } },
+                                    onSkip: { viewModel.dismissEventCard() })
+                                reinterpretButton
+                            }
+                            .padding(.top, Spacing.md)
+                            .transition(.opacity.combined(with: .scale))
+                        } else if let renderModel = PlanArchCardAdapter.adapt(
+                            planArchCard, childName: viewModel.childName
+                        ) {
+                            // Phase 2A: dispatch through the adapter back onto polished cards.
+                            VStack(spacing: Spacing.sm) {
+                                CardDispatcher(
+                                    cardID: renderModel.cardID,
+                                    context: renderModel.context,
+                                    handlers: viewModel.makePlanArchHandlers(for: planArchCard)
+                                )
+                                reinterpretButton
+                            }
+                            .padding(.top, Spacing.md)
+                            .transition(.opacity.combined(with: .scale))
+                        } else {
+                            // Unknown kind — debug fallback only. Spec §1 acceptance requires
+                            // every known kind to go through the adapter.
+                            VStack(spacing: Spacing.sm) {
+                                PlanArchCardView(
+                                    card: planArchCard,
+                                    onOption: { opt in viewModel.handlePlanArchOption(opt) },
+                                    onLazyTag: { card in viewModel.handlePlanArchLazyTag(for: card) }
                                 )
                                 reinterpretButton
                             }
                             .padding(.top, Spacing.md)
                             .transition(.opacity.combined(with: .scale))
                         }
-
-                        // Plan-arch card (AGENT_PLAN_ARCH=1) — typed CardPayload
-                        // from the new orchestrator. Phase 2A dispatches through
-                        // PlanArchCardAdapter → CardDispatcher (polished cards).
-                        // Falls back to PlanArchCardView for unknown / future kinds.
-                        if let planArchCard = viewModel.pendingPlanArchCard {
-                            // Strategy-agent T11.12 — question.<style> card path.
-                            if let qcard = QuestionCardAdapter.parse(planArchCard) {
-                                VStack(spacing: Spacing.sm) {
-                                    QuestionCardView(
-                                        card: qcard,
-                                        onAnswer: { body in
-                                            Task { await viewModel.sendAnswer(body) }
-                                        },
-                                        onCancel: {
-                                            viewModel.pendingPlanArchCard = nil
-                                        }
-                                    )
-                                    reinterpretButton
-                                }
-                                .padding(.top, Spacing.md)
-                                .transition(.opacity.combined(with: .scale))
-                            } else if planArchCard.kind.hasPrefix("event.")
-                                        || planArchCard.kind.hasPrefix("target.") {
-                                VStack(spacing: Spacing.sm) {
-                                    EventTargetCardView(
-                                        payload: planArchCard,
-                                        childName: viewModel.childName,
-                                        onConfirm: { token in
-                                            await viewModel.handleEventConfirm(token) },
-                                        onPickEvent: { ct, eid, occ in
-                                            Task { await viewModel.handleEventSelect(ct, eid, occ) } },
-                                        onResolveTarget: { ct, ids in
-                                            Task { await viewModel.handleResolveTarget(ct, ids) } },
-                                        onReflection: { approve, note in
-                                            await viewModel.handleReflectionReview(planArchCard, approve: approve, note: note) },
-                                        onScope: { ct in
-                                            Task { await viewModel.handleEventScope(ct) } },
-                                        onSkip: { viewModel.dismissEventCard() })
-                                    reinterpretButton
-                                }
-                                .padding(.top, Spacing.md)
-                                .transition(.opacity.combined(with: .scale))
-                            } else if let renderModel = PlanArchCardAdapter.adapt(
-                                planArchCard, childName: viewModel.childName
-                            ) {
-                                // Phase 2A: dispatch through the adapter back onto polished cards.
-                                VStack(spacing: Spacing.sm) {
-                                    CardDispatcher(
-                                        cardID: renderModel.cardID,
-                                        context: renderModel.context,
-                                        handlers: viewModel.makePlanArchHandlers(for: planArchCard)
-                                    )
-                                    reinterpretButton
-                                }
-                                .padding(.top, Spacing.md)
-                                .transition(.opacity.combined(with: .scale))
-                            } else {
-                                // Unknown kind — debug fallback only. Spec §1 acceptance requires
-                                // every known kind to go through the adapter.
-                                VStack(spacing: Spacing.sm) {
-                                    PlanArchCardView(
-                                        card: planArchCard,
-                                        onOption: { opt in viewModel.handlePlanArchOption(opt) },
-                                        onLazyTag: { card in viewModel.handlePlanArchLazyTag(for: card) }
-                                    )
-                                    reinterpretButton
-                                }
-                                .padding(.top, Spacing.md)
-                                .transition(.opacity.combined(with: .scale))
-                            }
-                        }
-
-                        Color.clear
-                            .frame(height: 1)
-                            .id(bottomAnchorID)
                     }
-                    .padding(.horizontal, Spacing.xl)
-                    .padding(.top, Spacing.md)
-                    .padding(.bottom, Self.messageListBottomPadding(keyboardOverlap: keyboardOverlapHeight))
-                    .background(
-                        GeometryReader { g in
-                            Color.clear.preference(
-                                key: ChatScrollBottomKey.self,
-                                value: g.frame(in: .named("chatScroll")).maxY
-                            )
-                        }
-                    )
-                }
-                .onAppear {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                        proxy.scrollTo(bottomAnchorID, anchor: .bottom)
-                    }
-                }
-                .onChange(of: viewModel.messages.count) { _, _ in
-                    withAnimation { proxy.scrollTo(bottomAnchorID, anchor: .bottom) }
-                }
-                .onChange(of: viewModel.pendingPlanArchCard?.planToken) { _, _ in
-                    withAnimation { proxy.scrollTo(bottomAnchorID, anchor: .bottom) }
-                }
-                .onChange(of: viewModel.currentCard?.0.rawValue) { _, _ in
-                    withAnimation { proxy.scrollTo(bottomAnchorID, anchor: .bottom) }
-                }
-                .onChange(of: viewModel.currentAppControlCard?.kind) { _, _ in
-                    withAnimation { proxy.scrollTo(bottomAnchorID, anchor: .bottom) }
-                }
-                // Keyboard show: re-pin to the bottom only when the user was
-                // already there, so the latest message stays visible above the
-                // keyboard. keyboardOverlapHeight reads ~0 here (native keyboard
-                // avoidance already resized the view), so we trigger off the real
-                // notification and wait a beat for the resize to settle.
-                .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
-                    guard isAtBottom else { return }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                        withAnimation { proxy.scrollTo(bottomAnchorID, anchor: .bottom) }
-                    }
-                }
-                .coordinateSpace(name: "chatScroll")
-                .onPreferenceChange(ChatScrollBottomKey.self) { contentMaxY in
-                    scrollBottomDistance = max(0, contentMaxY - viewportHeight)
-                }
 
-                composerPanel
-                    .background(Color.evSurfaceContainer)
-                    .padding(.bottom, Self.composerBottomInset(keyboardOverlap: keyboardOverlapHeight))
-
-                // Floating "jump to latest", layered above the composer so it is
-                // never hidden behind it.
-                if !isAtBottom {
-                    scrollToBottomButton(proxy)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                    Color.clear
+                        .frame(height: 1)
+                        .id(bottomAnchorID)
+                }
+                .padding(.horizontal, Spacing.xl)
+                .padding(.top, Spacing.md)
+                .padding(.bottom, Self.messageListBottomPadding(keyboardOverlap: keyboardOverlapHeight))
+            }
+            .onAppear {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    scrollController.scrollToBottom(animated: false)
                 }
             }
-            .animation(.easeInOut(duration: 0.18), value: isAtBottom)
+            .onChange(of: viewModel.messages.count) { _, _ in
+                scrollToBottomIfNeeded(previousBottomDistance: scrollBottomDistance)
+            }
+            .onChange(of: viewModel.pendingPlanArchCard?.planToken) { _, _ in
+                scrollToBottomIfNeeded(previousBottomDistance: scrollBottomDistance)
+            }
+            .onChange(of: viewModel.currentCard?.0.rawValue) { _, _ in
+                scrollToBottomIfNeeded(previousBottomDistance: scrollBottomDistance)
+            }
+            .onChange(of: viewModel.currentAppControlCard?.kind) { _, _ in
+                scrollToBottomIfNeeded(previousBottomDistance: scrollBottomDistance)
+            }
+            .offset(y: -Self.keyboardContentLift(keyboardOverlap: keyboardOverlapHeight))
+
+            composerPanel
+                .background(Color.evSurfaceContainer)
+                .padding(.bottom, Self.composerBottomInset(keyboardOverlap: keyboardOverlapHeight))
+
+            // Floating "jump to latest", layered above the composer so it is
+            // never hidden behind it.
+            if Self.shouldShowScrollToBottomButton(bottomDistance: scrollBottomDistance) {
+                scrollToBottomButton()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                    .zIndex(2)
+            }
         }
+        .animation(.easeInOut(duration: 0.18), value: isAtBottom)
         .background(Color.evSurfaceContainerLow)
         .onAppear {
             if !isPreview {
@@ -515,7 +615,7 @@ struct ChatView: View {
                 .padding(.horizontal, Spacing.xl)
             }
 
-            ChatInputBar(text: $viewModel.inputText) {
+            ChatInputBar(text: $viewModel.inputText, isFocused: $isComposerFocused) {
                 viewModel.sendMessage()
             }
         }
@@ -524,23 +624,154 @@ struct ChatView: View {
 
     /// Floating "jump to latest" affordance, shown only when scrolled up. Sits
     /// just above the composer, which itself floats above the keyboard.
-    private func scrollToBottomButton(_ proxy: ScrollViewProxy) -> some View {
-        Button {
-            withAnimation { proxy.scrollTo(bottomAnchorID, anchor: .bottom) }
-        } label: {
-            Image(systemName: "chevron.down")
-                .font(.system(size: 16, weight: .bold))
-                .foregroundStyle(Color.evPrimary)
-                .frame(width: 40, height: 40)
-                .background(Circle().fill(Color.evSurfaceContainerLowest))
-                .overlay(Circle().stroke(Color.evOutlineVariant.opacity(0.6), lineWidth: 0.5))
-                .shadow(color: Color.black.opacity(0.12), radius: 8, y: 3)
-        }
-        .buttonStyle(.plain)
-        .padding(.trailing, Spacing.xl)
-        .padding(.bottom, Self.composerBottomInset(keyboardOverlap: keyboardOverlapHeight) + 156)
-        .transition(.scale.combined(with: .opacity))
+    private func scrollToBottomButton() -> some View {
+        Image(systemName: "chevron.down")
+            .font(.system(size: 17, weight: .heavy))
+            .foregroundStyle(Color.white)
+            .frame(width: 46, height: 46)
+            .background {
+                Circle()
+                    .fill(.ultraThinMaterial)
+                Circle()
+                    .fill(
+                        LinearGradient(
+                            colors: [
+                                EvlinKidColors.green700.opacity(0.9),
+                                EvlinKidColors.green500.opacity(0.78)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                Circle()
+                    .stroke(Color.white.opacity(0.42), lineWidth: 1)
+                    .padding(1)
+            }
+            .contentShape(Circle())
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { _ in
+                        KeyboardDismissGate.suppressNextRootTapDismissal()
+                    }
+            )
+            .onTapGesture {
+                KeyboardDismissGate.suppressNextRootTapDismissal()
+                let shouldRestoreFocus = Self.shouldRestoreComposerFocusAfterScrollToBottom(
+                    wasComposerFocused: isComposerFocused,
+                    keyboardOverlap: keyboardOverlapHeight
+                )
+                scrollController.scrollToBottom(animated: true)
+                guard shouldRestoreFocus else { return }
+                DispatchQueue.main.async {
+                    isComposerFocused = true
+                }
+            }
+            .shadow(color: EvlinKidColors.green700.opacity(0.22), radius: 16, y: 7)
+            .shadow(color: Color.white.opacity(0.35), radius: 2, y: -1)
+            .padding(.bottom, Self.composerBottomInset(keyboardOverlap: keyboardOverlapHeight) + 132)
+            .transition(.opacity)
     }
+
+    private func scrollToBottomIfNeeded(previousBottomDistance: CGFloat) {
+        guard Self.shouldAutoPinAfterContentChange(previousBottomDistance: previousBottomDistance) else {
+            return
+        }
+        scrollController.scrollToBottom(animated: true)
+    }
+
+    static func shouldAutoPinAfterContentChange(previousBottomDistance: CGFloat) -> Bool {
+        previousBottomDistance < autoPinThreshold
+    }
+
+    static func shouldAutoPinAfterKeyboardChange(
+        previousBottomDistance: CGFloat,
+        previousKeyboardOverlap: CGFloat,
+        nextKeyboardOverlap: CGFloat
+    ) -> Bool {
+        false
+    }
+
+    static func keyboardContentLift(
+        keyboardOverlap: CGFloat,
+        tabInset: CGFloat = EvlinTabBar.visibleHeight
+    ) -> CGFloat {
+        max(0, composerBottomInset(keyboardOverlap: keyboardOverlap, tabInset: tabInset) - tabInset)
+    }
+
+    static func shouldShowScrollToBottomButton(bottomDistance: CGFloat) -> Bool {
+        bottomDistance >= scrollToBottomButtonThreshold
+    }
+
+    static func shouldRestoreComposerFocusAfterScrollToBottom(
+        wasComposerFocused: Bool,
+        keyboardOverlap: CGFloat
+    ) -> Bool {
+        wasComposerFocused || keyboardOverlap > 0
+    }
+
+    static func scrollBottomDistance(contentMaxY: CGFloat, scrollViewportHeight: CGFloat) -> CGFloat {
+        guard scrollViewportHeight > 0 else { return 0 }
+        return max(0, contentMaxY - scrollViewportHeight)
+    }
+
+    static func scrollBottomDistance(
+        contentOffsetY: CGFloat,
+        contentSizeHeight: CGFloat,
+        viewportHeight: CGFloat,
+        adjustedBottomInset: CGFloat
+    ) -> CGFloat {
+        guard viewportHeight > 0 else { return 0 }
+        let visibleBottomY = contentOffsetY + viewportHeight - adjustedBottomInset
+        return max(0, contentSizeHeight - visibleBottomY)
+    }
+
+    static func scrollTargetOffsetY(
+        contentSizeHeight: CGFloat,
+        viewportHeight: CGFloat,
+        adjustedTopInset: CGFloat,
+        adjustedBottomInset: CGFloat
+    ) -> CGFloat {
+        let minY = -adjustedTopInset
+        let maxY = contentSizeHeight - viewportHeight + adjustedBottomInset
+        return max(minY, maxY)
+    }
+
+    static func scrollToBottomSettleDelays(animated: Bool) -> [Double] {
+        animated ? [0, 0.08, 0.18, 0.32] : [0]
+    }
+
+    static func clampedContentOffsetY(
+        proposedOffsetY: CGFloat,
+        contentSizeHeight: CGFloat,
+        viewportHeight: CGFloat,
+        adjustedTopInset: CGFloat,
+        adjustedBottomInset: CGFloat
+    ) -> CGFloat {
+        let minY = -adjustedTopInset
+        let maxY = scrollTargetOffsetY(
+            contentSizeHeight: contentSizeHeight,
+            viewportHeight: viewportHeight,
+            adjustedTopInset: adjustedTopInset,
+            adjustedBottomInset: adjustedBottomInset
+        )
+        return min(max(proposedOffsetY, minY), maxY)
+    }
+
+    static func keyboardUIViewAnimationOption(curveRawValue: UInt) -> UIView.AnimationOptions {
+        switch UIView.AnimationCurve(rawValue: Int(curveRawValue)) {
+        case .easeIn:
+            return .curveEaseIn
+        case .easeOut:
+            return .curveEaseOut
+        case .linear:
+            return .curveLinear
+        default:
+            return .curveEaseInOut
+        }
+    }
+
+    static var autoPinThreshold: CGFloat { 100 }
+    static var scrollToBottomButtonThreshold: CGFloat { 180 }
 
     static func composerBottomInset(
         keyboardOverlap: CGFloat,
@@ -555,11 +786,9 @@ struct ChatView: View {
         tabInset: CGFloat = EvlinTabBar.visibleHeight,
         extraClearance: CGFloat = 28
     ) -> CGFloat {
-        // Grow with the keyboard so the last message clears the composer — which
-        // itself lifts above the keyboard via the same max(tabInset,
-        // keyboardOverlap) in composerBottomInset. Without this the keyboard
-        // hides the bottom messages.
-        composerPanelHeight + max(tabInset, keyboardOverlap) + extraClearance
+        // The ScrollView itself is lifted with the composer when the keyboard is
+        // visible, so this padding should only reserve the composer/tab clearance.
+        composerPanelHeight + tabInset + extraClearance
     }
 
     static func keyboardOverlap(keyboardFrameEnd: CGRect, viewFrame: CGRect) -> CGFloat {

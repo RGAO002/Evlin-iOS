@@ -6,8 +6,9 @@ import ManagedSettings
 ///
 /// Naming step shows the system-rendered app token icon only. Evlin cannot read
 /// the rendered app name as text, so the parent matches the icon to an App Store
-/// catalog result. Confirmation then reveals the full `Label(token)` for a
-/// visual "do these match?" check before the token becomes lockable by name.
+/// catalog result. Picking that result immediately marks the token lockable by
+/// name; the row then shows a side-by-side review (with a Rebind escape) instead
+/// of a blocking "do these match?" confirmation prompt.
 struct CatalogBindRowView: View {
     let token: ApplicationToken
     @Binding var row: PendingAppRow
@@ -73,7 +74,11 @@ struct CatalogBindRowView: View {
 
             ForEach(results) { result in
                 Button {
+                    // Picking the matching App Store result IS the confirmation —
+                    // the parent has been looking at Label(token) (shown above) the
+                    // whole time they searched. No separate "yes these match" tap.
                     row.bind(result)
+                    row.confirm()
                     query = result.canonicalName
                     results = []
                     inlineError = nil
@@ -93,6 +98,7 @@ struct CatalogBindRowView: View {
                         return
                     }
                     row.bind(CatalogSearchResult(canonicalName: manualName, bundleID: nil, aliases: []))
+                    row.confirm()
                     inlineError = nil
                 }
                 .font(.caption.weight(.semibold))
@@ -102,78 +108,90 @@ struct CatalogBindRowView: View {
 
     @ViewBuilder
     private func confirmationBody(_ entry: CatalogSearchResult) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(row.isLockableApp ? "\(entry.canonicalName) is lockable" : "Do these match?")
-                .font(.headline)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "checkmark.seal.fill")
+                    .font(.title3)
+                    .foregroundStyle(.green)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("\(entry.canonicalName) is lockable")
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                    Text("This app can now be locked by name.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+            }
 
-            Text(row.isLockableApp ? "This app can now be locked by name." : "Confirm the app iOS shows is the one you picked from the App Store.")
+            // Evlin can't read the token's name as text — it can only render
+            // Label(token). So this eyeball comparison is the only way to confirm the
+            // parent picked the right App Store entry (e.g. not a knockoff). The
+            // caption tells them WHY two near-identical rows are shown. Stacked
+            // full-width rows keep long names from wrapping/truncating (the old
+            // half-width columns did both — "WhatsApp" broke onto two lines).
+            Text("Double-check it's the same app:")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
-            HStack(spacing: 14) {
-                VStack(spacing: 8) {
-                    Text("iOS shows")
-                        .font(.caption2.weight(.bold))
-                        .foregroundStyle(.secondary)
+            VStack(spacing: 0) {
+                matchRow(label: "iOS shows") {
                     Label(token)
                         .labelStyle(.titleAndIcon)
+                        .font(.subheadline.weight(.semibold))
                         .lineLimit(1)
-                        .minimumScaleFactor(0.8)
+                        .minimumScaleFactor(0.7)
                 }
-                .frame(maxWidth: .infinity)
-
-                Text("=?")
-                    .font(.title3.weight(.black))
-                    .foregroundStyle(.secondary)
-
-                VStack(spacing: 8) {
-                    Text("You picked")
-                        .font(.caption2.weight(.bold))
-                        .foregroundStyle(.secondary)
-                    CatalogCandidateRow(result: entry, compact: true)
+                Divider().padding(.leading, 12)
+                matchRow(label: "You picked") {
+                    HStack(spacing: 8) {
+                        CatalogArtworkView(result: entry, size: 24)
+                        Text(entry.canonicalName)
+                            .font(.subheadline.weight(.semibold))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.7)
+                        Spacer(minLength: 0)
+                    }
                 }
-                .frame(maxWidth: .infinity)
             }
-            .padding(12)
-            .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
 
             if let inlineError {
                 InlineCaptureError(message: inlineError)
             }
 
-            if row.confirmed {
-                HStack(spacing: 8) {
-                    Image(systemName: "checkmark.seal.fill")
-                        .foregroundStyle(.green)
-                    Text("Ready")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.green)
-                    Spacer(minLength: 8)
-                    Button("Rebind") {
-                        rebind()
-                    }
-                    .font(.caption)
+            HStack {
+                Spacer(minLength: 0)
+                Button("Rebind") {
+                    rebind()
                 }
-            } else {
-                HStack {
-                    Button("Yes, these match") {
-                        row.confirm()
-                        inlineError = nil
-                    }
-                    .buttonStyle(.borderedProminent)
-
-                    Button("Pick a different app") {
-                        inlineError = "Nothing was saved. Pick a different App Store match for this token."
-                        rebind(keepError: true)
-                    }
-                    .buttonStyle(.bordered)
-                }
+                .font(.caption.weight(.semibold))
             }
         }
     }
 
-    private func rebind(keepError: Bool = false) {
-        let currentError = inlineError
+    /// One full-width row of the "do these match?" cross-check: a fixed-width
+    /// caption ("iOS shows" / "You picked") followed by the app representation.
+    /// Full width means long app names never wrap or truncate.
+    @ViewBuilder
+    private func matchRow<Content: View>(
+        label: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        HStack(spacing: 12) {
+            Text(label)
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(.secondary)
+                .frame(width: 64, alignment: .leading)
+            content()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+    }
+
+    private func rebind() {
         row = PendingAppRow(
             rowID: row.id,
             tokenBase64: row.tokenBase64,
@@ -181,7 +199,7 @@ struct CatalogBindRowView: View {
         )
         query = ""
         results = []
-        inlineError = keepError ? currentError : nil
+        inlineError = nil
     }
 
     private func scheduleSearch(_ text: String) {

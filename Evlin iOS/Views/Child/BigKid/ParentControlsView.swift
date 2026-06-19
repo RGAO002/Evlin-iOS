@@ -40,8 +40,8 @@ struct ParentControlsView: View {
             List {
                 Section {
                     Button { showLockList = true } label: {
-                        rowLabel(icon: "square.grid.2x2.fill", title: "Locked apps & lists",
-                                 subtitle: "Choose what Evlin can lock", trailingChevron: true,
+                        rowLabel(icon: "square.grid.2x2.fill", title: "App Controls",
+                                 subtitle: "Choose what Evlin can lock & monitor", trailingChevron: true,
                                  badgeColor: EvlinKidColors.green700)
                     }
                 }
