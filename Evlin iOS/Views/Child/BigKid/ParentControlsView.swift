@@ -115,7 +115,7 @@ struct ParentControlsView: View {
             }
             .fullScreenCover(isPresented: $showLockList) {
                 NavigationStack {
-                    LockListManagerView(familyID: familyID, childDeviceID: childDeviceID, mode: .settings)
+                    AppControlsV2View(childDeviceID: childDeviceID)
                         .toolbar {
                             ToolbarItem(placement: .cancellationAction) {
                                 Button("Done") { showLockList = false }
