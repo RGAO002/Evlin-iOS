@@ -33,6 +33,10 @@ struct AppControlsV2View: View {
     // saved first, so a failure here never blocks naming on this device.
     @State private var bindError: String?
 
+    // Bumped after a successful local bind so each row re-reads its `MatchedState`
+    // from LocalAliasStore — a just-bound app flips to "Matched" without a reload.
+    @State private var refreshTick = 0
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
@@ -126,6 +130,7 @@ struct AppControlsV2View: View {
                 ForEach(Array(selection.categoryTokens), id: \.self) { token in
                     CategoryRow(
                         token: token,
+                        state: matchedState(forCategory: token, tick: refreshTick),
                         isExpanded: expandedCategory == token,
                         onToggle: { toggleCategory(token) },
                         onRemove: {
@@ -155,6 +160,7 @@ struct AppControlsV2View: View {
                         AppRow(
                             token: token,
                             apiClient: apiClient,
+                            state: matchedState(forApp: token, tick: refreshTick),
                             isExpanded: expandedApp == token,
                             onToggle: { toggleApp(token) },
                             onRemove: {
@@ -214,6 +220,8 @@ struct AppControlsV2View: View {
         // Collapse the accordion immediately — the bind is committed locally.
         expandedApp = nil
         bindError = nil
+        // Re-read MatchedState so the just-bound app flips to "Matched".
+        refreshTick &+= 1
 
         // 2) upload, then 3) re-save with the backend's real alias_key. Detached
         // so a slow/failed sync never blocks the UI; failure is a soft inline note.
@@ -261,6 +269,8 @@ struct AppControlsV2View: View {
         // Collapse the accordion immediately — the bind is committed locally.
         expandedCategory = nil
         bindError = nil
+        // Re-read MatchedState so the just-bound category flips to "Matched".
+        refreshTick &+= 1
 
         // 2) upload, then 3) re-save every name with the backend's real alias_key.
         Task {
@@ -302,6 +312,30 @@ struct AppControlsV2View: View {
     private func reload() {
         selection = DefaultLockGroupStore.load()
     }
+
+    // MARK: - Local "is this still matched?" state (pure reads of LocalAliasStore)
+
+    /// App Controls v2 runs on the kid device, which holds the tokens locally. The
+    /// "matched?" signal is derived ONLY from local token presence — never a backend
+    /// row field (the lazy-tag conversion discards `token_available`/`status`).
+    ///
+    /// `tick` is unused in the body; it threads `refreshTick` through the row's
+    /// initializer so SwiftUI re-invokes this after a bind and the chip updates.
+    private func matchedState(forApp appToken: ApplicationToken, tick: Int) -> MatchedState {
+        let keys = LocalAliasStore.shared.applicationLookupKeys(equalTo: appToken)
+        let hasAliasKey = LocalAliasStore.shared.catalogAppTargets()
+            .contains { !Set($0.lookupKeys).isDisjoint(with: keys) }
+        let localTokenPresent = keys.contains { LocalAliasStore.shared.applicationToken(forLookupKey: $0) == appToken }
+        return MatchedState.from(hasAliasKey: hasAliasKey, localTokenPresent: localTokenPresent)
+    }
+
+    private func matchedState(forCategory catToken: ActivityCategoryToken, tick: Int) -> MatchedState {
+        let keys = LocalAliasStore.shared.categoryLookupKeys(equalTo: catToken)
+        let hasAliasKey = LocalAliasStore.shared.catalogCategoryTargets()
+            .contains { LocalAliasStore.shared.categoryToken(forName: $0.name) == catToken }
+        let localTokenPresent = keys.contains { LocalAliasStore.shared.categoryToken(forName: $0) == catToken }
+        return MatchedState.from(hasAliasKey: hasAliasKey, localTokenPresent: localTokenPresent)
+    }
 }
 
 // MARK: - Rows
@@ -310,6 +344,7 @@ struct AppControlsV2View: View {
 /// Expanded = the same header (highlighted) with an inline `CategoryTagPanel` below.
 private struct CategoryRow: View {
     let token: ActivityCategoryToken
+    let state: MatchedState
     let isExpanded: Bool
     let onToggle: () -> Void
     let onRemove: () -> Void
@@ -321,10 +356,13 @@ private struct CategoryRow: View {
             onToggle: onToggle,
             onRemove: onRemove,
             label: {
-                Label(token)
-                    .labelStyle(.titleAndIcon)
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(Color.evOnSurface)
+                HStack(spacing: 8) {
+                    Label(token)
+                        .labelStyle(.titleAndIcon)
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(Color.evOnSurface)
+                    MatchedChip(state: state, isExpanded: isExpanded)
+                }
             },
             panel: {
                 CategoryTagPanel(
@@ -342,6 +380,7 @@ private struct CategoryRow: View {
 private struct AppRow: View {
     let token: ApplicationToken
     let apiClient: APIClient
+    let state: MatchedState
     let isExpanded: Bool
     let onToggle: () -> Void
     let onRemove: () -> Void
@@ -354,10 +393,13 @@ private struct AppRow: View {
             onToggle: onToggle,
             onRemove: onRemove,
             label: {
-                Label(token)
-                    .labelStyle(.titleAndIcon)
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(Color.evOnSurface)
+                HStack(spacing: 8) {
+                    Label(token)
+                        .labelStyle(.titleAndIcon)
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(Color.evOnSurface)
+                    MatchedChip(state: state, isExpanded: isExpanded)
+                }
             },
             panel: {
                 AppStoreBindPanel(
@@ -426,6 +468,56 @@ private struct EvacAccordionRow<Label: View, Panel: View>: View {
                 .stroke(isExpanded ? Color.evPrimary : Color.evOutlineVariant, lineWidth: isExpanded ? 1 : 0.5)
         )
         .padding(.bottom, 8)
+    }
+}
+
+/// The local "Matched" status pill, mirroring the prototype's `.evac-chip`.
+///
+/// - `.matched` → green "Matched" chip (`#15803D` on `#DCFCE7`), with a check.
+/// - `.matchedNeedsRefresh` → weaker gray "Matched · Needs refresh" chip.
+/// - `.unmatched` → nothing (the row stays tappable to bind).
+///
+/// Like the prototype, the chip is hidden while the row is expanded (binding) so
+/// it doesn't compete with the inline panel.
+private struct MatchedChip: View {
+    let state: MatchedState
+    let isExpanded: Bool
+
+    var body: some View {
+        if !isExpanded {
+            switch state {
+            case .matched:
+                chip(
+                    icon: "checkmark",
+                    text: "Matched",
+                    foreground: Color(red: 0.082, green: 0.502, blue: 0.239), // #15803D
+                    background: Color(red: 0.863, green: 0.988, blue: 0.906)  // #DCFCE7
+                )
+            case .matchedNeedsRefresh:
+                chip(
+                    icon: "arrow.triangle.2.circlepath",
+                    text: "Matched · Needs refresh",
+                    foreground: Color.evOnSurfaceVariant,
+                    background: Color.evSurfaceContainerHighest
+                )
+            case .unmatched:
+                EmptyView()
+            }
+        }
+    }
+
+    private func chip(icon: String, text: String, foreground: Color, background: Color) -> some View {
+        HStack(spacing: 3) {
+            Image(systemName: icon)
+                .font(.system(size: 9, weight: .semibold))
+            Text(text)
+        }
+        .font(.system(size: 10, weight: .medium))
+        .foregroundStyle(foreground)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 2)
+        .background(background, in: Capsule())
+        .fixedSize()
     }
 }
 
