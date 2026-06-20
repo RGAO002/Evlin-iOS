@@ -15,13 +15,24 @@ import CryptoKit
 enum ShieldSource: String, Codable, Sendable {
     case manual
     case limit
+
+    /// Unknown-tolerant decode. The synthesized `RawRepresentable` decoder THROWS
+    /// on an unrecognized rawValue — e.g. a future `"schedule"` written by a newer
+    /// app binary and read back by an older extension binary. A throw here would
+    /// fail the whole `ShieldRecord` (and the surrounding `[String: ShieldRecord]`
+    /// dict) decode — a silent wipe of a parent's active shields. Falling back to
+    /// `.manual` keeps the record (and every sibling in the dict) alive.
+    init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = ShieldSource(rawValue: raw) ?? .manual
+    }
 }
 
 /// Single shield entry in ActiveLockStore.
 /// Keyed by `recordKey` (stable across mutations). Same (tier, targetKey)
 /// merges; different (tier, targetKey) coexist even if they cover the same app.
 /// See spec §3.1 and §3.2.
-struct ShieldRecord: Codable, Sendable {
+struct ShieldRecord: Codable, Sendable, Equatable {
     /// "exactApp:<b64>" | "savedList:<listID>" | "category:social" | "allApps:<target>" | "all"
     /// Stable. Merge target.
     let recordKey: String
