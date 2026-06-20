@@ -58,11 +58,23 @@ struct AppControlsV2View: View {
     // from LocalAliasStore — a just-bound app flips to "Matched" without a reload.
     @State private var refreshTick = 0
 
+    // Which matched app row the user tapped "Rebind" on. While set, that row shows
+    // the App Store search panel instead of its review; cleared on collapse, on
+    // opening a different row, and after a successful (re)bind.
+    @State private var rebindingApp: ApplicationToken?
+
     var body: some View {
+        // Fix 1 — the SCREEN is the container, not a small floating card.
+        //
+        // A full-screen, full-width `ScrollView` + top-aligned `VStack` fills the
+        // device on a plain neutral page background. There is NO bounded white
+        // card / warm tray wrapping the whole screen (the prototype's lines 66-67
+        // outer tray are its demo phone-bezel framing, not real device chrome).
+        // Each ROW supplies its own card. Because the scrolling screen (not a
+        // resizable card) is the container, expanding a row grows the row in place
+        // and pushes the rows below down WITHIN the scroll — the overall frame
+        // never resizes or jumps.
         ScrollView {
-            // Mirrors the prototype's nested-card chrome: a warm "secondary" tray
-            // (radius 20) wrapping a white "primary" card (radius 16, hairline
-            // border). The screen background is the warm "tertiary" page color.
             VStack(alignment: .leading, spacing: 0) {
                 header
                 subtitle
@@ -72,22 +84,12 @@ struct AppControlsV2View: View {
                 categoriesSection
                 appsSection
             }
-            .padding(16)
-            .background(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(Color.evCardFill)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .stroke(Color.evHairline, lineWidth: 0.5)
-            )
-            .padding(14)
-            .background(
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
-                    .fill(Color.evTrayFill)
-            )
-            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 16)
+            .padding(.top, 16)
+            .padding(.bottom, 24)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(Color.evPageBg)
         .sheet(isPresented: $showPicker) {
             CombinedPickerSheet(
@@ -210,14 +212,17 @@ struct AppControlsV2View: View {
                             apiClient: apiClient,
                             state: matchedState(forApp: token, tick: refreshTick),
                             isExpanded: expandedApp == token,
+                            isRebinding: rebindingApp == token,
                             onToggle: { toggleApp(token) },
                             onRemove: {
                                 if expandedApp == token {
                                     withAnimation(Self.accordionAnimation) { expandedApp = nil }
                                 }
+                                rebindingApp = nil
                                 DefaultLockGroupStore.removeApp(token)
                                 reload()
                             },
+                            onRebind: { rebindingApp = token },
                             onPick: { result in bindApp(token, result: result) },
                             onManual: { name in
                                 bindApp(token, result: CatalogSearchResult(canonicalName: name, bundleID: nil, aliases: []))
@@ -238,6 +243,9 @@ struct AppControlsV2View: View {
 
     private func toggleApp(_ token: ApplicationToken) {
         bindError = nil
+        // Collapsing this row, or opening a different one, always drops any
+        // in-progress rebind so a re-opened matched row shows its review again.
+        rebindingApp = nil
         withAnimation(Self.accordionAnimation) {
             if expandedApp == token {
                 expandedApp = nil
@@ -250,6 +258,7 @@ struct AppControlsV2View: View {
 
     private func toggleCategory(_ token: ActivityCategoryToken) {
         bindError = nil
+        rebindingApp = nil
         withAnimation(Self.accordionAnimation) {
             if expandedCategory == token {
                 expandedCategory = nil
@@ -278,6 +287,7 @@ struct AppControlsV2View: View {
 
         // Collapse the accordion immediately — the bind is committed locally.
         withAnimation(Self.accordionAnimation) { expandedApp = nil }
+        rebindingApp = nil
         bindError = nil
         // Re-read MatchedState so the just-bound app flips to "Matched".
         refreshTick &+= 1
@@ -438,16 +448,34 @@ private struct CategoryRow: View {
 }
 
 /// An app row: collapsed = icon + name (`Label(token)`) + chevron + remove "x".
-/// Expanded = the same header (highlighted) with an inline `AppStoreBindPanel` below.
+/// Expanded = the same header (highlighted) with an inline panel below.
+///
+/// Fix 2 — the expanded panel is state-aware:
+/// - `.matched` / `.matchedNeedsRefresh`, and NOT currently rebinding → a REVIEW
+///   panel ("iOS shows / You picked / Rebind"), so re-opening an already-matched
+///   app no longer dumps the user back into a search.
+/// - `.unmatched`, OR the user tapped "Rebind" on this row → the `AppStoreBindPanel`
+///   search, exactly as before.
 private struct AppRow: View {
     let token: ApplicationToken
     let apiClient: APIClient
     let state: MatchedState
     let isExpanded: Bool
+    let isRebinding: Bool
     let onToggle: () -> Void
     let onRemove: () -> Void
+    let onRebind: () -> Void
     let onPick: (CatalogSearchResult) -> Void
     let onManual: (String) -> Void
+
+    private var showsReview: Bool {
+        switch state {
+        case .matched, .matchedNeedsRefresh:
+            return !isRebinding
+        case .unmatched:
+            return false
+        }
+    }
 
     var body: some View {
         EvacAccordionRow(
@@ -464,13 +492,148 @@ private struct AppRow: View {
                 }
             },
             panel: {
-                AppStoreBindPanel(
-                    appName: "this app",
-                    apiClient: apiClient,
-                    onPick: onPick,
-                    onManual: onManual
-                )
+                if showsReview {
+                    MatchedReviewPanel(token: token, onRebind: onRebind)
+                } else {
+                    AppStoreBindPanel(
+                        appName: "this app",
+                        apiClient: apiClient,
+                        onPick: onPick,
+                        onManual: onManual
+                    )
+                }
             }
+        )
+    }
+}
+
+/// The "already matched" review panel, replicating `CatalogBindRowView.confirmationBody`'s
+/// "iOS shows / You picked" layout inline (so we never edit that file). Shows the real
+/// on-device `Label(token)` next to the bound name + artwork the parent picked, plus a
+/// "Rebind" escape that swaps this row back to the App Store search panel.
+private struct MatchedReviewPanel: View {
+    let token: ApplicationToken
+    let onRebind: () -> Void
+
+    /// The bound name/bundle for "You picked", read from the same LocalAliasStore
+    /// catalog target that `matchedState(forApp:)` uses to decide "matched": the
+    /// app target whose lookup keys intersect this token's lookup keys.
+    private var boundResult: CatalogSearchResult? {
+        let keys = Set(LocalAliasStore.shared.applicationLookupKeys(equalTo: token))
+        guard let target = LocalAliasStore.shared.catalogAppTargets()
+            .first(where: { !Set($0.lookupKeys).isDisjoint(with: keys) })
+        else { return nil }
+        // artworkURL defaults nil → CatalogArtworkView shows its letter-tile fallback.
+        return CatalogSearchResult(canonicalName: target.label, bundleID: target.bundleID, aliases: [])
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            // Same "why two near-identical rows?" caption as confirmationBody.
+            Text("Double-check it's the same app:")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            VStack(spacing: 0) {
+                reviewRow(label: "iOS shows") {
+                    Label(token)
+                        .labelStyle(.titleAndIcon)
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                }
+                Divider().padding(.leading, 12)
+                reviewRow(label: "You picked") {
+                    HStack(spacing: 8) {
+                        if let result = boundResult {
+                            EvacArtworkView(result: result, size: 24)
+                            Text(result.canonicalName)
+                                .font(.subheadline.weight(.semibold))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.7)
+                        } else {
+                            Text("Saved on this device")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                }
+            }
+            .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+            HStack {
+                Spacer(minLength: 0)
+                Button("Rebind", action: onRebind)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Color.evAccentGreen)
+            }
+        }
+    }
+
+    /// Full-width "iOS shows" / "You picked" row (fixed-width caption + content),
+    /// replicating `CatalogBindRowView.matchRow` so long names never wrap/truncate.
+    @ViewBuilder
+    private func reviewRow<Content: View>(
+        label: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        HStack(spacing: 12) {
+            Text(label)
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(.secondary)
+                .frame(width: 64, alignment: .leading)
+            content()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+    }
+}
+
+/// Inline replica of `CatalogBindRowView`'s private `CatalogArtworkView` (we can't
+/// reference that file-private type), used by the "You picked" review row. With a
+/// nil `artworkURL` it renders the first-letter gradient tile fallback.
+private struct EvacArtworkView: View {
+    let result: CatalogSearchResult
+    let size: CGFloat
+
+    var body: some View {
+        Group {
+            if let url = result.artworkURL {
+                AsyncImage(url: url) { phase in
+                    switch phase {
+                    case .success(let image):
+                        image
+                            .resizable()
+                            .scaledToFill()
+                    default:
+                        fallbackIcon
+                    }
+                }
+            } else {
+                fallbackIcon
+            }
+        }
+        .frame(width: size, height: size)
+        .clipShape(RoundedRectangle(cornerRadius: size <= 30 ? 8 : 10, style: .continuous))
+    }
+
+    private var fallbackIcon: some View {
+        RoundedRectangle(cornerRadius: size <= 30 ? 8 : 10, style: .continuous)
+            .fill(iconFill)
+            .overlay {
+                Text(String(result.canonicalName.prefix(1)).uppercased())
+                    .font(.caption.weight(.black))
+                    .foregroundStyle(.white)
+            }
+    }
+
+    private var iconFill: LinearGradient {
+        LinearGradient(
+            colors: result.bundleID == nil ? [.gray.opacity(0.7), .gray] : [.orange, .pink, .purple],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
         )
     }
 }
@@ -542,6 +705,11 @@ private struct EvacAccordionRow<Label: View, Panel: View>: View {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(isExpanded ? Color.evAccentGreenSoft : Color.evCardFill)
         )
+        // Prototype lines 154-155: when open, the header + panel are ONE connected
+        // card — green border, radius 12, `overflow:hidden`. The open header drops
+        // its own border and takes a faint green tint with no gap before the panel.
+        // Clipping to the rounded rect keeps the green tint + panel inside the radius.
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(isExpanded ? Color.evAccentGreen : Color.evHairline,
