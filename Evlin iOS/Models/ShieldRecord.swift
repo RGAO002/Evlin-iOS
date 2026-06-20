@@ -3,6 +3,20 @@ import FamilyControls
 import ManagedSettings
 import CryptoKit
 
+/// Provenance of a `ShieldRecord` — which subsystem authored it.
+/// - `.manual`: a parent/reflection-driven lock (the historical, only behavior).
+/// - `.limit`: written by the per-app time-limit subsystem (P4+).
+///
+/// String-backed so the JSON payload is human-readable and stable across the
+/// app/extension process boundary. Old persisted records predate this field;
+/// decode defaults a missing `source` to `.manual` (see `extension ShieldRecord`
+/// below) so legacy payloads never fail to decode (a decode failure = silent
+/// shield wipe).
+enum ShieldSource: String, Codable, Sendable {
+    case manual
+    case limit
+}
+
 /// Single shield entry in ActiveLockStore.
 /// Keyed by `recordKey` (stable across mutations). Same (tier, targetKey)
 /// merges; different (tier, targetKey) coexist even if they cover the same app.
@@ -41,6 +55,12 @@ struct ShieldRecord: Codable, Sendable {
 
     /// Which child device this record is scoped to. Required for multi-child families.
     var targetChildID: UUID
+
+    /// Which subsystem authored this record. Defaults to `.manual` so every
+    /// historical construction site (and every legacy persisted payload missing
+    /// the key) keeps its original parent/reflection-lock meaning. The per-app
+    /// time-limit subsystem sets `.limit`.
+    var source: ShieldSource = .manual
 
     // MARK: - Helpers
 
@@ -95,10 +115,71 @@ struct ShieldRecord: Codable, Sendable {
                 issuedAt: issuedAt,
                 expiresAt: expiresAt,
                 originalRequest: originalRequest,
-                targetChildID: targetChildID
+                targetChildID: targetChildID,
+                source: source
             ),
             true
         )
+    }
+}
+
+// MARK: - Codable (backward-compatible `source` migration)
+
+/// Custom Codable lives in an EXTENSION on purpose: declaring `init(from:)` in
+/// the struct body would suppress the synthesized MEMBERWISE init that
+/// `normalizedForCurrentSchema()`, `ActiveLockStore`, the extension, and the
+/// builders all rely on. Keeping it here preserves both inits.
+///
+/// The ONLY behavioral deviation from the synthesized Codable is `source`:
+/// old persisted records have no `source` key, so we `decodeIfPresent(...) ??
+/// .manual`. A hard `decode` would throw on legacy payloads and fail the whole
+/// `ShieldRecord` (and the surrounding `[String: ShieldRecord]` dict) — a silent
+/// wipe of a parent's active shields. Every other field decodes exactly as the
+/// synthesized version would, so the on-wire format is otherwise unchanged.
+extension ShieldRecord {
+    private enum CodingKeys: String, CodingKey {
+        case recordKey, tier, targetKey, displayName, lastCommandID
+        case appTokens, categoryTokens, webDomainTokens, appliesToAll
+        case issuedAt, expiresAt, originalRequest, targetChildID, source
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            recordKey: try c.decode(String.self, forKey: .recordKey),
+            tier: try c.decode(ShieldTier.self, forKey: .tier),
+            targetKey: try c.decode(String.self, forKey: .targetKey),
+            displayName: try c.decode(String.self, forKey: .displayName),
+            lastCommandID: try c.decode(UUID.self, forKey: .lastCommandID),
+            appTokens: try c.decode(Set<ApplicationToken>.self, forKey: .appTokens),
+            categoryTokens: try c.decode(Set<ActivityCategoryToken>.self, forKey: .categoryTokens),
+            webDomainTokens: try c.decode(Set<WebDomainToken>.self, forKey: .webDomainTokens),
+            appliesToAll: try c.decode(Bool.self, forKey: .appliesToAll),
+            issuedAt: try c.decode(Date.self, forKey: .issuedAt),
+            expiresAt: try c.decodeIfPresent(Date.self, forKey: .expiresAt),
+            originalRequest: try c.decode(String.self, forKey: .originalRequest),
+            targetChildID: try c.decode(UUID.self, forKey: .targetChildID),
+            // Backward-compatible: missing key → .manual. Never throws here.
+            source: try c.decodeIfPresent(ShieldSource.self, forKey: .source) ?? .manual
+        )
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(recordKey, forKey: .recordKey)
+        try c.encode(tier, forKey: .tier)
+        try c.encode(targetKey, forKey: .targetKey)
+        try c.encode(displayName, forKey: .displayName)
+        try c.encode(lastCommandID, forKey: .lastCommandID)
+        try c.encode(appTokens, forKey: .appTokens)
+        try c.encode(categoryTokens, forKey: .categoryTokens)
+        try c.encode(webDomainTokens, forKey: .webDomainTokens)
+        try c.encode(appliesToAll, forKey: .appliesToAll)
+        try c.encode(issuedAt, forKey: .issuedAt)
+        try c.encodeIfPresent(expiresAt, forKey: .expiresAt)
+        try c.encode(originalRequest, forKey: .originalRequest)
+        try c.encode(targetChildID, forKey: .targetChildID)
+        try c.encode(source, forKey: .source)
     }
 }
 
