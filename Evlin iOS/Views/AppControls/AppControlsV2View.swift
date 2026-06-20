@@ -2,6 +2,27 @@ import SwiftUI
 import FamilyControls
 import ManagedSettings
 
+// MARK: - Prototype-matched palette (app-controls-v2-prototype.html)
+//
+// The prototype lives in a warm-neutral palette that has no direct `Color.ev*`
+// equivalent, so — exactly as `MatchedChip` already does for `#15803D`/`#DCFCE7`
+// — these mirror the prototype's CSS custom properties as literal hex. Scoped to
+// this screen so the global tokens are untouched.
+private extension Color {
+    static let evPageBg     = Color(hex: 0xE9E7E0) // --color-background-tertiary
+    static let evTrayFill   = Color(hex: 0xF3F1EC) // --color-background-secondary
+    static let evCardFill   = Color(hex: 0xFFFFFF) // --color-background-primary
+    static let evHairline   = Color.black.opacity(0.12) // --color-border-tertiary
+    static let evHairlineStrong = Color.black.opacity(0.22) // --color-border-secondary
+    static let evTextPrimary   = Color(hex: 0x1B1B19) // --color-text-primary
+    static let evTextSecondary = Color(hex: 0x5F5E5A) // --color-text-secondary
+    static let evTextTertiary  = Color(hex: 0x908F86) // --color-text-tertiary
+    static let evTextDanger    = Color(hex: 0xA32D2D) // --color-text-danger
+    // The prototype's open/active accent is a bright green (#16A34A), NOT navy.
+    static let evAccentGreen   = Color(hex: 0x16A34A)
+    static let evAccentGreenSoft = Color(hex: 0x16A34A).opacity(0.06)
+}
+
 /// App Controls v2 screen — Tasks 3.2 + 3.4 (accordion inline bind + upload-on-bind).
 ///
 /// Replicates the `app-controls-v2-prototype.html` "App Controls v2" layout:
@@ -39,6 +60,9 @@ struct AppControlsV2View: View {
 
     var body: some View {
         ScrollView {
+            // Mirrors the prototype's nested-card chrome: a warm "secondary" tray
+            // (radius 20) wrapping a white "primary" card (radius 16, hairline
+            // border). The screen background is the warm "tertiary" page color.
             VStack(alignment: .leading, spacing: 0) {
                 header
                 subtitle
@@ -49,8 +73,22 @@ struct AppControlsV2View: View {
                 appsSection
             }
             .padding(16)
+            .background(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(Color.evCardFill)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(Color.evHairline, lineWidth: 0.5)
+            )
+            .padding(14)
+            .background(
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .fill(Color.evTrayFill)
+            )
+            .padding(16)
         }
-        .background(Color.evSurfaceContainer)
+        .background(Color.evPageBg)
         .sheet(isPresented: $showPicker) {
             CombinedPickerSheet(
                 initialSelection: selection,
@@ -68,27 +106,30 @@ struct AppControlsV2View: View {
 
     private var header: some View {
         HStack(alignment: .center) {
+            // Prototype: <h2 font-size:19px; font-weight:500> — not a heavy title.
             Text("App Controls")
-                .font(.title2.weight(.semibold))
-                .foregroundStyle(Color.evOnSurface)
+                .font(.system(size: 19, weight: .medium))
+                .foregroundStyle(Color.evTextPrimary)
 
             Spacer()
 
+            // Prototype `.evac-add`: transparent pill, hairline-strong border,
+            // bright-green label (#16A34A), 13px medium, 7×12 padding, radius 10.
             Button {
                 showPicker = true
             } label: {
                 HStack(spacing: 5) {
                     Image(systemName: "plus")
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(.system(size: 13, weight: .medium))
                     Text("Add")
-                        .font(.subheadline.weight(.medium))
+                        .font(.system(size: 13, weight: .medium))
                 }
-                .foregroundStyle(Color.evSecondary)
+                .foregroundStyle(Color.evAccentGreen)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 7)
                 .overlay(
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .stroke(Color.evOutline, lineWidth: 0.5)
+                        .stroke(Color.evHairlineStrong, lineWidth: 0.5)
                 )
             }
             .buttonStyle(.plain)
@@ -97,24 +138,29 @@ struct AppControlsV2View: View {
     }
 
     private var subtitle: some View {
+        // Prototype: 12px, text-secondary (#5f5e5a), line-height 1.5.
         Text("These all lock together as a group. Add an alias to a single one to also lock it by name.")
-            .font(.footnote)
-            .foregroundStyle(Color.evOnSurfaceVariant)
+            .font(.system(size: 12))
+            .foregroundStyle(Color.evTextSecondary)
+            .lineSpacing(3)
             .fixedSize(horizontal: false, vertical: true)
             .padding(.bottom, 14)
     }
 
     private func bindErrorBanner(_ message: String) -> some View {
+        // Prototype warning tones: bg #FAEEDA on text #854F0B, radius 10.
         HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(.orange)
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(Color(hex: 0x854F0B))
             Text(message)
-                .font(.caption.weight(.medium))
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Color(hex: 0x854F0B))
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
         }
         .padding(10)
-        .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .background(Color(hex: 0xFAEEDA), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         .padding(.bottom, 12)
     }
 
@@ -185,8 +231,10 @@ struct AppControlsV2View: View {
 
     // MARK: - Accordion toggles (only one expanded at a time)
 
-    /// Shared gentle curve for accordion expand/collapse — subtle, quick, no overshoot.
-    private static let accordionAnimation: Animation = .easeInOut(duration: 0.22)
+    /// Shared curve for the accordion's in-place unfold (Goal A). A high-damping
+    /// spring reads as a calm, graceful drawer that settles without any bounce or
+    /// overshoot — "平缓展开、收起". The height eased by this drives the reveal.
+    private static let accordionAnimation: Animation = .spring(response: 0.34, dampingFraction: 0.9)
 
     private func toggleApp(_ token: ApplicationToken) {
         bindError = nil
@@ -306,17 +354,20 @@ struct AppControlsV2View: View {
     // MARK: - Shared bits
 
     private func sectionHeader(_ title: String) -> some View {
+        // Prototype `.evac-sub`: 11px, weight 500, text-tertiary, uppercase,
+        // letter-spacing .04em (~0.44pt at 11px), 6px bottom margin.
         Text(title.uppercased())
-            .font(.caption2.weight(.medium))
-            .kerning(0.5)
-            .foregroundStyle(Color.evOutline)
+            .font(.system(size: 11, weight: .medium))
+            .kerning(0.44)
+            .foregroundStyle(Color.evTextTertiary)
             .padding(.bottom, 6)
     }
 
     private func emptyText(_ text: String) -> some View {
+        // Prototype empty state: 12px, text-tertiary.
         Text(text)
-            .font(.footnote)
-            .foregroundStyle(Color.evOutline)
+            .font(.system(size: 12))
+            .foregroundStyle(Color.evTextTertiary)
             .padding(.vertical, 4)
     }
 
@@ -445,9 +496,10 @@ private struct EvacAccordionRow<Label: View, Panel: View>: View {
                         label
                             .frame(maxWidth: .infinity, alignment: .leading)
 
+                        // Prototype: chevron flips down→up and goes green when open.
                         Image(systemName: "chevron.down")
                             .font(.system(size: 13, weight: .medium))
-                            .foregroundStyle(isExpanded ? Color.evPrimary : Color.evOnSurfaceVariant)
+                            .foregroundStyle(isExpanded ? Color.evAccentGreen : Color.evTextTertiary)
                             .rotationEffect(.degrees(isExpanded ? 180 : 0))
                     }
                     .contentShape(Rectangle())
@@ -456,29 +508,44 @@ private struct EvacAccordionRow<Label: View, Panel: View>: View {
 
                 Button(action: onRemove) {
                     Image(systemName: "xmark")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(Color.evOnSurfaceVariant)
+                        .font(.system(size: 15, weight: .regular))
+                        .foregroundStyle(Color.evTextTertiary)
                         .padding(4)
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Remove")
             }
 
-            if isExpanded {
-                panel
-                    .padding(.top, 12)
-                    .transition(.opacity.combined(with: .move(edge: .top)))
+            // GOAL A — graceful in-place "unfold".
+            //
+            // The panel + its top divider live inside a height-clipping container.
+            // When `isExpanded` flips, `withAnimation` at the call site eases the
+            // container's intrinsic height from 0 → content height, so the panel is
+            // *revealed in place* (drawer opening downward) and the rows below glide
+            // down — no `.move(edge:)` translate, so nothing flies in from above.
+            // `.transition(.opacity)` cross-fades the content as the height grows.
+            VStack(alignment: .leading, spacing: 0) {
+                if isExpanded {
+                    Divider()
+                        .overlay(Color.evHairline)
+                        .padding(.top, 11)
+                    panel
+                        .padding(.top, 12)
+                        .transition(.opacity)
+                }
             }
+            .clipped()
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 11)
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(isExpanded ? Color.evPrimary.opacity(0.06) : Color.evSurfaceContainerLowest)
+                .fill(isExpanded ? Color.evAccentGreenSoft : Color.evCardFill)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(isExpanded ? Color.evPrimary : Color.evOutlineVariant, lineWidth: isExpanded ? 1 : 0.5)
+                .stroke(isExpanded ? Color.evAccentGreen : Color.evHairline,
+                        lineWidth: isExpanded ? 1 : 0.5)
         )
         .padding(.bottom, 8)
     }
@@ -510,8 +577,8 @@ private struct MatchedChip: View {
                 chip(
                     icon: "arrow.triangle.2.circlepath",
                     text: "Matched · Needs refresh",
-                    foreground: Color.evOnSurfaceVariant,
-                    background: Color.evSurfaceContainerHighest
+                    foreground: Color.evTextTertiary,
+                    background: Color(hex: 0xE9E7E0) // prototype tertiary bg
                 )
             case .unmatched:
                 EmptyView()
