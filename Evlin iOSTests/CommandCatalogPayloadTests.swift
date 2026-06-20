@@ -376,6 +376,176 @@ final class CommandCatalogPayloadTests: XCTestCase {
         )
     }
 
+    /// REGRESSION (P3 review C1): the backend serializes command timestamps via
+    /// Python `datetime.now(timezone.utc).isoformat()` / Postgres `func.now()`,
+    /// which emit microseconds with an explicit offset
+    /// (e.g. `2026-06-19T21:00:00.123456+00:00`). A bare `ISO8601DateFormatter`
+    /// rejects fractional seconds, so `limitRule(from:)` collapsed the whole
+    /// limit to nil → silent total data loss for every real `set_limit`. This
+    /// test uses the REAL backend format and constructs the expected `Date`
+    /// WITHOUT the bare formatter, so it FAILS before the tolerant-parse fix and
+    /// PASSES after.
+    func test_commandPollerDecodesSetLimitWithFractionalSecondsTimestamps() throws {
+        let tokenBlob = Data("APP_TOKEN".utf8).base64EncodedString()
+        let poll = try decodePollCommand("""
+        {
+          "command_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+          "action": "set_limit",
+          "tier": "exactApp",
+          "target": {
+            "target_type": "app",
+            "bundle_id": "com.google.ios.youtube",
+            "target_display": "YouTube",
+            "original_request": "limit youtube to an hour",
+            "catalog_token_data_base64": "\(tokenBlob)"
+          },
+          "duration_minutes": null,
+          "issued_at": "2026-06-19T21:00:00.123456+00:00",
+          "limit": {
+            "rule_id": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+            "daily_budget_minutes": 60,
+            "reset_policy": "daily",
+            "schedule": {
+              "starts_at": "00:00",
+              "ends_at": "23:59",
+              "timezone": null
+            },
+            "effective_from": "2026-06-19T21:00:00.123456+00:00",
+            "expires_at": null,
+            "updated_at": "2026-06-19T21:00:00.123456+00:00"
+          }
+        }
+        """)
+
+        let command = CommandPoller.lockCommand(from: poll)
+
+        // The whole limit must survive (it was nil before the fix).
+        XCTAssertEqual(command.action, .setLimit)
+        let limit = try XCTUnwrap(
+            command.limit,
+            "set_limit with fractional-seconds timestamps must decode (C1 regression)"
+        )
+
+        // Expected instant constructed via DateComponents/Calendar (NOT the bare
+        // ISO8601 formatter), plus the .123456s fraction. `ISO8601DateFormatter`
+        // with `.withFractionalSeconds` resolves to milliseconds, so compare with
+        // a sub-millisecond accuracy window.
+        var components = DateComponents()
+        components.year = 2026
+        components.month = 6
+        components.day = 19
+        components.hour = 21
+        components.minute = 0
+        components.second = 0
+        var utc = Calendar(identifier: .gregorian)
+        utc.timeZone = TimeZone(identifier: "UTC")!
+        let wholeSecond = try XCTUnwrap(utc.date(from: components))
+        let expected = wholeSecond.addingTimeInterval(0.123456)
+
+        XCTAssertEqual(limit.effectiveFrom.timeIntervalSinceReferenceDate,
+                       expected.timeIntervalSinceReferenceDate, accuracy: 0.001)
+        XCTAssertEqual(limit.updatedAt.timeIntervalSinceReferenceDate,
+                       expected.timeIntervalSinceReferenceDate, accuracy: 0.001)
+        // issued_at must reflect the real issue time, not the `?? Date()` fallback.
+        XCTAssertEqual(command.issuedAt.timeIntervalSinceReferenceDate,
+                       expected.timeIntervalSinceReferenceDate, accuracy: 0.001)
+    }
+
+    /// A fractional-format `expires_at` must decode to a non-nil `Date` (the
+    /// `expires_at` branch of `limitRule(from:)` was otherwise untested).
+    func test_commandPollerDecodesSetLimitExpiresAtInFractionalFormat() throws {
+        let tokenBlob = Data("APP_TOKEN".utf8).base64EncodedString()
+        let poll = try decodePollCommand("""
+        {
+          "command_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+          "action": "set_limit",
+          "tier": "exactApp",
+          "target": {
+            "target_type": "app",
+            "bundle_id": "com.google.ios.youtube",
+            "target_display": "YouTube",
+            "original_request": "limit youtube to an hour",
+            "catalog_token_data_base64": "\(tokenBlob)"
+          },
+          "duration_minutes": null,
+          "issued_at": "2026-06-19T21:00:00.123456+00:00",
+          "limit": {
+            "rule_id": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+            "daily_budget_minutes": 60,
+            "reset_policy": "daily",
+            "schedule": {
+              "starts_at": "00:00",
+              "ends_at": "23:59",
+              "timezone": null
+            },
+            "effective_from": "2026-06-19T21:00:00.123456+00:00",
+            "expires_at": "2026-06-26T21:00:00.654321+00:00",
+            "updated_at": "2026-06-19T21:00:00.123456+00:00"
+          }
+        }
+        """)
+
+        let command = CommandPoller.lockCommand(from: poll)
+        let limit = try XCTUnwrap(command.limit)
+
+        var components = DateComponents()
+        components.year = 2026
+        components.month = 6
+        components.day = 26
+        components.hour = 21
+        components.minute = 0
+        components.second = 0
+        var utc = Calendar(identifier: .gregorian)
+        utc.timeZone = TimeZone(identifier: "UTC")!
+        let wholeSecond = try XCTUnwrap(utc.date(from: components))
+        let expectedExpiry = wholeSecond.addingTimeInterval(0.654321)
+
+        let expiresAt = try XCTUnwrap(limit.expiresAt)
+        XCTAssertEqual(expiresAt.timeIntervalSinceReferenceDate,
+                       expectedExpiry.timeIntervalSinceReferenceDate, accuracy: 0.001)
+    }
+
+    /// A malformed `schedule.starts_at` ("24:00" is out of the 0...23 hour range)
+    /// collapses the whole limit to nil. Documents the current nil-collapse
+    /// design decision (the typed-failure path is P6, out of scope here).
+    func test_commandPollerLeavesLimitNilForMalformedScheduleStartsAt() throws {
+        let tokenBlob = Data("APP_TOKEN".utf8).base64EncodedString()
+        let poll = try decodePollCommand("""
+        {
+          "command_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+          "action": "set_limit",
+          "tier": "exactApp",
+          "target": {
+            "target_type": "app",
+            "bundle_id": "com.google.ios.youtube",
+            "target_display": "YouTube",
+            "original_request": "limit youtube to an hour",
+            "catalog_token_data_base64": "\(tokenBlob)"
+          },
+          "duration_minutes": null,
+          "issued_at": "2026-06-19T21:00:00.123456+00:00",
+          "limit": {
+            "rule_id": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+            "daily_budget_minutes": 60,
+            "reset_policy": "daily",
+            "schedule": {
+              "starts_at": "24:00",
+              "ends_at": "23:59",
+              "timezone": null
+            },
+            "effective_from": "2026-06-19T21:00:00.123456+00:00",
+            "expires_at": null,
+            "updated_at": "2026-06-19T21:00:00.123456+00:00"
+          }
+        }
+        """)
+
+        let command = CommandPoller.lockCommand(from: poll)
+
+        XCTAssertEqual(command.action, .setLimit)
+        XCTAssertNil(command.limit)
+    }
+
     func test_commandPollerDecodesClearLimitIntoLockCommandClear() throws {
         let poll = try decodePollCommand("""
         {
