@@ -134,7 +134,9 @@ struct AppControlsV2View: View {
                         isExpanded: expandedCategory == token,
                         onToggle: { toggleCategory(token) },
                         onRemove: {
-                            if expandedCategory == token { expandedCategory = nil }
+                            if expandedCategory == token {
+                                withAnimation(Self.accordionAnimation) { expandedCategory = nil }
+                            }
                             DefaultLockGroupStore.removeCategory(token)
                             reload()
                         },
@@ -164,7 +166,9 @@ struct AppControlsV2View: View {
                             isExpanded: expandedApp == token,
                             onToggle: { toggleApp(token) },
                             onRemove: {
-                                if expandedApp == token { expandedApp = nil }
+                                if expandedApp == token {
+                                    withAnimation(Self.accordionAnimation) { expandedApp = nil }
+                                }
                                 DefaultLockGroupStore.removeApp(token)
                                 reload()
                             },
@@ -181,23 +185,30 @@ struct AppControlsV2View: View {
 
     // MARK: - Accordion toggles (only one expanded at a time)
 
+    /// Shared gentle curve for accordion expand/collapse — subtle, quick, no overshoot.
+    private static let accordionAnimation: Animation = .easeInOut(duration: 0.22)
+
     private func toggleApp(_ token: ApplicationToken) {
         bindError = nil
-        if expandedApp == token {
-            expandedApp = nil
-        } else {
-            expandedApp = token
-            expandedCategory = nil
+        withAnimation(Self.accordionAnimation) {
+            if expandedApp == token {
+                expandedApp = nil
+            } else {
+                expandedApp = token
+                expandedCategory = nil
+            }
         }
     }
 
     private func toggleCategory(_ token: ActivityCategoryToken) {
         bindError = nil
-        if expandedCategory == token {
-            expandedCategory = nil
-        } else {
-            expandedCategory = token
-            expandedApp = nil
+        withAnimation(Self.accordionAnimation) {
+            if expandedCategory == token {
+                expandedCategory = nil
+            } else {
+                expandedCategory = token
+                expandedApp = nil
+            }
         }
     }
 
@@ -218,7 +229,7 @@ struct AppControlsV2View: View {
         )
 
         // Collapse the accordion immediately — the bind is committed locally.
-        expandedApp = nil
+        withAnimation(Self.accordionAnimation) { expandedApp = nil }
         bindError = nil
         // Re-read MatchedState so the just-bound app flips to "Matched".
         refreshTick &+= 1
@@ -267,7 +278,7 @@ struct AppControlsV2View: View {
         }
 
         // Collapse the accordion immediately — the bind is committed locally.
-        expandedCategory = nil
+        withAnimation(Self.accordionAnimation) { expandedCategory = nil }
         bindError = nil
         // Re-read MatchedState so the just-bound category flips to "Matched".
         refreshTick &+= 1
@@ -434,9 +445,10 @@ private struct EvacAccordionRow<Label: View, Panel: View>: View {
                         label
                             .frame(maxWidth: .infinity, alignment: .leading)
 
-                        Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                        Image(systemName: "chevron.down")
                             .font(.system(size: 13, weight: .medium))
                             .foregroundStyle(isExpanded ? Color.evPrimary : Color.evOnSurfaceVariant)
+                            .rotationEffect(.degrees(isExpanded ? 180 : 0))
                     }
                     .contentShape(Rectangle())
                 }
@@ -455,6 +467,7 @@ private struct EvacAccordionRow<Label: View, Panel: View>: View {
             if isExpanded {
                 panel
                     .padding(.top, 12)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
         .padding(.horizontal, 12)
