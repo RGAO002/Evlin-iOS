@@ -138,6 +138,11 @@ enum NSELockApplier {
         case .expandLibrary:
             // Not a lock-state change — leave for the app.
             return nil
+        case .setLimit, .clearLimit:
+            // TODO(P6): per-app limit enforcement lives in the main app's
+            // planner/executor, not the push applier. P3 is wire-decode only,
+            // so this path makes no lock-state change here.
+            return nil
         }
     }
 

@@ -388,6 +388,8 @@ struct ReceiptCard: View {
         case .unblock:     return "eye"
         case .unshieldAll: return "lock.open.rotation"
         case .unblockAll:  return "eye.circle"
+        case .setLimit:    return "hourglass"      // TODO(P6): final limit receipt UI
+        case .clearLimit:  return "hourglass.bottomhalf.filled"
         }
     }
 
@@ -399,6 +401,8 @@ struct ReceiptCard: View {
         case .unblock:     return "Restored \(displayName) to home screen"
         case .unshieldAll: return "All shields cleared (\(displayName))"
         case .unblockAll:  return "All blocks cleared (\(displayName))"
+        case .setLimit:    return "Set time limit for \(displayName)"  // TODO(P6)
+        case .clearLimit:  return "Cleared time limit for \(displayName)"
         }
     }
 

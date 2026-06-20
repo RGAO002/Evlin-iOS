@@ -315,6 +315,130 @@ final class CommandCatalogPayloadTests: XCTestCase {
         XCTAssertEqual(CatalogCommandTokenData.decodedCategoryData(from: target), Data("CATEGORY_TOKEN".utf8))
     }
 
+    // MARK: - Per-app time limit (P3 wire decode)
+
+    func test_commandPollerDecodesSetLimitIntoLockCommandLimit() throws {
+        let tokenBlob = Data("APP_TOKEN".utf8).base64EncodedString()
+        let poll = try decodePollCommand("""
+        {
+          "command_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+          "action": "set_limit",
+          "tier": "exactApp",
+          "target": {
+            "target_type": "app",
+            "bundle_id": "com.google.ios.youtube",
+            "target_display": "YouTube",
+            "target_child_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            "original_request": "limit youtube to an hour",
+            "catalog_token_data_base64": "\(tokenBlob)"
+          },
+          "duration_minutes": null,
+          "issued_at": "2026-06-01T08:00:00Z",
+          "limit": {
+            "rule_id": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+            "daily_budget_minutes": 60,
+            "reset_policy": "daily",
+            "schedule": {
+              "starts_at": "00:00",
+              "ends_at": "23:59",
+              "timezone": null
+            },
+            "effective_from": "2026-06-01T08:00:00Z",
+            "expires_at": null,
+            "updated_at": "2026-06-01T08:00:00Z"
+          }
+        }
+        """)
+
+        let command = CommandPoller.lockCommand(from: poll)
+
+        XCTAssertEqual(command.action, .setLimit)
+        XCTAssertNil(command.clear)
+        // Budget must NOT flow through duration.
+        XCTAssertNil(command.durationMinutes)
+        XCTAssertNil(command.expiresAt)
+
+        let limit = try XCTUnwrap(command.limit)
+        XCTAssertEqual(limit.ruleId, UUID(uuidString: "cccccccc-cccc-cccc-cccc-cccccccccccc"))
+        XCTAssertEqual(limit.dailyBudgetMinutes, 60)
+        XCTAssertEqual(limit.resetPolicy, "daily")
+        XCTAssertEqual(limit.startMinute, 0)
+        XCTAssertEqual(limit.endMinute, 1439)
+        XCTAssertNil(limit.timezone)
+        XCTAssertEqual(
+            limit.effectiveFrom,
+            ISO8601DateFormatter().date(from: "2026-06-01T08:00:00Z")
+        )
+        XCTAssertNil(limit.expiresAt)
+        XCTAssertEqual(
+            limit.updatedAt,
+            ISO8601DateFormatter().date(from: "2026-06-01T08:00:00Z")
+        )
+    }
+
+    func test_commandPollerDecodesClearLimitIntoLockCommandClear() throws {
+        let poll = try decodePollCommand("""
+        {
+          "command_id": "dddddddd-dddd-dddd-dddd-dddddddddddd",
+          "action": "clear_limit",
+          "tier": "exactApp",
+          "target": {
+            "target_type": "app",
+            "bundle_id": "com.google.ios.youtube",
+            "target_display": "YouTube",
+            "original_request": "remove youtube limit"
+          },
+          "duration_minutes": null,
+          "issued_at": "2026-06-02T09:30:00Z",
+          "clear": {
+            "rule_id": "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
+            "reason": "parent_clear",
+            "updated_at": "2026-06-02T09:30:00Z"
+          }
+        }
+        """)
+
+        let command = CommandPoller.lockCommand(from: poll)
+
+        XCTAssertEqual(command.action, .clearLimit)
+        XCTAssertNil(command.limit)
+        XCTAssertNil(command.durationMinutes)
+
+        let clear = try XCTUnwrap(command.clear)
+        XCTAssertEqual(clear.ruleId, UUID(uuidString: "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"))
+        XCTAssertEqual(clear.reason, "parent_clear")
+        XCTAssertEqual(
+            clear.updatedAt,
+            ISO8601DateFormatter().date(from: "2026-06-02T09:30:00Z")
+        )
+    }
+
+    func test_commandPollerLeavesLimitAndClearNilForOrdinaryShield() throws {
+        let tokenBlob = Data("APP_TOKEN".utf8).base64EncodedString()
+        let poll = try decodePollCommand("""
+        {
+          "command_id": "11111111-1111-1111-1111-111111111111",
+          "action": "shield",
+          "tier": "exactApp",
+          "target": {
+            "bundle_id": "com.burbn.instagram",
+            "target_display": "Instagram",
+            "original_request": "lock ig",
+            "has_pending_blob": false,
+            "catalog_token_data_base64": "\(tokenBlob)"
+          },
+          "duration_minutes": 15,
+          "issued_at": "2026-05-31T12:00:00Z"
+        }
+        """)
+
+        let command = CommandPoller.lockCommand(from: poll)
+
+        XCTAssertEqual(command.action, .shield)
+        XCTAssertNil(command.limit)
+        XCTAssertNil(command.clear)
+    }
+
     private func decodePollCommand(_ json: String) throws -> PollCommandDTO {
         try JSONDecoder().decode(PollCommandDTO.self, from: Data(json.utf8))
     }

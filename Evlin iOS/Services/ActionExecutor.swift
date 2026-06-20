@@ -146,6 +146,11 @@ final class ActionExecutor: @unchecked Sendable {
             return .confirmedExact(verb: .unblockAll, displayName: "\(cleared.count) block(s) cleared", effectiveState: nil)
         case .expandLibrary:
             return .failed(.execution("expand_library handled in UI"))
+        case .setLimit, .clearLimit:
+            // TODO(P6): real per-app limit enforcement (planner + executor).
+            // P3 is wire-decode only; benign no-op so the switch stays
+            // exhaustive without claiming a false success.
+            return .failed(.execution("per-app limit not yet implemented"))
         }
     }
 

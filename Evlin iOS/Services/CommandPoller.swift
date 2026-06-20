@@ -324,8 +324,54 @@ final class CommandPoller {
             tier: tier,
             target: target,
             durationMinutes: poll.duration_minutes,
-            issuedAt: issued
+            issuedAt: issued,
+            limit: limitRule(from: poll.limit),
+            clear: clearLimit(from: poll.clear)
         )
+    }
+
+    /// Map a decoded `set_limit.limit` DTO into the internal `LimitRule` (P3).
+    /// Parses the "HH:mm" schedule window into minutes-since-midnight and the
+    /// ISO8601 timestamp strings into `Date`. Returns nil for a missing or
+    /// malformed payload so a bad limit maps gracefully rather than crashing.
+    private static func limitRule(from dto: PollLimitDTO?) -> LimitRule? {
+        guard let dto else { return nil }
+        guard
+            let startMinute = minutesSinceMidnight(dto.schedule.starts_at),
+            let endMinute = minutesSinceMidnight(dto.schedule.ends_at),
+            let effectiveFrom = ISO8601DateFormatter().date(from: dto.effective_from),
+            let updatedAt = ISO8601DateFormatter().date(from: dto.updated_at)
+        else { return nil }
+        let expiresAt = dto.expires_at.flatMap { ISO8601DateFormatter().date(from: $0) }
+        return LimitRule(
+            ruleId: dto.rule_id,
+            dailyBudgetMinutes: dto.daily_budget_minutes,
+            resetPolicy: dto.reset_policy,
+            startMinute: startMinute,
+            endMinute: endMinute,
+            timezone: dto.schedule.timezone,
+            effectiveFrom: effectiveFrom,
+            expiresAt: expiresAt,
+            updatedAt: updatedAt
+        )
+    }
+
+    /// Map a decoded `clear_limit.clear` DTO into the internal `ClearLimit` (P3).
+    private static func clearLimit(from dto: PollClearDTO?) -> ClearLimit? {
+        guard let dto else { return nil }
+        guard let updatedAt = ISO8601DateFormatter().date(from: dto.updated_at) else { return nil }
+        return ClearLimit(ruleId: dto.rule_id, reason: dto.reason, updatedAt: updatedAt)
+    }
+
+    /// Parse a "HH:mm" 24h clock string into minutes-since-midnight (0...1439).
+    /// Returns nil for malformed input.
+    private static func minutesSinceMidnight(_ hhmm: String) -> Int? {
+        let parts = hhmm.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+        guard parts.count == 2,
+              let hours = Int(parts[0]), let minutes = Int(parts[1]),
+              (0...23).contains(hours), (0...59).contains(minutes)
+        else { return nil }
+        return hours * 60 + minutes
     }
 
     private func execute(poll: PollCommandDTO, api: APIClient) async {
@@ -347,6 +393,12 @@ final class CommandPoller {
                 if let eff = eff, let data = try? JSONEncoder().encode(eff),
                    let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
                     d["effective_state"] = dict
+                }
+                // Plumb rule_id for per-app limit verbs (P3). No existing ack
+                // path carries rule_id; copy it from the decoded limit/clear.
+                if verb == .setLimit || verb == .clearLimit,
+                   let ruleID = cmd.limit?.ruleId ?? cmd.clear?.ruleId {
+                    d["rule_id"] = ruleID.uuidString
                 }
                 return ("confirmed", d)
             case .confirmedFallback(let verb, let name, let cat, let orig, let eff):
@@ -388,6 +440,18 @@ final class CommandPoller {
                 case .execution(let s):
                     d["reason"] = "execution"
                     d["message"] = s
+                case .limitQuotaExceeded(let windows, let slotsNeeded, let cap):
+                    // Per-app limit could not be scheduled within the OS window
+                    // cap (P3 ack wire only). snake_case detail keys match the
+                    // sibling branches above; plumb verb + rule_id like success.
+                    d["reason"] = "limit_quota_exceeded"
+                    d["windows"] = windows
+                    d["slots_needed"] = slotsNeeded
+                    d["cap"] = cap
+                    d["verb"] = (cmd.action == .clearLimit ? AckVerb.clearLimit : AckVerb.setLimit).rawValue
+                    if let ruleID = cmd.limit?.ruleId ?? cmd.clear?.ruleId {
+                        d["rule_id"] = ruleID.uuidString
+                    }
                 }
                 return ("failed", d)
             }

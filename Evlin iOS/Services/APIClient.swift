@@ -477,6 +477,40 @@ struct PollCommandDTO: Decodable {
     let target: PollTargetDTO
     let duration_minutes: Int?
     let issued_at: String
+    // Per-app time-limit payloads (P3). Synthesized Decodable performs
+    // decodeIfPresent for these optionals, so commands without the keys still
+    // decode unchanged.
+    let limit: PollLimitDTO?
+    let clear: PollClearDTO?
+}
+
+/// `set_limit.limit` wire payload (P3 decode only). Literal snake_case stored
+/// property names — this codebase does NOT use `convertFromSnakeCase`. ISO8601
+/// timestamps are carried as `String` (matching `PollCommandDTO.issued_at`) and
+/// parsed to `Date` at the LockCommand mapping layer.
+struct PollLimitDTO: Decodable {
+    let rule_id: UUID
+    let daily_budget_minutes: Int
+    let reset_policy: String
+    let schedule: PollLimitScheduleDTO
+    let effective_from: String
+    let expires_at: String?
+    let updated_at: String
+}
+
+/// `set_limit.limit.schedule` wire payload. `starts_at`/`ends_at` stay as
+/// "HH:mm" STRINGS here; parsing to minutes happens at the mapping layer.
+struct PollLimitScheduleDTO: Decodable {
+    let starts_at: String
+    let ends_at: String
+    let timezone: String?
+}
+
+/// `clear_limit.clear` wire payload (P3 decode only).
+struct PollClearDTO: Decodable {
+    let rule_id: UUID
+    let reason: String?
+    let updated_at: String
 }
 
 // MARK: - v2 ack-status decode

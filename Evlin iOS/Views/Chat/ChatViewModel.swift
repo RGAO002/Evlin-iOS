@@ -1185,6 +1185,13 @@ class ChatViewModel: ObservableObject {
             return .failedOther(reason: "The command wasn't well-formed.")
         case .execution(let message):
             return .failedOther(reason: message)
+        case .limitQuotaExceeded(let windows, let slotsNeeded, let cap):
+            // TODO(P6): dedicated limit-quota receipt copy. P3 routes it through
+            // the generic failure surface so the switch stays exhaustive.
+            return .failedOther(
+                reason: "Time limit needs \(slotsNeeded) schedule slot(s) "
+                    + "(\(windows) window(s)) but only \(cap) are available."
+            )
         }
     }
 

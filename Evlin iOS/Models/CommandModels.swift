@@ -10,6 +10,31 @@ enum CommandAction: String, Codable, Sendable {
     case unshieldAll = "unshield_all"
     case unblockAll = "unblock_all"
     case expandLibrary = "expand_library"
+    case setLimit = "set_limit"
+    case clearLimit = "clear_limit"
+}
+
+/// Per-app daily time limit rule decoded from a `set_limit` command (P3 wire
+/// decode only — enforcement/planning/execution land in later tasks).
+/// `startMinute`/`endMinute` are the schedule window parsed from "HH:mm" strings
+/// into minutes-since-midnight (0...1439).
+struct LimitRule: Codable, Sendable, Equatable {
+    let ruleId: UUID
+    let dailyBudgetMinutes: Int
+    let resetPolicy: String
+    let startMinute: Int
+    let endMinute: Int
+    let timezone: String?
+    let effectiveFrom: Date
+    let expiresAt: Date?
+    let updatedAt: Date
+}
+
+/// Payload decoded from a `clear_limit` command (P3 wire decode only).
+struct ClearLimit: Codable, Sendable, Equatable {
+    let ruleId: UUID
+    let reason: String?
+    let updatedAt: Date
 }
 
 struct CommandTarget: Codable, Sendable {
@@ -44,6 +69,10 @@ struct LockCommand: Codable, Sendable, Identifiable {
     let target: CommandTarget
     let durationMinutes: Int?      // nil = permanent
     let issuedAt: Date
+    // Per-app time-limit payloads (P3). Nil for all non-limit commands. Budget
+    // intentionally does NOT flow through durationMinutes/expiresAt.
+    var limit: LimitRule? = nil
+    var clear: ClearLimit? = nil
     var expiresAt: Date? {
         guard let m = durationMinutes else { return nil }
         return issuedAt.addingTimeInterval(TimeInterval(m * 60))
@@ -59,6 +88,8 @@ enum AckVerb: String, Codable, Sendable, Equatable {
     case unblock
     case unshieldAll = "unshield_all"
     case unblockAll = "unblock_all"
+    case setLimit = "set_limit"
+    case clearLimit = "clear_limit"
 }
 
 /// Child-computed snapshot of effective coverage after the mutation, so the
@@ -100,4 +131,7 @@ enum AckFailure: Codable, Sendable, Equatable {
     case nothingToUnlock
     case malformed
     case execution(String)
+    /// Per-app limit could not be scheduled because the requested schedule needs
+    /// more DeviceActivity windows than the OS cap allows (P3 ack wire only).
+    case limitQuotaExceeded(windows: Int, slotsNeeded: Int, cap: Int)
 }
