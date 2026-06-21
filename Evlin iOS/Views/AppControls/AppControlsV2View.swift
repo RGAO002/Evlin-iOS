@@ -183,6 +183,7 @@ struct AppControlsV2View: View {
                         token: token,
                         state: matchedState(forCategory: token, tick: refreshTick),
                         isExpanded: expandedCategory == token,
+                        selectedKey: selectedCategoryKey(forCategory: token, tick: refreshTick),
                         onToggle: { toggleCategory(token) },
                         onRemove: {
                             if expandedCategory == token {
@@ -447,6 +448,22 @@ struct AppControlsV2View: View {
         let localTokenPresent = keys.contains { LocalAliasStore.shared.categoryToken(forName: $0) == catToken }
         return MatchedState.from(hasAliasKey: hasAliasKey, localTokenPresent: localTokenPresent)
     }
+
+    /// Task 4 — the `semanticKey` of the suggestion this category is currently tagged
+    /// with, or nil if untagged. Category aliases are stored lowercased in
+    /// LocalAliasStore, so a matched category's lookup keys hold either the suggestion's
+    /// semanticKey ("social") or its displayName ("Social") lowercased. We match a
+    /// suggestion when either matches, and hand back its (canonical) `semanticKey` so
+    /// CategoryTagPanel highlights the chip whose `semanticKey == selectedKey`.
+    ///
+    /// `tick` is unused in the body; it threads `refreshTick` so SwiftUI recomputes
+    /// after a bind (the just-tagged chip lights up without a reload).
+    private func selectedCategoryKey(forCategory catToken: ActivityCategoryToken, tick: Int) -> String? {
+        let keys = Set(LocalAliasStore.shared.categoryLookupKeys(equalTo: catToken).map { $0.lowercased() })
+        return AppleScreenTimeCategorySuggestions.all.first { sugg in
+            keys.contains(sugg.semanticKey.lowercased()) || keys.contains(sugg.displayName.lowercased())
+        }?.semanticKey
+    }
 }
 
 // Apple's picker folds an individually-selected app into a category when that
@@ -472,6 +489,9 @@ private struct CategoryRow: View {
     let token: ActivityCategoryToken
     let state: MatchedState
     let isExpanded: Bool
+    /// Task 4 — the `semanticKey` of the currently-applied suggestion (or nil), so a
+    /// matched category opens with its current tag chip highlighted in CategoryTagPanel.
+    let selectedKey: String?
     let onToggle: () -> Void
     let onRemove: () -> Void
     let onPick: (AppleScreenTimeCategorySuggestion) -> Void
@@ -493,7 +513,7 @@ private struct CategoryRow: View {
             panel: {
                 CategoryTagPanel(
                     name: "this category",
-                    selectedKey: nil,
+                    selectedKey: selectedKey,
                     onPick: onPick
                 )
             }
@@ -561,90 +581,75 @@ private struct AppRow: View {
     }
 }
 
-/// The "already matched" review panel, replicating `CatalogBindRowView.confirmationBody`'s
-/// "iOS shows / You picked" layout inline (so we never edit that file). Shows the real
-/// on-device `Label(token)` next to the bound name + artwork the parent picked, plus a
-/// "Rebind" escape that swaps this row back to the App Store search panel.
+/// The "already matched" review panel. Reuses the shared `MatchedAppReviewView`
+/// (the SAME component the old Add App flow renders) so both screens are identical:
+/// the real on-device `Label(token)` next to the bound name + artwork the parent
+/// picked, plus a "Rebind" escape that swaps this row back to the App Store search.
 private struct MatchedReviewPanel: View {
     let token: ApplicationToken
     let apiClient: APIClient
     let onRebind: () -> Void
 
-    /// Fix 2 — the App Store result fetched live for "You picked", carrying the real
-    /// `artworkURL`. The local catalog target only persists name + bundleID, so the
-    /// reconstructed result has no artwork → letter-tile fallback. Once this lands
-    /// (network), the real icon shows. Stays nil for manual binds (bundleID == nil),
-    /// before the fetch completes, and on any failure — fallback persists, silently.
+    /// Task 3 — the App Store result fetched live for "You picked", carrying the real
+    /// `artworkURL` AND the proper-case `canonicalName`. The local catalog target only
+    /// persists a LOWERCASE name (LocalAliasStore keys are lowercased) + bundleID, so
+    /// the reconstructed result is lowercase with no artwork → capitalized letter-tile
+    /// fallback. Once this lands (network), the real icon + proper-case name show.
+    /// Stays nil for manual binds (bundleID == nil), before the fetch completes, and on
+    /// any failure — capitalized fallback persists, silently.
     @State private var fetchedArtwork: CatalogSearchResult?
 
     /// The bound name/bundle for "You picked", read from the same LocalAliasStore
     /// catalog target that `matchedState(forApp:)` uses to decide "matched": the
-    /// app target whose lookup keys intersect this token's lookup keys.
+    /// app target whose lookup keys intersect this token's lookup keys. The `label`
+    /// is LOWERCASE (alias keys are lowercased).
     private var boundResult: CatalogSearchResult? {
         let keys = Set(LocalAliasStore.shared.applicationLookupKeys(equalTo: token))
         guard let target = LocalAliasStore.shared.catalogAppTargets()
             .first(where: { !Set($0.lookupKeys).isDisjoint(with: keys) })
         else { return nil }
-        // artworkURL defaults nil → EvacArtworkView shows its letter-tile fallback.
+        // artworkURL defaults nil → CatalogArtworkView shows its letter-tile fallback.
         return CatalogSearchResult(canonicalName: target.label, bundleID: target.bundleID, aliases: [])
     }
 
+    /// Task 3 — the result handed to `MatchedAppReviewView` as "You picked":
+    /// - Live-fetched (proper-case `canonicalName` + real `artworkURL`) once it lands.
+    /// - Else the locally-reconstructed result with `.capitalized` name ("instagram"
+    ///   → "Instagram"); manual binds (bundleID == nil) keep that + the letter tile.
+    private var resolvedPicked: CatalogSearchResult? {
+        if let fetchedArtwork { return fetchedArtwork }
+        guard let bound = boundResult else { return nil }
+        return CatalogSearchResult(
+            canonicalName: bound.canonicalName.capitalized,
+            bundleID: bound.bundleID,
+            aliases: []
+        )
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            // Same "why two near-identical rows?" caption as confirmationBody.
-            Text("Double-check it's the same app:")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            VStack(spacing: 0) {
-                reviewRow(label: "iOS shows") {
-                    Label(token)
-                        .labelStyle(.titleAndIcon)
-                        .font(.subheadline.weight(.semibold))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.7)
-                }
-                Divider().padding(.leading, 12)
-                reviewRow(label: "You picked") {
-                    HStack(spacing: 8) {
-                        if let result = boundResult {
-                            // Fix 2 — prefer the live-fetched result (real artworkURL)
-                            // once it lands; until then (and for manual/bundle-less
-                            // binds, and on fetch failure) fall back to the locally
-                            // reconstructed result, which letter-tiles in EvacArtworkView.
-                            EvacArtworkView(result: fetchedArtwork ?? result, size: 24)
-                            Text(result.canonicalName)
-                                .font(.subheadline.weight(.semibold))
-                                .lineLimit(1)
-                                .minimumScaleFactor(0.7)
-                        } else {
-                            Text("Saved on this device")
-                                .font(.subheadline.weight(.semibold))
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer(minLength: 0)
-                    }
-                }
-            }
-            .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-
-            HStack {
-                Spacer(minLength: 0)
-                Button("Rebind", action: onRebind)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(Color.evAccentGreen)
+        Group {
+            if let picked = resolvedPicked {
+                MatchedAppReviewView(token: token, picked: picked, onRebind: { onRebind() })
+            } else {
+                // No local catalog target resolved (shouldn't happen for a matched
+                // row); keep a quiet placeholder rather than an empty panel.
+                Text("Saved on this device")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.secondary)
             }
         }
-        // Fix 2 — fetch the real App Store icon for "You picked". Non-blocking; the
-        // letter-tile shows until (and unless) this lands. Failure is silent.
+        // Task 3 — fetch the real App Store icon + proper-case name for "You picked".
+        // Non-blocking; the capitalized letter-tile shows until (and unless) this
+        // lands. Failure is silent.
         .task { await fetchArtworkIfPossible() }
     }
 
-    /// Fix 2 — re-runs the SAME catalog search the bind panel uses to recover the
-    /// `artworkURL` the local store never persisted. Only attempts when the bound
-    /// entry carries a bundleID (manual binds have none → keep the letter tile).
-    /// Matches by bundleID, falling back to a case-insensitive name match; both
-    /// failure modes leave `fetchedArtwork` nil so the reconstructed tile stays.
+    /// Task 3 — re-runs the SAME catalog search the bind panel uses to recover the
+    /// `artworkURL` + proper-case name the local store never persisted. Only attempts
+    /// when the bound entry carries a bundleID (manual binds have none → keep the
+    /// capitalized letter tile). Matches by bundleID, falling back to a
+    /// case-insensitive name match; both failure modes leave `fetchedArtwork` nil so
+    /// the reconstructed tile stays.
     private func fetchArtworkIfPossible() async {
         guard let bound = boundResult,
               let boundBundleID = bound.bundleID,
@@ -656,72 +661,6 @@ private struct MatchedReviewPanel: View {
         let match = results.first { $0.bundleID == boundBundleID }
             ?? results.first { $0.canonicalName.caseInsensitiveCompare(bound.canonicalName) == .orderedSame }
         if let match { fetchedArtwork = match }
-    }
-
-    /// Full-width "iOS shows" / "You picked" row (fixed-width caption + content),
-    /// replicating `CatalogBindRowView.matchRow` so long names never wrap/truncate.
-    @ViewBuilder
-    private func reviewRow<Content: View>(
-        label: String,
-        @ViewBuilder content: () -> Content
-    ) -> some View {
-        HStack(spacing: 12) {
-            Text(label)
-                .font(.caption2.weight(.bold))
-                .foregroundStyle(.secondary)
-                .frame(width: 64, alignment: .leading)
-            content()
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-    }
-}
-
-/// Inline replica of `CatalogBindRowView`'s private `CatalogArtworkView` (we can't
-/// reference that file-private type), used by the "You picked" review row. With a
-/// nil `artworkURL` it renders the first-letter gradient tile fallback.
-private struct EvacArtworkView: View {
-    let result: CatalogSearchResult
-    let size: CGFloat
-
-    var body: some View {
-        Group {
-            if let url = result.artworkURL {
-                AsyncImage(url: url) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image
-                            .resizable()
-                            .scaledToFill()
-                    default:
-                        fallbackIcon
-                    }
-                }
-            } else {
-                fallbackIcon
-            }
-        }
-        .frame(width: size, height: size)
-        .clipShape(RoundedRectangle(cornerRadius: size <= 30 ? 8 : 10, style: .continuous))
-    }
-
-    private var fallbackIcon: some View {
-        RoundedRectangle(cornerRadius: size <= 30 ? 8 : 10, style: .continuous)
-            .fill(iconFill)
-            .overlay {
-                Text(String(result.canonicalName.prefix(1)).uppercased())
-                    .font(.caption.weight(.black))
-                    .foregroundStyle(.white)
-            }
-    }
-
-    private var iconFill: LinearGradient {
-        LinearGradient(
-            colors: result.bundleID == nil ? [.gray.opacity(0.7), .gray] : [.orange, .pink, .purple],
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
-        )
     }
 }
 
