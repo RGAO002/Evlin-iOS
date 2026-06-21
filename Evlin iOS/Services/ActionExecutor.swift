@@ -82,6 +82,14 @@ enum CatalogCommandTokenData {
 
 protocol DeviceActivityScheduling {
     func startMonitoring(_ name: DeviceActivityName, during schedule: DeviceActivitySchedule) throws
+    /// Arm an activity that also measures usage events (the per-app-limit path,
+    /// P5). The `events:` dict maps `DeviceActivityEvent.Name` → threshold so
+    /// the extension's `eventDidReachThreshold` fires when a budget is reached.
+    func startMonitoring(
+        _ activity: DeviceActivityName,
+        during schedule: DeviceActivitySchedule,
+        events: [DeviceActivityEvent.Name: DeviceActivityEvent]
+    ) throws
     func stopMonitoring(_ activities: [DeviceActivityName])
     func stopMonitoring()
 }
@@ -91,6 +99,14 @@ struct DeviceActivityCenterScheduler: DeviceActivityScheduling {
 
     func startMonitoring(_ name: DeviceActivityName, during schedule: DeviceActivitySchedule) throws {
         try center.startMonitoring(name, during: schedule)
+    }
+
+    func startMonitoring(
+        _ activity: DeviceActivityName,
+        during schedule: DeviceActivitySchedule,
+        events: [DeviceActivityEvent.Name: DeviceActivityEvent]
+    ) throws {
+        try center.startMonitoring(activity, during: schedule, events: events)
     }
 
     func stopMonitoring(_ activities: [DeviceActivityName]) {

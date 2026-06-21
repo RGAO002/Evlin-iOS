@@ -86,10 +86,19 @@ final class ActionExecutorTests: XCTestCase {
 
 private final class DeviceActivitySchedulerSpy: DeviceActivityScheduling {
     private(set) var started: [(name: DeviceActivityName, schedule: DeviceActivitySchedule)] = []
+    private(set) var startedWithEvents: [(name: DeviceActivityName, schedule: DeviceActivitySchedule, events: [DeviceActivityEvent.Name: DeviceActivityEvent])] = []
     private(set) var stopped: [[DeviceActivityName]?] = []
 
     func startMonitoring(_ name: DeviceActivityName, during schedule: DeviceActivitySchedule) throws {
         started.append((name, schedule))
+    }
+
+    func startMonitoring(
+        _ activity: DeviceActivityName,
+        during schedule: DeviceActivitySchedule,
+        events: [DeviceActivityEvent.Name: DeviceActivityEvent]
+    ) throws {
+        startedWithEvents.append((activity, schedule, events))
     }
 
     func stopMonitoring(_ activities: [DeviceActivityName]) {
