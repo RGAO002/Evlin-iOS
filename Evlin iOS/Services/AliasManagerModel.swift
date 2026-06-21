@@ -46,6 +46,11 @@ final class AliasManagerModel: ObservableObject {
         defer { isLoading = false }
         do {
             rows = try await client.fetchAppAliases(familyID: familyID)
+        } catch is CancellationError {
+            // A superseding load (`.task` vs pull-to-refresh both call `load()`)
+            // cancelled this one — not a real failure; keep the existing rows.
+        } catch let urlError as URLError where urlError.code == .cancelled {
+            // Same: the URLSession request was cancelled by a newer refresh.
         } catch {
             errorMessage = error.localizedDescription
         }
