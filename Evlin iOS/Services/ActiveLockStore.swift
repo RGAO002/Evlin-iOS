@@ -63,6 +63,32 @@ actor ActiveLockStore {
         return removed
     }
 
+    /// Remove every `source == .limit` shield that covers the given per-app limit
+    /// rule's app, then recompute. Used by `clear_limit` (P6) so clearing a limit
+    /// also unshields if the limit had auto-shielded the app. Matches a limit
+    /// shield when it shares any of the rule's `appTokens` OR its `targetKey`
+    /// equals the rule's lowercased `bundleID` (the exactApp recordKey scheme).
+    ///
+    /// `source == .manual` (parent/reflection) shields are NEVER touched, even if
+    /// they cover the same app — only the limit subsystem's own shields are dropped.
+    @discardableResult
+    func removeLimitShields(appTokens: Set<ApplicationToken>, bundleID: String?) -> [ShieldRecord] {
+        let bidKey = bundleID?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let toRemove = shieldRecords.values.filter { record in
+            guard record.source == .limit else { return false }
+            if !appTokens.isEmpty, !record.appTokens.isDisjoint(with: appTokens) { return true }
+            if let bidKey, !bidKey.isEmpty, record.targetKey == bidKey { return true }
+            return false
+        }
+        guard !toRemove.isEmpty else { return [] }
+        for record in toRemove {
+            shieldRecords.removeValue(forKey: record.recordKey)
+        }
+        persist()
+        recomputeAndApply()
+        return toRemove
+    }
+
     // MARK: - Block API
 
     @discardableResult

@@ -135,6 +135,20 @@ final class ActionExecutor: @unchecked Sendable {
     private let activityScheduler: DeviceActivityScheduling
     private let authorizationStatusProvider: () -> AuthorizationStatus
 
+    /// Per-app limit dependencies (P6). The planner is built per-arm via
+    /// `makeLimitPlanner` rather than stored, for two reasons: (1) the planner is
+    /// `nonisolated` (its deinit must run off the MainActor back-deploy shim that
+    /// double-frees under this toolchain) — storing it on this `@MainActor`
+    /// executor would route the release through the executor's main-actor
+    /// synthesized deinit and re-trip that crash; (2) the planner is documented as
+    /// NOT a singleton: it self-heals from the scheduler's LIVE activity set, so a
+    /// fresh instance per arm discovers and stops any orphaned `evlin.limit.window.*`
+    /// activities. The factory shares this executor's `activityScheduler`, so a
+    /// test spy injected here is the SAME scheduler the planner arms against.
+    /// `execute(_:)` is a serial command path, so `arm` is never called concurrently.
+    private let ruleStore: AppLimitRuleStore
+    private let makeLimitPlanner: @Sendable () -> AppLimitPlanner
+
     /// iOS DeviceActivitySchedule hard minimum.
     static let minScheduleMinutes: Int = 15
 
@@ -142,10 +156,16 @@ final class ActionExecutor: @unchecked Sendable {
         activityScheduler: DeviceActivityScheduling = DeviceActivityCenterScheduler(),
         authorizationStatusProvider: @escaping () -> AuthorizationStatus = {
             AuthorizationCenter.shared.authorizationStatus
-        }
+        },
+        ruleStore: AppLimitRuleStore = .shared,
+        makeLimitPlanner: (@Sendable () -> AppLimitPlanner)? = nil
     ) {
         self.activityScheduler = activityScheduler
         self.authorizationStatusProvider = authorizationStatusProvider
+        self.ruleStore = ruleStore
+        // Default factory builds a planner sharing this executor's scheduler so
+        // arming + the executor's own shield/block scheduling hit the same backend.
+        self.makeLimitPlanner = makeLimitPlanner ?? { AppLimitPlanner(scheduler: activityScheduler) }
     }
 
     func execute(_ cmd: LockCommand, blob: Data? = nil) async -> AckResult {
@@ -171,12 +191,108 @@ final class ActionExecutor: @unchecked Sendable {
             return .confirmedExact(verb: .unblockAll, displayName: "\(cleared.count) block(s) cleared", effectiveState: nil)
         case .expandLibrary:
             return .failed(.execution("expand_library handled in UI"))
-        case .setLimit, .clearLimit:
-            // TODO(P6): real per-app limit enforcement (planner + executor).
-            // P3 is wire-decode only; benign no-op so the switch stays
-            // exhaustive without claiming a false success.
-            return .failed(.execution("per-app limit not yet implemented"))
+        case .setLimit:
+            return executeSetLimit(cmd)
+        case .clearLimit:
+            return await executeClearLimit(cmd)
         }
+    }
+
+    // MARK: - Per-app limit (P6)
+
+    /// `set_limit`: build an `AppLimitRule` from the command, persist it, then
+    /// arm DeviceActivity via the planner. Atomic on quota: the rule is upserted
+    /// first so the planner reads it from the store, and if the planner reports
+    /// `.quotaExceeded` (it guarantees it armed NOTHING) the just-upserted rule is
+    /// rolled back so the store never keeps a rule that didn't apply.
+    private func executeSetLimit(_ cmd: LockCommand) -> AckResult {
+        // 1. Guard a decoded limit payload. A nil here is a malformed/undecoded
+        //    command — NEVER ack success (the parent would read a silent no-op as
+        //    "limit applied").
+        guard let limit = cmd.limit else {
+            return .failed(.malformed)
+        }
+
+        // 2. Decode the app token. The device cannot shield an app it holds no
+        //    token for → application_not_configured.
+        guard let token = CatalogCommandTokenData.decodedApplicationToken(from: cmd.target) else {
+            return .failed(.applicationNotConfigured(resolveExactAppFailureReference(from: cmd.target)))
+        }
+
+        // 3. Build the rule from the command's limit payload + target metadata.
+        let display = cmd.target.targetDisplay ?? cmd.target.bundleID ?? "App"
+        let rule = AppLimitRule(
+            id: limit.ruleId,
+            appTokens: [token],
+            bundleID: cmd.target.bundleID ?? "",
+            displayName: display,
+            budgetMinutes: limit.dailyBudgetMinutes,
+            window: AppLimitWindow(
+                startMinute: limit.startMinute,
+                endMinute: limit.endMinute,
+                repeats: limit.resetPolicy.lowercased() != "once",
+                timezone: limit.timezone
+            ),
+            effectiveFrom: limit.effectiveFrom,
+            expiresAt: limit.expiresAt
+        )
+
+        // 4. Validate-then-commit (atomic on quota).
+        return applyLimitRule(rule, displayName: display)
+    }
+
+    /// Persist `rule`, arm the planner, and turn the plan result into an ack.
+    /// Split out from `executeSetLimit` so the atomic rollback-on-quota is
+    /// exercisable without a picker-minted `ApplicationToken` (tokens can't be
+    /// constructed in a unit test).
+    func applyLimitRule(_ rule: AppLimitRule, displayName: String) -> AckResult {
+        ruleStore.upsert(rule)
+        let result = makeLimitPlanner().arm(rules: ruleStore.all())
+        switch result {
+        case .armed:
+            return .confirmedExact(verb: .setLimit, displayName: displayName, effectiveState: nil)
+        case .quotaExceeded(let windows, let slotsNeeded, let cap):
+            // Roll back: the planner guarantees it armed NOTHING on quotaExceeded,
+            // so removing the rule restores the prior state exactly.
+            ruleStore.remove(ruleId: rule.id)
+            return .failed(.limitQuotaExceeded(windows: windows, slotsNeeded: slotsNeeded, cap: cap))
+        case .partiallyArmed(let armed, let failed):
+            // The rule didn't fully apply — do not ack success. Roll back so the
+            // store doesn't keep a rule whose arming partially failed; the next
+            // arm (e.g. on a retry or app relaunch) repacks from the store.
+            ruleStore.remove(ruleId: rule.id)
+            return .failed(.execution(
+                "per-app limit partially armed (\(armed) ok, \(failed) failed); not applied"
+            ))
+        }
+    }
+
+    /// `clear_limit`: remove the rule, drop any `source == .limit` shield it had
+    /// auto-applied (never touching `.manual` parent shields), then re-arm so the
+    /// planner's self-healing pass stops the now-vanished `evlin.limit.window.*`
+    /// activity. Removing a non-existent rule is idempotent → still confirms.
+    private func executeClearLimit(_ cmd: LockCommand) async -> AckResult {
+        guard let clear = cmd.clear else {
+            return .failed(.malformed)
+        }
+
+        // Capture the rule (if present) BEFORE removal so we know which app's
+        // limit shield to drop.
+        let existing = ruleStore.rule(forID: clear.ruleId)
+        ruleStore.remove(ruleId: clear.ruleId)
+
+        // Drop the limit shield for that rule's app. Only touches source == .limit
+        // records — a parent's source == .manual shield on the same app is kept.
+        let appTokens = existing?.appTokens ?? []
+        let bundleID = existing?.bundleID ?? cmd.target.bundleID
+        _ = await ActiveLockStore.shared.removeLimitShields(appTokens: appTokens, bundleID: bundleID)
+
+        // Re-arm without the removed rule. Self-healing discovery stops the
+        // vanished window activity.
+        _ = makeLimitPlanner().arm(rules: ruleStore.all())
+
+        let display = cmd.target.targetDisplay ?? existing?.displayName ?? cmd.target.bundleID ?? "App"
+        return .confirmedExact(verb: .clearLimit, displayName: display, effectiveState: nil)
     }
 
     /// Direct receipt-action unlock path. This intentionally bypasses chat/AI
