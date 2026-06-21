@@ -83,6 +83,9 @@ struct AppControlsV2View: View {
                 }
                 categoriesSection
                 appsSection
+                #if DEBUG
+                debugResetControl
+                #endif
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 16)
@@ -169,6 +172,42 @@ struct AppControlsV2View: View {
         .padding(.bottom, 12)
     }
 
+    // MARK: - DEBUG reset (Fix B — never ships)
+
+    #if DEBUG
+    /// DEBUG-only "Reset App Controls data" — wipes ALL local aliases/categories +
+    /// the "Locked set" group + the catalog alias-key index, then SNAPSHOT-wipes the
+    /// backend catalog (`apps: []` deletes every catalog row for this kid device), so
+    /// the tester can start clean and re-run the bind/rebind/unbind flow. Wrapped in
+    /// `#if DEBUG` so it never reaches a release build.
+    private var debugResetControl: some View {
+        Button(role: .destructive) {
+            // Wipes local aliases + categories + the "Locked set" group + catalog index.
+            LocalAliasStore.shared.removeAllAliases()
+            // Snapshot-wipe the backend catalog (apps: [] deletes every row). Best-effort.
+            Task { try? await apiClient.uploadChildAppCatalog(deviceID: childDeviceID, apps: []) }
+            reload()                 // selection now empty
+            refreshTick &+= 1
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "trash")
+                    .font(.system(size: 13, weight: .medium))
+                Text("Reset App Controls data (debug)")
+                    .font(.system(size: 13, weight: .medium))
+            }
+            .foregroundStyle(Color.evTextDanger)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 10)
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(Color.evTextDanger.opacity(0.4), lineWidth: 0.5)
+            )
+        }
+        .buttonStyle(.plain)
+        .padding(.top, 24)
+    }
+    #endif
+
     // MARK: - Categories (top, all shown)
 
     private var categoriesSection: some View {
@@ -224,7 +263,22 @@ struct AppControlsV2View: View {
                                 }
                                 // Fix 1 — removing the app while a Rebind is pending
                                 // still drops the (now-stale) alias before the row goes.
+                                // (If a rebind was pending on THIS token, this also
+                                // deletes the backend row — Fix A.2 — so the named-app
+                                // cleanup below no-ops, having no alias left to find.)
                                 cancelRebindIfPending()
+                                // Fix A.3 — for a NAMED app, also clean up its local alias
+                                // and DELETE its backend catalog row so it stops showing in
+                                // the parent "Manage aliases" after removal. Unnamed apps
+                                // have no alias keys → this whole block no-ops.
+                                let aliasKey = backendAliasKey(forApp: token)
+                                let aliasLookupKeys = LocalAliasStore.shared.applicationLookupKeys(equalTo: token)
+                                if !aliasLookupKeys.isEmpty {
+                                    LocalAliasStore.shared.removeApplicationAliases(keys: aliasLookupKeys)
+                                    if let aliasKey {
+                                        Task { try? await apiClient.deleteChildAppControlTarget(deviceID: childDeviceID, aliasKey: aliasKey) }
+                                    }
+                                }
                                 DefaultLockGroupStore.removeApp(token)
                                 reload()
                             },
@@ -299,10 +353,18 @@ struct AppControlsV2View: View {
         rebindingApp = nil
         let keys = LocalAliasStore.shared.applicationLookupKeys(equalTo: token)
         guard !keys.isEmpty else { return }
+        // Fix A.2 — capture the CURRENT backend alias key BEFORE we wipe the local
+        // alias below (which makes backendAliasKey(forApp:) unresolvable).
+        let aliasKey = backendAliasKey(forApp: token)
         // Removes the name alias → MatchedState recomputes to .unmatched. The
         // orphaned catalogAliasKeyIndex entry is harmless (overwritten on re-bind).
         LocalAliasStore.shared.removeApplicationAliases(keys: keys)
         refreshTick &+= 1
+        // Fix A.2 — also DELETE the stale backend catalog row. Best-effort, detached;
+        // never blocks the leave-without-pick unbind.
+        if let aliasKey {
+            Task { try? await apiClient.deleteChildAppControlTarget(deviceID: childDeviceID, aliasKey: aliasKey) }
+        }
     }
 
     // MARK: - App bind handler (onPick + onManual share this)
@@ -313,6 +375,14 @@ struct AppControlsV2View: View {
         row.bind(result)
         row.confirm()
         guard let upload = row.makeUploadApp(sourceDeviceID: childDeviceID) else { return }
+
+        // Fix A.1 — REBIND deletes the OLD backend row. Capture this token's CURRENT
+        // backend alias key BEFORE the local-alias replace below wipes it. After the
+        // new row uploads, we delete this stale row (guarded so re-confirming the SAME
+        // app — which upserts to the same key — is never deleted). Without this,
+        // `mergeChildAppCatalog` (additive) leaves A's row behind on rebind A→B, and it
+        // shows forever in the parent "Manage aliases".
+        let oldAliasKey = backendAliasKey(forApp: appToken)
 
         // 0) Rebind = REPLACE, not append. `saveApplicationAliases` is additive, so
         // without this a re-bind leaves the previous name's keys on this token. Since
@@ -358,6 +428,12 @@ struct AppControlsV2View: View {
                     bundleIdentifier: upload.bundleID,
                     catalogAliasKey: key
                 )
+                // Fix A.1 — now that the NEW row exists, delete the stale OLD backend
+                // row. Guard `oldAliasKey != key` so re-confirming the SAME app (which
+                // upserts to the same row/key) is never deleted. Best-effort.
+                if let oldAliasKey, oldAliasKey != key {
+                    try? await apiClient.deleteChildAppControlTarget(deviceID: childDeviceID, aliasKey: oldAliasKey)
+                }
             } catch {
                 // Local alias already saved — do NOT block. Surface a soft note.
                 await MainActor.run {
@@ -433,6 +509,18 @@ struct AppControlsV2View: View {
 
     private func reload() {
         selection = DefaultLockGroupStore.load()
+    }
+
+    // MARK: - Backend alias-key lookup (Fix A)
+
+    /// A token's CURRENT backend alias key — the `aliasKey` of the catalog target whose
+    /// lookup keys intersect this token's lookup keys, or nil if the app is unnamed
+    /// (never bound). Used to DELETE the stale backend catalog row on rebind / unbind /
+    /// remove so the parent "Manage aliases" list never accumulates orphaned rows.
+    private func backendAliasKey(forApp token: ApplicationToken) -> UUID? {
+        let keys = LocalAliasStore.shared.applicationLookupKeys(equalTo: token)
+        return LocalAliasStore.shared.catalogAppTargets()
+            .first { !Set($0.lookupKeys).isDisjoint(with: keys) }?.aliasKey
     }
 
     // MARK: - Local "is this still matched?" state (pure reads of LocalAliasStore)
