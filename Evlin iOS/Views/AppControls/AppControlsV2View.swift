@@ -454,6 +454,15 @@ struct AppControlsV2View: View {
         )
         let upload = row.makeUploadCategory(sourceDeviceID: childDeviceID)
 
+        // 0) Re-tag = REPLACE, not append. `saveCategoryToken` is additive, so
+        // without this a re-tag leaves the PREVIOUS tag's name keys on this token.
+        // Then `selectedCategoryKey` (and name-lock resolution) keep matching the
+        // old tag — the chip highlight never moves, so the tag looks unchangeable.
+        // Clear this token's prior category keys first; no-op on a first tag.
+        for key in LocalAliasStore.shared.categoryLookupKeys(equalTo: catToken) {
+            LocalAliasStore.shared.removeCategory(named: key)
+        }
+
         // 1) Local alias FIRST — display name + every alias variant (mirrors
         // AddAppFlowView's category save) so name-lock works even if upload fails.
         LocalAliasStore.shared.saveCategoryToken(catToken, forName: upload.displayName)
