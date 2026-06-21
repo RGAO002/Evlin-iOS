@@ -17,6 +17,21 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         super.intervalDidStart(for: activity)
 
         let raw = activity.rawValue
+
+        // Per-app limit daily reset (P7). The window's interval start (midnight for
+        // a daily window) means a fresh day's budget. DeviceActivity auto-resets
+        // each event's threshold counter at the interval boundary, so the budget
+        // refreshes on its own; this branch just un-shields so the kid gets the
+        // new day's allowance. We strip ONLY `source == .limit` records — a
+        // parent's `source == .manual` shield is NEVER touched.
+        // Prefix MUST equal `AppLimitPlanner.windowActivityPrefix`. Hardcoded (not
+        // referenced) because the planner is an app-target-only type not built into
+        // this extension; the constant is asserted equal in P7 tests.
+        if raw.hasPrefix("evlin.limit.window.") {
+            resetLimitShields(activity: raw)
+            return
+        }
+
         guard raw == "evlin.command.heartbeat" else { return }
 
         let ts = ISO8601DateFormatter().string(from: Date())
@@ -86,7 +101,76 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         super.eventDidReachThreshold(event, activity: activity)
         if event.rawValue == "evlin.bigkid.chunk" {
             Task { await BigKidExtensionReporter.shared.reportChunk() }
+            return
         }
+        // Per-app limit: the kid's usage of `<ruleId>`'s app crossed its daily
+        // budget. The event name is `evlin.limit.<ruleId>` (see AppLimitPlanner).
+        // Resolve the rule, write a `source == .limit` ShieldRecord, recompute.
+        if event.rawValue.hasPrefix("evlin.limit.") {
+            applyLimitShield(eventName: event.rawValue)
+        }
+    }
+
+    /// Threshold-reached enforcement (P7). Parse the `ruleId` from the
+    /// `evlin.limit.<ruleId>` event name, look the rule up in the App Group
+    /// (`AppLimitRuleStore`), then insert/merge a `source == .limit` ShieldRecord
+    /// (matchable by `ActiveLockStore.removeLimitShields`) and force a recompute so
+    /// the app is shielded. If the rule isn't found (e.g. just cleared) we do
+    /// nothing — there's nothing to shield.
+    private func applyLimitShield(eventName: String) {
+        let idString = String(eventName.dropFirst("evlin.limit.".count))
+        guard let ruleId = UUID(uuidString: idString),
+              let rule = AppLimitRuleStore.shared.rule(forID: ruleId) else {
+            defaults?.set(
+                "limit_threshold_norule event=\(eventName)",
+                forKey: "evlin.lastLimitShield"
+            )
+            return
+        }
+
+        let current = loadShields()
+        let updated = LimitShieldLogic.applyingLimit(to: current, rule: rule)
+        if let data = encodeShields(updated) {
+            defaults?.set(data, forKey: shieldsKey)
+        }
+        recomputeAndApplyShields(updated)
+
+        let ts = ISO8601DateFormatter().string(from: Date())
+        defaults?.set(
+            "limit_shielded_at=\(ts) rule=\(ruleId.uuidString) key=\(LimitShieldLogic.recordKey(for: rule))",
+            forKey: "evlin.lastLimitShield"
+        )
+        NSLog("[Evlin/Ext] limit threshold shielded rule=%@", ruleId.uuidString)
+    }
+
+    /// Daily-reset enforcement (P7). Strip EVERY `source == .limit` ShieldRecord
+    /// from the App Group shields dict, persist, and recompute so the kid regains
+    /// the new day's allowance. NEVER touches `source == .manual` (parent)
+    /// shields. Idempotent: if no limit shields exist this is a harmless recompute.
+    private func resetLimitShields(activity: String) {
+        let current = loadShields()
+        let stripped = LimitShieldLogic.strippingLimitShields(from: current)
+        let removedCount = current.count - stripped.count
+        if let data = encodeShields(stripped) {
+            defaults?.set(data, forKey: shieldsKey)
+        }
+        recomputeAndApplyShields(stripped)
+
+        let ts = ISO8601DateFormatter().string(from: Date())
+        defaults?.set(
+            "limit_reset_at=\(ts) activity=\(activity) removed=\(removedCount)"
+                + " remaining=\(stripped.count)",
+            forKey: "evlin.lastLimitReset"
+        )
+        NSLog("[Evlin/Ext] limit daily reset activity=%@ removed=%d", activity, removedCount)
+    }
+
+    /// Read the current shields dict from the App Group, normalizing each record
+    /// to the current schema (same migration the shield-removal path applies).
+    private func loadShields() -> [String: ShieldRecord] {
+        guard let data = defaults?.data(forKey: shieldsKey),
+              let decoded = decodeShields(from: data) else { return [:] }
+        return decoded.mapValues { $0.normalizedForCurrentSchema().record }
     }
 
     @discardableResult
@@ -131,7 +215,33 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             removedRecord = false
         }
 
-        // Recompute & apply (same logic as ActiveLockStore.recomputeAndApply)
+        // Recompute & apply the surviving record set to the ManagedSettingsStore.
+        let blocksRemaining = recomputeAndApplyShields(mutated)
+
+        // Mark that the extension forced its own recompute. The diagnostic in
+        // HomeSettingsSheet's "Last Extension Fire" already shows shieldRemoved;
+        // augment it so we can tell apart 'pre-empted by main app + idempotent
+        // recompute' (removedRecord=false) from 'extension did the work itself'
+        // (removedRecord=true).
+        let ts = ISO8601DateFormatter().string(from: Date())
+        defaults?.set(
+            "ext_recompute_at=\(ts) shieldsRemaining=\(mutated.count)"
+                + " blocksRemaining=\(blocksRemaining) removedHere=\(removedRecord)",
+            forKey: "evlin.lastRecompute"
+        )
+
+        return removedRecord
+    }
+
+    /// Recompute & apply shield/block state to the `ManagedSettingsStore` from the
+    /// given shields dict + whatever blocks the App Group currently holds. EXACTLY
+    /// the logic that used to live inline in `removeShieldByHashAndRecompute`
+    /// (extracted verbatim for P7 so the threshold + daily-reset branches can reuse
+    /// it). Same logic as `ActiveLockStore.recomputeAndApply`. Reads blocks from
+    /// defaults here so every call site recomputes from the live block set.
+    /// Returns the surviving block count for diagnostics.
+    @discardableResult
+    private func recomputeAndApplyShields(_ shields: [String: ShieldRecord]) -> Int {
         let blocks: [String: BlockRecord] = {
             guard let d = defaults?.data(forKey: blocksKey),
                   let decoded = decodeBlocks(from: d) else {
@@ -143,10 +253,10 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         let blockedApps = Set(blocks.values.map { ManagedSettings.Application(bundleIdentifier: $0.bundleID) })
         store.application.blockedApplications = blockedApps.isEmpty ? nil : blockedApps
 
-        let broadRecords = mutated.values.filter(\.appliesToAll)
+        let broadRecords = shields.values.filter(\.appliesToAll)
         if !broadRecords.isEmpty {
             let includesFullWebShield = broadRecords.contains(where: \.isFullWebBroadShield)
-            let allWeb = Set(mutated.values.flatMap(\.webDomainTokens))
+            let allWeb = Set(shields.values.flatMap(\.webDomainTokens))
             store.shield.applicationCategories = .all()
             store.shield.applications = nil
             if includesFullWebShield {
@@ -157,9 +267,9 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
                 store.shield.webDomains = allWeb.isEmpty ? nil : allWeb
             }
         } else {
-            let allApp = Set(mutated.values.flatMap(\.appTokens))
-            let allCat = Set(mutated.values.flatMap(\.categoryTokens))
-            let allWeb = Set(mutated.values.flatMap(\.webDomainTokens))
+            let allApp = Set(shields.values.flatMap(\.appTokens))
+            let allCat = Set(shields.values.flatMap(\.categoryTokens))
+            let allWeb = Set(shields.values.flatMap(\.webDomainTokens))
 
             store.shield.applications = allApp.isEmpty ? nil : allApp
             store.shield.applicationCategories = allCat.isEmpty ? nil : .specific(allCat)
@@ -167,19 +277,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             store.shield.webDomainCategories = nil
         }
 
-        // Mark that the extension forced its own recompute. The diagnostic in
-        // HomeSettingsSheet's "Last Extension Fire" already shows shieldRemoved;
-        // augment it so we can tell apart 'pre-empted by main app + idempotent
-        // recompute' (removedRecord=false) from 'extension did the work itself'
-        // (removedRecord=true).
-        let ts = ISO8601DateFormatter().string(from: Date())
-        defaults?.set(
-            "ext_recompute_at=\(ts) shieldsRemaining=\(mutated.count)"
-                + " blocksRemaining=\(blocks.count) removedHere=\(removedRecord)",
-            forKey: "evlin.lastRecompute"
-        )
-
-        return removedRecord
+        return blocks.count
     }
 
     /// Symmetric to `removeShieldByHashAndRecompute` but for timed

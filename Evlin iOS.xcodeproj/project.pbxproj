@@ -141,6 +141,8 @@
 				Models/CommandModels.swift,
 				Models/ShieldRecord.swift,
 				Models/ShieldTier.swift,
+				Services/AppLimitRuleStore.swift,
+				Services/LimitShieldLogic.swift,
 			);
 			target = B6FA97312F81C6A000DA619E /* EvlinDeviceActivityMonitor */;
 		};
