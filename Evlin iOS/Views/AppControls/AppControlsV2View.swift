@@ -314,6 +314,16 @@ struct AppControlsV2View: View {
         row.confirm()
         guard let upload = row.makeUploadApp(sourceDeviceID: childDeviceID) else { return }
 
+        // 0) Rebind = REPLACE, not append. `saveApplicationAliases` is additive, so
+        // without this a re-bind leaves the previous name's keys on this token. Since
+        // `catalogAppTargets().label` picks the alphabetically-first key, the review
+        // would keep showing the earlier-bound app no matter what the user re-picks.
+        // Clear this token's prior alias keys first; no-op on a fresh bind.
+        let priorKeys = LocalAliasStore.shared.applicationLookupKeys(equalTo: appToken)
+        if !priorKeys.isEmpty {
+            LocalAliasStore.shared.removeApplicationAliases(keys: priorKeys)
+        }
+
         // 1) Local alias FIRST so name-lock works even if the upload never lands.
         LocalAliasStore.shared.saveApplicationAliases(
             token: appToken,
