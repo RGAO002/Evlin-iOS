@@ -282,7 +282,13 @@ struct AppControlsV2View: View {
                                 DefaultLockGroupStore.removeApp(token)
                                 reload()
                             },
-                            onRebind: { rebindingApp = token },
+                            onRebind: {
+                                // Tapping Rebind clears the OLD binding RIGHT AWAY
+                                // (delete backend row + dict entry + local alias), then
+                                // shows the search — no need to exit/Done to clean up.
+                                unbindApp(token)
+                                rebindingApp = token
+                            },
                             onPick: { result in bindApp(token, result: result) },
                             onManual: { name in
                                 bindApp(token, result: CatalogSearchResult(canonicalName: name, bundleID: nil, aliases: []))
@@ -351,17 +357,26 @@ struct AppControlsV2View: View {
     private func cancelRebindIfPending() {
         guard let token = rebindingApp else { return }
         rebindingApp = nil
+        // Safety net: Rebind already unbinds immediately (see onRebind), so this is a
+        // no-op on the normal path. Kept for any leave path that didn't go through Rebind.
+        unbindApp(token)
+    }
+
+    /// Immediately drop a binding: remove the local name alias (so MatchedState
+    /// recomputes to `.unmatched`) AND delete the backend catalog row + its orphaned
+    /// family-dictionary entry. Used when "Rebind" is tapped (clear the OLD binding
+    /// right away, not on exit) and as the leave-without-pick safety net. No-op if
+    /// the token has no alias (already unbound).
+    private func unbindApp(_ token: ApplicationToken) {
         let keys = LocalAliasStore.shared.applicationLookupKeys(equalTo: token)
         guard !keys.isEmpty else { return }
-        // Fix A.2 — capture the CURRENT backend alias key BEFORE we wipe the local
-        // alias below (which makes backendAliasKey(forApp:) unresolvable).
+        // Capture the backend alias key BEFORE wiping the local alias (which makes
+        // backendAliasKey(forApp:) unresolvable).
         let aliasKey = backendAliasKey(forApp: token)
-        // Removes the name alias → MatchedState recomputes to .unmatched. The
-        // orphaned catalogAliasKeyIndex entry is harmless (overwritten on re-bind).
         LocalAliasStore.shared.removeApplicationAliases(keys: keys)
         refreshTick &+= 1
-        // Fix A.2 — also DELETE the stale backend catalog row. Best-effort, detached;
-        // never blocks the leave-without-pick unbind.
+        // DELETE the backend catalog row (+ orphaned dictionary entry, server-side).
+        // Best-effort, detached; never blocks the UI.
         if let aliasKey {
             Task { try? await apiClient.deleteChildAppControlTarget(deviceID: childDeviceID, aliasKey: aliasKey) }
         }
