@@ -19,6 +19,8 @@ final class AliasManagerModel: ObservableObject {
 
     let familyID: UUID
     private let client: AppAliasManagingClient
+    /// The in-flight load. Cancelled when a newer load starts so the latest wins.
+    private var loadTask: Task<Void, Never>?
 
     init(familyID: UUID, client: AppAliasManagingClient) {
         self.familyID = familyID
@@ -41,23 +43,34 @@ final class AliasManagerModel: ObservableObject {
     // MARK: - Load
 
     func load() async {
-        isLoading = true
-        errorMessage = nil
-        defer { isLoading = false }
-        do {
-            rows = try await client.fetchAppAliases(familyID: familyID)
-        } catch is CancellationError {
-            // A superseding load (`.task` vs pull-to-refresh both call `load()`)
-            // cancelled this one — not a real failure; keep the existing rows.
-        } catch let urlError as URLError where urlError.code == .cancelled {
-            // Same: the URLSession request was cancelled by a newer refresh.
-        } catch {
-            errorMessage = error.localizedDescription
+        // `.task` (on appear) and `.refreshable` (pull) BOTH call this. Running the
+        // fetch directly made the pull-to-refresh request get cancelled by the
+        // competing task / the gesture teardown, so `rows` never updated and the user
+        // had to leave + re-enter. Fix: cancel any in-flight load, then run the fetch
+        // in an UNSTRUCTURED `Task` so a cancelled CALLER can't abort it — the newest
+        // request always completes and updates `rows`.
+        loadTask?.cancel()
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.isLoading = true
+            defer { self.isLoading = false }
+            do {
+                self.rows = try await self.client.fetchAppAliases(familyID: self.familyID)
+                self.errorMessage = nil
+            } catch is CancellationError {
+                // Superseded by a newer load — keep the existing rows.
+            } catch let urlError as URLError where urlError.code == .cancelled {
+                // Request cancelled by a newer refresh — keep the existing rows.
+            } catch {
+                self.errorMessage = error.localizedDescription
+            }
+            // Best-effort: fetch child devices so the view can pick a real device ID
+            // when presenting AddAppFlowView for block-only apps. A failure here must
+            // NOT disrupt the alias list — alias rows remain visible regardless.
+            self.childDevices = (try? await self.client.fetchParentChildDevices(familyID: self.familyID)) ?? []
         }
-        // Best-effort: fetch child devices so the view can pick a real device ID
-        // when presenting AddAppFlowView for block-only apps. A failure here must
-        // NOT disrupt the alias list — alias rows remain visible regardless.
-        childDevices = (try? await client.fetchParentChildDevices(familyID: familyID)) ?? []
+        loadTask = task
+        await task.value
     }
 
     // MARK: - Mutations (server-confirmed; re-fetch on success)
