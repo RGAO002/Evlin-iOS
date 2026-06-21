@@ -785,7 +785,7 @@ struct ChildLockableHubStep: View {
                 CombinedPickerSheet(
                     initialSelection: DefaultLockGroupStore.load(),
                     onSave: { sel in
-                        DefaultLockGroupStore.save(sel)
+                        DefaultLockGroupStore.save(mergePreservingNamedApps(sel))
                         refreshTick += 1   // recompute summary counts on next render
                         showPicker = false
                     },
@@ -823,4 +823,19 @@ struct ChildLockableHubStep: View {
             )
         }
     }
+}
+
+// Apple's picker folds an individually-selected app into a category when that
+// category is picked, dropping it from applicationTokens. Re-preserve apps that
+// are NAMED (have a lock-by-name alias) so adding a category never silently
+// destroys a binding. Unnamed individual picks are allowed to fold into their
+// category; named-app removal goes through the row "x".
+private func mergePreservingNamedApps(_ picked: FamilyActivitySelection) -> FamilyActivitySelection {
+    var merged = picked
+    for token in DefaultLockGroupStore.load().applicationTokens
+    where !merged.applicationTokens.contains(token)
+        && !LocalAliasStore.shared.applicationLookupKeys(equalTo: token).isEmpty {
+        merged.applicationTokens.insert(token)
+    }
+    return merged
 }

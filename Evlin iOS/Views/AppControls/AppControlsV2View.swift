@@ -98,7 +98,7 @@ struct AppControlsV2View: View {
             CombinedPickerSheet(
                 initialSelection: selection,
                 onSave: { newSelection in
-                    DefaultLockGroupStore.save(newSelection)
+                    DefaultLockGroupStore.save(mergePreservingNamedApps(newSelection))
                     reload()
                     showPicker = false
                 },
@@ -447,6 +447,21 @@ struct AppControlsV2View: View {
         let localTokenPresent = keys.contains { LocalAliasStore.shared.categoryToken(forName: $0) == catToken }
         return MatchedState.from(hasAliasKey: hasAliasKey, localTokenPresent: localTokenPresent)
     }
+}
+
+// Apple's picker folds an individually-selected app into a category when that
+// category is picked, dropping it from applicationTokens. Re-preserve apps that
+// are NAMED (have a lock-by-name alias) so adding a category never silently
+// destroys a binding. Unnamed individual picks are allowed to fold into their
+// category; named-app removal goes through the row "x".
+private func mergePreservingNamedApps(_ picked: FamilyActivitySelection) -> FamilyActivitySelection {
+    var merged = picked
+    for token in DefaultLockGroupStore.load().applicationTokens
+    where !merged.applicationTokens.contains(token)
+        && !LocalAliasStore.shared.applicationLookupKeys(equalTo: token).isEmpty {
+        merged.applicationTokens.insert(token)
+    }
+    return merged
 }
 
 // MARK: - Rows
