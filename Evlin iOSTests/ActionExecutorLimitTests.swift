@@ -243,13 +243,143 @@ final class ActionExecutorLimitTests: XCTestCase {
         XCTAssertEqual(slotsNeeded, AppLimitPlanner.maxEventsPerActivity + 1)
         XCTAssertEqual(cap, AppLimitPlanner.maxEventsPerActivity)
 
-        // Rollback: the new rule must NOT remain in the store, and the seeded
-        // rules must be untouched (the planner armed nothing).
+        // Rollback: the new rule must NOT remain in the store, and the store must
+        // be restored to exactly the seeded set.
         XCTAssertNil(AppLimitRuleStore.shared.rule(forID: newRule.id),
                      "quota-tripping rule must be rolled back out of the store")
         XCTAssertEqual(AppLimitRuleStore.shared.all().count, AppLimitPlanner.maxEventsPerActivity,
                        "rollback must restore the prior store exactly")
-        XCTAssertTrue(spy.armed.isEmpty, "atomic: nothing armed on quota exceeded")
+        // Atomicity of the FAILING pass: the over-cap window (cap + 1 events) was
+        // never armed — the planner validated and armed NOTHING on quotaExceeded.
+        // (Fix 1's rollback then RE-ARMS the restored valid set so the device
+        // matches the store, so the spy legitimately sees the seeded window armed
+        // at exactly `cap` events; what must never appear is a cap+1 arm.)
+        XCTAssertFalse(spy.armed.contains { $0.events.count > AppLimitPlanner.maxEventsPerActivity },
+                       "the over-cap window must never have been armed")
+    }
+
+    /// UPDATE-rollback: a `set_limit` that UPDATEs an existing rule (same id,
+    /// changed budget/window) but trips `.quotaExceeded` must RESTORE the prior
+    /// valid rule — not delete it. Before Fix 1 the rollback `remove`d by id,
+    /// which deleted the previously-armed rule entirely (data loss).
+    func testApplyLimitRuleUpdateTrippingQuotaRestoresPriorRule() async {
+        let spy = LimitSchedulerSpy()
+        let executor = makeExecutor(spy: spy)
+
+        let ruleID = UUID()
+        // Rule X: the previously-valid, armed version of `r` on a DISTINCT window
+        // (its own slot) so it does not itself contribute to the cap breach.
+        let priorWindow = AppLimitWindow(startMinute: 60, endMinute: 120, repeats: true, timezone: nil)
+        let priorRule = AppLimitRule(
+            id: ruleID,
+            appTokens: [],
+            bundleID: "com.burbn.instagram",
+            displayName: "Instagram",
+            budgetMinutes: 45,
+            window: priorWindow,
+            effectiveFrom: Date(timeIntervalSince1970: 0),
+            expiresAt: nil
+        )
+        AppLimitRuleStore.shared.upsert(priorRule)
+
+        // Saturate the DAILY window to the per-activity event cap with OTHER rules.
+        let dailyWindow = AppLimitWindow(startMinute: 0, endMinute: 1439, repeats: true, timezone: nil)
+        for i in 0..<AppLimitPlanner.maxEventsPerActivity {
+            AppLimitRuleStore.shared.upsert(AppLimitRule(
+                id: UUID(),
+                appTokens: [],
+                bundleID: "com.seed.\(i)",
+                displayName: "Seed \(i)",
+                budgetMinutes: 30,
+                window: dailyWindow,
+                effectiveFrom: Date(timeIntervalSince1970: 0),
+                expiresAt: nil
+            ))
+        }
+
+        // UPDATE of `r`: SAME id, different budget AND window (now the saturated
+        // daily window) → that activity hits cap + 1 → quotaExceeded.
+        let updatedRule = AppLimitRule(
+            id: ruleID,
+            appTokens: [],
+            bundleID: "com.burbn.instagram",
+            displayName: "Instagram",
+            budgetMinutes: 90,            // changed budget
+            window: dailyWindow,          // changed window → joins the saturated slot
+            effectiveFrom: Date(timeIntervalSince1970: 0),
+            expiresAt: nil
+        )
+
+        let result = executor.applyLimitRule(updatedRule, displayName: "Instagram")
+
+        guard case .failed(.limitQuotaExceeded) = result else {
+            return XCTFail("expected .failed(.limitQuotaExceeded); got \(result)")
+        }
+
+        // The store must still hold the ORIGINAL X — not nil, not the new version.
+        let restored = AppLimitRuleStore.shared.rule(forID: ruleID)
+        XCTAssertNotNil(restored, "UPDATE-rollback must restore the prior rule, not delete it")
+        XCTAssertEqual(restored, priorRule, "restored rule must be the ORIGINAL X (budget/window unchanged)")
+        XCTAssertEqual(restored?.budgetMinutes, 45, "must NOT keep the updated budget")
+        XCTAssertEqual(restored?.window, priorWindow, "must NOT keep the updated window")
+    }
+
+    // MARK: - repeats derivation: only "daily" recurs; unknown → non-repeating
+
+    /// The `set_limit` window-build derives `repeats` POSITIVELY from
+    /// `reset_policy`: only known-recurring policies recur. An unknown / future
+    /// value (e.g. "none" or "once" — the app uses "none" for "Once" elsewhere)
+    /// must yield a NON-repeating window, not silently recur daily. This exercises
+    /// the SAME `windowRepeats(forResetPolicy:)` seam `executeSetLimit` calls when
+    /// building the rule, so a real picker-minted token is not required.
+    func testWindowRepeatsDerivationIsPositiveDaily() {
+        // The only v1 recurring policy.
+        XCTAssertTrue(ActionExecutor.windowRepeats(forResetPolicy: "daily"))
+        XCTAssertTrue(ActionExecutor.windowRepeats(forResetPolicy: "Daily"),
+                      "case-insensitive")
+
+        // Unknown / future / non-recurring policies must NOT repeat.
+        for policy in ["none", "once", "weekly", "future-unknown", ""] {
+            XCTAssertFalse(ActionExecutor.windowRepeats(forResetPolicy: policy),
+                           "unknown reset_policy '\(policy)' must be non-repeating")
+        }
+    }
+
+    /// End-to-end through the rule-build derivation: a command whose `reset_policy`
+    /// is the app's "Once" sentinel ("none") yields a persisted rule whose
+    /// `window.repeats == false`. Tokens can't be minted in a unit test, so the
+    /// rule is built via the same `windowRepeats(forResetPolicy:)` seam the
+    /// post-decode `executeSetLimit` path uses, then persisted via `applyLimitRule`.
+    func testSetLimitOnceResetPolicyPersistsNonRepeatingRule() async {
+        let spy = LimitSchedulerSpy()
+        let executor = makeExecutor(spy: spy)
+        let ruleID = UUID()
+
+        let rule = AppLimitRule(
+            id: ruleID,
+            appTokens: [],
+            bundleID: "com.burbn.instagram",
+            displayName: "Instagram",
+            budgetMinutes: 45,
+            window: AppLimitWindow(
+                startMinute: 0,
+                endMinute: 1439,
+                repeats: ActionExecutor.windowRepeats(forResetPolicy: "none"),
+                timezone: "America/Los_Angeles"
+            ),
+            effectiveFrom: Date(timeIntervalSince1970: 0),
+            expiresAt: nil
+        )
+
+        let result = executor.applyLimitRule(rule, displayName: "Instagram")
+        guard case .confirmedExact = result else {
+            return XCTFail("expected .confirmedExact; got \(result)")
+        }
+
+        let persisted = AppLimitRuleStore.shared.rule(forID: ruleID)
+        XCTAssertNotNil(persisted, "rule should persist")
+        XCTAssertFalse(persisted?.window.repeats ?? true,
+                       "reset_policy 'none' (Once) must yield a non-repeating window")
     }
 
     /// The happy path through `applyLimitRule`: a single rule on its own window

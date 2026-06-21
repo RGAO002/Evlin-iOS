@@ -230,7 +230,7 @@ final class ActionExecutor: @unchecked Sendable {
             window: AppLimitWindow(
                 startMinute: limit.startMinute,
                 endMinute: limit.endMinute,
-                repeats: limit.resetPolicy.lowercased() != "once",
+                repeats: Self.windowRepeats(forResetPolicy: limit.resetPolicy),
                 timezone: limit.timezone
             ),
             effectiveFrom: limit.effectiveFrom,
@@ -241,30 +241,62 @@ final class ActionExecutor: @unchecked Sendable {
         return applyLimitRule(rule, displayName: display)
     }
 
+    /// Map a backend `reset_policy` to whether the limit window recurs daily.
+    ///
+    /// Derived POSITIVELY: only known-recurring policies repeat, so an unknown /
+    /// future value is treated as a one-shot (non-repeating) window rather than
+    /// silently recurring daily. v1's only recurring policy is `"daily"` (resets
+    /// each midnight). This set MUST track the backend's `reset_policy` enum —
+    /// extend it when the backend adds further recurring policies.
+    static func windowRepeats(forResetPolicy policy: String) -> Bool {
+        policy.lowercased() == "daily"
+    }
+
     /// Persist `rule`, arm the planner, and turn the plan result into an ack.
     /// Split out from `executeSetLimit` so the atomic rollback-on-quota is
     /// exercisable without a picker-minted `ApplicationToken` (tokens can't be
     /// constructed in a unit test).
     func applyLimitRule(_ rule: AppLimitRule, displayName: String) -> AckResult {
+        // Snapshot the value at this id BEFORE upsert. For an UPDATE (same
+        // rule_id, changed budget/window) `upsert` overwrites the prior rule, so
+        // a rollback that just `remove`d would DELETE the previously-valid rule
+        // rather than restoring it — and on `.partiallyArmed` the planner already
+        // re-armed the new windows, so store and device would diverge. Restoring
+        // this snapshot (and re-arming from it) keeps both consistent.
+        let prior = ruleStore.rule(forID: rule.id)
         ruleStore.upsert(rule)
         let result = makeLimitPlanner().arm(rules: ruleStore.all())
         switch result {
         case .armed:
             return .confirmedExact(verb: .setLimit, displayName: displayName, effectiveState: nil)
         case .quotaExceeded(let windows, let slotsNeeded, let cap):
-            // Roll back: the planner guarantees it armed NOTHING on quotaExceeded,
-            // so removing the rule restores the prior state exactly.
-            ruleStore.remove(ruleId: rule.id)
+            // Validation failed before arming (planner armed NOTHING), but for an
+            // UPDATE the store now holds the new rule — restore the prior value.
+            rollback(prior: prior, ruleId: rule.id)
             return .failed(.limitQuotaExceeded(windows: windows, slotsNeeded: slotsNeeded, cap: cap))
         case .partiallyArmed(let armed, let failed):
-            // The rule didn't fully apply — do not ack success. Roll back so the
-            // store doesn't keep a rule whose arming partially failed; the next
-            // arm (e.g. on a retry or app relaunch) repacks from the store.
-            ruleStore.remove(ruleId: rule.id)
+            // The rule didn't fully apply — do not ack success. Restore the prior
+            // rule AND re-arm from the restored set so the device matches the
+            // store again (the failed pass had already stopped + re-armed windows).
+            rollback(prior: prior, ruleId: rule.id)
             return .failed(.execution(
                 "per-app limit partially armed (\(armed) ok, \(failed) failed); not applied"
             ))
         }
+    }
+
+    /// Restore the store to its pre-upsert state for `ruleId` and re-arm so the
+    /// device matches the store. If there was a `prior` value (an UPDATE), put it
+    /// back; otherwise the rule was newly inserted, so remove it. A fresh planner
+    /// per arm is fine — P5's self-healing stop-union picks up the just-armed new
+    /// windows from the live activity set and stops the ones no longer in the set.
+    private func rollback(prior: AppLimitRule?, ruleId: UUID) {
+        if let prior {
+            ruleStore.upsert(prior)
+        } else {
+            ruleStore.remove(ruleId: ruleId)
+        }
+        _ = makeLimitPlanner().arm(rules: ruleStore.all())
     }
 
     /// `clear_limit`: remove the rule, drop any `source == .limit` shield it had
