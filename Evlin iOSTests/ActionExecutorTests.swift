@@ -88,9 +88,13 @@ private final class DeviceActivitySchedulerSpy: DeviceActivityScheduling {
     private(set) var started: [(name: DeviceActivityName, schedule: DeviceActivitySchedule)] = []
     private(set) var startedWithEvents: [(name: DeviceActivityName, schedule: DeviceActivitySchedule, events: [DeviceActivityEvent.Name: DeviceActivityEvent])] = []
     private(set) var stopped: [[DeviceActivityName]?] = []
+    /// Live armed set backing `monitoredActivities()` — added on start, removed
+    /// on stop.
+    private(set) var activeActivities: Set<DeviceActivityName> = []
 
     func startMonitoring(_ name: DeviceActivityName, during schedule: DeviceActivitySchedule) throws {
         started.append((name, schedule))
+        activeActivities.insert(name)
     }
 
     func startMonitoring(
@@ -99,13 +103,18 @@ private final class DeviceActivitySchedulerSpy: DeviceActivityScheduling {
         events: [DeviceActivityEvent.Name: DeviceActivityEvent]
     ) throws {
         startedWithEvents.append((activity, schedule, events))
+        activeActivities.insert(activity)
     }
 
     func stopMonitoring(_ activities: [DeviceActivityName]) {
         stopped.append(activities)
+        for a in activities { activeActivities.remove(a) }
     }
 
     func stopMonitoring() {
         stopped.append(nil)
+        activeActivities.removeAll()
     }
+
+    func monitoredActivities() -> [DeviceActivityName] { Array(activeActivities) }
 }

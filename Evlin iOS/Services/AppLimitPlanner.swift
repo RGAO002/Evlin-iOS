@@ -11,6 +11,12 @@ enum AppLimitPlanResult: Equatable {
     /// DeviceActivity was (re)armed. `activityCount` distinct window activities,
     /// `eventCount` total `evlin.limit.<ruleId>` events across them.
     case armed(activityCount: Int, eventCount: Int)
+    /// Some window activities armed, but at least one threw at runtime AFTER
+    /// validation passed (e.g. DAM `excessiveActivities`). `armed`/`failed` are
+    /// window-activity counts. Validation atomicity is unaffected — this only
+    /// describes runtime arm failures, so P6 can ack accurately rather than
+    /// claiming full success. Already-armed windows are NOT rolled back.
+    case partiallyArmed(armed: Int, failed: Int)
     /// Validation failed BEFORE arming — nothing was stopped or armed (atomic).
     /// `slotsNeeded` is the count that breached `cap` (the offending dimension).
     case quotaExceeded(windows: Int, slotsNeeded: Int, cap: Int)
@@ -29,9 +35,18 @@ enum AppLimitPlanResult: Equatable {
 /// 5. Validate the whole plan atomically (≤ 20 activities, ≤ 50 tokens/window,
 ///    ≤ `maxEventsPerActivity` events/activity). On breach → `.quotaExceeded`
 ///    and the scheduler is NOT touched (no partial arm).
-/// 6. Commit: stop every `evlin.limit.*` window activity we know about (the
-///    union of windows previously armed by this planner + windows about to be
-///    armed), then arm each window via the `events:` scheduling overload.
+/// 6. Commit: stop every `evlin.limit.window.*` activity we could be
+///    responsible for, then arm each window via the `events:` scheduling
+///    overload. The stop set is the UNION of (a) windows this planner armed on
+///    its previous pass, (b) windows about to be armed, and (c) the scheduler's
+///    LIVE monitored activities filtered to the `evlin.limit.window.` prefix.
+///
+/// The planner is NOT a singleton and self-heals from the live activity set: a
+/// fresh instance (or one after an app restart) no longer relies solely on
+/// in-memory `lastArmedActivityNames`, so it discovers and stops orphaned
+/// `evlin.limit.window.*` activities a previous instance left behind. Other
+/// namespaces (`evlin.shield.*` / `evlin.block.*` / heartbeat) are never
+/// touched.
 ///
 /// Holds no persistence side effects beyond arming. P6 persists rules to the
 /// store, then calls `arm(rules:)`.
@@ -165,31 +180,58 @@ nonisolated final class AppLimitPlanner: @unchecked Sendable {
             plan.append(ArmedActivity(name: name, schedule: schedule, events: events))
         }
 
-        // "Stop all evlin.limit.*": DeviceActivityCenter stops only by explicit
-        // name (or stops EVERYTHING, which would also kill shield/block/heartbeat
-        // activities — unacceptable). So we compute the union of the window
-        // activity names we armed last time + the ones we're about to arm, and
-        // stop exactly that set. This wholesale-clears every limit window we
-        // could be responsible for, including ones that vanished from the rule
-        // set, without disturbing other namespaces.
+        // "Stop all evlin.limit.window.*": DeviceActivityCenter stops only by
+        // explicit name (or stops EVERYTHING, which would also kill
+        // shield/block/heartbeat activities — unacceptable). So we compute the
+        // stop set as the UNION of:
+        //   (a) window names we armed on our previous pass (in-memory),
+        //   (b) the window names we're about to arm,
+        //   (c) the scheduler's LIVE monitored activities, filtered to the
+        //       `evlin.limit.window.` prefix.
+        // (c) is the self-healing path: a fresh planner instance (or one after
+        // an app restart) has an empty (a), so without it, orphaned limit
+        // windows armed by a previous instance — and since vanished from the
+        // rule set — would leak forever. We never touch non-window namespaces.
         let namesToArm = Set(plan.map(\.name.rawValue))
-        let namesToStop = lastArmedActivityNames.union(namesToArm)
+        let liveOrphanWindows = Set(
+            scheduler.monitoredActivities()
+                .map(\.rawValue)
+                .filter { $0.hasPrefix(Self.windowActivityPrefix) }
+        )
+        let namesToStop = lastArmedActivityNames
+            .union(namesToArm)
+            .union(liveOrphanWindows)
         if !namesToStop.isEmpty {
             scheduler.stopMonitoring(namesToStop.sorted().map { DeviceActivityName($0) })
         }
 
         // Re-arm each window. Arming order doesn't matter; the stop above
-        // already cleared the slate.
+        // already cleared the slate. A single window failing to arm should not
+        // abort the others (the validate pass already guaranteed we're within
+        // quota), but we do NOT swallow the throw with try? — we collect each
+        // failure, log it, and report `.partiallyArmed` so P6 can ack honestly
+        // instead of claiming a full success.
+        var armedCount = 0
+        var failures: [(DeviceActivityName, Error)] = []
         for activity in plan {
-            // Best-effort: a single window failing to arm should not abort the
-            // others (the validate pass already guaranteed we're within quota).
-            // We still surface throws to the console via the scheduler's own
-            // logging path if any; here we keep the plan moving.
-            try? scheduler.startMonitoring(activity.name, during: activity.schedule, events: activity.events)
+            do {
+                try scheduler.startMonitoring(activity.name, during: activity.schedule, events: activity.events)
+                armedCount += 1
+            } catch {
+                failures.append((activity.name, error))
+                NSLog(
+                    "[Evlin] app_limit_arm_FAILED activity=%@ error=%@",
+                    activity.name.rawValue,
+                    error.localizedDescription
+                )
+            }
         }
 
         lastArmedActivityNames = namesToArm
-        return .armed(activityCount: plan.count, eventCount: totalEvents)
+        if failures.isEmpty {
+            return .armed(activityCount: plan.count, eventCount: totalEvents)
+        }
+        return .partiallyArmed(armed: armedCount, failed: failures.count)
     }
 
     // MARK: - Filtering
@@ -203,11 +245,17 @@ nonisolated final class AppLimitPlanner: @unchecked Sendable {
 
     // MARK: - Naming
 
+    /// Namespace prefix for every window activity this planner owns. The commit
+    /// pass filters the scheduler's live activities to this prefix so it only
+    /// ever stops limit windows — never `evlin.shield.*` / `evlin.block.*` /
+    /// heartbeat activities.
+    static let windowActivityPrefix = "evlin.limit.window."
+
     /// Stable per-window activity name. Uses the same sha256-hex-16 approach the
     /// DeviceActivity extension (P7) uses for `evlin.shield.*` / `evlin.block.*`,
     /// so the extension can recognize an `evlin.limit.window.*` interval.
     static func activityName(for window: AppLimitWindow) -> String {
-        "evlin.limit.window.\(sha16(windowKey(window)))"
+        "\(windowActivityPrefix)\(sha16(windowKey(window)))"
     }
 
     /// Per-rule event name. The extension's `eventDidReachThreshold` parses the
@@ -218,8 +266,15 @@ nonisolated final class AppLimitPlanner: @unchecked Sendable {
 
     /// Deterministic, collision-resistant string identity for a window. Order
     /// and separators are fixed so the hash is stable across processes/runs.
+    ///
+    /// The timezone is normalized through `TimeZone(identifier:)` so it matches
+    /// what `schedule(for:)` actually does: an invalid IANA id collapses to the
+    /// same bucket as `nil` (device-local), since `schedule(for:)` falls back to
+    /// device-local for both. Without this, an invalid id would hash to its own
+    /// slot doing the exact same thing as the nil/local slot. Nil stays `""`.
     static func windowKey(_ window: AppLimitWindow) -> String {
-        "\(window.startMinute)|\(window.endMinute)|\(window.repeats)|\(window.timezone ?? "")"
+        let tzID = window.timezone.flatMap { TimeZone(identifier: $0)?.identifier } ?? ""
+        return "\(window.startMinute)|\(window.endMinute)|\(window.repeats)|\(tzID)"
     }
 
     // MARK: - Schedule

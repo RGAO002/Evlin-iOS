@@ -31,11 +31,21 @@ final class AppLimitPlannerTests: XCTestCase {
         private(set) var startedNoEvents: [(name: DeviceActivityName, schedule: DeviceActivitySchedule)] = []
         private(set) var stopped: [[DeviceActivityName]?] = []
         private(set) var calls: [Call] = []
+        /// Live armed set backing `monitoredActivities()`. Added on a successful
+        /// start, removed on stop — so a spy shared across two planner instances
+        /// reports the live set, which is what self-healing discovery reads.
+        private(set) var activeActivities: Set<DeviceActivityName> = []
+        /// Throws from EVERY startMonitoring call (legacy unconditional path).
         var errorToThrow: Error?
+        /// Throws ONLY when the armed activity's name is in this set — lets a
+        /// test make a single window fail while the rest succeed.
+        var failingActivityNames: Set<String> = []
 
         func startMonitoring(_ name: DeviceActivityName, during schedule: DeviceActivitySchedule) throws {
             if let e = errorToThrow { throw e }
+            if failingActivityNames.contains(name.rawValue) { throw NSError(domain: "spy", code: 1) }
             startedNoEvents.append((name, schedule))
+            activeActivities.insert(name)
             calls.append(.start(name.rawValue))
         }
 
@@ -45,19 +55,25 @@ final class AppLimitPlannerTests: XCTestCase {
             events: [DeviceActivityEvent.Name: DeviceActivityEvent]
         ) throws {
             if let e = errorToThrow { throw e }
+            if failingActivityNames.contains(activity.rawValue) { throw NSError(domain: "spy", code: 1) }
             armed.append(Armed(name: activity, schedule: schedule, events: events))
+            activeActivities.insert(activity)
             calls.append(.startEvents(activity.rawValue))
         }
 
         func stopMonitoring(_ activities: [DeviceActivityName]) {
             stopped.append(activities)
+            for a in activities { activeActivities.remove(a) }
             calls.append(.stop(activities.map(\.rawValue).sorted()))
         }
 
         func stopMonitoring() {
             stopped.append(nil)
+            activeActivities.removeAll()
             calls.append(.stopAll)
         }
+
+        func monitoredActivities() -> [DeviceActivityName] { Array(activeActivities) }
     }
 
     // MARK: - Fixtures
@@ -338,5 +354,109 @@ final class AppLimitPlannerTests: XCTestCase {
             return XCTFail("expected .quotaExceeded for too many events, got \(result)")
         }
         XCTAssertTrue(spy.armed.isEmpty, "atomic: nothing armed when per-activity event cap exceeded")
+    }
+
+    // MARK: - Cross-instance self-healing: a fresh planner discovers + stops orphans
+
+    /// The planner is NOT a singleton. Instance A arms window X. Instance B is a
+    /// fresh `AppLimitPlanner` sharing the SAME scheduler, and arms a rule set
+    /// whose windows no longer include X. B's in-memory `lastArmedActivityNames`
+    /// is empty, so the ONLY way it can stop X is by reading the scheduler's live
+    /// activity set. Asserting X is stopped proves self-healing discovery.
+    func testFreshInstanceStopsOrphanWindowFromLiveActivitySet() {
+        let spy = PlannerSchedulerSpy()
+        let now = Date(timeIntervalSince1970: 1_000_000)
+
+        let windowX = AppLimitWindow(startMinute: 0, endMinute: 720, repeats: true, timezone: nil)
+        let windowY = AppLimitWindow(startMinute: 720, endMinute: 1439, repeats: true, timezone: nil)
+
+        // Instance A arms window X.
+        let plannerA = AppLimitPlanner(scheduler: spy, now: { now })
+        _ = plannerA.arm(rules: [rule(window: windowX, bundleID: "com.a")])
+        XCTAssertTrue(
+            spy.monitoredActivities().map(\.rawValue).contains(expectedWindowActivityName(windowX)),
+            "precondition: instance A left window X armed in the live set"
+        )
+
+        // Instance B is brand new (empty in-memory state) and shares the spy. It
+        // arms a rule set that NO LONGER contains window X.
+        let plannerB = AppLimitPlanner(scheduler: spy, now: { now })
+        _ = plannerB.arm(rules: [rule(window: windowY, bundleID: "com.b")])
+
+        // Window X's activity must have been stopped, discovered purely from the
+        // live activity set — not from any in-memory tracking B never had.
+        let stops = spy.stopped.compactMap { $0 }.map { Set($0.map(\.rawValue)) }
+        let lastStop = stops.last ?? []
+        XCTAssertTrue(
+            lastStop.contains(expectedWindowActivityName(windowX)),
+            "fresh instance B must stop orphaned window X discovered from the live set"
+        )
+        // And X is no longer monitored after B's repack.
+        XCTAssertFalse(
+            spy.monitoredActivities().map(\.rawValue).contains(expectedWindowActivityName(windowX)),
+            "orphan window X must be gone from the live set after self-healing"
+        )
+    }
+
+    // MARK: - Arm failure: a window that throws → .partiallyArmed, not swallowed
+
+    func testWindowArmFailureReturnsPartiallyArmed() {
+        let spy = PlannerSchedulerSpy()
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let planner = AppLimitPlanner(scheduler: spy, now: { now })
+
+        let morning = AppLimitWindow(startMinute: 0, endMinute: 720, repeats: true, timezone: nil)
+        let evening = AppLimitWindow(startMinute: 720, endMinute: 1439, repeats: true, timezone: nil)
+
+        // Make exactly the evening window's startMonitoring throw at runtime.
+        spy.failingActivityNames = [expectedWindowActivityName(evening)]
+
+        let result = planner.arm(rules: [
+            rule(window: morning, bundleID: "com.a"),
+            rule(window: evening, bundleID: "com.b"),
+        ])
+
+        // 2 windows passed validation; one threw at arm time → partiallyArmed(1, 1).
+        guard case let .partiallyArmed(armedCount, failedCount) = result else {
+            return XCTFail("expected .partiallyArmed when a window throws, got \(result)")
+        }
+        XCTAssertEqual(armedCount, 1, "only the morning window armed")
+        XCTAssertEqual(failedCount, 1, "the evening window's throw was surfaced, not swallowed")
+
+        // The surviving window did arm; the failing one is not in the armed log.
+        let armedNames = Set(spy.armed.map(\.name.rawValue))
+        XCTAssertTrue(armedNames.contains(expectedWindowActivityName(morning)))
+        XCTAssertFalse(armedNames.contains(expectedWindowActivityName(evening)))
+    }
+
+    // MARK: - Timezone normalization: nil and invalid id collapse to one window
+
+    /// `schedule(for:)` falls back to device-local for both a nil tz and an
+    /// invalid IANA id, so they must hash to the SAME window activity (one slot,
+    /// not two doing the same thing). See `windowKey` normalization.
+    func testNilAndInvalidTimezoneProduceSameWindowActivity() {
+        let spy = PlannerSchedulerSpy()
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let planner = AppLimitPlanner(scheduler: spy, now: { now })
+
+        let nilTz = AppLimitWindow(startMinute: 0, endMinute: 1439, repeats: true, timezone: nil)
+        let invalidTz = AppLimitWindow(startMinute: 0, endMinute: 1439, repeats: true, timezone: "Not/AZone")
+
+        XCTAssertEqual(
+            AppLimitPlanner.activityName(for: nilTz),
+            AppLimitPlanner.activityName(for: invalidTz),
+            "a nil tz and an invalid-id tz must resolve to the same window activity"
+        )
+
+        // And the planner collapses both rules into ONE slot, not two.
+        let result = planner.arm(rules: [
+            rule(window: nilTz, bundleID: "com.a"),
+            rule(window: invalidTz, bundleID: "com.b"),
+        ])
+        guard case let .armed(activityCount, eventCount) = result else {
+            return XCTFail("expected .armed, got \(result)")
+        }
+        XCTAssertEqual(activityCount, 1, "nil tz + invalid-id tz collapse to one window")
+        XCTAssertEqual(eventCount, 2)
     }
 }

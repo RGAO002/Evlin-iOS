@@ -92,6 +92,11 @@ protocol DeviceActivityScheduling {
     ) throws
     func stopMonitoring(_ activities: [DeviceActivityName])
     func stopMonitoring()
+    /// The activities DeviceActivity currently considers monitored. Lets a
+    /// caller (the per-app-limit planner, P5) self-heal from the live set
+    /// instead of relying on in-memory state that doesn't survive a fresh
+    /// instance or an app restart.
+    func monitoredActivities() -> [DeviceActivityName]
 }
 
 struct DeviceActivityCenterScheduler: DeviceActivityScheduling {
@@ -115,6 +120,10 @@ struct DeviceActivityCenterScheduler: DeviceActivityScheduling {
 
     func stopMonitoring() {
         center.stopMonitoring()
+    }
+
+    func monitoredActivities() -> [DeviceActivityName] {
+        Array(center.activities)
     }
 }
 
