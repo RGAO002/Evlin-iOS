@@ -91,6 +91,9 @@ struct AppControlsV2View: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(Color.evPageBg)
+        // Fix 1 — dismissing the whole screen while a Rebind is pending (the user
+        // tapped "Rebind" but never picked a new match) leaves the app unbound.
+        .onDisappear { cancelRebindIfPending() }
         .sheet(isPresented: $showPicker) {
             CombinedPickerSheet(
                 initialSelection: selection,
@@ -218,7 +221,9 @@ struct AppControlsV2View: View {
                                 if expandedApp == token {
                                     withAnimation(Self.accordionAnimation) { expandedApp = nil }
                                 }
-                                rebindingApp = nil
+                                // Fix 1 — removing the app while a Rebind is pending
+                                // still drops the (now-stale) alias before the row goes.
+                                cancelRebindIfPending()
                                 DefaultLockGroupStore.removeApp(token)
                                 reload()
                             },
@@ -245,7 +250,10 @@ struct AppControlsV2View: View {
         bindError = nil
         // Collapsing this row, or opening a different one, always drops any
         // in-progress rebind so a re-opened matched row shows its review again.
-        rebindingApp = nil
+        // Fix 1 — if the user tapped "Rebind" and is now LEAVING that row without
+        // having picked a new match, the deferred-unbind fires (alias removed →
+        // row reverts to .unmatched). Must run BEFORE mutating `expandedApp`.
+        cancelRebindIfPending()
         withAnimation(Self.accordionAnimation) {
             if expandedApp == token {
                 expandedApp = nil
@@ -258,7 +266,9 @@ struct AppControlsV2View: View {
 
     private func toggleCategory(_ token: ActivityCategoryToken) {
         bindError = nil
-        rebindingApp = nil
+        // Opening a category collapses any expanded app — if that app had a pending
+        // Rebind, leaving it unbinds it (Fix 1).
+        cancelRebindIfPending()
         withAnimation(Self.accordionAnimation) {
             if expandedCategory == token {
                 expandedCategory = nil
@@ -267,6 +277,31 @@ struct AppControlsV2View: View {
                 expandedApp = nil
             }
         }
+    }
+
+    // MARK: - Deferred-unbind (Fix 1)
+
+    /// Fix 1 — Rebind defaults to UNBIND when no new match is provided.
+    ///
+    /// Tapping "Rebind" keeps `rebindingApp` set (alias still present, search shown).
+    /// If the user then LEAVES that row without picking a new match — collapses it,
+    /// opens another row/category, removes the app, or dismisses the whole screen —
+    /// this drops the old binding: it removes the app's alias keys, so
+    /// `matchedState(forApp:)` recomputes to `.unmatched` and the row reverts to the
+    /// search affordance. The app STAYS in `DefaultLockGroupStore` (still a group
+    /// member) — only its name alias is gone, so it's an unnamed member again.
+    ///
+    /// A SUCCESSFUL new bind must NOT route through here: `bindApp(...)` clears
+    /// `rebindingApp` directly AFTER saving the new alias, so no unbind ever fires.
+    private func cancelRebindIfPending() {
+        guard let token = rebindingApp else { return }
+        rebindingApp = nil
+        let keys = LocalAliasStore.shared.applicationLookupKeys(equalTo: token)
+        guard !keys.isEmpty else { return }
+        // Removes the name alias → MatchedState recomputes to .unmatched. The
+        // orphaned catalogAliasKeyIndex entry is harmless (overwritten on re-bind).
+        LocalAliasStore.shared.removeApplicationAliases(keys: keys)
+        refreshTick &+= 1
     }
 
     // MARK: - App bind handler (onPick + onManual share this)
@@ -287,6 +322,10 @@ struct AppControlsV2View: View {
 
         // Collapse the accordion immediately — the bind is committed locally.
         withAnimation(Self.accordionAnimation) { expandedApp = nil }
+        // Fix 1 — SUCCESS path: the new alias is already saved (step 1 above), so we
+        // clear `rebindingApp` DIRECTLY here. We must NOT call cancelRebindIfPending()
+        // — that would remove the alias we just saved. Ordering is load-bearing:
+        // new alias saved → rebindingApp = nil → no unbind fires → rebound, kept.
         rebindingApp = nil
         bindError = nil
         // Re-read MatchedState so the just-bound app flips to "Matched".
@@ -493,7 +532,7 @@ private struct AppRow: View {
             },
             panel: {
                 if showsReview {
-                    MatchedReviewPanel(token: token, onRebind: onRebind)
+                    MatchedReviewPanel(token: token, apiClient: apiClient, onRebind: onRebind)
                 } else {
                     AppStoreBindPanel(
                         appName: "this app",
@@ -513,7 +552,15 @@ private struct AppRow: View {
 /// "Rebind" escape that swaps this row back to the App Store search panel.
 private struct MatchedReviewPanel: View {
     let token: ApplicationToken
+    let apiClient: APIClient
     let onRebind: () -> Void
+
+    /// Fix 2 — the App Store result fetched live for "You picked", carrying the real
+    /// `artworkURL`. The local catalog target only persists name + bundleID, so the
+    /// reconstructed result has no artwork → letter-tile fallback. Once this lands
+    /// (network), the real icon shows. Stays nil for manual binds (bundleID == nil),
+    /// before the fetch completes, and on any failure — fallback persists, silently.
+    @State private var fetchedArtwork: CatalogSearchResult?
 
     /// The bound name/bundle for "You picked", read from the same LocalAliasStore
     /// catalog target that `matchedState(forApp:)` uses to decide "matched": the
@@ -523,7 +570,7 @@ private struct MatchedReviewPanel: View {
         guard let target = LocalAliasStore.shared.catalogAppTargets()
             .first(where: { !Set($0.lookupKeys).isDisjoint(with: keys) })
         else { return nil }
-        // artworkURL defaults nil → CatalogArtworkView shows its letter-tile fallback.
+        // artworkURL defaults nil → EvacArtworkView shows its letter-tile fallback.
         return CatalogSearchResult(canonicalName: target.label, bundleID: target.bundleID, aliases: [])
     }
 
@@ -546,7 +593,11 @@ private struct MatchedReviewPanel: View {
                 reviewRow(label: "You picked") {
                     HStack(spacing: 8) {
                         if let result = boundResult {
-                            EvacArtworkView(result: result, size: 24)
+                            // Fix 2 — prefer the live-fetched result (real artworkURL)
+                            // once it lands; until then (and for manual/bundle-less
+                            // binds, and on fetch failure) fall back to the locally
+                            // reconstructed result, which letter-tiles in EvacArtworkView.
+                            EvacArtworkView(result: fetchedArtwork ?? result, size: 24)
                             Text(result.canonicalName)
                                 .font(.subheadline.weight(.semibold))
                                 .lineLimit(1)
@@ -569,6 +620,27 @@ private struct MatchedReviewPanel: View {
                     .foregroundStyle(Color.evAccentGreen)
             }
         }
+        // Fix 2 — fetch the real App Store icon for "You picked". Non-blocking; the
+        // letter-tile shows until (and unless) this lands. Failure is silent.
+        .task { await fetchArtworkIfPossible() }
+    }
+
+    /// Fix 2 — re-runs the SAME catalog search the bind panel uses to recover the
+    /// `artworkURL` the local store never persisted. Only attempts when the bound
+    /// entry carries a bundleID (manual binds have none → keep the letter tile).
+    /// Matches by bundleID, falling back to a case-insensitive name match; both
+    /// failure modes leave `fetchedArtwork` nil so the reconstructed tile stays.
+    private func fetchArtworkIfPossible() async {
+        guard let bound = boundResult,
+              let boundBundleID = bound.bundleID,
+              !boundBundleID.isEmpty
+        else { return }
+        // Same call AppStoreBindPanel makes: catalogSearch(q:) → [DTO] → .map(\.result).
+        guard let dtos = try? await apiClient.catalogSearch(q: bound.canonicalName) else { return }
+        let results = dtos.map(\.result)
+        let match = results.first { $0.bundleID == boundBundleID }
+            ?? results.first { $0.canonicalName.caseInsensitiveCompare(bound.canonicalName) == .orderedSame }
+        if let match { fetchedArtwork = match }
     }
 
     /// Full-width "iOS shows" / "You picked" row (fixed-width caption + content),
