@@ -64,10 +64,15 @@ enum DeviceAppsMockData {
         }
     }
 
-    // `1` leads the list so a parent can set a 1-minute budget (mainly for
-    // testing the threshold/shield path end to end; harmless to ship). The
+    // 15m is the lowest budget offered in release builds. DEBUG builds also
+    // expose a 1-minute option (no separate label — it just shows "1m") so the
+    // threshold/shield path can be tested end to end without waiting. The
     // backend accepts `daily_budget_minutes >= 1` and `formatLimit(1)` → "1m".
+    #if DEBUG
     static let limitOptions: [Int] = [1, 15, 20, 30, 45, 60, 90, 120]
+    #else
+    static let limitOptions: [Int] = [15, 20, 30, 45, 60, 90, 120]
+    #endif
 
     static func formatLimit(_ min: Int) -> String {
         if min >= 60 {

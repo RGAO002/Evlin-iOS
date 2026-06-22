@@ -278,10 +278,16 @@ final class LimitShieldLogicTests: XCTestCase {
 
     // MARK: - Task A: 1-minute picker option
 
-    /// `1` leads the limit picker so a parent can set a 1-minute budget, and
-    /// `formatLimit(1)` renders it as a clean "1m" (not "0h 1m" / "1").
-    func test_limitOptions_includesOneMinuteFirst_andFormatsCleanly() {
+    /// DEBUG builds lead the limit picker with `1` so a parent can set a
+    /// 1-minute budget for testing; release builds start at 15m. `formatLimit(1)`
+    /// always renders a clean "1m" (not "0h 1m" / "1").
+    func test_limitOptions_oneMinuteIsDebugOnly_andFormatsCleanly() {
+        #if DEBUG
         XCTAssertEqual(DeviceAppsMockData.limitOptions.first, 1)
+        #else
+        XCTAssertFalse(DeviceAppsMockData.limitOptions.contains(1))
+        XCTAssertEqual(DeviceAppsMockData.limitOptions.first, 15)
+        #endif
         XCTAssertEqual(DeviceAppsMockData.formatLimit(1), "1m")
     }
 }
