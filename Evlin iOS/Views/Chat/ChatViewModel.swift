@@ -1294,11 +1294,13 @@ class ChatViewModel: ObservableObject {
                             // resp.target_type — the latter is sometimes the "app" fallback
                             // even for a category, which let "Social" render a by-name iTunes
                             // artwork (a random social app's icon). Match the covering shield
-                            // by display name, else take the first, else fall back.
+                            // by display name ONLY: on an UNSHIELD the just-removed target is
+                            // no longer in `shieldsCovering`, so a `.first` fallback would pick
+                            // an unrelated leftover shield (e.g. a still-locked app). No match →
+                            // fall through to resp.target_type.
                             targetKind: Self.receiptTargetKind(
                                 fromShieldTier: resp.effectiveState?.shieldsCovering
-                                    .first(where: { $0.displayName == name })?.tier
-                                    ?? resp.effectiveState?.shieldsCovering.first?.tier
+                                    .first(where: { $0.displayName.caseInsensitiveCompare(name) == .orderedSame })?.tier
                             ) ?? Self.receiptTargetKind(from: resp.targetType)
                         )
                         return true
