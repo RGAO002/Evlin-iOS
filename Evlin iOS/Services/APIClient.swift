@@ -2581,7 +2581,12 @@ extension APIClient {
     func fetchAppAliases(familyID: UUID) async throws -> [AppAliasRow] {
         var comps = URLComponents(string: "\(baseURL)/parent/app-aliases")!
         comps.queryItems = [URLQueryItem(name: "family_id", value: familyID.uuidString)]
-        let (data, resp) = try await URLSession.shared.data(from: comps.url!)
+        // Force a fresh fetch — `data(from:url)` uses `.useProtocolCachePolicy`, so a
+        // pull-to-refresh can be served a STALE cached response (the symptom: the list
+        // only updates after leaving + re-entering). Bypass the URL cache.
+        var req = URLRequest(url: comps.url!)
+        req.cachePolicy = .reloadIgnoringLocalCacheData
+        let (data, resp) = try await URLSession.shared.data(for: req)
         guard let http = resp as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
             throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
         }
