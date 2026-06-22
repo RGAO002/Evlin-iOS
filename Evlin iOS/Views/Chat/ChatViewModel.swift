@@ -1290,7 +1290,16 @@ class ChatViewModel: ObservableObject {
                             ),
                             effective: resp.effectiveState,
                             messageID: messageID,
-                            targetKind: Self.receiptTargetKind(from: resp.targetType)
+                            // Prefer the ACTUALLY-APPLIED shield tier (kid-reported) over
+                            // resp.target_type — the latter is sometimes the "app" fallback
+                            // even for a category, which let "Social" render a by-name iTunes
+                            // artwork (a random social app's icon). Match the covering shield
+                            // by display name, else take the first, else fall back.
+                            targetKind: Self.receiptTargetKind(
+                                fromShieldTier: resp.effectiveState?.shieldsCovering
+                                    .first(where: { $0.displayName == name })?.tier
+                                    ?? resp.effectiveState?.shieldsCovering.first?.tier
+                            ) ?? Self.receiptTargetKind(from: resp.targetType)
                         )
                         return true
                     case "confirmed_fallback":
@@ -1396,6 +1405,21 @@ class ChatViewModel: ObservableObject {
         case "list":     return .savedList
         case "all":      return .all
         default:         return .app
+        }
+    }
+
+    /// Map the ACTUALLY-APPLIED shield's `tier` (kid-reported, authoritative) to the
+    /// receipt icon kind. Preferred over `resp.target_type`, which the backend
+    /// sometimes leaves as the "app" fallback even for a category — that let a
+    /// category receipt (e.g. "Social") render a by-name iTunes artwork (Snapchat).
+    /// `ShieldTier` raw values: exactApp / savedList / category / allApps / all.
+    static func receiptTargetKind(fromShieldTier tier: String?) -> NameIconKind? {
+        switch tier {
+        case "category":            return .category
+        case "savedList":           return .savedList
+        case "allApps", "all":      return .all
+        case "exactApp":            return .app
+        default:                    return nil
         }
     }
 
