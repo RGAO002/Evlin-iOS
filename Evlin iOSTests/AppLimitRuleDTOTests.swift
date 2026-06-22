@@ -151,3 +151,80 @@ final class AppLimitRuleDTOTests: XCTestCase {
         XCTAssertTrue(merged.allSatisfy { $0.ruleID == nil })
     }
 }
+
+/// P9 review: the optimistic-update supersession guard. `pickLimit`/`toggleLimit`
+/// bump a per-app monotonic token before their `await`; when each resumes it
+/// asks `AppLimitEditDecision.decide` whether it may still mutate state. Only
+/// the latest interaction (current == captured) is authoritative — a slower
+/// earlier response is a NO-OP (neither its success write-back nor its failure
+/// revert runs), which prevents stale overwrites, stale reverts, and the
+/// enabled/ruleID desync from toggling off before an earlier POST returns.
+final class AppLimitEditDecisionTests: XCTestCase {
+
+    func test_nonSupersededResponseApplies() {
+        // Single interaction: capture == current → apply.
+        XCTAssertEqual(
+            AppLimitEditDecision.decide(currentSeq: 1, capturedSeq: 1),
+            .apply)
+    }
+
+    func test_laterInteractionSupersedesEarlierResponse() {
+        // Two rapid taps for the same app: first captures 1, second bumps to 2.
+        // The slow FIRST response resumes while current == 2 → superseded.
+        // This holds for BOTH the success write-back and the failure revert
+        // (the helper is the single gate both paths consult), so an earlier
+        // response mutates nothing.
+        XCTAssertEqual(
+            AppLimitEditDecision.decide(currentSeq: 2, capturedSeq: 1),
+            .superseded)
+    }
+
+    func test_latestInteractionStillApplies() {
+        // The newer (second) interaction resumes last: capture == current == 2.
+        XCTAssertEqual(
+            AppLimitEditDecision.decide(currentSeq: 2, capturedSeq: 2),
+            .apply)
+    }
+
+    func test_missingTokenIsSuperseded() {
+        // Defensive: an absent entry (nil) never equals a captured token, so a
+        // response whose app has no recorded in-flight token is a NO-OP.
+        XCTAssertEqual(
+            AppLimitEditDecision.decide(currentSeq: nil, capturedSeq: 1),
+            .superseded)
+    }
+
+    /// End-to-end ordering proof: simulate two interactions on one app racing,
+    /// driving a tiny state array through the same decision the view uses.
+    /// The earlier response (success or failure) must be a no-op; only the
+    /// later one mutates state.
+    func test_earlierResponseIsNoOpAcrossSuccessAndRevert() {
+        var state = 0                 // stand-in for the app's mutable row
+        var current = 0               // stand-in for inflightSeq[app.id]
+
+        // Interaction A starts.
+        current += 1
+        let seqA = current            // == 1
+        // Interaction B starts before A's await resumes.
+        current += 1
+        let seqB = current            // == 2
+
+        // A's SUCCESS resumes first → superseded → must NOT write back.
+        if AppLimitEditDecision.decide(currentSeq: current, capturedSeq: seqA) == .apply {
+            state = 100
+        }
+        XCTAssertEqual(state, 0, "earlier success write-back must be a no-op")
+
+        // A's FAILURE path would also be gated the same way → must NOT revert.
+        if AppLimitEditDecision.decide(currentSeq: current, capturedSeq: seqA) == .apply {
+            state = -1
+        }
+        XCTAssertEqual(state, 0, "earlier failure revert must be a no-op")
+
+        // B resumes last → authoritative → applies.
+        if AppLimitEditDecision.decide(currentSeq: current, capturedSeq: seqB) == .apply {
+            state = 200
+        }
+        XCTAssertEqual(state, 200, "latest interaction applies normally")
+    }
+}

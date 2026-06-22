@@ -26,8 +26,16 @@ struct DeviceAppsSheet: View {
     @State private var isLoading = false
     @State private var loadFailed = false
     /// Inline error after a failed set/clear (the local change is reverted and
-    /// this message shown briefly under the list).
+    /// this message shown briefly under the list, then auto-dismissed).
     @State private var actionError: String? = nil
+    /// Auto-dismiss timer for `actionError`; replaced (cancelling the prior)
+    /// each time a new error is surfaced so the ~4s window restarts.
+    @State private var errorDismissTask: Task<Void, Never>? = nil
+    /// Per-app monotonic supersession token. Bumped at the START of each
+    /// `pickLimit`/`toggleLimit`; the captured value gates whether that
+    /// interaction's response may still mutate state once its `await` resumes
+    /// (see `AppLimitEditDecision`). Keeps the latest interaction authoritative.
+    @State private var inflightSeq: [String: Int] = [:]
 
     /// Family id for parent API calls — sourced the same way ProfileView's
     /// lock-all does (`UserDefaults` "evlin.familyID"). `nil` until paired.
@@ -74,6 +82,10 @@ struct DeviceAppsSheet: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.horizontal, 24)
                             .padding(.top, 10)
+                            // Reachable by VoiceOver (in addition to the
+                            // announcement posted when the error is set).
+                            .accessibilityHidden(false)
+                            .accessibilityLabel(actionError)
                     }
 
                     // Footer: daily-reset note (the limits the parent sets here
@@ -381,16 +393,35 @@ struct DeviceAppsSheet: View {
 
     // MARK: - Persistence (P9)
 
+    /// Surface an inline error, announce it for VoiceOver, and (re)start the
+    /// ~4s auto-dismiss timer — cancelling any prior timer so a fresh error
+    /// resets the window rather than being cleared early by the old one.
+    private func setActionError(_ message: String) {
+        actionError = message
+        AccessibilityNotification.Announcement(message).post()
+        errorDismissTask?.cancel()
+        errorDismissTask = Task {
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            if Task.isCancelled { return }
+            actionError = nil
+        }
+    }
+
     /// Picker tap: optimistically set the local limit, then POST it. The same
     /// set_limit POST both creates a rule (if off) and updates the budget (if
     /// on), so this also turns a limit ON. Reverts + surfaces an error on
     /// failure.
+    ///
+    /// Supersession: a per-app token is bumped before the `await`; once it
+    /// resumes, the success write-back / failure revert only run if this is
+    /// still the latest interaction for the app (a slower earlier response is a
+    /// NO-OP). See `AppLimitEditDecision`.
     private func pickLimit(_ minutes: Int, for app: DeviceAppItem) {
         editingLimitFor = nil
         guard let bundleID = app.bundleID,
               let famID = familyID,
               let cid = childDeviceID else {
-            actionError = "This app can't be limited."
+            setActionError("This app can't be limited.")
             return
         }
         guard let i = apps.firstIndex(where: { $0.id == app.id }) else { return }
@@ -398,6 +429,8 @@ struct DeviceAppsSheet: View {
         actionError = nil
         apps[i].limitMin = minutes
         apps[i].enabled = true
+        let seq = (inflightSeq[app.id] ?? 0) + 1
+        inflightSeq[app.id] = seq
         Task {
             do {
                 let rule = try await apiClient.setAppLimit(
@@ -406,33 +439,45 @@ struct DeviceAppsSheet: View {
                     bundleID: bundleID,
                     dailyBudgetMinutes: minutes,
                     displayName: app.name)
+                // Superseded by a newer tap/toggle → drop this response.
+                guard AppLimitEditDecision.decide(
+                    currentSeq: inflightSeq[app.id], capturedSeq: seq) == .apply else { return }
                 if let j = apps.firstIndex(where: { $0.id == app.id }) {
                     apps[j].ruleID = rule.rule_id
                     apps[j].limitMin = rule.daily_budget_minutes
                     apps[j].enabled = true
                 }
             } catch {
+                // Superseded → do NOT revert; the newer interaction owns state.
+                guard AppLimitEditDecision.decide(
+                    currentSeq: inflightSeq[app.id], capturedSeq: seq) == .apply else { return }
                 if let j = apps.firstIndex(where: { $0.id == app.id }) {
                     apps[j] = previous
                 }
-                actionError = "Couldn't save the limit — try again."
+                setActionError("Couldn't save the limit — try again.")
             }
         }
     }
 
     /// Toggle: ON → set_limit with the current pill value; OFF → clear the rule.
     /// Reverts + surfaces an error on failure.
+    ///
+    /// Supersession: same per-app token guard as `pickLimit` — a response that
+    /// is no longer the latest interaction is a NO-OP (no write-back, no
+    /// revert), preventing stale overwrites and enabled/ruleID desync.
     private func toggleLimit(for app: DeviceAppItem, on: Bool) {
         guard let bundleID = app.bundleID,
               let famID = familyID,
               let cid = childDeviceID else {
-            actionError = "This app can't be limited."
+            setActionError("This app can't be limited.")
             return
         }
         guard let i = apps.firstIndex(where: { $0.id == app.id }) else { return }
         let previous = apps[i]
         actionError = nil
         apps[i].enabled = on
+        let seq = (inflightSeq[app.id] ?? 0) + 1
+        inflightSeq[app.id] = seq
         Task {
             do {
                 if on {
@@ -442,24 +487,33 @@ struct DeviceAppsSheet: View {
                         bundleID: bundleID,
                         dailyBudgetMinutes: app.limitMin,
                         displayName: app.name)
+                    // Superseded by a newer tap/toggle → drop this response.
+                    guard AppLimitEditDecision.decide(
+                        currentSeq: inflightSeq[app.id], capturedSeq: seq) == .apply else { return }
                     if let j = apps.firstIndex(where: { $0.id == app.id }) {
                         apps[j].ruleID = rule.rule_id
                         apps[j].limitMin = rule.daily_budget_minutes
                     }
                 } else if let ruleID = app.ruleID {
                     try await apiClient.clearAppLimit(familyID: famID, ruleID: ruleID)
+                    // Superseded by a newer tap/toggle → drop this response.
+                    guard AppLimitEditDecision.decide(
+                        currentSeq: inflightSeq[app.id], capturedSeq: seq) == .apply else { return }
                     if let j = apps.firstIndex(where: { $0.id == app.id }) {
                         apps[j].ruleID = nil
                     }
                 }
                 // OFF with no ruleID: nothing persisted yet, local flip is enough.
             } catch {
+                // Superseded → do NOT revert; the newer interaction owns state.
+                guard AppLimitEditDecision.decide(
+                    currentSeq: inflightSeq[app.id], capturedSeq: seq) == .apply else { return }
                 if let j = apps.firstIndex(where: { $0.id == app.id }) {
                     apps[j] = previous
                 }
-                actionError = on
+                setActionError(on
                     ? "Couldn't turn on the limit — try again."
-                    : "Couldn't turn off the limit — try again."
+                    : "Couldn't turn off the limit — try again.")
             }
         }
     }

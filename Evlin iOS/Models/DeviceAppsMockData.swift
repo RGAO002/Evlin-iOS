@@ -94,6 +94,31 @@ struct AppLimitRuleSummary: Equatable {
     let dailyBudgetMinutes: Int
 }
 
+// MARK: - Optimistic-update supersession (P9 review)
+
+/// Pure decision for whether an in-flight optimistic-edit response may still
+/// touch state. Each `pickLimit`/`toggleLimit` interaction captures a
+/// per-app monotonic token at the start; when its `await` resumes it compares
+/// the captured token against the current one. Only the latest interaction
+/// (`current == captured`) is authoritative — an earlier, slower response is
+/// `.superseded` and must be a NO-OP (neither its success write-back nor its
+/// failure revert may run). This prevents a slow earlier response overwriting a
+/// newer selection, a failure reverting to a now-stale snapshot, and the
+/// enabled/ruleID desync from toggling off before an earlier POST returns.
+///
+/// Kept free of SwiftUI so it can be unit-tested without the view.
+enum AppLimitEditDecision: Equatable {
+    case apply
+    case superseded
+
+    /// `.apply` only when the resumed interaction is still the latest one for
+    /// the app (its captured token equals the current token). Any later
+    /// interaction (current > captured) supersedes it → `.superseded`.
+    static func decide(currentSeq: Int?, capturedSeq: Int) -> AppLimitEditDecision {
+        (currentSeq == capturedSeq) ? .apply : .superseded
+    }
+}
+
 enum DeviceAppLimitMerge {
     /// Overlay loaded backend rules onto freshly-built catalog rows (which start
     /// with the hardcoded default `limitMin`, `enabled: true`). Matching is by

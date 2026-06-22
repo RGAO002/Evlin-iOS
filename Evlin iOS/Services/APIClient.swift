@@ -2453,6 +2453,11 @@ extension APIClient {
         let command_id: UUID
     }
 
+    // NOTE: no `reset_policy` here — the backend `ParentAppLimitCreateRequest`
+    // doesn't declare it (it's currently ignored via `extra="ignore"`, and
+    // would 422 if `extra="forbid"` were ever set). v1 reset is daily by
+    // default server-side. `window_start_minute`/`window_end_minute` ARE
+    // accepted optionals and stay.
     private struct AppLimitCreateBody: Encodable {
         let family_id: UUID
         let child_device_id: UUID
@@ -2460,7 +2465,6 @@ extension APIClient {
         let daily_budget_minutes: Int
         let window_start_minute: Int
         let window_end_minute: Int
-        let reset_policy: String
         let display_name: String?
     }
 
@@ -2513,7 +2517,6 @@ extension APIClient {
             daily_budget_minutes: dailyBudgetMinutes,
             window_start_minute: 0,
             window_end_minute: 1439,
-            reset_policy: "daily",
             display_name: displayName
         )
         let payload = try JSONEncoder().encode(body)
