@@ -234,4 +234,54 @@ final class LimitShieldLogicTests: XCTestCase {
         XCTAssertEqual(LimitShieldLogic.targetKey(for: rule), "com.example.app")
         XCTAssertEqual(LimitShieldLogic.recordKey(for: rule), "exactApp:com.example.app")
     }
+
+    // MARK: - "Limit reached" notification copy (pure helper)
+
+    /// Happy path: the extension posts this BEFORE shielding when a budget is
+    /// hit. Title names the app; body carries the "N-min" limit and the app name.
+    func test_limitReachedNotification_interpolatesNameAndMinutes() {
+        let copy = LimitShieldLogic.limitReachedNotification(appName: "Instagram", minutes: 15)
+        XCTAssertEqual(copy.title, "Time's up on Instagram")
+        XCTAssertTrue(copy.body.contains("15-min"), "body should carry the budget minutes: \(copy.body)")
+        XCTAssertTrue(copy.body.contains("Instagram"), "body should name the app: \(copy.body)")
+        XCTAssertTrue(copy.body.contains("unlocks tomorrow"))
+    }
+
+    /// nil app name → "this app" fallback in both title and body; never a blank.
+    func test_limitReachedNotification_nilName_fallsBackToThisApp() {
+        let copy = LimitShieldLogic.limitReachedNotification(appName: nil, minutes: 30)
+        XCTAssertEqual(copy.title, "Time's up on this app")
+        XCTAssertTrue(copy.body.contains("this app"))
+        XCTAssertTrue(copy.body.contains("30-min"))
+    }
+
+    /// Empty / whitespace-only app name → same "this app" fallback (no "Time's
+    /// up on   " with a dangling blank).
+    func test_limitReachedNotification_emptyName_fallsBackToThisApp() {
+        let copy = LimitShieldLogic.limitReachedNotification(appName: "   ", minutes: 45)
+        XCTAssertEqual(copy.title, "Time's up on this app")
+        XCTAssertTrue(copy.body.contains("this app"))
+    }
+
+    /// nil/non-positive minutes → omit the "N-min" clause; read "today's limit"
+    /// so we never render "0-min".
+    func test_limitReachedNotification_nilMinutes_omitsMinuteClause() {
+        let copy = LimitShieldLogic.limitReachedNotification(appName: "Roblox", minutes: nil)
+        XCTAssertEqual(copy.title, "Time's up on Roblox")
+        XCTAssertFalse(copy.body.contains("-min"), "no minute clause when minutes unavailable: \(copy.body)")
+        XCTAssertTrue(copy.body.contains("today's limit"))
+
+        let zero = LimitShieldLogic.limitReachedNotification(appName: "Roblox", minutes: 0)
+        XCTAssertFalse(zero.body.contains("0-min"))
+        XCTAssertTrue(zero.body.contains("today's limit"))
+    }
+
+    // MARK: - Task A: 1-minute picker option
+
+    /// `1` leads the limit picker so a parent can set a 1-minute budget, and
+    /// `formatLimit(1)` renders it as a clean "1m" (not "0h 1m" / "1").
+    func test_limitOptions_includesOneMinuteFirst_andFormatsCleanly() {
+        XCTAssertEqual(DeviceAppsMockData.limitOptions.first, 1)
+        XCTAssertEqual(DeviceAppsMockData.formatLimit(1), "1m")
+    }
 }

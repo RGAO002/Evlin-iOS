@@ -76,4 +76,34 @@ enum LimitShieldLogic {
     ) -> [String: ShieldRecord] {
         shields.filter { $0.value.source != .limit }
     }
+
+    // MARK: - "Limit reached" notification copy
+
+    /// Pure builder for the local "time's up" notification the DeviceActivity
+    /// extension posts (on the kid's device) the moment a per-app budget is hit,
+    /// just before it applies the shield. Kept here (no `UserNotifications`
+    /// import) so the copy is unit-testable without the extension; the extension
+    /// wraps the returned `(title, body)` in a `UNMutableNotificationContent`.
+    ///
+    /// - `appName`: the rule's `displayName`. A nil/blank name falls back to
+    ///   "this app".
+    /// - `minutes`: the rule's `budgetMinutes`. When nil (or non-positive) the
+    ///   body omits the "N-min limit" clause and reads "today's limit" instead,
+    ///   so we never render "0-min" or a dangling number.
+    static func limitReachedNotification(
+        appName: String?,
+        minutes: Int?
+    ) -> (title: String, body: String) {
+        let trimmed = appName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = (trimmed?.isEmpty == false) ? trimmed! : "this app"
+        let title = "Time's up on \(name)"
+        let limitClause: String
+        if let minutes, minutes > 0 {
+            limitClause = "today's \(minutes)-min limit"
+        } else {
+            limitClause = "today's limit"
+        }
+        let body = "You've reached \(limitClause). \(name) unlocks tomorrow."
+        return (title, body)
+    }
 }

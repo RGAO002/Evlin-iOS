@@ -64,7 +64,10 @@ enum DeviceAppsMockData {
         }
     }
 
-    static let limitOptions: [Int] = [15, 20, 30, 45, 60, 90, 120]
+    // `1` leads the list so a parent can set a 1-minute budget (mainly for
+    // testing the threshold/shield path end to end; harmless to ship). The
+    // backend accepts `daily_budget_minutes >= 1` and `formatLimit(1)` → "1m".
+    static let limitOptions: [Int] = [1, 15, 20, 30, 45, 60, 90, 120]
 
     static func formatLimit(_ min: Int) -> String {
         if min >= 60 {

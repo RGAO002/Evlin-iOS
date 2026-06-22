@@ -3,6 +3,7 @@ import DeviceActivity
 import ManagedSettings
 import FamilyControls
 import CryptoKit
+import UserNotifications
 
 /// Fires when a scheduled shield interval ends. Removes the ShieldRecord from
 /// App Group persistence and recomputes shield state for remaining records.
@@ -128,6 +129,13 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             return
         }
 
+        // Notify THEN lock: post the local "time's up" notice on the kid's
+        // device before applying the shield, so the kid gets a heads-up the
+        // moment the budget is hit. Cheap + crash-safe for the extension's
+        // tight budget; if notification auth isn't granted, `add` silently
+        // no-ops (the extension can't and must not request authorization).
+        postLimitReachedNotification(ruleId: ruleId, rule: rule)
+
         let current = loadShields()
         let updated = LimitShieldLogic.applyingLimit(to: current, rule: rule)
         if let data = encodeShields(updated) {
@@ -141,6 +149,31 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             forKey: "evlin.lastLimitShield"
         )
         NSLog("[Evlin/Ext] limit threshold shielded rule=%@", ruleId.uuidString)
+    }
+
+    /// Post the local "time's up" notification for a reached per-app limit.
+    /// Content is built by the pure `LimitShieldLogic.limitReachedNotification`
+    /// helper (unit-tested) and wrapped here in a `UNMutableNotificationContent`.
+    /// Uses a deterministic per-rule identifier so an (unexpected) same-day
+    /// re-fire replaces rather than stacks. `trigger: nil` delivers immediately.
+    /// If authorization isn't granted, `add` is a silent no-op — fine; the
+    /// extension neither can nor should request authorization.
+    private func postLimitReachedNotification(ruleId: UUID, rule: AppLimitRule) {
+        let copy = LimitShieldLogic.limitReachedNotification(
+            appName: rule.displayName,
+            minutes: rule.budgetMinutes
+        )
+        let content = UNMutableNotificationContent()
+        content.title = copy.title
+        content.body = copy.body
+        content.sound = .default
+
+        let request = UNNotificationRequest(
+            identifier: "evlin.limit.reached.\(ruleId.uuidString)",
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request, withCompletionHandler: nil)
     }
 
     /// Daily-reset enforcement (P7). Strip EVERY `source == .limit` ShieldRecord
