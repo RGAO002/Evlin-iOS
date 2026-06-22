@@ -66,6 +66,36 @@ actor ActiveLockStore {
         return removed
     }
 
+    /// Resilience fallback for an unshield of a CATEGORY whose token the command
+    /// could not carry/resolve (no `catalog_category_token_data`, and the
+    /// `category_hint`/display doesn't resolve to a local category token, so the
+    /// recordKey-keyed `removeShield(recordKey:)` finds nothing). Without this a
+    /// parent's "unlock Social" silently no-ops and the receipt falls back to
+    /// "App".
+    ///
+    /// Matches active `.category`-tier records whose `displayName` equals `hint`
+    /// case-insensitively (e.g. stored "Social" vs command hint "social"),
+    /// removes them, recomputes, and returns the removed records (the caller acks
+    /// with the matched record's real `displayName`). Returns `[]` when nothing
+    /// matches — the caller keeps its existing `.nothingToUnlock` path.
+    @discardableResult
+    func removeCategoryShieldsByDisplayName(_ hint: String) -> [ShieldRecord] {
+        reconcileLimitShieldsFromDisk()
+        let needle = hint.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !needle.isEmpty else { return [] }
+        let toRemove = shieldRecords.values.filter {
+            $0.tier == .category
+                && $0.displayName.caseInsensitiveCompare(needle) == .orderedSame
+        }
+        guard !toRemove.isEmpty else { return [] }
+        for record in toRemove {
+            shieldRecords.removeValue(forKey: record.recordKey)
+        }
+        persist()
+        recomputeAndApply()
+        return toRemove
+    }
+
     /// Remove every `source == .limit` shield that covers the given per-app limit
     /// rule's app, then recompute. Used by `clear_limit` (P6) so clearing a limit
     /// also unshields if the limit had auto-shielded the app. Matches a limit

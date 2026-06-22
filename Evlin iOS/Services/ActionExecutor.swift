@@ -687,7 +687,15 @@ final class ActionExecutor: @unchecked Sendable {
             return await removeExplicit(tier: .savedList, targetKey: id.uuidString)
         case .category:
             guard let hint = cmd.target.categoryHint else { return .failed(.nothingToUnlock) }
-            return await removeExplicit(tier: .category, targetKey: hint.lowercased())
+            // Pass the best human-readable category name (categoryHint /
+            // target_display / original request) so that when the token-keyed
+            // removal misses, the fallback can match the active `.category`
+            // shield by its displayName ("Social") case-insensitively.
+            return await removeExplicit(
+                tier: .category,
+                targetKey: hint.lowercased(),
+                categoryDisplayHint: categoryLookupName(from: cmd.target)
+            )
         case .all:
             return await removeExplicit(tier: .all, targetKey: "all")
         case .allApps:
@@ -796,9 +804,47 @@ final class ActionExecutor: @unchecked Sendable {
         return nil
     }
 
-    private func removeExplicit(tier: ShieldTier, targetKey: String) async -> AckResult {
+    private func removeExplicit(
+        tier: ShieldTier,
+        targetKey: String,
+        categoryDisplayHint: String? = nil
+    ) async -> AckResult {
         let recordKey = ShieldRecord.makeRecordKey(tier: tier, targetKey: targetKey)
         guard let removed = await ActiveLockStore.shared.removeShield(recordKey: recordKey) else {
+            // Token-keyed removal found nothing. For a category unshield this is
+            // the BAD command shape: it carried only a lowercase `category_hint`
+            // (no resolvable category token), so the recordKey (`category:<hint>`)
+            // doesn't match the active `.category` shield's recordKey. Fall back
+            // to matching that active shield by its displayName ("Social")
+            // case-insensitively so "unlock Social" actually removes the shield
+            // and the receipt reports "Social" instead of falling back to "App".
+            if tier == .category,
+               let hint = categoryDisplayHint?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !hint.isEmpty {
+                let removedByName = await ActiveLockStore.shared
+                    .removeCategoryShieldsByDisplayName(hint)
+                if let match = strongestShield(in: removedByName) {
+                    for r in removedByName {
+                        cancelScheduled(recordKey: r.recordKey)
+                    }
+                    // Re-ask with the matched category's name so any remaining
+                    // shield on that category (or an `all`-tier shield) is still
+                    // disclosed, mirroring the happy-path category branch below.
+                    let post = await ActiveLockStore.shared.effectiveState(
+                        for: AppQuery(categoryHint: match.displayName.lowercased())
+                    )
+                    let eff = effectiveStateFrom(
+                        post.stillCovered,
+                        isBlocked: post.blockedAfter,
+                        possibleSavedList: post.possibleSavedListCoverage
+                    )
+                    return .confirmedExact(
+                        verb: .unshield,
+                        displayName: match.displayName,
+                        effectiveState: eff
+                    )
+                }
+            }
             return .failed(.nothingToUnlock)
         }
         cancelScheduled(recordKey: recordKey)
