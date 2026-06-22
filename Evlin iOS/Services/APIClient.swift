@@ -2402,6 +2402,152 @@ extension APIClient {
         }
         return try JSONDecoder().decode(DeviceLockStateResponse.self, from: data)
     }
+
+    // MARK: Per-app daily limits (P9 — DeviceAppsSheet "APP LIMITS")
+    //
+    // Parent CRUD over /parent/app-limits (backend child_device.py P2 routes).
+    // Mirrors lockAllApps for auth/base-URL: all three go through the authed
+    // layer (`authedJSON` / `authedRequest`), family resolved from the access
+    // token by the backend's `get_current_family`. We STILL send `family_id` in
+    // the create body (the route requires it + cross-checks it against the
+    // header → 403 family_mismatch) and pass it as `family_id_q` on list/delete
+    // so the same cross-check passes there too.
+    //
+    // Snake_case literal property names (this codebase does NOT set
+    // convertFromSnakeCase on its decoder/encoder). NOTE: the backend rule id
+    // field is `rule_id`, NOT `id`.
+
+    /// One per-app limit rule. Matches the backend `AppLimitRuleResponse`.
+    struct AppLimitRuleDTO: Codable, Equatable {
+        let rule_id: UUID
+        let family_id: UUID
+        let child_device_id: UUID
+        let bundle_id: String
+        let display_name: String?
+        let artwork_url: String?
+        let daily_budget_minutes: Int
+        let reset_policy: String
+        let window_start_minute: Int
+        let window_end_minute: Int
+        let timezone: String?
+        let status: String
+        let effective_from: Date
+        let expires_at: Date?
+        let updated_at: Date
+    }
+
+    /// POST /parent/app-limits response envelope (`AppLimitRuleSetResponse`).
+    private struct AppLimitRuleSetResponseDTO: Decodable {
+        let rule: AppLimitRuleDTO
+        let command_id: UUID
+    }
+
+    /// GET /parent/app-limits response envelope (`AppLimitRuleListResponse`).
+    private struct AppLimitRuleListResponseDTO: Decodable {
+        let rules: [AppLimitRuleDTO]
+    }
+
+    /// DELETE /parent/app-limits/{id} response envelope (`AppLimitRuleClearResponse`).
+    private struct AppLimitRuleClearResponseDTO: Decodable {
+        let rule: AppLimitRuleDTO
+        let command_id: UUID
+    }
+
+    private struct AppLimitCreateBody: Encodable {
+        let family_id: UUID
+        let child_device_id: UUID
+        let bundle_id: String
+        let daily_budget_minutes: Int
+        let window_start_minute: Int
+        let window_end_minute: Int
+        let reset_policy: String
+        let display_name: String?
+    }
+
+    /// Backend rule timestamps are ISO-8601 with fractional seconds + offset
+    /// (`2026-06-19T00:00:00+00:00`). A plain ISO8601DateFormatter rejects the
+    /// fractional variant, so accept both.
+    private static let appLimitDateDecoder: JSONDecoder = {
+        let dec = JSONDecoder()
+        let withFractional = ISO8601DateFormatter()
+        withFractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let plain = ISO8601DateFormatter()
+        plain.formatOptions = [.withInternetDateTime]
+        dec.dateDecodingStrategy = .custom { decoder in
+            let raw = try decoder.singleValueContainer().decode(String.self)
+            if let d = withFractional.date(from: raw) ?? plain.date(from: raw) { return d }
+            throw DecodingError.dataCorrupted(
+                .init(codingPath: decoder.codingPath,
+                      debugDescription: "Unrecognized app-limit date: \(raw)"))
+        }
+        return dec
+    }()
+
+    private func authedJSONAppLimit<T: Decodable>(
+        path: String, method: String, jsonBody: Data? = nil
+    ) async throws -> T {
+        var req = authedRequest(path: path, method: method)
+        if let jsonBody { req.httpBody = jsonBody }
+        let (data, http) = try await authedData(for: req)
+        guard (200..<300).contains(http.statusCode) else {
+            throw APIError.serverError(http.statusCode)
+        }
+        return try Self.appLimitDateDecoder.decode(T.self, from: data)
+    }
+
+    /// POST /parent/app-limits — create-or-update the daily time limit for one
+    /// app (by bundle id) on the kid device, then emit a set_limit command.
+    /// v1 always uses the whole-day window 00:00–23:59 with a daily reset.
+    @discardableResult
+    func setAppLimit(
+        familyID: UUID,
+        childDeviceID: UUID,
+        bundleID: String,
+        dailyBudgetMinutes: Int,
+        displayName: String? = nil
+    ) async throws -> AppLimitRuleDTO {
+        let body = AppLimitCreateBody(
+            family_id: familyID,
+            child_device_id: childDeviceID,
+            bundle_id: bundleID,
+            daily_budget_minutes: dailyBudgetMinutes,
+            window_start_minute: 0,
+            window_end_minute: 1439,
+            reset_policy: "daily",
+            display_name: displayName
+        )
+        let payload = try JSONEncoder().encode(body)
+        let envelope: AppLimitRuleSetResponseDTO = try await authedJSONAppLimit(
+            path: "/parent/app-limits", method: "POST", jsonBody: payload)
+        return envelope.rule
+    }
+
+    /// DELETE /parent/app-limits/{rule_id} — disable the rule and emit a
+    /// clear_limit command. `familyID` is sent as `family_id_q` for the
+    /// backend's header/body family cross-check.
+    func clearAppLimit(familyID: UUID, ruleID: UUID) async throws {
+        var comps = URLComponents()
+        comps.path = "/parent/app-limits/\(ruleID.uuidString)"
+        comps.queryItems = [URLQueryItem(name: "family_id_q", value: familyID.uuidString)]
+        let path = comps.string ?? "/parent/app-limits/\(ruleID.uuidString)"
+        let _: AppLimitRuleClearResponseDTO = try await authedJSONAppLimit(
+            path: path, method: "DELETE")
+    }
+
+    /// GET /parent/app-limits?child_device_id=&family_id_q= — active rules for a
+    /// child device. Family resolved from auth; `family_id_q` cross-checks it.
+    func listAppLimits(familyID: UUID, childDeviceID: UUID) async throws -> [AppLimitRuleDTO] {
+        var comps = URLComponents()
+        comps.path = "/parent/app-limits"
+        comps.queryItems = [
+            URLQueryItem(name: "child_device_id", value: childDeviceID.uuidString),
+            URLQueryItem(name: "family_id_q", value: familyID.uuidString),
+        ]
+        let path = comps.string ?? "/parent/app-limits?child_device_id=\(childDeviceID.uuidString)"
+        let envelope: AppLimitRuleListResponseDTO = try await authedJSONAppLimit(
+            path: path, method: "GET")
+        return envelope.rules
+    }
 }
 
 // MARK: - App-alias management (Task F1)

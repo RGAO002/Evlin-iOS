@@ -11,6 +11,12 @@ struct DeviceAppItem: Identifiable, Hashable {
     var usedMin: Int        // minutes used today
     var limitMin: Int       // current limit
     var artworkURL: URL? = nil
+    /// App Store bundle id (from the catalog target). Required to set/clear a
+    /// backend limit — `nil` means the app can't be limited (pill disabled).
+    var bundleID: String? = nil
+    /// Backend rule id once a limit exists. `nil` = no active rule (limit off);
+    /// carried so the toggle/clear can DELETE the right rule.
+    var ruleID: UUID? = nil
 }
 
 enum DeviceAppsMockData {
@@ -74,5 +80,41 @@ enum DeviceAppsMockData {
             return "\(min / 60)h \(min % 60)m"
         }
         return "\(min)m"
+    }
+}
+
+// MARK: - App ↔ rule merge (P9)
+
+/// A backend per-app rule reduced to just the fields the merge needs. Lets the
+/// merge logic be unit-tested without depending on the full `AppLimitRuleDTO`
+/// (which lives inside APIClient) — the view adapts the real DTO into this.
+struct AppLimitRuleSummary: Equatable {
+    let ruleID: UUID
+    let bundleID: String
+    let dailyBudgetMinutes: Int
+}
+
+enum DeviceAppLimitMerge {
+    /// Overlay loaded backend rules onto freshly-built catalog rows (which start
+    /// with the hardcoded default `limitMin`, `enabled: true`). Matching is by
+    /// `bundleID`:
+    ///   • app WITH a rule  → limitMin = rule budget, enabled = true,  ruleID set
+    ///   • app WITHOUT a rule → enabled = false (limit off), ruleID = nil
+    ///     (the default `limitMin` stays so the pill still shows a sensible value)
+    /// Apps with no bundleID can never match a rule → always "limit off".
+    static func apply(rules: [AppLimitRuleSummary], to apps: [DeviceAppItem]) -> [DeviceAppItem] {
+        let byBundle = Dictionary(rules.map { ($0.bundleID, $0) }, uniquingKeysWith: { first, _ in first })
+        return apps.map { app in
+            var updated = app
+            if let bundle = app.bundleID, let rule = byBundle[bundle] {
+                updated.limitMin = rule.dailyBudgetMinutes
+                updated.enabled = true
+                updated.ruleID = rule.ruleID
+            } else {
+                updated.enabled = false
+                updated.ruleID = nil
+            }
+            return updated
+        }
     }
 }

@@ -19,11 +19,21 @@ struct DeviceAppsSheet: View {
 
     @EnvironmentObject private var apiClient: APIClient
     @AppStorage("evlin.childDeviceID") private var pairedChildID: String = ""
+    @AppStorage("evlin.familyID") private var pairedFamilyID: String = ""
 
     @State private var apps: [DeviceAppItem] = []
     @State private var editingLimitFor: String? = nil
     @State private var isLoading = false
     @State private var loadFailed = false
+    /// Inline error after a failed set/clear (the local change is reverted and
+    /// this message shown briefly under the list).
+    @State private var actionError: String? = nil
+
+    /// Family id for parent API calls — sourced the same way ProfileView's
+    /// lock-all does (`UserDefaults` "evlin.familyID"). `nil` until paired.
+    private var familyID: UUID? { UUID(uuidString: pairedFamilyID) }
+    /// Paired kid device id (the same UUID the catalog fetch already uses).
+    private var childDeviceID: UUID? { UUID(uuidString: pairedChildID) }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -56,7 +66,25 @@ struct DeviceAppsSheet: View {
                     )
                     .padding(.horizontal, 20)
                     .padding(.top, 16)
-                    .padding(.bottom, 110)
+
+                    if let actionError {
+                        Text(actionError)
+                            .font(.custom("Inter", size: 11).weight(.semibold))
+                            .foregroundStyle(Color.evError)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 24)
+                            .padding(.top, 10)
+                    }
+
+                    // Footer: daily-reset note (the limits the parent sets here
+                    // reset every midnight on the kid device).
+                    Text("Limits reset daily at midnight.")
+                        .font(.custom("Inter", size: 11))
+                        .foregroundStyle(Color.evOnSurfaceVariant)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 24)
+                        .padding(.top, 12)
+                        .padding(.bottom, 110)
                 }
             }
         }
@@ -78,21 +106,39 @@ struct DeviceAppsSheet: View {
                     let targets = try await apiClient.fetchLazyTagCatalogTargets(childDeviceID: cid)
                     let appTargets = targets.filter { $0.type == .app }
                     // 1) Render immediately: prettified names + any backend artwork.
-                    apps = appTargets.map { t in
+                    //    Default the pill to 60m but leave the limit OFF — the real
+                    //    rules merge below flips on the apps that actually have one.
+                    let catalogApps = appTargets.map { t in
                         DeviceAppItem(
                             id: t.aliasKey.uuidString,
                             name: NameWithIcon.displayName(t.displayName),   // fixes casing (ig→Instagram, etc.)
                             iconSystemName: "app.fill",
                             brandColor: Color.evPrimary,
                             bgColor: Color.evPrimaryContainer,
-                            enabled: true,
+                            enabled: false,
                             usedMin: 0,
                             limitMin: 60,
-                            artworkURL: t.artworkURL
+                            artworkURL: t.artworkURL,
+                            bundleID: t.bundleID
                         )
                     }
+                    // 2) Load real per-app limits and merge by bundle_id (apps with
+                    //    a rule → on + that budget + ruleID; without → limit off).
+                    var merged = catalogApps
+                    if let famID = familyID {
+                        let rules = (try? await apiClient.listAppLimits(
+                            familyID: famID, childDeviceID: cid)) ?? []
+                        let summaries = rules.map {
+                            AppLimitRuleSummary(
+                                ruleID: $0.rule_id,
+                                bundleID: $0.bundle_id,
+                                dailyBudgetMinutes: $0.daily_budget_minutes)
+                        }
+                        merged = DeviceAppLimitMerge.apply(rules: summaries, to: catalogApps)
+                    }
+                    apps = merged
                     isLoading = false
-                    // 2) Backfill real icons: when the backend gave no artwork URL,
+                    // 3) Backfill real icons: when the backend gave no artwork URL,
                     //    resolve the App Store icon by name (cached) and patch it in.
                     for t in appTargets where t.artworkURL == nil {
                         let pretty = NameWithIcon.displayName(t.displayName)
@@ -214,7 +260,8 @@ struct DeviceAppsSheet: View {
 
                         Spacer()
 
-                        // Limit pill (tap to expand picker)
+                        // Limit pill (tap to expand picker). Disabled when the
+                        // app has no bundle id — there's nothing to limit on.
                         Button {
                             editingLimitFor = (editingLimitFor == app.id) ? nil : app.id
                         } label: {
@@ -233,17 +280,17 @@ struct DeviceAppsSheet: View {
                             )
                         }
                         .buttonStyle(.plain)
+                        .disabled(app.bundleID == nil)
+                        .opacity(app.bundleID == nil ? 0.5 : 1)
 
                         Toggle("", isOn: Binding(
                             get: { app.enabled },
-                            set: { newValue in
-                                if let i = apps.firstIndex(where: { $0.id == app.id }) {
-                                    apps[i].enabled = newValue
-                                }
-                            }
+                            set: { newValue in toggleLimit(for: app, on: newValue) }
                         ))
                         .labelsHidden()
                         .tint(Color.evSecondary)
+                        // No bundle id → can't set/clear a backend limit; lock off.
+                        .disabled(app.bundleID == nil)
                     }
 
                     // Progress bar
@@ -302,30 +349,117 @@ struct DeviceAppsSheet: View {
     }
 
     private func limitPicker(for app: DeviceAppItem) -> some View {
-        FlowLayout(spacing: 6) {
-            ForEach(DeviceAppsMockData.limitOptions, id: \.self) { min in
-                Button {
-                    if let i = apps.firstIndex(where: { $0.id == app.id }) {
-                        apps[i].limitMin = min
+        VStack(alignment: .leading, spacing: 8) {
+            FlowLayout(spacing: 6) {
+                ForEach(DeviceAppsMockData.limitOptions, id: \.self) { min in
+                    Button {
+                        pickLimit(min, for: app)
+                    } label: {
+                        Text(DeviceAppsMockData.formatLimit(min))
+                            .font(.custom("Manrope", size: 11).weight(.heavy))
+                            .foregroundStyle(app.limitMin == min ? .white : Color.evOnSurface)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .fill(app.limitMin == min ? Color.evPrimary : Color.white)
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .stroke(app.limitMin == min ? Color.evPrimary : Color.evOutlineVariant,
+                                            lineWidth: 1.5)
+                            )
                     }
-                    editingLimitFor = nil
-                } label: {
-                    Text(DeviceAppsMockData.formatLimit(min))
-                        .font(.custom("Manrope", size: 11).weight(.heavy))
-                        .foregroundStyle(app.limitMin == min ? .white : Color.evOnSurface)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .background(
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .fill(app.limitMin == min ? Color.evPrimary : Color.white)
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .stroke(app.limitMin == min ? Color.evPrimary : Color.evOutlineVariant,
-                                        lineWidth: 1.5)
-                        )
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
+            }
+            Text("Resets daily at midnight")
+                .font(.custom("Inter", size: 11))
+                .foregroundStyle(Color.evOnSurfaceVariant)
+        }
+    }
+
+    // MARK: - Persistence (P9)
+
+    /// Picker tap: optimistically set the local limit, then POST it. The same
+    /// set_limit POST both creates a rule (if off) and updates the budget (if
+    /// on), so this also turns a limit ON. Reverts + surfaces an error on
+    /// failure.
+    private func pickLimit(_ minutes: Int, for app: DeviceAppItem) {
+        editingLimitFor = nil
+        guard let bundleID = app.bundleID,
+              let famID = familyID,
+              let cid = childDeviceID else {
+            actionError = "This app can't be limited."
+            return
+        }
+        guard let i = apps.firstIndex(where: { $0.id == app.id }) else { return }
+        let previous = apps[i]
+        actionError = nil
+        apps[i].limitMin = minutes
+        apps[i].enabled = true
+        Task {
+            do {
+                let rule = try await apiClient.setAppLimit(
+                    familyID: famID,
+                    childDeviceID: cid,
+                    bundleID: bundleID,
+                    dailyBudgetMinutes: minutes,
+                    displayName: app.name)
+                if let j = apps.firstIndex(where: { $0.id == app.id }) {
+                    apps[j].ruleID = rule.rule_id
+                    apps[j].limitMin = rule.daily_budget_minutes
+                    apps[j].enabled = true
+                }
+            } catch {
+                if let j = apps.firstIndex(where: { $0.id == app.id }) {
+                    apps[j] = previous
+                }
+                actionError = "Couldn't save the limit — try again."
+            }
+        }
+    }
+
+    /// Toggle: ON → set_limit with the current pill value; OFF → clear the rule.
+    /// Reverts + surfaces an error on failure.
+    private func toggleLimit(for app: DeviceAppItem, on: Bool) {
+        guard let bundleID = app.bundleID,
+              let famID = familyID,
+              let cid = childDeviceID else {
+            actionError = "This app can't be limited."
+            return
+        }
+        guard let i = apps.firstIndex(where: { $0.id == app.id }) else { return }
+        let previous = apps[i]
+        actionError = nil
+        apps[i].enabled = on
+        Task {
+            do {
+                if on {
+                    let rule = try await apiClient.setAppLimit(
+                        familyID: famID,
+                        childDeviceID: cid,
+                        bundleID: bundleID,
+                        dailyBudgetMinutes: app.limitMin,
+                        displayName: app.name)
+                    if let j = apps.firstIndex(where: { $0.id == app.id }) {
+                        apps[j].ruleID = rule.rule_id
+                        apps[j].limitMin = rule.daily_budget_minutes
+                    }
+                } else if let ruleID = app.ruleID {
+                    try await apiClient.clearAppLimit(familyID: famID, ruleID: ruleID)
+                    if let j = apps.firstIndex(where: { $0.id == app.id }) {
+                        apps[j].ruleID = nil
+                    }
+                }
+                // OFF with no ruleID: nothing persisted yet, local flip is enough.
+            } catch {
+                if let j = apps.firstIndex(where: { $0.id == app.id }) {
+                    apps[j] = previous
+                }
+                actionError = on
+                    ? "Couldn't turn on the limit — try again."
+                    : "Couldn't turn off the limit — try again."
             }
         }
     }
