@@ -33,6 +33,7 @@ actor ActiveLockStore {
     /// `force_confirmations: ["B1"]` in the request.
     @discardableResult
     func addShield(_ new: ShieldRecord, force: Bool = false) -> AddShieldResult {
+        reconcileLimitShieldsFromDisk()
         let new = normalizeShieldRecord(new).record
         if let existing = shieldRecords[new.recordKey], !force {
             return mergeShield(existing: existing, new: new)
@@ -46,6 +47,7 @@ actor ActiveLockStore {
 
     @discardableResult
     func removeShield(recordKey: String) -> RemovedShield? {
+        reconcileLimitShieldsFromDisk()
         guard let record = shieldRecords.removeValue(forKey: recordKey) else { return nil }
         persist()
         recomputeAndApply()
@@ -56,6 +58,7 @@ actor ActiveLockStore {
 
     @discardableResult
     func unshieldAll() -> [ShieldRecord] {
+        reconcileLimitShieldsFromDisk()
         let removed = Array(shieldRecords.values)
         shieldRecords.removeAll()
         persist()
@@ -73,6 +76,12 @@ actor ActiveLockStore {
     /// they cover the same app — only the limit subsystem's own shields are dropped.
     @discardableResult
     func removeLimitShields(appTokens: Set<ApplicationToken>, bundleID: String?) -> [ShieldRecord] {
+        // Reconcile FIRST so we target the extension's CURRENT `.limit` set (a
+        // threshold may have fired since init). Then compute + remove targets,
+        // then persist (writes disk WITHOUT the targets), then recompute. Because
+        // persist writes the removal to disk before recompute's reconcile re-reads
+        // it, the removed records are NOT resurrected.
+        reconcileLimitShieldsFromDisk()
         let bidKey = bundleID?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let toRemove = shieldRecords.values.filter { record in
             guard record.source == .limit else { return false }
@@ -93,6 +102,7 @@ actor ActiveLockStore {
 
     @discardableResult
     func addBlock(_ new: BlockRecord) -> AddBlockResult {
+        reconcileLimitShieldsFromDisk()
         if blockRecords[new.bundleID] != nil { return .alreadyBlocked }
         blockRecords[new.bundleID] = new
         persist()
@@ -102,6 +112,7 @@ actor ActiveLockStore {
 
     @discardableResult
     func removeBlock(bundleID: String, categoryHint: String? = nil) -> RemovedBlock? {
+        reconcileLimitShieldsFromDisk()
         guard let record = blockRecords.removeValue(forKey: bundleID) else { return nil }
         persist()
         recomputeAndApply()
@@ -117,6 +128,7 @@ actor ActiveLockStore {
 
     @discardableResult
     func unblockAll() -> [BlockRecord] {
+        reconcileLimitShieldsFromDisk()
         let removed = Array(blockRecords.values)
         blockRecords.removeAll()
         persist()
@@ -131,6 +143,7 @@ actor ActiveLockStore {
     }
 
     func reapplyCurrentRestrictions() {
+        reconcileLimitShieldsFromDisk()
         recomputeAndApply()
     }
 
@@ -167,6 +180,7 @@ actor ActiveLockStore {
 
     @discardableResult
     func sweepExpired(now: Date = Date()) -> [ShieldRecord] {
+        reconcileLimitShieldsFromDisk()
         let expired = purgeExpiredRecords(now: now)
         guard !expired.shields.isEmpty || !expired.blocks.isEmpty else { return [] }
         persist()
@@ -258,6 +272,12 @@ actor ActiveLockStore {
     // MARK: - Private: recompute + persistence
 
     private func recomputeAndApply() {
+        // Covers the read-only reapply path and guarantees the union we push to
+        // the ManagedSettingsStore includes the extension's current `.limit`
+        // records. Safe for `removeLimitShields`: that path persists the removal
+        // to disk BEFORE calling here, so this reconcile re-reads disk without
+        // the removed records and cannot resurrect them.
+        reconcileLimitShieldsFromDisk()
         let expired = purgeExpiredRecords()
         if !expired.shields.isEmpty || !expired.blocks.isEmpty {
             persist()
@@ -314,6 +334,62 @@ actor ActiveLockStore {
         let line = "\(ts) branch=\(branch) shields=\(shieldRecords.count) blocks=\(blockRecords.count)"
             + " apps=\(appTokens) cats=\(catTokens) webs=\(webTokens)"
         defaults?.set(line, forKey: "evlin.lastRecompute")
+    }
+
+    // MARK: - Private: cross-process limit-shield reconciliation
+
+    /// Read + decode the App Group `shieldsKey` dict using the SAME `.iso8601`
+    /// decoder (with the legacy `PropertyListDecoder` fallback) that `restore()`
+    /// uses. Returns `nil` on missing data OR decode failure — the caller MUST
+    /// distinguish "couldn't read" (do nothing) from "read an empty dict"
+    /// (`[:]`, which legitimately means the extension cleared every limit shield).
+    private func diskShieldRecords() -> [String: ShieldRecord]? {
+        guard let data = defaults?.data(forKey: shieldsKey) else { return nil }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        if let decoded = try? decoder.decode([String: ShieldRecord].self, from: data) {
+            return decoded
+        }
+        if let decoded = try? PropertyListDecoder().decode([String: ShieldRecord].self, from: data) {
+            return decoded
+        }
+        return nil
+    }
+
+    /// Reconcile the in-memory `source == .limit` subset with the on-disk
+    /// `source == .limit` subset. `.limit` records are OWNED by the
+    /// DeviceActivity extension (it writes them on a usage-threshold fire and
+    /// removes them at the daily reset, directly into the same App Group dict).
+    /// The main app never re-reads that dict after init, so without this its
+    /// stale in-memory copy would erase the extension's writes on the next
+    /// `persist()`/`recomputeAndApply()`. Call this at the START of every
+    /// mutating method, BEFORE it mutates/persists.
+    ///
+    /// `source == .manual` records remain main-app-authoritative and are NEVER
+    /// touched here.
+    ///
+    /// Fail-safe: if disk can't be read/decoded (`diskShieldRecords() == nil`),
+    /// this is a NO-OP — a transient read failure must never wipe in-memory
+    /// shields.
+    private func reconcileLimitShieldsFromDisk() {
+        guard let disk = diskShieldRecords() else { return }
+
+        let diskLimit = disk.filter { $0.value.source == .limit }
+
+        // (a) Drop any in-memory `.limit` record that is no longer a `.limit`
+        // record on disk (picks up the extension's daily-reset clears).
+        for (key, record) in shieldRecords where record.source == .limit {
+            if diskLimit[key] == nil {
+                shieldRecords.removeValue(forKey: key)
+            }
+        }
+
+        // (b) Insert/update every disk `.limit` record (picks up the
+        // extension's threshold writes). Normalize for schema parity, exactly
+        // like `restore()` does.
+        for (key, record) in diskLimit {
+            shieldRecords[key] = normalizeShieldRecord(record).record
+        }
     }
 
     private func persist() {
