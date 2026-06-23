@@ -422,6 +422,9 @@ struct PollTargetDTO: Decodable {
     let catalog_category_token_data_base64: String?
     let applications: [String]?
     let applicationCategories: [String]?
+    // B2: per-target provenance. Backend emits "earned_time"|"manual".
+    let lock_source: String?
+    let unlock_sources: [String]?
 
     private enum CodingKeys: String, CodingKey {
         case bundle_id
@@ -445,6 +448,8 @@ struct PollTargetDTO: Decodable {
         case legacyCategoryTokenDataBase64 = "category_token_data_base64"
         case camelCatalogTokenDataBase64 = "catalogTokenDataBase64"
         case camelCatalogCategoryTokenDataBase64 = "catalogCategoryTokenDataBase64"
+        case lock_source
+        case unlock_sources
     }
 
     init(from decoder: Decoder) throws {
@@ -473,6 +478,8 @@ struct PollTargetDTO: Decodable {
         applicationCategories =
             try c.decodeIfPresent([String].self, forKey: .applicationCategories)
                 ?? c.decodeIfPresent([String].self, forKey: .application_categories)
+        lock_source = try c.decodeIfPresent(String.self, forKey: .lock_source)
+        unlock_sources = try c.decodeIfPresent([String].self, forKey: .unlock_sources)
     }
 }
 
@@ -488,6 +495,9 @@ struct PollCommandDTO: Decodable {
     // decode unchanged.
     let limit: PollLimitDTO?
     let clear: PollClearDTO?
+    // B2: top-level provenance (takes precedence over target.lock_source).
+    let lock_source: String?
+    let unlock_sources: [String]?
 }
 
 /// `set_limit.limit` wire payload (P3 decode only). Literal snake_case stored

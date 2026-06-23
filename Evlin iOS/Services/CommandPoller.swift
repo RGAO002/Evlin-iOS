@@ -316,6 +316,9 @@ final class CommandPoller {
         let trimmedHint = poll.target.category_hint?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let categoryHint = (trimmedHint?.isEmpty == false) ? trimmedHint : nil
+        // B2: top-level lock_source takes precedence over target.lock_source (spec §5.4).
+        let resolvedLockSource = poll.lock_source ?? poll.target.lock_source
+        let resolvedUnlockSources = poll.unlock_sources ?? poll.target.unlock_sources
         let target = CommandTarget(
             bundleID: poll.target.bundle_id,
             listName: poll.target.list_name,
@@ -330,7 +333,9 @@ final class CommandPoller {
             catalogTokenDataBase64: poll.target.catalog_token_data_base64,
             catalogCategoryTokenDataBase64: poll.target.catalog_category_token_data_base64,
             catalogApplicationTokenDataBase64s: poll.target.applications ?? [],
-            catalogCategoryTokenDataBase64s: poll.target.applicationCategories ?? []
+            catalogCategoryTokenDataBase64s: poll.target.applicationCategories ?? [],
+            lockSource: resolvedLockSource,
+            unlockSources: resolvedUnlockSources
         )
         let action: CommandAction = CommandAction(rawValue: poll.action) ?? .shield
 

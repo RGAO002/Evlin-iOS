@@ -60,6 +60,11 @@ struct CommandTarget: Codable, Sendable {
     var catalogCategoryTokenDataBase64: String? = nil
     var catalogApplicationTokenDataBase64s: [String] = []
     var catalogCategoryTokenDataBase64s: [String] = []
+
+    // B2: lock-source provenance. Wire snake value ("earned_time"|"manual").
+    var lockSource: String? = nil
+    // B2: for unshield commands — which sources to remove. Wire snake values.
+    var unlockSources: [String]? = nil
 }
 
 struct LockCommand: Codable, Sendable, Identifiable {
@@ -73,6 +78,9 @@ struct LockCommand: Codable, Sendable, Identifiable {
     // intentionally does NOT flow through durationMinutes/expiresAt.
     var limit: LimitRule? = nil
     var clear: ClearLimit? = nil
+    // B2: provenance carried from CommandTarget for convenience access.
+    var lockSource: String? { target.lockSource }
+    var unlockSources: [String]? { target.unlockSources }
     var expiresAt: Date? {
         guard let m = durationMinutes else { return nil }
         return issuedAt.addingTimeInterval(TimeInterval(m * 60))

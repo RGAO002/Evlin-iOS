@@ -595,8 +595,18 @@ final class ActionExecutor: @unchecked Sendable {
             issuedAt: cmd.issuedAt,
             expiresAt: expiresAt,
             originalRequest: cmd.target.originalRequest,
-            targetChildID: cmd.target.targetChildID ?? UUID()
+            targetChildID: cmd.target.targetChildID ?? UUID(),
+            sources: Self.shieldSources(fromWireLockSource: cmd.lockSource)
         )
+    }
+
+    /// B2: map a wire snake `lock_source` value to the `ShieldSource` set for a
+    /// new `ShieldRecord`. Internal so tests can verify the mapping directly.
+    static func shieldSources(fromWireLockSource wireSource: String?) -> Set<ShieldSource> {
+        switch wireSource {
+        case "earned_time": return [.earnedTime]
+        default:            return [.manual]
+        }
     }
 
     // MARK: - Block
@@ -684,6 +694,18 @@ final class ActionExecutor: @unchecked Sendable {
         switch tier {
         case .savedList:
             guard let id = cmd.target.listID else { return .failed(.nothingToUnlock) }
+            // B2: if unlock_sources specified, remove only those sources; legacy
+            // commands with no unlock_sources fall through to whole-record removal.
+            if let wireSources = cmd.unlockSources {
+                let recordKey = ShieldRecord.makeRecordKey(tier: .savedList, targetKey: id.uuidString)
+                for wireSource in wireSources {
+                    let src: ShieldSource = wireSource == "earned_time" ? .earnedTime : .manual
+                    await ActiveLockStore.shared.removeSource(src, fromRecordKey: recordKey)
+                }
+                // Build a minimal ack — record may still exist with remaining sources.
+                let displayName = cmd.target.listName ?? cmd.target.targetDisplay ?? "saved list"
+                return .confirmedExact(verb: .unshield, displayName: displayName, effectiveState: nil)
+            }
             return await removeExplicit(tier: .savedList, targetKey: id.uuidString)
         case .category:
             guard let hint = cmd.target.categoryHint else { return .failed(.nothingToUnlock) }
