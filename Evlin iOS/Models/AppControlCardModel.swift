@@ -35,6 +35,9 @@ enum AppControlCardKind: String, Sendable, CaseIterable {
     case categoryShieldOffer = "category_shield_offer"
     case catalogAppInactive = "catalog_app_inactive"
     case bundleIDRequired = "bundle_id_required"
+    // Task 6 — lock-selected-apps confirmation cards.
+    case lockSelectedAppsConfirm = "lock_selected_apps_confirm"
+    case lockSelectedAppsEmpty = "lock_selected_apps_empty"
 }
 
 /// One tappable option on an app-control card. Mirrors backend
@@ -49,6 +52,14 @@ struct AppControlCardOption: Sendable, Equatable, Identifiable {
     let forceConfirmations: [String]
 
     var id: String { action + "|" + label }
+}
+
+/// One app-preview row from `lock_selected_apps_confirm`. Mirrors the backend
+/// `AppPreviewItem` projection (`display_name`, `bundle_id`, `artwork_url`).
+struct AppPreviewItem: Sendable, Equatable {
+    let displayName: String
+    let bundleID: String?
+    let artworkURL: URL?
 }
 
 /// One disambiguation row. Mirrors the loose dict the seam projects for each
@@ -80,6 +91,12 @@ struct AppControlCardModel: Sendable, Equatable {
     let candidates: [AppControlCandidate]
     let aliasKey: String?
     let bundleID: String?
+    // Task 6 — lock_selected_apps_confirm payload fields.
+    let appsCount: Int
+    let categoriesCount: Int
+    let appPreview: [AppPreviewItem]
+    let categoryPreview: [String]
+    let durationMinutes: Int?
 
     /// Parse from the chat-response `card_payload` dict (already deserialised to
     /// `[String: Any]`). Returns nil when `card_id` isn't one of the
@@ -119,6 +136,22 @@ struct AppControlCardModel: Sendable, Equatable {
             )
         }
 
+        // Task 6 — lock_selected_apps_confirm payload fields (default-zero for
+        // other card kinds so no existing parse logic is affected).
+        let appsCount = (payload["apps_count"] as? Int) ?? 0
+        let categoriesCount = (payload["categories_count"] as? Int) ?? 0
+        let appPreviewDicts = (payload["app_preview"] as? [[String: Any]]) ?? []
+        let appPreview: [AppPreviewItem] = appPreviewDicts.compactMap { dict in
+            guard let displayName = dict["display_name"] as? String else { return nil }
+            return AppPreviewItem(
+                displayName: displayName,
+                bundleID: dict["bundle_id"] as? String,
+                artworkURL: (dict["artwork_url"] as? String).flatMap(URL.init(string:))
+            )
+        }
+        let categoryPreview = (payload["category_preview"] as? [String]) ?? []
+        let durationMinutes = payload["duration_minutes"] as? Int
+
         return AppControlCardModel(
             kind: kind,
             title: title,
@@ -128,7 +161,12 @@ struct AppControlCardModel: Sendable, Equatable {
             options: options,
             candidates: candidates,
             aliasKey: aliasKey,
-            bundleID: bundleID
+            bundleID: bundleID,
+            appsCount: appsCount,
+            categoriesCount: categoriesCount,
+            appPreview: appPreview,
+            categoryPreview: categoryPreview,
+            durationMinutes: durationMinutes
         )
     }
 }

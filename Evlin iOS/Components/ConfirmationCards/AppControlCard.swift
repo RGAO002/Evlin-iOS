@@ -192,6 +192,9 @@ struct AppControlCard: View {
         // informational badge fits.
         case .catalogAppInactive:     return "app.badge.checkmark"
         case .bundleIDRequired:       return "questionmark.app.dashed"
+        // Task 6 — lock-selected-apps confirmation cards.
+        case .lockSelectedAppsConfirm: return "checkmark.shield.fill"
+        case .lockSelectedAppsEmpty:   return "shield.slash"
         }
     }
 

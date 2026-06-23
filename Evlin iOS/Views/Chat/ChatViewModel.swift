@@ -960,8 +960,8 @@ class ChatViewModel: ObservableObject {
         case .singleAppShieldAdvice, .shieldTokenMissing, .appStoreDisambiguation,
              .appNotFoundTerminal, .childDisambiguation, .categoryRenameRequired,
              .cannotBlockCategory, .categoryShieldOffer, .catalogAppInactive,
-             .bundleIDRequired:
-            // Task 11 app-control cards are driven by currentAppControlCard +
+             .bundleIDRequired, .lockSelectedAppsConfirm, .lockSelectedAppsEmpty:
+            // Task 11/6 app-control cards are driven by currentAppControlCard +
             // handleAppControlOption / handleAppControlCandidate, NOT by the Brain
             // CardHandlers primary slot. This branch keeps the switch exhaustive;
             // it should never fire.

@@ -47,6 +47,9 @@ enum CardID: String, Codable, Sendable {
     case categoryShieldOffer = "category_shield_offer"
     case catalogAppInactive = "catalog_app_inactive"
     case bundleIDRequired = "bundle_id_required"
+    // Task 6 — lock-selected-apps confirmation cards.
+    case lockSelectedAppsConfirm = "lock_selected_apps_confirm"
+    case lockSelectedAppsEmpty = "lock_selected_apps_empty"
 }
 
 extension CardID {
@@ -58,7 +61,7 @@ extension CardID {
         case .singleAppShieldAdvice, .shieldTokenMissing, .appStoreDisambiguation,
              .appNotFoundTerminal, .childDisambiguation, .categoryRenameRequired,
              .cannotBlockCategory, .categoryShieldOffer, .catalogAppInactive,
-             .bundleIDRequired:
+             .bundleIDRequired, .lockSelectedAppsConfirm, .lockSelectedAppsEmpty:
             return true
         default:
             return false
