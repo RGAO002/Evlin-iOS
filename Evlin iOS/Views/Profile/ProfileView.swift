@@ -115,6 +115,9 @@ struct ProfileView: View {
     // B8: acked lock-button state derived from covering_sources/exhausted
     // (NOT optimistic). Drives red/green coloring of the green button.
     @State private var ackedLockButtonState: LockButtonState = .pending
+    // B10: whether the last fetched lock-state had exhausted==true (earned-time ran out).
+    // Used in toggleDeviceLock to route the unlock via unlockOverride (not unlockSelected).
+    @State private var lastFetchedExhausted: Bool = false
     // Lock-selected CTA wiring (POST /parent/device/lock-selected|unlock-selected).
     @State private var lockBusy = false
     @State private var lockError: String? = nil
@@ -699,9 +702,36 @@ struct ProfileView: View {
             return
         }
         let wantLocked = !ackedLockButtonState.isShielded
+        // B10: detect exhausted-unlock path — when the parent unlocks an exhausted day,
+        // we must call unlockOverride (not unlockSelected) AND write the local App Group
+        // flag so the Monitor extension suppresses immediately, offline, without waiting
+        // for the backend command to round-trip to the kid's device.
+        let isExhaustedUnlock = !wantLocked && lastFetchedExhausted
         lockBusy = true
         lockError = nil
         lockNote = nil
+        if isExhaustedUnlock {
+            // B10: exhausted-day override — write the local App Group flag first so the
+            // Monitor extension suppresses the earned-time shield immediately, offline,
+            // without waiting for the backend command to reach the kid's device.
+            // Then call unlockOverride (A8/B8 backend endpoint) to persist server-side.
+            EarnedTimeStore.shared.setOverride(true, forUsageDate: todayUsageDate())
+            do {
+                // child.id is a UUID string (backend child profile ID).
+                if let childProfileUUID = UUID(uuidString: child.id) {
+                    _ = try await apiClient.unlockOverride(childProfileID: childProfileUUID)
+                }
+            } catch {
+                lockError = "Couldn't unlock — try again."
+                lockBusy = false
+                return
+            }
+            lockBusy = false
+            await refreshLockState()
+            lockNote = nil
+            await familyStore.refresh()
+            return
+        }
         do {
             let resp: APIClient.DeviceLockStateResponse
             if wantLocked {
@@ -744,6 +774,8 @@ struct ProfileView: View {
         withAnimation(.easeOut(duration: 0.18)) {
             ackedLockButtonState = buttonState
             localStatus = buttonState.isShielded ? .locked : .unlocked
+            // B10: track exhausted separately so toggleDeviceLock can route correctly.
+            lastFetchedExhausted = state.exhausted == true
         }
     }
 
@@ -759,10 +791,13 @@ struct ProfileView: View {
             let buttonState = LockButtonState.from(
                 coveringSources: state.covering_sources,
                 exhausted: state.exhausted)
+            let isExhausted = state.exhausted == true
             await MainActor.run {
                 withAnimation(.easeOut(duration: 0.18)) {
                     ackedLockButtonState = buttonState
                     localStatus = buttonState.isShielded ? .locked : .unlocked
+                    // B10: track exhausted separately so toggleDeviceLock can route correctly.
+                    lastFetchedExhausted = isExhausted
                 }
             }
             if buttonState.isShielded == wantLocked { return true }
@@ -786,6 +821,17 @@ struct ProfileView: View {
                 fromLocalID: previousID,
                 toBackendID: id)
         }
+    }
+
+    /// B10: ISO-8601 date string for today in the device's local timezone.
+    /// Matches the `usage_date` key format that `EarnedTimeStore` and the
+    /// Monitor extension both use for the override flag.
+    private func todayUsageDate() -> String {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone.current
+        return f.string(from: Date())
     }
 
     private func performDelete() async {
