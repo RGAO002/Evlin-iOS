@@ -62,7 +62,7 @@ enum LimitShieldLogic {
             expiresAt: nil,
             originalRequest: "app limit reached: \(rule.displayName)",
             targetChildID: UUID(),
-            source: .limit
+            sources: [.limit]
         )
         var out = shields
         out[key] = record
@@ -74,7 +74,7 @@ enum LimitShieldLogic {
     static func strippingLimitShields(
         from shields: [String: ShieldRecord]
     ) -> [String: ShieldRecord] {
-        shields.filter { $0.value.source != .limit }
+        shields.filter { !$0.value.sources.contains(.limit) }
     }
 
     // MARK: - "Limit reached" notification copy

@@ -56,7 +56,7 @@ final class ActiveLockStoreLimitReconcileTests: XCTestCase {
 
         let shields = await store.allCurrent().shields
         XCTAssertTrue(
-            shields.contains(where: { $0.recordKey == limitRecord.recordKey && $0.source == .limit }),
+            shields.contains(where: { $0.recordKey == limitRecord.recordKey && $0.sources.contains(.limit) }),
             "Extension-written .limit shield was clobbered by routine main-app mutation. Present keys: \(shields.map(\.recordKey))"
         )
         // And the manual shield is there too.
@@ -76,7 +76,7 @@ final class ActiveLockStoreLimitReconcileTests: XCTestCase {
 
         let shields = await store.allCurrent().shields
         XCTAssertTrue(
-            shields.contains(where: { $0.recordKey == limitRecord.recordKey && $0.source == .limit }),
+            shields.contains(where: { $0.recordKey == limitRecord.recordKey && $0.sources.contains(.limit) }),
             "sweepExpired clobbered the extension-written .limit shield. Present keys: \(shields.map(\.recordKey))"
         )
     }
@@ -154,7 +154,7 @@ final class ActiveLockStoreLimitReconcileTests: XCTestCase {
         _ = await store.addShield(manual)
         var shields = await store.allCurrent().shields
         XCTAssertEqual(shields.count, 1)
-        XCTAssertEqual(shields.first?.source, .manual)
+        XCTAssertEqual(shields.first?.sources, [.manual])
 
         let removed = await store.removeShield(recordKey: manual.recordKey)
         XCTAssertNotNil(removed)
@@ -236,7 +236,7 @@ final class ActiveLockStoreLimitReconcileTests: XCTestCase {
             expiresAt: nil,
             originalRequest: "app limit reached: \(displayName)",
             targetChildID: UUID(),
-            source: .limit
+            sources: [.limit]
         )
     }
 
@@ -259,7 +259,7 @@ final class ActiveLockStoreLimitReconcileTests: XCTestCase {
             expiresAt: Date().addingTimeInterval(TimeInterval(minutes * 60)),
             originalRequest: "test",
             targetChildID: UUID(),
-            source: .manual
+            sources: [.manual]
         )
     }
 

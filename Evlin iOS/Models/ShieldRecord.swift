@@ -6,15 +6,17 @@ import CryptoKit
 /// Provenance of a `ShieldRecord` — which subsystem authored it.
 /// - `.manual`: a parent/reflection-driven lock (the historical, only behavior).
 /// - `.limit`: written by the per-app time-limit subsystem (P4+).
+/// - `.earnedTime`: granted by the earned screen-time subsystem (B1+).
 ///
 /// String-backed so the JSON payload is human-readable and stable across the
 /// app/extension process boundary. Old persisted records predate this field;
 /// decode defaults a missing `source` to `.manual` (see `extension ShieldRecord`
 /// below) so legacy payloads never fail to decode (a decode failure = silent
 /// shield wipe).
-enum ShieldSource: String, Codable, Sendable {
+enum ShieldSource: String, Codable, Sendable, Hashable {
     case manual
     case limit
+    case earnedTime
 
     /// Unknown-tolerant decode. The synthesized `RawRepresentable` decoder THROWS
     /// on an unrecognized rawValue — e.g. a future `"schedule"` written by a newer
@@ -67,11 +69,13 @@ struct ShieldRecord: Codable, Sendable, Equatable {
     /// Which child device this record is scoped to. Required for multi-child families.
     var targetChildID: UUID
 
-    /// Which subsystem authored this record. Defaults to `.manual` so every
-    /// historical construction site (and every legacy persisted payload missing
-    /// the key) keeps its original parent/reflection-lock meaning. The per-app
-    /// time-limit subsystem sets `.limit`.
-    var source: ShieldSource = .manual
+    /// Which subsystems have a stake in this record. A record may be claimed by
+    /// multiple subsystems simultaneously (e.g. `.earnedTime` + `.manual` when a
+    /// parent also manually locks the same app). The record is deleted only when
+    /// the set is empty. Defaults to `[.manual]` so every historical construction
+    /// site (and every legacy persisted payload missing both `source` and `sources`
+    /// keys) keeps its original parent/reflection-lock meaning.
+    var sources: Set<ShieldSource> = [.manual]
 
     // MARK: - Helpers
 
@@ -127,7 +131,7 @@ struct ShieldRecord: Codable, Sendable, Equatable {
                 expiresAt: expiresAt,
                 originalRequest: originalRequest,
                 targetChildID: targetChildID,
-                source: source
+                sources: sources
             ),
             true
         )
@@ -151,11 +155,31 @@ extension ShieldRecord {
     private enum CodingKeys: String, CodingKey {
         case recordKey, tier, targetKey, displayName, lastCommandID
         case appTokens, categoryTokens, webDomainTokens, appliesToAll
-        case issuedAt, expiresAt, originalRequest, targetChildID, source
+        case issuedAt, expiresAt, originalRequest, targetChildID
+        // New key written by B1+.
+        case sources
+        // Legacy scalar key (P4 era, pre-B1). Decoded read-only; we encode `sources`.
+        case source
     }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+
+        // Legacy-compatible sources decode:
+        //   1. `sources` array present (and non-empty) → use it.
+        //   2. Legacy scalar `source` present → wrap as a singleton set (preserves
+        //      `.limit` / `.earnedTime` — NOT forced to `.manual`).
+        //   3. Neither key present (oldest payloads) → default to `[.manual]`.
+        let resolvedSources: Set<ShieldSource>
+        if let set = (try? c.decodeIfPresent(Set<ShieldSource>.self, forKey: .sources)) ?? nil,
+           !set.isEmpty {
+            resolvedSources = set
+        } else if let scalar = (try? c.decodeIfPresent(ShieldSource.self, forKey: .source)) ?? nil {
+            resolvedSources = [scalar]
+        } else {
+            resolvedSources = [.manual]
+        }
+
         self.init(
             recordKey: try c.decode(String.self, forKey: .recordKey),
             tier: try c.decode(ShieldTier.self, forKey: .tier),
@@ -170,8 +194,7 @@ extension ShieldRecord {
             expiresAt: try c.decodeIfPresent(Date.self, forKey: .expiresAt),
             originalRequest: try c.decode(String.self, forKey: .originalRequest),
             targetChildID: try c.decode(UUID.self, forKey: .targetChildID),
-            // Backward-compatible: missing key → .manual. Never throws here.
-            source: try c.decodeIfPresent(ShieldSource.self, forKey: .source) ?? .manual
+            sources: resolvedSources
         )
     }
 
@@ -190,7 +213,8 @@ extension ShieldRecord {
         try c.encodeIfPresent(expiresAt, forKey: .expiresAt)
         try c.encode(originalRequest, forKey: .originalRequest)
         try c.encode(targetChildID, forKey: .targetChildID)
-        try c.encode(source, forKey: .source)
+        // Write the new `sources` array; legacy `source` key is intentionally omitted.
+        try c.encode(sources, forKey: .sources)
     }
 }
 

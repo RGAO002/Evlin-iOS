@@ -116,6 +116,7 @@
 				Models/ShieldTier.swift,
 				Services/ActiveLockStore.swift,
 				Services/ActiveLockStoreTypes.swift,
+				Services/ShieldSourceLogic.swift,
 			);
 			target = B600D6332FDB4C5F000E60E6 /* EvlinPushApplier */;
 		};
@@ -143,6 +144,7 @@
 				Models/ShieldTier.swift,
 				Services/AppLimitRuleStore.swift,
 				Services/LimitShieldLogic.swift,
+				Services/ShieldSourceLogic.swift,
 			);
 			target = B6FA97312F81C6A000DA619E /* EvlinDeviceActivityMonitor */;
 		};

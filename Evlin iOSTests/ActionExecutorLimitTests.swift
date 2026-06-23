@@ -490,7 +490,7 @@ final class ActionExecutorLimitTests: XCTestCase {
             expiresAt: nil,
             originalRequest: "limit",
             targetChildID: UUID(),
-            source: .limit
+            sources: [.limit]
         )
         let manualShield = ShieldRecord(
             recordKey: ShieldRecord.makeRecordKey(tier: .category, targetKey: "social"),
@@ -506,7 +506,7 @@ final class ActionExecutorLimitTests: XCTestCase {
             expiresAt: nil,
             originalRequest: "lock social",
             targetChildID: UUID(),
-            source: .manual
+            sources: [.manual]
         )
         _ = await ActiveLockStore.shared.addShield(limitShield)
         _ = await ActiveLockStore.shared.addShield(manualShield)
@@ -525,7 +525,7 @@ final class ActionExecutorLimitTests: XCTestCase {
         _ = await executor.execute(makeClearCommand(bundleID: bundleID, ruleID: ruleID))
 
         let shields = await ActiveLockStore.shared.allCurrent().shields
-        XCTAssertFalse(shields.contains { $0.source == .limit },
+        XCTAssertFalse(shields.contains { $0.sources.contains(.limit) },
                        "the limit shield must be dropped on clear")
         XCTAssertTrue(shields.contains { $0.recordKey == manualShield.recordKey },
                       "the parent's manual shield must be preserved")

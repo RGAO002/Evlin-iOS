@@ -114,7 +114,7 @@ actor ActiveLockStore {
         reconcileLimitShieldsFromDisk()
         let bidKey = bundleID?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let toRemove = shieldRecords.values.filter { record in
-            guard record.source == .limit else { return false }
+            guard record.sources.contains(.limit) else { return false }
             if !appTokens.isEmpty, !record.appTokens.isDisjoint(with: appTokens) { return true }
             if let bidKey, !bidKey.isEmpty, record.targetKey == bidKey { return true }
             return false
@@ -225,16 +225,32 @@ actor ActiveLockStore {
         let newPermanent = new.expiresAt == nil
 
         if existingPermanent && newPermanent {
+            // Both permanent: no expiry change, but we MUST still union sources.
+            // (e.g. earnedTime + manual are both permanent; earned-time and manual
+            // both write permanent records to the same recordKey.)
+            let merged = ShieldSourceLogic.unioning(existing, intoSources: new.sources)
+            if merged.sources != existing.sources {
+                shieldRecords[existing.recordKey] = merged
+                persist()
+                recomputeAndApply()
+            }
             return .noOpAlreadyPermanent
         }
         if existingPermanent && !newPermanent {
+            // Existing permanent, new is timed — union sources but keep permanent.
+            let merged = ShieldSourceLogic.unioning(existing, intoSources: new.sources)
+            if merged.sources != existing.sources {
+                shieldRecords[existing.recordKey] = merged
+                persist()
+                recomputeAndApply()
+            }
             return .needsConfirmation(.downgradePermanentToTimed(
                 existingKey: existing.recordKey,
                 newExpiry: new.expiresAt!
             ))
         }
         if !existingPermanent && newPermanent {
-            var upgraded = existing
+            var upgraded = ShieldSourceLogic.unioning(existing, intoSources: new.sources)
             let prev = upgraded.expiresAt!
             upgraded.expiresAt = nil
             upgraded.lastCommandID = new.lastCommandID
@@ -245,7 +261,7 @@ actor ActiveLockStore {
             return .upgradedToPermanent(previousExpiry: prev)
         }
         if new.expiresAt! > existing.expiresAt! {
-            var extended = existing
+            var extended = ShieldSourceLogic.unioning(existing, intoSources: new.sources)
             extended.expiresAt = new.expiresAt
             extended.lastCommandID = new.lastCommandID
             shieldRecords[existing.recordKey] = extended
@@ -253,7 +269,24 @@ actor ActiveLockStore {
             recomputeAndApply()
             return .extendedTimed(newExpiry: new.expiresAt!)
         }
+        // New expiry is shorter than existing: still union sources, no expiry change.
+        let merged = ShieldSourceLogic.unioning(existing, intoSources: new.sources)
+        if merged.sources != existing.sources {
+            shieldRecords[existing.recordKey] = merged
+            persist()
+            recomputeAndApply()
+        }
         return .noOpShorterThanExisting
+    }
+
+    /// Remove a single source from the record at `recordKey`. If the record's
+    /// `sources` set becomes empty the record is deleted entirely. No-ops
+    /// silently if `recordKey` is not found.
+    func removeSource(_ source: ShieldSource, fromRecordKey key: String) {
+        reconcileLimitShieldsFromDisk()
+        shieldRecords = ShieldSourceLogic.removingSource(source, fromRecordKey: key, in: shieldRecords)
+        persist()
+        recomputeAndApply()
     }
 
     // MARK: - Private: coverage query
@@ -404,11 +437,11 @@ actor ActiveLockStore {
     private func reconcileLimitShieldsFromDisk() {
         guard let disk = diskShieldRecords() else { return }
 
-        let diskLimit = disk.filter { $0.value.source == .limit }
+        let diskLimit = disk.filter { $0.value.sources.contains(.limit) }
 
         // (a) Drop any in-memory `.limit` record that is no longer a `.limit`
         // record on disk (picks up the extension's daily-reset clears).
-        for (key, record) in shieldRecords where record.source == .limit {
+        for (key, record) in shieldRecords where record.sources.contains(.limit) {
             if diskLimit[key] == nil {
                 shieldRecords.removeValue(forKey: key)
             }

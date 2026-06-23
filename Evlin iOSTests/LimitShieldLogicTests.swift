@@ -58,7 +58,7 @@ final class LimitShieldLogicTests: XCTestCase {
             expiresAt: nil,
             originalRequest: "lock snapchat",
             targetChildID: UUID(),
-            source: .manual
+            sources: [.manual]
         )
     }
 
@@ -71,7 +71,7 @@ final class LimitShieldLogicTests: XCTestCase {
         appTokens: Set<ApplicationToken>,
         bundleID: String?
     ) -> Bool {
-        guard record.source == .limit else { return false }
+        guard record.sources.contains(.limit) else { return false }
         if !appTokens.isEmpty, !record.appTokens.isDisjoint(with: appTokens) { return true }
         let bidKey = bundleID?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if let bidKey, !bidKey.isEmpty, record.targetKey == bidKey { return true }
@@ -89,7 +89,7 @@ final class LimitShieldLogicTests: XCTestCase {
         let record = try! XCTUnwrap(updated[key])
 
         // Shape the recompute + P6 clear both depend on.
-        XCTAssertEqual(record.source, .limit)
+        XCTAssertEqual(record.sources, [.limit])
         XCTAssertEqual(record.tier, .exactApp)
         XCTAssertEqual(record.targetKey, "com.burbn.instagram")
         XCTAssertEqual(record.recordKey, key)
@@ -141,8 +141,8 @@ final class LimitShieldLogicTests: XCTestCase {
             to: [manual.recordKey: manual], rule: rule
         )
         XCTAssertEqual(updated.count, 2)
-        XCTAssertEqual(updated[manual.recordKey]?.source, .manual)
-        XCTAssertEqual(updated[LimitShieldLogic.recordKey(for: rule)]?.source, .limit)
+        XCTAssertEqual(updated[manual.recordKey]?.sources, [.manual])
+        XCTAssertEqual(updated[LimitShieldLogic.recordKey(for: rule)]?.sources, [.limit])
     }
 
     // MARK: - strippingLimitShields (daily reset)
@@ -162,9 +162,9 @@ final class LimitShieldLogicTests: XCTestCase {
 
         XCTAssertEqual(stripped.count, 1, "Only the limit record should be removed")
         XCTAssertNotNil(stripped[manual.recordKey], "Manual (parent) shield must survive")
-        XCTAssertEqual(stripped[manual.recordKey]?.source, .manual)
+        XCTAssertEqual(stripped[manual.recordKey]?.sources, [.manual])
         XCTAssertNil(stripped[LimitShieldLogic.recordKey(for: rule)], "Limit shield must be gone")
-        XCTAssertFalse(stripped.values.contains { $0.source == .limit })
+        XCTAssertFalse(stripped.values.contains { $0.sources.contains(.limit) })
     }
 
     func test_strippingLimitShields_removesEveryLimitRecord() {
@@ -202,7 +202,7 @@ final class LimitShieldLogicTests: XCTestCase {
         let decoded = try dec.decode([String: ShieldRecord].self, from: data)
 
         let record = try XCTUnwrap(decoded[LimitShieldLogic.recordKey(for: rule)])
-        XCTAssertEqual(record.source, .limit)
+        XCTAssertTrue(record.sources.contains(.limit))
         XCTAssertTrue(
             removeLimitShieldsMatches(record, appTokens: [], bundleID: "com.burbn.instagram"),
             "Round-tripped limit shield must still be matchable by removeLimitShields"

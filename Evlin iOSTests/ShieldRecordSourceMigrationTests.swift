@@ -47,7 +47,7 @@ final class ShieldRecordSourceMigrationTests: XCTestCase {
     func test_legacyRecordWithoutSource_decodesAsManual() throws {
         let data = Data(legacyRecordJSON.utf8)
         let record = try evlinDecoder().decode(ShieldRecord.self, from: data)
-        XCTAssertEqual(record.source, .manual, "Missing source key must default to .manual")
+        XCTAssertEqual(record.sources, [.manual], "Missing source key must default to {.manual}")
         // The rest of the record must survive intact (no field shifted).
         XCTAssertEqual(record.recordKey, "exactApp:com.burbn.instagram")
         XCTAssertEqual(record.tier, .exactApp)
@@ -63,7 +63,7 @@ final class ShieldRecordSourceMigrationTests: XCTestCase {
         let decoded = try evlinDecoder().decode([String: ShieldRecord].self, from: data)
         XCTAssertEqual(decoded.count, 1)
         let record = try XCTUnwrap(decoded["exactApp:com.burbn.instagram"])
-        XCTAssertEqual(record.source, .manual)
+        XCTAssertEqual(record.sources, [.manual])
     }
 
     /// A JSON object whose `source` is a value NO current case matches (e.g. a
@@ -94,7 +94,7 @@ final class ShieldRecordSourceMigrationTests: XCTestCase {
         let data = Data(futureSourceRecordJSON.utf8)
         // Must NOT throw — an unknown future source value falls back to .manual.
         let record = try evlinDecoder().decode(ShieldRecord.self, from: data)
-        XCTAssertEqual(record.source, .manual, "Unknown future source value must fall back to .manual")
+        XCTAssertEqual(record.sources, [.manual], "Unknown future source value must fall back to {.manual}")
         // Rest of the record must survive intact.
         XCTAssertEqual(record.recordKey, "exactApp:com.burbn.instagram")
         XCTAssertEqual(record.tier, .exactApp)
@@ -105,7 +105,7 @@ final class ShieldRecordSourceMigrationTests: XCTestCase {
         let decoded = try evlinDecoder().decode([String: ShieldRecord].self, from: Data(dictJSON.utf8))
         XCTAssertEqual(decoded.count, 1)
         let dictRecord = try XCTUnwrap(decoded["exactApp:com.burbn.instagram"])
-        XCTAssertEqual(dictRecord.source, .manual)
+        XCTAssertEqual(dictRecord.sources, [.manual])
     }
 
     /// Full-field round-trip guard. The `Codable` is HAND-WRITTEN (not
@@ -128,7 +128,7 @@ final class ShieldRecordSourceMigrationTests: XCTestCase {
             expiresAt: Date(timeIntervalSince1970: 1_700_003_600),
             originalRequest: "limit my focus block",
             targetChildID: UUID(uuidString: "99999999-8888-7777-6666-555555555555")!,
-            source: .limit
+            sources: [.limit]
         )
 
         let data = try evlinEncoder().encode(original)
@@ -159,13 +159,13 @@ final class ShieldRecordSourceMigrationTests: XCTestCase {
             expiresAt: Date(timeIntervalSince1970: 1_700_003_600),
             originalRequest: "limit snapchat to 30m",
             targetChildID: UUID(),
-            source: .limit
+            sources: [.limit]
         )
 
         let data = try evlinEncoder().encode(original)
         let decoded = try evlinDecoder().decode(ShieldRecord.self, from: data)
 
-        XCTAssertEqual(decoded.source, .limit)
+        XCTAssertEqual(decoded.sources, [.limit])
         XCTAssertEqual(decoded.recordKey, original.recordKey)
         XCTAssertEqual(decoded.tier, original.tier)
         XCTAssertEqual(decoded.lastCommandID, original.lastCommandID)
@@ -190,6 +190,6 @@ final class ShieldRecordSourceMigrationTests: XCTestCase {
             originalRequest: "lock all",
             targetChildID: UUID()
         )
-        XCTAssertEqual(record.source, .manual)
+        XCTAssertEqual(record.sources, [.manual])
     }
 }
