@@ -425,9 +425,14 @@ struct DeviceAppsSheet: View {
     }
 
     private func statusText(for app: DeviceAppItem) -> String {
-        guard app.enabled else { return "Limit off" }
-        if app.usedMin == 0 { return "Not used today" }
-        return "\(DeviceAppsMockData.formatUsed(app.usedMin)) used"
+        // B11/v1: there is no real per-app usage data yet — usedMin is a mock
+        // value and must never be shown as real usage. Delegate to the pure
+        // formatter which deliberately ignores usedMin.
+        EarnedDisplayFormatters.appRowStatusText(
+            limitEnabled: app.enabled,
+            usedMin: app.usedMin,
+            limitMin: app.limitMin
+        )
     }
 
     // MARK: - B9: Device-cap card

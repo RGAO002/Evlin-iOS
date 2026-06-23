@@ -22,6 +22,9 @@ struct DeviceItem: Identifiable, Hashable {
     let name: String
     let detail: String
     let locked: Bool
+    /// B11: the enrolled device's UUID — used to look up per-device earned-time estimates.
+    /// Nil for mock/fixture rows.
+    let deviceUUID: UUID?
 
     /// Build a Profile "Enrolled Devices" row from a backend
     /// `EnrolledDeviceDTO` (`GET /family` / `GET /me/profile`). The display
@@ -35,6 +38,7 @@ struct DeviceItem: Identifiable, Hashable {
         self.name = dto.label ?? friendlyModel ?? dto.display ?? "Device"
         self.detail = display
         self.locked = false
+        self.deviceUUID = UUID(uuidString: dto.device_id)
     }
 
     /// Direct memberwise-style initializer for the mock fixtures below.
@@ -43,6 +47,7 @@ struct DeviceItem: Identifiable, Hashable {
         self.name = name
         self.detail = detail
         self.locked = locked
+        self.deviceUUID = nil
     }
 
     private static func friendlyDisplay(dto: EnrolledDeviceDTO, friendlyModel: String?) -> String {

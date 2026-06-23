@@ -118,6 +118,11 @@ struct ProfileView: View {
     // B10: whether the last fetched lock-state had exhausted==true (earned-time ran out).
     // Used in toggleDeviceLock to route the unlock via unlockOverride (not unlockSelected).
     @State private var lastFetchedExhausted: Bool = false
+    // B11: coarse earned-time summary from A3 backend endpoint.
+    // Nil until the first fetch completes; progress bar / countdown uses static
+    // config values until then (graceful degradation).
+    @State private var earnedSummary: APIClient.EarnedSummaryDTO? = nil
+    @State private var summaryFetchedAt: Date? = nil
     // Lock-selected CTA wiring (POST /parent/device/lock-selected|unlock-selected).
     @State private var lockBusy = false
     @State private var lockError: String? = nil
@@ -159,9 +164,46 @@ struct ProfileView: View {
     }
 
     /// The "screen time remaining" text used in both the summary card and the
-    /// Enrolled Devices row. Shows the daily limit when the rule is ON; "∞" when OFF.
+    /// Enrolled Devices row.
+    ///
+    /// B11 priority chain:
+    ///   1. Backend `countdown_label` when present (server pre-formats coarse copy).
+    ///   2. Compute coarse label from `remaining_minutes` via EarnedDisplayFormatters.
+    ///   3. Fall back to static config (daily limit / "∞") when no summary yet.
     private var screenTimeRemainingText: String {
-        dailyLimitOn ? formatLimit(dailyLimitMinutes) : "∞"
+        guard dailyLimitOn else { return "∞" }
+        if let label = earnedSummary?.countdown_label, !label.isEmpty {
+            return label
+        }
+        if let remaining = earnedSummary?.remaining_minutes {
+            return EarnedDisplayFormatters.coarseCountdownLabel(remainingMinutes: remaining)
+        }
+        return formatLimit(dailyLimitMinutes)
+    }
+
+    /// Freshness string shown below the countdown ("updated ~Xm ago").
+    /// Returns nil when no summary has been fetched yet (nothing to show).
+    private var summaryFreshnessText: String? {
+        guard let fetchedAt = summaryFetchedAt else { return nil }
+        let ago = Int(Date().timeIntervalSince(fetchedAt))
+        return EarnedDisplayFormatters.freshnessLabel(secondsAgo: ago)
+    }
+
+    /// Progress-bar fraction: used_minutes / daily_pool_minutes.
+    /// Falls back to 1.0 (full bar) before first fetch so the bar doesn't flash empty.
+    private var summaryProgressFraction: Double {
+        guard let summary = earnedSummary,
+              let pool = summary.daily_pool_minutes, pool > 0,
+              let used = summary.used_minutes else { return 1.0 }
+        return min(1.0, max(0.0, Double(used) / Double(pool)))
+    }
+
+    /// Per-device estimate label for a given device id.
+    /// Returns nil when no estimate data is available for that device.
+    private func deviceEstimateText(for deviceID: UUID?) -> String? {
+        guard let deviceID, let estimates = earnedSummary?.device_estimates else { return nil }
+        guard let estimate = estimates.first(where: { $0.child_device_id == deviceID }) else { return nil }
+        return EarnedDisplayFormatters.deviceEstimateLabel(estimatedMinutesLeft: estimate.estimated_minutes ?? 0)
     }
 
     var body: some View {
@@ -449,6 +491,15 @@ struct ProfileView: View {
                        pool > 0 {
                         dailyLimitMinutes = pool
                         rules = ProfileMockData.rules(for: child.id, dailyLimitMinutes: pool)
+                    }
+                }
+                Task {
+                    // B11: load the coarse earned-time summary (countdown_label,
+                    // used_minutes, daily_pool_minutes, device_estimates).
+                    // Failure is non-fatal — the UI degrades to the static config copy.
+                    if let summary = try? await apiClient.fetchEarnedSummary(childProfileID: uuid) {
+                        earnedSummary = summary
+                        summaryFetchedAt = Date()
                     }
                 }
                 // For UUID children the backend is the source of truth; only seed
@@ -992,12 +1043,15 @@ struct ProfileView: View {
                 } else {
                     VStack(spacing: 0) {
                         ForEach(Array(devices.enumerated()), id: \.element.id) { idx, d in
+                            // B11: per-device estimate label when available; fall back to
+                            // overall countdown label (same honest coarse copy).
+                            let deviceTimeLeft = deviceEstimateText(for: d.deviceUUID) ?? screenTimeRemainingText
                             DeviceRow(
                                 iconSystemName: d.iconSystemName,
                                 name: d.name,
                                 detail: d.detail,
                                 locked: localStatus != .unlocked,
-                                timeLeft: screenTimeRemainingText,
+                                timeLeft: deviceTimeLeft,
                                 timePct: 1.0,
                                 isLast: idx == devices.count - 1,
                                 onPress: { onOpenDevice(d) }
@@ -1211,23 +1265,38 @@ struct ProfileView: View {
                         .font(.custom("Manrope", size: 22).weight(.heavy))
                         .tracking(-0.22)
                         .foregroundStyle(Color.evPrimary)
+                    // B11: progress bar fraction = used / pool from earned summary.
+                    // Falls back to 1.0 (full bar) until first backend fetch.
                     GeometryReader { geo in
                         ZStack(alignment: .leading) {
                             Capsule().fill(Color.evSecondaryContainer).frame(height: 5)
                             Capsule().fill(Color.evSecondary)
-                                .frame(width: max(6, geo.size.width * 1.0), height: 5)
+                                .frame(width: max(6, geo.size.width * summaryProgressFraction), height: 5)
                         }
                     }
                     .frame(height: 5)
-                    HStack(spacing: 4) {
-                        // Daily Screen Time toggle ON → the limit applies;
-                        // OFF → unlimited, shown as the infinity symbol.
-                        Text(screenTimeRemainingText)
-                            .font(.custom("Inter", size: 11).weight(.heavy))
-                            .foregroundStyle(Color.evSecondary)
-                        Text("left today")
-                            .font(.custom("Inter", size: 11).weight(.heavy))
-                            .foregroundStyle(Color.evOnSurfaceVariant)
+                    // B11: coarse countdown label with precision badge + freshness.
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 4) {
+                            // Daily Screen Time toggle ON → coarse earned-time label;
+                            // OFF → unlimited, shown as the infinity symbol.
+                            Text(screenTimeRemainingText)
+                                .font(.custom("Inter", size: 11).weight(.heavy))
+                                .foregroundStyle(Color.evSecondary)
+                            // Precision badge: visible only when the summary has loaded
+                            // so the parent knows the granularity ("~10 min steps").
+                            if earnedSummary != nil && dailyLimitOn {
+                                Text("· \(EarnedDisplayFormatters.precisionBadge())")
+                                    .font(.custom("Inter", size: 10).weight(.medium))
+                                    .foregroundStyle(Color.evOnSurfaceVariant)
+                            }
+                        }
+                        // Freshness: shown only when we have a timestamp.
+                        if let freshness = summaryFreshnessText {
+                            Text(freshness)
+                                .font(.custom("Inter", size: 10))
+                                .foregroundStyle(Color.evOnSurfaceVariant)
+                        }
                     }
                 }
             }

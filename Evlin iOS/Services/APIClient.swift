@@ -2490,6 +2490,20 @@ extension APIClient {
         let remaining_minutes: Int?
         let override_active: Bool?
         let updated_at: String?
+        // B11: coarse display fields from A3 backend summary.
+        /// Pre-formatted coarse countdown label from the server ("about N min left").
+        /// When nil, the client computes from remaining_minutes via EarnedDisplayFormatters.
+        let countdown_label: String?
+        /// The child's daily earned-time pool in minutes (denominator for progress bar).
+        let daily_pool_minutes: Int?
+        /// Per-device estimated minutes left on each enrolled device.
+        let device_estimates: [EarnedDeviceEstimateDTO]?
+    }
+
+    /// Per-device estimated remaining minutes. Part of EarnedSummaryDTO (B11).
+    struct EarnedDeviceEstimateDTO: Decodable {
+        let child_device_id: UUID?
+        let estimated_minutes: Int?
     }
 
     /// GET /parent/earned-time/summary — child's current earned-time state.
