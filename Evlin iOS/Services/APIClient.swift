@@ -139,6 +139,11 @@ class APIClient: ObservableObject {
         // can ask the AI to re-interpret a turn the fastpath got wrong.
         // Default false → normal fastpath-first flow.
         let skip_fastpath: Bool
+        // Chat-history (B3): client-generated UUID that identifies the current
+        // conversation. Sent on every /parent/chat turn and feedback call.
+        // NOT sent on /parent/chat/answer-question (server derives it from the
+        // stored pending question). Rotated on Clear; set on open-history.
+        let conversation_id: String?
     }
 
     struct ChatActionResponse: Codable, Sendable {
@@ -219,7 +224,8 @@ class APIClient: ObservableObject {
                 // attempt to handle the message — the reinterpret flow goes
                 // through ChatViewModel.sendChatMessageWithRawData(), which
                 // sets skip_fastpath=true explicitly.
-                skip_fastpath: false
+                skip_fastpath: false,
+                conversation_id: nil
             )
             request.httpBody = try JSONEncoder().encode(body)
 

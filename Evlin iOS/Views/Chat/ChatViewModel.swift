@@ -110,7 +110,8 @@ class ChatViewModel: ObservableObject {
         UserDefaults.standard.string(forKey: "evlin.protectionMode") ?? "std"
     }
 
-    private static let storageKey = "evlin_chat_history"
+    /// Account-namespaced durable store for archived conversations (B2/B3).
+    var chatHistoryStore: ChatHistoryStore = ChatHistoryStore()
 
     private var clearObserver: Any?
 
@@ -161,16 +162,28 @@ class ChatViewModel: ObservableObject {
 
     // MARK: - Persistence
 
+    /// Account-scoped UserDefaults key for the live (in-progress) conversation messages.
+    /// Format: `chatconv.<accountID>.current` where accountID comes from `evlin.accountID`.
+    /// Falls back to a non-namespaced key when no account is set (pre-sign-in safety net).
+    private var currentConvStorageKey: String {
+        let accountID = UserDefaults.standard.string(forKey: "evlin.accountID") ?? "anon"
+        return "chatconv.\(accountID).current"
+    }
+
+    /// Persists the current (non-seed) messages using an account-namespaced key.
+    /// Synchronous — called from `messages` didSet. Seed messages are excluded.
     private func saveMessages() {
-        // Keep last 50 messages
-        let toSave = Array(messages.suffix(50))
+        let realMessages = messages.filter { !$0.isSeed }
+        guard !realMessages.isEmpty else { return }
+        let toSave = Array(realMessages.suffix(50))
         if let data = try? JSONEncoder().encode(toSave) {
-            UserDefaults.standard.set(data, forKey: Self.storageKey)
+            UserDefaults.standard.set(data, forKey: currentConvStorageKey)
         }
     }
 
+    /// Loads the current (in-progress) conversation from account-namespaced storage.
     private func loadMessages() {
-        guard let data = UserDefaults.standard.data(forKey: Self.storageKey),
+        guard let data = UserDefaults.standard.data(forKey: currentConvStorageKey),
               let saved = try? JSONDecoder().decode([ChatMessage].self, from: data),
               !saved.isEmpty else { return }
         messages = saved
@@ -179,17 +192,43 @@ class ChatViewModel: ObservableObject {
     func clearHistory() {
         messages.removeAll()
         surfacedReflectionSubmissionIDs.removeAll()
-        UserDefaults.standard.removeObject(forKey: Self.storageKey)
+        UserDefaults.standard.removeObject(forKey: currentConvStorageKey)
     }
 
-    // MARK: - Strategy-agent T11: conversation_id + answer-question + feedback
+    /// Archive current conversation (if non-empty) and reset to a fresh seed.
+    /// This is the "Clear" action in the UI.
+    func clear() {
+        let realMessages = messages.filter { !$0.isSeed }
+        if !realMessages.isEmpty {
+            // Capture state before rotating.
+            let convID = currentConversationID
+            let stored = realMessages.prefix(50).map { StoredChatMessage(sanitizing: $0) }
+            let title = realMessages.first(where: { $0.role == .parent })?.content
+                .prefix(50).description
+            Task { [weak self] in
+                guard let self else { return }
+                await self.chatHistoryStore.archiveCurrent(
+                    id: convID,
+                    title: title,
+                    messages: Array(stored)
+                )
+            }
+        }
+        // Rotate conversation id.
+        let fresh = UUID()
+        conversationIdString = fresh.uuidString
+        // Reset to seed.
+        surfacedReflectionSubmissionIDs.removeAll()
+        seedInitialMessages()
+    }
 
-    @AppStorage("evlin.conversation_id") private var conversationIdString: String = ""
+    // MARK: - Strategy-agent T11 / B3: conversation_id + answer-question + feedback
 
-    /// Stable per-device conversation token; auto-rotates when blank.
-    /// Mirror of SmartModeStore.conversationId so ChatViewModel can stamp it
-    /// onto outgoing /parent/chat and /parent/chat/answer-question requests.
-    private var conversationId: UUID {
+    @AppStorage("evlin.conversation_id") var conversationIdString: String = ""
+
+    /// Stable per-conversation UUID; rotated on `clear()` / set on `open(id:)`.
+    /// Sent on every /parent/chat turn and feedback call.
+    var currentConversationID: UUID {
         if let u = UUID(uuidString: conversationIdString) { return u }
         let fresh = UUID()
         conversationIdString = fresh.uuidString
@@ -246,7 +285,7 @@ class ChatViewModel: ObservableObject {
         guard let fam = familyID else { return }
         try? await FeedbackService(baseURL: apiClient.baseURL).submit(
             familyId: fam,
-            conversationId: conversationId,
+            conversationId: currentConversationID,
             messageId: messageId,
             rating: rating
         )
@@ -332,18 +371,31 @@ class ChatViewModel: ObservableObject {
 
     // MARK: - Seed initial messages
 
-    /// Fresh-install welcome. Beta-honest: NO fabricated lock receipt and NO
-    /// fabricated StrategyCard (those misled testers into thinking a lock had
-    /// already happened). Just a neutral greeting; the real dispatch/receipt
-    /// path takes over the moment the parent sends a message.
-    private func seedInitialMessages() {
-        messages = [
-            ChatMessage(
-                role: .agent,
-                content: "Hi, I'm Evlin. Ask me to lock an app, set a limit, or check in on your child's screen time and I'll help.",
-                timestamp: Date()
-            )
-        ]
+    /// Client-injected tutorial seed (spec §3.2). Never persisted, never archived,
+    /// never sent to the backend as history context. `isSeed = true` marks it for
+    /// exclusion from archives and from the `/parent/chat` `history` list.
+    func seedInitialMessages() {
+        let kid = childName.isEmpty ? "your kid" : childName
+        var seed = ChatMessage(
+            role: .agent,
+            content: """
+            Hi, I'm Evlin. Tell me what you want in plain English and I'll take care of \
+            it for \(kid). A few things you can ask:
+
+            Lock & block — "Lock \(kid)'s phone for 30 minutes" · "Block TikTok for 1 \
+            hour" · "Unblock TikTok"
+            Limits & check-ins — "Give \(kid) a 2-hour daily limit" · "How much has \
+            \(kid) used today?"
+            Tasks — "Add a task: clean your room"
+            Calendar — "What's on the calendar today?" · "Schedule soccer at 4pm"
+
+            No exact wording needed — just ask. Tap Clear to save this chat and start \
+            fresh.
+            """,
+            timestamp: Date()
+        )
+        seed.isSeed = true
+        messages = [seed]
     }
 
     // MARK: - Chat pipeline (Phase 9 — unified)
@@ -362,7 +414,8 @@ class ChatViewModel: ObservableObject {
         forceConfirmations: [String],
         skipFastpath: Bool = false,
     ) {
-        let history: [[String: String]] = messages.suffix(10).map { msg in
+        // Exclude the seed message from history sent to backend (spec §3.2).
+        let history: [[String: String]] = messages.filter { !$0.isSeed }.suffix(10).map { msg in
             ["role": msg.role == .parent ? "parent" : "agent", "content": msg.content]
         }
         Task { [weak self] in
@@ -2164,7 +2217,8 @@ class ChatViewModel: ObservableObject {
             force_confirmations: forceConfirmations,
             child_device_id: (bigKidChildID?.isEmpty == false) ? bigKidChildID : nil,
             client_alias_state: currentClientAliasStateCodable(),
-            skip_fastpath: skipFastpath
+            skip_fastpath: skipFastpath,
+            conversation_id: currentConversationID.uuidString
         )
         let encodedBody = try JSONEncoder().encode(bodyObj)
 

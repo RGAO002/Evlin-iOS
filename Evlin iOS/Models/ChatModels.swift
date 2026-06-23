@@ -117,6 +117,9 @@ struct ChatMessage: Identifiable, Codable {
     let timestamp: Date
     var reasoning: String?
     var debugTurnID: String? = nil
+    /// True for the client-injected tutorial seed message. Never archived,
+    /// never sent to the backend as history context.
+    var isSeed: Bool = false
 
     // Card data (persisted)
     var lockMinutes: Int?

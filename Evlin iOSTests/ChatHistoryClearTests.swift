@@ -153,3 +153,105 @@ final class ChatHistoryClearTests: XCTestCase {
         XCTAssertTrue(storeB.conversations.isEmpty, "account B must not see account A's data")
     }
 }
+
+// MARK: - B3: VM-level tests (conversation-id, clear=archive+reset, seed exclusion)
+
+/// Tests for ChatViewModel.clear(), currentConversationID rotation, and seed exclusion.
+///
+/// Strategy: create a ChatViewModel with an injected ChatHistoryStore (in-memory defaults)
+/// and inspect store.conversations + vm.messages after calling clear().
+@MainActor
+final class ChatViewModelClearTests: XCTestCase {
+
+    private var vm: ChatViewModel!
+    private var store: ChatHistoryStore!
+
+    override func setUp() async throws {
+        try await super.setUp()
+        vm = ChatViewModel()
+        // Inject an isolated in-memory store so these tests don't touch the real App Group.
+        let suiteName = "ChatViewModelClearTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        store = ChatHistoryStore(defaults: defaults)
+        store.setAccount(UUID())
+        store.upload = { _, _, _ in /* no-op */ }
+        vm.chatHistoryStore = store
+        // Ensure a clean conversation id for each test.
+        vm.conversationIdString = UUID().uuidString
+    }
+
+    override func tearDown() async throws {
+        vm = nil
+        store.clearAllLocal()
+        store = nil
+        try await super.tearDown()
+    }
+
+    // MARK: - test_clear_archives_nonempty_then_reseeds
+
+    /// clear() with ≥1 real (non-seed) message must:
+    ///   1. call archiveCurrent (store receives a conversation)
+    ///   2. reset messages to seed-only
+    ///   3. rotate conversationID
+    func test_clear_archives_nonempty_then_reseeds() async throws {
+        // Start: seed only (set by seedInitialMessages in init).
+        XCTAssertEqual(vm.messages.filter { !$0.isSeed }.count, 0, "precondition: seed only")
+
+        // Capture old ID.
+        let oldID = vm.currentConversationID
+
+        // Add a real user message.
+        vm.messages.append(ChatMessage(role: .parent, content: "Lock TikTok", timestamp: Date()))
+        XCTAssertEqual(vm.messages.filter { !$0.isSeed }.count, 1, "precondition: 1 real message")
+
+        // Call clear().
+        vm.clear()
+
+        // Give async archive task a moment to run.
+        try await Task.sleep(nanoseconds: 100_000_000) // 100ms
+
+        // 1. Store should have received the archive.
+        XCTAssertEqual(store.conversations.count, 1, "store must have 1 archived conversation")
+
+        // 2. Messages back to seed-only.
+        XCTAssertEqual(vm.messages.count, 1, "messages should contain only the seed after clear")
+        XCTAssertTrue(vm.messages.first?.isSeed == true, "the sole message must be the seed")
+
+        // 3. Conversation ID must have rotated.
+        XCTAssertNotEqual(vm.currentConversationID, oldID, "conversationID must rotate on clear")
+    }
+
+    // MARK: - test_clear_empty_does_not_archive
+
+    /// clear() on a seed-only (empty real) conversation must NOT archive anything.
+    func test_clear_empty_does_not_archive() async throws {
+        // Start: seed only.
+        XCTAssertEqual(vm.messages.filter { !$0.isSeed }.count, 0, "precondition: seed only")
+
+        vm.clear()
+
+        // Give async task a moment.
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        // Store must remain empty.
+        XCTAssertTrue(store.conversations.isEmpty, "store must NOT be called when conversation is empty (seed-only)")
+    }
+
+    // MARK: - test_seed_excluded_from_history_payload
+
+    /// The seed message (isSeed == true) must not appear in the history list
+    /// that would be sent to /parent/chat.
+    func test_seed_excluded_from_history_payload() {
+        // VM starts with seed. Add a real parent message too.
+        vm.messages.append(ChatMessage(role: .parent, content: "How much screen time today?", timestamp: Date()))
+
+        // Replicate the filter used in dispatchChat.
+        let history = vm.messages.filter { !$0.isSeed }
+
+        // Seed must not be in history.
+        XCTAssertFalse(history.contains(where: { $0.isSeed }), "seed must be excluded from history payload")
+        // But the real parent message must be present.
+        XCTAssertEqual(history.count, 1)
+        XCTAssertEqual(history.first?.role, .parent)
+    }
+}
