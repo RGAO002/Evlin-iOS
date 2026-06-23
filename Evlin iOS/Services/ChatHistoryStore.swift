@@ -13,6 +13,15 @@
 import Combine
 import Foundation
 
+// MARK: - ConversationUploadPayload
+
+/// Wire-format for PUT /parent/chat/conversations/{id}.
+/// Sent via authedRequest in Task B4 when a conversation is archived.
+struct ConversationUploadPayload: Codable {
+    let title: String?
+    let messages: [StoredChatMessage]
+}
+
 // MARK: - ConversationSummary
 
 /// Lightweight metadata record for one archived conversation. Stored as JSON

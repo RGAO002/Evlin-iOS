@@ -123,6 +123,18 @@ class ChatViewModel: ObservableObject {
         if messages.isEmpty {
             seedInitialMessages()
         }
+        // B4: wire the ChatHistoryStore upload seam to the real backend endpoint.
+        // PUT /parent/chat/conversations/{id} through authedRequest (Bearer + 401 refresh).
+        let client = apiClient
+        chatHistoryStore.upload = { id, title, messages in
+            let payload = ConversationUploadPayload(title: title, messages: messages)
+            var req = client.authedRequest(
+                path: "/parent/chat/conversations/\(id.uuidString)",
+                method: "PUT"
+            )
+            req.httpBody = try JSONEncoder().encode(payload)
+            _ = try await client.authedData(for: req)
+        }
         clearObserver = NotificationCenter.default.addObserver(
             forName: .evlinClearChat, object: nil, queue: .main
         ) { [weak self] _ in
@@ -237,22 +249,20 @@ class ChatViewModel: ObservableObject {
 
     /// Strategy-agent T11.11 — POST /parent/chat/answer-question and feed
     /// the response back through the existing chat pipeline.
+    /// B4: routes through apiClient.authedData (Bearer + 401 refresh).
+    /// Note: answer-question body does NOT include conversation_id; the server
+    /// derives the conversation from the stored pending question.
     func sendAnswer(_ body: AnswerQuestionBody) async {
-        guard let url = URL(string: "\(apiClient.baseURL)/parent/chat/answer-question") else {
-            return
-        }
         // The answered question is no longer actionable. Clear it immediately;
         // the response may replace it with a proposal card.
         pendingPlanArchCard = nil
         pendingPlanArchCardQueue = []
-        var req = URLRequest(url: url)
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        var req = apiClient.authedRequest(path: "/parent/chat/answer-question", method: "POST")
         req.httpBody = try? JSONEncoder().encode(body)
         self.isThinking = true
         defer { self.isThinking = false }
         do {
-            let (data, _) = try await URLSession.shared.data(for: req)
+            let (data, _) = try await apiClient.authedData(for: req)
             let response = try JSONDecoder().decode(APIClient.ChatResponse.self, from: data)
             self.handleAnswerQuestionResponse(response, rawData: data)
         } catch {
@@ -280,11 +290,9 @@ class ChatViewModel: ObservableObject {
     }
 
     /// Strategy-agent T11.11 — POST 👍/👎 feedback for an assistant turn.
+    /// B4: routes through authedRequest (Bearer + 401 refresh) via FeedbackService.
     func sendFeedback(messageId: String, rating: ChatFeedbackRating) async {
-        let (familyID, _) = currentFamilyAndChildIDs()
-        guard let fam = familyID else { return }
-        try? await FeedbackService(baseURL: apiClient.baseURL).submit(
-            familyId: fam,
+        try? await FeedbackService(client: apiClient).submit(
             conversationId: currentConversationID,
             messageId: messageId,
             rating: rating
@@ -2222,23 +2230,21 @@ class ChatViewModel: ObservableObject {
         )
         let encodedBody = try JSONEncoder().encode(bodyObj)
 
+        // B4: route through authedRequest/authedData (Bearer + single-flight 401 refresh).
+        // The outer retry loop handles transient 5xx; authedData handles 401 internally.
         var lastStatus = 0
         for attempt in 0..<3 {
-            let url = URL(string: "\(apiClient.baseURL)/parent/chat")!
-            var request = URLRequest(url: url)
-            request.httpMethod = "POST"
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            var request = apiClient.authedRequest(path: "/parent/chat", method: "POST")
             request.timeoutInterval = 30
             request.httpBody = encodedBody
 
             do {
-                let (data, response) = try await URLSession.shared.data(for: request)
-                let http = response as? HTTPURLResponse
-                lastStatus = http?.statusCode ?? 0
+                let (data, http) = try await apiClient.authedData(for: request)
+                lastStatus = http.statusCode
 
                 if lastStatus == 200 {
                     let decoded = try JSONDecoder().decode(APIClient.ChatResponse.self, from: data)
-                    let turnID = http?.value(forHTTPHeaderField: "X-Brain-Turn-Id")
+                    let turnID = http.value(forHTTPHeaderField: "X-Brain-Turn-Id")
                     return (decoded, data, turnID)
                 }
                 if (lastStatus == 500 || lastStatus == 503), attempt < 2 {
