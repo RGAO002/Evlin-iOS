@@ -1,0 +1,114 @@
+import Foundation
+import DeviceActivity
+import FamilyControls
+
+/// B4 — Whole-device earned-time ladder scheduler.
+///
+/// Arms ONE `DeviceActivity` activity (`evlin.earned.budget`) over the
+/// all-category measurement selection captured in `EarnedTimeStore`.
+/// Events are named `evlin.earned.t10`, `evlin.earned.t20`, … up to
+/// `min(poolMinutes, capMinutes)`, with the exact cap threshold always
+/// included (even when it is not a multiple of `earnedBucketMinutes`).
+///
+/// The threshold-planning logic (`thresholds(poolMinutes:capMinutes:)`) is a
+/// **pure function** — no DeviceActivity calls, no entitlements — so it can
+/// be unit-tested in isolation.
+@MainActor
+final class EarnedBudgetScheduler {
+
+    // MARK: - Constants (single sources of truth)
+
+    /// The granularity of earned-time buckets (minutes).
+    /// All event thresholds are derived from this value.
+    nonisolated static let earnedBucketMinutes: Int = 10
+
+    /// Hard ceiling on the number of DeviceActivity events that can be armed
+    /// in one activity (240 min / 10 min per bucket = 24 max meaningful slots).
+    nonisolated static let guardEventCount: Int = 24
+
+    private static let activityName = DeviceActivityName("evlin.earned.budget")
+
+    // MARK: - Singleton
+
+    static let shared = EarnedBudgetScheduler()
+    private let center = DeviceActivityCenter()
+
+    // MARK: - Pure threshold planner
+
+    /// Returns the sorted list of minute thresholds for the earned-budget ladder.
+    ///
+    /// - Every multiple of `earnedBucketMinutes` from the first bucket up to
+    ///   `min(poolMinutes, capMinutes)` is included.
+    /// - If `capMinutes` is not a multiple of `earnedBucketMinutes` AND
+    ///   `capMinutes ≤ poolMinutes`, the exact cap value is appended as the
+    ///   final threshold.
+    /// - The result count never exceeds `guardEventCount`.
+    /// - Returns `[]` when either argument is ≤ 0.
+    ///
+    /// `nonisolated` so this pure function can be called from any context
+    /// (including XCTestCase synchronous test methods) without actor-hop overhead.
+    nonisolated static func thresholds(poolMinutes: Int, capMinutes: Int) -> [Int] {
+        let ceiling = min(poolMinutes, capMinutes)
+        guard ceiling > 0 else { return [] }
+
+        // Generate multiples of earnedBucketMinutes up to ceiling.
+        var result: [Int] = stride(
+            from: earnedBucketMinutes,
+            through: ceiling,
+            by: earnedBucketMinutes
+        ).map { $0 }
+
+        // Append exact cap if it is not already a multiple of the bucket.
+        // This ensures the cap threshold is always represented.
+        if ceiling % earnedBucketMinutes != 0 {
+            result.append(ceiling)
+        }
+
+        // Guard: cap at guardEventCount slots (safety valve).
+        if result.count > guardEventCount {
+            result = Array(result.prefix(guardEventCount))
+        }
+
+        return result
+    }
+
+    // MARK: - Arming
+
+    /// Arm the earned-budget activity over `selection` using the pre-computed
+    /// pool/cap policy.
+    ///
+    /// Safe to call repeatedly — `DeviceActivityCenter.startMonitoring` is
+    /// idempotent for the same activity name (stops any prior run first).
+    /// The call is a no-op when `poolMinutes` or `capMinutes` is ≤ 0, or when
+    /// `thresholds` would produce no events.
+    func arm(poolMinutes: Int, capMinutes: Int, selection: FamilyActivitySelection) {
+        let steps = Self.thresholds(poolMinutes: poolMinutes, capMinutes: capMinutes)
+        guard !steps.isEmpty else { return }
+
+        let schedule = DeviceActivitySchedule(
+            intervalStart: DateComponents(hour: 0, minute: 0),
+            intervalEnd: DateComponents(hour: 23, minute: 59),
+            repeats: true
+        )
+
+        // Build one event per threshold step, each measuring the full
+        // all-category selection (applicationTokens + categoryTokens).
+        var events: [DeviceActivityEvent.Name: DeviceActivityEvent] = [:]
+        for minutes in steps {
+            let name = DeviceActivityEvent.Name("evlin.earned.t\(minutes)")
+            let event = DeviceActivityEvent(
+                applications: selection.applicationTokens,
+                categories: selection.categoryTokens,
+                threshold: DateComponents(minute: minutes)
+            )
+            events[name] = event
+        }
+
+        try? center.startMonitoring(Self.activityName, during: schedule, events: events)
+    }
+
+    /// Stop monitoring the earned-budget activity (e.g. at end of day / reset).
+    func stop() {
+        center.stopMonitoring([Self.activityName])
+    }
+}
