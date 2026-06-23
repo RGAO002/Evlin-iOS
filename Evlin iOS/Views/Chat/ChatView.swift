@@ -246,9 +246,9 @@ struct ChatView: View {
                         lastScrollOffsetY = offsetY
                         let threshold: CGFloat = 4
                         if delta > threshold && barVisible {
-                            withAnimation(.easeInOut(duration: 0.22)) { barVisible = false }
+                            barVisible = false
                         } else if delta < -threshold && !barVisible {
-                            withAnimation(.easeInOut(duration: 0.22)) { barVisible = true }
+                            barVisible = true
                         }
                     }
                 )
@@ -664,7 +664,7 @@ struct ChatView: View {
             Button {
                 showHistorySheet = true
             } label: {
-                Image(systemName: "clock.arrow.trianglehead.counterclockwise.rotate.90")
+                Image(systemName: "clock.arrow.circlepath")
                     .font(.system(size: 20, weight: .medium))
                     .foregroundStyle(Color.evOnSurfaceVariant)
                     .frame(width: 44, height: 44)
@@ -679,7 +679,7 @@ struct ChatView: View {
                     .foregroundStyle(Color.evOnSurface)
                     .lineLimit(1)
                 Button {
-                    renameAlertText = viewModel.currentConversationTitle ?? ""
+                    renameAlertText = viewModel.currentConversationTitle ?? "Evlin"
                     showRenameAlert = true
                 } label: {
                     Image(systemName: "pencil")

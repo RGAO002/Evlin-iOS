@@ -281,12 +281,18 @@ class ChatViewModel: ObservableObject {
 
     /// Rename the current conversation in-memory and persist via
     /// `chatHistoryStore`. The title is reset to nil on `clear()`.
+    /// When the trimmed title is empty, the in-memory title is set to nil
+    /// (top bar shows "Evlin") and no empty string is persisted.
     func renameCurrentConversation(_ newTitle: String) {
         let trimmed = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-        currentConversationTitle = trimmed.isEmpty ? nil : trimmed
-        let id = currentConversationID
-        let title = currentConversationTitle
-        chatHistoryStore.rename(id, title ?? "")
+        if trimmed.isEmpty {
+            currentConversationTitle = nil
+            // Do not persist an empty title — leave any prior stored title as-is
+            // (the in-memory nil already drives the bar back to "Evlin").
+        } else {
+            currentConversationTitle = trimmed
+            chatHistoryStore.rename(currentConversationID, trimmed)
+        }
     }
 
     /// Strategy-agent T11.11 — POST /parent/chat/answer-question and feed
