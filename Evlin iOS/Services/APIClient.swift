@@ -2497,7 +2497,22 @@ extension APIClient {
         /// The child's daily earned-time pool in minutes (denominator for progress bar).
         let daily_pool_minutes: Int?
         /// Per-device estimated minutes left on each enrolled device.
+        /// NOTE: A3 summary response returns this array under the JSON key "devices"
+        /// (spec §5.2). CodingKeys below maps the Swift property to that key.
         let device_estimates: [EarnedDeviceEstimateDTO]?
+
+        enum CodingKeys: String, CodingKey {
+            case child_profile_id
+            case state
+            case earned_minutes
+            case used_minutes
+            case remaining_minutes
+            case override_active
+            case updated_at
+            case countdown_label
+            case daily_pool_minutes
+            case device_estimates = "devices"
+        }
     }
 
     /// Per-device estimated remaining minutes. Part of EarnedSummaryDTO (B11).

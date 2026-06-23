@@ -125,4 +125,38 @@ final class EarnedDisplayTests: XCTestCase {
     func test_precisionBadge() {
         XCTAssertEqual(EarnedDisplayFormatters.precisionBadge(), "~10 min steps")
     }
+
+    // MARK: - 7. EarnedSummaryDTO decodes A3 "devices" key (B11 regression guard)
+
+    /// Regression test: A3 summary response returns per-device entries under the
+    /// JSON key "devices" (spec §5.2), NOT "device_estimates". The CodingKeys
+    /// mapping on EarnedSummaryDTO must bridge the two so the array decodes.
+    func test_earnedSummaryDTO_decodesDevicesKey() throws {
+        let deviceID = "A1B2C3D4-E5F6-7890-ABCD-EF1234567890"
+        let json = """
+        {
+            "child_profile_id": "00000000-0000-0000-0000-000000000001",
+            "state": "ok",
+            "earned_minutes": 60,
+            "used_minutes": 20,
+            "remaining_minutes": 40,
+            "devices": [
+                {
+                    "child_device_id": "\(deviceID)",
+                    "estimated_minutes": 30,
+                    "cap_minutes": 60,
+                    "cap_state": "ok"
+                }
+            ]
+        }
+        """.data(using: .utf8)!
+
+        let dto = try JSONDecoder().decode(APIClient.EarnedSummaryDTO.self, from: json)
+
+        XCTAssertNotNil(dto.device_estimates, "device_estimates must be non-nil — A3 returns the array under 'devices' key")
+        XCTAssertEqual(dto.device_estimates?.count, 1, "Expected 1 device estimate")
+        let entry = try XCTUnwrap(dto.device_estimates?.first)
+        XCTAssertEqual(entry.child_device_id?.uuidString.uppercased(), deviceID.uppercased())
+        XCTAssertEqual(entry.estimated_minutes, 30)
+    }
 }
