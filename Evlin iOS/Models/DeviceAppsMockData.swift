@@ -64,10 +64,20 @@ enum DeviceAppsMockData {
         }
     }
 
-    // 15m is the lowest budget offered in release builds. DEBUG builds also
-    // expose a 1-minute option (no separate label — it just shows "1m") so the
-    // threshold/shield path can be tested end to end without waiting. The
-    // backend accepts `daily_budget_minutes >= 1` and `formatLimit(1)` → "1m".
+    // ── OFFLINE / UNCONFIGURED FALLBACK ──────────────────────────────────────
+    // `limitOptionsBase` is the release-build fallback used by
+    // `EarnedAppOptions.compute` when the backend has not yet returned a
+    // per-device `allowed_app_options` array (e.g. first launch, no network).
+    // It is NO LONGER the source of truth for what options appear in the picker;
+    // the policy response is. Do NOT add new values here to change the runtime
+    // picker — update the backend policy instead.
+    //
+    // `limitOptions` is kept for backward compatibility (DeviceAppsSheet preview
+    // fixtures, unit tests that reference it directly). In DEBUG it includes the
+    // 1-minute test option; in release it matches `limitOptionsBase`.
+    // ─────────────────────────────────────────────────────────────────────────
+    static let limitOptionsBase: [Int] = [15, 20, 30, 45, 60, 90, 120]
+
     #if DEBUG
     static let limitOptions: [Int] = [1, 15, 20, 30, 45, 60, 90, 120]
     #else

@@ -39,6 +39,11 @@ struct ProfileView: View {
     @State private var editingRule: RuleItem? = nil
     @State private var showDSTEditor = false
     @State private var dailyLimitMinutes: Int = 120
+    /// When non-nil the pool editor persists via the backend (B9).
+    /// Nil = no UUID child id → fall back to UserDefaults (legacy path).
+    @State private var childProfileUUID: UUID? = nil
+    /// Saving indicator shown while putEarnedConfig is in-flight.
+    @State private var poolSaving = false
     @State private var showProfileMenu = false
     @State private var showEditProfile = false
     @State private var showDeleteConfirm = false
@@ -460,8 +465,23 @@ struct ProfileView: View {
             if localSubtitle.isEmpty { localSubtitle = child.subtitle }
             if localAvatarURL == nil { localAvatarURL = child.avatarURL }
 
-            // Per-child daily screen time limit — loaded from UserDefaults,
-            // default 120 min (2h). Seeds the rules detail + summary "left today".
+            // Per-child daily screen time limit.
+            // B9: prefer the backend pool value (fetchEarnedSummary) when the
+            // child has a UUID id; fall back to UserDefaults for legacy / offline.
+            let childUUID = UUID(uuidString: child.id)
+            childProfileUUID = childUUID
+            if let uuid = childUUID {
+                Task {
+                    // B9: load pool from the backend policy.
+                    // fetchEarnedPolicy().pool_minutes is the daily earned-time pool.
+                    if let policy = try? await apiClient.fetchEarnedPolicy(childProfileID: uuid),
+                       let pool = policy.pool_minutes,
+                       pool > 0 {
+                        dailyLimitMinutes = pool
+                        rules = ProfileMockData.rules(for: child.id, dailyLimitMinutes: pool)
+                    }
+                }
+            }
             let storedLimit = UserDefaults.standard.integer(forKey: "evlin.dailyLimitMin.\(child.id)")
             dailyLimitMinutes = storedLimit > 0 ? storedLimit : 120
             rules = ProfileMockData.rules(for: child.id, dailyLimitMinutes: dailyLimitMinutes)
@@ -1094,10 +1114,23 @@ struct ProfileView: View {
         )
         .sheet(isPresented: $showDSTEditor) {
             DailyScreenTimeEditor(currentMinutes: dailyLimitMinutes) { newMinutes in
+                // Optimistic local update.
                 dailyLimitMinutes = newMinutes
-                UserDefaults.standard.set(newMinutes, forKey: "evlin.dailyLimitMin.\(child.id)")
                 if let i = rules.firstIndex(where: { $0.id == "screen" }) {
                     rules[i].detail = "\(formatLimit(newMinutes)) limit per day"
+                }
+                // B9: persist via backend when we have a UUID child id;
+                // fall back to UserDefaults for legacy / offline path.
+                if let uuid = childProfileUUID {
+                    poolSaving = true
+                    Task {
+                        defer { poolSaving = false }
+                        _ = try? await apiClient.putEarnedConfig(
+                            childProfileID: uuid,
+                            poolMinutes: newMinutes)
+                    }
+                } else {
+                    UserDefaults.standard.set(newMinutes, forKey: "evlin.dailyLimitMin.\(child.id)")
                 }
             }
         }

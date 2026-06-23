@@ -2508,6 +2508,20 @@ extension APIClient {
         let daily_cap_minutes: Int?
         let enabled: Bool?
         let updated_at: String?
+        // B9: dynamic picker option sets. Optional — only present when the
+        // backend has generated the allowlists for this family's devices.
+        /// Allowed per-app daily budgets for all apps on this child's devices.
+        let allowed_app_options: [Int]?
+        /// Per-device cap options and current cap.
+        let devices: [EarnedPolicyDeviceDTO]?
+    }
+
+    /// Per-device sub-document inside EarnedPolicyDTO (B9).
+    struct EarnedPolicyDeviceDTO: Decodable {
+        let child_device_id: UUID?
+        let daily_cap_minutes: Int?
+        /// Selectable cap values the UI may offer for this device.
+        let allowed_cap_options: [Int]?
     }
 
     /// GET /parent/earned-time/policy — the family's earned-time configuration.

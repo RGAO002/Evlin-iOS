@@ -37,6 +37,22 @@ struct DeviceAppsSheet: View {
     /// (see `AppLimitEditDecision`). Keeps the latest interaction authoritative.
     @State private var inflightSeq: [String: Int] = [:]
 
+    // B9: device-cap + dynamic picker options
+    /// The device's current daily cap in minutes. Nil = not yet loaded / not configured.
+    @State private var deviceCapMinutes: Int? = nil
+    /// The family's earned-time pool. Shown alongside the cap: "/ of {pool} shared".
+    @State private var poolMinutes: Int? = nil
+    /// Policy-provided allowed cap options for this device (≤ pool, filtered by EarnedCapOptions).
+    @State private var capOptions: [Int] = []
+    /// Policy-provided allowed per-app options. Nil = use fallback base set.
+    @State private var policyAppOptions: [Int]? = nil
+    /// Cap picker expansion flag.
+    @State private var showCapPicker = false
+    /// Cap save in-flight.
+    @State private var capSaving = false
+    /// Cascade confirm: when non-nil, show the confirm sheet.
+    @State private var pendingCascade: EarnedCascadeDecision.Result? = nil
+
     /// Family id for parent API calls — sourced the same way ProfileView's
     /// lock-all does (`UserDefaults` "evlin.familyID"). `nil` until paired.
     private var familyID: UUID? { UUID(uuidString: pairedFamilyID) }
@@ -54,6 +70,14 @@ struct DeviceAppsSheet: View {
                 emptyPlaceholder
             } else {
                 ScrollView {
+                    // B9: Device-cap card — shown at the top when a cap or pool
+                    // value is available. "Daily total for this device / of {pool} shared".
+                    if deviceCapMinutes != nil || poolMinutes != nil {
+                        deviceCapCard
+                            .padding(.horizontal, 20)
+                            .padding(.top, 16)
+                    }
+
                     VStack(spacing: 0) {
                         ForEach(Array(apps.enumerated()), id: \.element.id) { idx, app in
                             appRow(app)
@@ -113,13 +137,36 @@ struct DeviceAppsSheet: View {
             }
             guard apps.isEmpty, let cid = UUID(uuidString: pairedChildID) else { return }
             isLoading = true
+
+            // B9: load earned-time policy (cap options + pool) alongside the catalog.
+            // Uses child.id as the profile UUID when available.
+            if let childProfileID = UUID(uuidString: childId) {
+                Task {
+                    if let policy = try? await apiClient.fetchEarnedPolicy(childProfileID: childProfileID) {
+                        poolMinutes = policy.pool_minutes
+                        policyAppOptions = policy.allowed_app_options
+                        // Find the cap entry for this specific device.
+                        if let devEntry = policy.devices?.first(where: { $0.child_device_id == cid }) {
+                            deviceCapMinutes = devEntry.daily_cap_minutes
+                            capOptions = EarnedCapOptions.compute(
+                                policyCapOptions: devEntry.allowed_cap_options,
+                                poolMinutes: policy.pool_minutes ?? Int.max)
+                        } else {
+                            deviceCapMinutes = policy.daily_cap_minutes
+                            capOptions = []
+                        }
+                    }
+                }
+            }
+
             Task {
                 do {
                     let targets = try await apiClient.fetchLazyTagCatalogTargets(childDeviceID: cid)
                     let appTargets = targets.filter { $0.type == .app }
                     // 1) Render immediately: prettified names + any backend artwork.
-                    //    Default the pill to 60m but leave the limit OFF — the real
+                    //    Default the pill to min(60, cap) — B9; leave the limit OFF — the real
                     //    rules merge below flips on the apps that actually have one.
+                    let defaultPill = EarnedAppOptions.defaultPill(deviceCap: deviceCapMinutes ?? 60)
                     let catalogApps = appTargets.map { t in
                         DeviceAppItem(
                             id: t.aliasKey.uuidString,
@@ -129,7 +176,7 @@ struct DeviceAppsSheet: View {
                             bgColor: Color.evPrimaryContainer,
                             enabled: false,
                             usedMin: 0,
-                            limitMin: 60,
+                            limitMin: defaultPill,
                             artworkURL: t.artworkURL,
                             bundleID: t.bundleID
                         )
@@ -165,6 +212,29 @@ struct DeviceAppsSheet: View {
                 }
             }
         }
+        // B9: cascade-confirm sheet.
+        .sheet(item: Binding(
+            get: { pendingCascade.map { CascadeConfirmItem(result: $0) } },
+            set: { if $0 == nil { pendingCascade = nil } }
+        )) { item in
+            CascadeConfirmSheet(
+                result: item.result,
+                onApplyTomorrow: {
+                    pendingCascade = nil
+                    // Re-call putDeviceCap with confirm_cascade (handled in saveDeviceCap).
+                    if let cap = deviceCapMinutes {
+                        saveDeviceCap(cap, confirmedCascade: true)
+                    }
+                },
+                onCancel: { pendingCascade = nil }
+            )
+        }
+    }
+
+    /// Wrapper to make EarnedCascadeDecision.Result Identifiable for .sheet(item:).
+    private struct CascadeConfirmItem: Identifiable {
+        let id = UUID()
+        let result: EarnedCascadeDecision.Result
     }
 
     /// Empty state: honest message for "no apps yet" vs load failure.
@@ -360,10 +430,134 @@ struct DeviceAppsSheet: View {
         return "\(DeviceAppsMockData.formatUsed(app.usedMin)) used"
     }
 
+    // MARK: - B9: Device-cap card
+
+    /// "Daily total for this device / of {pool} shared" card with a cap picker.
+    private var deviceCapCard: some View {
+        let cap = deviceCapMinutes
+        let pool = poolMinutes
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("DEVICE DAILY TOTAL")
+                        .font(.custom("Inter", size: 10).weight(.heavy))
+                        .tracking(1.2)
+                        .foregroundStyle(Color.evOnSurfaceVariant)
+                    HStack(alignment: .lastTextBaseline, spacing: 4) {
+                        Text(cap.map { DeviceAppsMockData.formatLimit($0) } ?? "—")
+                            .font(.custom("Manrope", size: 22).weight(.heavy))
+                            .foregroundStyle(Color.evPrimary)
+                        if let pool {
+                            Text("/ of \(DeviceAppsMockData.formatLimit(pool)) shared")
+                                .font(.custom("Inter", size: 12))
+                                .foregroundStyle(Color.evOnSurfaceVariant)
+                        }
+                    }
+                }
+                Spacer()
+                if !capOptions.isEmpty {
+                    Button {
+                        showCapPicker.toggle()
+                    } label: {
+                        Image(systemName: "pencil.circle.fill")
+                            .font(.system(size: 24))
+                            .foregroundStyle(Color.evPrimary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            // Inline cap picker
+            if showCapPicker && !capOptions.isEmpty {
+                FlowLayout(spacing: 6) {
+                    ForEach(capOptions, id: \.self) { opt in
+                        Button {
+                            showCapPicker = false
+                            saveDeviceCap(opt, confirmedCascade: false)
+                        } label: {
+                            Text(DeviceAppsMockData.formatLimit(opt))
+                                .font(.custom("Manrope", size: 11).weight(.heavy))
+                                .foregroundStyle(deviceCapMinutes == opt ? .white : Color.evOnSurface)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                        .fill(deviceCapMinutes == opt ? Color.evPrimary : Color.white)
+                                )
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                        .stroke(deviceCapMinutes == opt ? Color.evPrimary
+                                                                        : Color.evOutlineVariant,
+                                                lineWidth: 1.5)
+                                )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 14)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color.evSurfaceContainerLowest)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(Color.evOutlineVariant.opacity(0.4), lineWidth: 1)
+        )
+    }
+
+    // MARK: - B9: Dynamic per-app limit picker
+
+    /// Per-app limit picker with options computed from the earned-time policy.
+    /// Options = policy.allowed_app_options (if available) else fallback base,
+    /// both filtered to ≤ deviceCap. DEBUG injects 1-minute.
+    /// An existing rule > cap is shown as a read-only "changes tomorrow" chip.
     private func limitPicker(for app: DeviceAppItem) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let cap = deviceCapMinutes ?? Int.max
+        let isDebug: Bool = {
+            #if DEBUG
+            return true
+            #else
+            return false
+            #endif
+        }()
+        let computed = EarnedAppOptions.compute(
+            policyOptions: policyAppOptions,
+            deviceCap: cap,
+            existingBudget: app.enabled ? app.limitMin : nil,
+            isDebug: isDebug
+        )
+
+        return VStack(alignment: .leading, spacing: 8) {
+            // Over-cap existing chip (read-only, "changes tomorrow")
+            if !computed.overCapExisting.isEmpty {
+                HStack(spacing: 6) {
+                    ForEach(computed.overCapExisting, id: \.self) { val in
+                        HStack(spacing: 4) {
+                            Text(DeviceAppsMockData.formatLimit(val))
+                                .font(.custom("Manrope", size: 11).weight(.heavy))
+                            Text("· changes tomorrow")
+                                .font(.custom("Inter", size: 10))
+                        }
+                        .foregroundStyle(Color.evOnSurfaceVariant)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .fill(Color.evSurfaceContainerHigh)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .stroke(Color.evOutlineVariant, lineWidth: 1.5)
+                        )
+                    }
+                }
+            }
+
             FlowLayout(spacing: 6) {
-                ForEach(DeviceAppsMockData.limitOptions, id: \.self) { min in
+                ForEach(computed.selectable, id: \.self) { min in
                     Button {
                         pickLimit(min, for: app)
                     } label: {
@@ -516,6 +710,91 @@ struct DeviceAppsSheet: View {
                     : "Couldn't turn off the limit — try again.")
             }
         }
+    }
+
+    // MARK: - B9: Device cap persistence
+
+    /// Save the device daily cap via putDeviceCap. When the backend responds with
+    /// `needs_confirmation` (the new cap is below existing app rules), show the
+    /// cascade-confirm sheet. Pass `confirmedCascade: true` on re-call.
+    private func saveDeviceCap(_ newCap: Int, confirmedCascade: Bool) {
+        guard let cid = childDeviceID else {
+            setActionError("Can't save — device not paired.")
+            return
+        }
+        let previousCap = deviceCapMinutes
+        deviceCapMinutes = newCap   // optimistic
+        capSaving = true
+        Task {
+            defer { capSaving = false }
+            do {
+                _ = try await apiClient.putDeviceCap(childDeviceID: cid, dailyCapMinutes: newCap)
+                // On success the cap is already applied optimistically.
+            } catch {
+                // Revert on failure.
+                deviceCapMinutes = previousCap
+                setActionError("Couldn't save the cap — try again.")
+            }
+        }
+    }
+}
+
+// MARK: - B9: Cascade confirm sheet
+
+/// Presented when lowering pool or cap would affect existing device/app rules.
+/// Lists the affected items, defaults to "Apply tomorrow".
+private struct CascadeConfirmSheet: View {
+    let result: EarnedCascadeDecision.Result
+    var onApplyTomorrow: () -> Void = {}
+    var onCancel: () -> Void = {}
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    ForEach(result.affectedDevices, id: \.deviceID) { dev in
+                        Text(dev.description)
+                            .font(.custom("Inter", size: 14))
+                    }
+                    ForEach(result.affectedApps, id: \.bundleID) { app in
+                        Text(app.description)
+                            .font(.custom("Inter", size: 14))
+                    }
+                } header: {
+                    Text("These limits will change")
+                        .font(.custom("Inter", size: 12).weight(.semibold))
+                }
+
+                Section {
+                    Text("The changes take effect at midnight so today's sessions aren't cut short.")
+                        .font(.custom("Inter", size: 13))
+                        .foregroundStyle(Color.evOnSurfaceVariant)
+                }
+            }
+            .navigationTitle("Confirm Changes")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Cancel") {
+                        onCancel()
+                        dismiss()
+                    }
+                    .foregroundStyle(Color.evPrimary)
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Apply Tomorrow") {
+                        onApplyTomorrow()
+                        dismiss()
+                    }
+                    .font(.custom("Inter", size: 17).weight(.semibold))
+                    .foregroundStyle(Color.evPrimary)
+                }
+            }
+        }
+        .presentationDetents([.medium])
+        .presentationDragIndicator(.visible)
     }
 }
 
