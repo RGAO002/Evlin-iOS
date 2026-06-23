@@ -306,6 +306,8 @@ private struct AppPreviewTile: View {
                         image
                             .resizable()
                             .scaledToFill()
+                            .frame(width: 38, height: 38)
+                            .clipped()
                     default:
                         fallbackIcon
                     }
