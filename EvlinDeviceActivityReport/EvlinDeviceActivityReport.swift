@@ -2,6 +2,7 @@ import DeviceActivity
 import ExtensionFoundation
 import ExtensionKit
 import ManagedSettings
+import Security
 import SwiftUI
 
 @main
@@ -17,12 +18,16 @@ struct EvlinDeviceActivityReportExtension: DeviceActivityReportExtension {
         LockActivityReviewReport { configuration in
             LockActivityReviewView(configuration: configuration)
         }
+        TotalUsageProbeReport { configuration in
+            TotalUsageProbeReportView(configuration: configuration)
+        }
     }
 }
 
 extension DeviceActivityReport.Context {
     static let evlinMetadataProbe = Self("evlin.metadataProbe")
     static let evlinLockReview = Self("evlin.lockReview")
+    static let evlinTotalUsage = Self("evlin.totalUsage")
 }
 
 struct MetadataProbeConfiguration: Codable {
@@ -511,6 +516,148 @@ struct LockActivityReviewView: View {
                 }
                 .padding(.vertical, 3)
             }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+// MARK: - Total-usage number-export spike (feasibility probe)
+//
+// Answers ONE question: can the DAR extension write a plain Double (today's
+// whole-device total screen-time seconds) OUT to the App Group so the main app
+// can read it back? The earlier alias experiment proved strings/Date cross the
+// boundary but the opaque `ApplicationToken` fails to (de)serialize on iOS 26
+// (PropertyListEncoder broke on FamilyControls tokens — see
+// LocalAliasStore.hydrateFromReportDetailed). A Double has no opaque-type
+// problem, so it SHOULD cross; this scene confirms it on real hardware.
+//
+// "Whole-device total" = sum of every category's totalActivityDuration across
+// every segment. Categories partition all apps, so the sum is the entire
+// device INCLUDING apps the parent never selected — provided the view feeds an
+// all-activity filter (no application/category restriction).
+//
+// DAR always reports the device it RUNS ON: parent device → parent's usage,
+// child device → child's. Either way it proves whether the number crosses.
+
+struct TotalUsageProbeConfiguration: Codable {
+    var generatedAt: Date = .now
+    var segmentCount: Int = 0
+    var categoryCount: Int = 0
+    var totalSeconds: Double = 0
+    var writeStatus: String = "not attempted"
+}
+
+struct TotalUsageProbeReport: DeviceActivityReportScene {
+    let context: DeviceActivityReport.Context = .evlinTotalUsage
+    let content: (TotalUsageProbeConfiguration) -> TotalUsageProbeReportView
+
+    func makeConfiguration(
+        representing data: DeviceActivityResults<DeviceActivityData>
+    ) async -> TotalUsageProbeConfiguration {
+        var configuration = TotalUsageProbeConfiguration()
+        var total: TimeInterval = 0
+
+        for await activityData in data {
+            for await segment in activityData.activitySegments {
+                configuration.segmentCount += 1
+                for await categoryActivity in segment.categories {
+                    configuration.categoryCount += 1
+                    total += categoryActivity.totalActivityDuration
+                }
+            }
+        }
+
+        configuration.totalSeconds = total
+        let appGroupStatus = Self.writeTotalSeconds(total)
+        let keychainStatus = Self.writeTotalToKeychain(total)
+        configuration.writeStatus = "\(appGroupStatus) || \(keychainStatus)"
+        return configuration
+    }
+
+    /// Write the total as a Double to the App Group via BOTH UserDefaults and a
+    /// plain file (mirrors the alias snapshot's belt-and-suspenders transport).
+    /// Returns a short status string surfaced in the rendered report.
+    static func writeTotalSeconds(_ seconds: Double) -> String {
+        guard let defaults = UserDefaults(suiteName: "group.com.evlin.ios") else {
+            return "failed: UserDefaults(suiteName:) returned nil"
+        }
+        defaults.set(seconds, forKey: "evlin.dar.totalSeconds")
+        defaults.set(Date(), forKey: "evlin.dar.totalSeconds.heartbeat")
+        let flushed = defaults.synchronize()
+        let fileStatus = writeTotalFile(seconds)
+        return "ok seconds=\(String(format: "%.1f", seconds)) defaults_sync=\(flushed) file=\(fileStatus)"
+    }
+
+    private static func writeTotalFile(_ seconds: Double) -> String {
+        guard let containerURL = FileManager.default
+            .containerURL(forSecurityApplicationGroupIdentifier: "group.com.evlin.ios")
+        else {
+            return "no-container"
+        }
+        let fileURL = containerURL.appendingPathComponent("dar-total-seconds.txt")
+        do {
+            try String(seconds).write(to: fileURL, atomically: true, encoding: .utf8)
+            return "ok"
+        } catch {
+            return "fail-\(error.localizedDescription.prefix(30))"
+        }
+    }
+
+    /// Last untested cross-sandbox channel: the shared keychain access group.
+    /// Keychain goes through `securityd`, NOT the filesystem sandbox that blocks
+    /// the App Group write — so it MIGHT cross where files cannot. The group and
+    /// account are also entitled on the main app, so a successful write here is
+    /// readable there. status 0 (errSecSuccess) = the write crossed.
+    static func writeTotalToKeychain(_ seconds: Double) -> String {
+        let group = "D9FM36P37F.com.evlin.darbridge"
+        let account = "evlin.dar.totalSeconds"
+        guard let data = String(seconds).data(using: .utf8) else { return "kc:encode-fail" }
+        let base: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrAccount as String: account,
+            kSecAttrAccessGroup as String: group,
+        ]
+        SecItemDelete(base as CFDictionary)
+        var add = base
+        add[kSecValueData as String] = data
+        add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
+        let status = SecItemAdd(add as CFDictionary, nil)
+        return "kc:SecItemAdd=\(status)"
+    }
+}
+
+struct TotalUsageProbeReportView: View {
+    let configuration: TotalUsageProbeConfiguration
+
+    private var minutes: String {
+        String(format: "%.1f", configuration.totalSeconds / 60.0)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Write status: \(configuration.writeStatus)")
+                .font(.caption.monospaced().bold())
+                .foregroundStyle(
+                    configuration.writeStatus.hasPrefix("ok")
+                        ? Color.green
+                        : (configuration.writeStatus.contains("failed") ? Color.red : Color.orange)
+                )
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color(.systemGray6))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+
+            Text("DAR computed (extension side)")
+                .font(.headline)
+            Text("Total: \(minutes) min  (\(String(format: "%.0f", configuration.totalSeconds)) s)")
+                .font(.title3.monospacedDigit().bold())
+            Text("segments=\(configuration.segmentCount)  categories=\(configuration.categoryCount)")
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
+            Text("Generated \(configuration.generatedAt.formatted(date: .omitted, time: .standard))")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)

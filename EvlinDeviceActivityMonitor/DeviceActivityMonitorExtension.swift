@@ -100,6 +100,22 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
     override func eventDidReachThreshold(_ event: DeviceActivityEvent.Name,
                                          activity: DeviceActivityName) {
         super.eventDidReachThreshold(event, activity: activity)
+        // DEBUG whole-device-measurement spike: a threshold armed on ALL
+        // CATEGORIES fired. The Monitor extension (unlike the Report extension)
+        // CAN write the App Group, so this marker reliably crosses back to the
+        // app — proving the threshold measured whole-device usage. Harmless in
+        // production (nothing arms `evlin.test.wholeDevice` there).
+        if event.rawValue == "evlin.test.wholeDevice" {
+            let count = (defaults?.integer(forKey: "evlin.test.wholeDevice.count") ?? 0) + 1
+            defaults?.set(count, forKey: "evlin.test.wholeDevice.count")
+            defaults?.set(Date(), forKey: "evlin.test.wholeDevice.firedAt")
+            defaults?.set(
+                "fired #\(count) @ \(ISO8601DateFormatter().string(from: Date())) activity=\(activity.rawValue)",
+                forKey: "evlin.test.wholeDevice.diag"
+            )
+            NSLog("[Evlin/Ext] wholeDevice test threshold fired #%d", count)
+            return
+        }
         if event.rawValue == "evlin.bigkid.chunk" {
             Task { await BigKidExtensionReporter.shared.reportChunk() }
             return

@@ -1865,6 +1865,18 @@ struct HomeSettingsSheet: View {
                 } label: {
                     Label("DeviceActivityReport metadata test", systemImage: "chart.bar.doc.horizontal")
                 }
+                #if DEBUG
+                NavigationLink {
+                    DARNumberExportProbeView()
+                } label: {
+                    Label("DAR number export (total screen time)", systemImage: "number.circle")
+                }
+                NavigationLink {
+                    WholeDeviceThresholdProbeView()
+                } label: {
+                    Label("Whole-device threshold test", systemImage: "bolt.badge.clock")
+                }
+                #endif
                 NavigationLink {
                     LockActivityReviewScreen()
                 } label: {
