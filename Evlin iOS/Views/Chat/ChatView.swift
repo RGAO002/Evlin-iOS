@@ -3,6 +3,8 @@ import Combine
 
 private final class ChatScrollController: ObservableObject {
     var onBottomDistanceChange: ((CGFloat) -> Void)?
+    /// B6: called with the raw contentOffset.y on every scroll event.
+    var onContentOffsetYChange: ((CGFloat) -> Void)?
     private weak var scrollView: UIScrollView?
     private var observations: [NSKeyValueObservation] = []
 
@@ -90,12 +92,16 @@ private final class ChatScrollController: ObservableObject {
                 adjustedBottomInset: scrollView.adjustedContentInset.bottom
             )
         )
+        // B6: report raw Y for top-bar collapse direction tracking.
+        onContentOffsetYChange?(scrollView.contentOffset.y)
     }
 }
 
 private struct ChatScrollMetricsObserver: UIViewRepresentable {
     @ObservedObject var controller: ChatScrollController
     let onBottomDistanceChange: (CGFloat) -> Void
+    /// B6: optional raw content-offset callback for top-bar collapse.
+    var onContentOffsetYChange: ((CGFloat) -> Void)? = nil
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -107,6 +113,7 @@ private struct ChatScrollMetricsObserver: UIViewRepresentable {
 
     func updateUIView(_ view: UIView, context: Context) {
         controller.onBottomDistanceChange = onBottomDistanceChange
+        controller.onContentOffsetYChange = onContentOffsetYChange
         DispatchQueue.main.async {
             controller.attach(to: view.enclosingScrollView)
         }
@@ -140,6 +147,19 @@ struct ChatView: View {
     private var isAtBottom: Bool {
         !Self.shouldShowScrollToBottomButton(bottomDistance: scrollBottomDistance)
     }
+
+    // MARK: - B6: collapsing top bar state
+
+    /// Whether the top bar is currently visible (hides on scroll-down, shows on scroll-up).
+    @State private var barVisible: Bool = true
+    /// Last recorded content offset Y from the scroll controller, used to detect direction.
+    @State private var lastScrollOffsetY: CGFloat = 0
+    /// Show the History sheet (B7 — sheet wired when ChatHistorySheet exists).
+    @State private var showHistorySheet: Bool = false
+    /// Rename alert presentation flag.
+    @State private var showRenameAlert: Bool = false
+    /// Rename alert text field binding.
+    @State private var renameAlertText: String = ""
 
     /// Map `viewModel.childName` back to a `ChildProfile.id` so we can
     /// clear / reset the parent-side reflection fixture store when the
@@ -215,9 +235,23 @@ struct ChatView: View {
     private var content: some View {
         ZStack(alignment: .bottom) {
             ScrollView {
-                ChatScrollMetricsObserver(controller: scrollController) { distance in
-                    scrollBottomDistance = distance
-                }
+                ChatScrollMetricsObserver(
+                    controller: scrollController,
+                    onBottomDistanceChange: { distance in
+                        scrollBottomDistance = distance
+                    },
+                    onContentOffsetYChange: { offsetY in
+                        // B6: hide bar on scroll-down, show on scroll-up.
+                        let delta = offsetY - lastScrollOffsetY
+                        lastScrollOffsetY = offsetY
+                        let threshold: CGFloat = 4
+                        if delta > threshold && barVisible {
+                            withAnimation(.easeInOut(duration: 0.22)) { barVisible = false }
+                        } else if delta < -threshold && !barVisible {
+                            withAnimation(.easeInOut(duration: 0.22)) { barVisible = true }
+                        }
+                    }
+                )
                 .frame(width: 0, height: 0)
 
                 LazyVStack(spacing: Spacing.xxxl) {
@@ -531,6 +565,12 @@ struct ChatView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                     .zIndex(2)
             }
+
+            // B6: collapsing top bar — floats above the scroll view, hides on
+            // scroll-down and shows on scroll-up.
+            chatTopBar
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .zIndex(3)
         }
         .animation(.easeInOut(duration: 0.18), value: isAtBottom)
         .background(Color.evSurfaceContainerLow)
@@ -597,6 +637,79 @@ struct ChatView: View {
                 }
             )
         }
+        // B6: History sheet placeholder — wired to ChatHistorySheet in B7.
+        .sheet(isPresented: $showHistorySheet) {
+            // B7: replace EmptyView() with ChatHistorySheet(store: viewModel.chatHistoryStore)
+            EmptyView()
+        }
+        // B6: Rename alert — TextField lets parent give the current conversation a custom title.
+        .alert("Rename Conversation", isPresented: $showRenameAlert) {
+            TextField("Conversation name", text: $renameAlertText)
+            Button("Save") {
+                viewModel.renameCurrentConversation(renameAlertText)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Give this conversation a name.")
+        }
+    }
+
+    // MARK: - B6: Top bar
+
+    /// Collapsing top bar: History (left) · "Evlin"/title + pencil (center) · Clear (right).
+    /// Slides out upward on scroll-down and back in on scroll-up.
+    private var chatTopBar: some View {
+        HStack(spacing: 0) {
+            // LEFT — History button (sheet wired in B7).
+            Button {
+                showHistorySheet = true
+            } label: {
+                Image(systemName: "clock.arrow.trianglehead.counterclockwise.rotate.90")
+                    .font(.system(size: 20, weight: .medium))
+                    .foregroundStyle(Color.evOnSurfaceVariant)
+                    .frame(width: 44, height: 44)
+            }
+
+            Spacer()
+
+            // CENTER — current conversation title + pencil rename.
+            HStack(spacing: 6) {
+                Text(viewModel.currentConversationTitle ?? "Evlin")
+                    .font(.custom("Manrope", size: 17).weight(.bold))
+                    .foregroundStyle(Color.evOnSurface)
+                    .lineLimit(1)
+                Button {
+                    renameAlertText = viewModel.currentConversationTitle ?? ""
+                    showRenameAlert = true
+                } label: {
+                    Image(systemName: "pencil")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(Color.evOnSurfaceVariant)
+                }
+            }
+
+            Spacer()
+
+            // RIGHT — Clear (archive + reset).
+            Button {
+                viewModel.clear()
+            } label: {
+                Text("Clear")
+                    .font(.custom("Inter", size: 15).weight(.medium))
+                    .foregroundStyle(Color.evPrimary)
+                    .frame(height: 44)
+                    .padding(.trailing, 4)
+            }
+        }
+        .padding(.horizontal, Spacing.xl)
+        .frame(height: 48)
+        .background(
+            Color.evSurfaceContainerLow
+                .opacity(0.96)
+                .ignoresSafeArea(edges: .top)
+        )
+        .offset(y: barVisible ? 0 : -56)
+        .animation(.easeInOut(duration: 0.22), value: barVisible)
     }
 
     private var composerPanel: some View {

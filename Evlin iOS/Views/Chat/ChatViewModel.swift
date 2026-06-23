@@ -253,6 +253,8 @@ class ChatViewModel: ObservableObject {
         // Rotate conversation id.
         let fresh = UUID()
         conversationIdString = fresh.uuidString
+        // Reset title for the new conversation.
+        currentConversationTitle = nil
         // Reset to seed.
         surfacedReflectionSubmissionIDs.removeAll()
         seedInitialMessages()
@@ -269,6 +271,22 @@ class ChatViewModel: ObservableObject {
         let fresh = UUID()
         conversationIdString = fresh.uuidString
         return fresh
+    }
+
+    // MARK: - B6: conversation title / rename
+
+    /// Mutable display title for the current conversation. Defaults to nil
+    /// (shows "Evlin" in the top bar). The pencil rename overrides it.
+    @Published var currentConversationTitle: String? = nil
+
+    /// Rename the current conversation in-memory and persist via
+    /// `chatHistoryStore`. The title is reset to nil on `clear()`.
+    func renameCurrentConversation(_ newTitle: String) {
+        let trimmed = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        currentConversationTitle = trimmed.isEmpty ? nil : trimmed
+        let id = currentConversationID
+        let title = currentConversationTitle
+        chatHistoryStore.rename(id, title ?? "")
     }
 
     /// Strategy-agent T11.11 — POST /parent/chat/answer-question and feed
