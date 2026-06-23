@@ -9,6 +9,16 @@ enum ProfilePresentation {
     ]
 }
 
+// MARK: - B9: Pool cascade state (defined outside ProfileView so @State can use it)
+
+/// Carries the pending cascade confirmation context for a pool reduction.
+/// Used as `@State private var pendingPoolCascade: PoolCascadeState?` in ProfileView.
+struct PoolCascadeState: Identifiable {
+    let id = UUID()
+    let decision: EarnedCascadeDecision.Result
+    let newMinutes: Int
+}
+
 struct ProfileView: View {
     let child: ChildProfile
     var initialTaskId: Int? = nil
@@ -44,6 +54,9 @@ struct ProfileView: View {
     @State private var childProfileUUID: UUID? = nil
     /// Saving indicator shown while putEarnedConfig is in-flight.
     @State private var poolSaving = false
+    /// Pending pool reduction that needs cascade confirmation. Non-nil shows the
+    /// cascade-confirm sheet; the confirmed save proceeds with the stored value.
+    @State private var pendingPoolCascade: PoolCascadeState? = nil
     @State private var showProfileMenu = false
     @State private var showEditProfile = false
     @State private var showDeleteConfirm = false
@@ -286,6 +299,10 @@ struct ProfileView: View {
             .buttonStyle(.plain)
             .padding(.trailing, 20)
             .padding(.bottom, 24)
+
+            // B9: pool-cascade sheet host — zero-size ZStack sibling so the
+            // sheet modifier doesn't inflate the main VStack modifier chain.
+            PoolCascadeSheetHost(pending: $pendingPoolCascade) { confirmPoolSave($0) }
         }
         .background(Color.evSurfaceContainerLow)
         .navigationBarBackButtonHidden(true)
@@ -377,60 +394,7 @@ struct ProfileView: View {
                 }
             )
         }
-        .overlay {
-            // Profile FAB sheet. Replaces the generic `AddBottomSheet`:
-            //   • "Add Rule" was removed — rules have no backend (HP-3/HP-4).
-            //   • "Enroll Device" was removed — it only appended a cosmetic
-            //     local row; devices enroll via onboarding pairing (HP-6).
-            //   • "Add to Calendar" now persists via POST /calendar/events
-            //     instead of writing to dead mock state (HP-7/CAL-1).
-            EvlinSheetCardItem(item: $addMode) { mode in
-                Group {
-                    switch mode {
-                    case .menu:
-                        ProfileAddMenu(
-                            child: displayChild,
-                            mode: $addMode,
-                            onAddDevice: {
-                                addMode = nil
-                                addedDeviceKidName = displayChild.name
-                                showAddDevicePairing = true
-                            }
-                        )
-                    case .task:
-                        AddTaskForm(
-                            child: child,
-                            onSave: { newTask in
-                                handleCreateTask(newTask)
-                                addMode = nil
-                            },
-                            onCancel: { addMode = nil }
-                        )
-                    case .calendar:
-                        AddCalendarForm(
-                            child: child,
-                            onSave: { event in
-                                handleCreateCalendar(event)
-                                addMode = nil
-                            },
-                            onCancel: { addMode = nil }
-                        )
-                    case .rule:
-                        // Restored entry. Rules have no backend yet — show an
-                        // honest "coming soon" instead of the old local-only
-                        // form that silently dropped the rule (HP-3/HP-4).
-                        ProfileComingSoonSheet(
-                            icon: "shield",
-                            title: "Rules are coming soon",
-                            message: "Screen-time and routine rules aren't ready yet. For now, use Add Task, the chat, or Lock devices to manage \(displayChild.name)'s phone.",
-                            onClose: { addMode = nil }
-                        )
-                    case .device:
-                        EmptyView()
-                    }
-                }
-            }
-        }
+        .overlay { fabOverlay }
         .fullScreenCover(isPresented: $showAddDevicePairing) {
             AddDevicePairingFlow(
                 kidName: addedDeviceKidName.isEmpty ? displayChild.name : addedDeviceKidName,
@@ -474,6 +438,9 @@ struct ProfileView: View {
                 Task {
                     // B9: load pool from the backend policy.
                     // fetchEarnedPolicy().pool_minutes is the daily earned-time pool.
+                    // This Task runs async; it overwrites dailyLimitMinutes ONLY when
+                    // the backend actually returns a value (takes precedence over the
+                    // UserDefaults seed loaded below).
                     if let policy = try? await apiClient.fetchEarnedPolicy(childProfileID: uuid),
                        let pool = policy.pool_minutes,
                        pool > 0 {
@@ -481,10 +448,18 @@ struct ProfileView: View {
                         rules = ProfileMockData.rules(for: child.id, dailyLimitMinutes: pool)
                     }
                 }
+                // For UUID children the backend is the source of truth; only seed
+                // from UserDefaults as a transient placeholder until the Task above
+                // resolves. Do NOT update rules here — the Task will do it with the
+                // authoritative value, and an intermediate rule update would flicker.
+                let storedLimit = UserDefaults.standard.integer(forKey: "evlin.dailyLimitMin.\(child.id)")
+                dailyLimitMinutes = storedLimit > 0 ? storedLimit : 120
+            } else {
+                // Legacy / offline path: no backend UUID, use UserDefaults directly.
+                let storedLimit = UserDefaults.standard.integer(forKey: "evlin.dailyLimitMin.\(child.id)")
+                dailyLimitMinutes = storedLimit > 0 ? storedLimit : 120
+                rules = ProfileMockData.rules(for: child.id, dailyLimitMinutes: dailyLimitMinutes)
             }
-            let storedLimit = UserDefaults.standard.integer(forKey: "evlin.dailyLimitMin.\(child.id)")
-            dailyLimitMinutes = storedLimit > 0 ? storedLimit : 120
-            rules = ProfileMockData.rules(for: child.id, dailyLimitMinutes: dailyLimitMinutes)
 
             // Tasks: backend when this child owns the paired device;
             // otherwise an honest "No tasks yet" empty state (no more
@@ -1114,23 +1089,63 @@ struct ProfileView: View {
         )
         .sheet(isPresented: $showDSTEditor) {
             DailyScreenTimeEditor(currentMinutes: dailyLimitMinutes) { newMinutes in
-                // Optimistic local update.
-                dailyLimitMinutes = newMinutes
-                if let i = rules.firstIndex(where: { $0.id == "screen" }) {
-                    rules[i].detail = "\(formatLimit(newMinutes)) limit per day"
-                }
-                // B9: persist via backend when we have a UUID child id;
-                // fall back to UserDefaults for legacy / offline path.
-                if let uuid = childProfileUUID {
-                    poolSaving = true
-                    Task {
-                        defer { poolSaving = false }
-                        _ = try? await apiClient.putEarnedConfig(
-                            childProfileID: uuid,
-                            poolMinutes: newMinutes)
-                    }
-                } else {
-                    UserDefaults.standard.set(newMinutes, forKey: "evlin.dailyLimitMin.\(child.id)")
+                savePool(newMinutes: newMinutes, confirmedCascade: false)
+            }
+        }
+    }
+
+    // MARK: - FAB overlay (extracted to reduce body type-checker complexity)
+
+    /// Profile FAB sheet. Replaces the generic `AddBottomSheet`:
+    ///   • "Add Rule" was removed — rules have no backend (HP-3/HP-4).
+    ///   • "Enroll Device" was removed — it only appended a cosmetic local row;
+    ///     devices enroll via onboarding pairing (HP-6).
+    ///   • "Add to Calendar" now persists via POST /calendar/events
+    ///     instead of writing to dead mock state (HP-7/CAL-1).
+    private var fabOverlay: some View {
+        EvlinSheetCardItem(item: $addMode) { mode in
+            Group {
+                switch mode {
+                case .menu:
+                    ProfileAddMenu(
+                        child: displayChild,
+                        mode: $addMode,
+                        onAddDevice: {
+                            addMode = nil
+                            addedDeviceKidName = displayChild.name
+                            showAddDevicePairing = true
+                        }
+                    )
+                case .task:
+                    AddTaskForm(
+                        child: child,
+                        onSave: { newTask in
+                            handleCreateTask(newTask)
+                            addMode = nil
+                        },
+                        onCancel: { addMode = nil }
+                    )
+                case .calendar:
+                    AddCalendarForm(
+                        child: child,
+                        onSave: { event in
+                            handleCreateCalendar(event)
+                            addMode = nil
+                        },
+                        onCancel: { addMode = nil }
+                    )
+                case .rule:
+                    // Restored entry. Rules have no backend yet — show an
+                    // honest "coming soon" instead of the old local-only
+                    // form that silently dropped the rule (HP-3/HP-4).
+                    ProfileComingSoonSheet(
+                        icon: "shield",
+                        title: "Rules are coming soon",
+                        message: "Screen-time and routine rules aren't ready yet. For now, use Add Task, the chat, or Lock devices to manage \(displayChild.name)'s phone.",
+                        onClose: { addMode = nil }
+                    )
+                case .device:
+                    EmptyView()
                 }
             }
         }
@@ -1233,6 +1248,56 @@ struct ProfileView: View {
                 .stroke(Color.evOutlineVariant.opacity(0.4), lineWidth: 1)
         )
         .evShadow(.premium)
+    }
+
+    // MARK: - B9: Pool save with cascade gate
+
+    /// Called by PoolCascadeSheetHost when the user taps "Apply Tomorrow".
+    /// Clears the pending state and proceeds with the confirmed save.
+    private func confirmPoolSave(_ newMinutes: Int) {
+        pendingPoolCascade = nil
+        savePool(newMinutes: newMinutes, confirmedCascade: true)
+    }
+
+    /// Save the daily pool (earned-time budget) via putEarnedConfig.
+    /// When the new value is lower than the current pool AND confirmation has not
+    /// yet been given, gate behind the cascade-confirm sheet (R10/R11/R12).
+    ///
+    /// - Parameters:
+    ///   - newMinutes:       The requested new pool value in minutes.
+    ///   - confirmedCascade: Pass `true` when re-calling after the user confirms.
+    private func savePool(newMinutes: Int, confirmedCascade: Bool) {
+        // Gate: if lowering the pool without confirmation, show the confirm sheet.
+        // ProfileView doesn't hold per-device cap data, so we construct a
+        // "generic reduction" decision that always triggers confirmation.
+        if !confirmedCascade && newMinutes < dailyLimitMinutes {
+            let decision = EarnedCascadeDecision.Result(
+                needsConfirmation: true,
+                affectedDevices: [],
+                affectedApps: [],
+                defaultAction: .applyTomorrow)
+            pendingPoolCascade = PoolCascadeState(decision: decision, newMinutes: newMinutes)
+            return   // DO NOT call putEarnedConfig — wait for confirmation
+        }
+
+        // Optimistic local update.
+        dailyLimitMinutes = newMinutes
+        if let i = rules.firstIndex(where: { $0.id == "screen" }) {
+            rules[i].detail = "\(formatLimit(newMinutes)) limit per day"
+        }
+        // B9: persist via backend when we have a UUID child id;
+        // fall back to UserDefaults for legacy / offline path.
+        if let uuid = childProfileUUID {
+            poolSaving = true
+            Task {
+                defer { poolSaving = false }
+                _ = try? await apiClient.putEarnedConfig(
+                    childProfileID: uuid,
+                    poolMinutes: newMinutes)
+            }
+        } else {
+            UserDefaults.standard.set(newMinutes, forKey: "evlin.dailyLimitMin.\(child.id)")
+        }
     }
 }
 
@@ -1474,6 +1539,97 @@ private struct ProfileAddMenu: View {
             }
             .padding(.bottom, 12)
         }
+    }
+}
+
+// MARK: - B9: Pool cascade confirm sheet
+
+/// Presented when lowering the earned-time pool requires cascade confirmation.
+/// Mirrors `CascadeConfirmSheet` in DeviceAppsSheet but lives at the profile level.
+private struct PoolCascadeConfirmSheet: View {
+    let result: EarnedCascadeDecision.Result
+    var onApplyTomorrow: () -> Void = {}
+    var onCancel: () -> Void = {}
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    if result.affectedDevices.isEmpty && result.affectedApps.isEmpty {
+                        Text("Lowering the daily pool may reduce device and app limits.")
+                            .font(.custom("Inter", size: 14))
+                            .foregroundStyle(Color.evOnSurfaceVariant)
+                    }
+                    ForEach(result.affectedDevices, id: \.deviceID) { dev in
+                        Text(dev.description)
+                            .font(.custom("Inter", size: 14))
+                    }
+                    ForEach(result.affectedApps, id: \.bundleID) { app in
+                        Text(app.description)
+                            .font(.custom("Inter", size: 14))
+                    }
+                } header: {
+                    Text("These limits will change")
+                        .font(.custom("Inter", size: 12).weight(.semibold))
+                }
+
+                Section {
+                    Text("The changes take effect at midnight so today's sessions aren't cut short.")
+                        .font(.custom("Inter", size: 13))
+                        .foregroundStyle(Color.evOnSurfaceVariant)
+                }
+            }
+            .navigationTitle("Confirm Changes")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Cancel") {
+                        onCancel()
+                        dismiss()
+                    }
+                    .foregroundStyle(Color.evPrimary)
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Apply Tomorrow") {
+                        onApplyTomorrow()
+                        dismiss()
+                    }
+                    .font(.custom("Inter", size: 17).weight(.semibold))
+                    .foregroundStyle(Color.evPrimary)
+                }
+            }
+        }
+        .presentationDetents([.medium])
+        .presentationDragIndicator(.visible)
+    }
+}
+
+// MARK: - B9: Pool cascade sheet host
+//
+// A zero-size anchor view carrying the sheet modifier for pool-reduction
+// confirmation. Placed as a ZStack child in ProfileView's body rather than
+// as a modifier on the main VStack, so it doesn't inflate the body's type-
+// checker expression beyond Swift's limit.
+
+private struct PoolCascadeSheetHost: View {
+    @Binding var pending: PoolCascadeState?
+    /// Called with confirmed newMinutes when the parent taps "Apply Tomorrow".
+    /// Also dismisses the sheet by setting pending = nil BEFORE calling back.
+    var onSave: (Int) -> Void = { _ in }
+
+    var body: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .allowsHitTesting(false)
+            .sheet(item: $pending) { state in
+                PoolCascadeConfirmSheet(
+                    result: state.decision,
+                    onApplyTomorrow: { onSave(state.newMinutes) },
+                    onCancel: { pending = nil }
+                )
+            }
     }
 }
 

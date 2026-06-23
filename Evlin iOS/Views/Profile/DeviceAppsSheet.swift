@@ -714,14 +714,47 @@ struct DeviceAppsSheet: View {
 
     // MARK: - B9: Device cap persistence
 
-    /// Save the device daily cap via putDeviceCap. When the backend responds with
-    /// `needs_confirmation` (the new cap is below existing app rules), show the
-    /// cascade-confirm sheet. Pass `confirmedCascade: true` on re-call.
+    /// Save the device daily cap via putDeviceCap. When the new cap is lower than
+    /// an existing app-limit rule, gate on cascade confirmation before calling the
+    /// API. Pass `confirmedCascade: true` on re-call (from the confirm sheet).
+    ///
+    /// Gate logic (R10/R11/R12):
+    ///   1. If `confirmedCascade` is false, compute the cascade decision from the
+    ///      apps that currently have a rule budget exceeding `newCap`.
+    ///   2. If `needsConfirmation`, store the result in `pendingCascade` (which
+    ///      presents `CascadeConfirmSheet`) and return WITHOUT calling putDeviceCap.
+    ///   3. The confirm sheet re-calls this function with `confirmedCascade: true`,
+    ///      which skips the gate and proceeds to putDeviceCap.
     private func saveDeviceCap(_ newCap: Int, confirmedCascade: Bool) {
         guard let cid = childDeviceID else {
             setActionError("Can't save — device not paired.")
             return
         }
+
+        // Gate: check whether any enabled app rules exceed the new cap.
+        // Skip the gate when the parent already confirmed.
+        if !confirmedCascade {
+            let affectedApps = apps
+                .filter { $0.enabled && $0.limitMin > newCap }
+                .map { app in
+                    EarnedCascadeDecision.AffectedApp(
+                        bundleID: app.bundleID ?? app.id,
+                        name: app.name,
+                        currentBudgetMinutes: app.limitMin,
+                        newBudgetMinutes: newCap)
+                }
+            let currentPool = poolMinutes ?? newCap
+            let decision = EarnedCascadeDecision.decide(
+                newPoolMinutes: newCap,
+                currentPoolMinutes: currentPool,
+                affectedDevices: [],
+                affectedApps: affectedApps)
+            if decision.needsConfirmation {
+                pendingCascade = decision
+                return   // DO NOT call putDeviceCap — wait for confirmation
+            }
+        }
+
         let previousCap = deviceCapMinutes
         deviceCapMinutes = newCap   // optimistic
         capSaving = true

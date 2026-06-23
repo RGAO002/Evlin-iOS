@@ -1,6 +1,74 @@
 import XCTest
 @testable import Evlin_iOS
 
+// MARK: - Spy / fake for putDeviceCap
+
+/// Fake that records whether putDeviceCap was called. Used by cascade-gate tests
+/// so we can assert that the API is NOT invoked when confirmation is pending.
+final class DeviceCapAPISpy {
+    private(set) var putDeviceCapCallCount = 0
+    private(set) var lastCapMinutes: Int? = nil
+
+    func putDeviceCap(childDeviceID: UUID, dailyCapMinutes: Int) async throws {
+        putDeviceCapCallCount += 1
+        lastCapMinutes = dailyCapMinutes
+    }
+}
+
+// MARK: - Testable cascade-gate helper
+//
+// Mirrors the gate logic inside DeviceAppsSheet.saveDeviceCap so it can be
+// exercised without SwiftUI @State.
+//
+// The gate:
+//   • If confirmedCascade is false AND any enabled app has limitMin > newCap,
+//     compute the cascade decision. If needsConfirmation, set pendingCascade
+//     and return WITHOUT calling the API.
+//   • Otherwise call the API (represented here as the spy).
+
+struct DeviceCapSaveGateResult {
+    let pendingCascade: EarnedCascadeDecision.Result?
+    let apiWasCalled: Bool
+}
+
+@MainActor
+func exerciseDeviceCapSaveGate(
+    newCap: Int,
+    confirmedCascade: Bool,
+    enabledApps: [(name: String, bundleID: String, limitMin: Int)],
+    poolMinutes: Int?,
+    spy: DeviceCapAPISpy
+) async -> DeviceCapSaveGateResult {
+    // Build affected-app list exactly as saveDeviceCap does.
+    let affectedApps = enabledApps
+        .filter { $0.limitMin > newCap }
+        .map { app in
+            EarnedCascadeDecision.AffectedApp(
+                bundleID: app.bundleID,
+                name: app.name,
+                currentBudgetMinutes: app.limitMin,
+                newBudgetMinutes: newCap)
+        }
+
+    if !confirmedCascade {
+        let currentPool = poolMinutes ?? newCap
+        let decision = EarnedCascadeDecision.decide(
+            newPoolMinutes: newCap,
+            currentPoolMinutes: currentPool,
+            affectedDevices: [],
+            affectedApps: affectedApps)
+        if decision.needsConfirmation {
+            return DeviceCapSaveGateResult(pendingCascade: decision, apiWasCalled: false)
+        }
+    }
+
+    // Gate passed (or confirmedCascade = true) → call API.
+    try? await spy.putDeviceCap(
+        childDeviceID: UUID(),
+        dailyCapMinutes: newCap)
+    return DeviceCapSaveGateResult(pendingCascade: nil, apiWasCalled: true)
+}
+
 // MARK: - Pure logic tests for B9 option generation + cascade-confirm decision.
 //
 // All tests are network-free and UI-free. They exercise two pure helpers
@@ -185,5 +253,93 @@ final class EarnedConfigUITests: XCTestCase {
             newBudgetMinutes: 60
         )
         XCTAssertEqual(affectedApp.description, "YouTube 90m → 60m tomorrow")
+    }
+
+    // -------------------------------------------------------------------------
+    // MARK: Device-cap save gate (R10/R11/R12)
+    // -------------------------------------------------------------------------
+
+    /// Lowering a device cap below an existing enabled app-limit rule gates on
+    /// confirmation: pendingCascade is set and putDeviceCap is NOT called.
+    func testDeviceCapSave_loweringBelowAppRule_setsPendingCascadeAndBlocksAPI() async {
+        let spy = DeviceCapAPISpy()
+        let result = await exerciseDeviceCapSaveGate(
+            newCap: 30,
+            confirmedCascade: false,
+            enabledApps: [
+                (name: "YouTube", bundleID: "com.google.youtube", limitMin: 60)
+            ],
+            poolMinutes: 120,
+            spy: spy)
+
+        XCTAssertNotNil(result.pendingCascade, "pendingCascade must be set when cap < app rule")
+        XCTAssertTrue(result.pendingCascade?.needsConfirmation == true,
+                      "needsConfirmation must be true")
+        XCTAssertEqual(result.pendingCascade?.affectedApps.first?.name, "YouTube")
+        XCTAssertFalse(result.apiWasCalled,
+                       "putDeviceCap must NOT be called before the user confirms")
+        XCTAssertEqual(spy.putDeviceCapCallCount, 0,
+                       "Spy must record zero API calls before confirmation")
+    }
+
+    /// When the cap is NOT lower than any app rule, putDeviceCap is called
+    /// immediately (no cascade confirmation needed).
+    func testDeviceCapSave_noViolation_callsAPIDirectly() async {
+        let spy = DeviceCapAPISpy()
+        let result = await exerciseDeviceCapSaveGate(
+            newCap: 90,
+            confirmedCascade: false,
+            enabledApps: [
+                (name: "YouTube", bundleID: "com.google.youtube", limitMin: 60)
+            ],
+            poolMinutes: 120,
+            spy: spy)
+
+        XCTAssertNil(result.pendingCascade,
+                     "pendingCascade must be nil when no app rule is exceeded")
+        XCTAssertTrue(result.apiWasCalled, "putDeviceCap must be called when no cascade needed")
+        XCTAssertEqual(spy.putDeviceCapCallCount, 1)
+        XCTAssertEqual(spy.lastCapMinutes, 90)
+    }
+
+    /// After the user confirms (confirmedCascade = true), putDeviceCap is called
+    /// even though the new cap is below the existing app rule.
+    func testDeviceCapSave_confirmedCascade_callsAPI() async {
+        let spy = DeviceCapAPISpy()
+        let result = await exerciseDeviceCapSaveGate(
+            newCap: 30,
+            confirmedCascade: true,   // user already confirmed
+            enabledApps: [
+                (name: "YouTube", bundleID: "com.google.youtube", limitMin: 60)
+            ],
+            poolMinutes: 120,
+            spy: spy)
+
+        XCTAssertNil(result.pendingCascade,
+                     "pendingCascade must be nil once the user has confirmed")
+        XCTAssertTrue(result.apiWasCalled,
+                      "putDeviceCap must be called after the user confirms")
+        XCTAssertEqual(spy.putDeviceCapCallCount, 1)
+        XCTAssertEqual(spy.lastCapMinutes, 30)
+    }
+
+    /// Multiple affected apps all appear in the cascade result.
+    func testDeviceCapSave_multipleAppRulesExceeded_allAppearInCascade() async {
+        let spy = DeviceCapAPISpy()
+        let result = await exerciseDeviceCapSaveGate(
+            newCap: 20,
+            confirmedCascade: false,
+            enabledApps: [
+                (name: "YouTube", bundleID: "com.google.youtube", limitMin: 60),
+                (name: "Instagram", bundleID: "com.burbn.instagram", limitMin: 45),
+                (name: "TikTok", bundleID: "com.zhiliaoapp.musically", limitMin: 15) // 15 ≤ 20 — OK
+            ],
+            poolMinutes: 120,
+            spy: spy)
+
+        XCTAssertNotNil(result.pendingCascade)
+        XCTAssertEqual(result.pendingCascade?.affectedApps.count, 2,
+                       "Only apps exceeding the new cap should appear (TikTok at 15 is fine)")
+        XCTAssertFalse(result.apiWasCalled)
     }
 }
