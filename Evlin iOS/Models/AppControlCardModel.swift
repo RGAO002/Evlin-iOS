@@ -200,6 +200,13 @@ enum AppControlAction: Sendable, Equatable {
 }
 
 enum AppControlRouter {
+    /// The loop-safety invariant phrase for the lock_selected_apps_confirm card.
+    /// Contains "Locked set" + the duration; must NOT contain "list" (the word
+    /// "list" trips GUARD_OTHER_FAMILY and bypasses the app-control fastpath).
+    static func selectedSetLockPhrase(durationMinutes: Int) -> String {
+        "lock Locked set for \(durationMinutes) min"
+    }
+
     /// Route an option tap to a concrete action. `verb` parsing comes from the
     /// option's `action` string; `force_confirmations` is preferred when the
     /// backend supplied it so the seam's deterministic branch is honoured.
@@ -222,9 +229,17 @@ enum AppControlRouter {
             return .openAppSearch(query: card.targetDisplay)
         case "rename_list":
             return .renameList(target: card.targetDisplay)
+        case "lock_selected_apps_now":
+            // Confirm card: resend with the list-guard-safe phrase. No force so
+            // we don't replay the original "lock his phone" and loop.
+            return .resendPhrase(selectedSetLockPhrase(durationMinutes: card.durationMinutes ?? 30))
+        case "lock_all_apps_now":
+            // Empty card: lock the whole device for the chosen duration.
+            return .resendPhrase("lock all for \(card.durationMinutes ?? 30) min")
         case "cancel":
-            // Explicit Cancel option (cannot_block_category / category_shield_offer)
-            // is an intentional dismiss, not an unknown-action fall-through.
+            // Explicit Cancel option (cannot_block_category / category_shield_offer
+            // / lock_selected_apps_confirm / lock_selected_apps_empty) is an
+            // intentional dismiss, not an unknown-action fall-through.
             return .none
         default:
             return .none
