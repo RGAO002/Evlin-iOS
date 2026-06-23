@@ -41,6 +41,22 @@ private extension Color {
 /// upload happens ONLY inside the bind handlers.
 struct AppControlsV2View: View {
     let childDeviceID: UUID
+    /// Embedded mode (onboarding). When true, the screen drops its own title
+    /// header + subtitle + page background + outer ScrollView + DEBUG reset so the
+    /// hosting `OnboardingV2ScreenContainer` owns title/explainer/background, and
+    /// surfaces a prominent empty-state CTA. The standalone path (false) is
+    /// byte-for-byte unchanged.
+    var embedded: Bool = false
+    /// Called after EVERY mutation of the lock group (picker save / remove / bind)
+    /// so an embedding onboarding step can recompute "has ≥1 selected".
+    var onSelectionChanged: (() -> Void)? = nil
+
+    init(childDeviceID: UUID, embedded: Bool = false, onSelectionChanged: (() -> Void)? = nil) {
+        self.childDeviceID = childDeviceID
+        self.embedded = embedded
+        self.onSelectionChanged = onSelectionChanged
+    }
+
     @EnvironmentObject var apiClient: APIClient
 
     @State private var selection: FamilyActivitySelection = DefaultLockGroupStore.load()
@@ -74,26 +90,47 @@ struct AppControlsV2View: View {
         // resizable card) is the container, expanding a row grows the row in place
         // and pushes the rows below down WITHIN the scroll — the overall frame
         // never resizes or jumps.
-        ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                header
-                subtitle
-                if let bindError {
-                    bindErrorBanner(bindError)
+        Group {
+            if embedded {
+                // Embedded (onboarding): no page-background, no DEBUG reset, and NO
+                // big title/subtitle (the container supplies those). The container
+                // does NOT scroll its content slot, so we keep a ScrollView here so a
+                // long app list scrolls inside the step.
+                ScrollView {
+                    contentStack
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.top, 4)
+                        .padding(.bottom, 8)
                 }
-                categoriesSection
-                appsSection
-                #if DEBUG
-                debugResetControl
-                #endif
+            } else {
+                // Fix 1 — the SCREEN is the container, not a small floating card.
+                //
+                // A full-screen, full-width `ScrollView` + top-aligned `VStack` fills the
+                // device on a plain neutral page background. There is NO bounded white
+                // card / warm tray wrapping the whole screen (the prototype's lines 66-67
+                // outer tray are its demo phone-bezel framing, not real device chrome).
+                // Each ROW supplies its own card. Because the scrolling screen (not a
+                // resizable card) is the container, expanding a row grows the row in place
+                // and pushes the rows below down WITHIN the scroll — the overall frame
+                // never resizes or jumps.
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        header
+                        subtitle
+                        contentStack
+                        #if DEBUG
+                        debugResetControl
+                        #endif
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 16)
+                    .padding(.bottom, 24)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .background(Color.evPageBg)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 16)
-            .padding(.top, 16)
-            .padding(.bottom, 24)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .background(Color.evPageBg)
         // Fix 1 — dismissing the whole screen while a Rebind is pending (the user
         // tapped "Rebind" but never picked a new match) leaves the app unbound.
         .onDisappear { cancelRebindIfPending() }
@@ -103,10 +140,82 @@ struct AppControlsV2View: View {
                 onSave: { newSelection in
                     DefaultLockGroupStore.save(mergePreservingNamedApps(newSelection))
                     reload()
+                    onSelectionChanged?()
                     showPicker = false
                 },
                 onCancel: { showPicker = false }
             )
+        }
+    }
+
+    /// The shared body content (error banner + categories + apps). In embedded
+    /// mode an empty group ALSO shows a prominent full-width "Pick apps &
+    /// categories" CTA so an empty onboarding screen has an obvious action.
+    private var contentStack: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if let bindError {
+                bindErrorBanner(bindError)
+            }
+            if embedded {
+                embeddedAddControl
+            }
+            categoriesSection
+            appsSection
+        }
+    }
+
+    // MARK: - Embedded add control (onboarding)
+
+    /// In embedded mode the onboarding container hides the v2's own "App Controls"
+    /// header (and its inline "Add"), so the parent still needs a way to open the
+    /// picker. When the group is EMPTY we show a prominent full-width "Pick apps &
+    /// categories" CTA; once anything is picked we show a compact top-right "Add".
+    @ViewBuilder
+    private var embeddedAddControl: some View {
+        let isEmpty = selection.applicationTokens.isEmpty && selection.categoryTokens.isEmpty
+        if isEmpty {
+            Button {
+                showPicker = true
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "square.grid.2x2")
+                        .font(.system(size: 15, weight: .semibold))
+                    Text("Pick apps & categories")
+                        .font(.system(size: 15, weight: .semibold))
+                }
+                .foregroundStyle(Color.evAccentGreen)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 13)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.evAccentGreen, lineWidth: 1)
+                )
+            }
+            .buttonStyle(.plain)
+            .padding(.bottom, 14)
+        } else {
+            HStack {
+                Spacer()
+                Button {
+                    showPicker = true
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "plus")
+                            .font(.system(size: 13, weight: .medium))
+                        Text("Add")
+                            .font(.system(size: 13, weight: .medium))
+                    }
+                    .foregroundStyle(Color.evAccentGreen)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 7)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .stroke(Color.evHairlineStrong, lineWidth: 0.5)
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.bottom, 8)
         }
     }
 
@@ -230,6 +339,7 @@ struct AppControlsV2View: View {
                             }
                             DefaultLockGroupStore.removeCategory(token)
                             reload()
+                            onSelectionChanged?()
                         },
                         onPick: { suggestion in bindCategory(token, suggestion: suggestion) }
                     )
@@ -281,6 +391,7 @@ struct AppControlsV2View: View {
                                 }
                                 DefaultLockGroupStore.removeApp(token)
                                 reload()
+                                onSelectionChanged?()
                             },
                             onRebind: {
                                 // Tapping Rebind clears the OLD binding RIGHT AWAY
@@ -426,6 +537,9 @@ struct AppControlsV2View: View {
         bindError = nil
         // Re-read MatchedState so the just-bound app flips to "Matched".
         refreshTick &+= 1
+        // A bind is a group mutation (the app is now a NAMED member). Let an
+        // embedding onboarding step recompute "has ≥1 selected".
+        onSelectionChanged?()
 
         // 2) upload, then 3) re-save with the backend's real alias_key. Detached
         // so a slow/failed sync never blocks the UI; failure is a soft inline note.
@@ -490,6 +604,9 @@ struct AppControlsV2View: View {
         bindError = nil
         // Re-read MatchedState so the just-bound category flips to "Matched".
         refreshTick &+= 1
+        // A bind is a group mutation (the category is now a NAMED member). Let an
+        // embedding onboarding step recompute "has ≥1 selected".
+        onSelectionChanged?()
 
         // 2) upload, then 3) re-save every name with the backend's real alias_key.
         Task {
