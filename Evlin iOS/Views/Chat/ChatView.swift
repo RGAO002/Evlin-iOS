@@ -637,10 +637,13 @@ struct ChatView: View {
                 }
             )
         }
-        // B6: History sheet placeholder — wired to ChatHistorySheet in B7.
+        // B7: History sheet — native swipe-down dismissable sheet.
         .sheet(isPresented: $showHistorySheet) {
-            // B7: replace EmptyView() with ChatHistorySheet(store: viewModel.chatHistoryStore)
-            EmptyView()
+            ChatHistorySheet(
+                store: viewModel.chatHistoryStore,
+                vm: viewModel,
+                isPresented: $showHistorySheet
+            )
         }
         // B6: Rename alert — TextField lets parent give the current conversation a custom title.
         .alert("Rename Conversation", isPresented: $showRenameAlert) {

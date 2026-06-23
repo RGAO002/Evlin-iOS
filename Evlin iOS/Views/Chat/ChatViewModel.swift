@@ -295,6 +295,37 @@ class ChatViewModel: ObservableObject {
         }
     }
 
+    // MARK: - B7: open a saved conversation (inert, no ack polls)
+
+    /// Load a previously archived conversation from `chatHistoryStore` and
+    /// replace the current message list with inert versions of its messages.
+    ///
+    /// Inert guarantee: `StoredChatMessage.asInertChatMessage()` returns messages
+    /// with `commandID == nil` and a terminal (or nil) `receiptState`, so the
+    /// existing `resumePendingAckPolls` guard
+    /// (`role == .agent && receiptState == .pending && commandID != nil`) can
+    /// never fire. We do NOT call `resumePendingAckPolls` or
+    /// `reconcilePendingReceipts` after loading these messages.
+    func openConversation(_ id: UUID) async {
+        let stored = await chatHistoryStore.open(id)
+        let inert = stored.map { $0.asInertChatMessage() }
+        // Set the conversation id to the one being opened so any subsequent
+        // sends belong to the same conversation thread.
+        conversationIdString = id.uuidString
+        // Update the title to match the saved summary.
+        let summary = chatHistoryStore.conversations.first(where: { $0.id == id })
+        currentConversationTitle = summary?.title
+        // Wipe live card state — we're restoring a finished conversation.
+        pendingPlanArchCard = nil
+        pendingPlanArchCardQueue = []
+        currentCard = nil
+        currentAppControlCard = nil
+        surfacedReflectionSubmissionIDs.removeAll()
+        // Replace the message list (triggers saveMessages but inert messages
+        // are well-formed ChatMessages so no data is lost).
+        messages = inert.isEmpty ? { var s = ChatMessage(role: .agent, content: "", timestamp: Date()); s.isSeed = true; return [s] }() : inert
+    }
+
     /// Strategy-agent T11.11 — POST /parent/chat/answer-question and feed
     /// the response back through the existing chat pipeline.
     /// B4: routes through apiClient.authedData (Bearer + 401 refresh).
