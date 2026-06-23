@@ -34,6 +34,9 @@ struct AppControlCard: View {
                 if !model.options.isEmpty {
                     optionButtons
                 }
+            } else if model.kind == .lockSelectedAppsConfirm {
+                lockConfirmContent
+                optionButtons
             } else {
                 optionButtons
             }
@@ -174,6 +177,67 @@ struct AppControlCard: View {
         )
     }
 
+    // MARK: - Lock-selected-apps confirm content
+
+    /// App icon tiles + category chips shown only for `.lockSelectedAppsConfirm`.
+    @ViewBuilder
+    private var lockConfirmContent: some View {
+        // ── Apps section ──────────────────────────────────────────────────
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Apps · \(model.appsCount)")
+                .font(.custom("Inter", size: 12).weight(.semibold))
+                .foregroundStyle(Color.evOnSurfaceVariant)
+
+            let maxTiles = 6
+            let preview = model.appPreview
+            let overflow = model.appsCount - min(preview.count, maxTiles)
+            HStack(spacing: 6) {
+                ForEach(Array(preview.prefix(maxTiles).enumerated()), id: \.offset) { _, item in
+                    AppPreviewTile(
+                        artworkURL: item.artworkURL,
+                        displayName: item.displayName
+                    )
+                }
+                if overflow > 0 {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(Color.evSurfaceContainerLow)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .stroke(Color.evOutlineVariant, lineWidth: 1)
+                            )
+                        Text("+\(overflow)")
+                            .font(.custom("Inter", size: 12).weight(.bold))
+                            .foregroundStyle(Color.evOnSurfaceVariant)
+                    }
+                    .frame(width: 38, height: 38)
+                }
+            }
+        }
+
+        // ── Categories section ────────────────────────────────────────────
+        if !model.categoryPreview.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Categories · \(model.categoriesCount)")
+                    .font(.custom("Inter", size: 12).weight(.semibold))
+                    .foregroundStyle(Color.evOnSurfaceVariant)
+
+                // Wrap chips into a flowing horizontal layout.
+                // SwiftUI doesn't have a built-in wrap layout pre-iOS 16,
+                // but chips are few (≤8 from backend) so a simple HStack
+                // that allows truncation is acceptable; the brief only
+                // specifies a horizontal row of chips.
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(model.categoryPreview, id: \.self) { name in
+                            CategoryChip(name: name)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // MARK: - Per-kind iconography
 
     private var iconName: String {
@@ -218,6 +282,83 @@ struct AppControlCard: View {
         }
     }
 }
+
+// MARK: - App Preview Tile
+
+/// A 38×38 rounded-square app icon tile for the lock-confirm card preview row.
+/// Resolves artwork via the backend URL when available; falls back to an iTunes
+/// lookup by display name via `AppArtworkResolver`, then to an SF Symbol.
+private struct AppPreviewTile: View {
+    let artworkURL: URL?
+    let displayName: String
+
+    @State private var resolvedURL: URL? = nil
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color.evPrimaryContainer)
+
+            if let url = artworkURL ?? resolvedURL {
+                AsyncImage(url: url) { phase in
+                    switch phase {
+                    case .success(let image):
+                        image
+                            .resizable()
+                            .scaledToFill()
+                    default:
+                        fallbackIcon
+                    }
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            } else {
+                fallbackIcon
+            }
+        }
+        .frame(width: 38, height: 38)
+        .task(id: displayName) {
+            guard artworkURL == nil, resolvedURL == nil else { return }
+            resolvedURL = await AppArtworkResolver.shared.artwork(forName: displayName)
+        }
+    }
+
+    private var fallbackIcon: some View {
+        Image(systemName: "app.fill")
+            .font(.system(size: 16, weight: .bold))
+            .foregroundStyle(Color.evPrimary)
+    }
+}
+
+// MARK: - Category Chip
+
+/// A pill-shaped chip showing an SF Symbol + category name.
+/// Used in the lock-confirm card's categories section.
+private struct CategoryChip: View {
+    let name: String
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: NameWithIcon.categorySymbol(for: name))
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Color.evPrimary)
+            Text(name)
+                .font(.custom("Inter", size: 12).weight(.semibold))
+                .foregroundStyle(Color.evOnSurface)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(
+            Capsule(style: .continuous)
+                .fill(Color.evSurfaceContainerLow)
+        )
+        .overlay(
+            Capsule(style: .continuous)
+                .stroke(Color.evOutlineVariant, lineWidth: 1)
+        )
+    }
+}
+
+// MARK: - Candidate Icon
 
 private struct CandidateIcon: View {
     let url: URL?
