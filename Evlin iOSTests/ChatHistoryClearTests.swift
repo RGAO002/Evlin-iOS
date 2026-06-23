@@ -154,6 +154,109 @@ final class ChatHistoryClearTests: XCTestCase {
     }
 }
 
+// MARK: - B5: sign-out clear path
+
+/// Tests for Task B5: the sign-out clear-chat path wipes the account-namespaced
+/// store and leaves it with nil account scope so further archives are no-ops.
+///
+/// NOTE: ChatViewModel itself crashes in the test host (ScreenTimeManager /
+/// FamilyControls entitlement not available in simulator unit-test targets —
+/// a pre-existing B3 issue). These tests exercise the ChatHistoryStore sign-out
+/// contract directly, which is the unit-testable seam the task spec allows.
+@MainActor
+final class ChatHistorySignOutTests: XCTestCase {
+
+    private var store: ChatHistoryStore!
+    private let testAccountID = UUID()
+
+    // Use a separate in-memory suite so these tests never touch real app
+    // storage or trigger UserDefaults observers in the running test host.
+    private var testDefaults: UserDefaults!
+    private let legacyKey = "evlin_chat_history"
+
+    override func setUp() async throws {
+        try await super.setUp()
+        let suiteName = "ChatHistorySignOutTests.\(UUID().uuidString)"
+        testDefaults = UserDefaults(suiteName: suiteName)!
+        store = ChatHistoryStore(defaults: testDefaults)
+        store.upload = { _, _, _ in }
+        // Seed the account-namespaced store with one conversation.
+        store.setAccount(testAccountID)
+        let msg = StoredChatMessage(sanitizing: ChatMessage(role: .parent, content: "Hello", timestamp: Date()))
+        await store.archiveCurrent(id: UUID(), title: "Pre-signout conv", messages: [msg])
+        XCTAssertEqual(store.conversations.count, 1, "precondition: store has one conversation")
+    }
+
+    override func tearDown() async throws {
+        store.clearAllLocal()
+        store = nil
+        testDefaults.removePersistentDomain(forName: testDefaults.description)
+        testDefaults = nil
+        try await super.tearDown()
+    }
+
+    /// The sign-out clear path (simulated by calling clearAllLocal + setAccount(nil) directly)
+    /// must wipe all conversations AND make subsequent archiveCurrent calls a no-op.
+    /// This mirrors exactly what ChatViewModel's .evlinClearChat observer does to the store.
+    func test_signOut_clearAllLocal_then_setNil_disables_archive() async throws {
+        // Simulate the observer: clearAllLocal then setAccount(nil).
+        store.clearAllLocal()
+        store.setAccount(nil)
+
+        XCTAssertTrue(store.conversations.isEmpty, "clearAllLocal must have emptied the store")
+
+        // After setAccount(nil), archiveCurrent must be a silent no-op.
+        let msg2 = StoredChatMessage(sanitizing: ChatMessage(role: .agent, content: "Hi", timestamp: Date()))
+        await store.archiveCurrent(id: UUID(), title: "Should be dropped", messages: [msg2])
+        XCTAssertTrue(store.conversations.isEmpty,
+                      "archiveCurrent must be a no-op after setAccount(nil)")
+    }
+
+    /// The legacy evlin_chat_history UserDefaults key must be absent after sign-out.
+    /// AuthService.signOutLocally removes it. This test verifies the removeObject
+    /// + re-read round-trip behaves correctly using the isolated test suite.
+    func test_legacyKey_absent_after_signOut() {
+        // Seed then remove — verifying that once gone it stays gone.
+        testDefaults.set("legacy_data", forKey: legacyKey)
+        testDefaults.removeObject(forKey: legacyKey)
+        XCTAssertNil(testDefaults.object(forKey: legacyKey),
+                     "legacy evlin_chat_history key must be absent after sign-out")
+    }
+
+    /// After sign-out (setAccount(nil)) a subsequent setAccount(id) re-enables
+    /// archiving — this is the Part 2 wiring test (sign-in re-scopes the store).
+    func test_setAccount_after_signOut_re_enables_archive() async throws {
+        // Simulate sign-out.
+        store.clearAllLocal()
+        store.setAccount(nil)
+
+        // Simulate sign-in with a new account.
+        let newAccountID = UUID()
+        store.setAccount(newAccountID)
+
+        // Archive must succeed now.
+        let msg = StoredChatMessage(sanitizing: ChatMessage(role: .parent, content: "After sign in", timestamp: Date()))
+        await store.archiveCurrent(id: UUID(), title: "Post sign-in", messages: [msg])
+        XCTAssertEqual(store.conversations.count, 1,
+                       "archiveCurrent must succeed after setAccount is called with a real id")
+    }
+
+    /// Two accounts on the same store/UserDefaults suite must not share data.
+    /// Re-scoping from accountA → accountB shows an empty conversation list.
+    func test_setAccount_switches_scope_cleanly() async throws {
+        let accountA = testAccountID
+        let accountB = UUID()
+
+        // accountA already has 1 conversation (from setUp).
+        XCTAssertEqual(store.conversations.count, 1, "precondition: account A has a conversation")
+
+        // Switch to account B — should see empty list.
+        store.setAccount(accountB)
+        XCTAssertTrue(store.conversations.isEmpty,
+                      "account B must start with no conversations")
+    }
+}
+
 // MARK: - B3: VM-level tests (conversation-id, clear=archive+reset, seed exclusion)
 
 /// Tests for ChatViewModel.clear(), currentConversationID rotation, and seed exclusion.

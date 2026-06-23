@@ -99,6 +99,9 @@ enum ReflectionParentNoteFallback {
 extension Notification.Name {
     static let evlinClearChat = Notification.Name("evlinClearChat")
     static let evlinLockStateChanged = Notification.Name("evlinLockStateChanged")
+    /// Posted by AuthService after sign-in (postAuth) and restore(). Carries
+    /// `userInfo["account_id"]` (String UUID) so observers can scope their stores.
+    static let evlinAccountSignedIn = Notification.Name("evlin.account.signedIn")
 
     /// DEBUG-only: emitted by the child-side pairing screen when the
     /// "Single-device testing? Switch to Parent" button is tapped.

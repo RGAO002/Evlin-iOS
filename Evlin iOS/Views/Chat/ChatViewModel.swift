@@ -114,6 +114,7 @@ class ChatViewModel: ObservableObject {
     var chatHistoryStore: ChatHistoryStore = ChatHistoryStore()
 
     private var clearObserver: Any?
+    private var accountSignedInObserver: Any?
 
     init() {
         loadMessages()
@@ -135,11 +136,34 @@ class ChatViewModel: ObservableObject {
             req.httpBody = try JSONEncoder().encode(payload)
             _ = try await client.authedData(for: req)
         }
+        // B5 Part 2: wire the account id into the history store at init time so
+        // clear() → archiveCurrent is NOT a silent no-op when the user is signed in.
+        if let raw = UserDefaults.standard.string(forKey: "evlin.accountID"),
+           let accountID = UUID(uuidString: raw) {
+            chatHistoryStore.setAccount(accountID)
+        }
         clearObserver = NotificationCenter.default.addObserver(
             forName: .evlinClearChat, object: nil, queue: .main
         ) { [weak self] _ in
-            self?.messages.removeAll()
-            self?.surfacedReflectionSubmissionIDs.removeAll()
+            guard let self else { return }
+            // Remove the per-account current-conversation scratch store.
+            UserDefaults.standard.removeObject(forKey: self.currentConvStorageKey)
+            // Wipe all archived conversations for this account and drop the account scope.
+            self.chatHistoryStore.clearAllLocal()
+            self.chatHistoryStore.setAccount(nil)
+            self.messages.removeAll()
+            self.surfacedReflectionSubmissionIDs.removeAll()
+        }
+        // B5 Part 2: when a new session begins (sign-in or restore) wire the account
+        // so archives immediately work for this user.
+        accountSignedInObserver = NotificationCenter.default.addObserver(
+            forName: .evlinAccountSignedIn, object: nil, queue: .main
+        ) { [weak self] note in
+            guard let self,
+                  let raw = note.userInfo?["account_id"] as? String,
+                  let accountID = UUID(uuidString: raw)
+            else { return }
+            self.chatHistoryStore.setAccount(accountID)
         }
         rebuildSurfacedReflectionSubmissionIndex()
         resumePendingAckPolls()

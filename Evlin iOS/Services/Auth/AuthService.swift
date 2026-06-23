@@ -52,9 +52,23 @@ final class AuthService {
     /// the first authed call will refresh if the access token is stale.
     /// Rebuilds the full AuthAccountDTO (familyID/displayName) from the blob.
     func restore() {
+        // One-shot migration: drop the legacy global evlin_chat_history key on
+        // the first launch of this build. Never uploaded, never migrated.
+        let legacyCleanedKey = "evlin.legacyChatHistoryDropped"
+        if !UserDefaults.standard.bool(forKey: legacyCleanedKey) {
+            UserDefaults.standard.removeObject(forKey: "evlin_chat_history")
+            UserDefaults.standard.set(true, forKey: legacyCleanedKey)
+        }
         if let stored = KeychainStore.shared.load(),
            let acct = Self.accountDTO(from: stored) {
             state = .signedIn(acct)
+            // Persist account id so ChatViewModel can scope its store on init.
+            UserDefaults.standard.set(acct.id.uuidString, forKey: "evlin.accountID")
+            NotificationCenter.default.post(
+                name: .evlinAccountSignedIn,
+                object: nil,
+                userInfo: ["account_id": acct.id.uuidString]
+            )
         } else {
             state = .signedOut
         }
@@ -95,6 +109,9 @@ final class AuthService {
     func signOutLocally() {
         KeychainStore.shared.clear()
         state = .signedOut
+        // Clear chat so account B never sees account A's messages.
+        UserDefaults.standard.removeObject(forKey: "evlin_chat_history")
+        NotificationCenter.default.post(name: .evlinClearChat, object: nil)
     }
 
     /// POST /auth/email {email, password, full_name?}. The backend create-or-
@@ -155,6 +172,13 @@ final class AuthService {
                 needsFamily: acct.needsFamily
             ))
             state = .signedIn(acct)
+            // Persist account id so ChatViewModel can scope its store on init/re-init.
+            UserDefaults.standard.set(acct.id.uuidString, forKey: "evlin.accountID")
+            NotificationCenter.default.post(
+                name: .evlinAccountSignedIn,
+                object: nil,
+                userInfo: ["account_id": acct.id.uuidString]
+            )
         } catch {
             lastError = "network_error: \(error.localizedDescription)"
         }
