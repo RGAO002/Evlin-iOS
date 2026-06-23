@@ -498,6 +498,8 @@ struct PollCommandDTO: Decodable {
     // B2: top-level provenance (takes precedence over target.lock_source).
     let lock_source: String?
     let unlock_sources: [String]?
+    /// A4: present when action == "earned_time_config". Nil for all other actions.
+    let earned_time_config: PollEarnedTimeConfigDTO?
 }
 
 /// `set_limit.limit` wire payload (P3 decode only). Literal snake_case stored
@@ -527,6 +529,29 @@ struct PollClearDTO: Decodable {
     let rule_id: UUID
     let reason: String?
     let updated_at: String
+}
+
+/// A4: `earned_time_config` top-level payload (same-day pool/cap sync from
+/// backend). Literal snake_case stored property names — this codebase does NOT
+/// use `convertFromSnakeCase`. Synthesized `Decodable` handles all optionals.
+struct PollEarnedTimeConfigDTO: Decodable {
+    let child_profile_id: String?
+    let child_device_id: String?
+    let effective_date: String?
+    let usage_date: String?
+    let timezone: String?
+    let daily_pool_minutes: Int
+    let device_cap_minutes: Int
+    let earned_bucket_minutes: Int?
+    let selected_set: PollEarnedConfigSelectedSetDTO?
+}
+
+/// A4: `earned_time_config.selected_set` nested payload.
+struct PollEarnedConfigSelectedSetDTO: Decodable {
+    let list_id: String?
+    let recordKey: String?
+    let targetKey: String?
+    let has_tokens: Bool?
 }
 
 // MARK: - v2 ack-status decode

@@ -110,6 +110,18 @@ final class CommandPoller {
     /// Test seam for the real network poll. Nil in production.
     var pollCommandsOverride: ((UUID, APIClient) async throws -> [PollCommandDTO])?
 
+    // MARK: - Earned-time config seams (test-only hooks; production uses the defaults)
+
+    /// A4: Called by the inline `earned_time_config` handler instead of
+    /// `EarnedTimeStore.shared.saveLockedSetID` so tests can observe without
+    /// touching real App Group UserDefaults. Nil in production.
+    var saveLockedSetIDOverride: ((String, Data?) -> Void)?
+
+    /// A4: Called by the inline `earned_time_config` handler instead of
+    /// `EarnedBudgetScheduler.shared.arm` so tests can observe without needing
+    /// DeviceActivity entitlements. Nil in production.
+    var armBudgetOverride: ((Int, Int, FamilyActivitySelection) -> Void)?
+
     /// How often to poll while iOS grants background execution after the app
     /// leaves foreground. Tunable in tests.
     var backgroundPollIntervalNanoseconds: UInt64 = 5_000_000_000
@@ -397,6 +409,13 @@ final class CommandPoller {
     }
 
     private func execute(poll: PollCommandDTO, api: APIClient) async {
+        // A4: Intercept earned_time_config BEFORE lockCommand() so the command
+        // never reaches ActionExecutor. Handle inline and ack confirmed.
+        if poll.action == CommandAction.earnedTimeConfig.rawValue {
+            await handleEarnedTimeConfig(poll: poll, api: api)
+            return
+        }
+
         let cmd = Self.lockCommand(from: poll)
 
         var blob: Data? = nil
@@ -529,5 +548,78 @@ final class CommandPoller {
         )
         guard let data = try? JSONEncoder().encode(snapshot) else { return nil }
         return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    }
+
+    // MARK: - A4: earned_time_config inline handler
+
+    /// Handle a `earned_time_config` command inline, without going through
+    /// `ActionExecutor`.
+    ///
+    /// 1. Persists `selected_set.list_id` via EarnedTimeStore (+ re-keys any
+    ///    existing savedList shield record via ActiveLockStore.reKeyShieldRecord).
+    /// 2. Re-arms the `evlin.earned.budget` DeviceActivity ladder via
+    ///    EarnedBudgetScheduler.arm(poolMinutes:capMinutes:selection:).
+    /// 3. Acks the command as "confirmed" regardless of missing optional fields.
+    ///
+    /// Guard: if the device has no measurement selection (earned-time capture
+    /// never ran), arm() is skipped but the command is still acked confirmed.
+    private func handleEarnedTimeConfig(poll: PollCommandDTO, api: APIClient) async {
+        let cfg = poll.earned_time_config
+
+        // Step 1: Persist locked-set list_id + re-key any existing shield record.
+        if let listID = cfg?.selected_set?.list_id, !listID.isEmpty {
+            let existing = EarnedTimeStore.shared.lockedSetID ?? ""
+            if let override = saveLockedSetIDOverride {
+                override(listID, nil)
+            } else {
+                EarnedTimeStore.shared.saveLockedSetID(listID, tokenData: nil)
+            }
+            // Re-key any shield record stored under an old/provisional id.
+            if existing != listID {
+                await ActiveLockStore.shared.reKeyShieldRecord(
+                    fromLocalID: existing,
+                    toBackendID: listID
+                )
+            }
+        }
+
+        // Step 2: Re-arm the DeviceActivity budget ladder if measurement selection
+        // is present (captured during the one-time setup flow).
+        let poolMinutes = cfg?.daily_pool_minutes ?? 0
+        let capMinutes  = cfg?.device_cap_minutes  ?? 0
+
+        if poolMinutes > 0, capMinutes > 0 {
+            if let armOverride = armBudgetOverride {
+                // Test seam: provide the real selection (or empty) to the override
+                // so tests can verify pool/cap values without DeviceActivity.
+                let selection = EarnedTimeStore.shared.measurementSelection
+                    ?? FamilyActivitySelection()
+                armOverride(poolMinutes, capMinutes, selection)
+            } else if let selection = EarnedTimeStore.shared.measurementSelection {
+                EarnedBudgetScheduler.shared.arm(
+                    poolMinutes: poolMinutes,
+                    capMinutes: capMinutes,
+                    selection: selection
+                )
+            }
+            // If measurementSelection is nil, skip arm() gracefully.
+        }
+
+        // Step 3: Ack as confirmed.
+        let commandID = poll.command_id
+        do {
+            try await api.ack(commandID: commandID, status: "confirmed", detail: nil)
+            CommandDeliveryDiagnostics.record(
+                CommandDeliveryDiagnostics.keyCommandAck,
+                "ok command=\(commandID.uuidString) status=confirmed (earned_time_config)"
+            )
+        } catch {
+            CommandDeliveryDiagnostics.record(
+                CommandDeliveryDiagnostics.keyCommandAck,
+                "failed command=\(commandID.uuidString) status=confirmed " +
+                "error=\(error.localizedDescription)"
+            )
+            print("[CommandPoller] ack failed for earned_time_config \(commandID): \(error)")
+        }
     }
 }

@@ -12,6 +12,9 @@ enum CommandAction: String, Codable, Sendable {
     case expandLibrary = "expand_library"
     case setLimit = "set_limit"
     case clearLimit = "clear_limit"
+    /// A4: same-day pool/cap change sync from the backend. Handled inline in
+    /// CommandPoller; never reaches ActionExecutor.
+    case earnedTimeConfig = "earned_time_config"
 }
 
 /// Per-app daily time limit rule decoded from a `set_limit` command (P3 wire

@@ -195,6 +195,11 @@ final class ActionExecutor: @unchecked Sendable {
             return executeSetLimit(cmd)
         case .clearLimit:
             return await executeClearLimit(cmd)
+        case .earnedTimeConfig:
+            // A4: this case is intercepted in CommandPoller.execute(poll:api:) BEFORE
+            // ActionExecutor is called. If it somehow arrives here, fail gracefully
+            // rather than misrouting to shield or crashing.
+            return .failed(.execution("earned_time_config must not reach ActionExecutor"))
         }
     }
 

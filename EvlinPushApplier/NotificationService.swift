@@ -143,6 +143,11 @@ enum NSELockApplier {
             // planner/executor, not the push applier. P3 is wire-decode only,
             // so this path makes no lock-state change here.
             return nil
+        case .earnedTimeConfig:
+            // A4: same-day pool/cap sync — handled inline in CommandPoller on the
+            // main app side. The NSE has no DeviceActivity scheduling capability,
+            // so leave this command pending for the full app poller.
+            return nil
         }
     }
 
