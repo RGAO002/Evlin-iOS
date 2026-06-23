@@ -2296,7 +2296,12 @@ struct HomeSettingsSheet: View {
     }
 
     private func performSignOut() {
-        KeychainStore.shared.clear()
+        // C2 fix: route through AuthService.signOutLocally() so the P0-1
+        // chat-clear path (evlinClearChat → clearAllLocal + setAccount(nil))
+        // always runs on sign-out. AuthService clears the Keychain, posts
+        // evlinClearChat, and removes evlin.accountID. We handle the
+        // remaining app-state resets (onboarding / family prefs) here.
+        AuthService(api: apiClient).signOutLocally()
         let defaults = UserDefaults.standard
         defaults.set(false, forKey: "onboardingComplete")
         defaults.set("", forKey: "appMode")
@@ -2306,6 +2311,7 @@ struct HomeSettingsSheet: View {
         defaults.removeObject(forKey: "parentName")
         defaults.removeObject(forKey: "childName")
         defaults.removeObject(forKey: "targetChildId")
+        // evlinSessionSignedOut drives HomeView back to signed-out state.
         NotificationCenter.default.post(name: .evlinSessionSignedOut, object: nil)
         onClose()
     }

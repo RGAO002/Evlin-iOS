@@ -136,6 +136,24 @@ class ChatViewModel: ObservableObject {
             req.httpBody = try JSONEncoder().encode(payload)
             _ = try await client.authedData(for: req)
         }
+        // I1: wire fetchRemote seams so History hydrates from the backend on
+        // load (list) and on open when the local blob is missing (detail).
+        chatHistoryStore.fetchRemoteList = {
+            let req = client.authedRequest(
+                path: "/parent/chat/conversations",
+                method: "GET"
+            )
+            let (data, _) = try await client.authedData(for: req)
+            return try JSONDecoder().decode([RemoteConversationSummary].self, from: data)
+        }
+        chatHistoryStore.fetchRemoteDetail = { id in
+            let req = client.authedRequest(
+                path: "/parent/chat/conversations/\(id.uuidString)",
+                method: "GET"
+            )
+            let (data, _) = try await client.authedData(for: req)
+            return try JSONDecoder().decode(RemoteConversationDetail.self, from: data)
+        }
         // B5 Part 2: wire the account id into the history store at init time so
         // clear() → archiveCurrent is NOT a silent no-op when the user is signed in.
         if let raw = UserDefaults.standard.string(forKey: "evlin.accountID"),
@@ -323,7 +341,13 @@ class ChatViewModel: ObservableObject {
         surfacedReflectionSubmissionIDs.removeAll()
         // Replace the message list (triggers saveMessages but inert messages
         // are well-formed ChatMessages so no data is lost).
-        messages = inert.isEmpty ? { var s = ChatMessage(role: .agent, content: "", timestamp: Date()); s.isSeed = true; return [s] }() : inert
+        // I2: when the (post-hydrate) list is empty, seed the welcome message
+        // rather than injecting a blank agent bubble.
+        if inert.isEmpty {
+            seedInitialMessages()
+        } else {
+            messages = inert
+        }
     }
 
     /// Strategy-agent T11.11 — POST /parent/chat/answer-question and feed

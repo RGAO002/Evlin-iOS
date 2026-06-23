@@ -152,6 +152,43 @@ final class ChatHistoryClearTests: XCTestCase {
         // Account B must not see Account A's conversations.
         XCTAssertTrue(storeB.conversations.isEmpty, "account B must not see account A's data")
     }
+
+    // MARK: - I1: loadConversations merges injected remote list
+
+    /// `loadConversations` must merge a remote-only conversation into the local
+    /// index via the `fetchRemoteList` seam (last-write-wins; remote-only gets added).
+    func test_loadConversations_merges_remote_list() async throws {
+        // Local: one conversation.
+        store.upload = { _, _, _ in }
+        let localID = UUID()
+        let localMsg = StoredChatMessage(sanitizing: ChatMessage(role: .parent, content: "local", timestamp: Date()))
+        await store.archiveCurrent(id: localID, title: "Local Conv", messages: [localMsg])
+        XCTAssertEqual(store.conversations.count, 1, "precondition: one local conversation")
+
+        // Remote list: a NEW conversation that isn't in local storage.
+        let remoteID = UUID()
+        let remoteUpdated = ISO8601DateFormatter().string(from: Date().addingTimeInterval(60))
+        store.fetchRemoteList = {
+            [RemoteConversationSummary(
+                id: remoteID,
+                title: "Remote Conv",
+                updated_at: remoteUpdated,
+                preview: "Hello from backend"
+            )]
+        }
+
+        await store.loadConversations()
+
+        // Give the background merge task a moment to complete.
+        try await Task.sleep(nanoseconds: 100_000_000) // 100ms
+
+        XCTAssertEqual(store.conversations.count, 2, "remote-only conversation must be added to local index")
+        let remoteEntry = store.conversations.first(where: { $0.id == remoteID })
+        XCTAssertNotNil(remoteEntry, "remote conversation must appear in local index")
+        XCTAssertEqual(remoteEntry?.title, "Remote Conv")
+        XCTAssertEqual(remoteEntry?.preview, "Hello from backend")
+        XCTAssertFalse(remoteEntry?.needsSync ?? true, "remote-only entry must not be marked needsSync")
+    }
 }
 
 // MARK: - B5: sign-out clear path

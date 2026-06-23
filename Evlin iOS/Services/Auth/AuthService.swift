@@ -111,6 +111,9 @@ final class AuthService {
         state = .signedOut
         // Clear chat so account B never sees account A's messages.
         UserDefaults.standard.removeObject(forKey: "evlin_chat_history")
+        // Drop stale account id so a later ChatViewModel can't re-scope to the
+        // signed-out account's store (C2 / account-isolation fix).
+        UserDefaults.standard.removeObject(forKey: "evlin.accountID")
         NotificationCenter.default.post(name: .evlinClearChat, object: nil)
     }
 

@@ -88,6 +88,12 @@ private struct ConversationRow: View {
             Text(summary.updatedAt, style: .relative)
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            if let preview = summary.preview, !preview.isEmpty {
+                Text(preview)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
         }
         .padding(.vertical, 2)
     }

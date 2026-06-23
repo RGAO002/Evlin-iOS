@@ -9,6 +9,11 @@
 //  calls `upload` best-effort. A failed upload marks `needsSync` and NEVER
 //  loses the local data. Failed uploads are retried on `loadConversations`.
 //
+//  I1: a `fetchRemote` seam lets `loadConversations` merge the backend list
+//  (last-write-wins by `updated_at`) and `open(_:)` hydrate a missing blob.
+//  Default implementation is a no-op so B2/B3 unit tests (no network) still
+//  pass without change.
+//
 
 import Combine
 import Foundation
@@ -19,6 +24,24 @@ import Foundation
 /// Sent via authedRequest in Task B4 when a conversation is archived.
 struct ConversationUploadPayload: Codable {
     let title: String?
+    let messages: [StoredChatMessage]
+}
+
+// MARK: - Remote DTOs (I1)
+
+/// Wire-format for one entry in GET /parent/chat/conversations.
+struct RemoteConversationSummary: Decodable {
+    let id: UUID
+    let title: String?
+    let updated_at: String   // ISO-8601
+    let preview: String?
+}
+
+/// Wire-format for GET /parent/chat/conversations/{id}.
+struct RemoteConversationDetail: Decodable {
+    let id: UUID
+    let title: String?
+    let updated_at: String   // ISO-8601
     let messages: [StoredChatMessage]
 }
 
@@ -34,6 +57,9 @@ struct ConversationSummary: Codable, Identifiable, Equatable {
     /// `true` when the last `upload` attempt failed; retried on next
     /// `loadConversations` call (outbox pattern).
     var needsSync: Bool
+    /// Short preview of the last message (~80 chars). Populated on
+    /// `archiveCurrent` and from the remote list's `preview` field (B7/I1).
+    var preview: String?
 }
 
 // MARK: - ChatHistoryStore
@@ -51,9 +77,9 @@ struct ConversationSummary: Codable, Identifiable, Equatable {
 /// accounts on the same device never share data. `setAccount(_:)` must be
 /// called after sign-in. `clearAllLocal()` is called on sign-out.
 ///
-/// ### Testability seam
-/// The `upload` closure is a mutable var — tests inject a throwing stub to
-/// exercise the outbox path without any real network.
+/// ### Testability seams
+/// `upload` and `fetchRemote` are mutable vars — tests inject stubs to
+/// exercise paths without any real network.
 @MainActor
 final class ChatHistoryStore: ObservableObject {
 
@@ -82,6 +108,21 @@ final class ChatHistoryStore: ObservableObject {
         // Intentionally does not throw so a fresh install stays in-sync=true.
     }
 
+    // MARK: - FetchRemote seam (I1)
+
+    /// Called by `loadConversations` to get the remote summary list, and by
+    /// `open(_:)` to hydrate a missing message blob. Default is a no-op so
+    /// existing B2/B3 unit tests (which inject no network) still pass.
+    ///
+    /// The first closure returns `[RemoteConversationSummary]` (the list endpoint).
+    /// The second closure returns `RemoteConversationDetail` for one id (the detail endpoint).
+    var fetchRemoteList: () async throws -> [RemoteConversationSummary] = {
+        return []
+    }
+    var fetchRemoteDetail: (_ id: UUID) async throws -> RemoteConversationDetail = { id in
+        throw URLError(.unsupportedURL)
+    }
+
     // MARK: - Private storage
 
     private let defaults: UserDefaults
@@ -97,6 +138,12 @@ final class ChatHistoryStore: ObservableObject {
         let d = JSONDecoder()
         d.dateDecodingStrategy = .iso8601
         return d
+    }()
+
+    private static let iso8601: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
     }()
 
     // MARK: - Init
@@ -129,16 +176,25 @@ final class ChatHistoryStore: ObservableObject {
         // 1. Write messages blob.
         saveMessages(messages, for: accountID, convID: id)
 
-        // 2. Upsert the summary in the index — marked needsSync until upload succeeds.
+        // 2. Derive preview from the last non-empty message content (~80 chars).
+        let previewText: String? = messages.reversed()
+            .first(where: { !$0.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
+            .map { msg in
+                let raw = msg.content.trimmingCharacters(in: .whitespacesAndNewlines)
+                return raw.count > 80 ? String(raw.prefix(80)) + "…" : raw
+            }
+
+        // 3. Upsert the summary in the index — marked needsSync until upload succeeds.
         let now = Date()
         var summary = conversations.first(where: { $0.id == id })
             ?? ConversationSummary(id: id, title: title, createdAt: now, updatedAt: now, needsSync: true)
         summary.title = title
         summary.updatedAt = now
         summary.needsSync = true
+        summary.preview = previewText ?? summary.preview
         upsert(summary, for: accountID)
 
-        // 3. Fire background upload — best-effort; local copy is already safe.
+        // 4. Fire background upload — best-effort; local copy is already safe.
         let uploadClosure = self.upload
         Task { [weak self] in
             do {
@@ -151,21 +207,57 @@ final class ChatHistoryStore: ObservableObject {
         }
     }
 
-    // MARK: - Load
+    // MARK: - Load (with remote merge, I1)
 
-    /// Reloads the conversation index and retries any outbox entries.
+    /// Reloads the conversation index, best-effort merges the remote list
+    /// (last-write-wins by `updated_at`), and retries any outbox entries.
+    /// Network failure is silently ignored — local data is always shown.
     func loadConversations() async {
         guard let accountID else { return }
         conversations = loadIndex(for: accountID)
+
+        // I1: fetch remote list best-effort and merge into local index.
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let remote = try await self.fetchRemoteList()
+                await self.mergeRemoteList(remote, accountID: accountID)
+            } catch {
+                // Offline or auth error — local data is already shown, no action needed.
+            }
+        }
+
         await retryOutbox(for: accountID)
     }
 
-    // MARK: - Open
+    // MARK: - Open (with remote hydration, I1)
 
-    /// Returns the stored messages for a conversation, or empty if not found.
+    /// Returns the stored messages for a conversation. When the local blob is
+    /// missing or empty, attempts to fetch the detail from the backend first
+    /// (best-effort; returns empty on failure so UI stays responsive).
     func open(_ id: UUID) async -> [StoredChatMessage] {
         guard let accountID else { return [] }
-        return loadMessages(for: accountID, convID: id)
+        let local = loadMessages(for: accountID, convID: id)
+        if !local.isEmpty { return local }
+
+        // I1: no local blob — try to hydrate from backend.
+        do {
+            let detail = try await fetchRemoteDetail(id)
+            if !detail.messages.isEmpty {
+                saveMessages(detail.messages, for: accountID, convID: id)
+                // Update summary metadata from remote detail.
+                let isoDate = Self.iso8601.date(from: detail.updated_at) ?? Date()
+                if let idx = conversations.firstIndex(where: { $0.id == id }) {
+                    conversations[idx].updatedAt = isoDate
+                    conversations[idx].title = detail.title ?? conversations[idx].title
+                    saveIndex(conversations, for: accountID)
+                }
+                return detail.messages
+            }
+        } catch {
+            // Offline or not found — fall through and return empty.
+        }
+        return []
     }
 
     // MARK: - Rename
@@ -260,6 +352,46 @@ final class ChatHistoryStore: ObservableObject {
                     // Still offline — keep needsSync=true, retry next time.
                 }
             }
+        }
+    }
+
+    /// I1: merge the remote summary list into the local index.
+    /// Last-write-wins by `updated_at`; remote-only entries are added.
+    @MainActor
+    private func mergeRemoteList(_ remote: [RemoteConversationSummary], accountID: UUID) {
+        var changed = false
+        for rem in remote {
+            let remDate = Self.iso8601.date(from: rem.updated_at)
+                // Fallback: try without fractional seconds.
+                ?? ISO8601DateFormatter().date(from: rem.updated_at)
+                ?? Date(timeIntervalSince1970: 0)
+
+            if let idx = conversations.firstIndex(where: { $0.id == rem.id }) {
+                // Existing local entry — only update if remote is newer.
+                if remDate > conversations[idx].updatedAt {
+                    conversations[idx].title = rem.title ?? conversations[idx].title
+                    conversations[idx].updatedAt = remDate
+                    conversations[idx].preview = rem.preview ?? conversations[idx].preview
+                    changed = true
+                }
+            } else {
+                // Remote-only conversation — add to local index (blob hydrated lazily in open).
+                let summary = ConversationSummary(
+                    id: rem.id,
+                    title: rem.title,
+                    createdAt: remDate,
+                    updatedAt: remDate,
+                    needsSync: false,
+                    preview: rem.preview
+                )
+                conversations.append(summary)
+                changed = true
+            }
+        }
+        if changed {
+            // Re-sort newest-first.
+            conversations.sort { $0.updatedAt > $1.updatedAt }
+            saveIndex(conversations, for: accountID)
         }
     }
 }
