@@ -69,12 +69,18 @@ enum LimitShieldLogic {
         return out
     }
 
-    /// Daily-reset strip: drop EVERY `source == .limit` record, leaving every
-    /// `source == .manual` (parent/reflection) record untouched. Pure.
+    /// Daily-reset strip: remove the `.limit` source from EVERY record that carries
+    /// it, then delete the record only when its sources set becomes empty.
+    ///
+    /// B1 carry fix: the prior implementation used a blanket `filter { !sources.contains(.limit) }`
+    /// which deleted the WHOLE record for mixed-source records like `{.limit, .earnedTime}` or
+    /// `{.limit, .manual}`. The correct behaviour is source-aware removal via
+    /// `ShieldSourceLogic.strippingSource` — records whose non-limit sources survive are kept.
+    /// Pure.
     static func strippingLimitShields(
         from shields: [String: ShieldRecord]
     ) -> [String: ShieldRecord] {
-        shields.filter { !$0.value.sources.contains(.limit) }
+        ShieldSourceLogic.strippingSource(.limit, from: shields)
     }
 
     // MARK: - "Limit reached" notification copy

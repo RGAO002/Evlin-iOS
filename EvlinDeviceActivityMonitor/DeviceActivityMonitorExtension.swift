@@ -33,6 +33,16 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             return
         }
 
+        // B5 — Earned-time daily reset. The `evlin.earned.budget` interval starts at
+        // midnight each day (see `EarnedBudgetScheduler.arm`). Strip ONLY the
+        // `.earnedTime` source from all selected-set records — do NOT delete whole
+        // records (a record with {.manual, .earnedTime} must survive with {.manual}).
+        // This mirrors the limit daily-reset path above but is source-specific.
+        if raw == "evlin.earned.budget" {
+            resetEarnedTimeShields(activity: raw)
+            return
+        }
+
         guard raw == "evlin.command.heartbeat" else { return }
 
         let ts = ISO8601DateFormatter().string(from: Date())
@@ -126,6 +136,15 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         if event.rawValue.hasPrefix("evlin.limit.") {
             applyLimitShield(eventName: event.rawValue)
         }
+
+        // B5 — Earned-time ladder threshold fired. Event name is `evlin.earned.t<N>`
+        // (armed by `EarnedBudgetScheduler`). Two actions:
+        //   1. POST an idempotent cumulative sample to the A2 backend (with retry queue).
+        //   2. If N ≥ effective cap/tripwire AND no override flag → apply `.earnedTime`
+        //      shield over the Locked-set tokens (pure App Group path, no actor).
+        if event.rawValue.hasPrefix("evlin.earned.t") {
+            handleEarnedThreshold(eventName: event.rawValue, activity: activity)
+        }
     }
 
     /// Threshold-reached enforcement (P7). Parse the `ruleId` from the
@@ -190,6 +209,182 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             trigger: nil
         )
         UNUserNotificationCenter.current().add(request, withCompletionHandler: nil)
+    }
+
+    // MARK: - B5: Earned-time enforcement
+
+    /// Handle an `evlin.earned.t<N>` threshold event.
+    ///
+    /// 1. Parse N from the event name.
+    /// 2. Update `EarnedTimeStore.latestDeviceEstimate` to N (cumulative usage).
+    /// 3. POST an idempotent sample to the backend via `EarnedSampleReporter`.
+    /// 4. Compute the effective cap/tripwire from the store.
+    /// 5. If N ≥ effectiveCap AND override absent → apply `.earnedTime` shield
+    ///    over the Locked-set tokens using the pure App Group path.
+    ///
+    /// Uses NO actor (App Group direct read/write only), matching how `applyLimitShield`
+    /// uses `loadShields` → `LimitShieldLogic` → `recomputeAndApplyShields`.
+    private func handleEarnedThreshold(eventName: String, activity: DeviceActivityName) {
+        let suffix = String(eventName.dropFirst("evlin.earned.t".count))
+        guard let n = Int(suffix) else {
+            NSLog("[Evlin/Ext] earned threshold: unparseable N in '%@'", eventName)
+            return
+        }
+
+        let earnedStore = EarnedTimeStore.shared
+        earnedStore.latestDeviceEstimate = n
+
+        // Drain any queued retries + fire the new sample.
+        if let baseURL = ExtensionConfig.baseURL,
+           let childID = ExtensionConfig.childId,
+           let deviceID = ExtensionConfig.childId {
+            let usageDate = todayISODate()
+            let tz = TimeZone.current.identifier
+            Task {
+                await EarnedSampleReporter.drainRetryQueue(baseURL: baseURL, childID: childID)
+                await EarnedSampleReporter.report(
+                    baseURL: baseURL,
+                    childID: childID,
+                    deviceID: deviceID,
+                    usageDate: usageDate,
+                    timezone: tz,
+                    thresholdMinutes: n,
+                    estimatedMinutes: n
+                )
+            }
+        }
+
+        // Tripwire check: compute effective cap and decide whether to shield.
+        let latestEstimate = earnedStore.latestDeviceEstimate ?? n
+        let backendRemaining = earnedStore.backendRemainingAtLastSync ?? 0
+        // Pool and cap from EarnedTimeStore are not explicitly stored — use
+        // the per-child defaults if available, otherwise use the budget scheduler's
+        // computed ceiling (min(pool, cap)). The tripwire threshold uses the total
+        // pool as both pool and cap when no explicit values are stored, defaulting
+        // to min(pool,cap) = earned ceiling. Lean path: use latestEstimate + backendRemaining
+        // rounded up to bucket, then compare against N.
+        let bucketMinutes = 10 // mirrors EarnedBudgetScheduler.earnedBucketMinutes
+        // Use stored pool/cap if available; fall back to a conservative large value
+        // so tripwire fires at the ladder cap (armed threshold).
+        let poolMinutes = earnedStore.poolMinutes ?? 240
+        let capMinutes  = earnedStore.capMinutes  ?? 240
+        let effectiveCap = EarnedSampleReporter.effectiveCapThreshold(
+            latestEstimate: latestEstimate,
+            backendRemaining: backendRemaining,
+            poolMinutes: poolMinutes,
+            capMinutes: capMinutes,
+            bucketMinutes: bucketMinutes
+        )
+
+        let usageDateForOverride = todayISODate()
+        guard EarnedSampleReporter.shouldApplyEarnedShield(
+            thresholdN: n,
+            effectiveCap: effectiveCap,
+            usageDate: usageDateForOverride,
+            store: earnedStore
+        ) else {
+            NSLog("[Evlin/Ext] earned t%d below effectiveCap=%d or override set — no shield", n, effectiveCap)
+            return
+        }
+
+        applyEarnedTimeShield(earnedStore: earnedStore, thresholdN: n)
+    }
+
+    /// Apply the `.earnedTime` shield over the Locked-set tokens.
+    ///
+    /// Reads the Locked-set ID + token data from `EarnedTimeStore`, unions
+    /// `.earnedTime` into the existing record (or creates one) via
+    /// `ShieldSourceLogic.unioning`, persists, and recomputes.
+    ///
+    /// Pure App Group path — no actor, no `ActiveLockStore`.
+    private func applyEarnedTimeShield(earnedStore: EarnedTimeStore, thresholdN: Int) {
+        guard let lockedSetID = earnedStore.lockedSetID else {
+            NSLog("[Evlin/Ext] earned shield: no lockedSetID in store — cannot shield")
+            return
+        }
+
+        let recordKey = "savedList:\(lockedSetID)"
+        var current = loadShields()
+
+        // Build the record if it doesn't exist yet; union .earnedTime if it does.
+        if let existing = current[recordKey] {
+            current[recordKey] = ShieldSourceLogic.unioning(existing, intoSources: [.earnedTime])
+        } else {
+            // Decode the opaque FamilyActivitySelection blob for the Locked set.
+            // The extension has the ScreenTime entitlement and can decode tokens.
+            var appTokens: Set<ApplicationToken> = []
+            var catTokens:  Set<ActivityCategoryToken> = []
+            var webTokens:  Set<WebDomainToken> = []
+            if let blob = earnedStore.lockedSetTokenData,
+               let sel = try? JSONDecoder().decode(FamilyActivitySelection.self, from: blob) {
+                appTokens = sel.applicationTokens
+                catTokens = sel.categoryTokens
+                webTokens = sel.webDomainTokens
+            }
+            let record = ShieldRecord(
+                recordKey: recordKey,
+                tier: .savedList,
+                targetKey: lockedSetID,
+                displayName: "Locked Set",
+                lastCommandID: UUID(),
+                appTokens: appTokens,
+                categoryTokens: catTokens,
+                webDomainTokens: webTokens,
+                appliesToAll: false,
+                issuedAt: Date(),
+                expiresAt: nil,
+                originalRequest: "earned time cap reached: t\(thresholdN)",
+                targetChildID: ExtensionConfig.childId ?? UUID(),
+                sources: [.earnedTime]
+            )
+            current[recordKey] = record
+        }
+
+        if let data = encodeShields(current) {
+            defaults?.set(data, forKey: shieldsKey)
+        }
+        recomputeAndApplyShields(current)
+
+        let ts = ISO8601DateFormatter().string(from: Date())
+        defaults?.set(
+            "earned_shielded_at=\(ts) t=\(thresholdN) key=\(recordKey)",
+            forKey: "evlin.lastEarnedShield"
+        )
+        NSLog("[Evlin/Ext] earned time cap reached t%d — .earnedTime shield applied", thresholdN)
+    }
+
+    /// B5 daily reset: strip ONLY `.earnedTime` from every shield record.
+    /// Records with only `.earnedTime` are deleted; mixed records survive with
+    /// their remaining sources. Preserves `.manual` and `.limit` sources.
+    private func resetEarnedTimeShields(activity: String) {
+        let current = loadShields()
+        let stripped = ShieldSourceLogic.strippingSource(.earnedTime, from: current)
+        let removedCount = current.count - stripped.count
+        let modifiedCount = stripped.values.filter { rec in
+            current[rec.recordKey]?.sources.contains(.earnedTime) == true
+        }.count
+        if let data = encodeShields(stripped) {
+            defaults?.set(data, forKey: shieldsKey)
+        }
+        recomputeAndApplyShields(stripped)
+
+        let ts = ISO8601DateFormatter().string(from: Date())
+        defaults?.set(
+            "earned_reset_at=\(ts) activity=\(activity) deleted=\(removedCount) modified=\(modifiedCount)",
+            forKey: "evlin.lastEarnedReset"
+        )
+        NSLog("[Evlin/Ext] earned time daily reset activity=%@ deleted=%d modified=%d",
+              activity, removedCount, modifiedCount)
+    }
+
+    /// ISO-8601 date string for today in the device's local timezone.
+    /// Matches the `usage_date` field the backend expects.
+    private func todayISODate() -> String {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone.current
+        return f.string(from: Date())
     }
 
     /// Daily-reset enforcement (P7). Strip EVERY `source == .limit` ShieldRecord

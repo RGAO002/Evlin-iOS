@@ -21,6 +21,8 @@ import FamilyControls
 ///   - `earned.overridden.<usageDate>`     — Bool override flag per date string
 ///   - `earned.backendRemainingAtLastSync` — Int minutes from last backend sync
 ///   - `earned.latestDeviceEstimate`       — Int minutes from extension's latest estimate
+///   - `earned.poolMinutes`                — Int total earned pool for today (from backend)
+///   - `earned.capMinutes`                 — Int hard parent-set cap (from backend)
 final class EarnedTimeStore: @unchecked Sendable {
     static let shared = EarnedTimeStore()
 
@@ -35,6 +37,8 @@ final class EarnedTimeStore: @unchecked Sendable {
     private let lockedSetDataKey = "earned.lockedSetTokenData"
     private let backendKey       = "earned.backendRemainingAtLastSync"
     private let estimateKey      = "earned.latestDeviceEstimate"
+    private let poolKey          = "earned.poolMinutes"
+    private let capKey           = "earned.capMinutes"
 
     private func overrideKey(for usageDate: String) -> String {
         "earned.overridden.\(usageDate)"
@@ -143,6 +147,42 @@ final class EarnedTimeStore: @unchecked Sendable {
         }
     }
 
+    // MARK: - Pool + cap
+
+    /// The total earned pool for today (minutes), as last written by the backend sync.
+    /// Nil until the first sync. The extension uses this for tripwire math.
+    var poolMinutes: Int? {
+        get {
+            guard defaults?.object(forKey: poolKey) != nil else { return nil }
+            return defaults?.integer(forKey: poolKey)
+        }
+        set {
+            if let v = newValue {
+                defaults?.set(v, forKey: poolKey)
+            } else {
+                defaults?.removeObject(forKey: poolKey)
+            }
+            defaults?.synchronize()
+        }
+    }
+
+    /// The hard parent-set cap (minutes), as last written by the backend sync.
+    /// Nil until the first sync. The extension uses this for tripwire math.
+    var capMinutes: Int? {
+        get {
+            guard defaults?.object(forKey: capKey) != nil else { return nil }
+            return defaults?.integer(forKey: capKey)
+        }
+        set {
+            if let v = newValue {
+                defaults?.set(v, forKey: capKey)
+            } else {
+                defaults?.removeObject(forKey: capKey)
+            }
+            defaults?.synchronize()
+        }
+    }
+
     // MARK: - Reset
 
     /// Wipe all earned-time keys. Used by tests and a full account reset.
@@ -152,7 +192,7 @@ final class EarnedTimeStore: @unchecked Sendable {
     /// they care about, so residual keys from other dates do not affect results.
     func removeAll() {
         [measurementKey, lockedSetIDKey, lockedSetDataKey,
-         backendKey, estimateKey].forEach { defaults?.removeObject(forKey: $0) }
+         backendKey, estimateKey, poolKey, capKey].forEach { defaults?.removeObject(forKey: $0) }
         // Sweep any override flags persisted for known test dates.
         if let suite = defaults {
             let prefix = "earned.overridden."

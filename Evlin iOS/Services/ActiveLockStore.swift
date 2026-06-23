@@ -439,11 +439,24 @@ actor ActiveLockStore {
 
         let diskLimit = disk.filter { $0.value.sources.contains(.limit) }
 
-        // (a) Drop any in-memory `.limit` record that is no longer a `.limit`
-        // record on disk (picks up the extension's daily-reset clears).
+        // (a) Drop the `.limit` SOURCE from any in-memory record that is no
+        // longer listed as a `.limit` record on disk (picks up the extension's
+        // daily-reset clears).
+        //
+        // B1 carry fix: the prior implementation called `removeValue(forKey:)` on
+        // any in-memory record with `.limit` that was absent from `diskLimit`.
+        // For mixed-source records like `{.limit, .earnedTime}` or `{.limit, .manual}`
+        // this wiped the WHOLE record — stripping non-limit sources that were still
+        // legitimately active. The fix delegates to `ShieldSourceLogic.removing` to
+        // strip ONLY the `.limit` source and delete the record only when empty.
         for (key, record) in shieldRecords where record.sources.contains(.limit) {
             if diskLimit[key] == nil {
-                shieldRecords.removeValue(forKey: key)
+                // Remove only the .limit source; keep the record if other sources remain.
+                if let trimmed = ShieldSourceLogic.removing(.limit, from: record) {
+                    shieldRecords[key] = trimmed
+                } else {
+                    shieldRecords.removeValue(forKey: key)
+                }
             }
         }
 
