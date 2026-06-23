@@ -516,7 +516,10 @@ final class CommandPoller {
                 AckEffectiveState.ShieldCover(
                     displayName: $0.displayName,
                     expiresAtISO: $0.expiresAt.map { ISO8601DateFormatter().string(from: $0) },
-                    tier: $0.tier.rawValue
+                    tier: $0.tier.rawValue,
+                    recordKey: $0.recordKey,
+                    targetKey: $0.targetKey,
+                    sources: $0.sources.map { $0.rawValue }.sorted()
                 )
             }
         let snapshot = AckEffectiveState(

@@ -111,6 +111,27 @@ struct AckEffectiveState: Codable, Sendable, Equatable {
         let displayName: String
         let expiresAtISO: String?      // nil = permanent
         let tier: String               // ShieldTier rawValue
+        // B7: identity + provenance fields (optional for back-compat with old binaries)
+        let recordKey: String?         // e.g. "savedList:<listID>"
+        let targetKey: String?         // e.g. "<listID>"
+        let sources: [String]?         // ShieldSource rawValues: "manual"/"limit"/"earnedTime"
+
+        // Memberwise init with defaults for back-compat callers that don't pass the new fields.
+        init(
+            displayName: String,
+            expiresAtISO: String?,
+            tier: String,
+            recordKey: String? = nil,
+            targetKey: String? = nil,
+            sources: [String]? = nil
+        ) {
+            self.displayName = displayName
+            self.expiresAtISO = expiresAtISO
+            self.tier = tier
+            self.recordKey = recordKey
+            self.targetKey = targetKey
+            self.sources = sources
+        }
     }
     let isBlocked: Bool
     let shieldsCovering: [ShieldCover]
