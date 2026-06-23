@@ -1876,6 +1876,11 @@ struct HomeSettingsSheet: View {
                 } label: {
                     Label("Whole-device threshold test", systemImage: "bolt.badge.clock")
                 }
+                NavigationLink {
+                    EarnedTimeMeasurementCaptureView()
+                } label: {
+                    Label("Earned time — measurement capture (B3)", systemImage: "timer.circle")
+                }
                 #endif
                 NavigationLink {
                     LockActivityReviewScreen()

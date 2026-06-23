@@ -143,6 +143,7 @@
 				Models/ShieldRecord.swift,
 				Models/ShieldTier.swift,
 				Services/AppLimitRuleStore.swift,
+				Services/EarnedTimeStore.swift,
 				Services/LimitShieldLogic.swift,
 				Services/ShieldSourceLogic.swift,
 			);
