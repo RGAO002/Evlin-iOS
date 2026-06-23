@@ -94,12 +94,18 @@ struct ProfileView: View {
     // Local mutable status so the Lock/Unlock button can flip the avatar
     // and pills without requiring a global mutation. See HTML 1029-1034.
     @State private var localStatus: ChildProfile.Status = .unlocked
-    // Lock/Unlock-all CTA wiring (POST /parent/device/lock-all|unlock-all).
+    // B8: acked lock-button state derived from covering_sources/exhausted
+    // (NOT optimistic). Drives red/green coloring of the green button.
+    @State private var ackedLockButtonState: LockButtonState = .pending
+    // Lock-selected CTA wiring (POST /parent/device/lock-selected|unlock-selected).
     @State private var lockBusy = false
     @State private var lockError: String? = nil
     // Neutral (non-error) status note, e.g. "queued — will apply when the
     // phone next checks in". Shown in muted text, distinct from lockError.
     @State private var lockNote: String? = nil
+    // B6 carry: once the backend list_id is first learned, remember it so
+    // we only call saveLockedSetID + reKeyShieldRecord once per session.
+    @State private var knownBackendListID: String? = nil
     // Local mutable copy of the child's display fields so Edit Profile
     // can show changes within the session.
     @State private var localName: String = ""
@@ -683,10 +689,13 @@ struct ProfileView: View {
     /// refresh the family aggregate, then pop. On failure (409 = child still
     /// has a linked device, mapped through `ChildCRUDMapper` like the
     /// HomeSettingsSheet flow) show the error and do NOT pop.
+    /// B8: Selected-set lock CTA. Locks/unlocks the CONFIGURED LOCKED SET (not
+    /// all apps). Red/green is driven by the ACKED `covering_sources` field from
+    /// the backend response — never optimistic.
+    ///
+    /// Keeps the "locking…/pending" queued-copy pattern: queue the command, then
+    /// poll until the kid acks or we time out, then show the real result.
     @MainActor
-    /// Lock/Unlock-all CTA: queues the all-apps shield (or unshield_all) for
-    /// the PAIRED kid device — the same lock the reflection lockdown applies.
-    /// Optimistic flip; reverted with an inline error if the queue fails.
     private func toggleDeviceLock() async {
         guard let cid = backendChildID,
               let famRaw = UserDefaults.standard.string(forKey: "evlin.familyID"),
@@ -694,43 +703,37 @@ struct ProfileView: View {
             lockError = "Pair \(displayChild.name)'s device first."
             return
         }
-        let wantLocked = localStatus == .unlocked
+        let wantLocked = !ackedLockButtonState.isShielded
         lockBusy = true
         lockError = nil
         lockNote = nil
-        withAnimation(.easeOut(duration: 0.18)) {
-            localStatus = wantLocked ? .locked : .unlocked
-        }
         do {
+            let resp: APIClient.DeviceLockStateResponse
             if wantLocked {
-                _ = try await apiClient.lockAllApps(familyID: famID, childDeviceID: cid)
+                resp = try await apiClient.lockSelected(familyID: famID, childDeviceID: cid)
             } else {
-                _ = try await apiClient.unlockAllApps(familyID: famID, childDeviceID: cid)
+                resp = try await apiClient.unlockSelected(familyID: famID, childDeviceID: cid)
             }
+            // Apply B6 carry from command response if it surfaced a list_id.
+            applyListIDIfNeeded(resp.list_id)
         } catch {
-            withAnimation(.easeOut(duration: 0.18)) {
-                localStatus = wantLocked ? .unlocked : .locked
-            }
             lockError = "Couldn't \(wantLocked ? "lock" : "unlock") — try again."
             lockBusy = false
             return
         }
         lockBusy = false
-        // The queue accepted it, but "queued" ≠ "applied". Poll the kid device's
-        // REAL state until it actually applies + acks (or time out), so the
-        // parent gets a truthful receipt instead of a silent optimistic flip.
-        let applied = await waitForLockState(wantLocked, cid: cid, famID: famID)
+        // Queue accepted → poll until the kid acks the REAL state change.
+        let applied = await waitForLockStateAcked(wantLocked: wantLocked, cid: cid, famID: famID)
         lockNote = applied ? nil : (wantLocked
             ? "Queued — \(displayChild.name)'s phone will lock when it next checks in."
             : "Queued — \(displayChild.name)'s phone will unlock when it next checks in.")
-        // Push the now-real state out to Home (FamilyStore.refresh re-reads
-        // lock-state and re-renders the child card).
+        // Push the now-real state to Home.
         await familyStore.refresh()
     }
 
-    /// Set `localStatus` from the device's REAL all-apps lock state (instead of
-    /// the always-`.unlocked` `child.status` default), so re-entering the screen
-    /// shows the actual lock — not a stale green button.
+    /// Refresh `ackedLockButtonState` from the device's REAL lock-state ack.
+    /// Derives from `covering_sources` + `exhausted` (not `locked` bool).
+    /// Also applies the B6 carry: persists list_id once when first learned.
     @MainActor
     private func refreshLockState() async {
         guard let cid = backendChildID,
@@ -738,23 +741,56 @@ struct ProfileView: View {
               let famID = UUID(uuidString: famRaw),
               let state = try? await apiClient.fetchDeviceLockState(familyID: famID, childDeviceID: cid)
         else { return }
+        // B6 carry: persist list_id and re-key any local-id record.
+        applyListIDIfNeeded(state.list_id)
+        let buttonState = LockButtonState.from(
+            coveringSources: state.covering_sources,
+            exhausted: state.exhausted)
         withAnimation(.easeOut(duration: 0.18)) {
-            localStatus = state.locked ? .locked : .unlocked
+            ackedLockButtonState = buttonState
+            localStatus = buttonState.isShielded ? .locked : .unlocked
         }
     }
 
-    /// Poll `lock-state` until it matches `want` (the kid applied + acked) or a
-    /// ~15s budget elapses. The kid's pollers run on a ~10s cadence, so this
-    /// usually confirms within one or two ticks.
-    private func waitForLockState(_ want: Bool, cid: UUID, famID: UUID) async -> Bool {
+    /// Poll `lock-state` until the acked button state matches `wantLocked`
+    /// (covering_sources non-empty ↔ locked) or ~15s elapses.
+    private func waitForLockStateAcked(wantLocked: Bool, cid: UUID, famID: UUID) async -> Bool {
         for _ in 0..<6 {
             try? await Task.sleep(nanoseconds: 2_500_000_000)
-            if let state = try? await apiClient.fetchDeviceLockState(familyID: famID, childDeviceID: cid),
-               state.locked == want {
-                return true
+            guard let state = try? await apiClient.fetchDeviceLockState(familyID: famID, childDeviceID: cid) else {
+                continue
             }
+            applyListIDIfNeeded(state.list_id)
+            let buttonState = LockButtonState.from(
+                coveringSources: state.covering_sources,
+                exhausted: state.exhausted)
+            await MainActor.run {
+                withAnimation(.easeOut(duration: 0.18)) {
+                    ackedLockButtonState = buttonState
+                    localStatus = buttonState.isShielded ? .locked : .unlocked
+                }
+            }
+            if buttonState.isShielded == wantLocked { return true }
         }
         return false
+    }
+
+    /// B6 carry: when a lock-state or policy fetch surfaces the backend
+    /// `list_id`, persist it via EarnedTimeStore once and kick the
+    /// ActiveLockStore re-key migration so any local-id shield record unifies.
+    /// Idempotent — only runs on first learn (knownBackendListID guard).
+    @MainActor
+    private func applyListIDIfNeeded(_ newID: String?) {
+        guard let id = newID, !id.isEmpty, id != knownBackendListID else { return }
+        let previousID = knownBackendListID ?? ""
+        knownBackendListID = id
+        EarnedTimeStore.shared.saveLockedSetID(id, tokenData: nil)
+        // Re-key any shield record that was stored under the local/provisional id.
+        Task {
+            await ActiveLockStore.shared.reKeyShieldRecord(
+                fromLocalID: previousID,
+                toBackendID: id)
+        }
     }
 
     private func performDelete() async {
@@ -1068,7 +1104,6 @@ struct ProfileView: View {
     }
 
     private var summaryCard: some View {
-        let isUnlocked = localStatus == .unlocked
         return VStack(spacing: 16) {
             HStack(spacing: 18) {
                 EvlinAvatarView(
@@ -1103,20 +1138,19 @@ struct ProfileView: View {
                 }
             }
 
-            // HP-1: the old Lock/Unlock CTA only flipped local @State — it
-            // Locks EVERY registered device — for iOS that's the all-apps
-            // shield, the same mechanism the reflection lockdown applies
-            // (POST /parent/device/lock-all → kid CommandPoller → shield
-            // tier=all; unlock queues unshield_all). Optimistic flip,
-            // reverted with an inline error if the queue call fails.
+            // B8: Selected-set lock CTA.
+            // Red/green derives from ACKED state (ackedLockButtonState), NOT
+            // optimistic local flip. Green = selected set is clear (sources=[]).
+            // Red = covering_sources non-empty OR earned-time exhausted.
+            // Pending (sources=nil) = neutral/disabled until first ack.
             VStack(spacing: 6) {
                 Button { Task { await toggleDeviceLock() } } label: {
                     HStack(spacing: 10) {
-                        Image(systemName: isUnlocked ? "lock" : "lock.open")
+                        Image(systemName: ackedLockButtonState.isShielded ? "lock.open" : "lock")
                             .font(.system(size: 18, weight: .semibold))
-                        Text(isUnlocked
-                             ? "Lock \(displayChild.name)'s devices"
-                             : "Unlock \(displayChild.name)'s devices")
+                        Text(ackedLockButtonState.isShielded
+                             ? "Unlock \(displayChild.name)'s devices"
+                             : "Lock \(displayChild.name)'s devices")
                             .font(.custom("Manrope", size: 14).weight(.heavy))
                             .tracking(0.2)
                     }
@@ -1125,14 +1159,14 @@ struct ProfileView: View {
                     .padding(.vertical, 14)
                     .background(
                         RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .fill(isUnlocked
-                                  ? AnyShapeStyle(Color.evSecondaryGradient)
-                                  : AnyShapeStyle(Color.evError))
+                            .fill(ackedLockButtonState.isShielded
+                                  ? AnyShapeStyle(Color.evError)
+                                  : AnyShapeStyle(Color.evSecondaryGradient))
                     )
                 }
                 .buttonStyle(.plain)
-                .disabled(lockBusy || backendChildID == nil)
-                .opacity(backendChildID == nil ? 0.45 : (lockBusy ? 0.7 : 1))
+                .disabled(lockBusy || backendChildID == nil || ackedLockButtonState.isPending)
+                .opacity(backendChildID == nil ? 0.45 : (lockBusy || ackedLockButtonState.isPending ? 0.7 : 1))
 
                 // Caption only when something needs saying: a failure (red), a
                 // neutral "queued" receipt, or why the button is disabled.

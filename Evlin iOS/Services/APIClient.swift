@@ -2396,27 +2396,188 @@ extension APIClient {
         return try await authedJSON(path: "/parent/device/unlock-all", method: "POST", jsonBody: payload)
     }
 
+    /// B8 §5.4 — full lock-state shape returned by GET /parent/device/lock-state
+    /// (and equivalently by lock-selected / unlock-selected). Back-compat: all
+    /// fields except `locked` are optional so old backends ({locked:bool} only)
+    /// still decode cleanly.
+    ///
+    /// Mixed-casing rule (NO convertFromSnakeCase):
+    ///   • `recordKey` / `targetKey` → camelCase (explicit CodingKeys below)
+    ///   • everything else             → snake_case
     struct DeviceLockStateResponse: Decodable {
-        /// True iff EVERY app is currently shielded on the kid device — the real
-        /// device truth, derived from the kid's last-reported effective state
-        /// (only flips once the kid actually applied + acked the lock).
+        // Always present
         let locked: Bool
+
+        // Optional — new fields added in B8; absent on old backends.
+        let child_profile_id: UUID?
+        let child_device_id: UUID?
+        /// The backend ChildCatalogList.id for the Locked Set (B6 carry).
+        let list_id: String?
+        /// camelCase: CodingKey = "recordKey"
+        let recordKey: String?
+        /// camelCase: CodingKey = "targetKey"
+        let targetKey: String?
+        let tier: String?
+        /// Which shield sources currently cover the selected set.
+        /// Values: "manual" | "limit" | "earnedTime"
+        let covering_sources: [String]?
+        /// True when the kid's earned-time budget is exhausted for today.
+        let exhausted: Bool?
+        let override_active: Bool?
+        let updated_at: String?
+        let warning: String?
+
+        // Explicit CodingKeys: recordKey/targetKey are camelCase; all others
+        // use their natural snake_case names (no conversion).
+        enum CodingKeys: String, CodingKey {
+            case locked
+            case child_profile_id
+            case child_device_id
+            case list_id
+            case recordKey        // camelCase on the wire
+            case targetKey        // camelCase on the wire
+            case tier
+            case covering_sources
+            case exhausted
+            case override_active
+            case updated_at
+            case warning
+        }
     }
 
     /// GET /parent/device/lock-state — the kid device's real lock truth, so the
     /// Profile button + Home card can show the actual state instead of an
     /// ephemeral optimistic flip.
     func fetchDeviceLockState(familyID: UUID, childDeviceID: UUID) async throws -> DeviceLockStateResponse {
-        var comps = URLComponents(string: "\(baseURL)/parent/device/lock-state")!
-        comps.queryItems = [
-            URLQueryItem(name: "family_id", value: familyID.uuidString),
-            URLQueryItem(name: "child_device_id", value: childDeviceID.uuidString),
-        ]
-        let (data, resp) = try await URLSession.shared.data(from: comps.url!)
-        guard let http = resp as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
-            throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
-        }
-        return try JSONDecoder().decode(DeviceLockStateResponse.self, from: data)
+        try await authedJSON(
+            path: "/parent/device/lock-state?family_id=\(familyID.uuidString)&child_device_id=\(childDeviceID.uuidString)",
+            method: "GET")
+    }
+
+    // MARK: B8 — Selected-set lock/unlock
+
+    private struct LockSelectedBody: Encodable {
+        let family_id: UUID
+        let child_device_id: UUID
+    }
+
+    /// POST /parent/device/lock-selected — queues a selected-set shield on the
+    /// kid device (locks only the apps in the configured Locked Set list, not
+    /// every app). The kid's CommandPoller applies it on its next poll.
+    @discardableResult
+    func lockSelected(familyID: UUID, childDeviceID: UUID) async throws -> DeviceLockStateResponse {
+        let payload = try JSONEncoder().encode(
+            LockSelectedBody(family_id: familyID, child_device_id: childDeviceID))
+        return try await authedJSON(path: "/parent/device/lock-selected", method: "POST", jsonBody: payload)
+    }
+
+    /// POST /parent/device/unlock-selected — reverses `lockSelected`.
+    @discardableResult
+    func unlockSelected(familyID: UUID, childDeviceID: UUID) async throws -> DeviceLockStateResponse {
+        let payload = try JSONEncoder().encode(
+            LockSelectedBody(family_id: familyID, child_device_id: childDeviceID))
+        return try await authedJSON(path: "/parent/device/unlock-selected", method: "POST", jsonBody: payload)
+    }
+
+    // MARK: B8 — Earned-time summary + policy + config
+
+    /// Earned-time summary for one child device. State values: "ok" | "exhausted".
+    struct EarnedSummaryDTO: Decodable {
+        let child_profile_id: UUID?
+        let state: String?          // "ok" | "exhausted"
+        let earned_minutes: Int?
+        let used_minutes: Int?
+        let remaining_minutes: Int?
+        let override_active: Bool?
+        let updated_at: String?
+    }
+
+    /// GET /parent/earned-time/summary — child's current earned-time state.
+    /// Query params: child_profile_id (required).
+    func fetchEarnedSummary(childProfileID: UUID) async throws -> EarnedSummaryDTO {
+        try await authedJSON(
+            path: "/parent/earned-time/summary?child_profile_id=\(childProfileID.uuidString)",
+            method: "GET")
+    }
+
+    /// Earned-time policy returned by GET /parent/earned-time/policy.
+    struct EarnedPolicyDTO: Decodable {
+        let child_profile_id: UUID?
+        let list_id: String?
+        let pool_minutes: Int?
+        let daily_cap_minutes: Int?
+        let enabled: Bool?
+        let updated_at: String?
+    }
+
+    /// GET /parent/earned-time/policy — the family's earned-time configuration.
+    func fetchEarnedPolicy(childProfileID: UUID) async throws -> EarnedPolicyDTO {
+        try await authedJSON(
+            path: "/parent/earned-time/policy?child_profile_id=\(childProfileID.uuidString)",
+            method: "GET")
+    }
+
+    /// PUT /parent/earned-time/config — update the earned-time policy.
+    private struct EarnedConfigBody: Encodable {
+        let child_profile_id: UUID
+        let pool_minutes: Int?
+        let daily_cap_minutes: Int?
+        let enabled: Bool?
+    }
+
+    @discardableResult
+    func putEarnedConfig(
+        childProfileID: UUID,
+        poolMinutes: Int? = nil,
+        dailyCapMinutes: Int? = nil,
+        enabled: Bool? = nil
+    ) async throws -> EarnedPolicyDTO {
+        let payload = try JSONEncoder().encode(EarnedConfigBody(
+            child_profile_id: childProfileID,
+            pool_minutes: poolMinutes,
+            daily_cap_minutes: dailyCapMinutes,
+            enabled: enabled))
+        return try await authedJSON(path: "/parent/earned-time/config", method: "PUT", jsonBody: payload)
+    }
+
+    /// PUT /parent/device/screen-time-cap — update the kid device's daily cap.
+    private struct ScreenTimeCapBody: Encodable {
+        let child_device_id: UUID
+        let daily_cap_minutes: Int
+    }
+
+    struct ScreenTimeCapResponseDTO: Decodable {
+        let child_device_id: UUID?
+        let daily_cap_minutes: Int?
+        let updated_at: String?
+    }
+
+    @discardableResult
+    func putDeviceCap(childDeviceID: UUID, dailyCapMinutes: Int) async throws -> ScreenTimeCapResponseDTO {
+        let payload = try JSONEncoder().encode(ScreenTimeCapBody(
+            child_device_id: childDeviceID,
+            daily_cap_minutes: dailyCapMinutes))
+        return try await authedJSON(path: "/parent/device/screen-time-cap", method: "PUT", jsonBody: payload)
+    }
+
+    /// POST /parent/earned-time/unlock-override — grant a one-off time extension.
+    private struct UnlockOverrideBody: Encodable {
+        let child_profile_id: UUID
+        let extra_minutes: Int?
+    }
+
+    struct UnlockOverrideResponseDTO: Decodable {
+        let child_profile_id: UUID?
+        let override_active: Bool?
+        let updated_at: String?
+    }
+
+    @discardableResult
+    func unlockOverride(childProfileID: UUID, extraMinutes: Int? = nil) async throws -> UnlockOverrideResponseDTO {
+        let payload = try JSONEncoder().encode(UnlockOverrideBody(
+            child_profile_id: childProfileID,
+            extra_minutes: extraMinutes))
+        return try await authedJSON(path: "/parent/earned-time/unlock-override", method: "POST", jsonBody: payload)
     }
 
     // MARK: Per-app daily limits (P9 — DeviceAppsSheet "APP LIMITS")
