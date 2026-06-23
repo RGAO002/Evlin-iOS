@@ -279,6 +279,53 @@ actor ActiveLockStore {
         return .noOpShorterThanExisting
     }
 
+    // MARK: - B6: recordKey migration
+
+    /// Re-key the `savedList:<localID>` shield record to `savedList:<backendID>`,
+    /// preserving all fields (sources, expiry, tokens, timestamps). Idempotent:
+    ///
+    /// - If the record is already keyed by `backendID` → no-op.
+    /// - If no record exists for `localID` → no-op.
+    /// - If `localID == backendID` → no-op (identity).
+    ///
+    /// Called once the backend `ChildCatalogList.id` is first learned
+    /// (via `EarnedTimeStore.saveLockedSetID`). Safe to call multiple times.
+    func reKeyShieldRecord(fromLocalID localID: String, toBackendID backendID: String) {
+        guard localID != backendID else { return }
+
+        let oldKey = ShieldRecord.makeRecordKey(tier: .savedList, targetKey: localID)
+        let newKey = ShieldRecord.makeRecordKey(tier: .savedList, targetKey: backendID)
+
+        // Idempotent: if the new key already exists, the migration already ran.
+        if shieldRecords[newKey] != nil { return }
+
+        // Find the old record.
+        guard let old = shieldRecords[oldKey] else { return }
+
+        // Build the migrated record — same content, new key + targetKey.
+        let migrated = ShieldRecord(
+            recordKey: newKey,
+            tier: .savedList,
+            targetKey: backendID,
+            displayName: old.displayName,
+            lastCommandID: old.lastCommandID,
+            appTokens: old.appTokens,
+            categoryTokens: old.categoryTokens,
+            webDomainTokens: old.webDomainTokens,
+            appliesToAll: old.appliesToAll,
+            issuedAt: old.issuedAt,
+            expiresAt: old.expiresAt,
+            originalRequest: old.originalRequest,
+            targetChildID: old.targetChildID,
+            sources: old.sources
+        )
+
+        shieldRecords.removeValue(forKey: oldKey)
+        shieldRecords[newKey] = migrated
+        persist()
+        recomputeAndApply()
+    }
+
     /// Remove a single source from the record at `recordKey`. If the record's
     /// `sources` set becomes empty the record is deleted entirely. No-ops
     /// silently if `recordKey` is not found.
