@@ -142,6 +142,14 @@ struct AppControlsV2View: View {
                     reload()
                     onSelectionChanged?()
                     showPicker = false
+                    // Sync the updated "Locked set" to the backend so lockSelected finds it.
+                    // Fire-and-forget: failure here only means the lazy sync in
+                    // toggleDeviceLock retries on next lock tap — it never blocks local UI.
+                    let deviceID = childDeviceID
+                    let client = apiClient
+                    Task.detached {
+                        _ = try? await syncLockedSetToBackend(deviceID: deviceID, apiClient: client)
+                    }
                 },
                 onCancel: { showPicker = false }
             )

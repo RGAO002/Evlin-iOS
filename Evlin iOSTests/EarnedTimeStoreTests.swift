@@ -177,6 +177,36 @@ final class EarnedTimeStoreTests: XCTestCase {
         XCTAssertEqual(reloaded.latestDeviceEstimate, 7)
     }
 
+    // MARK: - Locked-set list alias key (locked-set-sync)
+
+    func test_lockedSetListAliasKey_isNilByDefault() {
+        let store = freshStore()
+        XCTAssertNil(store.lockedSetListAliasKey)
+    }
+
+    func test_saveLockedSetListAliasKey_roundTrips() {
+        let store = freshStore()
+        let key = UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!
+        store.saveLockedSetListAliasKey(key)
+        XCTAssertEqual(store.lockedSetListAliasKey, key)
+    }
+
+    func test_saveLockedSetListAliasKey_overwritesPreviousValue() {
+        let store = freshStore()
+        let key1 = UUID(uuidString: "11111111-1111-1111-1111-111111111111")!
+        let key2 = UUID(uuidString: "22222222-2222-2222-2222-222222222222")!
+        store.saveLockedSetListAliasKey(key1)
+        store.saveLockedSetListAliasKey(key2)
+        XCTAssertEqual(store.lockedSetListAliasKey, key2)
+    }
+
+    func test_removeAll_clearsLockedSetListAliasKey() {
+        let store = freshStore()
+        store.saveLockedSetListAliasKey(UUID())
+        store.removeAll()
+        XCTAssertNil(store.lockedSetListAliasKey)
+    }
+
     // MARK: - removeAll (teardown helper)
 
     func test_removeAll_clearsEverything() {

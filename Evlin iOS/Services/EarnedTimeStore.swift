@@ -33,8 +33,9 @@ final class EarnedTimeStore: @unchecked Sendable {
     // MARK: - Keys
 
     private let measurementKey   = "earned.measurementSelection"
-    private let lockedSetIDKey   = "earned.lockedSetID"
-    private let lockedSetDataKey = "earned.lockedSetTokenData"
+    private let lockedSetIDKey          = "earned.lockedSetID"
+    private let lockedSetDataKey        = "earned.lockedSetTokenData"
+    private let lockedSetListAliasKeyKey = "earned.lockedSetListAliasKey"
     private let backendKey       = "earned.backendRemainingAtLastSync"
     private let estimateKey      = "earned.latestDeviceEstimate"
     private let poolKey          = "earned.poolMinutes"
@@ -81,6 +82,20 @@ final class EarnedTimeStore: @unchecked Sendable {
     /// Used by the extension for offline shield enforcement without the picker.
     var lockedSetTokenData: Data? {
         defaults?.data(forKey: lockedSetDataKey)
+    }
+
+    /// The `alias_key` UUID of the "Locked set" `ChildCatalogList` on the backend.
+    /// Present once `syncLockedSetToBackend` has successfully created or updated the list.
+    /// Used by the sync function to upsert (update) rather than create a duplicate list.
+    var lockedSetListAliasKey: UUID? {
+        guard let str = defaults?.string(forKey: lockedSetListAliasKeyKey) else { return nil }
+        return UUID(uuidString: str)
+    }
+
+    /// Persist the alias_key returned by `createControlList` / `updateControlList`.
+    func saveLockedSetListAliasKey(_ key: UUID) {
+        defaults?.set(key.uuidString, forKey: lockedSetListAliasKeyKey)
+        defaults?.synchronize()
     }
 
     /// Persist the Locked-set identity and optional token blob.
@@ -191,7 +206,7 @@ final class EarnedTimeStore: @unchecked Sendable {
     /// prefixes. Tests call `removeAll` in tearDown and then re-assert the keys
     /// they care about, so residual keys from other dates do not affect results.
     func removeAll() {
-        [measurementKey, lockedSetIDKey, lockedSetDataKey,
+        [measurementKey, lockedSetIDKey, lockedSetDataKey, lockedSetListAliasKeyKey,
          backendKey, estimateKey, poolKey, capKey].forEach { defaults?.removeObject(forKey: $0) }
         // Sweep any override flags persisted for known test dates.
         if let suite = defaults {

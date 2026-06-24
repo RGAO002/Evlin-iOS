@@ -786,6 +786,13 @@ struct ProfileView: View {
             await familyStore.refresh()
             return
         }
+        // Lazy sync: upload the local "Locked set" before calling lockSelected so the
+        // backend ChildCatalogList exists even for brownfield users (apps chosen locally
+        // before this fix was deployed). Only runs when wantLocked; unlock works
+        // regardless of whether the backend list is present.
+        if wantLocked {
+            _ = try? await syncLockedSetToBackend(deviceID: cid, apiClient: apiClient)
+        }
         do {
             let resp: APIClient.DeviceLockStateResponse
             if wantLocked {
