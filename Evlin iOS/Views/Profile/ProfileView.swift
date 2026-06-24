@@ -502,12 +502,15 @@ struct ProfileView: View {
                         summaryFetchedAt = Date()
                     }
                 }
-                // For UUID children the backend is the source of truth; only seed
-                // from UserDefaults as a transient placeholder until the Task above
-                // resolves. Do NOT update rules here — the Task will do it with the
-                // authoritative value, and an intermediate rule update would flicker.
+                // For UUID children the backend pool is authoritative, but we must
+                // ALWAYS render the Active Rules immediately. Seed them synchronously
+                // from UserDefaults/default; the async policy Task refreshes the pool
+                // detail when (and only when) the backend responds. REGRESSION FIX:
+                // previously `rules` was set ONLY inside the async policy Task, so when
+                // the backend was unreachable the 3 Active Rules vanished entirely.
                 let storedLimit = UserDefaults.standard.integer(forKey: "evlin.dailyLimitMin.\(child.id)")
                 dailyLimitMinutes = storedLimit > 0 ? storedLimit : 120
+                rules = ProfileMockData.rules(for: child.id, dailyLimitMinutes: dailyLimitMinutes)
             } else {
                 // Legacy / offline path: no backend UUID, use UserDefaults directly.
                 let storedLimit = UserDefaults.standard.integer(forKey: "evlin.dailyLimitMin.\(child.id)")
@@ -793,7 +796,11 @@ struct ProfileView: View {
             // Apply B6 carry from command response if it surfaced a list_id.
             applyListIDIfNeeded(resp.list_id)
         } catch {
-            lockError = "Couldn't \(wantLocked ? "lock" : "unlock") — try again."
+            // Surface the real cause so we can tell a 404 (backend not yet deployed
+            // with the new /parent/device/lock-selected route) apart from a 4xx (no
+            // "Locked set" of apps configured for this child) — instead of an opaque
+            // "try again".
+            lockError = "Couldn't \(wantLocked ? "lock" : "unlock"): \(String(describing: error))"
             lockBusy = false
             return
         }
