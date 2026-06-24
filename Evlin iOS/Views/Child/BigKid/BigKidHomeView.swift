@@ -1,3 +1,4 @@
+import FamilyControls
 import SwiftUI
 
 struct BigKidHomeView: View {
@@ -5,6 +6,13 @@ struct BigKidHomeView: View {
     var onTaskTap: (BigKidTask) -> Void
     var onManageApps: (() -> Void)? = nil
     var onCommandDelivery: (() -> Void)? = nil
+
+    // B3 production capture: tracks whether the measurement selection has been
+    // saved. Initialized from EarnedTimeStore.shared at render time and updated
+    // when the ScreenTimeCaptureView calls onDone so the card disappears without
+    // requiring a full view rebuild.
+    @State private var measurementSelectionCaptured: Bool =
+        EarnedTimeStore.shared.measurementSelection != nil
 
     private var doneCount: Int {
         state.tasks.filter { $0.status == .done || $0.bypass?.status == .approved }.count
@@ -34,6 +42,16 @@ struct BigKidHomeView: View {
             VStack(alignment: .leading, spacing: 0) {
                 greeting
                 heroCard.padding(.bottom, 22)
+                // B3: show the capture card until the all-category measurement
+                // selection is present. Once saved, isEarnedTimeReady becomes
+                // satisfiable (when a Locked-set id is also present) and the
+                // earned-budget ladder arms on next foreground.
+                if !measurementSelectionCaptured {
+                    ScreenTimeCaptureView {
+                        measurementSelectionCaptured = true
+                    }
+                    .padding(.bottom, 22)
+                }
                 if onManageApps != nil {
                     manageAppsCard.padding(.bottom, 22)
                 }

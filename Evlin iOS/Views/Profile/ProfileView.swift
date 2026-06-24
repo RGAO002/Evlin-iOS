@@ -796,11 +796,18 @@ struct ProfileView: View {
             // Apply B6 carry from command response if it surfaced a list_id.
             applyListIDIfNeeded(resp.list_id)
         } catch {
-            // Surface the real cause so we can tell a 404 (backend not yet deployed
-            // with the new /parent/device/lock-selected route) apart from a 4xx (no
-            // "Locked set" of apps configured for this child) — instead of an opaque
-            // "try again".
-            lockError = "Couldn't \(wantLocked ? "lock" : "unlock"): \(String(describing: error))"
+            // Detect "no Locked set configured" specifically (backend returns a 4xx
+            // with a code in 400-422 when the selected set is missing or empty —
+            // e.g. `selected_set_missing_or_empty`). Show a friendly, actionable
+            // message that guides the parent to the app-controls / lock-list UI
+            // (which uploads the Locked set via POST /child/catalog-list).
+            // All other failures (404 route not found, 500, network) get the raw
+            // error so they remain diagnosable.
+            if ProfileView.isNoLockedSetError(error) {
+                lockError = "Select which apps to lock first — tap \"App Controls\" (the lock list) to set up the Locked set, then try again."
+            } else {
+                lockError = "Couldn't \(wantLocked ? "lock" : "unlock"): \(String(describing: error))"
+            }
             lockBusy = false
             return
         }
@@ -879,6 +886,31 @@ struct ProfileView: View {
                 fromLocalID: previousID,
                 toBackendID: id)
         }
+    }
+
+    /// Returns true when `error` indicates the backend has no "Locked set"
+    /// configured for this child (a 4xx response in the 400–422 range from
+    /// the lock-selected endpoint). 400-range means "client error / bad request"
+    /// — the most likely root cause at runtime is `selected_set_missing_or_empty`.
+    /// 404 (route-not-found) and 5xx are NOT in this bucket; they fall through
+    /// to the generic raw-error display so they remain diagnosable.
+    ///
+    /// Exposed as `internal` (not private) so the unit test can call it directly
+    /// without going through the full async `toggleDeviceLock()` path.
+    static func isNoLockedSetError(_ error: Error) -> Bool {
+        if case .serverError(let code) = error as? APIError {
+            // 400: selected_set_missing_or_empty or similar validation failure.
+            // 409: Conflict — empty-set or set-not-found conflict from backend.
+            // 422: Unprocessable entity — malformed/empty set.
+            // Exclude 404 (route not yet deployed — diagnosable infra gap, not a
+            // missing locked-set) and 5xx (server/infra failures) so those errors
+            // still surface their raw code for triage.
+            switch code {
+            case 400, 409, 422: return true
+            default:            return false
+            }
+        }
+        return false
     }
 
     /// B10: ISO-8601 date string for today in the device's local timezone.
