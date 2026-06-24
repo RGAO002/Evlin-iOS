@@ -85,8 +85,8 @@ final class EarnedTimeStore: @unchecked Sendable {
     }
 
     /// The `alias_key` UUID of the "Locked set" `ChildCatalogList` on the backend.
-    /// Present once `syncLockedSetToBackend` has successfully created or updated the list.
-    /// Used by the sync function to upsert (update) rather than create a duplicate list.
+    /// Returned by the backend in lock-state and policy responses (B8 carry) and persisted
+    /// via `applyListIDIfNeeded`. The backend now auto-maintains this list server-side.
     var lockedSetListAliasKey: UUID? {
         guard let str = defaults?.string(forKey: lockedSetListAliasKeyKey) else { return nil }
         return UUID(uuidString: str)

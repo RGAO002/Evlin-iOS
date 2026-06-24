@@ -138,18 +138,10 @@ struct AppControlsV2View: View {
             CombinedPickerSheet(
                 initialSelection: selection,
                 onSave: { newSelection in
-                    DefaultLockGroupStore.save(mergePreservingNamedApps(newSelection))
+                    DefaultLockGroupStore.save(mergePreservingPriorSelection(newSelection))
                     reload()
                     onSelectionChanged?()
                     showPicker = false
-                    // Sync the updated "Locked set" to the backend so lockSelected finds it.
-                    // Fire-and-forget: failure here only means the lazy sync in
-                    // toggleDeviceLock retries on next lock tap — it never blocks local UI.
-                    let deviceID = childDeviceID
-                    let client = apiClient
-                    Task.detached {
-                        _ = try? await syncLockedSetToBackend(deviceID: deviceID, apiClient: client)
-                    }
                 },
                 onCancel: { showPicker = false }
             )
@@ -714,16 +706,31 @@ struct AppControlsV2View: View {
 }
 
 // Apple's picker folds an individually-selected app into a category when that
-// category is picked, dropping it from applicationTokens. Re-preserve apps that
-// are NAMED (have a lock-by-name alias) so adding a category never silently
-// destroys a binding. Unnamed individual picks are allowed to fold into their
-// category; named-app removal goes through the row "x".
-private func mergePreservingNamedApps(_ picked: FamilyActivitySelection) -> FamilyActivitySelection {
+// category is picked, dropping it from applicationTokens. We apply union semantics
+// on Save: any app or category that was in the stored group BEFORE the picker was
+// opened is re-inserted unless the user explicitly removed it via the row "x" buttons
+// (which call DefaultLockGroupStore.removeApp/removeCategory directly and are already
+// absent from the store when Save fires). This lets a single app (e.g. Instagram) and
+// a whole category (e.g. Social) coexist in the group independently.
+func mergePreservingPriorSelection(_ picked: FamilyActivitySelection) -> FamilyActivitySelection {
+    mergePreservingPriorSelection(picked, prior: DefaultLockGroupStore.load())
+}
+
+/// Pure inner implementation — accepts the prior selection explicitly so it is
+/// unit-testable without touching DefaultLockGroupStore.
+func mergePreservingPriorSelection(
+    _ picked: FamilyActivitySelection,
+    prior: FamilyActivitySelection
+) -> FamilyActivitySelection {
     var merged = picked
-    for token in DefaultLockGroupStore.load().applicationTokens
-    where !merged.applicationTokens.contains(token)
-        && !LocalAliasStore.shared.applicationLookupKeys(equalTo: token).isEmpty {
+    // Re-add any app that was in the prior group but the picker dropped (e.g. because
+    // a containing category was selected). Named and unnamed apps alike are preserved.
+    for token in prior.applicationTokens where !merged.applicationTokens.contains(token) {
         merged.applicationTokens.insert(token)
+    }
+    // Re-add any category that was in the prior group but the picker dropped.
+    for token in prior.categoryTokens where !merged.categoryTokens.contains(token) {
+        merged.categoryTokens.insert(token)
     }
     return merged
 }
