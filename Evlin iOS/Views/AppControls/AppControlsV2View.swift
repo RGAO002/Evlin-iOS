@@ -136,9 +136,16 @@ struct AppControlsV2View: View {
         .onDisappear { cancelRebindIfPending() }
         .sheet(isPresented: $showPicker) {
             CombinedPickerSheet(
-                initialSelection: selection,
-                onSave: { newSelection in
-                    DefaultLockGroupStore.save(mergePreservingPriorSelection(newSelection))
+                // Fix — the "Add" picker starts EMPTY each time (nil → fresh empty
+                // selection). "Add" picks NEW things; what's already in the group stays
+                // (removal is via the row "x"). With an empty start, Apple's picker can't
+                // drop existing items, so the save below can be a plain additive UNION.
+                initialSelection: nil,
+                onSave: { picked in
+                    var merged = DefaultLockGroupStore.load()
+                    merged.applicationTokens.formUnion(picked.applicationTokens)
+                    merged.categoryTokens.formUnion(picked.categoryTokens)
+                    DefaultLockGroupStore.save(merged)
                     reload()
                     onSelectionChanged?()
                     showPicker = false
@@ -337,7 +344,25 @@ struct AppControlsV2View: View {
                             if expandedCategory == token {
                                 withAnimation(Self.accordionAnimation) { expandedCategory = nil }
                             }
+                            // Mirror the App row's remove (Fix A.3): a tagged category
+                            // also DELETES its backend catalog row. Without this the row
+                            // stays `active`, so `ensure_selected_set` keeps pulling the
+                            // category back into the Locked set and it gets locked even
+                            // after the parent removed it here. Capture the alias key
+                            // BEFORE clearing the local aliases that resolve it.
+                            let aliasKey = backendAliasKey(forCategory: token)
+                            for key in LocalAliasStore.shared.categoryLookupKeys(equalTo: token) {
+                                LocalAliasStore.shared.removeCategory(named: key)
+                            }
+                            if let aliasKey {
+                                Task { try? await apiClient.deleteChildAppControlTarget(deviceID: childDeviceID, aliasKey: aliasKey) }
+                            }
                             DefaultLockGroupStore.removeCategory(token)
+                            // If the Locked set is shielded RIGHT NOW, the live
+                            // shield is a baked snapshot — drop this category from
+                            // it immediately so it unshields without an
+                            // unlock→relock dance.
+                            Task { await ActiveLockStore.shared.dropTokenFromSavedListShields(category: token) }
                             reload()
                             onSelectionChanged?()
                         },
@@ -390,6 +415,9 @@ struct AppControlsV2View: View {
                                     }
                                 }
                                 DefaultLockGroupStore.removeApp(token)
+                                // Drop this app from any live Locked-set shield now
+                                // (baked snapshot won't refresh on its own).
+                                Task { await ActiveLockStore.shared.dropTokenFromSavedListShields(app: token) }
                                 reload()
                                 onSelectionChanged?()
                             },
@@ -664,6 +692,17 @@ struct AppControlsV2View: View {
             .first { !Set($0.lookupKeys).isDisjoint(with: keys) }?.aliasKey
     }
 
+    /// A category's CURRENT backend alias key — the `aliasKey` of the catalog
+    /// target whose stored token decodes equal to this token, or nil if the
+    /// category was never tagged/synced. Mirrors `backendAliasKey(forApp:)`.
+    /// Used to DELETE the stale backend catalog row on category removal so
+    /// `ensure_selected_set` stops re-adding it to the Locked set (and it leaves
+    /// the parent "Manage aliases" list).
+    private func backendAliasKey(forCategory token: ActivityCategoryToken) -> UUID? {
+        LocalAliasStore.shared.catalogCategoryTargets()
+            .first { LocalAliasStore.shared.categoryToken(forName: $0.name) == token }?.aliasKey
+    }
+
     // MARK: - Local "is this still matched?" state (pure reads of LocalAliasStore)
 
     /// App Controls v2 runs on the kid device, which holds the tokens locally. The
@@ -674,16 +713,20 @@ struct AppControlsV2View: View {
     /// initializer so SwiftUI re-invokes this after a bind and the chip updates.
     private func matchedState(forApp appToken: ApplicationToken, tick: Int) -> MatchedState {
         let keys = LocalAliasStore.shared.applicationLookupKeys(equalTo: appToken)
-        let hasAliasKey = LocalAliasStore.shared.catalogAppTargets()
-            .contains { !Set($0.lookupKeys).isDisjoint(with: keys) }
+        // Base "has alias" on LOCAL alias presence (set synchronously during the bind),
+        // not the backend catalog target (stored later by the detached upload Task), so a
+        // just-matched app shows "Matched" the instant the user picks — no collapse/expand.
+        let hasAliasKey = !LocalAliasStore.shared.applicationLookupKeys(equalTo: appToken).isEmpty
         let localTokenPresent = keys.contains { LocalAliasStore.shared.applicationToken(forLookupKey: $0) == appToken }
         return MatchedState.from(hasAliasKey: hasAliasKey, localTokenPresent: localTokenPresent)
     }
 
     private func matchedState(forCategory catToken: ActivityCategoryToken, tick: Int) -> MatchedState {
         let keys = LocalAliasStore.shared.categoryLookupKeys(equalTo: catToken)
-        let hasAliasKey = LocalAliasStore.shared.catalogCategoryTargets()
-            .contains { LocalAliasStore.shared.categoryToken(forName: $0.name) == catToken }
+        // Base "has alias" on LOCAL alias presence (set synchronously during the bind),
+        // not the backend catalog target (stored later by the detached upload Task), so a
+        // just-tagged category shows "Matched" the instant the user picks — no collapse/expand.
+        let hasAliasKey = !LocalAliasStore.shared.categoryLookupKeys(equalTo: catToken).isEmpty
         let localTokenPresent = keys.contains { LocalAliasStore.shared.categoryToken(forName: $0) == catToken }
         return MatchedState.from(hasAliasKey: hasAliasKey, localTokenPresent: localTokenPresent)
     }
