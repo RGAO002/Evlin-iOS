@@ -235,11 +235,7 @@ struct EventDetailCard: View {
                 TextField("Event title", text: $draft.title).evlinFormInput()
             }
             evField("TIME") {
-                HStack(spacing: 8) {
-                    TextField("Start", text: $draft.start).evlinFormInput()
-                    Text("–").foregroundStyle(Color.evOnSurfaceVariant)
-                    TextField("End", text: $draft.end).evlinFormInput()
-                }
+                EventTimePicker(start: $draft.start, end: $draft.end)
             }
             evField("ASSIGNED TO") { recipientPills }
             evField("CATEGORY") { categoryPills }
