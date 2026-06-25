@@ -195,6 +195,10 @@ struct EventDetailCard: View {
             noteRow
             Divider()
             locationRow
+            if event.reminderMinutesBefore != nil {
+                Divider()
+                reminderRow
+            }
         }
     }
 
@@ -552,6 +556,25 @@ struct EventDetailCard: View {
                 .foregroundStyle(Color.evOnSurfaceVariant)
                 .frame(width: 24)
             Text(event.location)
+                .font(.custom("Inter", size: 14))
+                .foregroundStyle(Color.evOnSurface)
+            Spacer()
+        }
+        .padding(.vertical, 12)
+    }
+
+    /// Read-mode reminder summary. Only rendered when a reminder is set (the
+    /// caller gates this on `reminderMinutesBefore != nil`), so `mins` is
+    /// always non-nil here — fall back to 30 defensively. Bell icon mirrors
+    /// the other read rows' leading-SF-Symbol treatment.
+    private var reminderRow: some View {
+        let mins = event.reminderMinutesBefore ?? 30
+        return HStack(spacing: 12) {
+            Image(systemName: "bell")
+                .font(.system(size: 16))
+                .foregroundStyle(Color.evOnSurfaceVariant)
+                .frame(width: 24)
+            Text("Reminder · \(mins) minutes before")
                 .font(.custom("Inter", size: 14))
                 .foregroundStyle(Color.evOnSurface)
             Spacer()

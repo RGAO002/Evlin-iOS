@@ -686,7 +686,11 @@ struct CalendarView: View {
             end: endStr,
             category: "Activity",
             location: "",
-            note: ""
+            note: "",
+            // New events default the reminder ON ("30 minutes before") to
+            // match the reference design. Editing an existing event keeps its
+            // own stored value (this only seeds the blank new-event draft).
+            reminderMinutesBefore: 30
         )
         newEvent = PendingNewEvent(event: event, person: chosenPerson)
     }
