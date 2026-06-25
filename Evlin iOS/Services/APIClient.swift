@@ -193,12 +193,13 @@ class APIClient: ObservableObject {
         message: String,
         childName: String,
         history: [[String: String]],
-        forceConfirmations: [String] = []
+        forceConfirmations: [String] = [],
+        childDeviceID: String? = nil
     ) async throws -> ChatResponse {
         // Read paired family_id from UserDefaults so commands get queued to the child device.
         let familyID = UserDefaults.standard.string(forKey: "evlin.familyID")
-        // BigKid child id (set by the BigKid debug panel) — needed for the `reflect` action.
-        let bigKidChildID = UserDefaults.standard.string(forKey: "evlin.childDeviceID")
+        // child_device_id is passed in by the caller (resolved via
+        // ChatViewModel.effectiveChildDeviceID so multi-child families send nil → backend gate).
 
         // Retry up to 3 times — Gemini sometimes returns 500/503.
         var lastStatus = 0
@@ -215,7 +216,7 @@ class APIClient: ObservableObject {
                 history: history,
                 family_id: familyID,
                 force_confirmations: forceConfirmations,
-                child_device_id: (bigKidChildID?.isEmpty == false) ? bigKidChildID : nil,
+                child_device_id: childDeviceID,
                 client_alias_state: [
                     "known_apps": LocalAliasStore.shared.allApplicationKeys(),
                     "known_categories": LocalAliasStore.shared.allCategoryNames()

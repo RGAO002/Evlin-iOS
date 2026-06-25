@@ -11,6 +11,20 @@ class ChatViewModel: ObservableObject {
     @Published var isThinking = false
     @Published var errorMessage: String?
 
+    /// Multi-child gate (MVP): when the paired family has >1 child profile we
+    /// send `child_device_id: nil` so the backend disambiguation gate asks
+    /// "which child?" instead of silently targeting the one pinned device.
+    /// Single-child families keep sending the stored id (fast path, no card).
+    /// Pure function so it can be unit-tested without a live view model.
+    nonisolated static func effectiveChildDeviceID(childCount: Int, storedChildDeviceID: String?) -> String? {
+        childCount > 1 ? nil : storedChildDeviceID
+    }
+
+    /// Injected by ChatView from `familyStore.children.count`. Defaults to 1
+    /// so any code path that constructs a bare view model still sends the
+    /// stored id (single-child behaviour) rather than nil-ing it out.
+    var childCountProvider: () -> Int = { 1 }
+
     /// Currently-rendered confirmation card, if any. See plan Phase 9.
     /// Set when backend returns `action.card_id`, cleared when user answers.
     @Published var currentCard: (CardID, CardContext, CardHandlers)?
@@ -2318,7 +2332,13 @@ class ChatViewModel: ObservableObject {
         skipFastpath: Bool = false
     ) async throws -> (APIClient.ChatResponse, Data, String?) {
         let familyID = UserDefaults.standard.string(forKey: "evlin.familyID")
-        let bigKidChildID = UserDefaults.standard.string(forKey: "evlin.childDeviceID")
+        let storedChildID = UserDefaults.standard.string(forKey: "evlin.childDeviceID")
+        // Multi-child gate: nil out the pinned device id when >1 child so the
+        // backend asks "which child?" instead of silently targeting one device.
+        let cdid = Self.effectiveChildDeviceID(
+            childCount: childCountProvider(),
+            storedChildDeviceID: (storedChildID?.isEmpty == false) ? storedChildID : nil
+        )
 
         let bodyObj = APIClient.ChatRequest(
             message: message,
@@ -2326,7 +2346,7 @@ class ChatViewModel: ObservableObject {
             history: history,
             family_id: familyID,
             force_confirmations: forceConfirmations,
-            child_device_id: (bigKidChildID?.isEmpty == false) ? bigKidChildID : nil,
+            child_device_id: cdid,
             client_alias_state: currentClientAliasStateCodable(),
             skip_fastpath: skipFastpath,
             conversation_id: currentConversationID.uuidString
