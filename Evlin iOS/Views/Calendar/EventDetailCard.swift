@@ -16,9 +16,16 @@ struct EventDetailCard: View {
     /// save the second array is empty.
     var onSave: (CalendarEvent, [String]) -> Void = { _, _ in }
     var onDelete: () -> Void = {}
+    /// Persist a reminder on/off change from the READ card WITHOUT dismissing
+    /// it (onSave closes the card; this keeps it open). Args mirror onSave:
+    /// the primary event + extra participant columns.
+    var onReminderChange: (CalendarEvent, [String]) -> Void = { _, _ in }
 
     @State private var isEditing: Bool
     @State private var draft: CalendarEvent
+    /// Optimistic local state for the read-mode reminder toggle, seeded from
+    /// the event so a tap reflects immediately while the PUT round-trips.
+    @State private var reminderOn: Bool
 
     // Inline-pill "add new category" — HTML 1494-1502, 1566.
     /// CAL-8: custom categories persist across cards + launches as a small
@@ -74,7 +81,8 @@ struct EventDetailCard: View {
          isNew: Bool = false,
          onClose: @escaping () -> Void = {},
          onSave: @escaping (CalendarEvent, [String]) -> Void = { _, _ in },
-         onDelete: @escaping () -> Void = {}) {
+         onDelete: @escaping () -> Void = {},
+         onReminderChange: @escaping (CalendarEvent, [String]) -> Void = { _, _ in }) {
         self.event = event
         self.person = person
         self.people = people
@@ -83,9 +91,11 @@ struct EventDetailCard: View {
         self.onClose = onClose
         self.onSave = onSave
         self.onDelete = onDelete
+        self.onReminderChange = onReminderChange
         _isEditing = State(initialValue: isNew)
         _draft = State(initialValue: event)
         _recipientSelection = State(initialValue: Set(event.participantCols ?? [event.col]))
+        _reminderOn = State(initialValue: event.reminderMinutesBefore != nil)
     }
 
     var body: some View {
@@ -195,10 +205,8 @@ struct EventDetailCard: View {
             noteRow
             Divider()
             locationRow
-            if event.reminderMinutesBefore != nil {
-                Divider()
-                reminderRow
-            }
+            Divider()
+            reminderRow
         }
     }
 
@@ -559,21 +567,33 @@ struct EventDetailCard: View {
         .padding(.vertical, 12)
     }
 
-    /// Read-mode reminder summary. Only rendered when a reminder is set (the
-    /// caller gates this on `reminderMinutesBefore != nil`), so `mins` is
-    /// always non-nil here — fall back to 30 defensively. Bell icon mirrors
-    /// the other read rows' leading-SF-Symbol treatment.
+    /// Read-mode reminder control: an on/off toggle, always shown. ON sets a
+    /// 30-min-before reminder, OFF clears it; the change persists immediately
+    /// via `onReminderChange` WITHOUT closing the card. `reminderOn` is local
+    /// optimistic state seeded from the event so the tap reflects at once.
     private var reminderRow: some View {
-        let mins = event.reminderMinutesBefore ?? 30
-        return HStack(spacing: 12) {
+        HStack(spacing: 12) {
             Image(systemName: "bell")
                 .font(.system(size: 16))
                 .foregroundStyle(Color.evOnSurfaceVariant)
                 .frame(width: 24)
-            Text("Reminder · \(mins) minutes before")
+            Text(reminderOn ? "Reminder · 30 minutes before" : "Reminder")
                 .font(.custom("Inter", size: 14))
                 .foregroundStyle(Color.evOnSurface)
             Spacer()
+            Toggle("", isOn: Binding(
+                get: { reminderOn },
+                set: { newVal in
+                    reminderOn = newVal
+                    var updated = event
+                    updated.reminderMinutesBefore = newVal ? 30 : nil
+                    let cols = event.participantCols ?? [event.col]
+                    updated.col = cols.first ?? event.col
+                    onReminderChange(updated, Array(cols.dropFirst()))
+                }
+            ))
+            .labelsHidden()
+            .tint(Color.evPrimary)
         }
         .padding(.vertical, 12)
     }

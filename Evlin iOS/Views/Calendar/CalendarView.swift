@@ -97,6 +97,11 @@ struct CalendarView: View {
                             Task { await store.delete(id: backendID, refetchFor: target) }
                         }
                         activeEvent = nil
+                    },
+                    onReminderChange: { updated, extras in
+                        // Persist the reminder flip but KEEP the card open
+                        // (unlike onSave, which dismisses it).
+                        persistSave(updated, extras: extras, isNew: false)
                     }
                 )
                 .transition(.opacity)
