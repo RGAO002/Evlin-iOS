@@ -42,12 +42,22 @@ final class BigKidState {
     }
 
     var allTasksDone: Bool {
-        tasks.allSatisfy {
-            $0.status == .done || $0.bypass?.status == .approved
+        Self.usageCountingAllowed(for: tasks)
+    }
+
+    static func usageCountingAllowed(for tasks: [BigKidTask]) -> Bool {
+        tasks.allSatisfy { task in
+            task.status == .done || task.bypass?.status == .approved
         }
     }
 
     func task(id: UUID) -> BigKidTask? {
         tasks.first(where: { $0.id == id })
+    }
+}
+
+extension ChildStateResponse {
+    var usageCountingAllowed: Bool {
+        BigKidState.usageCountingAllowed(for: tasks)
     }
 }

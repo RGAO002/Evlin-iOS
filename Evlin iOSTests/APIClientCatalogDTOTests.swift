@@ -215,6 +215,28 @@ final class APIClientCatalogDTOTests: XCTestCase {
         XCTAssertEqual(json["source_device_id"] as? String, sourceDeviceID.uuidString)
     }
 
+    func test_deviceCapRequestBodyMatchesBackendSchema() throws {
+        let childProfileID = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
+        let childDeviceID = UUID(uuidString: "66666666-7777-8888-9999-AAAAAAAAAAAA")!
+
+        let data = try APIClient.makeDeviceCapRequestBodyData(
+            childProfileID: childProfileID,
+            childDeviceID: childDeviceID,
+            capMinutes: 45,
+            timezone: "America/New_York",
+            effective: "today",
+            confirmCascade: true)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+
+        XCTAssertEqual(json["child_profile_id"] as? String, childProfileID.uuidString)
+        XCTAssertEqual(json["child_device_id"] as? String, childDeviceID.uuidString)
+        XCTAssertEqual(json["cap_minutes"] as? Int, 45)
+        XCTAssertEqual(json["timezone"] as? String, "America/New_York")
+        XCTAssertEqual(json["effective"] as? String, "today")
+        XCTAssertEqual(json["confirm_cascade"] as? Bool, true)
+        XCTAssertNil(json["daily_cap_minutes"])
+    }
+
     func test_catalogListUploadResponseDecodesAliasKeyAndAppCount() throws {
         let aliasKey = UUID(uuidString: "33333333-3333-3333-3333-333333333333")!
         let childDeviceID = UUID(uuidString: "44444444-4444-4444-4444-444444444444")!

@@ -7,27 +7,25 @@ import XCTest
 /// no SwiftUI, no DeviceActivity types, no ManagedSettingsStore.
 ///
 /// Covered:
-///   1. Coarse countdown label rounding (10-min steps, "about N min left")
+///   1. Countdown label formatting (5-minute pool granularity)
 ///   2. Freshness phrasing ("updated ~Xm ago", thresholds for hours/just now)
 ///   3. Exhausted copy ("Time's up for today")
-///   4. Per-device estimate label (honest coarse copy)
+///   4. Per-device estimate label (5-minute cap granularity copy)
 ///   5. Per-app "used" is hidden in v1 (statusText returns only limit-off / nothing about usage)
 final class EarnedDisplayTests: XCTestCase {
 
     // MARK: - 1. Coarse countdown label
 
-    func test_coarseCountdown_roundsTo10MinSteps() {
-        // 83 min → rounds DOWN to 80
-        XCTAssertEqual(EarnedDisplayFormatters.coarseCountdownLabel(remainingMinutes: 83), "about 80 min left")
+    func test_coarseCountdown_showsActualMinutesUnderAnHour() {
+        XCTAssertEqual(EarnedDisplayFormatters.coarseCountdownLabel(remainingMinutes: 45), "45m left")
     }
 
-    func test_coarseCountdown_exactMultipleOf10() {
-        XCTAssertEqual(EarnedDisplayFormatters.coarseCountdownLabel(remainingMinutes: 60), "about 60 min left")
+    func test_coarseCountdown_exactHour() {
+        XCTAssertEqual(EarnedDisplayFormatters.coarseCountdownLabel(remainingMinutes: 60), "1h left")
     }
 
-    func test_coarseCountdown_smallRemainder() {
-        // 7 min → below first step → "about 10 min left" (floor clamps to 10)
-        XCTAssertEqual(EarnedDisplayFormatters.coarseCountdownLabel(remainingMinutes: 7), "about 10 min left")
+    func test_coarseCountdown_hourAndMinutes() {
+        XCTAssertEqual(EarnedDisplayFormatters.coarseCountdownLabel(remainingMinutes: 65), "1h 5m left")
     }
 
     func test_coarseCountdown_zero_isExhausted() {
@@ -39,9 +37,8 @@ final class EarnedDisplayTests: XCTestCase {
         XCTAssertEqual(EarnedDisplayFormatters.coarseCountdownLabel(remainingMinutes: -5), "Time's up for today")
     }
 
-    func test_coarseCountdown_largeValue_roundsCorrectly() {
-        // 147 min → 140
-        XCTAssertEqual(EarnedDisplayFormatters.coarseCountdownLabel(remainingMinutes: 147), "about 140 min left")
+    func test_coarseCountdown_largeValue_formatsHoursAndMinutes() {
+        XCTAssertEqual(EarnedDisplayFormatters.coarseCountdownLabel(remainingMinutes: 147), "2h 27m left")
     }
 
     // MARK: - 2. Freshness phrasing
@@ -83,9 +80,9 @@ final class EarnedDisplayTests: XCTestCase {
 
     // MARK: - 4. Per-device estimate label
 
-    func test_deviceEstimate_showsCoarseMinutes() {
-        // 45 min remaining on device → "about 40 min left on this device"
-        XCTAssertEqual(EarnedDisplayFormatters.deviceEstimateLabel(estimatedMinutesLeft: 45), "about 40 min left on this device")
+    func test_deviceEstimate_showsActualRemainingMinutes() {
+        XCTAssertEqual(EarnedDisplayFormatters.deviceEstimateLabel(estimatedMinutesLeft: 45), "45 mins left")
+        XCTAssertEqual(EarnedDisplayFormatters.deviceEstimateLabel(estimatedMinutesLeft: 65), "65 mins left")
     }
 
     func test_deviceEstimate_atCap_showsTimesUp() {
@@ -96,34 +93,94 @@ final class EarnedDisplayTests: XCTestCase {
         XCTAssertEqual(EarnedDisplayFormatters.deviceEstimateLabel(estimatedMinutesLeft: -1), "time's up on this device")
     }
 
-    // MARK: - 5. v1: per-app "used" is hidden
+    func test_deviceRemaining_overallPoolEmptyOverridesStaleDeviceEstimate() {
+        XCTAssertEqual(
+            EarnedDisplayFormatters.deviceRemainingLabel(
+                remainingToCapMinutes: 60,
+                overallRemainingMinutes: 0,
+                fallbackOverallLabel: "Time's up for today"
+            ),
+            "Time's up for today"
+        )
+        XCTAssertEqual(
+            EarnedDisplayFormatters.deviceRemainingFraction(
+                remainingToCapMinutes: 60,
+                capMinutes: 65,
+                overallRemainingMinutes: 0,
+                dailyPoolMinutes: 65
+            ),
+            0,
+            accuracy: 0.001
+        )
+    }
+
+    func test_deviceRemaining_usesRemainingToCapNotEstimatedUsedMinutes() {
+        XCTAssertEqual(
+            EarnedDisplayFormatters.deviceRemainingLabel(
+                remainingToCapMinutes: 10,
+                overallRemainingMinutes: nil,
+                fallbackOverallLabel: "50m left"
+            ),
+            "10 mins left"
+        )
+        XCTAssertEqual(
+            EarnedDisplayFormatters.deviceRemainingFraction(
+                remainingToCapMinutes: 10,
+                capMinutes: 60,
+                overallRemainingMinutes: nil,
+                dailyPoolMinutes: nil
+            ),
+            1.0 / 6.0,
+            accuracy: 0.001
+        )
+    }
+
+    // MARK: - 5. Per-app "used" shows real (coarse) usage
 
     func test_perAppStatus_limitOff_returnsLimitOffOnly() {
-        // When the limit is off, status is "Limit off" — no usage number
+        // Limit off → "Limit off", regardless of any usage value.
         let result = EarnedDisplayFormatters.appRowStatusText(limitEnabled: false, usedMin: 30, limitMin: 60)
         XCTAssertEqual(result, "Limit off")
-        XCTAssertFalse(result.contains("used"), "v1: must not show usage data")
-        XCTAssertFalse(result.contains("30"), "v1: usedMin must not appear")
     }
 
-    func test_perAppStatus_limitOn_doesNotShowUsageNumbers() {
-        // When limit is on but v1 has no real usage, status must NOT show "X used / X min used"
-        let result = EarnedDisplayFormatters.appRowStatusText(limitEnabled: true, usedMin: 0, limitMin: 60)
-        XCTAssertFalse(result.contains("used"), "v1: must not show per-app usage data")
-        XCTAssertFalse(result.contains("0"), "v1: usedMin=0 must not appear as a number")
+    func test_perAppStatus_limitOn_showsUsageFigure() {
+        XCTAssertEqual(EarnedDisplayFormatters.appRowStatusText(limitEnabled: true, usedMin: 0, limitMin: 60), "0 / 60 min")
+        XCTAssertEqual(EarnedDisplayFormatters.appRowStatusText(limitEnabled: true, usedMin: 45, limitMin: 60), "45 / 60 min")
     }
 
-    func test_perAppStatus_limitOn_nonZeroUsed_doesNotShowUsage() {
-        // Even if the mock usedMin is non-zero, v1 must not display it
-        let result = EarnedDisplayFormatters.appRowStatusText(limitEnabled: true, usedMin: 45, limitMin: 60)
-        XCTAssertFalse(result.contains("used"), "v1: per-app usage must be hidden")
-        XCTAssertFalse(result.contains("45"), "v1: usedMin must not appear")
+    func test_perAppStatus_atOrOverLimit_clampsToLimit() {
+        // Clamped to the limit; the row's separate "LIMIT REACHED" badge conveys
+        // the reached state (this text must not double-label it).
+        XCTAssertEqual(EarnedDisplayFormatters.appRowStatusText(limitEnabled: true, usedMin: 60, limitMin: 60), "60 / 60 min")
+        XCTAssertEqual(EarnedDisplayFormatters.appRowStatusText(limitEnabled: true, usedMin: 75, limitMin: 60), "60 / 60 min")
     }
 
-    // MARK: - 6. Precision badge copy
+    // MARK: - 6. Remaining-time fraction
 
-    func test_precisionBadge() {
-        XCTAssertEqual(EarnedDisplayFormatters.precisionBadge(), "~10 min steps")
+    func test_remainingFraction_usesRemainingOverPool() {
+        XCTAssertEqual(
+            EarnedDisplayFormatters.remainingFraction(remainingMinutes: 30, dailyPoolMinutes: 120),
+            0.25,
+            accuracy: 0.001
+        )
+    }
+
+    func test_remainingFraction_clampsToValidBarRange() {
+        XCTAssertEqual(EarnedDisplayFormatters.remainingFraction(remainingMinutes: -5, dailyPoolMinutes: 120), 0)
+        XCTAssertEqual(EarnedDisplayFormatters.remainingFraction(remainingMinutes: 140, dailyPoolMinutes: 120), 1)
+        XCTAssertEqual(EarnedDisplayFormatters.remainingFraction(remainingMinutes: 30, dailyPoolMinutes: 0), 1)
+        XCTAssertEqual(EarnedDisplayFormatters.remainingFraction(remainingMinutes: nil, dailyPoolMinutes: 120), 1)
+    }
+
+    func test_remainingFraction_exhaustedIsEmptyEvenWithoutPoolDenominator() {
+        XCTAssertEqual(EarnedDisplayFormatters.remainingFraction(remainingMinutes: 0, dailyPoolMinutes: nil), 0)
+        XCTAssertEqual(EarnedDisplayFormatters.remainingFraction(remainingMinutes: -5, dailyPoolMinutes: nil), 0)
+    }
+
+    func test_remainingTier_usesRemainingTimeThresholds() {
+        XCTAssertEqual(EarnedDisplayFormatters.remainingTier(fraction: 0.9), .green)
+        XCTAssertEqual(EarnedDisplayFormatters.remainingTier(fraction: 0.5), .yellow)
+        XCTAssertEqual(EarnedDisplayFormatters.remainingTier(fraction: 0.2), .red)
     }
 
     // MARK: - 7. EarnedSummaryDTO decodes A3 "devices" key (B11 regression guard)

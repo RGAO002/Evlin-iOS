@@ -56,15 +56,21 @@ enum EventTimeBridge {
 }
 
 /// Composite time editor: two tappable Starts/Ends cells, a native wheel
-/// `DatePicker` bound to the active cell, and a connected duration
-/// segmented control. Reads/writes `"hh:mm a"` strings only — the model
-/// type and save path are untouched.
+/// `DatePicker` that stays COLLAPSED until a cell is tapped (Apple-Calendar
+/// inline-reveal), and a connected duration segmented control. Reads/writes
+/// `"hh:mm a"` strings only — the model type and save path are untouched.
 struct EventTimePicker: View {
     @Binding var start: String
     @Binding var end: String
 
     private enum Field { case start, end }
-    @State private var active: Field = .start
+    /// `nil` = collapsed (no wheel). A non-nil value reveals the wheel bound to
+    /// that field. Tapping the already-open cell again collapses it.
+    @State private var active: Field?
+
+    /// Graceful inline unfold — same calm, high-damping spring the App Controls
+    /// accordion uses (no "fly down from the top"; an opacity + height reveal).
+    private static let revealAnimation: Animation = .spring(response: 0.34, dampingFraction: 0.9)
 
     /// Duration presets, in minutes, with their display labels.
     private static let durations: [(minutes: Int, label: String)] = [
@@ -72,13 +78,15 @@ struct EventTimePicker: View {
     ]
 
     /// The wheel binds here: read the active field's string as a `Date`;
-    /// writing formats back into the active field's `"hh:mm a"` string.
+    /// writing formats back into the active field's `"hh:mm a"` string. When
+    /// nothing is active the get falls back to `start` (the wheel isn't shown
+    /// then, so the value is never displayed).
     private var activeDate: Binding<Date> {
         Binding(
-            get: { EventTimeBridge.parse(active == .start ? start : end) },
+            get: { EventTimeBridge.parse(active == .end ? end : start) },
             set: { newDate in
                 let s = EventTimeBridge.format(newDate)
-                if active == .start { start = s } else { end = s }
+                if active == .end { end = s } else { start = s }
             }
         )
     }
@@ -98,12 +106,19 @@ struct EventTimePicker: View {
                 timeCell(title: "Ends", value: end, field: .end)
             }
 
-            // Native wheel picker bound to the active cell.
-            DatePicker("", selection: activeDate, displayedComponents: .hourAndMinute)
-                .datePickerStyle(.wheel)
-                .labelsHidden()
-                .frame(maxWidth: .infinity)
-                .tint(Color.evPrimary)
+            // Native wheel — only present once a cell is tapped. Reduced height
+            // (a full wheel is ~216pt and felt too big/abrupt) and clipped so it
+            // reads as a compact inline drawer.
+            if active != nil {
+                DatePicker("", selection: activeDate, displayedComponents: .hourAndMinute)
+                    .datePickerStyle(.wheel)
+                    .labelsHidden()
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 168)
+                    .clipped()
+                    .tint(Color.evPrimary)
+                    .transition(.opacity)
+            }
 
             // Duration row: label + connected segmented control.
             HStack(spacing: 10) {
@@ -113,27 +128,42 @@ struct EventTimePicker: View {
                 durationSegments
             }
         }
+        .animation(Self.revealAnimation, value: active)
     }
 
-    /// One Starts/Ends cell. The active one is tinted with the accent;
-    /// tapping makes it active so the wheel below targets it.
+    /// Toggle a cell: open its wheel, or collapse if it's already the open one.
+    private func toggle(_ field: Field) {
+        withAnimation(Self.revealAnimation) {
+            active = (active == field) ? nil : field
+        }
+    }
+
+    /// One Starts/Ends cell. The open one is tinted with the accent and its
+    /// chevron points up; tapping reveals/collapses the wheel below.
     private func timeCell(title: String, value: String, field: Field) -> some View {
         let isActive = active == field
         return Button {
-            active = field
+            toggle(field)
         } label: {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(title.uppercased())
-                    .font(.custom("Inter", size: 10).weight(.heavy))
-                    .tracking(1.0)
+            HStack(spacing: 8) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title.uppercased())
+                        .font(.custom("Inter", size: 10).weight(.heavy))
+                        .tracking(1.0)
+                        .foregroundStyle(isActive ? Color.evPrimary : Color.evOnSurfaceVariant)
+                    Text(value)
+                        .font(.custom("Manrope", size: 17).weight(.heavy))
+                        .foregroundStyle(isActive ? Color.evPrimary : Color.evOnSurface)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 11, weight: .heavy))
                     .foregroundStyle(isActive ? Color.evPrimary : Color.evOnSurfaceVariant)
-                Text(value)
-                    .font(.custom("Manrope", size: 17).weight(.heavy))
-                    .foregroundStyle(isActive ? Color.evPrimary : Color.evOnSurface)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
+                    .rotationEffect(.degrees(isActive ? 180 : 0))
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
             .background(
@@ -157,8 +187,10 @@ struct EventTimePicker: View {
             ForEach(Array(Self.durations.enumerated()), id: \.element.minutes) { index, item in
                 let isSel = selectedDuration == item.minutes
                 Button {
+                    // Quick-set the span WITHOUT forcing the wheel open (it stays
+                    // collapsed by default; if it's already open on Ends it updates
+                    // live). Tapping the time cells is the only way to reveal it.
                     end = EventTimeBridge.adding(item.minutes, to: start)
-                    active = .end
                 } label: {
                     Text(item.label)
                         .font(.custom("Inter", size: 11).weight(.heavy))

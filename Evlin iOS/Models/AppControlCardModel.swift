@@ -38,6 +38,8 @@ enum AppControlCardKind: String, Sendable, CaseIterable {
     // Task 6 — lock-selected-apps confirmation cards.
     case lockSelectedAppsConfirm = "lock_selected_apps_confirm"
     case lockSelectedAppsEmpty = "lock_selected_apps_empty"
+    // Family-level bare unlock/unblock picker.
+    case restrictionUnlockPicker = "restriction_unlock_picker"
 }
 
 /// One tappable option on an app-control card. Mirrors backend
@@ -62,6 +64,28 @@ struct AppPreviewItem: Sendable, Equatable {
     let artworkURL: URL?
 }
 
+struct RestrictionUnlockRow: Sendable, Equatable, Identifiable {
+    let id: String
+    let title: String
+    let subtitle: String
+    let badge: String
+    let action: String
+    let kind: String
+    let childDeviceID: String
+    let deviceLabel: String
+    let expiresAtISO: String?
+}
+
+struct RestrictionUnlockGroup: Sendable, Equatable, Identifiable {
+    let id: String
+    let childName: String
+    let avatarURL: URL?
+    let avatarValue: String
+    let avatarColorHex: String?
+    let deviceSummary: String
+    let sessions: [RestrictionUnlockRow]
+}
+
 /// One disambiguation row. Mirrors the loose dict the seam projects for each
 /// candidate (`_app_control_candidate_projection`).
 struct AppControlCandidate: Sendable, Equatable, Identifiable {
@@ -70,6 +94,9 @@ struct AppControlCandidate: Sendable, Equatable, Identifiable {
     let artworkURL: URL?
     let targetType: String?
     let childDeviceID: String?
+    let childAvatarURL: URL?
+    let childAvatarValue: String?
+    let childAvatarColorHex: String?
     let aliasKey: String?
 
     /// Stable enough for SwiftUI ForEach: a candidate is uniquely identified by
@@ -97,6 +124,8 @@ struct AppControlCardModel: Sendable, Equatable {
     let appPreview: [AppPreviewItem]
     let categoryPreview: [String]
     let durationMinutes: Int?
+    let pickerToken: String?
+    let restrictionGroups: [RestrictionUnlockGroup]
 
     /// Parse from the chat-response `card_payload` dict (already deserialised to
     /// `[String: Any]`). Returns nil when `card_id` isn't one of the
@@ -132,6 +161,9 @@ struct AppControlCardModel: Sendable, Equatable {
                 artworkURL: (dict["artwork_url"] as? String).flatMap(URL.init(string:)),
                 targetType: dict["target_type"] as? String,
                 childDeviceID: dict["child_device_id"] as? String,
+                childAvatarURL: (dict["child_avatar_url"] as? String).flatMap(URL.init(string:)),
+                childAvatarValue: dict["child_avatar_value"] as? String,
+                childAvatarColorHex: dict["child_avatar_color"] as? String,
                 aliasKey: dict["alias_key"] as? String
             )
         }
@@ -151,6 +183,8 @@ struct AppControlCardModel: Sendable, Equatable {
         }
         let categoryPreview = (payload["category_preview"] as? [String]) ?? []
         let durationMinutes = payload["duration_minutes"] as? Int
+        let pickerToken = payload["picker_token"] as? String
+        let restrictionGroups = parseRestrictionGroups(payload["restriction_groups"] as? [[String: Any]])
 
         return AppControlCardModel(
             kind: kind,
@@ -166,8 +200,49 @@ struct AppControlCardModel: Sendable, Equatable {
             categoriesCount: categoriesCount,
             appPreview: appPreview,
             categoryPreview: categoryPreview,
-            durationMinutes: durationMinutes
+            durationMinutes: durationMinutes,
+            pickerToken: pickerToken,
+            restrictionGroups: restrictionGroups
         )
+    }
+
+    private static func parseRestrictionGroups(_ dicts: [[String: Any]]?) -> [RestrictionUnlockGroup] {
+        (dicts ?? []).compactMap { dict in
+            let childName = (dict["child_name"] as? String) ?? "Child"
+            let avatar = dict["avatar"] as? [String: Any]
+            let avatarValue = (avatar?["value"] as? String) ?? String(childName.prefix(1)).uppercased()
+            let avatarColor = avatar?["color"] as? String
+            let avatarURL = (avatar?["signed_url"] as? String).flatMap(URL.init(string:))
+            let devices = (dict["devices"] as? [[String: Any]]) ?? []
+            let deviceLabels = devices.compactMap { $0["label"] as? String }.filter { !$0.isEmpty }
+            let sessions = ((dict["sessions"] as? [[String: Any]]) ?? []).compactMap { row -> RestrictionUnlockRow? in
+                guard let id = row["id"] as? String else { return nil }
+                let title = (row["title"] as? String)
+                    ?? (row["display_name"] as? String)
+                    ?? "Restricted item"
+                return RestrictionUnlockRow(
+                    id: id,
+                    title: title,
+                    subtitle: (row["subtitle"] as? String) ?? "",
+                    badge: (row["badge"] as? String) ?? "ACTIVE",
+                    action: (row["action"] as? String) ?? "unshield",
+                    kind: (row["kind"] as? String) ?? "app",
+                    childDeviceID: (row["child_device_id"] as? String) ?? "",
+                    deviceLabel: (row["device_label"] as? String) ?? "",
+                    expiresAtISO: row["expires_at_iso"] as? String
+                )
+            }
+            guard !sessions.isEmpty else { return nil }
+            return RestrictionUnlockGroup(
+                id: (dict["child_id"] as? String) ?? childName,
+                childName: childName,
+                avatarURL: avatarURL,
+                avatarValue: avatarValue,
+                avatarColorHex: avatarColor,
+                deviceSummary: deviceLabels.isEmpty ? "" : deviceLabels.joined(separator: ", "),
+                sessions: sessions
+            )
+        }
     }
 }
 

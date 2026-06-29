@@ -126,7 +126,9 @@ final class AppLimitPlannerTests: XCTestCase {
         let armed = try XCTUnwrap(spy.armed.first)
         XCTAssertEqual(armed.name.rawValue, expectedWindowActivityName(dailyWindow))
         XCTAssertTrue(armed.schedule.repeats)
-        XCTAssertEqual(armed.events.count, 5)
+        // ENFORCEMENT events only (`evlin.limit.*`); measurement (`evlin.applimit.*`)
+        // usage-bar events also ride in the dict but aren't counted here.
+        XCTAssertEqual(armed.events.keys.filter { $0.rawValue.hasPrefix("evlin.limit.") }.count, 5)
 
         // Each event is named evlin.limit.<ruleId> and threshold = budget minutes.
         for r in rules {
@@ -161,9 +163,9 @@ final class AppLimitPlannerTests: XCTestCase {
         XCTAssertEqual(names, [expectedWindowActivityName(morning), expectedWindowActivityName(evening)])
 
         let morningActivity = try XCTUnwrap(spy.armed.first { $0.name.rawValue == expectedWindowActivityName(morning) })
-        XCTAssertEqual(morningActivity.events.count, 2)
+        XCTAssertEqual(morningActivity.events.keys.filter { $0.rawValue.hasPrefix("evlin.limit.") }.count, 2)
         let eveningActivity = try XCTUnwrap(spy.armed.first { $0.name.rawValue == expectedWindowActivityName(evening) })
-        XCTAssertEqual(eveningActivity.events.count, 1)
+        XCTAssertEqual(eveningActivity.events.keys.filter { $0.rawValue.hasPrefix("evlin.limit.") }.count, 1)
     }
 
     // MARK: - Quota: > 20 distinct windows → atomic failure, nothing armed

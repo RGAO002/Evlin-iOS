@@ -96,6 +96,58 @@ actor ActiveLockStore {
         return toRemove
     }
 
+    /// Surgically remove a single APP token from every live `.savedList`
+    /// (Locked-set) shield's baked snapshot, then recompute + re-apply.
+    ///
+    /// The Locked-set shield bakes a token snapshot at lock time and does NOT
+    /// refresh on its own. When the parent removes one app from the App Controls
+    /// picker while the Locked set is shielded RIGHT NOW, this drops just that
+    /// token from the live shield so the app unshields IMMEDIATELY — no
+    /// unlock→relock dance. No-ops (no persist/recompute) when nothing matches.
+    func dropTokenFromSavedListShields(app token: ApplicationToken) {
+        reconcileLimitShieldsFromDisk()
+        applyDropFromSavedListShields { record in
+            guard record.appTokens.contains(token) else { return nil }
+            var updated = record
+            updated.appTokens.remove(token)
+            return updated
+        }
+    }
+
+    /// Sibling of `dropTokenFromSavedListShields(app:)` for a CATEGORY token —
+    /// drops it from every live `.savedList` shield's baked snapshot so a category
+    /// removed from the picker unshields immediately while the Locked set is held.
+    func dropTokenFromSavedListShields(category token: ActivityCategoryToken) {
+        reconcileLimitShieldsFromDisk()
+        applyDropFromSavedListShields { record in
+            guard record.categoryTokens.contains(token) else { return nil }
+            var updated = record
+            updated.categoryTokens.remove(token)
+            return updated
+        }
+    }
+
+    /// Apply `transform` to every `.savedList` shield. `transform` returns the
+    /// updated record (token removed) or `nil` to leave it untouched. A
+    /// `.savedList` record left with no tokens at all is deleted entirely.
+    /// Persists + recomputes only when at least one record actually changed.
+    private func applyDropFromSavedListShields(_ transform: (ShieldRecord) -> ShieldRecord?) {
+        var changed = false
+        for record in shieldRecords.values where record.tier == .savedList {
+            guard let updated = transform(record) else { continue }
+            if updated.appTokens.isEmpty, updated.categoryTokens.isEmpty,
+               updated.webDomainTokens.isEmpty, !updated.appliesToAll {
+                shieldRecords.removeValue(forKey: record.recordKey)
+            } else {
+                shieldRecords[record.recordKey] = updated
+            }
+            changed = true
+        }
+        guard changed else { return }
+        persist()
+        recomputeAndApply()
+    }
+
     /// Remove every `source == .limit` shield that covers the given per-app limit
     /// rule's app, then recompute. Used by `clear_limit` (P6) so clearing a limit
     /// also unshields if the limit had auto-shielded the app. Matches a limit

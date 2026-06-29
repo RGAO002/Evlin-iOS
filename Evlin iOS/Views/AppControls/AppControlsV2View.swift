@@ -334,43 +334,51 @@ struct AppControlsV2View: View {
                 emptyText("No categories.")
             } else {
                 ForEach(Array(selection.categoryTokens), id: \.self) { token in
-                    CategoryRow(
-                        token: token,
-                        state: matchedState(forCategory: token, tick: refreshTick),
-                        isExpanded: expandedCategory == token,
-                        selectedKey: selectedCategoryKey(forCategory: token, tick: refreshTick),
-                        onToggle: { toggleCategory(token) },
-                        onRemove: {
-                            if expandedCategory == token {
-                                withAnimation(Self.accordionAnimation) { expandedCategory = nil }
-                            }
-                            // Mirror the App row's remove (Fix A.3): a tagged category
-                            // also DELETES its backend catalog row. Without this the row
-                            // stays `active`, so `ensure_selected_set` keeps pulling the
-                            // category back into the Locked set and it gets locked even
-                            // after the parent removed it here. Capture the alias key
-                            // BEFORE clearing the local aliases that resolve it.
-                            let aliasKey = backendAliasKey(forCategory: token)
-                            for key in LocalAliasStore.shared.categoryLookupKeys(equalTo: token) {
-                                LocalAliasStore.shared.removeCategory(named: key)
-                            }
-                            if let aliasKey {
-                                Task { try? await apiClient.deleteChildAppControlTarget(deviceID: childDeviceID, aliasKey: aliasKey) }
-                            }
-                            DefaultLockGroupStore.removeCategory(token)
-                            // If the Locked set is shielded RIGHT NOW, the live
-                            // shield is a baked snapshot — drop this category from
-                            // it immediately so it unshields without an
-                            // unlock→relock dance.
-                            Task { await ActiveLockStore.shared.dropTokenFromSavedListShields(category: token) }
-                            reload()
-                            onSelectionChanged?()
-                        },
-                        onPick: { suggestion in bindCategory(token, suggestion: suggestion) }
-                    )
+                    categoryRow(token)
                 }
             }
         }
+    }
+
+    /// One Categories row. Extracted from `categoriesSection`'s `ForEach` body so
+    /// the heavy inline closures don't blow the SwiftUI type-checker's budget
+    /// ("unable to type-check this expression in reasonable time").
+    @ViewBuilder
+    private func categoryRow(_ token: ActivityCategoryToken) -> some View {
+        CategoryRow(
+            token: token,
+            state: matchedState(forCategory: token, tick: refreshTick),
+            isExpanded: expandedCategory == token,
+            selectedKey: selectedCategoryKey(forCategory: token, tick: refreshTick),
+            onToggle: { toggleCategory(token) },
+            onRemove: { removeCategory(token) },
+            onPick: { suggestion in bindCategory(token, suggestion: suggestion) }
+        )
+    }
+
+    /// Remove a tagged category from the picker. Mirrors the App row's remove
+    /// (Fix A.3): also DELETES its backend catalog row. Without this the row stays
+    /// `active`, so `ensure_selected_set` keeps pulling the category back into the
+    /// Locked set and it gets locked even after the parent removed it here.
+    private func removeCategory(_ token: ActivityCategoryToken) {
+        if expandedCategory == token {
+            withAnimation(Self.accordionAnimation) { expandedCategory = nil }
+        }
+        // Capture the alias key BEFORE clearing the local aliases that resolve it.
+        let aliasKey = backendAliasKey(forCategory: token)
+        for key in LocalAliasStore.shared.categoryLookupKeys(equalTo: token) {
+            LocalAliasStore.shared.removeCategory(named: key)
+        }
+        if let aliasKey {
+            Task { try? await apiClient.deleteChildAppControlTarget(deviceID: childDeviceID, aliasKey: aliasKey) }
+        }
+        DefaultLockGroupStore.removeCategory(token)
+        // If the Locked set is shielded RIGHT NOW, the live shield is a baked
+        // snapshot — drop this category from it immediately so it unshields
+        // without an unlock→relock dance.
+        Task { await ActiveLockStore.shared.dropTokenFromSavedListShields(category: token) }
+        reload()
+        onSelectionChanged?()
     }
 
     // MARK: - Apps (below, lazy)
@@ -385,58 +393,67 @@ struct AppControlsV2View: View {
             } else {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(Array(selection.applicationTokens), id: \.self) { token in
-                        AppRow(
-                            token: token,
-                            apiClient: apiClient,
-                            state: matchedState(forApp: token, tick: refreshTick),
-                            isExpanded: expandedApp == token,
-                            isRebinding: rebindingApp == token,
-                            onToggle: { toggleApp(token) },
-                            onRemove: {
-                                if expandedApp == token {
-                                    withAnimation(Self.accordionAnimation) { expandedApp = nil }
-                                }
-                                // Fix 1 — removing the app while a Rebind is pending
-                                // still drops the (now-stale) alias before the row goes.
-                                // (If a rebind was pending on THIS token, this also
-                                // deletes the backend row — Fix A.2 — so the named-app
-                                // cleanup below no-ops, having no alias left to find.)
-                                cancelRebindIfPending()
-                                // Fix A.3 — for a NAMED app, also clean up its local alias
-                                // and DELETE its backend catalog row so it stops showing in
-                                // the parent "Manage aliases" after removal. Unnamed apps
-                                // have no alias keys → this whole block no-ops.
-                                let aliasKey = backendAliasKey(forApp: token)
-                                let aliasLookupKeys = LocalAliasStore.shared.applicationLookupKeys(equalTo: token)
-                                if !aliasLookupKeys.isEmpty {
-                                    LocalAliasStore.shared.removeApplicationAliases(keys: aliasLookupKeys)
-                                    if let aliasKey {
-                                        Task { try? await apiClient.deleteChildAppControlTarget(deviceID: childDeviceID, aliasKey: aliasKey) }
-                                    }
-                                }
-                                DefaultLockGroupStore.removeApp(token)
-                                // Drop this app from any live Locked-set shield now
-                                // (baked snapshot won't refresh on its own).
-                                Task { await ActiveLockStore.shared.dropTokenFromSavedListShields(app: token) }
-                                reload()
-                                onSelectionChanged?()
-                            },
-                            onRebind: {
-                                // Tapping Rebind clears the OLD binding RIGHT AWAY
-                                // (delete backend row + dict entry + local alias), then
-                                // shows the search — no need to exit/Done to clean up.
-                                unbindApp(token)
-                                rebindingApp = token
-                            },
-                            onPick: { result in bindApp(token, result: result) },
-                            onManual: { name in
-                                bindApp(token, result: CatalogSearchResult(canonicalName: name, bundleID: nil, aliases: []))
-                            }
-                        )
+                        appRow(token)
                     }
                 }
             }
         }
+    }
+
+    /// One Apps row. Extracted from `appsSection`'s `ForEach` body so the heavy
+    /// inline closures don't blow the SwiftUI type-checker's budget ("unable to
+    /// type-check this expression in reasonable time").
+    @ViewBuilder
+    private func appRow(_ token: ApplicationToken) -> some View {
+        AppRow(
+            token: token,
+            apiClient: apiClient,
+            state: matchedState(forApp: token, tick: refreshTick),
+            isExpanded: expandedApp == token,
+            isRebinding: rebindingApp == token,
+            onToggle: { toggleApp(token) },
+            onRemove: { removeApp(token) },
+            onRebind: {
+                // Tapping Rebind clears the OLD binding RIGHT AWAY (delete backend
+                // row + dict entry + local alias), then shows the search — no need
+                // to exit/Done to clean up.
+                unbindApp(token)
+                rebindingApp = token
+            },
+            onPick: { result in bindApp(token, result: result) },
+            onManual: { name in
+                bindApp(token, result: CatalogSearchResult(canonicalName: name, bundleID: nil, aliases: []))
+            }
+        )
+    }
+
+    /// Remove an app from the picker.
+    private func removeApp(_ token: ApplicationToken) {
+        if expandedApp == token {
+            withAnimation(Self.accordionAnimation) { expandedApp = nil }
+        }
+        // Fix 1 — removing the app while a Rebind is pending still drops the
+        // (now-stale) alias before the row goes. (If a rebind was pending on THIS
+        // token, this also deletes the backend row — Fix A.2 — so the named-app
+        // cleanup below no-ops, having no alias left to find.)
+        cancelRebindIfPending()
+        // Fix A.3 — for a NAMED app, also clean up its local alias and DELETE its
+        // backend catalog row so it stops showing in the parent "Manage aliases"
+        // after removal. Unnamed apps have no alias keys → this whole block no-ops.
+        let aliasKey = backendAliasKey(forApp: token)
+        let aliasLookupKeys = LocalAliasStore.shared.applicationLookupKeys(equalTo: token)
+        if !aliasLookupKeys.isEmpty {
+            LocalAliasStore.shared.removeApplicationAliases(keys: aliasLookupKeys)
+            if let aliasKey {
+                Task { try? await apiClient.deleteChildAppControlTarget(deviceID: childDeviceID, aliasKey: aliasKey) }
+            }
+        }
+        DefaultLockGroupStore.removeApp(token)
+        // Drop this app from any live Locked-set shield now (baked snapshot won't
+        // refresh on its own).
+        Task { await ActiveLockStore.shared.dropTokenFromSavedListShields(app: token) }
+        reload()
+        onSelectionChanged?()
     }
 
     // MARK: - Accordion toggles (only one expanded at a time)

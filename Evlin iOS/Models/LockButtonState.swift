@@ -2,12 +2,12 @@ import Foundation
 
 /// B8 — pure value that drives the ProfileView green/red lock button.
 ///
-/// Derived from `DeviceLockStateResponse.covering_sources` + `exhausted`, or
-/// from `EarnedSummaryDTO.state` for multi-device child-level display.
+/// Derived from `DeviceLockStateResponse.covering_sources`, or from
+/// `EarnedSummaryDTO.state` for multi-device child-level display.
 ///
 /// Three states:
 /// - `.pending`           — no acked state yet (sources = nil); show spinner/neutral
-/// - `.clear`             — selected set is unlocked (sources = [] AND not exhausted)
+/// - `.clear`             — selected set is unlocked (sources = [])
 /// - `.shielded(who:)`    — locked; `who` lists which sources are active
 enum LockButtonState: Equatable {
     case pending
@@ -16,18 +16,17 @@ enum LockButtonState: Equatable {
 
     // MARK: - Factory from lock-state acked fields
 
-    /// Derive button state from the acked `covering_sources` array and the
-    /// `exhausted` flag (both from `DeviceLockStateResponse`).
+    /// Derive button state from the acked `covering_sources` array.
     ///
     /// Rules (in priority order):
-    /// 1. If `exhausted == true` → `.shielded(who: sources ?? [])` (earned time ran out)
-    /// 2. If `sources` is nil    → `.pending` (no acked state yet)
-    /// 3. If `sources` is empty  → `.clear`
-    /// 4. Otherwise              → `.shielded(who: sources)`
+    /// 1. If `sources` is nil    → `.pending` (no acked state yet)
+    /// 2. If `sources` is empty  → `.clear`
+    /// 3. Otherwise              → `.shielded(who: sources)`
+    ///
+    /// `exhausted` is intentionally not enough to show a red Unlock button.
+    /// The button is an App Controls lock toggle, so red means the selected set
+    /// is actually covered by a shield source.
     static func from(coveringSources: [String]?, exhausted: Bool?) -> LockButtonState {
-        if exhausted == true {
-            return .shielded(who: coveringSources ?? [])
-        }
         guard let sources = coveringSources else { return .pending }
         return sources.isEmpty ? .clear : .shielded(who: sources)
     }

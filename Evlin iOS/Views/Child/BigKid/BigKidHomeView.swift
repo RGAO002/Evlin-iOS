@@ -209,10 +209,8 @@ struct BigKidHomeView: View {
     private var timeLeftCard: some View {
         // home.jsx lines 204–245
         let mode = TimeMode(minutesLeft: state.minutesLeft, max: state.minutesMax)
-        // B11: coarse label shown to the child — honest "about N min left".
-        // The big exact number stays as before; the coarse label is the
-        // primary accessible framing the child is meant to internalize.
-        let coarseLabel = EarnedDisplayFormatters.coarseCountdownLabel(remainingMinutes: state.minutesLeft)
+        // B11: countdown label uses the same 5-minute granularity as parent surfaces.
+        let countdownLabel = EarnedDisplayFormatters.coarseCountdownLabel(remainingMinutes: state.minutesLeft)
         return EvKidCard(padding: 22) {
             VStack(alignment: .leading, spacing: 0) {
                 HStack {
@@ -225,7 +223,7 @@ struct BigKidHomeView: View {
                 }
                 .padding(.bottom, 6)
                 // B11: coarse primary label (honest framing for the child).
-                Text(coarseLabel)
+                Text(countdownLabel)
                     .font(.system(size: 22, weight: .heavy))
                     .tracking(-0.4)
                     .foregroundStyle(mode.fg)

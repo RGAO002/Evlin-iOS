@@ -31,6 +31,31 @@ struct LimitRule: Codable, Sendable, Equatable {
     let effectiveFrom: Date
     let expiresAt: Date?
     let updatedAt: Date
+    let usedTodayMinutes: Int?
+
+    init(
+        ruleId: UUID,
+        dailyBudgetMinutes: Int,
+        resetPolicy: String,
+        startMinute: Int,
+        endMinute: Int,
+        timezone: String?,
+        effectiveFrom: Date,
+        expiresAt: Date?,
+        updatedAt: Date,
+        usedTodayMinutes: Int? = nil
+    ) {
+        self.ruleId = ruleId
+        self.dailyBudgetMinutes = dailyBudgetMinutes
+        self.resetPolicy = resetPolicy
+        self.startMinute = startMinute
+        self.endMinute = endMinute
+        self.timezone = timezone
+        self.effectiveFrom = effectiveFrom
+        self.expiresAt = expiresAt
+        self.updatedAt = updatedAt
+        self.usedTodayMinutes = usedTodayMinutes
+    }
 }
 
 /// Payload decoded from a `clear_limit` command (P3 wire decode only).

@@ -192,7 +192,7 @@ final class ActionExecutor: @unchecked Sendable {
         case .expandLibrary:
             return .failed(.execution("expand_library handled in UI"))
         case .setLimit:
-            return executeSetLimit(cmd)
+            return await executeSetLimit(cmd)
         case .clearLimit:
             return await executeClearLimit(cmd)
         case .earnedTimeConfig:
@@ -210,7 +210,7 @@ final class ActionExecutor: @unchecked Sendable {
     /// first so the planner reads it from the store, and if the planner reports
     /// `.quotaExceeded` (it guarantees it armed NOTHING) the just-upserted rule is
     /// rolled back so the store never keeps a rule that didn't apply.
-    private func executeSetLimit(_ cmd: LockCommand) -> AckResult {
+    private func executeSetLimit(_ cmd: LockCommand) async -> AckResult {
         // 1. Guard a decoded limit payload. A nil here is a malformed/undecoded
         //    command — NEVER ack success (the parent would read a silent no-op as
         //    "limit applied").
@@ -243,7 +243,11 @@ final class ActionExecutor: @unchecked Sendable {
         )
 
         // 4. Validate-then-commit (atomic on quota).
-        return applyLimitRule(rule, displayName: display)
+        return await applyLimitRuleFromCommand(
+            rule,
+            displayName: display,
+            usedTodayMinutes: limit.usedTodayMinutes
+        )
     }
 
     /// Map a backend `reset_policy` to whether the limit window recurs daily.
@@ -288,6 +292,31 @@ final class ActionExecutor: @unchecked Sendable {
                 "per-app limit partially armed (\(armed) ok, \(failed) failed); not applied"
             ))
         }
+    }
+
+    /// Command-path wrapper around `applyLimitRule`. When a parent re-enables a
+    /// limit after the app already crossed today's budget, DeviceActivity may not
+    /// emit another threshold callback. The backend sends today's used minutes so
+    /// the kid can immediately restore the `.limit` shield instead of waiting for
+    /// an event that already happened.
+    func applyLimitRuleFromCommand(
+        _ rule: AppLimitRule,
+        displayName: String,
+        usedTodayMinutes: Int?
+    ) async -> AckResult {
+        let result = applyLimitRule(rule, displayName: displayName)
+        guard case .confirmedExact = result,
+              let usedTodayMinutes,
+              usedTodayMinutes >= rule.budgetMinutes,
+              let record = LimitShieldLogic.applyingLimit(
+                to: [:],
+                rule: rule
+              )[LimitShieldLogic.recordKey(for: rule)]
+        else {
+            return result
+        }
+        _ = await ActiveLockStore.shared.addShield(record)
+        return result
     }
 
     /// Restore the store to its pre-upsert state for `ruleId` and re-arm so the

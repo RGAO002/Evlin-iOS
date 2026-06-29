@@ -1,1 +1,7 @@
 .superpowers/
+
+# secrets / build artifacts / xcode user state
+sentry.env
+.sentry-cli/
+build/
+*.xcuserstate

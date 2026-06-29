@@ -29,6 +29,9 @@ final class BigKidStatePoller: ObservableObject {
     private let fetchState: () async throws -> ChildStateResponse
     private let reconcileReflectionLock: (ChildStateResponse) async -> Void
     private let applySnapshot: (ChildStateResponse, BigKidState) -> Void
+    private let setUsageCountingAllowed: (Bool) -> Bool
+    private let rearmUsageCounters: () -> Void
+    private let reportEffectiveState: () async -> Void
     private var task: Task<Void, Never>?
     private var invalidationObserver: NSObjectProtocol?
 
@@ -60,6 +63,16 @@ final class BigKidStatePoller: ObservableObject {
         self.applySnapshot = { snapshot, state in
             state.apply(snapshot)
         }
+        self.setUsageCountingAllowed = Self.writeUsageCountingAllowed
+        self.rearmUsageCounters = Self.rearmUsageCountersFromStoredPolicy
+        self.reportEffectiveState = {
+            guard let snapshot = await CommandPoller.globalEffectiveStateDictionary() else { return }
+            do {
+                try await client.reportHeartbeat(globalEffectiveState: snapshot)
+            } catch {
+                print("[BigKidStatePoller] report effective state failed: \(error)")
+            }
+        }
     }
 
     init(
@@ -68,13 +81,19 @@ final class BigKidStatePoller: ObservableObject {
         reconcileReflectionLock: @escaping (ChildStateResponse) async -> Void,
         applySnapshot: @escaping (ChildStateResponse, BigKidState) -> Void = { snapshot, state in
             state.apply(snapshot)
-        }
+        },
+        setUsageCountingAllowed: @escaping (Bool) -> Bool = BigKidStatePoller.writeUsageCountingAllowed,
+        rearmUsageCounters: @escaping () -> Void = {},
+        reportEffectiveState: @escaping () async -> Void = {}
     ) {
         self.client = BigKidAPIClient(baseURL: URL(string: "https://example.invalid")!, childId: UUID())
         self.state = state
         self.fetchState = fetchState
         self.reconcileReflectionLock = reconcileReflectionLock
         self.applySnapshot = applySnapshot
+        self.setUsageCountingAllowed = setUsageCountingAllowed
+        self.rearmUsageCounters = rearmUsageCounters
+        self.reportEffectiveState = reportEffectiveState
     }
 
     deinit {
@@ -124,6 +143,16 @@ final class BigKidStatePoller: ObservableObject {
             let snapshot = try await fetchState()
             await reconcileReflectionLock(snapshot)
             applySnapshot(snapshot, state)
+            let wasCountingAllowed = setUsageCountingAllowed(snapshot.usageCountingAllowed)
+            let shouldRecoverSkippedUsage = snapshot.usageCountingAllowed
+                && Self.hasSkippedUnfinishedUsageEvent()
+            if snapshot.usageCountingAllowed && (!wasCountingAllowed || shouldRecoverSkippedUsage) {
+                rearmUsageCounters()
+                if shouldRecoverSkippedUsage {
+                    CommandDeliveryDiagnostics.remove(CommandDeliveryDiagnostics.keyUsageCountingLastSkipped)
+                }
+            }
+            await reportEffectiveState()
             lastFetchedAt = Date()
             lastError = nil
         } catch {
@@ -154,5 +183,57 @@ final class BigKidStatePoller: ObservableObject {
             }
         }
         return "Couldn't refresh"
+    }
+
+    private static func writeUsageCountingAllowed(_ allowed: Bool) -> Bool {
+        let store = EarnedTimeStore.shared
+        let previous = store.usageCountingAllowed
+        store.usageCountingAllowed = allowed
+        return previous
+    }
+
+    private static func hasSkippedUnfinishedUsageEvent() -> Bool {
+        CommandDeliveryDiagnostics.read(CommandDeliveryDiagnostics.keyUsageCountingLastSkipped)
+            .contains("unfinished_tasks=true")
+    }
+
+    private static func rearmUsageCountersFromStoredPolicy() {
+        let store = EarnedTimeStore.shared
+
+        if store.isEarnedTimeReady, let selection = store.measurementSelection {
+            let offset = max(store.latestDeviceEstimate ?? 0, store.earnedUsageOffsetMinutes)
+            store.earnedUsageOffsetMinutes = offset
+            let pool = store.poolMinutes ?? store.backendRemainingAtLastSync ?? 60
+            let cap = store.capMinutes ?? 240
+            let remaining = max(0, min(pool, cap) - offset)
+            if remaining > 0 {
+                EarnedBudgetScheduler.shared.arm(
+                    poolMinutes: remaining,
+                    capMinutes: remaining,
+                    selection: selection
+                )
+            }
+        }
+
+        let adjustedRules = AppLimitRuleStore.shared.all().compactMap { rule -> AppLimitRule? in
+            let used = max(
+                store.appLimitUsageOffsetMinutes(ruleID: rule.id),
+                store.appLimitReportedMinutes(ruleID: rule.id)
+            )
+            store.setAppLimitUsageOffset(ruleID: rule.id, usedMinutes: used)
+            let remaining = rule.budgetMinutes - used
+            guard remaining > 0 else { return nil }
+            return AppLimitRule(
+                id: rule.id,
+                appTokens: rule.appTokens,
+                bundleID: rule.bundleID,
+                displayName: rule.displayName,
+                budgetMinutes: remaining,
+                window: rule.window,
+                effectiveFrom: rule.effectiveFrom,
+                expiresAt: rule.expiresAt
+            )
+        }
+        _ = AppLimitPlanner().arm(rules: adjustedRules)
     }
 }

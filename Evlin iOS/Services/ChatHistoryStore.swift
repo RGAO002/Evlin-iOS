@@ -128,6 +128,11 @@ final class ChatHistoryStore: ObservableObject {
     private let defaults: UserDefaults
     private var accountID: UUID?
 
+    /// Read-only view of the account this store is currently bound to (`nil`
+    /// before `setAccount(_:)` runs). `ChatViewModel.ensureAccountBound()` uses
+    /// this to skip a redundant Keychain read once binding has happened.
+    var boundAccountID: UUID? { accountID }
+
     private let encoder: JSONEncoder = {
         let e = JSONEncoder()
         e.dateEncodingStrategy = .iso8601

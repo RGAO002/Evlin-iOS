@@ -50,6 +50,8 @@ enum CardID: String, Codable, Sendable {
     // Task 6 — lock-selected-apps confirmation cards.
     case lockSelectedAppsConfirm = "lock_selected_apps_confirm"
     case lockSelectedAppsEmpty = "lock_selected_apps_empty"
+    // Bare unlock/unblock picker across current family restrictions.
+    case restrictionUnlockPicker = "restriction_unlock_picker"
 }
 
 extension CardID {
@@ -61,7 +63,8 @@ extension CardID {
         case .singleAppShieldAdvice, .shieldTokenMissing, .appStoreDisambiguation,
              .appNotFoundTerminal, .childDisambiguation, .categoryRenameRequired,
              .cannotBlockCategory, .categoryShieldOffer, .catalogAppInactive,
-             .bundleIDRequired, .lockSelectedAppsConfirm, .lockSelectedAppsEmpty:
+             .bundleIDRequired, .lockSelectedAppsConfirm, .lockSelectedAppsEmpty,
+             .restrictionUnlockPicker:
             return true
         default:
             return false

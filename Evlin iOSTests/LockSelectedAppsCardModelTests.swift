@@ -6,6 +6,7 @@ final class LockSelectedAppsCardModelTests: XCTestCase {
     func testCardIDRegistersNewKinds() {
         XCTAssertEqual(CardID(rawValue: "lock_selected_apps_confirm")?.isAppControlCard, true)
         XCTAssertEqual(CardID(rawValue: "lock_selected_apps_empty")?.isAppControlCard, true)
+        XCTAssertEqual(CardID(rawValue: "restriction_unlock_picker")?.isAppControlCard, true)
     }
 
     func testParseConfirmCardWithActionedOptions() {
@@ -27,5 +28,77 @@ final class LockSelectedAppsCardModelTests: XCTestCase {
         XCTAssertEqual(model?.appPreview.first?.displayName, "Instagram")
         XCTAssertEqual(model?.options.count, 2)   // options NOT dropped (they carry action)
         XCTAssertEqual(model?.options.first?.action, "lock_selected_apps_now")
+    }
+
+    func testParseRestrictionUnlockPicker() {
+        let payload: [String: Any] = [
+            "type": "restriction_unlock_picker",
+            "title": "Current restrictions",
+            "body": "2 active restrictions across 1 child.",
+            "target_display": "Current restrictions",
+            "target_kind": "all",
+            "picker_token": "tok-123",
+            "restriction_groups": [[
+                "child_id": "child-1",
+                "child_name": "Ryan",
+                "avatar": [
+                    "value": "R",
+                    "color": "#258B3A",
+                    "signed_url": "https://example.test/avatars/ryan.jpg",
+                ],
+                "devices": [["id": "device-1", "label": "iPhone"]],
+                "sessions": [[
+                    "id": "row-1",
+                    "title": "Instagram",
+                    "subtitle": "App shield",
+                    "badge": "TIMED",
+                    "action": "unshield",
+                    "kind": "app",
+                    "child_device_id": "device-1",
+                    "device_label": "iPhone",
+                ], [
+                    "id": "row-2",
+                    "title": "TikTok",
+                    "subtitle": "Blocked app",
+                    "badge": "BLOCKED",
+                    "action": "unblock",
+                    "kind": "app",
+                    "child_device_id": "device-1",
+                    "device_label": "iPhone",
+                ]]
+            ]],
+            "options": [["action": "restriction_unlock_selected", "label": "Unlock selected"]],
+        ]
+
+        let model = AppControlCardModel.parse(cardID: "restriction_unlock_picker", payload: payload)
+        XCTAssertEqual(model?.kind, .restrictionUnlockPicker)
+        XCTAssertEqual(model?.pickerToken, "tok-123")
+        XCTAssertEqual(model?.restrictionGroups.count, 1)
+        XCTAssertEqual(model?.restrictionGroups.first?.childName, "Ryan")
+        XCTAssertEqual(model?.restrictionGroups.first?.avatarURL?.absoluteString, "https://example.test/avatars/ryan.jpg")
+        XCTAssertEqual(model?.restrictionGroups.first?.sessions.map(\.action), ["unshield", "unblock"])
+    }
+
+    func testParseChildDisambiguationCandidateAvatar() {
+        let payload: [String: Any] = [
+            "type": "child_disambiguation",
+            "title": "Which child?",
+            "body": "You have more than one kid device. Which one should this apply to?",
+            "target_display": "Locked set",
+            "target_kind": "all",
+            "candidates": [[
+                "display": "Ryan",
+                "child_device_id": "device-1",
+                "child_avatar_url": "https://example.test/avatars/ryan.jpg",
+                "child_avatar_value": "R",
+                "child_avatar_color": "#258B3A",
+            ]],
+        ]
+
+        let model = AppControlCardModel.parse(cardID: "child_disambiguation", payload: payload)
+        XCTAssertEqual(model?.kind, .childDisambiguation)
+        XCTAssertEqual(model?.candidates.first?.childAvatarURL?.absoluteString, "https://example.test/avatars/ryan.jpg")
+        XCTAssertEqual(model?.candidates.first?.childAvatarValue, "R")
+        XCTAssertEqual(model?.candidates.first?.childAvatarColorHex, "#258B3A")
     }
 }

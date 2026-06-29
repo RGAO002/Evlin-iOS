@@ -136,6 +136,27 @@ final class EarnedSampleReporterTests: XCTestCase {
         )
     }
 
+    func test_sampleRequest_usesBackendChildDeviceHeader() throws {
+        let deviceID = UUID(uuidString: "A1B2C3D4-E5F6-7890-ABCD-EF1234567890")!
+        let body = EarnedSampleReporter.makeSampleBody(
+            deviceID: deviceID,
+            usageDate: "2026-06-23",
+            timezone: "UTC",
+            thresholdMinutes: 10,
+            estimatedMinutes: 10,
+            observedAt: "2026-06-23T10:00:00Z"
+        )
+
+        let request = try EarnedSampleReporter.makeSampleRequest(
+            baseURL: URL(string: "https://api.example.test")!,
+            childDeviceID: deviceID,
+            body: body
+        )
+
+        XCTAssertEqual(request.value(forHTTPHeaderField: "X-Evlin-Child-Device-ID"), deviceID.uuidString)
+        XCTAssertNil(request.value(forHTTPHeaderField: "X-Child-Id"))
+    }
+
     // MARK: - 2. Retry-queue enqueue on simulated POST failure
 
     func test_enqueueRetry_appendsToAppGroup() throws {
@@ -175,6 +196,30 @@ final class EarnedSampleReporterTests: XCTestCase {
         let queue = EarnedSampleReporter.loadRetryQueue(suiteName: suiteName)
         XCTAssertEqual(queue.count, 3)
         XCTAssertEqual(queue.map(\.thresholdMinutes), [10, 20, 30])
+    }
+
+    func test_retryQueueDebugSummary_reportsPendingCountAndNewestThreshold() {
+        let deviceID = UUID()
+        XCTAssertEqual(EarnedSampleReporter.retryQueueDebugSummary(suiteName: suiteName), "0 pending")
+
+        for n in [15, 20] {
+            EarnedSampleReporter.enqueueRetry(
+                EarnedSampleReporter.RetryEntry(
+                    deviceID: deviceID,
+                    usageDate: "2026-06-28",
+                    timezone: "America/New_York",
+                    thresholdMinutes: n,
+                    estimatedMinutes: n,
+                    observedAt: "2026-06-28T20:00:00Z"
+                ),
+                suiteName: suiteName
+            )
+        }
+
+        XCTAssertEqual(
+            EarnedSampleReporter.retryQueueDebugSummary(suiteName: suiteName),
+            "2 pending; newest t20 observed 2026-06-28T20:00:00Z"
+        )
     }
 
     func test_clearRetryQueue_emptiesQueue() {

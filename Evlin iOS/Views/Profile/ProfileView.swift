@@ -88,21 +88,9 @@ struct ProfileView: View {
     @State private var deleteError: String? = nil
     @State private var addError: String? = nil
     @State private var pollTask: Task<Void, Never>? = nil
+    @State private var earnedSummaryPollTask: Task<Void, Never>? = nil
     private var backendChildID: UUID? {
-        // Prefer the locally-paired id when it belongs to THIS child (multi-child
-        // disambiguation). Fall back to this child's device from the backend
-        // family aggregate so a fresh login — where the local `evlin.childDeviceID`
-        // is empty — still resolves the already-paired device instead of wrongly
-        // prompting "pair the kid's device".
-        if familyStore.ownsPairedDevice(childId: child.id, pairedDeviceID: pairedChildID),
-           let id = UUID(uuidString: pairedChildID) {
-            return id
-        }
-        if let dev = familyStore.child(byId: child.id)?.devices.first,
-           let id = UUID(uuidString: dev.device_id) {
-            return id
-        }
-        return nil
+        familyStore.childDeviceID(forChildId: child.id, preferredDeviceID: pairedChildID)
     }
     private var bigKidParent: BigKidParentClient? {
         guard backendChildID != nil else { return nil }
@@ -118,7 +106,7 @@ struct ProfileView: View {
     // B10: whether the last fetched lock-state had exhausted==true (earned-time ran out).
     // Used in toggleDeviceLock to route the unlock via unlockOverride (not unlockSelected).
     @State private var lastFetchedExhausted: Bool = false
-    // B11: coarse earned-time summary from A3 backend endpoint.
+    // B11: earned-time summary from A3 backend endpoint.
     // Nil until the first fetch completes; progress bar / countdown uses static
     // config values until then (graceful degradation).
     @State private var earnedSummary: APIClient.EarnedSummaryDTO? = nil
@@ -167,8 +155,8 @@ struct ProfileView: View {
     /// Enrolled Devices row.
     ///
     /// B11 priority chain:
-    ///   1. Backend `countdown_label` when present (server pre-formats coarse copy).
-    ///   2. Compute coarse label from `remaining_minutes` via EarnedDisplayFormatters.
+    ///   1. Backend `countdown_label` when present (server pre-formats copy).
+    ///   2. Compute a countdown label from `remaining_minutes` via EarnedDisplayFormatters.
     ///   3. Fall back to static config (daily limit / "∞") when no summary yet.
     private var screenTimeRemainingText: String {
         guard dailyLimitOn else { return "∞" }
@@ -189,21 +177,51 @@ struct ProfileView: View {
         return EarnedDisplayFormatters.freshnessLabel(secondsAgo: ago)
     }
 
-    /// Progress-bar fraction: used_minutes / daily_pool_minutes.
+    /// Progress-bar fraction: remaining_minutes / daily_pool_minutes.
     /// Falls back to 1.0 (full bar) before first fetch so the bar doesn't flash empty.
     private var summaryProgressFraction: Double {
-        guard let summary = earnedSummary,
-              let pool = summary.daily_pool_minutes, pool > 0,
-              let used = summary.used_minutes else { return 1.0 }
-        return min(1.0, max(0.0, Double(used) / Double(pool)))
+        EarnedDisplayFormatters.remainingFraction(
+            remainingMinutes: earnedSummary?.remaining_minutes,
+            dailyPoolMinutes: earnedSummary?.daily_pool_minutes
+        )
     }
 
-    /// Per-device estimate label for a given device id.
-    /// Returns nil when no estimate data is available for that device.
-    private func deviceEstimateText(for deviceID: UUID?) -> String? {
+    /// Per-device estimate for a given device id.
+    /// `estimated_minutes` is reported usage, not time left; prefer
+    /// `remaining_to_cap_minutes`, or compute cap - used when both values exist.
+    private func deviceEstimate(for deviceID: UUID?) -> APIClient.EarnedDeviceEstimateDTO? {
         guard let deviceID, let estimates = earnedSummary?.device_estimates else { return nil }
-        guard let estimate = estimates.first(where: { $0.child_device_id == deviceID }) else { return nil }
-        return EarnedDisplayFormatters.deviceEstimateLabel(estimatedMinutesLeft: estimate.estimated_minutes ?? 0)
+        return estimates.first(where: { $0.child_device_id == deviceID })
+    }
+
+    private func deviceRemainingToCapMinutes(for deviceID: UUID?) -> Int? {
+        guard let estimate = deviceEstimate(for: deviceID) else { return nil }
+        if let remaining = estimate.remaining_to_cap_minutes {
+            return remaining
+        }
+        if let cap = estimate.cap_minutes,
+           let used = estimate.estimated_minutes {
+            return max(0, cap - used)
+        }
+        return nil
+    }
+
+    private func deviceRemainingText(for deviceID: UUID?) -> String {
+        EarnedDisplayFormatters.deviceRemainingLabel(
+            remainingToCapMinutes: deviceRemainingToCapMinutes(for: deviceID),
+            overallRemainingMinutes: earnedSummary?.remaining_minutes,
+            fallbackOverallLabel: screenTimeRemainingText
+        )
+    }
+
+    private func deviceRemainingFraction(for deviceID: UUID?) -> Double {
+        let estimate = deviceEstimate(for: deviceID)
+        return EarnedDisplayFormatters.deviceRemainingFraction(
+            remainingToCapMinutes: deviceRemainingToCapMinutes(for: deviceID),
+            capMinutes: estimate?.cap_minutes,
+            overallRemainingMinutes: earnedSummary?.remaining_minutes,
+            dailyPoolMinutes: earnedSummary?.daily_pool_minutes
+        )
     }
 
     var body: some View {
@@ -480,6 +498,9 @@ struct ProfileView: View {
             let childUUID = UUID(uuidString: child.id)
             childProfileUUID = childUUID
             if let uuid = childUUID {
+                if let cachedSummary = familyStore.earnedSummary(forChildID: child.id) {
+                    earnedSummary = cachedSummary
+                }
                 Task {
                     // B9: load pool from the backend policy.
                     // fetchEarnedPolicy().pool_minutes is the daily earned-time pool.
@@ -493,15 +514,8 @@ struct ProfileView: View {
                         rules = ProfileMockData.rules(for: child.id, dailyLimitMinutes: pool)
                     }
                 }
-                Task {
-                    // B11: load the coarse earned-time summary (countdown_label,
-                    // used_minutes, daily_pool_minutes, device_estimates).
-                    // Failure is non-fatal — the UI degrades to the static config copy.
-                    if let summary = try? await apiClient.fetchEarnedSummary(childProfileID: uuid) {
-                        earnedSummary = summary
-                        summaryFetchedAt = Date()
-                    }
-                }
+                Task { await refreshEarnedSummary() }
+                startEarnedSummaryPolling()
                 // For UUID children the backend pool is authoritative, but we must
                 // ALWAYS render the Active Rules immediately. Seed them synchronously
                 // from UserDefaults/default; the async policy Task refreshes the pool
@@ -546,6 +560,30 @@ struct ProfileView: View {
         .onDisappear {
             pollTask?.cancel()
             pollTask = nil
+            earnedSummaryPollTask?.cancel()
+            earnedSummaryPollTask = nil
+        }
+    }
+
+    @MainActor
+    private func refreshEarnedSummary() async {
+        // B11: load the earned-time summary (countdown_label, used_minutes,
+        // daily_pool_minutes, device_estimates). Failure is non-fatal — the UI
+        // keeps the shared cached summary or degrades to the static config copy.
+        if let summary = await familyStore.refreshEarnedSummary(forChildID: child.id) {
+            earnedSummary = summary
+            summaryFetchedAt = Date()
+        }
+    }
+
+    private func startEarnedSummaryPolling() {
+        earnedSummaryPollTask?.cancel()
+        earnedSummaryPollTask = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 30_000_000_000)
+                if Task.isCancelled { return }
+                await refreshEarnedSummary()
+            }
         }
     }
 
@@ -556,7 +594,8 @@ struct ProfileView: View {
         do {
             let r = try await apiClient.pairFamily(
                 code: trimmed,
-                deviceLabel: UIDevice.current.name
+                deviceLabel: UIDevice.current.name,
+                targetChildProfileID: child.id
             )
             UserDefaults.standard.set(r.family_id.uuidString, forKey: "evlin.familyID")
             UserDefaults.standard.set(r.parent_device_id.uuidString, forKey: "evlin.parentDeviceID")
@@ -750,6 +789,7 @@ struct ProfileView: View {
     @MainActor
     private func toggleDeviceLock() async {
         guard let cid = backendChildID,
+              let pid = UUID(uuidString: child.id),
               let famRaw = UserDefaults.standard.string(forKey: "evlin.familyID"),
               let famID = UUID(uuidString: famRaw) else {
             lockError = "Pair \(displayChild.name)'s device first."
@@ -769,11 +809,14 @@ struct ProfileView: View {
             // Monitor extension suppresses the earned-time shield immediately, offline,
             // without waiting for the backend command to reach the kid's device.
             // Then call unlockOverride (A8/B8 backend endpoint) to persist server-side.
-            EarnedTimeStore.shared.setOverride(true, forUsageDate: todayUsageDate())
+            let overrideUsageDate = todayUsageDate()
+            EarnedTimeStore.shared.setOverride(true, forUsageDate: overrideUsageDate)
             do {
-                // child.id is a UUID string (backend child profile ID).
+                // child.id is a UUID string (backend child profile ID). Send the
+                // SAME usage_date we wrote to the App Group so server + device agree.
                 if let childProfileUUID = UUID(uuidString: child.id) {
-                    _ = try await apiClient.unlockOverride(childProfileID: childProfileUUID)
+                    _ = try await apiClient.unlockOverride(
+                        childProfileID: childProfileUUID, usageDate: overrideUsageDate)
                 }
             } catch {
                 lockError = "Couldn't unlock — try again."
@@ -787,14 +830,14 @@ struct ProfileView: View {
             return
         }
         do {
-            let resp: APIClient.DeviceLockStateResponse
+            let resp: APIClient.LockSelectedResponse
             if wantLocked {
-                resp = try await apiClient.lockSelected(familyID: famID, childDeviceID: cid)
+                resp = try await apiClient.lockSelected(familyID: famID, childProfileID: pid, childDeviceID: cid)
             } else {
-                resp = try await apiClient.unlockSelected(familyID: famID, childDeviceID: cid)
+                resp = try await apiClient.unlockSelected(familyID: famID, childProfileID: pid, childDeviceID: cid)
             }
             // Apply B6 carry from command response if it surfaced a list_id.
-            applyListIDIfNeeded(resp.list_id)
+            applyListIDIfNeeded(resp.list_id.uuidString)
         } catch {
             // Detect "no Locked set configured" specifically (backend returns a 4xx
             // with a code in 400-422 when the selected set is missing or empty —
@@ -822,7 +865,8 @@ struct ProfileView: View {
     }
 
     /// Refresh `ackedLockButtonState` from the device's REAL lock-state ack.
-    /// Derives from `covering_sources` + `exhausted` (not `locked` bool).
+    /// Derives from `covering_sources` (not `locked` bool). `exhausted`
+    /// is tracked separately for override routing only.
     /// Also applies the B6 carry: persists list_id once when first learned.
     @MainActor
     private func refreshLockState() async {
@@ -1082,16 +1126,16 @@ struct ProfileView: View {
                 } else {
                     VStack(spacing: 0) {
                         ForEach(Array(devices.enumerated()), id: \.element.id) { idx, d in
-                            // B11: per-device estimate label when available; fall back to
-                            // overall countdown label (same honest coarse copy).
-                            let deviceTimeLeft = deviceEstimateText(for: d.deviceUUID) ?? screenTimeRemainingText
+                            // B11: per-device estimates are clamped by the overall pool,
+                            // so stale device data cannot look fuller than the summary.
+                            let deviceTimeLeft = deviceRemainingText(for: d.deviceUUID)
                             DeviceRow(
                                 iconSystemName: d.iconSystemName,
                                 name: d.name,
                                 detail: d.detail,
                                 locked: localStatus != .unlocked,
                                 timeLeft: deviceTimeLeft,
-                                timePct: 1.0,
+                                timePct: deviceRemainingFraction(for: d.deviceUUID),
                                 isLast: idx == devices.count - 1,
                                 onPress: { onOpenDevice(d) }
                             )
@@ -1304,32 +1348,26 @@ struct ProfileView: View {
                         .font(.custom("Manrope", size: 22).weight(.heavy))
                         .tracking(-0.22)
                         .foregroundStyle(Color.evPrimary)
-                    // B11: progress bar fraction = used / pool from earned summary.
+                    // B11: progress bar fraction = remaining / pool from earned summary.
                     // Falls back to 1.0 (full bar) until first backend fetch.
                     GeometryReader { geo in
+                        let fillWidth = summaryProgressFraction <= 0
+                            ? 0
+                            : max(6, geo.size.width * summaryProgressFraction)
                         ZStack(alignment: .leading) {
                             Capsule().fill(Color.evSecondaryContainer).frame(height: 5)
-                            Capsule().fill(Color.evSecondary)
-                                .frame(width: max(6, geo.size.width * summaryProgressFraction), height: 5)
+                            Capsule().fill(Color.evTimeRemaining(summaryProgressFraction))
+                                .frame(width: fillWidth, height: 5)
                         }
                     }
                     .frame(height: 5)
-                    // B11: coarse countdown label with precision badge + freshness.
+                    // B11: countdown label with freshness.
                     VStack(alignment: .leading, spacing: 2) {
-                        HStack(spacing: 4) {
-                            // Daily Screen Time toggle ON → coarse earned-time label;
-                            // OFF → unlimited, shown as the infinity symbol.
-                            Text(screenTimeRemainingText)
-                                .font(.custom("Inter", size: 11).weight(.heavy))
-                                .foregroundStyle(Color.evSecondary)
-                            // Precision badge: visible only when the summary has loaded
-                            // so the parent knows the granularity ("~10 min steps").
-                            if earnedSummary != nil && dailyLimitOn {
-                                Text("· \(EarnedDisplayFormatters.precisionBadge())")
-                                    .font(.custom("Inter", size: 10).weight(.medium))
-                                    .foregroundStyle(Color.evOnSurfaceVariant)
-                            }
-                        }
+                        // Daily Screen Time toggle ON → earned-time label;
+                        // OFF → unlimited, shown as the infinity symbol.
+                        Text(screenTimeRemainingText)
+                            .font(.custom("Inter", size: 11).weight(.heavy))
+                            .foregroundStyle(Color.evSecondary)
                         // Freshness: shown only when we have a timestamp.
                         if let freshness = summaryFreshnessText {
                             Text(freshness)
@@ -1343,7 +1381,7 @@ struct ProfileView: View {
             // B8: Selected-set lock CTA.
             // Red/green derives from ACKED state (ackedLockButtonState), NOT
             // optimistic local flip. Green = selected set is clear (sources=[]).
-            // Red = covering_sources non-empty OR earned-time exhausted.
+            // Red = covering_sources non-empty.
             // Pending (sources=nil) = neutral/disabled until first ack.
             VStack(spacing: 6) {
                 Button { Task { await toggleDeviceLock() } } label: {
@@ -1476,6 +1514,21 @@ extension FamilyStore {
         }
         let noDeviceData = children.allSatisfy { $0.devices.isEmpty }
         return noDeviceData && children.count == 1
+    }
+
+    /// Resolve the backend child-device UUID for a child profile. Prefer the
+    /// locally stored paired id when it belongs to that child; otherwise fall
+    /// back to the device listed in the live family aggregate.
+    func childDeviceID(forChildId childId: String, preferredDeviceID: String) -> UUID? {
+        if ownsPairedDevice(childId: childId, pairedDeviceID: preferredDeviceID),
+           let id = UUID(uuidString: preferredDeviceID) {
+            return id
+        }
+        if let dev = child(byId: childId)?.devices.first,
+           let id = UUID(uuidString: dev.device_id) {
+            return id
+        }
+        return nil
     }
 }
 

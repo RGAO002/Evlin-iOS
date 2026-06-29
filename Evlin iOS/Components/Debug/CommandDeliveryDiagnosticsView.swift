@@ -38,6 +38,7 @@ struct CommandDeliveryDiagnosticsView: View {
                 Text("Expected APNs path: token registered → token upload ok → remote notification received → one-shot poll completed → command ack ok. DAM heartbeat is a debug-only spike: arm it, background/lock/force-quit the app, then wait about 2 minutes to see whether the extension wakes and reports /child/heartbeat.")
             }
 
+            earnedTimeDiagnosticsSection
             heartbeatHistorySection
             nseSpikeSection
             pickerSeparationSection
@@ -55,6 +56,63 @@ struct CommandDeliveryDiagnosticsView: View {
                 refreshTick += 1
             }
         }
+    }
+
+    @ViewBuilder
+    private var earnedTimeDiagnosticsSection: some View {
+        let store = EarnedTimeStore.shared
+        Section {
+            earnedRow("usageCountingAllowed", store.usageCountingAllowed ? "true" : "false")
+            earnedRow("last skipped usage event", CommandDeliveryDiagnostics.read(CommandDeliveryDiagnostics.keyUsageCountingLastSkipped))
+            earnedRow("last earned threshold", CommandDeliveryDiagnostics.read(CommandDeliveryDiagnostics.keyEarnedLastThreshold))
+            earnedRow("last sample POST", CommandDeliveryDiagnostics.read(EarnedSampleReporter.lastSamplePostDebugKey))
+            earnedRow("retry queue", EarnedSampleReporter.retryQueueDebugSummary())
+            earnedRow("latestDeviceEstimate", optionalMinutes(store.latestDeviceEstimate))
+            earnedRow("usage offset", "\(store.earnedUsageOffsetMinutes) min")
+            earnedRow("backend remaining", optionalMinutes(store.backendRemainingAtLastSync))
+            earnedRow("pool / cap", "\(optionalMinutes(store.poolMinutes)) / \(optionalMinutes(store.capMinutes))")
+            earnedRow("baseURL", CommandDeliveryDiagnostics.read("evlin.baseURL"))
+            earnedRow("childId", CommandDeliveryDiagnostics.read("evlin.childId"))
+            earnedRow("measurement selection", measurementSelectionSummary(store.measurementSelection))
+            earnedRow("locked set id", store.lockedSetID ?? "(missing)")
+            earnedRow("locked token data", store.lockedSetTokenData == nil ? "(missing)" : "present")
+
+            Button(role: .destructive) {
+                CommandDeliveryDiagnostics.remove(CommandDeliveryDiagnostics.keyEarnedLastThreshold)
+                CommandDeliveryDiagnostics.remove(CommandDeliveryDiagnostics.keyUsageCountingLastSkipped)
+                CommandDeliveryDiagnostics.remove(EarnedSampleReporter.lastSamplePostDebugKey)
+                EarnedSampleReporter.clearRetryQueue()
+                refreshTick += 1
+            } label: {
+                Text("Clear earned-time diagnostics")
+            }
+        } header: {
+            Text("Earned Time")
+        } footer: {
+            Text("If the total pool stops moving, check this section. No new last threshold means DeviceActivity stopped firing. last skipped means unfinished-task gating blocked it. Retry queue or failed POST means the extension fired but could not reach the backend.")
+        }
+        .id("earned-\(refreshTick)")
+    }
+
+    private func earnedRow(_ key: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(key)
+                .font(.system(size: 12, weight: .semibold))
+            Text(value)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+        }
+        .padding(.vertical, 2)
+    }
+
+    private func optionalMinutes(_ value: Int?) -> String {
+        value.map { "\($0) min" } ?? "(missing)"
+    }
+
+    private func measurementSelectionSummary(_ selection: FamilyActivitySelection?) -> String {
+        guard let selection else { return "(missing)" }
+        return "apps=\(selection.applicationTokens.count) categories=\(selection.categoryTokens.count) web=\(selection.webDomainTokens.count)"
     }
 
     /// Debug-only acceptance gate for the App Controls v2 redesign. The whole

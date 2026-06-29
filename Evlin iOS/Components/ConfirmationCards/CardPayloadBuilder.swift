@@ -37,7 +37,8 @@ enum CardPayloadBuilder {
         case .singleAppShieldAdvice, .shieldTokenMissing, .appStoreDisambiguation,
              .appNotFoundTerminal, .childDisambiguation, .categoryRenameRequired,
              .cannotBlockCategory, .categoryShieldOffer, .catalogAppInactive,
-             .bundleIDRequired, .lockSelectedAppsConfirm, .lockSelectedAppsEmpty:
+             .bundleIDRequired, .lockSelectedAppsConfirm, .lockSelectedAppsEmpty,
+             .restrictionUnlockPicker:
             // Task 11/6 app-control cards don't use CardPayload — they render via
             // AppControlCard from AppControlCardModel. Defensive empty stub so the
             // switch stays exhaustive; this builder is never called for them.

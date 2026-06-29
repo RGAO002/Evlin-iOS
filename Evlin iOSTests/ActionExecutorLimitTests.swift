@@ -408,7 +408,11 @@ final class ActionExecutorLimitTests: XCTestCase {
         XCTAssertEqual(display, "Instagram")
         XCTAssertNotNil(AppLimitRuleStore.shared.rule(forID: rule.id), "rule must persist on success")
         XCTAssertEqual(spy.armed.count, 1, "the planner armed the one window")
-        XCTAssertEqual(spy.armed.first?.events.count, 1, "one event for the one rule")
+        // ENFORCEMENT events only — measurement (`evlin.applimit.*`) usage-bar
+        // events also ride in the dict.
+        let enforcementEvents = (spy.armed.first?.events ?? [:]).keys
+            .filter { $0.rawValue.hasPrefix("evlin.limit.") }
+        XCTAssertEqual(enforcementEvents.count, 1, "one enforcement event for the one rule")
     }
 
     // MARK: - clear_limit with no `clear` → .failed
@@ -529,6 +533,43 @@ final class ActionExecutorLimitTests: XCTestCase {
                        "the limit shield must be dropped on clear")
         XCTAssertTrue(shields.contains { $0.recordKey == manualShield.recordKey },
                       "the parent's manual shield must be preserved")
+    }
+
+    func testApplyLimitRuleFromCommandImmediatelyShieldsWhenUsedTodayAlreadyReachedBudget() async {
+        let spy = LimitSchedulerSpy()
+        let executor = makeExecutor(spy: spy)
+        let rule = AppLimitRule(
+            id: UUID(),
+            appTokens: [],
+            bundleID: "com.burbn.instagram",
+            displayName: "Instagram",
+            budgetMinutes: 1,
+            window: AppLimitWindow(startMinute: 0, endMinute: 1439, repeats: true, timezone: nil),
+            effectiveFrom: Date(timeIntervalSince1970: 0),
+            expiresAt: nil
+        )
+
+        let result = await executor.applyLimitRuleFromCommand(
+            rule,
+            displayName: "Instagram",
+            usedTodayMinutes: 1
+        )
+
+        guard case let .confirmedExact(verb, display, _) = result else {
+            return XCTFail("expected set_limit confirmation; got \(result)")
+        }
+        XCTAssertEqual(verb, .setLimit)
+        XCTAssertEqual(display, "Instagram")
+
+        let shields = await ActiveLockStore.shared.allCurrent().shields
+        XCTAssertTrue(
+            shields.contains {
+                $0.recordKey == LimitShieldLogic.recordKey(for: rule)
+                    && $0.sources.contains(.limit)
+                    && $0.targetKey == "com.burbn.instagram"
+            },
+            "re-enabling an already-spent app limit must immediately restore the limit shield"
+        )
     }
 
     /// Clearing a non-existent rule is idempotent — still confirms.

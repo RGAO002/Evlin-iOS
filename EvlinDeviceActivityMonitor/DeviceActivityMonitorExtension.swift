@@ -127,6 +127,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             return
         }
         if event.rawValue == "evlin.bigkid.chunk" {
+            guard usageCountingAllowed(eventName: event.rawValue) else { return }
             Task { await BigKidExtensionReporter.shared.reportChunk() }
             return
         }
@@ -134,7 +135,16 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         // budget. The event name is `evlin.limit.<ruleId>` (see AppLimitPlanner).
         // Resolve the rule, write a `source == .limit` ShieldRecord, recompute.
         if event.rawValue.hasPrefix("evlin.limit.") {
+            guard usageCountingAllowed(eventName: event.rawValue) else { return }
             applyLimitShield(eventName: event.rawValue)
+        }
+
+        // Per-app usage-bar MEASUREMENT: `evlin.applimit.<ruleId>.t<N>` fired at a
+        // quarter of the budget. Report usage ONLY — the distinct `evlin.applimit.`
+        // prefix routes it here and NEVER to the `evlin.limit.` shield branch above.
+        if event.rawValue.hasPrefix("evlin.applimit.") {
+            guard usageCountingAllowed(eventName: event.rawValue) else { return }
+            reportAppLimitUsage(eventName: event.rawValue)
         }
 
         // B5 — Earned-time ladder threshold fired. Event name is `evlin.earned.t<N>`
@@ -143,8 +153,20 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         //   2. If N ≥ effective cap/tripwire AND no override flag → apply `.earnedTime`
         //      shield over the Locked-set tokens (pure App Group path, no actor).
         if event.rawValue.hasPrefix("evlin.earned.t") {
+            guard usageCountingAllowed(eventName: event.rawValue) else { return }
             handleEarnedThreshold(eventName: event.rawValue, activity: activity)
         }
+    }
+
+    private func usageCountingAllowed(eventName: String) -> Bool {
+        guard EarnedTimeStore.shared.usageCountingAllowed else {
+            let ts = ISO8601DateFormatter().string(from: Date())
+            defaults?.set("\(ts) skipped usage event=\(eventName) unfinished_tasks=true",
+                          forKey: "evlin.usageCounting.lastSkipped")
+            NSLog("[Evlin/Ext] skipped usage event=%@ because unfinished tasks remain", eventName)
+            return false
+        }
+        return true
     }
 
     /// Threshold-reached enforcement (P7). Parse the `ruleId` from the
@@ -184,6 +206,59 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             forKey: "evlin.lastLimitShield"
         )
         NSLog("[Evlin/Ext] limit threshold shielded rule=%@", ruleId.uuidString)
+
+        // Drive the parent's usage bar to 100%: post a `:budget` usage sample
+        // (used == budget). This makes the bar read "reached" even for tiny
+        // budgets that have no measurement thresholds. Additive — the shield is
+        // untouched; usage reporting is a separate concern.
+        let usageDate = todayISODate()
+        postAppLimitUsageSample(
+            ruleID: ruleId,
+            thresholdMinutes: rule.budgetMinutes,
+            estimatedMinutes: rule.budgetMinutes,
+            clientSampleID: "applimit:\(ruleId.uuidString.lowercased()):\(usageDate):budget"
+        )
+    }
+
+    /// Per-app usage-bar MEASUREMENT (never shields). Parse the
+    /// `evlin.applimit.<ruleId>.t<N>` event name and POST N minutes used for that
+    /// rule. The distinct `evlin.applimit.` prefix (routed here, NOT to
+    /// `applyLimitShield`) is what keeps measurement from ever locking the app.
+    private func reportAppLimitUsage(eventName: String) {
+        let rest = String(eventName.dropFirst("evlin.applimit.".count))  // "<UUID>.t<N>"
+        guard let sep = rest.range(of: ".t", options: .backwards) else { return }
+        let idString = String(rest[..<sep.lowerBound])
+        let nString = String(rest[sep.upperBound...])
+        guard let ruleId = UUID(uuidString: idString), let n = Int(nString) else { return }
+        postAppLimitUsageSample(
+            ruleID: ruleId, thresholdMinutes: n, estimatedMinutes: n, clientSampleID: nil
+        )
+    }
+
+    /// Drain the retry queue then POST one per-app usage sample via
+    /// `AppLimitUsageReporter`. No shield. Uses the App-Group baseURL/childId the
+    /// app mirrors for the extension (same source the earned-time reporter uses).
+    private func postAppLimitUsageSample(
+        ruleID: UUID, thresholdMinutes: Int, estimatedMinutes: Int, clientSampleID: String?
+    ) {
+        guard let baseURL = ExtensionConfig.baseURL,
+              let deviceID = ExtensionConfig.childId else { return }
+        let usageDate = todayISODate()
+        let tz = TimeZone.current.identifier
+        let offset = EarnedTimeStore.shared.appLimitUsageOffsetMinutes(ruleID: ruleID)
+        let isBudgetSample = clientSampleID?.hasSuffix(":budget") == true
+        let adjustedThreshold = isBudgetSample ? thresholdMinutes : min(1440, offset + thresholdMinutes)
+        let adjustedEstimate = isBudgetSample ? estimatedMinutes : min(1440, offset + estimatedMinutes)
+        EarnedTimeStore.shared.recordAppLimitUsage(ruleID: ruleID, usedMinutes: adjustedEstimate)
+        Task {
+            await AppLimitUsageReporter.drainRetryQueue(baseURL: baseURL)
+            await AppLimitUsageReporter.report(
+                baseURL: baseURL, deviceID: deviceID, ruleID: ruleID,
+                usageDate: usageDate, timezone: tz,
+                thresholdMinutes: adjustedThreshold, estimatedMinutes: adjustedEstimate,
+                clientSampleID: clientSampleID
+            )
+        }
     }
 
     /// Post the local "time's up" notification for a reached per-app limit.
@@ -232,30 +307,41 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         }
 
         let earnedStore = EarnedTimeStore.shared
-        earnedStore.latestDeviceEstimate = n
+        let offset = earnedStore.earnedUsageOffsetMinutes
+        let adjustedN = min(1440, offset + n)
+        earnedStore.latestDeviceEstimate = adjustedN
+
+        let ts = ISO8601DateFormatter().string(from: Date())
+        defaults?.set(
+            "\(ts) event=\(eventName) activity=\(activity.rawValue) raw=\(n) adjusted=\(adjustedN) offset=\(offset)",
+            forKey: "evlin.earned.lastThreshold"
+        )
 
         // Drain any queued retries + fire the new sample.
         if let baseURL = ExtensionConfig.baseURL,
-           let childID = ExtensionConfig.childId,
            let deviceID = ExtensionConfig.childId {
             let usageDate = todayISODate()
             let tz = TimeZone.current.identifier
             Task {
-                await EarnedSampleReporter.drainRetryQueue(baseURL: baseURL, childID: childID)
+                await EarnedSampleReporter.drainRetryQueue(baseURL: baseURL)
                 await EarnedSampleReporter.report(
                     baseURL: baseURL,
-                    childID: childID,
                     deviceID: deviceID,
                     usageDate: usageDate,
                     timezone: tz,
-                    thresholdMinutes: n,
-                    estimatedMinutes: n
+                    thresholdMinutes: adjustedN,
+                    estimatedMinutes: adjustedN
                 )
             }
+        } else {
+            defaults?.set(
+                "\(ts) missing baseURL or childId for event=\(eventName) baseURL=\(String(describing: ExtensionConfig.baseURL)) childId=\(String(describing: ExtensionConfig.childId))",
+                forKey: EarnedSampleReporter.lastSamplePostDebugKey
+            )
         }
 
         // Tripwire check: compute effective cap and decide whether to shield.
-        let latestEstimate = earnedStore.latestDeviceEstimate ?? n
+        let latestEstimate = earnedStore.latestDeviceEstimate ?? adjustedN
         let backendRemaining = earnedStore.backendRemainingAtLastSync ?? 0
         // Pool and cap from EarnedTimeStore are not explicitly stored — use
         // the per-child defaults if available, otherwise use the budget scheduler's
@@ -263,7 +349,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         // pool as both pool and cap when no explicit values are stored, defaulting
         // to min(pool,cap) = earned ceiling. Lean path: use latestEstimate + backendRemaining
         // rounded up to bucket, then compare against N.
-        let bucketMinutes = 10 // mirrors EarnedBudgetScheduler.earnedBucketMinutes
+        let bucketMinutes = 5 // mirrors EarnedBudgetScheduler.earnedBucketMinutes
         // Use stored pool/cap if available; fall back to a conservative large value
         // so tripwire fires at the ladder cap (armed threshold).
         let poolMinutes = earnedStore.poolMinutes ?? 240
@@ -278,16 +364,17 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
 
         let usageDateForOverride = todayISODate()
         guard EarnedSampleReporter.shouldApplyEarnedShield(
-            thresholdN: n,
+            thresholdN: adjustedN,
             effectiveCap: effectiveCap,
             usageDate: usageDateForOverride,
             store: earnedStore
         ) else {
-            NSLog("[Evlin/Ext] earned t%d below effectiveCap=%d or override set — no shield", n, effectiveCap)
+            NSLog("[Evlin/Ext] earned t%d adjusted=%d below effectiveCap=%d or override set — no shield",
+                  n, adjustedN, effectiveCap)
             return
         }
 
-        applyEarnedTimeShield(earnedStore: earnedStore, thresholdN: n)
+        applyEarnedTimeShield(earnedStore: earnedStore, thresholdN: adjustedN)
     }
 
     /// Apply the `.earnedTime` shield over the Locked-set tokens.

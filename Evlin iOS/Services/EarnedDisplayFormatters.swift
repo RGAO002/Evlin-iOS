@@ -1,25 +1,54 @@
-/// B11 — Pure, stateless formatters for coarse earned-time displays.
+/// B11 — Pure, stateless formatters for earned-time displays.
 ///
 /// All functions are static (no instance state) so they are trivially unit-
 /// testable without mocks. Copy is intentionally honest:
-///   - "about" / "approx" prefixes signal coarseness
-///   - Values are rounded to 10-min steps so the UI never implies precision
+///   - Remaining pool values use the app's 5-minute cap granularity
 ///   - Per-app "used" is suppressed (no real per-app usage data in v1)
 ///
 /// EarnedDisplayTests covers every public method here.
 enum EarnedDisplayFormatters {
 
+    // MARK: - Remaining-time tier (color bands)
+
+    /// Three-tier band for a REMAINING-time bar. `fraction` = remaining / total
+    /// (1.0 = full, 0 = empty): `> ⅔` green, `⅓ … ⅔` yellow, `≤ ⅓` red. Pure
+    /// threshold logic — `Color.evTimeRemaining(_:)` maps the tier to a color.
+    enum RemainingTier { case green, yellow, red }
+
+    static func remainingTier(fraction: Double) -> RemainingTier {
+        if fraction > 2.0 / 3.0 { return .green }
+        if fraction > 1.0 / 3.0 { return .yellow }
+        return .red
+    }
+
+    /// Fraction for remaining-time bars. This is intentionally remaining / pool,
+    /// not used / pool, so the filled portion shrinks from right to left as time
+    /// is spent.
+    static func remainingFraction(remainingMinutes: Int?, dailyPoolMinutes: Int?) -> Double {
+        guard let remainingMinutes else { return 1.0 }
+        guard remainingMinutes > 0 else { return 0 }
+        guard let dailyPoolMinutes,
+              dailyPoolMinutes > 0
+        else { return 1.0 }
+
+        return min(1.0, max(0.0, Double(remainingMinutes) / Double(dailyPoolMinutes)))
+    }
+
     // MARK: - Countdown label (parent + child surfaces)
 
-    /// Returns a coarse "about N min left" label for the remaining earned-time.
-    ///
-    /// Rounds DOWN to the nearest 10-min step with a floor of 10 min so the
-    /// copy is always at or below the true value (never over-promises).
+    /// Returns a clean remaining-time label matching the backend countdown copy.
     /// Returns the exhausted copy when `remainingMinutes` ≤ 0.
     static func coarseCountdownLabel(remainingMinutes: Int) -> String {
         guard remainingMinutes > 0 else { return exhaustedLabel() }
-        let coarse = max(10, (remainingMinutes / 10) * 10)
-        return "about \(coarse) min left"
+        let hours = remainingMinutes / 60
+        let minutes = remainingMinutes % 60
+        if hours == 0 {
+            return "\(minutes)m left"
+        }
+        if minutes == 0 {
+            return "\(hours)h left"
+        }
+        return "\(hours)h \(minutes)m left"
     }
 
     // MARK: - Exhausted copy
@@ -31,15 +60,72 @@ enum EarnedDisplayFormatters {
 
     // MARK: - Per-device estimate label (parent Enrolled Devices row)
 
-    /// Returns a coarse label for how much time is estimated left on one device.
+    /// Returns the 5-minute granularity label for how much time is estimated
+    /// left on one device.
     ///
-    /// Uses the same 10-min coarse rounding as `coarseCountdownLabel`.
     /// When the estimate is ≤ 0 (device cap reached) returns the device-
     /// specific exhausted copy so parents can see which device is out.
     static func deviceEstimateLabel(estimatedMinutesLeft: Int) -> String {
         guard estimatedMinutesLeft > 0 else { return "time's up on this device" }
-        let coarse = max(10, (estimatedMinutesLeft / 10) * 10)
-        return "about \(coarse) min left on this device"
+        return "\(estimatedMinutesLeft) mins left"
+    }
+
+    /// Device row copy must never claim device time remains after the shared
+    /// pool is empty. Per-device estimates can lag the aggregate summary, so
+    /// overall remaining time wins when it is exhausted.
+    static func deviceRemainingLabel(
+        remainingToCapMinutes: Int?,
+        overallRemainingMinutes: Int?,
+        fallbackOverallLabel: String
+    ) -> String {
+        if let overallRemainingMinutes, overallRemainingMinutes <= 0 {
+            return fallbackOverallLabel
+        }
+        if let remainingToCapMinutes {
+            return deviceEstimateLabel(estimatedMinutesLeft: remainingToCapMinutes)
+        }
+        return fallbackOverallLabel
+    }
+
+    /// Device row progress uses the same remaining-time direction as the shared
+    /// pool. If both per-device and overall values exist, clamp to the smaller
+    /// fraction so a stale device estimate cannot look fuller than the pool.
+    static func deviceRemainingFraction(
+        remainingToCapMinutes: Int?,
+        capMinutes: Int?,
+        overallRemainingMinutes: Int?,
+        dailyPoolMinutes: Int?
+    ) -> Double {
+        if let overallRemainingMinutes, overallRemainingMinutes <= 0 {
+            return 0
+        }
+
+        let hasOverall = overallRemainingMinutes != nil
+        let overallFraction = remainingFraction(
+            remainingMinutes: overallRemainingMinutes,
+            dailyPoolMinutes: dailyPoolMinutes
+        )
+
+        guard let remainingToCapMinutes else {
+            return overallFraction
+        }
+
+        let deviceDenominator = capMinutes ?? dailyPoolMinutes
+        let deviceFraction: Double
+        if remainingToCapMinutes <= 0 {
+            deviceFraction = 0
+        } else {
+            deviceFraction = remainingFraction(
+                remainingMinutes: remainingToCapMinutes,
+                dailyPoolMinutes: deviceDenominator
+            )
+        }
+
+        guard hasOverall else {
+            return deviceFraction
+        }
+
+        return min(overallFraction, deviceFraction)
     }
 
     // MARK: - Freshness label
@@ -60,13 +146,6 @@ enum EarnedDisplayFormatters {
         return "updated ~\(hours)h ago"
     }
 
-    // MARK: - Precision badge
-
-    /// Short badge shown next to the countdown label to communicate coarseness.
-    static func precisionBadge() -> String {
-        "~10 min steps"
-    }
-
     // MARK: - Per-app row status (v1: hide usage)
 
     /// Status text for a per-app row in DeviceAppsSheet.
@@ -76,7 +155,10 @@ enum EarnedDisplayFormatters {
     /// `usedMin` and returns only whether the limit is active or not.
     static func appRowStatusText(limitEnabled: Bool, usedMin: Int, limitMin: Int) -> String {
         guard limitEnabled else { return "Limit off" }
-        // v1: do not show usage numbers — there is no real per-app usage yet.
-        return "Limit on"
+        // Real (coarse) per-app usage now flows in via the measurement samples.
+        // Show the figure clamped to the limit ("60 / 60 min" at/over budget,
+        // never "65 / 60"). The row's separate right-aligned "LIMIT REACHED" badge
+        // conveys the reached state, so this text must NOT also say it.
+        return "\(min(usedMin, limitMin)) / \(limitMin) min"
     }
 }

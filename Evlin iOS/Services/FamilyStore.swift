@@ -22,6 +22,7 @@ final class FamilyStore {
     private(set) var parents: [ParentMemberDTO] = []
     private(set) var parentDevices: [EnrolledDeviceDTO] = []
     private(set) var selfParent: ParentProfileDTO?
+    private(set) var earnedSummariesByChildID: [String: APIClient.EarnedSummaryDTO] = [:]
 
     /// Real all-apps lock state of the single paired kid device
     /// (`evlin.childDeviceID`), refreshed alongside the family aggregate from
@@ -41,7 +42,8 @@ final class FamilyStore {
             ChildProfile(
                 dto: dto,
                 locked: pairedDeviceLocked
-                    && ownsPairedDevice(childId: dto.id, pairedDeviceID: pairedID)
+                    && ownsPairedDevice(childId: dto.id, pairedDeviceID: pairedID),
+                earnedSummary: earnedSummariesByChildID[dto.id]
             )
         }
     }
@@ -58,6 +60,7 @@ final class FamilyStore {
             let me = try await api.fetchMeProfile()
             apply(me)
             await refreshPairedLockState()
+            await refreshEarnedSummaries()
             state = .loaded
         } catch {
             state = .failed(error.localizedDescription)
@@ -72,6 +75,7 @@ final class FamilyStore {
             let me = try await api.fetchMeProfile()
             apply(me)
             await refreshPairedLockState()
+            await refreshEarnedSummaries()
             state = .loaded
         } catch {
             if children.isEmpty && family == nil {
@@ -89,6 +93,7 @@ final class FamilyStore {
             let fam = try await api.fetchFamily()
             apply(fam)
             await refreshPairedLockState()
+            await refreshEarnedSummaries()
             state = .loaded
         } catch {
             state = .failed(error.localizedDescription)
@@ -133,6 +138,29 @@ final class FamilyStore {
     /// Look up a child by its backend id.
     func child(byId id: String) -> ChildDTO? { children.first { $0.id == id } }
 
+    /// Cached earned-time summary for a child. Home cards and Kid's Space both
+    /// read/write this cache so their time-pool bars stay on the same snapshot.
+    func earnedSummary(forChildID id: String) -> APIClient.EarnedSummaryDTO? {
+        earnedSummariesByChildID[id]
+    }
+
+    /// Store the latest earned-time summary for a child. This is intentionally
+    /// public within the app module so detail screens can publish their fresher
+    /// fetch back to Home instead of holding a divergent local-only value.
+    func cacheEarnedSummary(_ summary: APIClient.EarnedSummaryDTO, forChildID id: String) {
+        earnedSummariesByChildID[id] = summary
+    }
+
+    /// Fetch one child's earned-time summary and write it into the shared cache.
+    /// Returns nil on failure, preserving the previous cache entry.
+    func refreshEarnedSummary(forChildID id: String) async -> APIClient.EarnedSummaryDTO? {
+        guard let childID = UUID(uuidString: id),
+              let summary = try? await api.fetchEarnedSummary(childProfileID: childID)
+        else { return nil }
+        cacheEarnedSummary(summary, forChildID: id)
+        return summary
+    }
+
     /// Refresh the paired kid device's real all-apps lock state so the Home
     /// child card reflects the device (not a stale `.unlocked` default). One
     /// paired device per install (`evlin.childDeviceID`); no-op when unpaired or
@@ -150,5 +178,23 @@ final class FamilyStore {
         if let state = try? await api.fetchDeviceLockState(familyID: famID, childDeviceID: deviceID) {
             pairedDeviceLocked = state.locked
         }
+    }
+
+    /// Refresh child earned-time summaries used by the parent Home cards. This
+    /// keeps the Home "time pool" bar on the same remaining/pool data source as
+    /// the child's profile summary card.
+    func refreshEarnedSummaries() async {
+        guard !children.isEmpty else { return }
+        let validChildIDs = Set(children.map(\.id))
+        var next = earnedSummariesByChildID.filter { validChildIDs.contains($0.key) }
+
+        for child in children {
+            guard let childID = UUID(uuidString: child.id),
+                  let summary = try? await api.fetchEarnedSummary(childProfileID: childID)
+            else { continue }
+            next[child.id] = summary
+        }
+
+        earnedSummariesByChildID = next
     }
 }

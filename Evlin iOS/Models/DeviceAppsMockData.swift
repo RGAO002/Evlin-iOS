@@ -110,6 +110,9 @@ struct AppLimitRuleSummary: Equatable {
     let ruleID: UUID
     let bundleID: String
     let dailyBudgetMinutes: Int
+    /// Coarse minutes used today for this app (backend `used_minutes`). Drives the
+    /// per-app usage bar. Defaulted so callers/tests that don't supply it compile.
+    var usedMinutes: Int = 0
 }
 
 // MARK: - Optimistic-update supersession (P9 review)
@@ -141,8 +144,9 @@ enum DeviceAppLimitMerge {
     /// Overlay loaded backend rules onto freshly-built catalog rows (which start
     /// with the hardcoded default `limitMin`, `enabled: true`). Matching is by
     /// `bundleID`:
-    ///   • app WITH a rule  → limitMin = rule budget, enabled = true,  ruleID set
-    ///   • app WITHOUT a rule → enabled = false (limit off), ruleID = nil
+    ///   • app WITH a rule  → limitMin = rule budget, usedMin = rule usage,
+    ///                         enabled = true, ruleID set
+    ///   • app WITHOUT a rule → enabled = false (limit off), usedMin = 0, ruleID = nil
     ///     (the default `limitMin` stays so the pill still shows a sensible value)
     /// Apps with no bundleID can never match a rule → always "limit off".
     static func apply(rules: [AppLimitRuleSummary], to apps: [DeviceAppItem]) -> [DeviceAppItem] {
@@ -151,10 +155,12 @@ enum DeviceAppLimitMerge {
             var updated = app
             if let bundle = app.bundleID, let rule = byBundle[bundle] {
                 updated.limitMin = rule.dailyBudgetMinutes
+                updated.usedMin = rule.usedMinutes
                 updated.enabled = true
                 updated.ruleID = rule.ruleID
             } else {
                 updated.enabled = false
+                updated.usedMin = 0
                 updated.ruleID = nil
             }
             return updated

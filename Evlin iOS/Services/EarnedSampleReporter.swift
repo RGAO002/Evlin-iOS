@@ -19,6 +19,7 @@ enum EarnedSampleReporter {
     // MARK: - App Group keys
 
     static let retryQueueKey = "evlin.earnedSampleRetryQueue"
+    static let lastSamplePostDebugKey = "evlin.earned.lastSamplePost"
 
     // MARK: - Sample body builder (pure)
 
@@ -49,6 +50,22 @@ enum EarnedSampleReporter {
         ]
     }
 
+    /// Build the backend request for POST /child/earned-time/sample.
+    /// Backend auth is scoped by `X-Evlin-Child-Device-ID`, and the header must
+    /// match body.device_id exactly.
+    static func makeSampleRequest(
+        baseURL: URL,
+        childDeviceID: UUID,
+        body: [String: Any]
+    ) throws -> URLRequest {
+        var req = URLRequest(url: baseURL.appendingPathComponent("child/earned-time/sample"))
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue(childDeviceID.uuidString, forHTTPHeaderField: "X-Evlin-Child-Device-ID")
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+        return req
+    }
+
     // MARK: - Network POST + retry enqueue
 
     /// POST the sample to `{base}/child/earned-time/sample`.
@@ -57,7 +74,6 @@ enum EarnedSampleReporter {
     /// threshold fire can drain it.
     static func report(
         baseURL: URL,
-        childID: UUID,
         deviceID: UUID,
         usageDate: String,
         timezone: String,
@@ -75,17 +91,29 @@ enum EarnedSampleReporter {
             observedAt: observedAt
         )
 
-        var req = URLRequest(url: baseURL.appendingPathComponent("child/earned-time/sample"))
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.setValue(childID.uuidString, forHTTPHeaderField: "X-Child-Id")
-        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        guard let req = try? makeSampleRequest(
+            baseURL: baseURL,
+            childDeviceID: deviceID,
+            body: body
+        ) else {
+            enqueueRetry(RetryEntry(
+                deviceID: deviceID,
+                usageDate: usageDate,
+                timezone: timezone,
+                thresholdMinutes: thresholdMinutes,
+                estimatedMinutes: estimatedMinutes,
+                observedAt: observedAt
+            ), suiteName: suiteName)
+            recordDebug("enqueue request_build_failed t\(thresholdMinutes)", suiteName: suiteName)
+            return
+        }
 
         do {
             let (_, response) = try await URLSession.shared.data(for: req)
             let status = (response as? HTTPURLResponse)?.statusCode ?? -1
             // 2xx or 409 (already exists — idempotent) are both successes.
             let success = (status >= 200 && status < 300) || status == 409
+            recordDebug("post t\(thresholdMinutes) status=\(status) success=\(success)", suiteName: suiteName)
             if !success {
                 enqueueRetry(RetryEntry(
                     deviceID: deviceID,
@@ -97,6 +125,7 @@ enum EarnedSampleReporter {
                 ), suiteName: suiteName)
             }
         } catch {
+            recordDebug("enqueue network_error t\(thresholdMinutes) error=\(error.localizedDescription)", suiteName: suiteName)
             enqueueRetry(RetryEntry(
                 deviceID: deviceID,
                 usageDate: usageDate,
@@ -113,7 +142,6 @@ enum EarnedSampleReporter {
     /// an infinite-grow loop if the queue is partially drained.
     static func drainRetryQueue(
         baseURL: URL,
-        childID: UUID,
         suiteName: String = "group.com.evlin.ios"
     ) async {
         let queue = loadRetryQueue(suiteName: suiteName)
@@ -121,10 +149,6 @@ enum EarnedSampleReporter {
         clearRetryQueue(suiteName: suiteName)
 
         for entry in queue {
-            var req = URLRequest(url: baseURL.appendingPathComponent("child/earned-time/sample"))
-            req.httpMethod = "POST"
-            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            req.setValue(childID.uuidString, forHTTPHeaderField: "X-Child-Id")
             let body = makeSampleBody(
                 deviceID: entry.deviceID,
                 usageDate: entry.usageDate,
@@ -133,7 +157,14 @@ enum EarnedSampleReporter {
                 estimatedMinutes: entry.estimatedMinutes,
                 observedAt: entry.observedAt
             )
-            req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+            guard let req = try? makeSampleRequest(
+                baseURL: baseURL,
+                childDeviceID: entry.deviceID,
+                body: body
+            ) else {
+                enqueueRetry(entry, suiteName: suiteName)
+                continue
+            }
 
             let success: Bool
             do {
@@ -178,9 +209,20 @@ enum EarnedSampleReporter {
         UserDefaults(suiteName: suiteName)?.removeObject(forKey: retryQueueKey)
     }
 
+    static func retryQueueDebugSummary(suiteName: String = "group.com.evlin.ios") -> String {
+        let queue = loadRetryQueue(suiteName: suiteName)
+        guard let newest = queue.last else { return "0 pending" }
+        return "\(queue.count) pending; newest t\(newest.thresholdMinutes) observed \(newest.observedAt)"
+    }
+
     private static func saveRetryQueue(_ queue: [RetryEntry], suiteName: String) {
         guard let data = try? JSONEncoder().encode(queue) else { return }
         UserDefaults(suiteName: suiteName)?.set(data, forKey: retryQueueKey)
+    }
+
+    private static func recordDebug(_ message: String, suiteName: String) {
+        let ts = ISO8601DateFormatter().string(from: Date())
+        UserDefaults(suiteName: suiteName)?.set("\(ts) \(message)", forKey: lastSamplePostDebugKey)
     }
 
     // MARK: - Tripwire math (pure)

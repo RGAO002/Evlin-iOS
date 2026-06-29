@@ -84,6 +84,31 @@ final class ParentNotificationRoutingTests: XCTestCase {
         XCTAssertEqual(routedChild.id, child.id)
     }
 
+    func testTaskReviewNotificationRoutesToBackendTaskDetail() {
+        let taskID = UUID(uuidString: "77777777-7777-7777-7777-777777777777")!
+        let notification = makeNotification(
+            eventID: "88888888-8888-8888-8888-888888888888",
+            childProfileId: child.id,
+            type: "task_submitted",
+            deepLink: [
+                "route": "taskReview",
+                "child_id": "99999999-9999-9999-9999-999999999999",
+                "task_id": taskID.uuidString,
+            ]
+        )
+
+        let route = ParentNotificationRouteResolver.route(
+            for: notification,
+            children: [child]
+        )
+
+        guard case .appRoute(.taskDetailByBackendID(let routedChild, let routedTaskID)) = route else {
+            return XCTFail("Expected backend task detail route, got \(String(describing: route))")
+        }
+        XCTAssertEqual(routedChild.id, child.id)
+        XCTAssertEqual(routedTaskID, taskID)
+    }
+
     func testPendingNotificationOpenStoreConsumesEventOnce() {
         let defaults = UserDefaults(suiteName: "ParentNotificationRoutingTests-\(UUID().uuidString)")!
         let store = PendingNotificationOpenStore(defaults: defaults)

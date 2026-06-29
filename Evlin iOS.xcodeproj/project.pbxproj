@@ -143,6 +143,7 @@
 				Models/ShieldRecord.swift,
 				Models/ShieldTier.swift,
 				Services/AppLimitRuleStore.swift,
+				Services/AppLimitUsageReporter.swift,
 				Services/EarnedSampleReporter.swift,
 				Services/EarnedTimeStore.swift,
 				Services/LimitShieldLogic.swift,
@@ -399,6 +400,7 @@
 				B6FA971E2F81BB9400DA619E /* Resources */,
 				B6FA97422F81C6A000DA619E /* Embed Foundation Extensions */,
 				B6DA74B32FB6000100DA619E /* Embed ExtensionKit Extensions */,
+				B608A5FF2FEB6F8A0092C7BC /* ShellScript */,
 			);
 			buildRules = (
 			);
@@ -542,6 +544,26 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		B608A5FF2FEB6F8A0092C7BC /* ShellScript */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "# Type a script or drag a script file from your workspace to insert its path.\n\"${SRCROOT}/scripts/sentry-upload-dsyms.sh\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		6FAC3B70F0392A2946CB6486 /* Sources */ = {
@@ -886,7 +908,7 @@
 				DEVELOPMENT_TEAM = D9FM36P37F;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GCC_DYNAMIC_NO_PIC = NO;
 				GCC_NO_COMMON_BLOCKS = YES;
@@ -950,7 +972,7 @@
 				DEVELOPMENT_TEAM = D9FM36P37F;
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GCC_NO_COMMON_BLOCKS = YES;
 				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;

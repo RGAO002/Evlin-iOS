@@ -553,6 +553,14 @@ struct ChatView: View {
                 scrollToBottomIfNeeded(previousBottomDistance: scrollBottomDistance)
             }
             .offset(y: -Self.keyboardContentLift(keyboardOverlap: keyboardOverlapHeight))
+            // A single tap anywhere in the chat area hides the top bar; the ONLY
+            // way to bring it back is scrolling up. `simultaneousGesture` so it
+            // rides alongside message/card taps and never blocks them or scroll.
+            .simultaneousGesture(
+                TapGesture().onEnded {
+                    if barVisible { barVisible = false }
+                }
+            )
 
             composerPanel
                 .background(Color.evSurfaceContainer)
@@ -678,34 +686,43 @@ struct ChatView: View {
 
             Spacer()
 
-            // CENTER — current conversation title + pencil rename.
-            HStack(spacing: 6) {
-                Text(viewModel.currentConversationTitle ?? "Evlin")
-                    .font(.custom("Manrope", size: 17).weight(.bold))
-                    .foregroundStyle(Color.evOnSurface)
-                    .lineLimit(1)
-                Button {
-                    renameAlertText = viewModel.currentConversationTitle ?? "Evlin"
-                    showRenameAlert = true
-                } label: {
+            // CENTER — tap the whole title (title + pencil) to rename the
+            // current conversation. One 44pt-tall button so the tap target is
+            // reliably hittable (a bare 14pt pencil was too small to tap).
+            Button {
+                renameAlertText = viewModel.currentConversationTitle ?? ""
+                showRenameAlert = true
+            } label: {
+                HStack(spacing: 6) {
+                    Text(viewModel.currentConversationTitle ?? "Evlin")
+                        .font(.custom("Manrope", size: 17).weight(.bold))
+                        .foregroundStyle(Color.evOnSurface)
+                        .lineLimit(1)
                     Image(systemName: "pencil")
                         .font(.system(size: 14, weight: .medium))
                         .foregroundStyle(Color.evOnSurfaceVariant)
                 }
+                .frame(height: 44)
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Rename conversation")
 
             Spacer()
 
-            // RIGHT — Clear (archive + reset).
+            // RIGHT — New chat: archives the current conversation into history
+            // and opens a fresh one (same archive+reset action as the History
+            // sheet's "Clear current chat" — relabelled here as New chat so the
+            // top bar offers an obvious "start a new conversation" affordance).
             Button {
                 viewModel.clear()
             } label: {
-                Text("Clear")
-                    .font(.custom("Inter", size: 15).weight(.medium))
+                Image(systemName: "square.and.pencil")
+                    .font(.system(size: 19, weight: .medium))
                     .foregroundStyle(Color.evPrimary)
-                    .frame(height: 44)
-                    .padding(.trailing, 4)
+                    .frame(width: 44, height: 44)
             }
+            .accessibilityLabel("New chat")
         }
         .padding(.horizontal, Spacing.xl)
         .frame(height: 48)
@@ -714,7 +731,13 @@ struct ChatView: View {
                 .opacity(0.96)
                 .ignoresSafeArea(edges: .top)
         )
-        .offset(y: barVisible ? 0 : -56)
+        // Fully hide when collapsed: a large slide-up offset clears the top
+        // safe area, opacity 0 guarantees nothing peeks at the screen edge, and
+        // allowsHitTesting(false) stops the hidden History/New-chat icons from
+        // catching taps.
+        .offset(y: barVisible ? 0 : -140)
+        .opacity(barVisible ? 1 : 0)
+        .allowsHitTesting(barVisible)
         .animation(.easeInOut(duration: 0.22), value: barVisible)
     }
 

@@ -84,6 +84,17 @@ struct HomeView: View {
         .fullScreenCover(isPresented: $showSettings) {
             HomeSettingsSheet(onClose: { showSettings = false })
         }
+        .task {
+            await pollEarnedSummaries()
+        }
+    }
+
+    @MainActor
+    private func pollEarnedSummaries() async {
+        while !Task.isCancelled {
+            await familyStore.refreshEarnedSummaries()
+            try? await Task.sleep(nanoseconds: 30_000_000_000)
+        }
     }
 }
 

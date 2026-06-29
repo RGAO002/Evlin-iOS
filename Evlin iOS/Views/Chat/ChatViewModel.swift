@@ -168,12 +168,11 @@ class ChatViewModel: ObservableObject {
             let (data, _) = try await client.authedData(for: req)
             return try JSONDecoder().decode(RemoteConversationDetail.self, from: data)
         }
-        // B5 Part 2: wire the account id into the history store at init time so
-        // clear() → archiveCurrent is NOT a silent no-op when the user is signed in.
-        if let raw = UserDefaults.standard.string(forKey: "evlin.accountID"),
-           let accountID = UUID(uuidString: raw) {
-            chatHistoryStore.setAccount(accountID)
-        }
+        // Bind the account id into the history store at init so archiving is
+        // NOT a silent no-op. Resolves from the AUTHORITATIVE Keychain session
+        // first — the `evlin.accountID` UserDefaults mirror is fragile (onboarding
+        // / child-mode flows wipe it), which silently disabled all archiving.
+        ensureAccountBound()
         clearObserver = NotificationCenter.default.addObserver(
             forName: .evlinClearChat, object: nil, queue: .main
         ) { [weak self] _ in
@@ -247,6 +246,13 @@ class ChatViewModel: ObservableObject {
         if let data = try? JSONEncoder().encode(toSave) {
             UserDefaults.standard.set(data, forKey: currentConvStorageKey)
         }
+        // Auto-archive: the moment a conversation has any real content it is
+        // durably saved into history and kept fresh as new messages arrive.
+        // This is what makes EVERY conversation — including the very first /
+        // default one — show up in "Past conversations" and stay restorable,
+        // without the parent having to rename it or tap "New chat" first.
+        currentConversationMaterialized = true
+        persistCurrentConversation()
     }
 
     /// Loads the current (in-progress) conversation from account-namespaced storage.
@@ -271,8 +277,8 @@ class ChatViewModel: ObservableObject {
             // Capture state before rotating.
             let convID = currentConversationID
             let stored = realMessages.prefix(50).map { StoredChatMessage(sanitizing: $0) }
-            let title = realMessages.first(where: { $0.role == .parent })?.content
-                .prefix(50).description
+            // Preserve a manual rename; only fall back to a derived label.
+            let title = currentConversationTitle ?? Self.derivedTitle(from: realMessages)
             Task { [weak self] in
                 guard let self else { return }
                 await self.chatHistoryStore.archiveCurrent(
@@ -290,6 +296,8 @@ class ChatViewModel: ObservableObject {
         // Reset to seed.
         surfacedReflectionSubmissionIDs.removeAll()
         seedInitialMessages()
+        currentConversationMaterialized = false
+        didAttemptAutoTitle = false
     }
 
     // MARK: - Strategy-agent T11 / B3: conversation_id + answer-question + feedback
@@ -323,8 +331,94 @@ class ChatViewModel: ObservableObject {
             // (the in-memory nil already drives the bar back to "Evlin").
         } else {
             currentConversationTitle = trimmed
-            chatHistoryStore.rename(currentConversationID, trimmed)
+            // Renaming MATERIALIZES the conversation: persist it to saved history
+            // now (so a named conversation is kept even before it is cleared) and
+            // keep it fresh as later messages arrive (see saveMessages).
+            currentConversationMaterialized = true
+            persistCurrentConversation()
         }
+    }
+
+    /// True once the current conversation has been promoted into saved history
+    /// (renamed, or opened from history). While true, every message change
+    /// re-persists it so the saved copy never goes stale.
+    private var currentConversationMaterialized = false
+
+    /// One-shot guard so the AI auto-title fires at most once per conversation.
+    /// Reset on clear()/new-chat. The `currentConversationTitle == nil` check is
+    /// the real precedence gate (a manual rename or an already-applied title
+    /// both make it non-nil), so a rename always wins.
+    private var didAttemptAutoTitle = false
+
+    /// ChatGPT-style auto-title: when the parent sends the FIRST message in a
+    /// new, un-renamed conversation, ask the backend for a concise title and
+    /// apply it (updates the top bar + the History entry). Fire-and-forget — on
+    /// any failure the conversation keeps its derived first-message title.
+    private func maybeAutoTitle(firstMessage: String) {
+        guard currentConversationTitle == nil, !didAttemptAutoTitle else { return }
+        let parentCount = messages.filter { $0.role == .parent && !$0.isSeed }.count
+        guard parentCount == 1 else { return }
+        didAttemptAutoTitle = true
+        Task { [weak self] in
+            guard let self else { return }
+            guard let title = try? await self.apiClient.generateConversationTitle(firstMessage: firstMessage),
+                  !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else { return }
+            await MainActor.run {
+                // Respect a manual rename that may have landed in the meantime.
+                guard self.currentConversationTitle == nil else { return }
+                self.currentConversationTitle = title
+                self.currentConversationMaterialized = true
+                self.persistCurrentConversation()
+            }
+        }
+    }
+
+    /// Upsert the current conversation into `chatHistoryStore` (local-first +
+    /// best-effort backend PUT) with its current title + sanitized real messages.
+    /// Resolve the account scope from the AUTHORITATIVE Keychain session first,
+    /// falling back to the (fragile) `evlin.accountID` UserDefaults mirror. nil
+    /// only when there is genuinely no session.
+    private func resolveAccountID() -> UUID? {
+        if let raw = KeychainStore.shared.load()?.accountID,
+           let id = UUID(uuidString: raw) { return id }
+        if let raw = UserDefaults.standard.string(forKey: "evlin.accountID"),
+           let id = UUID(uuidString: raw) { return id }
+        return nil
+    }
+
+    /// Bind the history store to the current account if it isn't already bound.
+    /// Cheap when already bound (no Keychain read). Safe to call repeatedly —
+    /// called at init and before every archive/open so a wiped UserDefaults
+    /// mirror can never silently disable archiving again.
+    private func ensureAccountBound() {
+        guard chatHistoryStore.boundAccountID == nil else { return }
+        guard let id = resolveAccountID() else { return }
+        chatHistoryStore.setAccount(id)
+    }
+
+    private func persistCurrentConversation() {
+        ensureAccountBound()
+        let convID = currentConversationID
+        let real = messages.filter { !$0.isSeed }
+        // Use the explicit (renamed) title when set; otherwise derive a stable
+        // label from the first parent message so the history list shows
+        // something identifiable instead of a wall of "Evlin".
+        let title = currentConversationTitle ?? Self.derivedTitle(from: real)
+        let stored = real.prefix(50).map { StoredChatMessage(sanitizing: $0) }
+        Task { [weak self] in
+            await self?.chatHistoryStore.archiveCurrent(id: convID, title: title, messages: Array(stored))
+        }
+    }
+
+    /// Fallback display title for an un-renamed conversation: the first parent
+    /// message trimmed to ~40 chars. nil when no parent message exists yet (the
+    /// history row then falls back to "Evlin" + preview).
+    private static func derivedTitle(from messages: [ChatMessage]) -> String? {
+        guard let first = messages.first(where: { $0.role == .parent })?.content
+            .trimmingCharacters(in: .whitespacesAndNewlines), !first.isEmpty
+        else { return nil }
+        return first.count > 40 ? String(first.prefix(40)) + "…" : first
     }
 
     // MARK: - B7: open a saved conversation (inert, no ack polls)
@@ -339,6 +433,7 @@ class ChatViewModel: ObservableObject {
     /// never fire. We do NOT call `resumePendingAckPolls` or
     /// `reconcilePendingReceipts` after loading these messages.
     func openConversation(_ id: UUID) async {
+        ensureAccountBound()
         let stored = await chatHistoryStore.open(id)
         let inert = stored.map { $0.asInertChatMessage() }
         // Set the conversation id to the one being opened so any subsequent
@@ -347,6 +442,9 @@ class ChatViewModel: ObservableObject {
         // Update the title to match the saved summary.
         let summary = chatHistoryStore.conversations.first(where: { $0.id == id })
         currentConversationTitle = summary?.title
+        // An opened conversation is already saved — keep it materialized so
+        // further messages re-persist into history.
+        currentConversationMaterialized = true
         // Wipe live card state — we're restoring a finished conversation.
         pendingPlanArchCard = nil
         pendingPlanArchCardQueue = []
@@ -356,11 +454,14 @@ class ChatViewModel: ObservableObject {
         // Replace the message list (triggers saveMessages but inert messages
         // are well-formed ChatMessages so no data is lost).
         // I2: when the (post-hydrate) list is empty, seed the welcome message
-        // rather than injecting a blank agent bubble.
+        // rather than injecting a blank agent bubble. Otherwise prepend the same
+        // tutorial/fastpath seed ABOVE the restored messages so a reopened
+        // conversation shows the welcome guide just like a fresh one. The seed
+        // is `isSeed = true`, so it is never re-archived or sent as history.
         if inert.isEmpty {
             seedInitialMessages()
         } else {
-            messages = inert
+            messages = [makeSeedMessage()] + inert
         }
     }
 
@@ -455,6 +556,10 @@ class ChatViewModel: ObservableObject {
         isThinking = true
         errorMessage = nil
 
+        // ChatGPT-style: the first message in a new, un-renamed conversation
+        // gets an AI-generated title (fire-and-forget; falls back silently).
+        maybeAutoTitle(firstMessage: text)
+
         lastUserMessageForCard = text
         dispatchChat(userMessage: text, forceConfirmations: [])
     }
@@ -500,6 +605,13 @@ class ChatViewModel: ObservableObject {
     /// never sent to the backend as history context. `isSeed = true` marks it for
     /// exclusion from archives and from the `/parent/chat` `history` list.
     func seedInitialMessages() {
+        messages = [makeSeedMessage()]
+    }
+
+    /// Build the tutorial/fastpath welcome bubble. `isSeed = true` excludes it
+    /// from archives and from the `/parent/chat` history context. Extracted so a
+    /// restored conversation can also show the tutorial at the top.
+    private func makeSeedMessage() -> ChatMessage {
         let kid = childName.isEmpty ? "your kid" : childName
         var seed = ChatMessage(
             role: .agent,
@@ -520,7 +632,7 @@ class ChatViewModel: ObservableObject {
             timestamp: Date()
         )
         seed.isSeed = true
-        messages = [seed]
+        return seed
     }
 
     // MARK: - Chat pipeline (Phase 9 — unified)
@@ -1138,7 +1250,8 @@ class ChatViewModel: ObservableObject {
         case .singleAppShieldAdvice, .shieldTokenMissing, .appStoreDisambiguation,
              .appNotFoundTerminal, .childDisambiguation, .categoryRenameRequired,
              .cannotBlockCategory, .categoryShieldOffer, .catalogAppInactive,
-             .bundleIDRequired, .lockSelectedAppsConfirm, .lockSelectedAppsEmpty:
+             .bundleIDRequired, .lockSelectedAppsConfirm, .lockSelectedAppsEmpty,
+             .restrictionUnlockPicker:
             // Task 11/6 app-control cards are driven by currentAppControlCard +
             // handleAppControlOption / handleAppControlCandidate, NOT by the Brain
             // CardHandlers primary slot. This branch keeps the switch exhaustive;

@@ -57,6 +57,45 @@ final class KeychainStore {
         return try? JSONDecoder().decode(StoredTokens.self, from: data)
     }
 
+    /// Outcome of a Keychain read that distinguishes "no session on file" from
+    /// "the Keychain was momentarily unreadable". The bare `load()` collapses
+    /// both into `nil`, which is wrong for the refresher: a transient read error
+    /// (e.g. the item is briefly unavailable before first unlock) must NOT be
+    /// treated as a sign-out, or a perfectly valid session gets discarded.
+    enum LoadResult: Equatable {
+        /// A session blob was present and decoded cleanly.
+        case found(StoredTokens)
+        /// No session is stored (item not found, or present but undecodable —
+        /// either way there is nothing usable, so the user is signed out).
+        case notFound
+        /// The Keychain returned an unexpected status; the read may succeed on a
+        /// later attempt. Callers should treat this as transient, NOT a sign-out.
+        case unreadable(OSStatus)
+    }
+
+    /// Like `load()`, but reports WHY a read produced no tokens so callers can
+    /// tell a genuine sign-out apart from a transient Keychain failure.
+    func loadResult() -> LoadResult {
+        var query = baseQuery()
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        switch status {
+        case errSecSuccess:
+            guard let data = item as? Data,
+                  let tokens = try? JSONDecoder().decode(StoredTokens.self, from: data) else {
+                // Present but unreadable/corrupt → nothing usable; treat as no session.
+                return .notFound
+            }
+            return .found(tokens)
+        case errSecItemNotFound:
+            return .notFound
+        default:
+            return .unreadable(status)
+        }
+    }
+
     func clear() {
         SecItemDelete(baseQuery() as CFDictionary)
     }

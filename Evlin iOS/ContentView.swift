@@ -15,6 +15,7 @@ enum AppRoute: Hashable {
     /// Pushable Task Detail. We carry the full child + task by id so we
     /// can reach the live task model inside the view.
     case taskDetail(child: ChildProfile, taskId: Int)
+    case taskDetailByBackendID(child: ChildProfile, backendTaskId: UUID)
     /// Pushable per-device app-limits screen. Mirrors `taskDetail` —
     /// pushes onto the same stack so edge-swipe-back works.
     case deviceDetail(device: DeviceItem, childId: String)
@@ -454,6 +455,14 @@ extension View {
                 TaskDetailView(
                     childId: child.id,
                     taskId: taskId,
+                    onBack: {
+                        if !path.wrappedValue.isEmpty { path.wrappedValue.removeLast() }
+                    }
+                )
+            case .taskDetailByBackendID(let child, let backendTaskId):
+                TaskDetailView(
+                    childId: child.id,
+                    backendTaskId: backendTaskId,
                     onBack: {
                         if !path.wrappedValue.isEmpty { path.wrappedValue.removeLast() }
                     }

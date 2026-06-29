@@ -23,6 +23,8 @@ import FamilyControls
 ///   - `earned.latestDeviceEstimate`       — Int minutes from extension's latest estimate
 ///   - `earned.poolMinutes`                — Int total earned pool for today (from backend)
 ///   - `earned.capMinutes`                 — Int hard parent-set cap (from backend)
+///   - `evlin.usageCountingAllowed`        — Bool gate written from /child/state
+///   - `earned.usageCountingOffset`        — Int counted minutes before a task pause
 final class EarnedTimeStore: @unchecked Sendable {
     static let shared = EarnedTimeStore()
 
@@ -40,6 +42,10 @@ final class EarnedTimeStore: @unchecked Sendable {
     private let estimateKey      = "earned.latestDeviceEstimate"
     private let poolKey          = "earned.poolMinutes"
     private let capKey           = "earned.capMinutes"
+    private let usageCountingAllowedKey = "evlin.usageCountingAllowed"
+    private let earnedUsageOffsetKey = "earned.usageCountingOffset"
+    private let appLimitUsageOffsetPrefix = "evlin.appLimitUsageOffset."
+    private let appLimitReportedPrefix = "evlin.appLimitReported."
 
     private func overrideKey(for usageDate: String) -> String {
         "earned.overridden.\(usageDate)"
@@ -198,6 +204,62 @@ final class EarnedTimeStore: @unchecked Sendable {
         }
     }
 
+    // MARK: - Usage counting gate
+
+    /// True when screen/app usage should count toward earned pool, device cap,
+    /// and per-app limits. The child state poller flips this off while any task
+    /// is still unfinished; the DeviceActivity extension reads it before
+    /// reporting or enforcing usage thresholds.
+    var usageCountingAllowed: Bool {
+        get {
+            guard defaults?.object(forKey: usageCountingAllowedKey) != nil else { return true }
+            return defaults?.bool(forKey: usageCountingAllowedKey) ?? true
+        }
+        set {
+            defaults?.set(newValue, forKey: usageCountingAllowedKey)
+            defaults?.synchronize()
+        }
+    }
+
+    /// Earned-time cumulative minutes that were already counted before usage
+    /// counting was paused for unfinished tasks. After re-arming DeviceActivity,
+    /// the extension adds this offset to fresh threshold values.
+    var earnedUsageOffsetMinutes: Int {
+        get {
+            guard defaults?.object(forKey: earnedUsageOffsetKey) != nil else { return 0 }
+            return max(0, defaults?.integer(forKey: earnedUsageOffsetKey) ?? 0)
+        }
+        set {
+            defaults?.set(max(0, newValue), forKey: earnedUsageOffsetKey)
+            defaults?.synchronize()
+        }
+    }
+
+    func appLimitUsageOffsetMinutes(ruleID: UUID) -> Int {
+        let key = appLimitUsageOffsetPrefix + ruleID.uuidString.lowercased()
+        guard defaults?.object(forKey: key) != nil else { return 0 }
+        return max(0, defaults?.integer(forKey: key) ?? 0)
+    }
+
+    func setAppLimitUsageOffset(ruleID: UUID, usedMinutes: Int) {
+        let key = appLimitUsageOffsetPrefix + ruleID.uuidString.lowercased()
+        defaults?.set(max(0, usedMinutes), forKey: key)
+        defaults?.synchronize()
+    }
+
+    func appLimitReportedMinutes(ruleID: UUID) -> Int {
+        let key = appLimitReportedPrefix + ruleID.uuidString.lowercased()
+        guard defaults?.object(forKey: key) != nil else { return 0 }
+        return max(0, defaults?.integer(forKey: key) ?? 0)
+    }
+
+    func recordAppLimitUsage(ruleID: UUID, usedMinutes: Int) {
+        let key = appLimitReportedPrefix + ruleID.uuidString.lowercased()
+        let current = appLimitReportedMinutes(ruleID: ruleID)
+        defaults?.set(max(current, usedMinutes), forKey: key)
+        defaults?.synchronize()
+    }
+
     // MARK: - Reset
 
     /// Wipe all earned-time keys. Used by tests and a full account reset.
@@ -207,12 +269,17 @@ final class EarnedTimeStore: @unchecked Sendable {
     /// they care about, so residual keys from other dates do not affect results.
     func removeAll() {
         [measurementKey, lockedSetIDKey, lockedSetDataKey, lockedSetListAliasKeyKey,
-         backendKey, estimateKey, poolKey, capKey].forEach { defaults?.removeObject(forKey: $0) }
+         backendKey, estimateKey, poolKey, capKey, usageCountingAllowedKey,
+         earnedUsageOffsetKey].forEach { defaults?.removeObject(forKey: $0) }
         // Sweep any override flags persisted for known test dates.
         if let suite = defaults {
             let prefix = "earned.overridden."
             suite.dictionaryRepresentation().keys
-                .filter { $0.hasPrefix(prefix) }
+                .filter {
+                    $0.hasPrefix(prefix)
+                    || $0.hasPrefix(appLimitUsageOffsetPrefix)
+                    || $0.hasPrefix(appLimitReportedPrefix)
+                }
                 .forEach { suite.removeObject(forKey: $0) }
         }
     }

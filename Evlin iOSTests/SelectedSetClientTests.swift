@@ -114,16 +114,16 @@ final class SelectedSetClientTests: XCTestCase {
         XCTAssertEqual(state, .shielded(who: ["manual"]))
     }
 
-    func test_lockButtonState_exhausted_isRed() {
-        // exhausted = true even with no covering_sources → earned-time ran out → red
+    func test_lockButtonState_exhaustedWithEmptySources_isGreen() {
+        // exhausted alone is not a real selected-set lock; empty sources means clear.
         let state = LockButtonState.from(coveringSources: [], exhausted: true)
-        XCTAssertEqual(state, .shielded(who: []))
+        XCTAssertEqual(state, .clear)
     }
 
-    func test_lockButtonState_exhaustedNilSources_isShielded() {
-        // exhausted takes precedence when sources is nil
+    func test_lockButtonState_exhaustedNilSources_isPending() {
+        // nil sources still means no acked lock truth yet.
         let state = LockButtonState.from(coveringSources: nil, exhausted: true)
-        XCTAssertEqual(state, .shielded(who: []))
+        XCTAssertEqual(state, .pending)
     }
 
     func test_lockButtonState_multipleSources() {
@@ -133,6 +133,16 @@ final class SelectedSetClientTests: XCTestCase {
         } else {
             XCTFail("Expected .shielded, got \(state)")
         }
+    }
+
+    func test_lockButtonState_emptySourcesAndNotExhaustedClearsPriorRedState() {
+        let red = LockButtonState.from(coveringSources: ["manual"], exhausted: false)
+        XCTAssertTrue(red.isShielded)
+
+        let cleared = LockButtonState.from(coveringSources: [], exhausted: false)
+        XCTAssertEqual(cleared, .clear)
+        XCTAssertFalse(cleared.isShielded,
+                       "fresh lock-state with no sources and exhausted=false must drive the button back to green")
     }
 
     // MARK: - 3. EarnedSummaryDTO child-level state

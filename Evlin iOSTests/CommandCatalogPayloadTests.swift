@@ -451,6 +451,45 @@ final class CommandCatalogPayloadTests: XCTestCase {
                        expected.timeIntervalSinceReferenceDate, accuracy: 0.001)
     }
 
+    func test_commandPollerPreservesSetLimitUsedTodayMinutes() throws {
+        let tokenBlob = Data("APP_TOKEN".utf8).base64EncodedString()
+        let poll = try decodePollCommand("""
+        {
+          "command_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+          "action": "set_limit",
+          "tier": "exactApp",
+          "target": {
+            "target_type": "app",
+            "bundle_id": "com.burbn.instagram",
+            "target_display": "Instagram",
+            "original_request": "limit instagram to 1 minute",
+            "catalog_token_data_base64": "\(tokenBlob)"
+          },
+          "duration_minutes": null,
+          "issued_at": "2026-06-19T21:00:00+00:00",
+          "limit": {
+            "rule_id": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+            "daily_budget_minutes": 1,
+            "used_today_minutes": 1,
+            "reset_policy": "daily",
+            "schedule": {
+              "starts_at": "00:00",
+              "ends_at": "23:59",
+              "timezone": null
+            },
+            "effective_from": "2026-06-19T21:00:00+00:00",
+            "expires_at": null,
+            "updated_at": "2026-06-19T21:00:00+00:00"
+          }
+        }
+        """)
+
+        let command = CommandPoller.lockCommand(from: poll)
+
+        let limit = try XCTUnwrap(command.limit)
+        XCTAssertEqual(limit.usedTodayMinutes, 1)
+    }
+
     /// A fractional-format `expires_at` must decode to a non-nil `Date` (the
     /// `expires_at` branch of `limitRule(from:)` was otherwise untested).
     func test_commandPollerDecodesSetLimitExpiresAtInFractionalFormat() throws {

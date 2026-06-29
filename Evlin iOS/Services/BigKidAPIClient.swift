@@ -20,6 +20,15 @@ final class BigKidAPIClient: ObservableObject {
         try await get("/child/state")
     }
 
+    func reportHeartbeat(globalEffectiveState: [String: Any]? = nil) async throws {
+        var body: [String: Any] = ["device_id": childId.uuidString]
+        if let globalEffectiveState {
+            body["global_effective_state"] = globalEffectiveState
+        }
+        let req = try makeJSONRequest(path: "/child/heartbeat", method: "POST", body: body)
+        _ = try await sendVoid(req)
+    }
+
     // MARK: - Tasks
 
     /// Submit one or more evidence photos for a task. The `photos` array

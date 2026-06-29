@@ -679,6 +679,14 @@ struct CalendarView: View {
         let personId = focusPerson ?? "family"
         let chosenPerson = person(personId)
         let formatter = DateFormatter()
+        // MUST pin en_US_POSIX: the whole calendar pipeline (utcISO parser,
+        // EventTimeBridge, parseTimeToMinutes) reads the "hh:mm a" wall-clock with
+        // literal "AM"/"PM". Without this, a non-US device locale (e.g. zh_CN)
+        // formats the period as "上午/下午", which the en_US_POSIX parser can't
+        // read → utcISO returns nil → start_at/end_at sent as null → backend
+        // rejects the timed event with 422 ("timed events require start_at and
+        // end_at"). This is the only "hh:mm a" *producer* that was missing it.
+        formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "hh:mm a"
         let startDate = Date()
         let startStr = formatter.string(from: startDate)

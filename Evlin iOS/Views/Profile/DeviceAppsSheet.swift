@@ -56,8 +56,14 @@ struct DeviceAppsSheet: View {
     /// Family id for parent API calls — sourced the same way ProfileView's
     /// lock-all does (`UserDefaults` "evlin.familyID"). `nil` until paired.
     private var familyID: UUID? { UUID(uuidString: pairedFamilyID) }
-    /// Paired kid device id (the same UUID the catalog fetch already uses).
-    private var childDeviceID: UUID? { UUID(uuidString: pairedChildID) }
+    /// Target device for this sheet. Runtime callers pass the tapped device;
+    /// previews/legacy callers may fall back to the locally paired device id.
+    private var childDeviceID: UUID? {
+        DeviceTargetResolver.selectedChildDeviceID(
+            tappedDeviceUUID: device.deviceUUID,
+            pairedChildDeviceID: pairedChildID
+        )
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -135,7 +141,7 @@ struct DeviceAppsSheet: View {
                 apps = fixtureApps
                 return
             }
-            guard apps.isEmpty, let cid = UUID(uuidString: pairedChildID) else { return }
+            guard apps.isEmpty, let cid = childDeviceID else { return }
             isLoading = true
 
             // B9: load earned-time policy (cap options + pool) alongside the catalog.
@@ -145,14 +151,20 @@ struct DeviceAppsSheet: View {
                     if let policy = try? await apiClient.fetchEarnedPolicy(childProfileID: childProfileID) {
                         poolMinutes = policy.pool_minutes
                         policyAppOptions = policy.allowed_app_options
-                        // Find the cap entry for this specific device.
+                        // Find the cap entry for this specific device. The EFFECTIVE
+                        // per-app cap mirrors the backend (R7 / _validate_budget_vs_cap):
+                        // an explicit device cap if set, ELSE the daily pool. Without
+                        // this fallback `deviceCapMinutes` was nil for a pool-only device,
+                        // so `defaultPill` became min(60, 60)=60 and turning on a limit
+                        // POSTed budget=60 — which the backend 422s once the pool drops
+                        // below 60 ("app_limit_exceeds_device_cap").
                         if let devEntry = policy.devices?.first(where: { $0.child_device_id == cid }) {
-                            deviceCapMinutes = devEntry.daily_cap_minutes
+                            deviceCapMinutes = devEntry.daily_cap_minutes ?? policy.pool_minutes
                             capOptions = EarnedCapOptions.compute(
                                 policyCapOptions: devEntry.allowed_cap_options,
                                 poolMinutes: policy.pool_minutes ?? Int.max)
                         } else {
-                            deviceCapMinutes = policy.daily_cap_minutes
+                            deviceCapMinutes = policy.daily_cap_minutes ?? policy.pool_minutes
                             capOptions = []
                         }
                     }
@@ -191,7 +203,8 @@ struct DeviceAppsSheet: View {
                             AppLimitRuleSummary(
                                 ruleID: $0.rule_id,
                                 bundleID: $0.bundle_id,
-                                dailyBudgetMinutes: $0.daily_budget_minutes)
+                                dailyBudgetMinutes: $0.daily_budget_minutes,
+                                usedMinutes: $0.used_minutes ?? 0)
                         }
                         merged = DeviceAppLimitMerge.apply(rules: summaries, to: catalogApps)
                     }
@@ -425,9 +438,8 @@ struct DeviceAppsSheet: View {
     }
 
     private func statusText(for app: DeviceAppItem) -> String {
-        // B11/v1: there is no real per-app usage data yet — usedMin is a mock
-        // value and must never be shown as real usage. Delegate to the pure
-        // formatter which deliberately ignores usedMin.
+        // usedMin is REAL (coarse) per-app usage from the backend usage samples
+        // (merged in onAppear). The formatter shows "X / Y min".
         EarnedDisplayFormatters.appRowStatusText(
             limitEnabled: app.enabled,
             usedMin: app.usedMin,
@@ -680,11 +692,15 @@ struct DeviceAppsSheet: View {
         Task {
             do {
                 if on {
+                    // Clamp to the device's effective cap (mirrors the backend's
+                    // _validate_budget_vs_cap): a stale rule budget set when the pool
+                    // was higher would otherwise 422 once the pool drops below it.
+                    let budget = max(1, min(app.limitMin, deviceCapMinutes ?? app.limitMin))
                     let rule = try await apiClient.setAppLimit(
                         familyID: famID,
                         childDeviceID: cid,
                         bundleID: bundleID,
-                        dailyBudgetMinutes: app.limitMin,
+                        dailyBudgetMinutes: budget,
                         displayName: app.name)
                     // Superseded by a newer tap/toggle → drop this response.
                     guard AppLimitEditDecision.decide(
@@ -735,6 +751,10 @@ struct DeviceAppsSheet: View {
             setActionError("Can't save — device not paired.")
             return
         }
+        guard let childProfileID = UUID(uuidString: childId) else {
+            setActionError("Can't save — child profile not loaded.")
+            return
+        }
 
         // Gate: check whether any enabled app rules exceed the new cap.
         // Skip the gate when the parent already confirmed.
@@ -766,7 +786,12 @@ struct DeviceAppsSheet: View {
         Task {
             defer { capSaving = false }
             do {
-                _ = try await apiClient.putDeviceCap(childDeviceID: cid, dailyCapMinutes: newCap)
+                _ = try await apiClient.putDeviceCap(
+                    childProfileID: childProfileID,
+                    childDeviceID: cid,
+                    capMinutes: newCap,
+                    effective: "today",
+                    confirmCascade: true)
                 // On success the cap is already applied optimistically.
             } catch {
                 // Revert on failure.

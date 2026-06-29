@@ -28,7 +28,10 @@ final class EventTargetCardTests: XCTestCase {
         let json = """
         {"type":"danger_confirm","kind":"target.child_select","source":"event",
          "title":"Which child?","detail":{"continuation_token":"ct1",
-           "options":[{"label":"Liam","id":"id-1"},{"label":"Emma","id":"id-2"}]}}
+           "options":[
+             {"label":"Liam","id":"id-1","avatar":{"kind":"emoji","value":"L","color":"#2563EB","signed_url":null}},
+             {"label":"Emma","id":"id-2","avatar":{"kind":"emoji","value":"E","color":"#2E7D32","signed_url":null}}
+           ]}}
         """.data(using: .utf8)!
         let card = try JSONDecoder().decode(PlanArchCardPayload.self, from: json)
         let d = EventTargetDetail(card.detail)
@@ -36,6 +39,8 @@ final class EventTargetCardTests: XCTestCase {
         let opts = d.options("options")
         XCTAssertEqual(opts.map(\.id), ["id-1", "id-2"])
         XCTAssertEqual(opts.map(\.label), ["Liam", "Emma"])
+        XCTAssertEqual(opts.map(\.avatarValue), ["L", "E"])
+        XCTAssertEqual(opts.map(\.avatarColorHex), ["#2563EB", "#2E7D32"])
     }
 
     func testDetailExtractsGroups() throws {

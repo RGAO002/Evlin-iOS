@@ -14,7 +14,8 @@ import SwiftUI
 ///   - hosts the in-place EditTaskCard modal (no native sheet)
 struct TaskDetailView: View {
     let childId: String
-    let taskId: Int
+    let taskId: Int?
+    let backendTaskId: UUID?
     var onBack: () -> Void = {}
 
     @State private var task: TaskItem? = nil
@@ -26,6 +27,18 @@ struct TaskDetailView: View {
     @AppStorage("evlin.childDeviceID") private var pairedChildID: String = ""
     @EnvironmentObject private var apiClient: APIClient
     @Environment(FamilyStore.self) private var familyStore
+
+    init(
+        childId: String,
+        taskId: Int? = nil,
+        backendTaskId: UUID? = nil,
+        onBack: @escaping () -> Void = {}
+    ) {
+        self.childId = childId
+        self.taskId = taskId
+        self.backendTaskId = backendTaskId
+        self.onBack = onBack
+    }
 
     /// Live child from the family aggregate; nil when the id isn't in the
     /// store (HP-9 — no more silent `previewLiam` fallback).
@@ -44,9 +57,7 @@ struct TaskDetailView: View {
     }
 
     private var backendChildID: UUID? {
-        guard familyStore.ownsPairedDevice(childId: childId,
-                                           pairedDeviceID: pairedChildID) else { return nil }
-        return UUID(uuidString: pairedChildID)
+        familyStore.childDeviceID(forChildId: childId, preferredDeviceID: pairedChildID)
     }
     private var bigKidParent: BigKidParentClient? {
         guard backendChildID != nil else { return nil }
@@ -147,7 +158,13 @@ struct TaskDetailView: View {
                         TaskItem.from(backend: t, sequenceID: idx + 1)
                     }
                     await MainActor.run {
-                        task = mapped.first(where: { $0.id == taskId })
+                        if let backendTaskId {
+                            task = mapped.first(where: { $0.backendID == backendTaskId })
+                        } else if let taskId {
+                            task = mapped.first(where: { $0.id == taskId })
+                        } else {
+                            task = nil
+                        }
                         backendError = nil
                     }
                 } catch {

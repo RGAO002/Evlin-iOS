@@ -9,26 +9,26 @@ final class EarnedBudgetSchedulerTests: XCTestCase {
 
     // MARK: - Bucket constant
 
-    func test_bucketMinutes_isTen() {
-        XCTAssertEqual(EarnedBudgetScheduler.earnedBucketMinutes, 10)
+    func test_bucketMinutes_isFive() {
+        XCTAssertEqual(EarnedBudgetScheduler.earnedBucketMinutes, 5)
     }
 
     // MARK: - Basic capping at cap (cap < pool, multiple of bucket)
 
     func test_thresholds_pool120_cap90_stopsAtCap() {
-        // cap=90, buckets: 10,20,30,...,90 (all multiples up to cap)
+        // cap=90, buckets: 5,10,15,...,90 (all multiples up to cap)
         let result = EarnedBudgetScheduler.thresholds(poolMinutes: 120, capMinutes: 90)
-        let expected = stride(from: 10, through: 90, by: 10).map { $0 }
+        let expected = stride(from: 5, through: 90, by: 5).map { $0 }
         XCTAssertEqual(result, expected)
     }
 
     // MARK: - Exact cap appended when not a multiple of bucket
 
     func test_thresholds_pool120_cap95_appendsExactCap() {
-        // cap=95, buckets up to 90 (last multiple ≤ 95), then 95 appended
-        let result = EarnedBudgetScheduler.thresholds(poolMinutes: 120, capMinutes: 95)
-        let multiples = stride(from: 10, through: 90, by: 10).map { $0 }
-        let expected = multiples + [95]
+        // cap=97, buckets up to 95 (last multiple ≤ 97), then 97 appended
+        let result = EarnedBudgetScheduler.thresholds(poolMinutes: 120, capMinutes: 97)
+        let multiples = stride(from: 5, through: 95, by: 5).map { $0 }
+        let expected = multiples + [97]
         XCTAssertEqual(result, expected)
     }
 
@@ -36,7 +36,7 @@ final class EarnedBudgetSchedulerTests: XCTestCase {
 
     func test_thresholds_pool120_cap120_coversFullRange() {
         let result = EarnedBudgetScheduler.thresholds(poolMinutes: 120, capMinutes: 120)
-        let expected = stride(from: 10, through: 120, by: 10).map { $0 }
+        let expected = stride(from: 5, through: 120, by: 5).map { $0 }
         XCTAssertEqual(result, expected)
     }
 
@@ -45,8 +45,16 @@ final class EarnedBudgetSchedulerTests: XCTestCase {
     func test_thresholds_pool60_cap120_cappedAtPool() {
         // effective ceiling = min(60, 120) = 60
         let result = EarnedBudgetScheduler.thresholds(poolMinutes: 60, capMinutes: 120)
-        let expected = stride(from: 10, through: 60, by: 10).map { $0 }
+        let expected = stride(from: 5, through: 60, by: 5).map { $0 }
         XCTAssertEqual(result, expected)
+    }
+
+    func test_thresholds_pool240_cap240_coversFourHoursAtFiveMinuteGranularity() {
+        let result = EarnedBudgetScheduler.thresholds(poolMinutes: 240, capMinutes: 240)
+        let expected = stride(from: 5, through: 240, by: 5).map { $0 }
+        XCTAssertEqual(result, expected)
+        XCTAssertEqual(result.count, 48)
+        XCTAssertEqual(EarnedBudgetScheduler.guardEventCount, 48)
     }
 
     // MARK: - Event count guard
@@ -77,7 +85,7 @@ final class EarnedBudgetSchedulerTests: XCTestCase {
     // MARK: - Exact cap NOT duplicated when already a bucket multiple
 
     func test_thresholds_capAlreadyMultipleOfBucket_notDuplicated() {
-        // cap=90 is already a multiple of 10; it must appear exactly once
+        // cap=90 is already a multiple of 5; it must appear exactly once
         let result = EarnedBudgetScheduler.thresholds(poolMinutes: 120, capMinutes: 90)
         let count = result.filter { $0 == 90 }.count
         XCTAssertEqual(count, 1, "cap=90 (already a bucket multiple) must appear exactly once")
@@ -96,7 +104,7 @@ final class EarnedBudgetSchedulerTests: XCTestCase {
     // MARK: - Ascending order
 
     func test_thresholds_alwaysAscending() {
-        let result = EarnedBudgetScheduler.thresholds(poolMinutes: 120, capMinutes: 95)
+        let result = EarnedBudgetScheduler.thresholds(poolMinutes: 120, capMinutes: 97)
         for i in 1..<result.count {
             XCTAssertLessThan(result[i - 1], result[i], "thresholds must be strictly ascending")
         }

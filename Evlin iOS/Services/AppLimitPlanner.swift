@@ -167,6 +167,7 @@ nonisolated final class AppLimitPlanner: @unchecked Sendable {
             let name = DeviceActivityName(Self.activityName(for: window))
             let schedule = Self.schedule(for: window)
             var events: [DeviceActivityEvent.Name: DeviceActivityEvent] = [:]
+            var enforcementTokens = 0
             for rule in bucket.rules {
                 let eventName = DeviceActivityEvent.Name(Self.eventName(for: rule.id))
                 events[eventName] = DeviceActivityEvent(
@@ -175,8 +176,41 @@ nonisolated final class AppLimitPlanner: @unchecked Sendable {
                     webDomains: [],
                     threshold: DateComponents(minute: rule.budgetMinutes)
                 )
+                enforcementTokens += rule.appTokens.count
             }
-            totalEvents += events.count
+            // `eventCount` in the result is ENFORCEMENT events only (the `.armed`
+            // doc + P6 ack semantics) — the measurement events below are an
+            // implementation detail of the usage bar, not part of the ack.
+            totalEvents += bucket.rules.count
+
+            // Add measurement (usage-bar) events ADDITIVELY, packed into this
+            // activity's remaining event/token budget after enforcement reserves
+            // its share. Distinct `evlin.applimit.*` prefix → the extension routes
+            // these to usage reporting and NEVER to applyLimitShield. A rule that
+            // doesn't fit keeps enforcement and just loses the bar (logged).
+            let alloc = Self.allocateMeasurement(
+                rules: bucket.rules.map {
+                    (id: $0.id, tokenCount: $0.appTokens.count, budgetMinutes: $0.budgetMinutes)
+                },
+                reservedEvents: bucket.rules.count,
+                reservedTokens: enforcementTokens
+            )
+            for rule in bucket.rules {
+                guard let thresholds = alloc.perRule[rule.id] else { continue }
+                for t in thresholds {
+                    let mName = DeviceActivityEvent.Name(Self.measurementEventName(for: rule.id, threshold: t))
+                    events[mName] = DeviceActivityEvent(
+                        applications: rule.appTokens,
+                        categories: [],
+                        webDomains: [],
+                        threshold: DateComponents(minute: t)
+                    )
+                }
+            }
+            if !alloc.dropped.isEmpty {
+                NSLog("[Evlin] app_limit_measurement_dropped window=%@ count=%d (enforcement intact)",
+                      name.rawValue, alloc.dropped.count)
+            }
             plan.append(ArmedActivity(name: name, schedule: schedule, events: events))
         }
 
@@ -262,6 +296,65 @@ nonisolated final class AppLimitPlanner: @unchecked Sendable {
     /// `evlin.limit.<id>` suffix back to a UUID to look up the rule + its tokens.
     static func eventName(for ruleID: UUID) -> String {
         "evlin.limit.\(ruleID.uuidString)"
+    }
+
+    // MARK: - Measurement (per-app usage bar)
+
+    /// Coarse "quarters" usage thresholds for a budget — at ~25/50/75% of the
+    /// budget, strictly inside `(0, budget)`, integer, unique, ascending, at most
+    /// 3. They fire BEFORE the enforcement threshold so the parent's usage bar can
+    /// move in quarters. A tiny budget (whose quarters all round outside the open
+    /// range) yields none — enforcement still applies, the bar just can't move.
+    static func measurementThresholds(budgetMinutes: Int) -> [Int] {
+        guard budgetMinutes >= 2 else { return [] }
+        let quarters = [0.25, 0.5, 0.75].map { Int((Double(budgetMinutes) * $0).rounded()) }
+        let inside = quarters.filter { $0 > 0 && $0 < budgetMinutes }
+        return Array(Set(inside)).sorted()
+    }
+
+    /// Per-rule, per-threshold MEASUREMENT event name. A DISTINCT `evlin.applimit.`
+    /// prefix (never `evlin.limit.`) so the extension routes it to usage reporting
+    /// and NEVER to `applyLimitShield`.
+    static func measurementEventName(for ruleID: UUID, threshold: Int) -> String {
+        "evlin.applimit.\(ruleID.uuidString).t\(threshold)"
+    }
+
+    /// Result of packing measurement events into an activity's remaining budget.
+    struct MeasurementAllocation: Equatable {
+        var perRule: [UUID: [Int]]
+        var dropped: [UUID]
+    }
+
+    /// Pack measurement thresholds into the per-activity event/token budget that
+    /// REMAINS after enforcement is reserved. Enforcement always wins: a rule
+    /// whose measurement events don't fit keeps its enforcement event and is
+    /// listed in `dropped` (it only loses the usage bar). A rule with no
+    /// measurable thresholds (tiny budget) is neither allocated nor dropped.
+    /// Stable order by rule id keeps the kept set deterministic across input order.
+    static func allocateMeasurement(
+        rules: [(id: UUID, tokenCount: Int, budgetMinutes: Int)],
+        reservedEvents: Int,
+        reservedTokens: Int
+    ) -> MeasurementAllocation {
+        var perRule: [UUID: [Int]] = [:]
+        var dropped: [UUID] = []
+        var usedEvents = reservedEvents
+        var usedTokens = reservedTokens
+        for r in rules.sorted(by: { $0.id.uuidString < $1.id.uuidString }) {
+            let thresholds = measurementThresholds(budgetMinutes: r.budgetMinutes)
+            if thresholds.isEmpty { continue }
+            let eventCost = thresholds.count
+            let tokenCost = thresholds.count * r.tokenCount
+            if usedEvents + eventCost <= maxEventsPerActivity,
+               usedTokens + tokenCost <= maxTokensPerActivity {
+                perRule[r.id] = thresholds
+                usedEvents += eventCost
+                usedTokens += tokenCost
+            } else {
+                dropped.append(r.id)
+            }
+        }
+        return MeasurementAllocation(perRule: perRule, dropped: dropped)
     }
 
     /// Deterministic, collision-resistant string identity for a window. Order

@@ -12,6 +12,8 @@ enum CommandDeliveryDiagnostics {
     static let keyCommandPoll = "evlin.delivery.commandPoll"
     static let keyCommandAck = "evlin.delivery.commandAck"
     static let keyDAMHeartbeat = "evlin.delivery.damHeartbeat"
+    static let keyEarnedLastThreshold = "evlin.earned.lastThreshold"
+    static let keyUsageCountingLastSkipped = "evlin.usageCounting.lastSkipped"
     /// SPIKE-ONLY (DAM heartbeat experiment). Capped history of heartbeat
     /// `intervalDidStart` fires written by the extension, so the diagnostics
     /// view can show the cadence + self-rearm result SEQUENCE, not just the
@@ -49,6 +51,10 @@ enum CommandDeliveryDiagnostics {
     /// SPIKE-ONLY. Read a running integer counter (e.g. total heartbeat fires).
     static func readInt(_ key: String) -> Int {
         defaults.integer(forKey: key)
+    }
+
+    static func remove(_ key: String) {
+        defaults.removeObject(forKey: key)
     }
 
     /// SPIKE-ONLY. Wipe the heartbeat history + counter between experiments.
@@ -386,7 +392,8 @@ final class CommandPoller {
             timezone: dto.schedule.timezone,
             effectiveFrom: effectiveFrom,
             expiresAt: expiresAt,
-            updatedAt: updatedAt
+            updatedAt: updatedAt,
+            usedTodayMinutes: dto.used_today_minutes
         )
     }
 
@@ -501,7 +508,7 @@ final class CommandPoller {
         var ackDetail = detail
         if status == "confirmed" {
             var d = ackDetail ?? [:]
-            if let global = await globalEffectiveStateDictionary() {
+            if let global = await Self.globalEffectiveStateDictionary() {
                 d["global_effective_state"] = global
             }
             ackDetail = d
@@ -522,7 +529,7 @@ final class CommandPoller {
         }
     }
 
-    private func globalEffectiveStateDictionary() async -> [String: Any]? {
+    static func globalEffectiveStateDictionary() async -> [String: Any]? {
         let current = await ActiveLockStore.shared.allCurrent()
         let covers = current.shields
             .sorted { lhs, rhs in
@@ -589,6 +596,8 @@ final class CommandPoller {
         let capMinutes  = cfg?.device_cap_minutes  ?? 0
 
         if poolMinutes > 0, capMinutes > 0 {
+            EarnedTimeStore.shared.poolMinutes = poolMinutes
+            EarnedTimeStore.shared.capMinutes = capMinutes
             if let armOverride = armBudgetOverride {
                 // Test seam: provide the real selection (or empty) to the override
                 // so tests can verify pool/cap values without DeviceActivity.

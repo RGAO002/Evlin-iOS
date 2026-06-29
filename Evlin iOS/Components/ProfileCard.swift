@@ -9,7 +9,12 @@ struct ProfileCard: View {
 
     private var displayTimeLeft: String {
         let trimmed = child.timeLeft.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? "2h" : trimmed
+        guard !trimmed.isEmpty else { return "2h left" }
+        if trimmed.localizedCaseInsensitiveContains("left")
+            || trimmed.localizedCaseInsensitiveContains("up") {
+            return trimmed
+        }
+        return "\(trimmed) left"
     }
 
     var body: some View {
@@ -42,7 +47,7 @@ struct ProfileCard: View {
                                     .fill(Color.evSecondary)
                                     .frame(width: 8, height: 8)
                             }
-                            Text("UNLOCKED · \(displayTimeLeft) left")
+                            Text("UNLOCKED · \(displayTimeLeft)")
                                 .font(.custom("Inter", size: 10).weight(.heavy))
                                 .tracking(1.4)
                                 .foregroundStyle(Color.evSecondary)
@@ -60,10 +65,12 @@ struct ProfileCard: View {
 
                     // Line 3: progress bar — red (locked) or green (unlocked).
                     // Fill width = remaining-time fraction (child.timePct).
-                    // timePct is a hardcoded 1.0 today, so it reads full until
-                    // real remaining-time data is wired in.
+                    // As the remaining fraction falls, the right edge moves left.
                     GeometryReader { geo in
                         let isLocked = child.status != .unlocked
+                        let fillWidth = child.timePct <= 0
+                            ? 0
+                            : max(6, geo.size.width * child.timePct)
                         ZStack(alignment: .leading) {
                             Capsule()
                                 .fill(isLocked
@@ -71,8 +78,8 @@ struct ProfileCard: View {
                                       : Color.evSecondaryContainer)
                                 .frame(height: 5)
                             Capsule()
-                                .fill(isLocked ? Color.evError : Color.evSecondary)
-                                .frame(width: max(6, geo.size.width * child.timePct), height: 5)
+                                .fill(isLocked ? Color.evError : Color.evTimeRemaining(child.timePct))
+                                .frame(width: fillWidth, height: 5)
                         }
                     }
                     .frame(height: 5)

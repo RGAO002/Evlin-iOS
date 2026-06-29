@@ -12,7 +12,32 @@ import Foundation
 struct TargetOption: Identifiable, Equatable {
     let id: String              // child_profile_id / child_device_id / event_id (STABLE)
     let label: String
+    var avatarURL: String? = nil
+    var avatarValue: String? = nil
+    var avatarColorHex: String? = nil
     var occurrenceStart: String = ""   // event.disambiguation carries this; spec §6.4
+
+    init(id: String, label: String, occurrenceStart: String = "") {
+        self.id = id
+        self.label = label
+        self.occurrenceStart = occurrenceStart
+    }
+
+    init(
+        id: String,
+        label: String,
+        avatarURL: String?,
+        avatarValue: String?,
+        avatarColorHex: String?,
+        occurrenceStart: String = ""
+    ) {
+        self.id = id
+        self.label = label
+        self.avatarURL = avatarURL
+        self.avatarValue = avatarValue
+        self.avatarColorHex = avatarColorHex
+        self.occurrenceStart = occurrenceStart
+    }
 }
 
 struct TargetGroup: Identifiable {
@@ -43,8 +68,15 @@ struct EventTargetDetail {
         (raw[key] as? [[String: Any]] ?? []).compactMap { o in
             guard let id = o["id"] as? String, let label = o["label"] as? String
             else { return nil }
-            return TargetOption(id: id, label: label,
-                                occurrenceStart: (o["occurrence_start"] as? String) ?? "")
+            let avatar = o["avatar"] as? [String: Any]
+            return TargetOption(
+                id: id,
+                label: label,
+                avatarURL: avatar?["signed_url"] as? String,
+                avatarValue: avatar?["value"] as? String,
+                avatarColorHex: avatar?["color"] as? String,
+                occurrenceStart: (o["occurrence_start"] as? String) ?? ""
+            )
         }
     }
 
@@ -53,7 +85,14 @@ struct EventTargetDetail {
             guard let name = g["child_name"] as? String else { return nil }
             let opts = (g["options"] as? [[String: Any]] ?? []).compactMap { o -> TargetOption? in
                 guard let id = o["id"] as? String, let label = o["label"] as? String else { return nil }
-                return TargetOption(id: id, label: label)
+                let avatar = o["avatar"] as? [String: Any]
+                return TargetOption(
+                    id: id,
+                    label: label,
+                    avatarURL: avatar?["signed_url"] as? String,
+                    avatarValue: avatar?["value"] as? String,
+                    avatarColorHex: avatar?["color"] as? String
+                )
             }
             // id includes the array index so same-named children stay distinct.
             return TargetGroup(id: "\(idx)-\(name)", childName: name, options: opts)

@@ -18,6 +18,7 @@ struct AppControlCard: View {
     let onOption: (AppControlCardOption) -> Void
     let onCandidate: (AppControlCandidate) -> Void
     var onCancel: (() -> Void)? = nil
+    @State private var selectedRestrictionIDs: Set<String> = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -34,6 +35,8 @@ struct AppControlCard: View {
                 if !model.options.isEmpty {
                     optionButtons
                 }
+            } else if model.kind == .restrictionUnlockPicker {
+                restrictionUnlockContent
             } else if model.kind == .lockSelectedAppsConfirm {
                 lockConfirmContent
                 optionButtons
@@ -41,7 +44,7 @@ struct AppControlCard: View {
                 optionButtons
             }
 
-            if let onCancel {
+            if let onCancel, model.kind != .restrictionUnlockPicker {
                 Button(action: onCancel) {
                     Text("Not now")
                         .font(.custom("Inter", size: 13).weight(.semibold))
@@ -71,6 +74,11 @@ struct AppControlCard: View {
                 .stroke(Color.evOutlineVariant, lineWidth: 1)
         )
         .evShadow(.premium)
+        .onAppear {
+            if model.kind == .restrictionUnlockPicker, selectedRestrictionIDs.isEmpty {
+                selectedRestrictionIDs = Set(model.restrictionGroups.flatMap { $0.sessions.map(\.id) })
+            }
+        }
     }
 
     private var isDisambiguation: Bool {
@@ -139,8 +147,11 @@ struct AppControlCard: View {
                 } label: {
                     HStack(spacing: 12) {
                         CandidateIcon(
-                            url: candidate.artworkURL,
-                            systemName: model.kind == .childDisambiguation ? "person.fill" : "app.fill"
+                            url: model.kind == .childDisambiguation ? candidate.childAvatarURL : candidate.artworkURL,
+                            systemName: model.kind == .childDisambiguation ? "person.fill" : "app.fill",
+                            fallbackText: model.kind == .childDisambiguation ? (candidate.childAvatarValue ?? String(candidate.display.prefix(1)).uppercased()) : nil,
+                            fallbackColorHex: model.kind == .childDisambiguation ? candidate.childAvatarColorHex : nil,
+                            circular: model.kind == .childDisambiguation
                         )
                         .frame(width: 32, height: 32)
 
@@ -175,6 +186,218 @@ struct AppControlCard: View {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .stroke(Color.evOutlineVariant, lineWidth: 1)
         )
+    }
+
+    @ViewBuilder
+    private var restrictionUnlockContent: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            ForEach(model.restrictionGroups, id: \.id) { group in
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 10) {
+                        restrictionGroupAvatar(group)
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(group.childName)
+                                .font(.custom("Manrope", size: 16).weight(.heavy))
+                                .foregroundStyle(Color.evOnSurface)
+                            Text(group.deviceSummary.isEmpty ? restrictionCountLabel(group.sessions.count) : "\(group.deviceSummary) · \(restrictionCountLabel(group.sessions.count))")
+                                .font(.custom("Inter", size: 12))
+                                .foregroundStyle(Color.evOnSurfaceVariant)
+                                .lineLimit(1)
+                        }
+                        Spacer()
+                        Button {
+                            let ids = group.sessions.map(\.id)
+                            let currentlyAllSelected = ids.allSatisfy { selectedRestrictionIDs.contains($0) }
+                            if currentlyAllSelected {
+                                selectedRestrictionIDs.subtract(ids)
+                            } else {
+                                selectedRestrictionIDs.formUnion(ids)
+                            }
+                        } label: {
+                            Text(group.sessions.allSatisfy { selectedRestrictionIDs.contains($0.id) } ? "Selected" : "Select")
+                                .font(.custom("Inter", size: 12).weight(.bold))
+                                .foregroundStyle(Color.evPrimary)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 7)
+                                .background(Capsule().fill(Color.evPrimaryContainer))
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    VStack(spacing: 8) {
+                        ForEach(group.sessions) { row in
+                            restrictionRow(row)
+                        }
+                    }
+                }
+                .padding(12)
+                .background(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(Color.evSurfaceContainerLow)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .stroke(Color.evOutlineVariant, lineWidth: 1)
+                )
+            }
+
+            HStack(spacing: 9) {
+                Button {
+                    onOption(AppControlCardOption(action: "cancel", label: "Cancel", forceConfirmations: []))
+                } label: {
+                    Text("Cancel")
+                        .font(.custom("Inter", size: 14).weight(.bold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 13)
+                        .foregroundStyle(Color.evOnSurface)
+                        .background(
+                            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                                .fill(Color.evSurfaceContainer)
+                        )
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    guard let token = model.pickerToken, !selectedRestrictionIDs.isEmpty else { return }
+                    let selected = model.restrictionGroups
+                        .flatMap(\.sessions)
+                        .map(\.id)
+                        .filter { selectedRestrictionIDs.contains($0) }
+                    let marker = "restriction_unlock:\(token):selected:\(selected.joined(separator: ","))"
+                    onOption(AppControlCardOption(
+                        action: "restriction_unlock_selected",
+                        label: "Remove selected",
+                        forceConfirmations: [marker]
+                    ))
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "lock.open.fill")
+                        Text("Remove selected")
+                    }
+                    .font(.custom("Inter", size: 14).weight(.bold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 13)
+                    .foregroundStyle(Color.white)
+                    .background(
+                        RoundedRectangle(cornerRadius: 13, style: .continuous)
+                            .fill(selectedRestrictionIDs.isEmpty ? Color.evOutline : Color.evPrimary)
+                    )
+                }
+                .buttonStyle(.plain)
+                .disabled(selectedRestrictionIDs.isEmpty)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func restrictionGroupAvatar(_ group: RestrictionUnlockGroup) -> some View {
+        let size: CGFloat = 38
+        if let url = group.avatarURL {
+            AsyncImage(url: url) { phase in
+                switch phase {
+                case .success(let image):
+                    image
+                        .resizable()
+                        .scaledToFill()
+                default:
+                    restrictionAvatarFallback(group)
+                }
+            }
+            .frame(width: size, height: size)
+            .clipShape(Circle())
+        } else {
+            restrictionAvatarFallback(group)
+                .frame(width: size, height: size)
+        }
+    }
+
+    private func restrictionAvatarFallback(_ group: RestrictionUnlockGroup) -> some View {
+        let base = color(from: group.avatarColorHex) ?? Color.evPrimary
+        let raw = group.avatarValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = raw.isEmpty ? String(group.childName.prefix(1)).uppercased() : raw
+        return ZStack {
+            Circle().fill(base.opacity(0.16))
+            Text(text)
+                .font(.custom("Manrope", size: 15).weight(.heavy))
+                .foregroundStyle(base)
+                .lineLimit(1)
+                .minimumScaleFactor(0.55)
+        }
+    }
+
+    private func restrictionCountLabel(_ count: Int) -> String {
+        "\(count) active restriction\(count == 1 ? "" : "s")"
+    }
+
+    private func restrictionRow(_ row: RestrictionUnlockRow) -> some View {
+        let isSelected = selectedRestrictionIDs.contains(row.id)
+        return Button {
+            if isSelected {
+                selectedRestrictionIDs.remove(row.id)
+            } else {
+                selectedRestrictionIDs.insert(row.id)
+            }
+        } label: {
+            HStack(spacing: 10) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .fill(isSelected ? Color.evPrimary : Color.evSurfaceContainerLowest)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                .stroke(isSelected ? Color.evPrimary : Color.evOutline, lineWidth: 1.5)
+                        )
+                    if isSelected {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundStyle(Color.white)
+                    }
+                }
+                .frame(width: 28, height: 28)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(row.title)
+                        .font(.custom("Inter", size: 14).weight(.bold))
+                        .foregroundStyle(Color.evOnSurface)
+                        .lineLimit(1)
+                    Text(row.subtitle.isEmpty ? row.deviceLabel : "\(row.subtitle) · \(row.deviceLabel)")
+                        .font(.custom("Inter", size: 11))
+                        .foregroundStyle(Color.evOnSurfaceVariant)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 6)
+                Text(row.badge)
+                    .font(.custom("Inter", size: 10).weight(.heavy))
+                    .tracking(0.8)
+                    .foregroundStyle(row.action == "unblock" ? Color.orange : Color.evPrimary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .background(Capsule().fill((row.action == "unblock" ? Color.orange : Color.evPrimary).opacity(0.12)))
+            }
+            .padding(11)
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(isSelected ? Color.evPrimaryContainer.opacity(0.42) : Color.evSurfaceContainerLowest)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(isSelected ? Color.evPrimary.opacity(0.24) : Color.clear, lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func color(from hex: String?) -> Color? {
+        guard var raw = hex?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+            return nil
+        }
+        if raw.hasPrefix("#") {
+            raw.removeFirst()
+        }
+        guard raw.count == 6, let value = UInt(raw, radix: 16) else {
+            return nil
+        }
+        return Color(hex: value)
     }
 
     // MARK: - Lock-selected-apps confirm content
@@ -259,6 +482,7 @@ struct AppControlCard: View {
         // Task 6 — lock-selected-apps confirmation cards.
         case .lockSelectedAppsConfirm: return "checkmark.shield.fill"
         case .lockSelectedAppsEmpty:   return "shield.slash"
+        case .restrictionUnlockPicker: return "lock.open.fill"
         }
     }
 
@@ -365,33 +589,72 @@ private struct CategoryChip: View {
 private struct CandidateIcon: View {
     let url: URL?
     let systemName: String
+    var fallbackText: String? = nil
+    var fallbackColorHex: String? = nil
+    var circular: Bool = false
 
     var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .fill(Color.evPrimaryContainer)
-
-            if let url {
-                AsyncImage(url: url) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image
-                            .resizable()
-                            .scaledToFill()
-                    default:
-                        fallback
-                    }
-                }
+        if circular {
+            content
+                .background(Circle().fill(fallbackBase.opacity(0.16)))
+                .clipShape(Circle())
+        } else {
+            content
+                .background(
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .fill(Color.evPrimaryContainer)
+                )
                 .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-            } else {
-                fallback
-            }
         }
     }
 
+    private var fallbackBase: Color {
+        color(from: fallbackColorHex) ?? Color.evPrimaryContainer
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if let url {
+            AsyncImage(url: url) { phase in
+                switch phase {
+                case .success(let image):
+                    image
+                        .resizable()
+                        .scaledToFill()
+                default:
+                    fallback
+                }
+            }
+        } else {
+            fallback
+        }
+    }
+
+    @ViewBuilder
     private var fallback: some View {
-        Image(systemName: systemName)
-            .font(.system(size: 14, weight: .bold))
-            .foregroundStyle(Color.evPrimary)
+        if let fallbackText, !fallbackText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            Text(fallbackText)
+                .font(.custom("Manrope", size: 13).weight(.heavy))
+                .foregroundStyle(color(from: fallbackColorHex) ?? Color.evPrimary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
+        } else {
+            Image(systemName: systemName)
+                .font(.system(size: 14, weight: .bold))
+                .foregroundStyle(Color.evPrimary)
+        }
+    }
+
+    private func color(from hex: String?) -> Color? {
+        guard var raw = hex?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+            return nil
+        }
+        if raw.hasPrefix("#") {
+            raw.removeFirst()
+        }
+        guard raw.count == 6, let value = UInt(raw, radix: 16) else {
+            return nil
+        }
+        return Color(hex: value)
     }
 }

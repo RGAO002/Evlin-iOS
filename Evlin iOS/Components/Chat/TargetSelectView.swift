@@ -78,6 +78,7 @@ struct TargetSelectView: View {
     private func optionRow(_ opt: TargetOption) -> some View {
         let on = selected.contains(opt.id)
         return HStack(spacing: 11) {
+            optionAvatar(opt)
             Text(opt.label).font(.subheadline.weight(.medium)).foregroundStyle(Color.evOnSurface)
             Spacer(minLength: 0)
             ZStack {
@@ -96,6 +97,53 @@ struct TargetSelectView: View {
         .frame(maxWidth: .infinity)
         .background(Color.evSurfaceContainerLow,
                     in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    @ViewBuilder
+    private func optionAvatar(_ opt: TargetOption) -> some View {
+        let size: CGFloat = 28
+        if let rawURL = opt.avatarURL, let url = URL(string: rawURL) {
+            AsyncImage(url: url) { phase in
+                switch phase {
+                case .success(let image):
+                    image.resizable().scaledToFill()
+                default:
+                    avatarFallback(opt)
+                }
+            }
+            .frame(width: size, height: size)
+            .clipShape(Circle())
+        } else {
+            avatarFallback(opt)
+                .frame(width: size, height: size)
+        }
+    }
+
+    private func avatarFallback(_ opt: TargetOption) -> some View {
+        let text = (opt.avatarValue?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
+            ? opt.avatarValue!
+            : String(opt.label.prefix(1)).uppercased()
+        let base = Self.color(fromHex: opt.avatarColorHex) ?? Color.evPrimary
+        return ZStack {
+            Circle().fill(base.opacity(0.16))
+            Text(text)
+                .font(.system(size: 11, weight: .heavy))
+                .foregroundStyle(base)
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
+        }
+    }
+
+    private static func color(fromHex hex: String?) -> Color? {
+        guard var s = hex?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !s.isEmpty else { return nil }
+        if s.hasPrefix("#") { s.removeFirst() }
+        guard s.count == 6, let value = UInt32(s, radix: 16) else { return nil }
+        return Color(
+            red: Double((value >> 16) & 0xFF) / 255.0,
+            green: Double((value >> 8) & 0xFF) / 255.0,
+            blue: Double(value & 0xFF) / 255.0
+        )
     }
 
     private func primaryButton(_ title: String, enabled: Bool,

@@ -5,6 +5,19 @@ import XCTest
 /// into the iOS Codable DTOs, asserting the snake_case wire shape maps exactly,
 /// plus DeviceModelMap fallback + DeviceInfoProvider field names (spec §6.1).
 final class FamilyStoreTests: XCTestCase {
+    // FamilyStore is `@MainActor @Observable` and owns APIClient, which uses
+    // @Published. Under this project's current Swift back-deploy runtime,
+    // releasing that graph inside XCTest can abort in the isolated-deinit shim.
+    // Existing tests use the same process-lifetime retention workaround for
+    // AuthService/ChatViewModel; keep this test focused on cache behavior.
+    @MainActor private static var retainedStores: [FamilyStore] = []
+
+    @MainActor private func makeRetainedFamilyStore() -> FamilyStore {
+        let store = FamilyStore(api: APIClient(baseURL: "http://preview.local"))
+        Self.retainedStores.append(store)
+        return store
+    }
+
 
     /// A representative GET /family response: one family with two parents
     /// (owner + co-parent), two children (one with a photo avatar + a child
@@ -188,6 +201,70 @@ final class FamilyStoreTests: XCTestCase {
         XCTAssertTrue(dto.children.isEmpty)
     }
 
+    func testChildProfileMapsEarnedSummaryToRemainingTimeDisplay() throws {
+        let dto = ChildDTO(
+            id: "cccccccc-cccc-cccc-cccc-cccccccccccc",
+            display_name: "Kid A",
+            age: 12,
+            gender: "female",
+            avatar: AvatarDTO(kind: "emoji", value: "🧒", color: "#2E7D32", signed_url: nil, expires_at: nil),
+            devices: []
+        )
+        let summary = APIClient.EarnedSummaryDTO(
+            child_profile_id: UUID(uuidString: "cccccccc-cccc-cccc-cccc-cccccccccccc"),
+            state: "ok",
+            earned_minutes: 120,
+            used_minutes: 90,
+            remaining_minutes: 30,
+            override_active: false,
+            updated_at: nil,
+            countdown_label: nil,
+            daily_pool_minutes: 120,
+            device_estimates: nil
+        )
+
+        let profile = ChildProfile(dto: dto, earnedSummary: summary)
+
+        XCTAssertEqual(profile.timeLeft, "30m left")
+        XCTAssertEqual(profile.timePct, 0.25, accuracy: 0.001)
+    }
+
+    @MainActor
+    func testFamilyStoreEarnedSummaryCacheUsesLatestSummary() {
+        let store = makeRetainedFamilyStore()
+        let childID = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+        let stale = APIClient.EarnedSummaryDTO(
+            child_profile_id: UUID(uuidString: childID),
+            state: "exhausted",
+            earned_minutes: 90,
+            used_minutes: 90,
+            remaining_minutes: 0,
+            override_active: false,
+            updated_at: nil,
+            countdown_label: "Time's up for today",
+            daily_pool_minutes: 90,
+            device_estimates: nil
+        )
+        let fresh = APIClient.EarnedSummaryDTO(
+            child_profile_id: UUID(uuidString: childID),
+            state: "ok",
+            earned_minutes: 90,
+            used_minutes: 0,
+            remaining_minutes: 90,
+            override_active: false,
+            updated_at: nil,
+            countdown_label: "1h 30m left",
+            daily_pool_minutes: 90,
+            device_estimates: nil
+        )
+
+        store.cacheEarnedSummary(stale, forChildID: childID)
+        store.cacheEarnedSummary(fresh, forChildID: childID)
+
+        XCTAssertEqual(store.earnedSummary(forChildID: childID)?.countdown_label, "1h 30m left")
+        XCTAssertEqual(store.earnedSummary(forChildID: childID)?.remaining_minutes, 90)
+    }
+
     /// §15.8 R2 / PIN (B): the pending co-parent poll path — family=null,
     /// pending_invite populated, account.needs_family == true.
     func testDecodesFamilyMePendingCoparent() throws {
@@ -215,8 +292,21 @@ final class FamilyStoreTests: XCTestCase {
 
     func testDeviceModelMapKnownAndFallback() {
         XCTAssertEqual(DeviceModelMap.friendlyName(for: "iPhone12,1"), "iPhone 11")
+        XCTAssertEqual(DeviceModelMap.friendlyName(for: "iPhone14,6"), "iPhone SE (3rd gen)")
         XCTAssertEqual(DeviceModelMap.friendlyName(for: "iPhone16,1"), "iPhone 15 Pro")
         XCTAssertEqual(DeviceModelMap.friendlyName(for: "iPhone17,1"), "iPhone 16 Pro")
+        XCTAssertEqual(DeviceModelMap.friendlyName(for: "iPhone17,5"), "iPhone 16e")
+        XCTAssertEqual(DeviceModelMap.friendlyName(for: "iPhone18,1"), "iPhone 17 Pro")
+        XCTAssertEqual(DeviceModelMap.friendlyName(for: "iPhone18,2"), "iPhone 17 Pro Max")
+        XCTAssertEqual(DeviceModelMap.friendlyName(for: "iPhone18,3"), "iPhone 17")
+        XCTAssertEqual(DeviceModelMap.friendlyName(for: "iPhone18,4"), "iPhone Air")
+        XCTAssertEqual(DeviceModelMap.friendlyName(for: "iPhone18,5"), "iPhone 17e")
+        XCTAssertEqual(DeviceModelMap.friendlyName(for: "iPad13,1"), "iPad Air (4th gen)")
+        XCTAssertEqual(DeviceModelMap.friendlyName(for: "iPad15,7"), "iPad (A16)")
+        XCTAssertEqual(DeviceModelMap.friendlyName(for: "iPad15,3"), "iPad Air 11'' (M3)")
+        XCTAssertEqual(DeviceModelMap.friendlyName(for: "iPad16,8"), "iPad Air 11'' (M4)")
+        XCTAssertEqual(DeviceModelMap.friendlyName(for: "iPad17,1"), "iPad Pro 11'' (M5)")
+        XCTAssertEqual(DeviceModelMap.friendlyName(for: "iPad16,1"), "iPad mini (A17 Pro)")
         // Unmapped raw id falls back to the raw id verbatim.
         XCTAssertEqual(DeviceModelMap.friendlyName(for: "iPhone99,9"), "iPhone99,9")
     }
@@ -239,6 +329,46 @@ final class FamilyStoreTests: XCTestCase {
 
         XCTAssertEqual(item.name, "iPhone 11")
         XCTAssertEqual(item.detail, "iPhone 11 · iOS 18")
+    }
+
+    func testDeviceItemMapsIPadModelIdentifierForEnrolledDeviceRows() {
+        let dto = EnrolledDeviceDTO(
+            device_id: "device-1",
+            mode: "child",
+            label: nil,
+            device_model: "iPad13,1",
+            platform: "ios",
+            os_version: "18.5",
+            display: "iPad13,1 · iOS 18",
+            last_seen_at: nil,
+            online: false,
+            is_self: false
+        )
+
+        let item = DeviceItem(dto: dto)
+
+        XCTAssertEqual(item.name, "iPad Air (4th gen)")
+        XCTAssertEqual(item.detail, "iPad Air (4th gen) · iOS 18")
+    }
+
+    func testDeviceItemMapsLatestIPhoneModelIdentifierForEnrolledDeviceRows() {
+        let dto = EnrolledDeviceDTO(
+            device_id: "device-1",
+            mode: "child",
+            label: nil,
+            device_model: "iPhone18,3",
+            platform: "ios",
+            os_version: "26.1",
+            display: "iPhone18,3 · iOS 26",
+            last_seen_at: nil,
+            online: false,
+            is_self: false
+        )
+
+        let item = DeviceItem(dto: dto)
+
+        XCTAssertEqual(item.name, "iPhone 17")
+        XCTAssertEqual(item.detail, "iPhone 17 · iOS 26")
     }
 
     func testDeviceInfoProviderFieldNames() {

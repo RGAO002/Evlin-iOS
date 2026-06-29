@@ -6,7 +6,7 @@ import FamilyControls
 ///
 /// Arms ONE `DeviceActivity` activity (`evlin.earned.budget`) over the
 /// all-category measurement selection captured in `EarnedTimeStore`.
-/// Events are named `evlin.earned.t10`, `evlin.earned.t20`, … up to
+/// Events are named `evlin.earned.t5`, `evlin.earned.t10`, … up to
 /// `min(poolMinutes, capMinutes)`, with the exact cap threshold always
 /// included (even when it is not a multiple of `earnedBucketMinutes`).
 ///
@@ -20,11 +20,11 @@ final class EarnedBudgetScheduler {
 
     /// The granularity of earned-time buckets (minutes).
     /// All event thresholds are derived from this value.
-    nonisolated static let earnedBucketMinutes: Int = 10
+    nonisolated static let earnedBucketMinutes: Int = 5
 
     /// Hard ceiling on the number of DeviceActivity events that can be armed
-    /// in one activity (240 min / 10 min per bucket = 24 max meaningful slots).
-    nonisolated static let guardEventCount: Int = 24
+    /// in one activity (240 min / 5 min per bucket = 48 max meaningful slots).
+    nonisolated static let guardEventCount: Int = 48
 
     private static let activityName = DeviceActivityName("evlin.earned.budget")
 

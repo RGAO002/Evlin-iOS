@@ -183,17 +183,17 @@ final class ActiveLockStoreTests: XCTestCase {
         XCTAssertTrue(state.isBlocked)
     }
 
+    @MainActor
     func test_sweepExpired_removes_past_shields() async {
         let store = ActiveLockStore()
         let live = Self.makeTimedShield(displayName: "IG", minutes: 60, targetKey: "live_key")
-        let dead = Self.makeTimedShield(displayName: "TT", minutes: 0, expiresAt: Date().addingTimeInterval(-5), targetKey: "dead_key")
+        let soon = Self.makeTimedShield(displayName: "TT", minutes: 1, expiresAt: Date().addingTimeInterval(30), targetKey: "soon_key")
 
         _ = await store.addShield(live)
-        _ = await store.addShield(dead)
+        _ = await store.addShield(soon)
 
-        let removed = await store.sweepExpired()
-        XCTAssertEqual(removed.count, 1)
-        XCTAssertEqual(removed[0].recordKey, dead.recordKey)
+        let removed = await store.sweepExpired(now: Date().addingTimeInterval(120))
+        XCTAssertEqual(removed.map(\.recordKey), [soon.recordKey])
         let after = await store.allCurrent().shields.count
         XCTAssertEqual(after, 1)
     }

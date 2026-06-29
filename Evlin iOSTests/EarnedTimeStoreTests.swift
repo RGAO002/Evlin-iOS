@@ -177,6 +177,25 @@ final class EarnedTimeStoreTests: XCTestCase {
         XCTAssertEqual(reloaded.latestDeviceEstimate, 7)
     }
 
+    // MARK: - usage counting gate
+
+    func test_usageCountingAllowed_defaultsToTrueBeforeChildStateArrives() {
+        let store = freshStore()
+        XCTAssertTrue(store.usageCountingAllowed)
+    }
+
+    func test_usageCountingAllowed_roundTripsAcrossInstances() {
+        let store = freshStore()
+        store.usageCountingAllowed = false
+
+        XCTAssertFalse(UserDefaults(suiteName: "group.com.evlin.ios")?.bool(
+            forKey: "evlin.usageCountingAllowed"
+        ) ?? true)
+
+        store.usageCountingAllowed = true
+        XCTAssertTrue(store.usageCountingAllowed)
+    }
+
     // MARK: - Locked-set list alias key (locked-set-sync)
 
     func test_lockedSetListAliasKey_isNilByDefault() {
@@ -216,6 +235,7 @@ final class EarnedTimeStoreTests: XCTestCase {
         store.setOverride(true, forUsageDate: "2026-06-23")
         store.backendRemainingAtLastSync = 30
         store.latestDeviceEstimate = 10
+        store.usageCountingAllowed = false
 
         store.removeAll()
 
@@ -225,6 +245,7 @@ final class EarnedTimeStoreTests: XCTestCase {
         XCTAssertFalse(store.isOverridden(forUsageDate: "2026-06-23"))
         XCTAssertNil(store.backendRemainingAtLastSync)
         XCTAssertNil(store.latestDeviceEstimate)
+        XCTAssertTrue(store.usageCountingAllowed)
         XCTAssertFalse(store.isEarnedTimeReady)
     }
 }

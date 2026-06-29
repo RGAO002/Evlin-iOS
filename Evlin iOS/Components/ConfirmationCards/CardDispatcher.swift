@@ -79,7 +79,8 @@ struct CardDispatcher: View {
         case .singleAppShieldAdvice, .shieldTokenMissing, .appStoreDisambiguation,
              .appNotFoundTerminal, .childDisambiguation, .categoryRenameRequired,
              .cannotBlockCategory, .categoryShieldOffer, .catalogAppInactive,
-             .bundleIDRequired, .lockSelectedAppsConfirm, .lockSelectedAppsEmpty:
+             .bundleIDRequired, .lockSelectedAppsConfirm, .lockSelectedAppsEmpty,
+             .restrictionUnlockPicker:
             // Task 11/6 deterministic app-control cards never flow through
             // CardDispatcher — they render via ChatViewModel.currentAppControlCard
             // + AppControlCard. This case exists only to keep the switch

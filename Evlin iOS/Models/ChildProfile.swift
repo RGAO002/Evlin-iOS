@@ -36,15 +36,29 @@ extension ChildProfile {
     /// card + filter pills reflect whether the child is actually locked instead
     /// of a hardcoded `.unlocked`. Defaults to unlocked for callers without the
     /// live state.
-    init(dto: ChildDTO, locked: Bool = false) {
+    init(dto: ChildDTO, locked: Bool = false, earnedSummary: APIClient.EarnedSummaryDTO? = nil) {
         self.id = dto.id
         self.name = dto.display_name
         self.age = dto.age ?? 0
         self.avatarURL = dto.avatar.signed_url
         self.accentColor = ChildProfile.color(fromHex: dto.avatar.color) ?? .evPrimary
         self.status = locked ? .locked : .unlocked
-        self.timeLeft = "2h"
-        self.timePct = 1.0
+        if let summary = earnedSummary {
+            if let label = summary.countdown_label, !label.isEmpty {
+                self.timeLeft = label
+            } else if let remaining = summary.remaining_minutes {
+                self.timeLeft = EarnedDisplayFormatters.coarseCountdownLabel(remainingMinutes: remaining)
+            } else {
+                self.timeLeft = "2h"
+            }
+            self.timePct = EarnedDisplayFormatters.remainingFraction(
+                remainingMinutes: summary.remaining_minutes,
+                dailyPoolMinutes: summary.daily_pool_minutes
+            )
+        } else {
+            self.timeLeft = "2h"
+            self.timePct = 1.0
+        }
         self.subtitle = ""
     }
 

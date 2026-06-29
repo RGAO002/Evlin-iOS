@@ -152,11 +152,70 @@ final class EarnedConfigCommandTests: XCTestCase {
         XCTAssertEqual(armCallCount, 1, "EarnedBudgetScheduler.arm() must be called once")
         XCTAssertEqual(armedPool, 90, "arm() pool must equal daily_pool_minutes from payload")
         XCTAssertEqual(armedCap,  60, "arm() cap must equal device_cap_minutes from payload")
+        XCTAssertEqual(store.poolMinutes, 90,
+                       "pool must persist so task-completion rearming uses the latest policy")
+        XCTAssertEqual(store.capMinutes, 60,
+                       "cap must persist so task-completion rearming uses the latest policy")
 
         // saveLockedSetID must be called once with the correct list_id.
         XCTAssertEqual(saveCallCount, 1, "EarnedTimeStore.saveLockedSetID must be called once")
         XCTAssertEqual(savedListID, "AAAAAAAA-0000-0000-0000-000000000001",
                        "saveLockedSetID must receive selected_set.list_id from payload")
     }
-}
 
+    func test_poller_consecutiveEarnedTimeConfigsRearmsWithLatestPoolAndCap() async throws {
+        let store = EarnedTimeStore.shared
+        store.removeAll()
+        store.saveMeasurementSelection(FamilyActivitySelection())
+
+        let poller = CommandPoller.shared
+        let savedCommandsOverride  = poller.pollCommandsOverride
+        let savedSaveListOverride   = poller.saveLockedSetIDOverride
+        let savedArmOverride        = poller.armBudgetOverride
+        let savedDeviceIDProvider   = poller.childDeviceIDProvider
+        let savedOneShotOverride    = poller.oneShotPollOverride
+        defer {
+            poller.pollCommandsOverride   = savedCommandsOverride
+            poller.saveLockedSetIDOverride = savedSaveListOverride
+            poller.armBudgetOverride      = savedArmOverride
+            poller.childDeviceIDProvider  = savedDeviceIDProvider
+            poller.oneShotPollOverride    = savedOneShotOverride
+            store.removeAll()
+        }
+
+        let deviceID = UUID(uuidString: "DEADBEEF-0000-0000-0000-000000000002")!
+        poller.childDeviceIDProvider = { deviceID }
+        poller.oneShotPollOverride = nil
+
+        var armCalls: [(pool: Int, cap: Int)] = []
+        poller.armBudgetOverride = { pool, cap, _ in
+            armCalls.append((pool, cap))
+        }
+        poller.saveLockedSetIDOverride = { _, _ in }
+
+        let first = try JSONDecoder().decode(PollCommandDTO.self, from: makeConfigJSON(
+            commandID: "11111111-0000-0000-0000-000000000101",
+            poolMinutes: 120,
+            capMinutes: 90,
+            listID: "AAAAAAAA-0000-0000-0000-000000000101"
+        ))
+        let second = try JSONDecoder().decode(PollCommandDTO.self, from: makeConfigJSON(
+            commandID: "11111111-0000-0000-0000-000000000102",
+            poolMinutes: 60,
+            capMinutes: 45,
+            listID: "AAAAAAAA-0000-0000-0000-000000000102"
+        ))
+        var responses = [[first], [second]]
+        poller.pollCommandsOverride = { _, _ in
+            responses.isEmpty ? [] : responses.removeFirst()
+        }
+
+        await poller.pollOnceForCurrentDevice()
+        await poller.pollOnceForCurrentDevice()
+
+        XCTAssertEqual(armCalls.map(\.pool), [120, 60])
+        XCTAssertEqual(armCalls.map(\.cap), [90, 45])
+        XCTAssertEqual(store.poolMinutes, 60)
+        XCTAssertEqual(store.capMinutes, 45)
+    }
+}

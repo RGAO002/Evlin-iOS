@@ -515,6 +515,9 @@ struct PollLimitDTO: Decodable {
     let effective_from: String
     let expires_at: String?
     let updated_at: String
+    /// Minutes already used today (backend-authoritative). Optional for forward/
+    /// backward wire-skew safety — absent on older backends → nil.
+    let used_today_minutes: Int?
 }
 
 /// `set_limit.limit.schedule` wire payload. `starts_at`/`ends_at` stay as
@@ -2087,16 +2090,52 @@ extension APIClient {
 
     /// POST /family/onboarding/child-all-set — the kid reports it reached the
     /// "All set!" screen so the parent's waiting-for-kid screen advances.
-    /// Unauthed (the kid device has no session); best-effort fire-and-forget.
-    func markChildAllSet(childDeviceID: UUID) async {
-        guard let url = URL(string: "\(baseURL)/family/onboarding/child-all-set") else { return }
+    ///
+    /// This is the SINGLE signal that flips the backend `child_onboarding_complete`
+    /// flag the parent's poll gates on. It used to be a one-shot fire-and-forget
+    /// POST: a single dropped/cancelled request stranded the parent on the waiting
+    /// screen forever. It now RETRIES with backoff until the (idempotent) write
+    /// lands. Unauthed — the kid device has no session.
+    @discardableResult
+    func markChildAllSet(childDeviceID: UUID) async -> Bool {
+        let base = baseURL
+        return await Self.deliverAllSet(childDeviceID: childDeviceID) { id in
+            await Self.postChildAllSetOnce(baseURL: base, childDeviceID: id)
+        }
+    }
+
+    /// Retry an idempotent all-set delivery until `perform` reports success or
+    /// `maxAttempts` is exhausted. Backoff doubles 0.5s → 8s (capped). `sleep`
+    /// and `perform` are injected so the policy is unit-tested without the network.
+    static func deliverAllSet(
+        childDeviceID: UUID,
+        maxAttempts: Int = 8,
+        sleep: (UInt64) async -> Void = { try? await Task.sleep(nanoseconds: $0) },
+        perform: (UUID) async -> Bool
+    ) async -> Bool {
+        let attempts = max(1, maxAttempts)
+        for attempt in 0..<attempts {
+            if await perform(childDeviceID) { return true }
+            if attempt < attempts - 1 {
+                let backoffMs = min(8_000, 500 << min(attempt, 4))
+                await sleep(UInt64(backoffMs) * 1_000_000)
+            }
+        }
+        return false
+    }
+
+    /// One unauthed POST to /family/onboarding/child-all-set. Returns true on 2xx.
+    private static func postChildAllSetOnce(baseURL: String, childDeviceID: UUID) async -> Bool {
+        guard let url = URL(string: "\(baseURL)/family/onboarding/child-all-set") else { return false }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.timeoutInterval = 12
         req.httpBody = try? JSONSerialization.data(
             withJSONObject: ["child_device_id": childDeviceID.uuidString])
-        _ = try? await URLSession.shared.data(for: req)
+        guard let (_, resp) = try? await URLSession.shared.data(for: req),
+              let http = resp as? HTTPURLResponse else { return false }
+        return (200...299).contains(http.statusCode)
     }
 
     /// PUT /me/profile — rename + update the parent's emoji/preset avatar.
@@ -2185,13 +2224,15 @@ extension APIClient {
     func pairFamily(
         code: String,
         deviceLabel: String,
-        protectionMode: String? = nil
+        protectionMode: String? = nil,
+        targetChildProfileID: String? = nil
     ) async throws -> PairResponseDTO {
         var body: [String: Any] = [
             "code": code,
             "parent_device_label": deviceLabel,
         ]
         if let protectionMode { body["protection_mode"] = protectionMode }
+        if let targetChildProfileID { body["target_child_profile_id"] = targetChildProfileID }
         let payload = try JSONSerialization.data(withJSONObject: body)
         return try await authedJSON(path: "/family/pair", method: "POST", jsonBody: payload)
     }
@@ -2484,24 +2525,38 @@ extension APIClient {
 
     private struct LockSelectedBody: Encodable {
         let family_id: UUID
+        let child_profile_id: UUID
         let child_device_id: UUID
+    }
+
+    /// Decoded shape of POST /parent/device/{lock,unlock}-selected — the backend
+    /// `ParentLockSelectedResponse`. This is the *queue-accepted* receipt, NOT a
+    /// lock-state: it has NO `locked` field. The real locked truth is learned via
+    /// the follow-up ack poll (`waitForLockStateAcked` / `fetchDeviceLockState`).
+    /// Decoding this into `DeviceLockStateResponse` was the `keyNotFound("locked")`
+    /// red-text bug — the lock had actually succeeded.
+    struct LockSelectedResponse: Decodable {
+        let command_id: UUID
+        let action: String
+        let list_id: UUID
+        let warning: String?
     }
 
     /// POST /parent/device/lock-selected — queues a selected-set shield on the
     /// kid device (locks only the apps in the configured Locked Set list, not
     /// every app). The kid's CommandPoller applies it on its next poll.
     @discardableResult
-    func lockSelected(familyID: UUID, childDeviceID: UUID) async throws -> DeviceLockStateResponse {
+    func lockSelected(familyID: UUID, childProfileID: UUID, childDeviceID: UUID) async throws -> LockSelectedResponse {
         let payload = try JSONEncoder().encode(
-            LockSelectedBody(family_id: familyID, child_device_id: childDeviceID))
+            LockSelectedBody(family_id: familyID, child_profile_id: childProfileID, child_device_id: childDeviceID))
         return try await authedJSON(path: "/parent/device/lock-selected", method: "POST", jsonBody: payload)
     }
 
     /// POST /parent/device/unlock-selected — reverses `lockSelected`.
     @discardableResult
-    func unlockSelected(familyID: UUID, childDeviceID: UUID) async throws -> DeviceLockStateResponse {
+    func unlockSelected(familyID: UUID, childProfileID: UUID, childDeviceID: UUID) async throws -> LockSelectedResponse {
         let payload = try JSONEncoder().encode(
-            LockSelectedBody(family_id: familyID, child_device_id: childDeviceID))
+            LockSelectedBody(family_id: familyID, child_profile_id: childProfileID, child_device_id: childDeviceID))
         return try await authedJSON(path: "/parent/device/unlock-selected", method: "POST", jsonBody: payload)
     }
 
@@ -2517,7 +2572,7 @@ extension APIClient {
         let override_active: Bool?
         let updated_at: String?
         // B11: coarse display fields from A3 backend summary.
-        /// Pre-formatted coarse countdown label from the server ("about N min left").
+        /// Pre-formatted countdown label from the server ("1h 5m left" / "30m left").
         /// When nil, the client computes from remaining_minutes via EarnedDisplayFormatters.
         let countdown_label: String?
         /// The child's daily earned-time pool in minutes (denominator for progress bar).
@@ -2544,7 +2599,9 @@ extension APIClient {
     /// Per-device estimated remaining minutes. Part of EarnedSummaryDTO (B11).
     struct EarnedDeviceEstimateDTO: Decodable {
         let child_device_id: UUID?
-        let estimated_minutes: Int?
+        let estimated_minutes: Int?          // minutes USED on this device
+        let remaining_to_cap_minutes: Int?   // minutes LEFT (effective cap − used)
+        let cap_minutes: Int?                // explicit device cap; nil ⇒ effective cap = pool
     }
 
     /// GET /parent/earned-time/summary — child's current earned-time state.
@@ -2586,53 +2643,110 @@ extension APIClient {
             method: "GET")
     }
 
-    /// PUT /parent/earned-time/config — update the earned-time policy.
+    /// PUT /parent/earned-time/config — set the daily earned-time pool.
+    /// Body MUST match the backend `PutPoolConfigRequest`: `daily_pool_minutes`
+    /// (NOT pool_minutes), a REQUIRED `timezone`, and `effective`. The old body
+    /// (pool_minutes / daily_cap_minutes / enabled, no timezone) made the backend
+    /// reject every save with 422 — the pool was never persisted, so the whole
+    /// earned-time pipeline (command → arm ladder → samples → bars) never started.
+    /// `effective: "today"` is what makes the backend apply same-day AND emit the
+    /// `earned_time_config` command so the child device arms its measurement
+    /// ladder now (the default "tomorrow" writes a future row and emits nothing).
+    /// Per-device cap is a SEPARATE endpoint (`putDeviceCap`), not this body.
     private struct EarnedConfigBody: Encodable {
         let child_profile_id: UUID
-        let pool_minutes: Int?
-        let daily_cap_minutes: Int?
-        let enabled: Bool?
+        let daily_pool_minutes: Int
+        let timezone: String
+        let effective: String
+        let confirm_cascade: Bool
+    }
+
+    /// Tolerant decode of the backend's `ConfigWrittenResponse | NeedsConfirmationResponse`
+    /// (both carry `status`; remaining fields are optional across the two shapes).
+    struct EarnedConfigWriteResponse: Decodable {
+        let status: String?
+        let daily_pool_minutes: Int?
+        let cap_minutes: Int?
+        let command_ids: [String]?
     }
 
     @discardableResult
     func putEarnedConfig(
         childProfileID: UUID,
-        poolMinutes: Int? = nil,
-        dailyCapMinutes: Int? = nil,
-        enabled: Bool? = nil
-    ) async throws -> EarnedPolicyDTO {
+        poolMinutes: Int,
+        effective: String = "today",
+        confirmCascade: Bool = true
+    ) async throws -> EarnedConfigWriteResponse {
         let payload = try JSONEncoder().encode(EarnedConfigBody(
             child_profile_id: childProfileID,
-            pool_minutes: poolMinutes,
-            daily_cap_minutes: dailyCapMinutes,
-            enabled: enabled))
+            daily_pool_minutes: poolMinutes,
+            timezone: TimeZone.current.identifier,
+            effective: effective,
+            confirm_cascade: confirmCascade))
         return try await authedJSON(path: "/parent/earned-time/config", method: "PUT", jsonBody: payload)
     }
 
     /// PUT /parent/device/screen-time-cap — update the kid device's daily cap.
     private struct ScreenTimeCapBody: Encodable {
+        let child_profile_id: UUID
         let child_device_id: UUID
-        let daily_cap_minutes: Int
+        let cap_minutes: Int
+        let timezone: String
+        let effective: String
+        let confirm_cascade: Bool
     }
 
     struct ScreenTimeCapResponseDTO: Decodable {
-        let child_device_id: UUID?
-        let daily_cap_minutes: Int?
-        let updated_at: String?
+        let status: String?
+        let cap_minutes: Int?
+        let effective_date: String?
+        let command_ids: [String]?
     }
 
     @discardableResult
-    func putDeviceCap(childDeviceID: UUID, dailyCapMinutes: Int) async throws -> ScreenTimeCapResponseDTO {
-        let payload = try JSONEncoder().encode(ScreenTimeCapBody(
+    static func makeDeviceCapRequestBodyData(
+        childProfileID: UUID,
+        childDeviceID: UUID,
+        capMinutes: Int,
+        timezone: String,
+        effective: String,
+        confirmCascade: Bool
+    ) throws -> Data {
+        try JSONEncoder().encode(ScreenTimeCapBody(
+            child_profile_id: childProfileID,
             child_device_id: childDeviceID,
-            daily_cap_minutes: dailyCapMinutes))
+            cap_minutes: capMinutes,
+            timezone: timezone,
+            effective: effective,
+            confirm_cascade: confirmCascade))
+    }
+
+    @discardableResult
+    func putDeviceCap(
+        childProfileID: UUID,
+        childDeviceID: UUID,
+        capMinutes: Int,
+        effective: String = "today",
+        confirmCascade: Bool = true
+    ) async throws -> ScreenTimeCapResponseDTO {
+        let payload = try Self.makeDeviceCapRequestBodyData(
+            childProfileID: childProfileID,
+            childDeviceID: childDeviceID,
+            capMinutes: capMinutes,
+            timezone: TimeZone.current.identifier,
+            effective: effective,
+            confirmCascade: confirmCascade)
         return try await authedJSON(path: "/parent/device/screen-time-cap", method: "PUT", jsonBody: payload)
     }
 
     /// POST /parent/earned-time/unlock-override — grant a one-off time extension.
     private struct UnlockOverrideBody: Encodable {
         let child_profile_id: UUID
-        let extra_minutes: Int?
+        // REQUIRED by the backend (UnlockOverrideRequest): the exhausted day to
+        // override, "yyyy-MM-dd" in the child's local tz. Omitting it 422'd every
+        // exhausted-day unlock ("Couldn't unlock"). `extra_minutes` was NOT in the
+        // schema (silently dead) and is dropped.
+        let usage_date: String
     }
 
     struct UnlockOverrideResponseDTO: Decodable {
@@ -2642,10 +2756,10 @@ extension APIClient {
     }
 
     @discardableResult
-    func unlockOverride(childProfileID: UUID, extraMinutes: Int? = nil) async throws -> UnlockOverrideResponseDTO {
+    func unlockOverride(childProfileID: UUID, usageDate: String) async throws -> UnlockOverrideResponseDTO {
         let payload = try JSONEncoder().encode(UnlockOverrideBody(
             child_profile_id: childProfileID,
-            extra_minutes: extraMinutes))
+            usage_date: usageDate))
         return try await authedJSON(path: "/parent/earned-time/unlock-override", method: "POST", jsonBody: payload)
     }
 
@@ -2680,6 +2794,10 @@ extension APIClient {
         let effective_from: Date
         let expires_at: Date?
         let updated_at: Date
+        // Per-app usage bar: minutes used today. OPTIONAL so a backend that
+        // predates this field (or a missing key) decodes the whole rule list
+        // cleanly — read `?? 0`.
+        let used_minutes: Int?
     }
 
     /// POST /parent/app-limits response envelope (`AppLimitRuleSetResponse`).
@@ -2986,6 +3104,19 @@ extension APIClient {
 
     /// Builds an authed URLRequest with the current access token. Callers that
     /// receive a 401 should call `refreshAndRetry` exactly once.
+    /// POST /parent/chat/title — ask the backend to name a conversation from its
+    /// first message (ChatGPT-style). Stateless; the caller decides whether to
+    /// apply it. Throws on network/auth/decode failure so the caller can keep
+    /// its existing fallback title.
+    func generateConversationTitle(firstMessage: String) async throws -> String {
+        var req = authedRequest(path: "/parent/chat/title", method: "POST")
+        req.httpBody = try JSONEncoder().encode(["message": firstMessage])
+        let (data, http) = try await authedData(for: req)
+        guard http.statusCode == 200 else { throw AuthError.http(http.statusCode) }
+        struct TitleResponse: Decodable { let title: String }
+        return try JSONDecoder().decode(TitleResponse.self, from: data).title
+    }
+
     func authedRequest(path: String, method: String = "GET") -> URLRequest {
         let url = URL(string: "\(baseURL)\(path)")!
         var req = URLRequest(url: url)
@@ -3027,8 +3158,18 @@ extension APIClient {
     /// POST /auth/refresh with the stored refresh token and atomically rewrites
     /// the Keychain with the rotated tokens (§14.7).
     static let sharedRefresher = SingleFlightRefresher {
-        guard let current = KeychainStore.shared.load() else {
+        // P1-C3: only a GENUINELY ABSENT session is a terminal sign-out. A
+        // temporarily unreadable Keychain (e.g. locked before first unlock) must
+        // surface as a transient error — throwing `.signedOut` here used to make
+        // `authedData` CLEAR a perfectly valid session and force re-login.
+        let current: StoredTokens
+        switch KeychainStore.shared.loadResult() {
+        case .found(let tokens):
+            current = tokens
+        case .notFound:
             throw APIClient.AuthError.signedOut
+        case .unreadable(let status):
+            throw APIClient.AuthError.http(Int(status))
         }
         let base = APIClient.currentBaseURL
         let url = URL(string: "\(base)/auth/refresh")!

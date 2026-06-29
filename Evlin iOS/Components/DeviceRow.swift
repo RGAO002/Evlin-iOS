@@ -17,8 +17,7 @@ struct DeviceRow: View {
 
     private var barColor: Color {
         if locked { return Color.evError }
-        if let pct = timePct, pct > 0.8 { return Color(hex: 0xF97316) }
-        return Color.evSecondary
+        return Color.evTimeRemaining(timePct ?? 1.0)
     }
 
     var body: some View {

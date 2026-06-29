@@ -11,6 +11,10 @@ enum ParentNotificationRouteResolver {
         "reflection_reworked",
         "kid_nudged_parent",
     ]
+    private static let taskTypes: Set<String> = [
+        "task_submitted",
+        "task_help_requested",
+    ]
 
     static func route(
         for notification: FeedNotification,
@@ -45,6 +49,13 @@ enum ParentNotificationRouteResolver {
             ))
         }
 
+        if isTaskRoute(link), let taskID = taskID(from: link) {
+            return .appRoute(.taskDetailByBackendID(
+                child: child,
+                backendTaskId: taskID
+            ))
+        }
+
         return .appRoute(.profile(child))
     }
 
@@ -68,6 +79,23 @@ enum ParentNotificationRouteResolver {
         default:
             return false
         }
+    }
+
+    private static func isTaskRoute(_ link: [String: String]) -> Bool {
+        if let type = link["notification_type"], taskTypes.contains(type) {
+            return true
+        }
+        switch link["route"] {
+        case "taskReview", "kidTaskDetail", "task":
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func taskID(from link: [String: String]) -> UUID? {
+        let raw = link["task_id"] ?? link["taskId"]
+        return raw.flatMap(UUID.init(uuidString:))
     }
 
     private static func reflectionID(from link: [String: String]) -> UUID {
