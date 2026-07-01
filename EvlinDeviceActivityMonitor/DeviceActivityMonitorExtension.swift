@@ -14,6 +14,33 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
     private let defaults = UserDefaults(suiteName: "group.com.evlin.ios")
     private let store = ManagedSettingsStore()
 
+    /// Build the canonical day key "YYYY-MM-DD@<tz>" in the device's current tz.
+    private func currentDayKey() -> String {
+        let tz = TimeZone.current
+        let f = DateFormatter()
+        f.calendar = Calendar(identifier: .gregorian)
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = tz
+        f.dateFormat = "yyyy-MM-dd"
+        return "\(f.string(from: Date()))@\(tz.identifier)"
+    }
+
+    /// Emit a ScreenTimeEvent from the extension (emitter = kid_extension).
+    private func emitEvent(kind: ScreenTimeEvent.Kind,
+                           source: ScreenTimeEvent.Source?,
+                           app: String?,
+                           reason: String,
+                           transition: ScreenTimeEvent.Transition? = nil) {
+        let e = ScreenTimeEvent(
+            ts: ISO8601DateFormatter().string(from: Date()),
+            emitter: .kidExtension,
+            deviceID: defaults?.string(forKey: "evlin.childDeviceID"),
+            dayKey: currentDayKey(),
+            kind: kind, source: source, app: app, reason: reason,
+            nums: nil, transition: transition, policyGen: nil, corrID: nil)
+        ScreenTimeEventLog.emit(e)
+    }
+
     override func intervalDidStart(for activity: DeviceActivityName) {
         super.intervalDidStart(for: activity)
 
@@ -164,6 +191,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             defaults?.set("\(ts) skipped usage event=\(eventName) unfinished_tasks=true",
                           forKey: "evlin.usageCounting.lastSkipped")
             NSLog("[Evlin/Ext] skipped usage event=%@ because unfinished tasks remain", eventName)
+            emitEvent(kind: .drop, source: nil, app: eventName, reason: "usage_counting_disabled")
             return false
         }
         return true
@@ -206,6 +234,10 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             forKey: "evlin.lastLimitShield"
         )
         NSLog("[Evlin/Ext] limit threshold shielded rule=%@", ruleId.uuidString)
+        emitEvent(kind: .lock, source: .perAppLimit,
+                  app: LimitShieldLogic.recordKey(for: rule),
+                  reason: "budget_reached",
+                  transition: .init(before: "shielded:false", after: "shielded:true"))
 
         // Drive the parent's usage bar to 100%: post a `:budget` usage sample
         // (used == budget). This makes the bar read "reached" even for tiny
@@ -371,6 +403,8 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         ) else {
             NSLog("[Evlin/Ext] earned t%d adjusted=%d below effectiveCap=%d or override set — no shield",
                   n, adjustedN, effectiveCap)
+            emitEvent(kind: .decision, source: .earnedPool, app: "device-wide",
+                      reason: "pool_under_cap")
             return
         }
 
@@ -438,6 +472,9 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             forKey: "evlin.lastEarnedShield"
         )
         NSLog("[Evlin/Ext] earned time cap reached t%d — .earnedTime shield applied", thresholdN)
+        emitEvent(kind: .lock, source: .earnedPool, app: "device-wide",
+                  reason: "pool_exhausted",
+                  transition: .init(before: "shielded:false", after: "shielded:true"))
     }
 
     /// B5 daily reset: strip ONLY `.earnedTime` from every shield record.
@@ -462,6 +499,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         )
         NSLog("[Evlin/Ext] earned time daily reset activity=%@ deleted=%d modified=%d",
               activity, removedCount, modifiedCount)
+        emitEvent(kind: .reset, source: .earnedPool, app: "device-wide", reason: "interval_reset")
     }
 
     /// ISO-8601 date string for today in the device's local timezone.
@@ -494,6 +532,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             forKey: "evlin.lastLimitReset"
         )
         NSLog("[Evlin/Ext] limit daily reset activity=%@ removed=%d", activity, removedCount)
+        emitEvent(kind: .reset, source: .perAppLimit, app: "device-wide", reason: "interval_reset")
     }
 
     /// Read the current shields dict from the App Group, normalizing each record
@@ -608,6 +647,14 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             store.shield.webDomainCategories = nil
         }
 
+        let broad = shields.values.contains(where: \.appliesToAll)
+        let shieldTokenCount = broad ? -1
+            : Set(shields.values.flatMap(\.appTokens)).count
+              + Set(shields.values.flatMap(\.categoryTokens)).count
+              + Set(shields.values.flatMap(\.webDomainTokens)).count
+        emitEvent(kind: .decision, source: nil, app: "device-wide",
+                  reason: broad ? "recompute_broad_lock" : "recompute_applied",
+                  transition: .init(before: nil, after: "shield_tokens:\(shieldTokenCount)"))
         return blocks.count
     }
 
