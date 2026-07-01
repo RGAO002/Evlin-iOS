@@ -21,6 +21,7 @@ The three features:
 4. Usage survives app reinstall (no reset-on-recompile).
 5. Numbers shown on the kid device match the parent view.
 6. When something misbehaves, the exact chain of events is queryable (in-app, in Xcode/Console, and in the backend) so root cause is obvious instead of guesswork.
+7. The "current lock/block list" parent/chat shows matches what is actually enforced on the kid device (device-reported snapshot is authoritative), or is clearly marked **stale/pending** — never silently wrong.
 
 ### Non-goals (deferred to a later "structural" round)
 - Shared pure decision function + cross-language golden vectors.
@@ -87,6 +88,19 @@ Codify the relationship (no big rebuild):
 - **Device keeps a live working copy** for immediate + offline enforcement (unavoidable — Apple only exposes usage to the on-device extension).
 - The device treats the backend's computed "remaining" as authoritative for **display** and reconciles its local counters toward it.
 - **Guard rail (must be explicit in the plan):** within the same `day_key`, the device's local usage estimate must **never regress** (be pushed back up / unlock) because of a stale backend `remaining`. Local usage may only be reset on **day reset**, **catch-up reset** (Fix 7), or an **explicit override**. "Display alignment" must not be implemented as "roll back local counters / re-unlock."
+
+### Part B.1 — Restriction-state authority (the "current lock/block list" must reflect reality)
+
+The authoritative "what is currently locked/blocked on the kid device" is the kid device's **`ActiveLockStore` snapshot** — the persisted App-Group dicts `evlin.shieldRecords` + `evlin.blockRecords` (suite `group.com.evlin.ios`) that the DeviceActivity extension actually writes and enforces. Parent/chat "current restrictions" MUST prefer the **latest device-reported snapshot**; command-history replay and `global_effective_state` booleans are only a **pending/optimistic fallback** and MUST be labeled `stale`/`pending`, never presented as authoritative.
+
+- The snapshot carries, per shield: `recordKey`, `tier`, `targetKey`, `displayName`, `sources` (incl. `.earnedTime`), `expiresAt`; per block: `bundleID`, `displayName`; plus `device_id` and `updated_at`.
+- Earned-pool locks already live in the same `shieldRecords` system (record `savedList:<lockedSetID>`, source `.earnedTime`) — so the fix is about **reporting/preferring** this snapshot, not building a new lock type.
+- **Diagnostic reality:** even on-device, `ActiveLockStore.shared` is an *in-memory* copy loaded at init; when the extension (a separate process) writes a lock while the app is suspended, that in-memory copy can lag the persisted App-Group dict. The App-Group persisted dict is the enforcement truth. Refreshing the in-memory copy from the App-Group dict on foreground is a Tier-2/A1 fix; A0.5 just makes the divergence **visible**.
+
+Scoping across this round:
+- **A0.5 (this round, local):** the debug screen shows the *real* current restrictions read directly from the App-Group `evlin.shieldRecords`/`evlin.blockRecords` dicts (enforcement truth), alongside `ActiveLockStore.allCurrent()` so any divergence is visible.
+- **A1 (backend pipeline):** the kid device reports a **full** current-restrictions snapshot (shields + blocks with the fields above) on heartbeat / command ack — not just an `isBlocked` bool; the backend stores the full structure in `Device.last_effective_state`.
+- **Tier 2 / chat:** parent/chat "current lock/block list" prefers the latest device snapshot, shows `stale` when old, and renders an earned-pool lock explicitly (`Locked set` · source `earnedTime` · reason `pool_exhausted` · device · `updated_at`).
 
 ### Part C — Fixes
 
