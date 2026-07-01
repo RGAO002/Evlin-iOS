@@ -58,4 +58,11 @@ if [ -z "$CLI" ]; then
 fi
 
 echo "Uploading dSYMs from $DSYM_PATH -> $SENTRY_ORG/$SENTRY_PROJECT"
-"$CLI" debug-files upload --include-sources --org "$SENTRY_ORG" --project "$SENTRY_PROJECT" "$DSYM_PATH"
+# Best-effort: a failed upload (e.g. a read-only token without the
+# project:releases write scope, or no network) must NOT fail the build/archive
+# — dSYM upload only affects Sentry symbolication, not the produced binary.
+# Every other branch above already exits 0 on a problem; this guards the last one.
+if ! "$CLI" debug-files upload --include-sources --org "$SENTRY_ORG" --project "$SENTRY_PROJECT" "$DSYM_PATH"; then
+  echo "warning: sentry dSYM upload failed (non-fatal) — archive continues. Token needs the project:releases write scope; see this script's header."
+  exit 0
+fi
