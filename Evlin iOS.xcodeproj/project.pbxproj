@@ -148,6 +148,7 @@
 				Services/EarnedSampleReporter.swift,
 				Services/EarnedTimeStore.swift,
 				Services/LimitShieldLogic.swift,
+				Services/ScreenTimeEventLog.swift,
 				Services/ShieldSourceLogic.swift,
 			);
 			target = B6FA97312F81C6A000DA619E /* EvlinDeviceActivityMonitor */;
