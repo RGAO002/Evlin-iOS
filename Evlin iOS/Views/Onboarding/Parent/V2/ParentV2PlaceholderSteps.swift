@@ -894,6 +894,12 @@ struct ParentFirstActionsStep: View {
                         .disabled(phase == .sending || phase == .waitingForKid)
                     }
                 } else {
+                    // Escape hatch: the kid's phone may never report a lockable
+                    // app (incomplete kid setup, single-device testing), leaving
+                    // this screen with no forward path. Let the parent advance
+                    // manually — onContinue(false) means "no confirmed block",
+                    // same honest signal the timeout/fail path sends.
+                    OnboardingV2PrimaryButton("Skip for now", role: .parent) { onContinue(false) }
                     OnboardingV2SecondaryButton("Back to waiting", action: onBack ?? {})
                 }
                 if let onBack { OnboardingV2BackLink(action: onBack) }
