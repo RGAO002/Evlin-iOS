@@ -140,6 +140,7 @@
 			membershipExceptions = (
 				Models/BlockRecord.swift,
 				Models/CommandModels.swift,
+				Models/ScreenTimeEvent.swift,
 				Models/ShieldRecord.swift,
 				Models/ShieldTier.swift,
 				Services/AppLimitRuleStore.swift,
