@@ -106,6 +106,12 @@ struct SpikeView: View {
                         Label("Tokens ↔ aliases (Managed Apps)", systemImage: "list.bullet.rectangle")
                     }
 
+                    NavigationLink {
+                        ScreenTimeEventLogView()
+                    } label: {
+                        Label("Screen-Time Events", systemImage: "clock.badge.checkmark")
+                    }
+
                     Button("Poll child commands NOW") {
                         Task { await pollChildCommandsNow() }
                     }
