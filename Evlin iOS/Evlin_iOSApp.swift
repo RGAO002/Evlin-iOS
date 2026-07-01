@@ -39,6 +39,10 @@ struct Evlin_iOSApp: App {
     @AppStorage(AppDelegate.parentDeviceIDDefaultsKey) private var parentDeviceID: String = ""
 
     init() {
+        // Restore the device identity from its Keychain mirror before anything
+        // reads it, so a reinstall re-attaches to the same backend device
+        // instead of minting a fresh id and losing usage. See DeviceIdentity.
+        DeviceIdentity.shared.hydrate()
         // One-shot migration from legacy evlin.activeLocks store.
         // Pre-launch, so safe to drop legacy data. See plan Phase 11.
         ActiveLockMigration.runIfNeeded()
@@ -95,6 +99,7 @@ struct Evlin_iOSApp: App {
                         armEarnedBudgetIfReady()
                     case .background:
                         startBackgroundPollerIfPaired()
+                        DeviceIdentity.shared.capture()
                     case .inactive:
                         break
                     @unknown default: break

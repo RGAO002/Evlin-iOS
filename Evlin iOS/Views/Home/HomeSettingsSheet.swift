@@ -1622,6 +1622,7 @@ struct HomeSettingsSheet: View {
                         UserDefaults.standard.removeObject(forKey: "evlin.familyID")
                         UserDefaults.standard.removeObject(forKey: "evlin.parentDeviceID")
                         UserDefaults.standard.removeObject(forKey: "evlin.childDeviceID")
+                        DeviceIdentity.shared.clear()
                         UserDefaults.standard.set(false, forKey: "onboardingComplete")
                         UserDefaults.standard.set("", forKey: "appMode")
                     }
@@ -1795,6 +1796,7 @@ struct HomeSettingsSheet: View {
                     UserDefaults.standard.removeObject(forKey: "evlin.familyID")
                     UserDefaults.standard.removeObject(forKey: "evlin.parentDeviceID")
                     UserDefaults.standard.removeObject(forKey: "evlin.childDeviceID")
+                    DeviceIdentity.shared.clear()
                     UserDefaults.standard.removeObject(forKey: "evlin_chat_history")
                     UserDefaults.standard.removeObject(forKey: "serverURL")
                     EvlinDemoShortcuts.clearFlag()
@@ -2313,6 +2315,7 @@ struct HomeSettingsSheet: View {
         defaults.removeObject(forKey: "evlin.familyID")
         defaults.removeObject(forKey: "evlin.parentDeviceID")
         defaults.removeObject(forKey: "evlin.childDeviceID")
+        DeviceIdentity.shared.clear()
         defaults.removeObject(forKey: "parentName")
         defaults.removeObject(forKey: "childName")
         defaults.removeObject(forKey: "targetChildId")

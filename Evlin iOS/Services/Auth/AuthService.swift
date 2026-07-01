@@ -108,6 +108,7 @@ final class AuthService {
 
     func signOutLocally() {
         KeychainStore.shared.clear()
+        DeviceIdentity.shared.clear()
         state = .signedOut
         // Clear chat so account B never sees account A's messages.
         UserDefaults.standard.removeObject(forKey: "evlin_chat_history")
