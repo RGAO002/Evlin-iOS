@@ -764,11 +764,10 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = EvlinDeviceActivityReport/EvlinDeviceActivityReportRelease.entitlements;
-				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "iPhone Distribution";
-				CODE_SIGN_STYLE = Manual;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 2;
-				DEVELOPMENT_TEAM = "";
-				"DEVELOPMENT_TEAM[sdk=iphoneos*]" = D9FM36P37F;
+				DEVELOPMENT_TEAM = D9FM36P37F;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = EvlinDeviceActivityReport/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = EvlinDeviceActivityReport;
@@ -783,7 +782,6 @@
 				PRODUCT_BUNDLE_IDENTIFIER = "com.evlin.Evlin-iOS.EvlinDeviceActivityReport";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
-				"PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]" = "Evlin DAR iOS AppStore";
 				SKIP_INSTALL = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
