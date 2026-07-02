@@ -9,20 +9,48 @@ struct AgentClient {
         self.baseURL = baseURL
     }
 
-    /// Confirm a staged proposal. Returns either a tool-style receipt
-    /// (existing tools) or a legacy ChatAction+message bundle (when the
-    /// proposal was a staged shield_app_legacy entry).
-    func executeProposal(token: String) async throws -> AgentExecResult {
-        let url = URL(string: "\(baseURL)/parent/agent/exec")!
-        var req = URLRequest(url: url)
+    func makeExecRequest(token: String) throws -> URLRequest {
+        var req = URLRequest(url: URL(string: "\(baseURL)/parent/agent/exec")!)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.timeoutInterval = 20
         req.httpBody = try JSONSerialization.data(withJSONObject: ["token": token])
-        let (data, resp) = try await URLSession.shared.data(for: req)
-        guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
+        return req
+    }
+
+    func makeRevertRequest(actionID: String) -> URLRequest {
+        var req = URLRequest(url: URL(string: "\(baseURL)/parent/actions/\(actionID)/revert")!)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 15
+        return req
+    }
+
+    /// Pure, testable Bearer attach. Both sendCardRequest and authedSend MUST
+    /// route through this — it is the single point that turns an unauthed
+    /// request into an authed one.
+    static func attachBearer(_ req: URLRequest, accessToken: String?) -> URLRequest {
+        guard let accessToken, !accessToken.isEmpty else { return req }
+        var authed = req
+        authed.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        return authed
+    }
+
+    /// Same Bearer-attach + authedData routing as sendCardRequest — the agent
+    /// endpoints are gaining get_current_account server-side (observe mode
+    /// first), and raw URLSession requests carry no Authorization header.
+    private func authedSend(_ req: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        let authed = Self.attachBearer(req, accessToken: KeychainStore.shared.load()?.accessToken)
+        return try await APIClient().authedData(for: authed)
+    }
+
+    /// Confirm a staged proposal. Returns either a tool-style receipt
+    /// (existing tools) or a legacy ChatAction+message bundle (when the
+    /// proposal was a staged shield_app_legacy entry).
+    func executeProposal(token: String) async throws -> AgentExecResult {
+        let (data, http) = try await authedSend(try makeExecRequest(token: token))
+        guard http.statusCode == 200 else {
             throw AgentError.serverError(
-                code: (resp as? HTTPURLResponse)?.statusCode ?? 0,
+                code: http.statusCode,
                 detail: String(data: data, encoding: .utf8) ?? "")
         }
         let decoded = try JSONDecoder().decode(ExecResponseDTO.self, from: data)
@@ -45,14 +73,7 @@ struct AgentClient {
 
     /// Revert a previously executed action by undo_token.
     func revertAction(actionID: String) async throws -> RevertResult {
-        let url = URL(string: "\(baseURL)/parent/actions/\(actionID)/revert")!
-        var req = URLRequest(url: url)
-        req.httpMethod = "POST"
-        req.timeoutInterval = 15
-        let (data, resp) = try await URLSession.shared.data(for: req)
-        guard let http = resp as? HTTPURLResponse else {
-            throw AgentError.serverError(code: 0, detail: "no response")
-        }
+        let (data, http) = try await authedSend(makeRevertRequest(actionID: actionID))
         if http.statusCode == 410 {
             throw AgentError.expired
         }
@@ -195,10 +216,7 @@ extension AgentClient {
         // the card "did nothing". Attach the Bearer token and route through
         // APIClient.authedData so we get the same single-flight 401-refresh + retry
         // the rest of the app uses.
-        var authed = req
-        if let access = KeychainStore.shared.load()?.accessToken {
-            authed.setValue("Bearer \(access)", forHTTPHeaderField: "Authorization")
-        }
+        let authed = Self.attachBearer(req, accessToken: KeychainStore.shared.load()?.accessToken)
         let (data, http) = try await APIClient().authedData(for: authed)
         let code = http.statusCode
         if code == 410 { throw AgentTargetError.expired }
