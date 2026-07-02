@@ -64,6 +64,10 @@ class ChatViewModel: ObservableObject {
     /// mutate via the queue. Kept as a property (not computed) so existing
     /// SwiftUI bindings (`$viewModel.pendingPlanArchCard`) still compile.
     @Published var pendingPlanArchCard: PlanArchCardPayload?
+    /// Event-exec tokens already consumed successfully this session. The card
+    /// view consults this on rebuild (tab switch) to render "✓ Added" instead
+    /// of a re-tappable Confirm whose token would 410.
+    var confirmedEventTokens: Set<String> = []
 
     /// True iff the most recent backend response came from the
     /// deterministic fastpath router (vs strategy_agent). Drives whether
@@ -2684,6 +2688,11 @@ class ChatViewModel: ObservableObject {
         do {
             _ = try await agentClient().eventExec(token: token)
             NotificationCenter.default.post(name: .evlinCalendarInvalidated, object: nil)
+            // The "✓ Added" state lives in the card view's @State, which dies
+            // if the view is rebuilt (tab switch). Record the consumed token so
+            // the rebuilt card renders confirmed instead of re-offering Confirm
+            // (a second tap would 410 — the token is single-use).
+            confirmedEventTokens.insert(token)
             return nil
         } catch AgentClient.AgentTargetError.expired {
             await expireEventCard()

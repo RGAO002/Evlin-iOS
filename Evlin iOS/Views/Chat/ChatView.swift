@@ -135,7 +135,10 @@ struct ChatView: View {
     @EnvironmentObject var apiClient: APIClient
     @Environment(ParentReflectionFixtureStore.self) private var reflectionStore
     @Environment(FamilyStore.self) private var familyStore
-    @StateObject private var viewModel = ChatViewModel()
+    /// Injected by the shell (ContentView) so it outlives tab switches — the
+    /// tab content is a `switch`, so this view is destroyed on every switch
+    /// and a local @StateObject would drop pending confirm cards.
+    @ObservedObject var viewModel: ChatViewModel
     @StateObject private var scrollController = ChatScrollController()
     @State private var keyboardOverlapHeight: CGFloat = 0
     @FocusState private var isComposerFocused: Bool
@@ -482,6 +485,7 @@ struct ChatView: View {
                                 EventTargetCardView(
                                     payload: planArchCard,
                                     childName: viewModel.childName,
+                                    confirmedTokens: viewModel.confirmedEventTokens,
                                     onConfirm: { token in
                                         await viewModel.handleEventConfirm(token) },
                                     onPickEvent: { ct, eid, occ in
@@ -1108,7 +1112,7 @@ private struct TypingDots: View {
 }
 
 #Preview {
-    ChatView(isPreview: true)
+    ChatView(viewModel: ChatViewModel(), isPreview: true)
         .environmentObject(APIClient(baseURL: "http://preview.local"))
         .environmentObject(ScreenTimeManager.shared)
         .environment(ParentReflectionFixtureStore())

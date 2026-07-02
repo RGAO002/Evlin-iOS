@@ -41,6 +41,10 @@ private enum CalendarConfirmState: Equatable { case idle, working, confirmed, fa
 struct EventTargetCardView: View {
     let payload: PlanArchCardPayload
     let childName: String
+    /// Tokens already consumed successfully (from ChatViewModel). @State dies
+    /// on view rebuild (tab switch); without this the card re-offers Confirm
+    /// for a single-use token that would 410.
+    var confirmedTokens: Set<String> = []
     let onConfirm: (_ token: String) async -> String?
     let onPickEvent: (_ continuationToken: String, _ eventId: String, _ occurrenceStart: String) -> Void
     let onResolveTarget: (_ continuationToken: String, _ ids: [String]) -> Void
@@ -218,7 +222,13 @@ struct EventTargetCardView: View {
     /// failed) state instead of dismissing it.
     @ViewBuilder
     private func confirmFooter(token: String, isBundle: Bool) -> some View {
-        switch confirmState {
+        // A rebuilt view (tab switch) starts at .idle even when this token was
+        // already consumed — render it confirmed instead of re-offering the
+        // button (the token is single-use; a second tap 410s).
+        let effectiveState: CalendarConfirmState =
+            (confirmState == .idle && confirmedTokens.contains(token))
+                ? .confirmed : confirmState
+        switch effectiveState {
         case .confirmed:
             HStack(spacing: 7) {
                 Image(systemName: "checkmark.circle.fill")

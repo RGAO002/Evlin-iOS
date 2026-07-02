@@ -96,6 +96,11 @@ struct ParentRootView: View {
     /// Drives the bell's red dot (new-since-opened). Default-inits its
     /// baseURL from the persisted serverURL.
     @StateObject private var notifBell = NotificationFeedClient()
+    /// Owned by the shell (not ChatView) so chat state — messages, pending
+    /// confirm cards, thinking indicator — survives tab switches. The tab
+    /// content is a `switch`, so ChatView is destroyed on every switch; a
+    /// ChatView-local @StateObject would drop any un-actioned confirm card.
+    @StateObject private var chatViewModel = ChatViewModel()
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
@@ -126,7 +131,7 @@ struct ParentRootView: View {
                     CalendarView(store: calendarStore)
                         .onAppear { calendarStore.rebind(api: apiClient) }
                 case .chat:
-                    ChatView()
+                    ChatView(viewModel: chatViewModel)
                 case .library:
                     LibraryView()
                 case .insights:
