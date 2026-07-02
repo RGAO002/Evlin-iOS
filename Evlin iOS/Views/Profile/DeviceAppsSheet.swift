@@ -159,7 +159,7 @@ struct DeviceAppsSheet: View {
                         // POSTed budget=60 — which the backend 422s once the pool drops
                         // below 60 ("app_limit_exceeds_device_cap").
                         if let devEntry = policy.devices?.first(where: { $0.child_device_id == cid }) {
-                            deviceCapMinutes = devEntry.daily_cap_minutes ?? policy.pool_minutes
+                            deviceCapMinutes = devEntry.device_cap_minutes ?? policy.pool_minutes
                             capOptions = EarnedCapOptions.compute(
                                 policyCapOptions: devEntry.allowed_cap_options,
                                 poolMinutes: policy.pool_minutes ?? Int.max)

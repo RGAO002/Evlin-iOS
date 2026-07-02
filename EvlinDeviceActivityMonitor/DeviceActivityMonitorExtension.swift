@@ -408,7 +408,12 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             return
         }
 
-        applyEarnedTimeShield(earnedStore: earnedStore, thresholdN: adjustedN)
+        // Which budget actually bound: an explicit device cap below the pool
+        // means this exhaustion is the DEVICE CAP's, not the shared pool's.
+        let boundSource: ScreenTimeEvent.Source =
+            (capMinutes < poolMinutes && adjustedN >= capMinutes) ? .deviceCap : .earnedPool
+
+        applyEarnedTimeShield(earnedStore: earnedStore, thresholdN: adjustedN, source: boundSource)
     }
 
     /// Apply the `.earnedTime` shield over the Locked-set tokens.
@@ -418,7 +423,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
     /// `ShieldSourceLogic.unioning`, persists, and recomputes.
     ///
     /// Pure App Group path — no actor, no `ActiveLockStore`.
-    private func applyEarnedTimeShield(earnedStore: EarnedTimeStore, thresholdN: Int) {
+    private func applyEarnedTimeShield(earnedStore: EarnedTimeStore, thresholdN: Int, source: ScreenTimeEvent.Source) {
         guard let lockedSetID = earnedStore.lockedSetID else {
             NSLog("[Evlin/Ext] earned shield: no lockedSetID in store — cannot shield")
             return
@@ -475,8 +480,8 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             forKey: "evlin.lastEarnedShield"
         )
         NSLog("[Evlin/Ext] earned time cap reached t%d — .earnedTime shield applied", thresholdN)
-        emitEvent(kind: .lock, source: .earnedPool, app: "device-wide",
-                  reason: "pool_exhausted",
+        emitEvent(kind: .lock, source: source, app: "device-wide",
+                  reason: source == .deviceCap ? "cap_exhausted" : "pool_exhausted",
                   transition: .init(before: "shielded:false", after: "shielded:true"))
     }
 
