@@ -43,6 +43,17 @@ enum ScreenTimeEventLog {
         (defaults.stringArray(forKey: key) ?? []).compactMap(ScreenTimeEvent.from(jsonLine:))
     }
 
+    /// Raw JSONL lines (oldest → newest). The A1 uploader hashes these for
+    /// deterministic client_event_ids, so it needs the exact stored strings.
+    static func readLines() -> [String] {
+        guard let d = shared else { return [] }
+        return readLines(from: d)
+    }
+
+    static func readLines(from defaults: UserDefaults) -> [String] {
+        defaults.stringArray(forKey: key) ?? []
+    }
+
     static func clear() {
         guard let d = shared else { return }
         clear(in: d)

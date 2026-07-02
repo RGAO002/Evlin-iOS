@@ -97,6 +97,7 @@ struct Evlin_iOSApp: App {
                         refreshParentPushRegistrationIfNeeded()
                         startPollerIfPaired()
                         armEarnedBudgetIfReady()
+                        Task { await ScreenTimeEventUploader.uploadPending() }
                     case .background:
                         startBackgroundPollerIfPaired()
                         DeviceIdentity.shared.capture()
