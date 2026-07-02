@@ -131,6 +131,9 @@ struct CalendarView: View {
         // covering both initial load and day navigation.
         .task(id: selectedDate) { await store.load(for: selectedDate) }
         .refreshable { await store.load(for: selectedDate) }
+        .onReceive(NotificationCenter.default.publisher(for: .evlinCalendarInvalidated)) { _ in
+            Task { await store.load(for: selectedDate) }
+        }
         .alert("Calendar", isPresented: Binding(
             get: { store.lastError != nil },
             set: { if !$0 { store.lastError = nil } }

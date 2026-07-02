@@ -2683,6 +2683,7 @@ class ChatViewModel: ObservableObject {
     func handleEventConfirm(_ token: String) async -> String? {
         do {
             _ = try await agentClient().eventExec(token: token)
+            NotificationCenter.default.post(name: .evlinCalendarInvalidated, object: nil)
             return nil
         } catch AgentClient.AgentTargetError.expired {
             await expireEventCard()

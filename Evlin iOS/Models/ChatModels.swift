@@ -111,6 +111,10 @@ extension Notification.Name {
     /// `evlin.dev.pendingPairingCode` UserDefaults key (cleared after read).
     static let evlinSingleDeviceJumpToParent =
         Notification.Name("evlinSingleDeviceJumpToParent")
+
+    /// Posted after a chat-confirmed calendar mutation (event-exec 200) so the
+    /// Calendar tab refetches instead of showing stale data.
+    static let evlinCalendarInvalidated = Notification.Name("evlin.calendarInvalidated")
 }
 
 struct ChatMessage: Identifiable, Codable {
