@@ -22,6 +22,16 @@ struct ScreenTimeEventLogView: View {
     var body: some View {
         List {
             Section {
+                let ud = UserDefaults.standard
+                identityRow("parent UD", ud.string(forKey: DeviceIdentity.parentKey))
+                identityRow("parent KC", DeviceIdentity.shared.mirroredValue(forKey: DeviceIdentity.parentKey))
+                identityRow("child  UD", ud.string(forKey: DeviceIdentity.childKey))
+                identityRow("child  KC", DeviceIdentity.shared.mirroredValue(forKey: DeviceIdentity.childKey))
+            } header: {
+                Text("Device identity (UD = UserDefaults · KC = Keychain mirror)")
+            }
+
+            Section {
                 let truthShields = CurrentRestrictionsReader.persistedShields()
                 let truthBlocks = CurrentRestrictionsReader.persistedBlocks()
                 let shieldDiverges = Set(truthShields.map(\.recordKey)) != Set(memoryShields.map(\.recordKey))
@@ -87,5 +97,12 @@ struct ScreenTimeEventLogView: View {
         }
         .navigationTitle("Screen-Time Events")
         .task { await refreshCurrentRestrictions() }
+    }
+
+    private func identityRow(_ label: String, _ value: String?) -> some View {
+        Text("\(label)  \(value ?? "—")")
+            .font(.system(size: 10, design: .monospaced))
+            .foregroundStyle(value == nil ? .secondary : .primary)
+            .textSelection(.enabled)
     }
 }

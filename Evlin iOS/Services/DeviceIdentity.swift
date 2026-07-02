@@ -50,6 +50,11 @@ final class DeviceIdentity {
         for key in [Self.parentKey, Self.childKey] { keychainDelete(account: key) }
     }
 
+    /// Debug-surface read of the Keychain mirror (nil when no mirror stored).
+    func mirroredValue(forKey key: String) -> String? {
+        validUUID(keychainGet(account: key))
+    }
+
     private func validUUID(_ s: String?) -> String? {
         guard let s, UUID(uuidString: s) != nil else { return nil }
         return s
