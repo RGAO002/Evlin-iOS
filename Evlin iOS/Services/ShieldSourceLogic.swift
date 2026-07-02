@@ -76,3 +76,66 @@ enum ShieldSourceLogic {
         return out
     }
 }
+
+/// Wave-1 Task 5: one-time re-key sweep for the "immortal lock" bug.
+///
+/// `ShieldRecord.makeRecordKey` now lowercases the `.savedList` targetKey
+/// segment, but records persisted BEFORE that fix may still be keyed
+/// `savedList:<UPPERCASE-UUID>` (written via the pre-fix `id.uuidString`
+/// unlock path). Those stale keys would never again be found by a
+/// `removeSource`/`removeShield` call built through the now-normalized
+/// helper, leaving them "immortal". `ActiveLockStore.restore()` runs this
+/// sweep once per decode to re-key (or merge) any such records.
+///
+/// Pure, side-effect-free — mirrors `ShieldSourceLogic`'s dict-transform
+/// style so it's independently testable without an `ActiveLockStore`
+/// instance or an injected `UserDefaults` suite.
+enum ScreenTimeRecordKeySweep {
+
+    /// Re-key every `savedList:`-prefixed entry whose key isn't already its
+    /// lowercased form. When the lowercase form already exists in `dict`, the
+    /// two records are merged by unioning `sources` (the existing lowercase
+    /// record's other fields — tokens, displayName, expiry, etc. — win, since
+    /// it's the canonical/newer record going forward). When no lowercase twin
+    /// exists, the record is simply re-keyed in place (all fields preserved,
+    /// `recordKey`/`targetKey` updated to match the new key).
+    static func sweep(_ dict: [String: ShieldRecord]) -> [String: ShieldRecord] {
+        let prefix = "savedList:"
+        var out = dict
+        for (key, record) in dict {
+            guard key.hasPrefix(prefix) else { continue }
+            // Lowercase only the segment AFTER the prefix — `key.lowercased()`
+            // would also fold "savedList" itself to "savedlist", breaking the
+            // `hasPrefix("savedList:")` convention every other call site relies on.
+            let targetSegment = String(key.dropFirst(prefix.count))
+            let loweredKey = ShieldRecord.makeRecordKey(tier: .savedList, targetKey: targetSegment)
+            guard loweredKey != key else { continue }
+
+            out.removeValue(forKey: key)
+            if let twin = out[loweredKey] {
+                out[loweredKey] = ShieldSourceLogic.unioning(twin, intoSources: record.sources)
+            } else {
+                // `recordKey`/`targetKey` are immutable (`let`) — rebuild the
+                // record rather than mutate in place. Every other field is
+                // carried over unchanged.
+                out[loweredKey] = ShieldRecord(
+                    recordKey: loweredKey,
+                    tier: record.tier,
+                    targetKey: record.targetKey.lowercased(),
+                    displayName: record.displayName,
+                    lastCommandID: record.lastCommandID,
+                    appTokens: record.appTokens,
+                    categoryTokens: record.categoryTokens,
+                    webDomainTokens: record.webDomainTokens,
+                    appliesToAll: record.appliesToAll,
+                    issuedAt: record.issuedAt,
+                    expiresAt: record.expiresAt,
+                    originalRequest: record.originalRequest,
+                    targetChildID: record.targetChildID,
+                    sources: record.sources
+                )
+            }
+        }
+        return out
+    }
+}

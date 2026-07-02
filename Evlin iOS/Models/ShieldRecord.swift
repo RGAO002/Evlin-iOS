@@ -80,12 +80,24 @@ struct ShieldRecord: Codable, Sendable, Equatable {
     // MARK: - Helpers
 
     /// Derive recordKey for a tier/targetKey pair. See spec §3.2.
+    ///
+    /// `.savedList` lowercases its `targetKey`: that segment is always a UUID
+    /// string (the backend `ChildCatalogList.id`, or the pre-sync local
+    /// `UUID().uuidString`), and the two sides of the app disagreed on case —
+    /// the extension writes the backend's lowercase string, while
+    /// `id.uuidString` on the parent unlock path renders uppercase. Without
+    /// normalizing here the two recordKeys never match and `removeSource`
+    /// silently misses the dict entry, leaving an "immortal" shield (Wave-1
+    /// Task 5). Other tiers are left untouched: their targetKeys are already
+    /// lowercased at their call sites (bundle ids, category hints) and are not
+    /// UUID-shaped, so case-folding them here would be a no-op at best and a
+    /// correctness risk at worst.
     static func makeRecordKey(tier: ShieldTier, targetKey: String) -> String {
         switch tier {
         case .all: return "all"
         case .allApps: return "allApps:\(targetKey)"
         case .exactApp: return "exactApp:\(targetKey)"
-        case .savedList: return "savedList:\(targetKey)"
+        case .savedList: return "savedList:\(targetKey.lowercased())"
         case .category: return "category:\(targetKey)"
         }
     }

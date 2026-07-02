@@ -612,6 +612,19 @@ actor ActiveLockStore {
                 migrated = true
             }
         }
+
+        // Wave-1 Task 5: one-time re-key sweep for the "immortal lock" bug.
+        // Older persisted stores may hold `savedList:<UPPERCASE>` keys written
+        // before `makeRecordKey` normalized to lowercase (e.g. via the
+        // pre-B6 `id.uuidString` unlock path). Re-key them to lowercase,
+        // merging into an existing lowercase twin (unioning `sources`) so a
+        // stale uppercase record can never again dodge `removeSource`.
+        let sweptShields = ScreenTimeRecordKeySweep.sweep(shieldRecords)
+        if Set(sweptShields.keys) != Set(shieldRecords.keys) {
+            migrated = true
+        }
+        shieldRecords = sweptShields
+
         let expired = purgeExpiredRecords()
         if migrated || !expired.shields.isEmpty || !expired.blocks.isEmpty {
             persist()

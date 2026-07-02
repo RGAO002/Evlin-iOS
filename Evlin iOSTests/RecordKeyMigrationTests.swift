@@ -106,10 +106,13 @@ final class RecordKeyMigrationTests: XCTestCase {
         // Restore an ActiveLockStore from disk (reads the persisted record).
         let lockStore = ActiveLockStore()
 
-        // Sanity: local-id record is present before migration.
+        // Sanity: local-id record is present before migration. Wave-1 Task 5's
+        // restore()-time sweep normalizes the persisted uppercase-UUID key to
+        // lowercase on load, so the in-memory key is already lowercase here
+        // even though `persistShieldRecord` wrote it uppercase to disk.
         let beforeShields = await lockStore.allCurrent().shields
         XCTAssertEqual(beforeShields.count, 1, "pre-condition: one shield present")
-        XCTAssertEqual(beforeShields[0].recordKey, "savedList:\(localID)")
+        XCTAssertEqual(beforeShields[0].recordKey, "savedList:\(localID.lowercased())")
 
         // Trigger the migration by calling reKeyShieldRecord directly.
         await lockStore.reKeyShieldRecord(fromLocalID: localID, toBackendID: backendID)
@@ -119,7 +122,9 @@ final class RecordKeyMigrationTests: XCTestCase {
         XCTAssertEqual(afterShields.count, 1, "count must not change")
         let migrated = try XCTUnwrap(afterShields.first)
 
-        XCTAssertEqual(migrated.recordKey, "savedList:\(backendID)", "recordKey must use backend id")
+        // Wave-1 Task 5: `makeRecordKey`/`reKeyShieldRecord` normalize the
+        // `.savedList` segment to lowercase.
+        XCTAssertEqual(migrated.recordKey, "savedList:\(backendID.lowercased())", "recordKey must use backend id")
         XCTAssertEqual(migrated.targetKey, backendID, "targetKey must use backend id")
         XCTAssertEqual(migrated.sources, [.manual, .earnedTime], "sources must be preserved")
         XCTAssertEqual(migrated.expiresAt?.timeIntervalSinceReferenceDate ?? -1,
@@ -147,14 +152,14 @@ final class RecordKeyMigrationTests: XCTestCase {
 
         let afterFirst = await lockStore.allCurrent().shields
         XCTAssertEqual(afterFirst.count, 1)
-        XCTAssertEqual(afterFirst[0].recordKey, "savedList:\(backendID)")
+        XCTAssertEqual(afterFirst[0].recordKey, "savedList:\(backendID.lowercased())")
 
         // Second migration — must be a no-op.
         await lockStore.reKeyShieldRecord(fromLocalID: localID, toBackendID: backendID)
 
         let afterSecond = await lockStore.allCurrent().shields
         XCTAssertEqual(afterSecond.count, 1, "count must stay 1 after second migration")
-        XCTAssertEqual(afterSecond[0].recordKey, "savedList:\(backendID)", "key must stay on backendID")
+        XCTAssertEqual(afterSecond[0].recordKey, "savedList:\(backendID.lowercased())", "key must stay on backendID")
     }
 
     // MARK: - Test 3: manual + remote resolve to the same savedList:<backendID>
@@ -177,7 +182,7 @@ final class RecordKeyMigrationTests: XCTestCase {
 
         // Post-sync: `DefaultLockGroup.shared.id` must return the backend id.
         XCTAssertEqual(DefaultLockGroup.shared.id, backendID, "post-sync: id must be backend id")
-        XCTAssertEqual(DefaultLockGroup.shared.recordKey, "savedList:\(backendID)")
+        XCTAssertEqual(DefaultLockGroup.shared.recordKey, "savedList:\(backendID.lowercased())")
     }
 
     // MARK: - Test 4: pre-sync fallback uses local UUID
@@ -193,6 +198,6 @@ final class RecordKeyMigrationTests: XCTestCase {
 
         XCTAssertFalse(id1.isEmpty, "pre-sync id must be non-empty")
         XCTAssertEqual(id1, id2, "pre-sync id must be stable across calls")
-        XCTAssertEqual(DefaultLockGroup.shared.recordKey, "savedList:\(id1)")
+        XCTAssertEqual(DefaultLockGroup.shared.recordKey, "savedList:\(id1.lowercased())")
     }
 }

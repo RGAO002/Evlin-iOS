@@ -424,7 +424,10 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             return
         }
 
-        let recordKey = "savedList:\(lockedSetID)"
+        // Route through the canonical helper (not raw interpolation) so this
+        // stays in lockstep with any future normalization in `makeRecordKey`
+        // (Wave-1 Task 5: helper now lowercases the savedList segment).
+        let recordKey = ShieldRecord.makeRecordKey(tier: .savedList, targetKey: lockedSetID)
         var current = loadShields()
 
         // Build the record if it doesn't exist yet; union .earnedTime if it does.

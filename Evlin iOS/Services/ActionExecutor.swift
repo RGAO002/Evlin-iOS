@@ -731,6 +731,9 @@ final class ActionExecutor: @unchecked Sendable {
             // B2: if unlock_sources specified, remove only those sources; legacy
             // commands with no unlock_sources fall through to whole-record removal.
             if let wireSources = cmd.unlockSources {
+                // `id.uuidString` is uppercase; `makeRecordKey` lowercases the
+                // `.savedList` segment so this matches the extension's
+                // lowercase-backend-string key (Wave-1 Task 5 fix).
                 let recordKey = ShieldRecord.makeRecordKey(tier: .savedList, targetKey: id.uuidString)
                 for wireSource in wireSources {
                     let src: ShieldSource = wireSource == "earned_time" ? .earnedTime : .manual
@@ -865,6 +868,9 @@ final class ActionExecutor: @unchecked Sendable {
         targetKey: String,
         categoryDisplayHint: String? = nil
     ) async -> AckResult {
+        // For `.savedList` callers (e.g. the `id.uuidString` fallback at :743)
+        // `makeRecordKey` lowercases the targetKey so this lines up with the
+        // extension's lowercase-backend-string key regardless of case here.
         let recordKey = ShieldRecord.makeRecordKey(tier: tier, targetKey: targetKey)
         guard let removed = await ActiveLockStore.shared.removeShield(recordKey: recordKey) else {
             // Token-keyed removal found nothing. For a category unshield this is
