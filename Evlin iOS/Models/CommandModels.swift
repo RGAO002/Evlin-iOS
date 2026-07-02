@@ -161,9 +161,32 @@ struct AckEffectiveState: Codable, Sendable, Equatable {
             self.sources = sources
         }
     }
+    struct BlockEntry: Codable, Sendable, Equatable {
+        let bundleID: String
+        let displayName: String
+    }
+
     let isBlocked: Bool
     let shieldsCovering: [ShieldCover]
     let possibleSavedListCoverage: Bool  // indeterminate — honest "May still be…" line
+    /// Full per-app block list (B.1-A1). Optional for back-compat with old
+    /// binaries whose payloads only carried `isBlocked`.
+    let blocks: [BlockEntry]?
+
+    // Explicit init with a defaulted `blocks:` so the 7 pre-B.1 construction
+    // sites (ActionExecutor + tests) compile unchanged — same pattern as
+    // ShieldCover's back-compat init above.
+    init(
+        isBlocked: Bool,
+        shieldsCovering: [ShieldCover],
+        possibleSavedListCoverage: Bool,
+        blocks: [BlockEntry]? = nil
+    ) {
+        self.isBlocked = isBlocked
+        self.shieldsCovering = shieldsCovering
+        self.possibleSavedListCoverage = possibleSavedListCoverage
+        self.blocks = blocks
+    }
 }
 
 /// Extended AckResult.

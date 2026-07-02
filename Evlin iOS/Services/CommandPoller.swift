@@ -529,9 +529,20 @@ final class CommandPoller {
         }
     }
 
+    /// Enforcement-truth snapshot: reads the PERSISTED App-Group shield/block
+    /// records (what the extension actually wrote and iOS enforces) — NOT the
+    /// in-memory ActiveLockStore copy, which lags when the extension locks
+    /// while this app is suspended (proven divergence, 2026-07-01).
     static func globalEffectiveStateDictionary() async -> [String: Any]? {
-        let current = await ActiveLockStore.shared.allCurrent()
-        let covers = current.shields
+        globalEffectiveStateDictionary(
+            defaults: UserDefaults(suiteName: CurrentRestrictionsReader.suiteName))
+    }
+
+    nonisolated static func globalEffectiveStateDictionary(defaults: UserDefaults?) -> [String: Any]? {
+        guard let d = defaults else { return nil }
+        let shields = CurrentRestrictionsReader.persistedShields(from: d)
+        let blocks = CurrentRestrictionsReader.persistedBlocks(from: d)
+        let covers = shields
             .sorted { lhs, rhs in
                 if lhs.displayName == rhs.displayName {
                     return lhs.recordKey < rhs.recordKey
@@ -549,9 +560,12 @@ final class CommandPoller {
                 )
             }
         let snapshot = AckEffectiveState(
-            isBlocked: !current.blocks.isEmpty,
+            isBlocked: !blocks.isEmpty,
             shieldsCovering: covers,
-            possibleSavedListCoverage: false
+            possibleSavedListCoverage: false,
+            blocks: blocks
+                .sorted { $0.bundleID < $1.bundleID }
+                .map { .init(bundleID: $0.bundleID, displayName: $0.displayName) }
         )
         guard let data = try? JSONEncoder().encode(snapshot) else { return nil }
         return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
