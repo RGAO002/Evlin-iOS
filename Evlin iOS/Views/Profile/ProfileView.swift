@@ -166,7 +166,9 @@ struct ProfileView: View {
         if let remaining = earnedSummary?.remaining_minutes {
             return EarnedDisplayFormatters.coarseCountdownLabel(remainingMinutes: remaining)
         }
-        return formatLimit(dailyLimitMinutes)
+        // Pre-fetch fallback shows the static limit; keep the "left" suffix so
+        // the copy reads the same before and after the first summary arrives.
+        return "\(formatLimit(dailyLimitMinutes)) left"
     }
 
     /// Freshness string shown below the countdown ("updated ~Xm ago").
@@ -1365,9 +1367,11 @@ struct ProfileView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         // Daily Screen Time toggle ON → earned-time label;
                         // OFF → unlimited, shown as the infinity symbol.
+                        // Label color tracks the bar's remaining-time tier
+                        // (green/yellow/red) so text and bar never disagree.
                         Text(screenTimeRemainingText)
                             .font(.custom("Inter", size: 11).weight(.heavy))
-                            .foregroundStyle(Color.evSecondary)
+                            .foregroundStyle(Color.evTimeRemaining(summaryProgressFraction))
                         // Freshness: shown only when we have a timestamp.
                         if let freshness = summaryFreshnessText {
                             Text(freshness)
