@@ -1462,7 +1462,7 @@ struct ProfileView: View {
     /// - Parameters:
     ///   - newMinutes:       The requested new pool value in minutes.
     ///   - confirmedCascade: Pass `true` when re-calling after the user confirms.
-    private func savePool(newMinutes: Int, confirmedCascade: Bool) {
+    private func savePool(newMinutes: Int, confirmedCascade: Bool, effective: String = "today") {
         // Gate: if lowering the pool without confirmation, show the confirm sheet.
         // ProfileView doesn't hold per-device cap data, so we construct a
         // "generic reduction" decision that always triggers confirmation.
@@ -1489,7 +1489,8 @@ struct ProfileView: View {
                 defer { poolSaving = false }
                 _ = try? await apiClient.putEarnedConfig(
                     childProfileID: uuid,
-                    poolMinutes: newMinutes)
+                    poolMinutes: newMinutes,
+                    effective: effective)
             }
         } else {
             UserDefaults.standard.set(newMinutes, forKey: "evlin.dailyLimitMin.\(child.id)")

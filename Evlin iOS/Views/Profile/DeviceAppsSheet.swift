@@ -530,7 +530,7 @@ struct DeviceAppsSheet: View {
     /// Per-app limit picker with options computed from the earned-time policy.
     /// Options = policy.allowed_app_options (if available) else fallback base,
     /// both filtered to ≤ deviceCap. DEBUG injects 1-minute.
-    /// An existing rule > cap is shown as a read-only "changes tomorrow" chip.
+    /// An existing rule > cap is shown as a read-only "applies immediately" chip.
     private func limitPicker(for app: DeviceAppItem) -> some View {
         let cap = deviceCapMinutes ?? Int.max
         let isDebug: Bool = {
@@ -555,7 +555,7 @@ struct DeviceAppsSheet: View {
                         HStack(spacing: 4) {
                             Text(DeviceAppsMockData.formatLimit(val))
                                 .font(.custom("Manrope", size: 11).weight(.heavy))
-                            Text("· changes tomorrow")
+                            Text("· applies immediately")
                                 .font(.custom("Inter", size: 10))
                         }
                         .foregroundStyle(Color.evOnSurfaceVariant)
@@ -746,7 +746,7 @@ struct DeviceAppsSheet: View {
     ///      presents `CascadeConfirmSheet`) and return WITHOUT calling putDeviceCap.
     ///   3. The confirm sheet re-calls this function with `confirmedCascade: true`,
     ///      which skips the gate and proceeds to putDeviceCap.
-    private func saveDeviceCap(_ newCap: Int, confirmedCascade: Bool) {
+    private func saveDeviceCap(_ newCap: Int, confirmedCascade: Bool, effective: String = "today") {
         guard let cid = childDeviceID else {
             setActionError("Can't save — device not paired.")
             return
@@ -790,7 +790,7 @@ struct DeviceAppsSheet: View {
                     childProfileID: childProfileID,
                     childDeviceID: cid,
                     capMinutes: newCap,
-                    effective: "today",
+                    effective: effective,
                     confirmCascade: true)
                 // On success the cap is already applied optimistically.
             } catch {
