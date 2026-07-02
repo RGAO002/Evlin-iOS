@@ -1830,6 +1830,34 @@ class ChatViewModel: ObservableObject {
         "\(token)#\(rowIndex)"
     }
 
+    /// Pure transform for the exec-receipt attach so it's unit-testable.
+    /// Fallback rule (audit finding #3): an executed receipt must NEVER be
+    /// dropped — if no agent bubble exists to host it, append a fresh one.
+    nonisolated static func attachingExecReceipt(
+        _ receipt: ReceiptDTO,
+        proposalToken: String,
+        to messages: [ChatMessage]
+    ) -> [ChatMessage] {
+        var out = messages
+        if let i = out.lastIndex(where: { $0.role == .agent }) {
+            var msg = out[i]
+            msg.proposals?.removeAll(where: { $0.token == proposalToken })
+            msg.receipts = (msg.receipts ?? []) + [receipt]
+            out[i] = msg
+            return out
+        }
+        var msg = ChatMessage(
+            role: .agent,
+            content: receipt.summary,
+            timestamp: Date(),
+            reasoning: nil,
+            action: nil
+        )
+        msg.receipts = [receipt]
+        out.append(msg)
+        return out
+    }
+
     private func aliasResolvedForLazyTagPreflight(target: String, kind: AliasKind) -> Bool {
         switch kind {
         case .app:
@@ -2011,12 +2039,8 @@ class ChatViewModel: ObservableObject {
             let result = try await client.executeProposal(token: p.token)
             switch result {
             case .receipt(let receipt):
-                if let i = messages.lastIndex(where: { $0.role == .agent }) {
-                    var msg = messages[i]
-                    msg.proposals?.removeAll(where: { $0.token == p.token })
-                    msg.receipts = (msg.receipts ?? []) + [receipt]
-                    messages[i] = msg
-                }
+                messages = Self.attachingExecReceipt(
+                    receipt, proposalToken: p.token, to: messages)
             case .legacyAction(let action, let message, let reasoning):
                 // Remove the proposal from the previous agent bubble so the
                 // ProposalCard disappears. We do NOT thread the legacy action
