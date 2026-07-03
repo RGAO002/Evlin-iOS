@@ -71,6 +71,12 @@ struct CommandTarget: Codable, Sendable {
     var listID: UUID?                 // stable identifier for a Saved List
     var categoryHint: String?
     var targetAll: Bool = false       // true when kind=all
+    // Task 3 (paper-lock fix): true when the backend's `all_selected` flag
+    // (Task 1/2 plumbing) says the kid's saved-list selection was "all apps
+    // and categories" at upload time. Distinct from `targetAll`, which marks
+    // the unrelated kind=all tier. Optional because most commands (and all
+    // pre-Task-1 backends) never send this key.
+    var allSelected: Bool? = nil
     var originalRequest: String
     var targetDisplay: String?
     var targetChildID: UUID?          // for multi-child

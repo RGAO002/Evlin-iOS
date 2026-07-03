@@ -926,6 +926,16 @@ struct ProfileView: View {
         let previousID = knownBackendListID ?? ""
         knownBackendListID = id
         EarnedTimeStore.shared.saveLockedSetID(id, tokenData: nil)
+        // Task 3 (paper-lock fix): would also call
+        // EarnedTimeStore.shared.saveLockedSetAllSelected(...) here, but
+        // `DeviceLockStateResponse` (this call site's only response DTO —
+        // populated from the backend's `ensure_selected_set`/`SelectedSetPreview`,
+        // see Evlin-Backend app/services/selected_set.py) does not carry an
+        // `all_selected` field; Task 1 only threaded `all_selected` onto the
+        // lock-command `target` payload (read via `cmd.target.allSelected` in
+        // ActionExecutor.buildShieldRecord), not onto this identity/lock-state
+        // endpoint. Not guessing a nonexistent wire field here — if this
+        // endpoint later gains `all_selected`, wire it the same way.
         // Re-key any shield record that was stored under the local/provisional id.
         Task {
             await ActiveLockStore.shared.reKeyShieldRecord(

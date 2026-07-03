@@ -439,12 +439,23 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         if let existing = current[recordKey] {
             current[recordKey] = ShieldSourceLogic.unioning(existing, intoSources: [.earnedTime])
         } else {
-            // Decode the opaque FamilyActivitySelection blob for the Locked set.
-            // The extension has the ScreenTime entitlement and can decode tokens.
+            // Device-local union (paper-lock fix): earnedStore.lockedSetTokenData
+            // is never actually populated anywhere in the app today (both
+            // saveLockedSetID call sites pass tokenData: nil — ProfileView.swift,
+            // CommandPoller.swift), so this blob decode was dead code. Read the
+            // kid's live FamilyActivitySelection from DefaultLockGroupStore instead —
+            // same ground-truth source ActionExecutor now uses on the parent-lock path.
             var appTokens: Set<ApplicationToken> = []
             var catTokens:  Set<ActivityCategoryToken> = []
             var webTokens:  Set<WebDomainToken> = []
-            if let blob = earnedStore.lockedSetTokenData,
+            let localSelection = DefaultLockGroupStore.load()
+            appTokens = localSelection.applicationTokens
+            catTokens = localSelection.categoryTokens
+            webTokens = localSelection.webDomainTokens
+            // Legacy blob fallback, kept for completeness if a future writer
+            // ever does populate lockedSetTokenData ahead of DefaultLockGroupStore.
+            if appTokens.isEmpty && catTokens.isEmpty,
+               let blob = earnedStore.lockedSetTokenData,
                let sel = try? JSONDecoder().decode(FamilyActivitySelection.self, from: blob) {
                 appTokens = sel.applicationTokens
                 catTokens = sel.categoryTokens
@@ -459,7 +470,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
                 appTokens: appTokens,
                 categoryTokens: catTokens,
                 webDomainTokens: webTokens,
-                appliesToAll: false,
+                appliesToAll: earnedStore.lockedSetAllSelected,
                 issuedAt: Date(),
                 expiresAt: nil,
                 originalRequest: "earned time cap reached: t\(thresholdN)",

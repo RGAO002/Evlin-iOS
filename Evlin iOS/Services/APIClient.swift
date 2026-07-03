@@ -415,6 +415,7 @@ struct PollTargetDTO: Decodable {
     let has_pending_blob: Bool?
     let category_hint: String?
     let target_all: Bool?                // new: "shield everything"
+    let all_selected: Bool?              // Task 3: kid's saved-list selection was "all" at upload time
     let original_request: String
     let target_display: String?
     let target_child_id: String?         // new: which child device (multi-child)
@@ -435,6 +436,7 @@ struct PollTargetDTO: Decodable {
         case category_hint
         case categoryHint
         case target_all
+        case all_selected
         case original_request
         case target_display
         case target_child_id
@@ -463,6 +465,7 @@ struct PollTargetDTO: Decodable {
             try c.decodeIfPresent(String.self, forKey: .category_hint)
                 ?? c.decodeIfPresent(String.self, forKey: .categoryHint)
         target_all = try c.decodeIfPresent(Bool.self, forKey: .target_all)
+        all_selected = try c.decodeIfPresent(Bool.self, forKey: .all_selected)
         original_request = try c.decodeIfPresent(String.self, forKey: .original_request) ?? ""
         target_display = try c.decodeIfPresent(String.self, forKey: .target_display)
         target_child_id = try c.decodeIfPresent(String.self, forKey: .target_child_id)

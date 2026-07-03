@@ -343,6 +343,7 @@ final class CommandPoller {
             listID: poll.target.list_id.flatMap(UUID.init(uuidString:)),
             categoryHint: categoryHint,
             targetAll: poll.target.target_all ?? false,
+            allSelected: poll.target.all_selected,
             originalRequest: poll.target.original_request,
             targetDisplay: poll.target.target_display,
             targetChildID: poll.target.target_child_id.flatMap(UUID.init(uuidString:)),
@@ -595,6 +596,15 @@ final class CommandPoller {
             } else {
                 EarnedTimeStore.shared.saveLockedSetID(listID, tokenData: nil)
             }
+            // Task 3 (paper-lock fix): would also persist
+            // EarnedTimeStore.shared.saveLockedSetAllSelected(...) here, but
+            // `PollEarnedConfigSelectedSetDTO` (this handler's only response
+            // shape for `earned_time_config.selected_set`) does not carry an
+            // `all_selected` field on the wire — Task 1 only threaded
+            // `all_selected` onto the lock-command `target` payload consumed
+            // by ActionExecutor.buildShieldRecord, not onto this same-day
+            // pool/cap sync payload. Not guessing a nonexistent wire field;
+            // if this payload later gains `all_selected`, wire it the same way.
             // Re-key any shield record stored under an old/provisional id.
             if existing != listID {
                 await ActiveLockStore.shared.reKeyShieldRecord(

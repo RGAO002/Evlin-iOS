@@ -38,6 +38,7 @@ final class EarnedTimeStore: @unchecked Sendable {
     private let lockedSetIDKey          = "earned.lockedSetID"
     private let lockedSetDataKey        = "earned.lockedSetTokenData"
     private let lockedSetListAliasKeyKey = "earned.lockedSetListAliasKey"
+    private let lockedSetAllSelectedKey = "earned.lockedSetAllSelected"
     private let backendKey       = "earned.backendRemainingAtLastSync"
     private let estimateKey      = "earned.latestDeviceEstimate"
     private let poolKey          = "earned.poolMinutes"
@@ -112,6 +113,20 @@ final class EarnedTimeStore: @unchecked Sendable {
         } else {
             defaults?.removeObject(forKey: lockedSetDataKey)
         }
+        defaults?.synchronize()
+    }
+
+    /// True when the backend's `all_selected` flag (Task 1/2 plumbing) says
+    /// the kid's Locked-set selection was "all apps and categories" as of
+    /// the last sync. Read by the extension's `applyEarnedTimeShield` on the
+    /// earned-time exhaustion path (offline-safe, since it's App-Group local).
+    var lockedSetAllSelected: Bool {
+        defaults?.bool(forKey: lockedSetAllSelectedKey) ?? false
+    }
+
+    /// Persist the `all_selected` flag alongside the Locked-set identity.
+    func saveLockedSetAllSelected(_ value: Bool) {
+        defaults?.set(value, forKey: lockedSetAllSelectedKey)
         defaults?.synchronize()
     }
 
@@ -269,6 +284,7 @@ final class EarnedTimeStore: @unchecked Sendable {
     /// they care about, so residual keys from other dates do not affect results.
     func removeAll() {
         [measurementKey, lockedSetIDKey, lockedSetDataKey, lockedSetListAliasKeyKey,
+         lockedSetAllSelectedKey,
          backendKey, estimateKey, poolKey, capKey, usageCountingAllowedKey,
          earnedUsageOffsetKey].forEach { defaults?.removeObject(forKey: $0) }
         // Sweep any override flags persisted for known test dates.

@@ -535,7 +535,9 @@ final class ActionExecutor: @unchecked Sendable {
         }.first
     }
 
-    private func buildShieldRecord(from cmd: LockCommand, blob: Data?) throws -> ShieldRecord {
+    // internal (not private): exercised directly by LockedSetFullCoverageTests
+    // via @testable import, matching the plan's Task 3 test-access approach.
+    func buildShieldRecord(from cmd: LockCommand, blob: Data?) throws -> ShieldRecord {
         let tier = cmd.tier ?? .category
         let targetKey: String
         var appTokens: Set<ApplicationToken> = []
@@ -570,6 +572,20 @@ final class ActionExecutor: @unchecked Sendable {
             if let catalogCategories = try CatalogCommandTokenData.decodedCategoryTokenSet(from: cmd.target) {
                 categoryTokens = catalogCategories
             }
+            // Device-local union (paper-lock fix): backend enumeration only ever
+            // contains catalog-MATCHED tokens (app_control_execution.py resolves
+            // list membership through ensure_selected_set's token_available filter).
+            // The kid's own FamilyActivitySelection in DefaultLockGroupStore is the
+            // ground truth for "what did the kid actually pick" — union it in
+            // UNCONDITIONALLY so unmatched apps and every category are covered too,
+            // not just when the backend sent zero tokens.
+            let localSelection = DefaultLockGroupStore.load()
+            appTokens.formUnion(localSelection.applicationTokens)
+            categoryTokens.formUnion(localSelection.categoryTokens)
+            webDomainTokens.formUnion(localSelection.webDomainTokens)
+            // Legacy blob/local-list fallback stays as a last resort for the
+            // (now rare) case where DefaultLockGroupStore itself is empty but an
+            // older opaque blob or named local list still carries tokens.
             if appTokens.isEmpty && categoryTokens.isEmpty {
                 let sel: FamilyActivitySelection
                 // iOS 26 PropertyListEncoder crashes on FamilyControls tokens; try JSON first,
@@ -587,6 +603,9 @@ final class ActionExecutor: @unchecked Sendable {
                 appTokens = sel.applicationTokens
                 categoryTokens = sel.categoryTokens
                 webDomainTokens = sel.webDomainTokens
+            }
+            if cmd.target.allSelected == true {
+                appliesToAll = true
             }
             displayName = cmd.target.listName ?? "saved list"
         case .category:

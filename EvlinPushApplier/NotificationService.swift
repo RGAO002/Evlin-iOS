@@ -171,6 +171,7 @@ enum NSELockApplier {
         let tier = cmd.tier ?? .category
         var appTokens: Set<ApplicationToken> = []
         var categoryTokens: Set<ActivityCategoryToken> = []
+        var webDomainTokens: Set<WebDomainToken> = []
         var appliesToAll = false
         let targetKey: String
         var displayName = cmd.target.targetDisplay ?? "Unknown"
@@ -186,8 +187,23 @@ enum NSELockApplier {
             targetKey = id.uuidString
             appTokens = Set(cmd.target.catalogApplicationTokenDataBase64s.compactMap(decodeApplicationToken))
             categoryTokens = Set(cmd.target.catalogCategoryTokenDataBase64s.compactMap(decodeCategoryToken))
-            // No inline tokens → app handles it via blob / LocalAliasStore.
-            guard !appTokens.isEmpty || !categoryTokens.isEmpty else { return nil }
+            // Device-local union (paper-lock fix, NSE parity with ActionExecutor's
+            // buildShieldRecord): DefaultLockGroupStore is the same App-Group-shared
+            // ground truth for "what did the kid actually pick" that the main app's
+            // executor and the DeviceActivityMonitor extension both now consult
+            // unconditionally. Union it in here too so NSE-delivered savedList locks
+            // (the force-quit-resilient fast path) also cover unmatched apps/categories,
+            // not just whatever inline tokens the backend happened to enumerate.
+            let localSelection = DefaultLockGroupStore.load()
+            appTokens.formUnion(localSelection.applicationTokens)
+            categoryTokens.formUnion(localSelection.categoryTokens)
+            webDomainTokens.formUnion(localSelection.webDomainTokens)
+            // No tokens from ANY source → app handles it via blob / LocalAliasStore
+            // fallback paths this target intentionally does not link.
+            guard !appTokens.isEmpty || !categoryTokens.isEmpty || !webDomainTokens.isEmpty else { return nil }
+            if cmd.target.allSelected == true {
+                appliesToAll = true
+            }
             displayName = cmd.target.listName ?? "saved list"
         case .category:
             guard let token = decodeCategoryToken(cmd.target.catalogCategoryTokenDataBase64),
@@ -214,7 +230,7 @@ enum NSELockApplier {
             lastCommandID: cmd.id,
             appTokens: appTokens,
             categoryTokens: categoryTokens,
-            webDomainTokens: [],
+            webDomainTokens: webDomainTokens,
             appliesToAll: appliesToAll,
             issuedAt: cmd.issuedAt,
             expiresAt: expiresAt,
@@ -346,6 +362,7 @@ private struct NSEWireCommand: Decodable {
             listID: poll.target.list_id.flatMap(UUID.init(uuidString:)),
             categoryHint: categoryHint,
             targetAll: poll.target.target_all ?? false,
+            allSelected: poll.target.all_selected,
             originalRequest: poll.target.original_request,
             targetDisplay: poll.target.target_display,
             targetChildID: poll.target.target_child_id.flatMap(UUID.init(uuidString:)),
@@ -376,6 +393,7 @@ private struct NSEWireTarget: Decodable {
     let has_pending_blob: Bool?
     let category_hint: String?
     let target_all: Bool?
+    let all_selected: Bool?          // Task 3: kid's saved-list selection was "all" at upload time
     let original_request: String
     let target_display: String?
     let target_child_id: String?
@@ -393,6 +411,7 @@ private struct NSEWireTarget: Decodable {
         case category_hint
         case categoryHint
         case target_all
+        case all_selected
         case original_request
         case target_display
         case target_child_id
@@ -417,6 +436,7 @@ private struct NSEWireTarget: Decodable {
         category_hint = try c.decodeIfPresent(String.self, forKey: .category_hint)
             ?? c.decodeIfPresent(String.self, forKey: .categoryHint)
         target_all = try c.decodeIfPresent(Bool.self, forKey: .target_all)
+        all_selected = try c.decodeIfPresent(Bool.self, forKey: .all_selected)
         original_request = try c.decodeIfPresent(String.self, forKey: .original_request) ?? ""
         target_display = try c.decodeIfPresent(String.self, forKey: .target_display)
         target_child_id = try c.decodeIfPresent(String.self, forKey: .target_child_id)

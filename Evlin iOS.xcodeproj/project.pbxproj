@@ -116,6 +116,9 @@
 				Models/ShieldTier.swift,
 				Services/ActiveLockStore.swift,
 				Services/ActiveLockStoreTypes.swift,
+				Services/DefaultLockGroup.swift,
+				Services/DefaultLockGroupStore.swift,
+				Services/EarnedTimeStore.swift,
 				Services/ShieldSourceLogic.swift,
 			);
 			target = B600D6332FDB4C5F000E60E6 /* EvlinPushApplier */;
@@ -145,6 +148,8 @@
 				Models/ShieldTier.swift,
 				Services/AppLimitRuleStore.swift,
 				Services/AppLimitUsageReporter.swift,
+				Services/DefaultLockGroup.swift,
+				Services/DefaultLockGroupStore.swift,
 				Services/EarnedSampleReporter.swift,
 				Services/EarnedTimeStore.swift,
 				Services/LimitShieldLogic.swift,
