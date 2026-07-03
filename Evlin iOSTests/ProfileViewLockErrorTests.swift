@@ -9,6 +9,24 @@ import XCTest
 
 final class ProfileViewLockErrorTests: XCTestCase {
 
+    func test_pollRefreshScope_includesWholeVisibleProfileState() {
+        let scope = ProfileRefreshScope.automaticPoll
+
+        XCTAssertTrue(scope.refreshBackendState)
+        XCTAssertTrue(scope.refreshLockState)
+        XCTAssertTrue(scope.refreshEarnedSummary)
+        XCTAssertTrue(scope.refreshFamilyAggregate)
+    }
+
+    func test_pullToRefreshScope_includesFamilyAggregate() {
+        let scope = ProfileRefreshScope.pullToRefresh
+
+        XCTAssertTrue(scope.refreshBackendState)
+        XCTAssertTrue(scope.refreshLockState)
+        XCTAssertTrue(scope.refreshEarnedSummary)
+        XCTAssertTrue(scope.refreshFamilyAggregate)
+    }
+
     // MARK: - Positive: 400-range serverErrors → no-Locked-set path
 
     func test_400_isNoLockedSetError() {

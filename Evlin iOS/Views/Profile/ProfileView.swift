@@ -19,6 +19,27 @@ struct PoolCascadeState: Identifiable {
     let newMinutes: Int
 }
 
+struct ProfileRefreshScope: Equatable {
+    let refreshBackendState: Bool
+    let refreshLockState: Bool
+    let refreshEarnedSummary: Bool
+    let refreshFamilyAggregate: Bool
+
+    static let automaticPoll = ProfileRefreshScope(
+        refreshBackendState: true,
+        refreshLockState: true,
+        refreshEarnedSummary: true,
+        refreshFamilyAggregate: true
+    )
+
+    static let pullToRefresh = ProfileRefreshScope(
+        refreshBackendState: true,
+        refreshLockState: true,
+        refreshEarnedSummary: true,
+        refreshFamilyAggregate: true
+    )
+}
+
 struct ProfileView: View {
     let child: ChildProfile
     var initialTaskId: Int? = nil
@@ -348,6 +369,9 @@ struct ProfileView: View {
                 // it. 40pt was leaving the trailing pencil hidden.
                 .padding(.bottom, 120)
             }
+            .refreshable {
+                await refreshProfileState(scope: .pullToRefresh)
+            }
         }
 
             // Floating + FAB (HTML 1124-1130)
@@ -578,6 +602,29 @@ struct ProfileView: View {
         }
     }
 
+    @MainActor
+    private func refreshProfileState(scope: ProfileRefreshScope) async {
+        if scope.refreshFamilyAggregate {
+            await familyStore.refresh()
+            syncDevicesFromFamilyStore()
+        }
+        if scope.refreshBackendState {
+            await refreshFromBackend()
+        }
+        if scope.refreshLockState {
+            await refreshLockState()
+        }
+        if scope.refreshEarnedSummary {
+            await refreshEarnedSummary()
+        }
+    }
+
+    @MainActor
+    private func syncDevicesFromFamilyStore() {
+        guard let liveChild = familyStore.child(byId: child.id) else { return }
+        devices = liveChild.devices.map(DeviceItem.init(dto:))
+    }
+
     private func startEarnedSummaryPolling() {
         earnedSummaryPollTask?.cancel()
         earnedSummaryPollTask = Task {
@@ -671,7 +718,7 @@ struct ProfileView: View {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 8_000_000_000)
                 if Task.isCancelled { return }
-                await refreshFromBackend()
+                await refreshProfileState(scope: .automaticPoll)
             }
         }
     }
