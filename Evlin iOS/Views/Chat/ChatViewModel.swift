@@ -16,10 +16,17 @@ class ChatViewModel: ObservableObject {
     /// the generic typing-dots indicator when non-nil.
     @Published var stageText: String?
 
-    /// Feature flag (spec §14 rollout). Default false: `dispatchChat` behaves
-    /// EXACTLY as before this task when this is false — zero behavior change.
+    /// Streaming is the default chat experience. This remains a KILL SWITCH:
+    /// explicitly setting the key to false restores instant (non-stream)
+    /// replies everywhere without a new release. Unset (the normal state) → on.
     var chatStreamingEnabled: Bool {
-        get { UserDefaults.standard.bool(forKey: "evlin.chatStreamingEnabled") }
+        get {
+            let defaults = UserDefaults.standard
+            guard defaults.object(forKey: "evlin.chatStreamingEnabled") != nil else {
+                return true
+            }
+            return defaults.bool(forKey: "evlin.chatStreamingEnabled")
+        }
         set { UserDefaults.standard.set(newValue, forKey: "evlin.chatStreamingEnabled") }
     }
 
