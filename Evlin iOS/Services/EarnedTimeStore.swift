@@ -303,11 +303,23 @@ final class EarnedTimeStore: @unchecked Sendable {
     /// prefixes. Tests call `removeAll` in tearDown and then re-assert the keys
     /// they care about, so residual keys from other dates do not affect results.
     func removeAll() {
-        [measurementKey, lockedSetIDKey, lockedSetDataKey, lockedSetListAliasKeyKey,
+        defaults?.removeObject(forKey: measurementKey)
+        clearUsageStateForIdentityChange()
+    }
+
+    /// Clear per-family usage/day state when the child-device identity changes
+    /// (re-pairing under a new family / account switch). Everything armed or
+    /// counted under the previous identity — day odometer, re-arm offset,
+    /// backend sync, pool/cap policy, locked set, per-app offsets, override
+    /// flags — belongs to the OLD family and must not leak into the new one.
+    /// The measurement selection is kept: it describes this device's apps,
+    /// not a family policy.
+    func clearUsageStateForIdentityChange() {
+        [lockedSetIDKey, lockedSetDataKey, lockedSetListAliasKeyKey,
          lockedSetAllSelectedKey,
          backendKey, lastBackendSyncAtKey, estimateKey, poolKey, capKey, usageCountingAllowedKey,
          earnedUsageOffsetKey].forEach { defaults?.removeObject(forKey: $0) }
-        // Sweep any override flags persisted for known test dates.
+        // Sweep any per-date override flags and per-app usage offsets.
         if let suite = defaults {
             let prefix = "earned.overridden."
             suite.dictionaryRepresentation().keys

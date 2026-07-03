@@ -132,6 +132,10 @@ struct ScreenTimeCaptureView: View {
         // includeEntireCategory:true selection — that is the correct behavior
         // for whole-device monitoring.
         EarnedTimeStore.shared.saveMeasurementSelection(selection)
+        // Arm immediately. Waiting for the next scene activation left the
+        // device unmonitored — or worse, still monitored by a stale ladder —
+        // when the kid went straight to other apps after this step.
+        EarnedBudgetArming.armIfReady()
         withAnimation(.easeOut(duration: 0.3)) { isSaved = true }
         // Brief delay so the success state is visible, then dismiss.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {

@@ -143,6 +143,13 @@ final class BigKidStatePoller: ObservableObject {
     }
 
     private func fetchOnce() async {
+        // Re-pairing under a new family can happen while the app stays
+        // foregrounded (no scene-activation arm pass runs). Catch the identity
+        // change here — within one poll tick — so the previous family's ladder
+        // is stopped before it can bill usage to the new family.
+        if EarnedBudgetArming.reconcileIdentityTransition() {
+            EarnedBudgetArming.armIfReady()
+        }
         do {
             let snapshot = try await fetchState()
             await reconcileReflectionLock(snapshot)
