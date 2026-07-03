@@ -29,6 +29,40 @@ final class TypewriterEngineTests: XCTestCase {
         XCTAssertEqual(e.revealed.count, 600)
     }
 
+    func test_isComplete_false_until_finalized_even_when_drained() {
+        // Regression: the driving Timer must key off isComplete, NOT a transient
+        // revealed==buffer. Between streamed deltas the engine drains its current
+        // buffer (revealed==buffer) but is NOT finalized — stopping there would
+        // freeze the reveal and drop later deltas (empty/partial bubble bug).
+        let clock = FakeClock()
+        let e = TypewriterEngine(clock: clock)
+        e.append("Hel")
+        for _ in 0..<3 { clock.now += 0.03; e.tick() }
+        XCTAssertEqual(e.revealed, "Hel")            // drained the current buffer
+        XCTAssertFalse(e.isComplete)                 // but NOT complete — more may come
+        e.append("lo")                               // a later delta arrives
+        for _ in 0..<3 { clock.now += 0.03; e.tick() }
+        XCTAssertEqual(e.revealed, "Hello")          // still revealing because timer lived
+        XCTAssertFalse(e.isComplete)                 // still not finalized
+        e.finalize(with: "Hello")
+        for _ in 0..<6 { clock.now += 0.03; e.tick() }
+        XCTAssertTrue(e.isComplete)                  // finalized AND fully revealed
+    }
+
+    func test_isComplete_after_immediate_finalize_only_when_revealed() {
+        // Fastpath path: append + finalize immediately (before any tick).
+        // isComplete must be false until the ticks actually reveal the text —
+        // otherwise the bubble would be declared done while still empty.
+        let clock = FakeClock()
+        let e = TypewriterEngine(clock: clock)
+        e.append("done")
+        e.finalize(with: "done")
+        XCTAssertFalse(e.isComplete)                 // finalized but revealed=="" still
+        for _ in 0..<6 { clock.now += 0.03; e.tick() }
+        XCTAssertEqual(e.revealed, "done")
+        XCTAssertTrue(e.isComplete)
+    }
+
     func test_finalize_flushes_within_200ms() {
         let clock = FakeClock()
         let e = TypewriterEngine(clock: clock, tickInterval: 0.03)

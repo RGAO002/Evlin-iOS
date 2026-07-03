@@ -30,6 +30,12 @@ nonisolated final class TypewriterEngine: @unchecked Sendable {
 
     var bufferForTesting: String { buffer }
 
+    /// The reveal is truly done: text has been `finalize`d AND every character
+    /// is shown. The driving timer must stop on THIS — not on a transient
+    /// `revealed == buffer`, which is momentarily true in the gaps between
+    /// streamed deltas (before `finalize`), and would kill the timer early.
+    var isComplete: Bool { finalized && revealed == buffer }
+
     init(clock: TypewriterClock = SystemClock(), tickInterval: TimeInterval = 0.03) {
         self.clock = clock
         self.tickInterval = tickInterval

@@ -49,6 +49,13 @@ class ChatViewModel: ObservableObject {
     /// isn't deallocated mid-stream; invalidated once the engine has fully
     /// caught up to its buffer after `finalize(with:)`.
     private var typewriterTimer: Timer?
+    /// STRONG ref to the engine currently being revealed. The engine is created
+    /// inside a synchronous scope (`typewriteNonStreamedText`) or an async one
+    /// (`dispatchChatStreaming`) that returns BEFORE the reveal finishes; the
+    /// Timer captures it weakly. Without this VM-held strong ref the engine
+    /// deallocs at that scope's return and the bubble renders empty. Cleared in
+    /// `invalidateTypewriterTimer` once the reveal is done/abandoned.
+    private var activeTypewriterEngine: TypewriterEngine?
     /// Guards `dispatchChatLegacyOnce` so a `.fallbackToLegacy` failure can
     /// trigger the legacy JSON dispatch at most once per user message (no
     /// recursion / double-send if something upstream retries).
@@ -852,12 +859,17 @@ class ChatViewModel: ObservableObject {
                 case .error(let message):
                     stageText = nil
                     errorMessage = message
+                    // Terminal error with no finalize — stop the reveal so the
+                    // timer doesn't idle forever holding the engine.
+                    invalidateTypewriterTimer()
                 }
             }
         } catch let failure as StreamFailure {
             stageText = nil
             switch failure {
             case .fallbackToLegacy:
+                // Pre-headers failure: no stream engine was started here, and
+                // the legacy dispatch starts its OWN typewriter — do NOT stop.
                 dispatchChatLegacyOnce(
                     userMessage: userMessage,
                     forceConfirmations: forceConfirmations,
@@ -865,14 +877,24 @@ class ChatViewModel: ObservableObject {
                 )
             case .manualRetry(let msg):
                 errorMessage = msg
+                invalidateTypewriterTimer()
             case .signedOut:
                 handleSignedOut()
+                invalidateTypewriterTimer()
             }
         } catch {
             stageText = nil
             errorMessage = error.localizedDescription
+            invalidateTypewriterTimer()
         }
-        invalidateTypewriterTimer()
+        // DO NOT invalidate the typewriter timer here. The reveal is
+        // asynchronous and OUTLIVES this stream loop: on the common
+        // envelope-only (fastpath) path the bubble+engine+timer are created
+        // inside the envelope handler and the text is revealed over the next
+        // ~180ms of ticks. Killing the timer here (synchronously, right after
+        // the loop ends) stops it before its first tick, so `revealed` stays
+        // "" and the bubble renders empty. The timer self-invalidates in its
+        // own callback once `revealed == buffer` (startTypewriterTimer).
         isThinking = false
     }
 
@@ -937,11 +959,20 @@ class ChatViewModel: ObservableObject {
     @MainActor
     private func startTypewriterTimer(_ engine: TypewriterEngine) {
         typewriterTimer?.invalidate()
-        typewriterTimer = Timer.scheduledTimer(withTimeInterval: 0.03, repeats: true) { [weak self, weak engine] _ in
-            guard let engine else { self?.invalidateTypewriterTimer(); return }
-            engine.tick()
-            if engine.revealed == engine.bufferForTesting {
+        // Hold the engine strongly for the reveal's lifetime — it outlives the
+        // dispatch scope that created it (see `activeTypewriterEngine`).
+        activeTypewriterEngine = engine
+        typewriterTimer = Timer.scheduledTimer(withTimeInterval: 0.03, repeats: true) { [weak self] _ in
+            guard let self, let engine = self.activeTypewriterEngine else {
                 self?.invalidateTypewriterTimer()
+                return
+            }
+            engine.tick()
+            // Stop ONLY when finalized AND fully revealed. A transient
+            // `revealed == buffer` between streamed deltas must NOT stop the
+            // timer, or later deltas never get revealed.
+            if engine.isComplete {
+                self.invalidateTypewriterTimer()
             }
         }
     }
@@ -950,6 +981,7 @@ class ChatViewModel: ObservableObject {
     private func invalidateTypewriterTimer() {
         typewriterTimer?.invalidate()
         typewriterTimer = nil
+        activeTypewriterEngine = nil
     }
 
     /// Terminal refresh failure on the stream path (`StreamFailure.signedOut`).
