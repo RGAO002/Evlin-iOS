@@ -758,6 +758,29 @@ struct CatalogListUploadRequestBody: Codable, Sendable, Equatable {
     let selectionBlobBase64: String?
     let appCount: Int
     let members: [CatalogListMemberUpload]?
+    let allSelected: Bool
+
+    init(
+        deviceID: UUID,
+        aliasKey: UUID?,
+        sourceDeviceID: UUID?,
+        listName: String,
+        aliases: [String],
+        selectionBlobBase64: String?,
+        appCount: Int,
+        members: [CatalogListMemberUpload]?,
+        allSelected: Bool = false
+    ) {
+        self.deviceID = deviceID
+        self.aliasKey = aliasKey
+        self.sourceDeviceID = sourceDeviceID
+        self.listName = listName
+        self.aliases = aliases
+        self.selectionBlobBase64 = selectionBlobBase64
+        self.appCount = appCount
+        self.members = members
+        self.allSelected = allSelected
+    }
 
     enum CodingKeys: String, CodingKey {
         case deviceID = "device_id"
@@ -768,6 +791,7 @@ struct CatalogListUploadRequestBody: Codable, Sendable, Equatable {
         case selectionBlobBase64 = "selection_blob_base64"
         case appCount = "app_count"
         case members
+        case allSelected = "all_selected"
     }
 }
 
@@ -1184,19 +1208,29 @@ struct ControlListInput: Sendable, Equatable {
     /// Optional opaque selection bytes (legacy path). When members are present
     /// the backend derives app_count from them and ignores this.
     let selectionBlobBase64: String?
+    /// True when the kid's raw `FamilyActivitySelection` represents "all apps
+    /// and categories" rather than a specific subset. Computed on-device (the
+    /// backend cannot see Apple's picker semantics) via
+    /// `LockedSetSelectionSemantics.isAllSelected(_:)`. Defaults to `false` —
+    /// safe default until a reliable device-local signal is wired in. See
+    /// `LockedSetSelectionSemantics.swift` for what to verify before flipping
+    /// this on for real.
+    let allSelected: Bool
 
     init(
         aliasKey: UUID? = nil,
         listName: String,
         aliases: [String] = [],
         members: [CatalogListMemberUpload],
-        selectionBlobBase64: String? = nil
+        selectionBlobBase64: String? = nil,
+        allSelected: Bool = false
     ) {
         self.aliasKey = aliasKey
         self.listName = listName
         self.aliases = aliases
         self.members = members
         self.selectionBlobBase64 = selectionBlobBase64
+        self.allSelected = allSelected
     }
 }
 
@@ -1696,7 +1730,8 @@ extension APIClient {
         aliases: [String],
         selectionBlobBase64: String? = nil,
         appCount: Int,
-        members: [CatalogListMemberUpload]? = nil
+        members: [CatalogListMemberUpload]? = nil,
+        allSelected: Bool = false
     ) async throws -> CatalogListUploadResponse {
         let url = URL(string: "\(baseURL)/child/catalog-list")!
         var req = URLRequest(url: url)
@@ -1712,7 +1747,8 @@ extension APIClient {
                 aliases: aliases,
                 selectionBlobBase64: selectionBlobBase64,
                 appCount: appCount,
-                members: members
+                members: members,
+                allSelected: allSelected
             )
         )
         let (data, resp) = try await URLSession.shared.data(for: req)
@@ -1887,7 +1923,8 @@ extension APIClient {
             aliases: list.aliases,
             selectionBlobBase64: list.selectionBlobBase64,
             appCount: list.members.count,
-            members: list.members
+            members: list.members,
+            allSelected: list.allSelected
         )
         return ControlListDTO(from: response)
     }
@@ -1914,7 +1951,8 @@ extension APIClient {
             aliases: list.aliases,
             selectionBlobBase64: list.selectionBlobBase64,
             appCount: list.members.count,
-            members: list.members
+            members: list.members,
+            allSelected: list.allSelected
         )
         return ControlListDTO(from: response)
     }

@@ -362,7 +362,11 @@ struct SavedListPickerView: View {
                 listName: trimmed,
                 aliases: [trimmed],
                 members: members,
-                selectionBlobBase64: nil
+                selectionBlobBase64: nil,
+                // No raw FamilyActivitySelection is available in this ID-based
+                // catalog composer (see file header) — see
+                // LockedSetSelectionSemantics for why this is always false today.
+                allSelected: false
             )
             if editingListID == nil {
                 _ = try await apiClient.createControlList(input, deviceID: owningDeviceID)
