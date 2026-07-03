@@ -372,47 +372,40 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             )
         }
 
-        // Tripwire check: compute effective cap and decide whether to shield.
-        let latestEstimate = earnedStore.latestDeviceEstimate ?? adjustedN
-        let backendRemaining = earnedStore.backendRemainingAtLastSync ?? 0
-        // Pool and cap from EarnedTimeStore are not explicitly stored — use
-        // the per-child defaults if available, otherwise use the budget scheduler's
-        // computed ceiling (min(pool, cap)). The tripwire threshold uses the total
-        // pool as both pool and cap when no explicit values are stored, defaulting
-        // to min(pool,cap) = earned ceiling. Lean path: use latestEstimate + backendRemaining
-        // rounded up to bucket, then compare against N.
-        let bucketMinutes = 5 // mirrors EarnedBudgetScheduler.earnedBucketMinutes
-        // Use stored pool/cap if available; fall back to a conservative large value
-        // so tripwire fires at the ladder cap (armed threshold).
+        // Fresh-at-fire-time gate (Fix 4). The tripwire is the parent-set budget
+        // read fresh from the store — NOT latestEstimate+backendRemaining (which
+        // was a tautology: no writer for backendRemaining ⇒ effectiveCap ≤ adjustedN
+        // ⇒ always fired). See EarnedGateTautologyTests.
         let poolMinutes = earnedStore.poolMinutes ?? 240
         let capMinutes  = earnedStore.capMinutes  ?? 240
-        let effectiveCap = EarnedSampleReporter.effectiveCapThreshold(
-            latestEstimate: latestEstimate,
-            backendRemaining: backendRemaining,
+        let usageDateForOverride = todayISODate()
+
+        guard EarnedSampleReporter.shouldApplyEarnedShieldFresh(
+            adjustedN: adjustedN,
             poolMinutes: poolMinutes,
             capMinutes: capMinutes,
-            bucketMinutes: bucketMinutes
-        )
-
-        let usageDateForOverride = todayISODate()
-        guard EarnedSampleReporter.shouldApplyEarnedShield(
-            thresholdN: adjustedN,
-            effectiveCap: effectiveCap,
             usageDate: usageDateForOverride,
             store: earnedStore
         ) else {
-            NSLog("[Evlin/Ext] earned t%d adjusted=%d below effectiveCap=%d or override set — no shield",
-                  n, adjustedN, effectiveCap)
             emitEvent(kind: .decision, source: .earnedPool, app: "device-wide",
                       reason: "pool_under_cap")
             return
         }
 
-        // Which budget actually bound: an explicit device cap below the pool
-        // means this exhaustion is the DEVICE CAP's, not the shared pool's.
+        // Defense-in-depth: a fresh backend sync with comfortable headroom vetoes
+        // a LOCAL self-lock (the "backend same-second says rem=40" incident).
+        if EarnedSampleReporter.backendVetoesSelfLock(
+            lastBackendRemaining: earnedStore.backendRemainingAtLastSync,
+            lastBackendSyncAt: earnedStore.lastBackendSyncAt,
+            now: Date()
+        ) {
+            emitEvent(kind: .drop, source: .earnedPool, app: "device-wide",
+                      reason: "backend_headroom_veto")
+            return
+        }
+
         let boundSource: ScreenTimeEvent.Source =
             (capMinutes < poolMinutes && adjustedN >= capMinutes) ? .deviceCap : .earnedPool
-
         applyEarnedTimeShield(earnedStore: earnedStore, thresholdN: adjustedN, source: boundSource)
     }
 

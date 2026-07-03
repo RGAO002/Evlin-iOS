@@ -197,19 +197,26 @@ final class BigKidStatePoller: ObservableObject {
             .contains("unfinished_tasks=true")
     }
 
+    // Pure seam (Fix 4 test 6): the real pool/cap/offset the re-arm uses.
+    nonisolated static func earnedRearmInputs(store: EarnedTimeStore) -> (poolMinutes: Int, capMinutes: Int, offset: Int) {
+        let offset = max(store.latestDeviceEstimate ?? 0, store.earnedUsageOffsetMinutes)
+        let pool = store.poolMinutes ?? 60
+        let cap  = store.capMinutes ?? pool
+        return (pool, cap, offset)
+    }
+
     private static func rearmUsageCountersFromStoredPolicy() {
         let store = EarnedTimeStore.shared
 
         if store.isEarnedTimeReady, let selection = store.measurementSelection {
-            let offset = max(store.latestDeviceEstimate ?? 0, store.earnedUsageOffsetMinutes)
-            store.earnedUsageOffsetMinutes = offset
-            let pool = store.poolMinutes ?? store.backendRemainingAtLastSync ?? 60
-            let cap = store.capMinutes ?? 240
-            let remaining = max(0, min(pool, cap) - offset)
-            if remaining > 0 {
+            let inputs = Self.earnedRearmInputs(store: store)
+            store.earnedUsageOffsetMinutes = inputs.offset
+            // Arm at the REAL pool/cap; the offset is applied by the extension
+            // (adjustedN = offset + rawN), so the ladder itself keeps real budgets.
+            if min(inputs.poolMinutes, inputs.capMinutes) - inputs.offset > 0 {
                 EarnedBudgetScheduler.shared.arm(
-                    poolMinutes: remaining,
-                    capMinutes: remaining,
+                    poolMinutes: inputs.poolMinutes,
+                    capMinutes: inputs.capMinutes,
                     selection: selection
                 )
             }

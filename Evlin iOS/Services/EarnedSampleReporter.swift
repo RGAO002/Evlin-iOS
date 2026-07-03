@@ -244,7 +244,7 @@ enum EarnedSampleReporter {
         backendRemaining: Int,
         poolMinutes: Int,
         capMinutes: Int,
-        bucketMinutes: Int = 10
+        bucketMinutes: Int = 5
     ) -> Int {
         let ceiling = min(poolMinutes, capMinutes)
         guard ceiling > 0 else { return ceiling }
@@ -277,5 +277,41 @@ enum EarnedSampleReporter {
     ) -> Bool {
         guard !store.isOverridden(forUsageDate: usageDate) else { return false }
         return thresholdN >= effectiveCap
+    }
+
+    // MARK: - Fresh-at-fire-time gate (Fix 4)
+
+    /// Fresh-at-fire-time earned-shield gate. The tripwire is the parent-set
+    /// budget `min(poolMinutes, capMinutes)` read fresh — NOT a function of the
+    /// device's own estimate (which made the gate a tautology). Applies the
+    /// shield iff usage has reached the budget and no override is set.
+    static func shouldApplyEarnedShieldFresh(
+        adjustedN: Int,
+        poolMinutes: Int,
+        capMinutes: Int,
+        usageDate: String,
+        store: EarnedTimeStore
+    ) -> Bool {
+        guard !store.isOverridden(forUsageDate: usageDate) else { return false }
+        let budget = min(poolMinutes, capMinutes)
+        guard budget > 0 else { return false }   // no budget known → do not self-lock
+        return adjustedN >= budget
+    }
+
+    /// Defense-in-depth: refuse a LOCAL self-lock when the last synced backend
+    /// remaining says there is comfortable headroom AND that sync is fresh.
+    /// (Prevents the extension locking while the backend same-second reports
+    /// `available rem=40`.) A stale or absent sync does NOT suppress — offline
+    /// enforcement must still work.
+    static func backendVetoesSelfLock(
+        lastBackendRemaining: Int?,
+        lastBackendSyncAt: Date?,
+        now: Date,
+        marginMinutes: Int = 5,
+        freshnessSeconds: TimeInterval = 600
+    ) -> Bool {
+        guard let rem = lastBackendRemaining, let at = lastBackendSyncAt else { return false }
+        guard now.timeIntervalSince(at) < freshnessSeconds else { return false }
+        return rem > marginMinutes
     }
 }

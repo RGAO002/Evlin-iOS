@@ -622,6 +622,12 @@ final class CommandPoller {
         if poolMinutes > 0, capMinutes > 0 {
             EarnedTimeStore.shared.poolMinutes = poolMinutes
             EarnedTimeStore.shared.capMinutes = capMinutes
+            // Fix 4 writer: derive backend remaining from the freshly-synced
+            // budget minus the device's own latest estimate, and stamp the sync
+            // time so the extension's backend-headroom veto can trust freshness.
+            let est = EarnedTimeStore.shared.latestDeviceEstimate ?? 0
+            EarnedTimeStore.shared.backendRemainingAtLastSync = max(0, min(poolMinutes, capMinutes) - est)
+            EarnedTimeStore.shared.lastBackendSyncAt = Date()
             if let armOverride = armBudgetOverride {
                 // Test seam: provide the real selection (or empty) to the override
                 // so tests can verify pool/cap values without DeviceActivity.

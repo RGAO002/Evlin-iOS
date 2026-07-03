@@ -40,6 +40,7 @@ final class EarnedTimeStore: @unchecked Sendable {
     private let lockedSetListAliasKeyKey = "earned.lockedSetListAliasKey"
     private let lockedSetAllSelectedKey = "earned.lockedSetAllSelected"
     private let backendKey       = "earned.backendRemainingAtLastSync"
+    private let lastBackendSyncAtKey = "earned.lastBackendSyncAt"
     private let estimateKey      = "earned.latestDeviceEstimate"
     private let poolKey          = "earned.poolMinutes"
     private let capKey           = "earned.capMinutes"
@@ -166,6 +167,25 @@ final class EarnedTimeStore: @unchecked Sendable {
         }
     }
 
+    /// The wall-clock time of the last successful backend sync that wrote
+    /// `backendRemainingAtLastSync`. Nil if no sync has occurred. Stored as
+    /// epoch seconds (`Double`) so it round-trips through `UserDefaults`.
+    var lastBackendSyncAt: Date? {
+        get {
+            guard defaults?.object(forKey: lastBackendSyncAtKey) != nil else { return nil }
+            let epoch = defaults?.double(forKey: lastBackendSyncAtKey) ?? 0
+            return Date(timeIntervalSince1970: epoch)
+        }
+        set {
+            if let v = newValue {
+                defaults?.set(v.timeIntervalSince1970, forKey: lastBackendSyncAtKey)
+            } else {
+                defaults?.removeObject(forKey: lastBackendSyncAtKey)
+            }
+            defaults?.synchronize()
+        }
+    }
+
     /// The extension's latest on-device screen-time estimate in minutes.
     /// Nil until the first threshold callback fires.
     var latestDeviceEstimate: Int? {
@@ -285,7 +305,7 @@ final class EarnedTimeStore: @unchecked Sendable {
     func removeAll() {
         [measurementKey, lockedSetIDKey, lockedSetDataKey, lockedSetListAliasKeyKey,
          lockedSetAllSelectedKey,
-         backendKey, estimateKey, poolKey, capKey, usageCountingAllowedKey,
+         backendKey, lastBackendSyncAtKey, estimateKey, poolKey, capKey, usageCountingAllowedKey,
          earnedUsageOffsetKey].forEach { defaults?.removeObject(forKey: $0) }
         // Sweep any override flags persisted for known test dates.
         if let suite = defaults {
