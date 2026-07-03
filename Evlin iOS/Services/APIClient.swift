@@ -3158,6 +3158,12 @@ extension APIClient {
         return try JSONDecoder().decode(TitleResponse.self, from: data).title
     }
 
+    /// Public seam over the §14.7 single-flight refresher so the streaming
+    /// client reuses the SAME refresh lock instead of building a second one.
+    func refreshAccessTokenSingleFlight() async throws -> String {
+        try await Self.sharedRefresher.refreshedToken()
+    }
+
     func authedRequest(path: String, method: String = "GET") -> URLRequest {
         let url = URL(string: "\(baseURL)\(path)")!
         var req = URLRequest(url: url)
