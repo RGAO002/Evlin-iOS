@@ -176,6 +176,46 @@ final class EarnedConfigCommandTests: XCTestCase {
                        "saveLockedSetID must receive selected_set.list_id from payload")
     }
 
+    func test_poller_earnedTimeConfig_doesNotArmWhileUsageCountingIsPaused() async throws {
+        let store = EarnedTimeStore.shared
+        store.removeAll()
+        store.saveMeasurementSelection(FamilyActivitySelection())
+        store.usageCountingAllowed = false
+
+        let poller = CommandPoller.shared
+        let savedCommandsOverride  = poller.pollCommandsOverride
+        let savedSaveListOverride  = poller.saveLockedSetIDOverride
+        let savedArmOverride       = poller.armBudgetOverride
+        let savedDeviceIDProvider  = poller.childDeviceIDProvider
+        let savedOneShotOverride   = poller.oneShotPollOverride
+        defer {
+            poller.pollCommandsOverride   = savedCommandsOverride
+            poller.saveLockedSetIDOverride = savedSaveListOverride
+            poller.armBudgetOverride      = savedArmOverride
+            poller.childDeviceIDProvider  = savedDeviceIDProvider
+            poller.oneShotPollOverride    = savedOneShotOverride
+            store.removeAll()
+        }
+
+        let deviceID = UUID(uuidString: "DEADBEEF-0000-0000-0000-000000000005")!
+        poller.childDeviceIDProvider = { deviceID }
+        poller.oneShotPollOverride = nil
+        poller.saveLockedSetIDOverride = { _, _ in }
+
+        var armCallCount = 0
+        poller.armBudgetOverride = { _, _, _ in armCallCount += 1 }
+        poller.pollCommandsOverride = { _, _ in
+            [try JSONDecoder().decode(PollCommandDTO.self,
+                from: self.makeConfigJSON(poolMinutes: 90, capMinutes: 60))]
+        }
+
+        await poller.pollOnceForCurrentDevice()
+
+        XCTAssertEqual(armCallCount, 0)
+        XCTAssertEqual(store.poolMinutes, 90)
+        XCTAssertEqual(store.capMinutes, 60)
+    }
+
     func test_poller_consecutiveEarnedTimeConfigsRearmsWithLatestPoolAndCap() async throws {
         let store = EarnedTimeStore.shared
         store.removeAll()

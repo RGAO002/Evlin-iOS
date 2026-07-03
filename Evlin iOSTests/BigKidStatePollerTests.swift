@@ -63,15 +63,18 @@ final class BigKidStatePollerTests: XCTestCase {
             .fixture(status: .submitted, phase: .submitted),
         ])
         let state = BigKidState(snapshot: initial)
+        var stopCount = 0
         let poller = BigKidStatePoller(
             state: state,
             fetchState: { pending },
-            reconcileReflectionLock: { _ in }
+            reconcileReflectionLock: { _ in },
+            stopUsageCounters: { stopCount += 1 }
         )
 
         await poller.refreshNow()
 
         XCTAssertFalse(EarnedTimeStore.shared.usageCountingAllowed)
+        XCTAssertEqual(stopCount, 1)
     }
 
     func test_refresh_enablesUsageCountingWhenTasksAreDoneOrBypassed() async {

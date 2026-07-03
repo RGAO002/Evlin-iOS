@@ -1,4 +1,5 @@
 import XCTest
+import DeviceActivity
 @testable import Evlin_iOS
 
 /// B4 — Pure threshold-planning logic tests.
@@ -108,5 +109,32 @@ final class EarnedBudgetSchedulerTests: XCTestCase {
         for i in 1..<result.count {
             XCTAssertLessThan(result[i - 1], result[i], "thresholds must be strictly ascending")
         }
+    }
+
+    func test_resumeScheduleStartsAtNowAndDoesNotRepeatFromMidnight() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "America/New_York")!
+        let start = DateComponents(
+            calendar: calendar,
+            timeZone: calendar.timeZone,
+            year: 2026,
+            month: 7,
+            day: 3,
+            hour: 14,
+            minute: 32,
+            second: 16
+        ).date!
+
+        let schedule = EarnedBudgetScheduler.resumeSchedule(startingAt: start, calendar: calendar)
+
+        XCTAssertEqual(schedule.intervalStart.year, 2026)
+        XCTAssertEqual(schedule.intervalStart.month, 7)
+        XCTAssertEqual(schedule.intervalStart.day, 3)
+        XCTAssertEqual(schedule.intervalStart.hour, 14)
+        XCTAssertEqual(schedule.intervalStart.minute, 32)
+        XCTAssertEqual(schedule.intervalStart.second, 16)
+        XCTAssertEqual(schedule.intervalEnd.hour, 23)
+        XCTAssertEqual(schedule.intervalEnd.minute, 59)
+        XCTAssertFalse(schedule.repeats)
     }
 }

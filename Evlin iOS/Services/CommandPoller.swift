@@ -587,6 +587,7 @@ final class CommandPoller {
     /// never ran), arm() is skipped but the command is still acked confirmed.
     private func handleEarnedTimeConfig(poll: PollCommandDTO, api: APIClient) async {
         let cfg = poll.earned_time_config
+        let commandID = poll.command_id
 
         // Step 1: Persist locked-set list_id + re-key any existing shield record.
         if let listID = cfg?.selected_set?.list_id, !listID.isEmpty {
@@ -636,6 +637,10 @@ final class CommandPoller {
                 EarnedTimeStore.shared.backendRemainingAtLastSync = max(0, min(poolMinutes, capMinutes) - est)
             }
             EarnedTimeStore.shared.lastBackendSyncAt = Date()
+            guard EarnedTimeStore.shared.usageCountingAllowed else {
+                EarnedBudgetScheduler.shared.stop()
+                return await ackEarnedTimeConfig(commandID: commandID, api: api)
+            }
             if let armOverride = armBudgetOverride {
                 // Test seam: provide the real selection (or empty) to the override
                 // so tests can verify pool/cap values without DeviceActivity.
@@ -653,7 +658,10 @@ final class CommandPoller {
         }
 
         // Step 3: Ack as confirmed.
-        let commandID = poll.command_id
+        await ackEarnedTimeConfig(commandID: commandID, api: api)
+    }
+
+    private func ackEarnedTimeConfig(commandID: UUID, api: APIClient) async {
         do {
             try await api.ack(commandID: commandID, status: "confirmed", detail: nil)
             CommandDeliveryDiagnostics.record(

@@ -196,6 +196,10 @@ struct Evlin_iOSApp: App {
         guard store.isEarnedTimeReady,
               let selection = store.measurementSelection
         else { return }
+        guard store.usageCountingAllowed else {
+            EarnedBudgetScheduler.shared.stop()
+            return
+        }
 
         // Pool: use backend-synced remaining minutes; fall back to a safe 60-min
         // default so the ladder is still armed even before the first sync.

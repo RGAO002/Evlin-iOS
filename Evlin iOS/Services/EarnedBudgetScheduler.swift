@@ -74,6 +74,36 @@ final class EarnedBudgetScheduler {
 
     // MARK: - Arming
 
+    nonisolated static func dailySchedule() -> DeviceActivitySchedule {
+        DeviceActivitySchedule(
+            intervalStart: DateComponents(hour: 0, minute: 0),
+            intervalEnd: DateComponents(hour: 23, minute: 59),
+            repeats: true
+        )
+    }
+
+    nonisolated static func resumeSchedule(
+        startingAt start: Date,
+        calendar: Calendar = .current
+    ) -> DeviceActivitySchedule {
+        let startComponents = calendar.dateComponents(
+            [.calendar, .timeZone, .year, .month, .day, .hour, .minute, .second],
+            from: start
+        )
+        var endComponents = calendar.dateComponents(
+            [.calendar, .timeZone, .year, .month, .day],
+            from: start
+        )
+        endComponents.hour = 23
+        endComponents.minute = 59
+        endComponents.second = 59
+        return DeviceActivitySchedule(
+            intervalStart: startComponents,
+            intervalEnd: endComponents,
+            repeats: false
+        )
+    }
+
     /// Arm the earned-budget activity over `selection` using the pre-computed
     /// pool/cap policy.
     ///
@@ -81,15 +111,16 @@ final class EarnedBudgetScheduler {
     /// idempotent for the same activity name (stops any prior run first).
     /// The call is a no-op when `poolMinutes` or `capMinutes` is ≤ 0, or when
     /// `thresholds` would produce no events.
-    func arm(poolMinutes: Int, capMinutes: Int, selection: FamilyActivitySelection) {
+    func arm(
+        poolMinutes: Int,
+        capMinutes: Int,
+        selection: FamilyActivitySelection,
+        schedule: DeviceActivitySchedule? = nil
+    ) {
         let steps = Self.thresholds(poolMinutes: poolMinutes, capMinutes: capMinutes)
         guard !steps.isEmpty else { return }
 
-        let schedule = DeviceActivitySchedule(
-            intervalStart: DateComponents(hour: 0, minute: 0),
-            intervalEnd: DateComponents(hour: 23, minute: 59),
-            repeats: true
-        )
+        let schedule = schedule ?? Self.dailySchedule()
 
         // Build one event per threshold step, each measuring the full
         // all-category selection (applicationTokens + categoryTokens).
@@ -105,6 +136,21 @@ final class EarnedBudgetScheduler {
         }
 
         try? center.startMonitoring(Self.activityName, during: schedule, events: events)
+    }
+
+    func armFromNow(
+        poolMinutes: Int,
+        capMinutes: Int,
+        selection: FamilyActivitySelection,
+        now: Date = Date(),
+        calendar: Calendar = .current
+    ) {
+        arm(
+            poolMinutes: poolMinutes,
+            capMinutes: capMinutes,
+            selection: selection,
+            schedule: Self.resumeSchedule(startingAt: now, calendar: calendar)
+        )
     }
 
     /// Stop monitoring the earned-budget activity (e.g. at end of day / reset).

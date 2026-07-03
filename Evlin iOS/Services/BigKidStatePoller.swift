@@ -31,6 +31,7 @@ final class BigKidStatePoller: ObservableObject {
     private let applySnapshot: (ChildStateResponse, BigKidState) -> Void
     private let setUsageCountingAllowed: (Bool) -> Bool
     private let rearmUsageCounters: () -> Void
+    private let stopUsageCounters: () -> Void
     private let reportEffectiveState: () async -> Void
     private var task: Task<Void, Never>?
     private var invalidationObserver: NSObjectProtocol?
@@ -65,6 +66,7 @@ final class BigKidStatePoller: ObservableObject {
         }
         self.setUsageCountingAllowed = Self.writeUsageCountingAllowed
         self.rearmUsageCounters = Self.rearmUsageCountersFromStoredPolicy
+        self.stopUsageCounters = Self.stopUsageCountersForTaskPause
         self.reportEffectiveState = {
             guard let snapshot = await CommandPoller.globalEffectiveStateDictionary() else { return }
             do {
@@ -84,6 +86,7 @@ final class BigKidStatePoller: ObservableObject {
         },
         setUsageCountingAllowed: @escaping (Bool) -> Bool = BigKidStatePoller.writeUsageCountingAllowed,
         rearmUsageCounters: @escaping () -> Void = {},
+        stopUsageCounters: @escaping () -> Void = {},
         reportEffectiveState: @escaping () async -> Void = {}
     ) {
         self.client = BigKidAPIClient(baseURL: URL(string: "https://example.invalid")!, childId: UUID())
@@ -93,6 +96,7 @@ final class BigKidStatePoller: ObservableObject {
         self.applySnapshot = applySnapshot
         self.setUsageCountingAllowed = setUsageCountingAllowed
         self.rearmUsageCounters = rearmUsageCounters
+        self.stopUsageCounters = stopUsageCounters
         self.reportEffectiveState = reportEffectiveState
     }
 
@@ -146,6 +150,9 @@ final class BigKidStatePoller: ObservableObject {
             let wasCountingAllowed = setUsageCountingAllowed(snapshot.usageCountingAllowed)
             let shouldRecoverSkippedUsage = snapshot.usageCountingAllowed
                 && Self.hasSkippedUnfinishedUsageEvent()
+            if !snapshot.usageCountingAllowed && wasCountingAllowed {
+                stopUsageCounters()
+            }
             if snapshot.usageCountingAllowed && (!wasCountingAllowed || shouldRecoverSkippedUsage) {
                 rearmUsageCounters()
                 if shouldRecoverSkippedUsage {
@@ -197,6 +204,12 @@ final class BigKidStatePoller: ObservableObject {
             .contains("unfinished_tasks=true")
     }
 
+    private static func stopUsageCountersForTaskPause() {
+        EarnedBudgetScheduler.shared.stop()
+        BigKidActivityScheduler.shared.stop()
+        _ = AppLimitPlanner().arm(rules: [])
+    }
+
     // Pure seam (Fix 4 test 6): the real pool/cap/offset the re-arm uses.
     nonisolated static func earnedRearmInputs(store: EarnedTimeStore) -> (poolMinutes: Int, capMinutes: Int, offset: Int) {
         let offset = max(store.latestDeviceEstimate ?? 0, store.earnedUsageOffsetMinutes)
@@ -214,7 +227,7 @@ final class BigKidStatePoller: ObservableObject {
             // Arm at the REAL pool/cap; the offset is applied by the extension
             // (adjustedN = offset + rawN), so the ladder itself keeps real budgets.
             if min(inputs.poolMinutes, inputs.capMinutes) - inputs.offset > 0 {
-                EarnedBudgetScheduler.shared.arm(
+                EarnedBudgetScheduler.shared.armFromNow(
                     poolMinutes: inputs.poolMinutes,
                     capMinutes: inputs.capMinutes,
                     selection: selection
