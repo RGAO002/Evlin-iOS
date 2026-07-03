@@ -622,11 +622,19 @@ final class CommandPoller {
         if poolMinutes > 0, capMinutes > 0 {
             EarnedTimeStore.shared.poolMinutes = poolMinutes
             EarnedTimeStore.shared.capMinutes = capMinutes
-            // Fix 4 writer: derive backend remaining from the freshly-synced
-            // budget minus the device's own latest estimate, and stamp the sync
-            // time so the extension's backend-headroom veto can trust freshness.
-            let est = EarnedTimeStore.shared.latestDeviceEstimate ?? 0
-            EarnedTimeStore.shared.backendRemainingAtLastSync = max(0, min(poolMinutes, capMinutes) - est)
+            // Wave-2 Task 1 veto-staleness fix: prefer the server-authoritative
+            // `remaining_minutes` carried on the wire (pool − used, computed
+            // backend-side). Falling back to a device-derived estimate here is
+            // what caused the original bug — remaining never refreshed as usage
+            // grew within the freshness window, so it could wrongly suppress a
+            // legitimate at-budget local self-lock. Only fall back to the old
+            // derived formula for backends that omit the new field.
+            if let wireRemaining = cfg?.remaining_minutes {
+                EarnedTimeStore.shared.backendRemainingAtLastSync = max(0, wireRemaining)
+            } else {
+                let est = EarnedTimeStore.shared.latestDeviceEstimate ?? 0
+                EarnedTimeStore.shared.backendRemainingAtLastSync = max(0, min(poolMinutes, capMinutes) - est)
+            }
             EarnedTimeStore.shared.lastBackendSyncAt = Date()
             if let armOverride = armBudgetOverride {
                 // Test seam: provide the real selection (or empty) to the override

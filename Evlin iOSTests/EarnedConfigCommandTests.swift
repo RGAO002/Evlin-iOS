@@ -19,8 +19,10 @@ final class EarnedConfigCommandTests: XCTestCase {
         commandID: String = "11111111-0000-0000-0000-000000000001",
         poolMinutes: Int = 90,
         capMinutes: Int = 60,
-        listID: String = "AAAAAAAA-0000-0000-0000-000000000001"
+        listID: String = "AAAAAAAA-0000-0000-0000-000000000001",
+        remainingMinutes: Int? = nil
     ) -> Data {
+        let remainingField = remainingMinutes.map { ",\n            \"remaining_minutes\": \($0)" } ?? ""
         let raw = """
         {
           "command_id": "\(commandID)",
@@ -39,7 +41,7 @@ final class EarnedConfigCommandTests: XCTestCase {
             "timezone": "America/New_York",
             "daily_pool_minutes": \(poolMinutes),
             "device_cap_minutes": \(capMinutes),
-            "earned_bucket_minutes": 10,
+            "earned_bucket_minutes": 10\(remainingField),
             "selected_set": {
               "list_id": "\(listID)",
               "recordKey": "savedList:\(listID)",
@@ -64,10 +66,21 @@ final class EarnedConfigCommandTests: XCTestCase {
                                 "PollCommandDTO.earned_time_config must not be nil")
         XCTAssertEqual(cfg.daily_pool_minutes, 90)
         XCTAssertEqual(cfg.device_cap_minutes, 60)
+        XCTAssertNil(cfg.remaining_minutes,
+                     "old-shape payloads (no remaining_minutes) must still decode")
 
         let sel = try XCTUnwrap(cfg.selected_set,
                                 "earned_time_config.selected_set must not be nil")
         XCTAssertEqual(sel.list_id, "AAAAAAAA-0000-0000-0000-000000000001")
+    }
+
+    // Wave-2 Task 1 veto-staleness fix: DTO must decode the new optional
+    // `remaining_minutes` field when the backend includes it on the wire.
+    func test_pollCommandDTO_decodesRemainingMinutesWhenPresent() throws {
+        let data = makeConfigJSON(poolMinutes: 90, capMinutes: 60, remainingMinutes: 37)
+        let dto = try JSONDecoder().decode(PollCommandDTO.self, from: data)
+        let cfg = try XCTUnwrap(dto.earned_time_config)
+        XCTAssertEqual(cfg.remaining_minutes, 37)
     }
 
     // MARK: - T2: CommandAction enum
@@ -217,5 +230,93 @@ final class EarnedConfigCommandTests: XCTestCase {
         XCTAssertEqual(armCalls.map(\.cap), [90, 45])
         XCTAssertEqual(store.poolMinutes, 60)
         XCTAssertEqual(store.capMinutes, 45)
+    }
+
+    // MARK: - Wave-2 Task 1 veto-staleness fix: backendRemainingAtLastSync source
+
+    /// When the wire payload carries `remaining_minutes`, it must be preferred
+    /// over the on-device-derived `min(pool,cap) - latestDeviceEstimate` value
+    /// — that derived formula is what went stale within the freshness window
+    /// and could wrongly suppress a legitimate at-budget local self-lock.
+    func test_poller_earnedTimeConfig_prefersWireRemainingOverDerived() async throws {
+        let store = EarnedTimeStore.shared
+        store.removeAll()
+        store.saveMeasurementSelection(FamilyActivitySelection())
+        // Device's own estimate would derive min(90,60) - 5 = 55 if used — the
+        // wire value (12) must win instead.
+        store.latestDeviceEstimate = 5
+
+        let poller = CommandPoller.shared
+        let savedCommandsOverride  = poller.pollCommandsOverride
+        let savedSaveListOverride  = poller.saveLockedSetIDOverride
+        let savedArmOverride       = poller.armBudgetOverride
+        let savedDeviceIDProvider  = poller.childDeviceIDProvider
+        let savedOneShotOverride   = poller.oneShotPollOverride
+        defer {
+            poller.pollCommandsOverride   = savedCommandsOverride
+            poller.saveLockedSetIDOverride = savedSaveListOverride
+            poller.armBudgetOverride      = savedArmOverride
+            poller.childDeviceIDProvider  = savedDeviceIDProvider
+            poller.oneShotPollOverride    = savedOneShotOverride
+            store.removeAll()
+        }
+
+        let deviceID = UUID(uuidString: "DEADBEEF-0000-0000-0000-000000000003")!
+        poller.childDeviceIDProvider = { deviceID }
+        poller.oneShotPollOverride = nil
+        poller.armBudgetOverride = { _, _, _ in }
+        poller.saveLockedSetIDOverride = { _, _ in }
+
+        poller.pollCommandsOverride = { _, _ in
+            [try JSONDecoder().decode(PollCommandDTO.self,
+                from: self.makeConfigJSON(poolMinutes: 90, capMinutes: 60,
+                                          remainingMinutes: 12))]
+        }
+
+        await poller.pollOnceForCurrentDevice()
+
+        XCTAssertEqual(store.backendRemainingAtLastSync, 12,
+                       "wire remaining_minutes must win over the derived estimate")
+    }
+
+    /// Old-shape payloads (no `remaining_minutes`) must still fall back to the
+    /// derived formula so pre-upgrade backends keep working.
+    func test_poller_earnedTimeConfig_fallsBackToDerivedWhenWireAbsent() async throws {
+        let store = EarnedTimeStore.shared
+        store.removeAll()
+        store.saveMeasurementSelection(FamilyActivitySelection())
+        store.latestDeviceEstimate = 5
+
+        let poller = CommandPoller.shared
+        let savedCommandsOverride  = poller.pollCommandsOverride
+        let savedSaveListOverride  = poller.saveLockedSetIDOverride
+        let savedArmOverride       = poller.armBudgetOverride
+        let savedDeviceIDProvider  = poller.childDeviceIDProvider
+        let savedOneShotOverride   = poller.oneShotPollOverride
+        defer {
+            poller.pollCommandsOverride   = savedCommandsOverride
+            poller.saveLockedSetIDOverride = savedSaveListOverride
+            poller.armBudgetOverride      = savedArmOverride
+            poller.childDeviceIDProvider  = savedDeviceIDProvider
+            poller.oneShotPollOverride    = savedOneShotOverride
+            store.removeAll()
+        }
+
+        let deviceID = UUID(uuidString: "DEADBEEF-0000-0000-0000-000000000004")!
+        poller.childDeviceIDProvider = { deviceID }
+        poller.oneShotPollOverride = nil
+        poller.armBudgetOverride = { _, _, _ in }
+        poller.saveLockedSetIDOverride = { _, _ in }
+
+        poller.pollCommandsOverride = { _, _ in
+            [try JSONDecoder().decode(PollCommandDTO.self,
+                from: self.makeConfigJSON(poolMinutes: 90, capMinutes: 60,
+                                          remainingMinutes: nil))]
+        }
+
+        await poller.pollOnceForCurrentDevice()
+
+        XCTAssertEqual(store.backendRemainingAtLastSync, 55,
+                       "no wire value present -> falls back to min(pool,cap) - estimate")
     }
 }

@@ -550,6 +550,12 @@ struct PollEarnedTimeConfigDTO: Decodable {
     let daily_pool_minutes: Int
     let device_cap_minutes: Int
     let earned_bucket_minutes: Int?
+    /// Wave-2 Task 1 veto-staleness fix: server-authoritative remaining minutes
+    /// for today (pool − used), computed backend-side at sync time. Optional so
+    /// old backends that omit this field still decode. When present, this is
+    /// preferred over the on-device derived estimate for
+    /// `EarnedTimeStore.backendRemainingAtLastSync`.
+    let remaining_minutes: Int?
     let selected_set: PollEarnedConfigSelectedSetDTO?
 }
 
