@@ -1071,6 +1071,24 @@ class ChatViewModel: ObservableObject {
             return
         }
 
+        // Uniform typewriter (choice A, Task 9): a NEW agent text bubble from
+        // a live (non-stream) response gets the SAME reveal treatment as the
+        // streamed delta path, gated behind the one flag. History hydration
+        // and restored conversations never reach `processResponse` — they
+        // assign `messages` directly (see `loadMessages`/`seedInitialMessages`)
+        // — so only live turns are affected.
+        if chatStreamingEnabled {
+            var msg = ChatMessage(
+                role: .agent, content: "", timestamp: Date(),
+                reasoning: resp.reasoning, action: nil, debugTurnID: bubbleDebugTurnID
+            )
+            if isSafety { msg.isSafetyCard = true }
+            messages.append(msg)
+            typewriteNonStreamedText(resp.message, bubbleID: msg.id)
+            isThinking = false
+            return
+        }
+
         var msg = ChatMessage(
             role: .agent, content: resp.message, timestamp: Date(),
             reasoning: resp.reasoning, action: nil, debugTurnID: bubbleDebugTurnID
@@ -1078,6 +1096,24 @@ class ChatViewModel: ObservableObject {
         if isSafety { msg.isSafetyCard = true }
         messages.append(msg)
         isThinking = false
+    }
+
+    /// Uniform typewriter for a non-streamed (fastpath/instant) reply: reuses
+    /// the exact `TypewriterEngine` + 0.03s Timer machinery the streaming path
+    /// (`dispatchChatStreaming`) drives via `startTypewriterTimer`. The whole
+    /// text arrives at once, so it's pushed straight through `append` +
+    /// `finalize` — the finalize deadline-countdown guarantees the reveal
+    /// completes within 200 ms regardless of length, while short fastpath
+    /// replies still get the base reveal-rate drip (backlog/6 per tick).
+    @MainActor
+    private func typewriteNonStreamedText(_ text: String, bubbleID: UUID) {
+        let engine = TypewriterEngine()
+        engine.onChange = { [weak self] revealed in
+            self?.updateStreamBubble(id: bubbleID, text: revealed)
+        }
+        startTypewriterTimer(engine)
+        engine.append(text)
+        engine.finalize(with: text)
     }
 
     @MainActor
