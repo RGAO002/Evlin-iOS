@@ -22,6 +22,14 @@ struct DeviceAppsSheet: View {
     @AppStorage("evlin.familyID") private var pairedFamilyID: String = ""
 
     @State private var apps: [DeviceAppItem] = []
+    /// B-hardening: resolved-icon backfill (onAppear step 3) writes ONLY here,
+    /// never into `apps`. Writing into `apps[i].artworkURL` per-icon caused a
+    /// SwiftUI re-render of every row over several seconds after sheet-open;
+    /// combined with the per-row hand-rolled `Toggle` binding (unstable
+    /// identity), unrelated churn could fire ANOTHER row's toggle set closure
+    /// — the suspected mechanism behind a phantom limit toggle on an app the
+    /// parent never touched. Keyed by bundleID (see `appRow`'s lookup).
+    @State private var artworkByBundleID: [String: URL] = [:]
     @State private var editingLimitFor: String? = nil
     @State private var isLoading = false
     @State private var loadFailed = false
@@ -85,8 +93,26 @@ struct DeviceAppsSheet: View {
                     }
 
                     VStack(spacing: 0) {
-                        ForEach(Array(apps.enumerated()), id: \.element.id) { idx, app in
-                            appRow(app)
+                        // Layer 2: `ForEach($apps)` gives each row a STABLE identity
+                        // bound directly to its element (DeviceAppItem.id is the
+                        // backend-derived aliasKey UUID string — not a fresh UUID()
+                        // per render), instead of a plain function re-invoked with a
+                        // value copy on every parent re-render. Combined with the
+                        // extracted `DeviceAppRow` view, this stops unrelated state
+                        // churn (e.g. the artwork backfill) from destabilizing which
+                        // row's Toggle closure is live.
+                        ForEach($apps) { $app in
+                            let idx = apps.firstIndex(where: { $0.id == app.id }) ?? 0
+                            DeviceAppRow(
+                                app: $app,
+                                resolvedArtworkURL: app.artworkURL ?? app.bundleID.flatMap { artworkByBundleID[$0] },
+                                isEditingLimit: editingLimitFor == app.id,
+                                onToggleEditingLimit: {
+                                    editingLimitFor = (editingLimitFor == app.id) ? nil : app.id
+                                },
+                                limitPicker: { limitPicker(for: app) },
+                                onToggle: { newValue in toggleLimit(for: app, on: newValue) }
+                            )
                             if idx < apps.count - 1 {
                                 Rectangle()
                                     .fill(Color.evOutlineVariant.opacity(0.4))
@@ -215,8 +241,10 @@ struct DeviceAppsSheet: View {
                     for t in appTargets where t.artworkURL == nil {
                         let pretty = NameWithIcon.displayName(t.displayName)
                         if let url = await AppArtworkResolver.shared.artwork(forName: pretty),
-                           let i = apps.firstIndex(where: { $0.id == t.aliasKey.uuidString }) {
-                            apps[i].artworkURL = url
+                           let bundle = t.bundleID {
+                            // Layer 1: write ONLY the side dictionary — never `apps` —
+                            // so this backfill can't re-render/re-identify app rows.
+                            artworkByBundleID[bundle] = url
                         }
                     }
                 } catch {
@@ -307,145 +335,6 @@ struct DeviceAppsSheet: View {
         )
     }
 
-    private func appRow(_ app: DeviceAppItem) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 14) {
-                Group {
-                    if let artworkURL = app.artworkURL {
-                        AsyncImage(url: artworkURL) { phase in
-                            switch phase {
-                            case .success(let image):
-                                image
-                                    .resizable()
-                                    .scaledToFill()
-                            default:
-                                // While loading or on failure, fall back to SF symbol
-                                ZStack {
-                                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                        .fill(app.bgColor)
-                                    Image(systemName: app.iconSystemName)
-                                        .font(.system(size: 20, weight: .medium))
-                                        .foregroundStyle(app.brandColor)
-                                }
-                            }
-                        }
-                        .frame(width: 40, height: 40)
-                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    } else {
-                        ZStack {
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .fill(app.bgColor)
-                            Image(systemName: app.iconSystemName)
-                                .font(.system(size: 20, weight: .medium))
-                                .foregroundStyle(app.brandColor)
-                        }
-                        .frame(width: 40, height: 40)
-                    }
-                }
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(Color.black.opacity(0.06), lineWidth: 1)
-                )
-
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack {
-                        Text(app.name)
-                            .font(.custom("Manrope", size: 14).weight(.bold))
-                            .foregroundStyle(Color.evOnSurface)
-
-                        Spacer()
-
-                        // Limit pill (tap to expand picker). Disabled when the
-                        // app has no bundle id — there's nothing to limit on.
-                        Button {
-                            editingLimitFor = (editingLimitFor == app.id) ? nil : app.id
-                        } label: {
-                            HStack(spacing: 4) {
-                                Image(systemName: "clock")
-                                    .font(.system(size: 11))
-                                Text(DeviceAppsMockData.formatLimit(app.limitMin))
-                                    .font(.custom("Manrope", size: 11).weight(.heavy))
-                            }
-                            .foregroundStyle(app.enabled ? Color.evPrimary : Color.evOutline)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 4)
-                            .background(
-                                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                    .fill(app.enabled ? Color.evPrimaryContainer : Color.evSurfaceContainerHigh)
-                            )
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(app.bundleID == nil)
-                        .opacity(app.bundleID == nil ? 0.5 : 1)
-
-                        Toggle("", isOn: Binding(
-                            get: { app.enabled },
-                            set: { newValue in toggleLimit(for: app, on: newValue) }
-                        ))
-                        .labelsHidden()
-                        .tint(Color.evSecondary)
-                        // No bundle id → can't set/clear a backend limit; lock off.
-                        .disabled(app.bundleID == nil)
-                    }
-
-                    // Progress bar
-                    progressBar(for: app)
-
-                    // Status text
-                    HStack {
-                        Text(statusText(for: app))
-                            .font(.custom("Inter", size: 10))
-                            .foregroundStyle(app.enabled && app.usedMin >= app.limitMin
-                                             ? Color.evError
-                                             : Color.evOnSurfaceVariant)
-                        Spacer()
-                        if app.enabled && app.usedMin >= app.limitMin {
-                            Text("LIMIT REACHED")
-                                .font(.custom("Inter", size: 10).weight(.heavy))
-                                .tracking(0.8)
-                                .foregroundStyle(Color.evError)
-                        }
-                    }
-                }
-            }
-            .padding(.horizontal, 18)
-            .padding(.vertical, 14)
-
-            if editingLimitFor == app.id {
-                limitPicker(for: app)
-                    .padding(.horizontal, 18)
-                    .padding(.bottom, 14)
-            }
-        }
-    }
-
-    private func progressBar(for app: DeviceAppItem) -> some View {
-        let pct = min(1.0, Double(app.usedMin) / Double(max(app.limitMin, 1)))
-        let color: Color = !app.enabled
-            ? Color.evOutlineVariant
-            : pct >= 1.0 ? Color.evError
-            : pct > 0.75 ? Color(hex: 0xF97316)
-            : Color.evSecondary
-        return GeometryReader { geo in
-            ZStack(alignment: .leading) {
-                Capsule().fill(Color.evSurfaceContainerHigh)
-                Capsule()
-                    .fill(color)
-                    .frame(width: geo.size.width * (app.enabled ? pct : 0))
-            }
-        }
-        .frame(height: 4)
-    }
-
-    private func statusText(for app: DeviceAppItem) -> String {
-        // usedMin is REAL (coarse) per-app usage from the backend usage samples
-        // (merged in onAppear). The formatter shows "X / Y min".
-        EarnedDisplayFormatters.appRowStatusText(
-            limitEnabled: app.enabled,
-            usedMin: app.usedMin,
-            limitMin: app.limitMin
-        )
-    }
 
     // MARK: - B9: Device-cap card
 
@@ -638,6 +527,30 @@ struct DeviceAppsSheet: View {
         guard let i = apps.firstIndex(where: { $0.id == app.id }) else { return }
         let previous = apps[i]
         actionError = nil
+
+        // Layer 3 (minimal, chip-picker variant): unlike the Toggle, each chip
+        // Button already captures its own concrete `minutes` value per-render
+        // (no hand-rolled Binding), so identity instability is not the same
+        // risk here. Still instrument every tap — fired or a no-op re-tap of
+        // the already-applied value — so the event timeline covers both
+        // per-app controls uniformly.
+        let fired = !(previous.enabled && previous.limitMin == minutes)
+        ScreenTimeEventLog.emit(ScreenTimeEvent(
+            ts: ISO8601DateFormatter().string(from: Date()),
+            emitter: .parentApp,
+            deviceID: nil,
+            dayKey: nil,
+            kind: .decision,
+            source: .perAppLimit,
+            app: bundleID,
+            reason: fired ? "pick_user" : "pick_suppressed_no_change",
+            nums: ScreenTimeEvent.Nums(budget: minutes),
+            transition: ScreenTimeEvent.Transition(
+                before: "\(previous.enabled ? previous.limitMin : 0)",
+                after: "\(minutes)"),
+            policyGen: nil,
+            corrID: nil))
+        guard fired else { return }
         apps[i].limitMin = minutes
         apps[i].enabled = true
         let seq = (inflightSeq[app.id] ?? 0) + 1
@@ -799,6 +712,224 @@ struct DeviceAppsSheet: View {
                 setActionError("Couldn't save the cap — try again.")
             }
         }
+    }
+}
+
+// MARK: - Hardening: stable-identity app row (phantom-toggle fix)
+
+/// A single app row in `DeviceAppsSheet`. Extracted into a real `View` type
+/// (Layer 2 of the phantom-toggle hardening) so SwiftUI can give each row a
+/// STABLE identity driven by `$apps[index]` via `ForEach($apps)`, instead of
+/// the previous plain `appRow(_:)` FUNCTION whose `Toggle` used a hand-rolled
+/// `Binding(get:set:)` recaptured fresh on every parent re-render — unstable
+/// control identity that let unrelated churn (e.g. the artwork backfill,
+/// see Layer 1) potentially fire another row's toggle-set closure.
+///
+/// Layer 3 (gesture-diff gate): before forwarding a Toggle change to the
+/// network call, this row compares the incoming value against its own
+/// `lastAppliedEnabled` (seeded on `onAppear`). A change that doesn't
+/// actually differ from the last-applied state is suppressed — nothing is
+/// sent to the network — and BOTH fired and suppressed invocations write a
+/// `ScreenTimeEventLog` diagnostic so a future phantom toggle is provable
+/// from the on-device event timeline instead of merely suspected.
+private struct DeviceAppRow: View {
+    @Binding var app: DeviceAppItem
+    let resolvedArtworkURL: URL?
+    let isEditingLimit: Bool
+    let onToggleEditingLimit: () -> Void
+    let limitPicker: () -> AnyView
+    /// Called ONLY when the diff-gate (Layer 3) determines this is a real,
+    /// changed user gesture. Owns the network call + optimistic update in
+    /// the parent (`toggleLimit`) — this row does not touch persistence.
+    let onToggle: (Bool) -> Void
+
+    /// Last value this row is known to have actually applied (seeded from
+    /// `app.enabled` on appear, updated whenever a toggle is actually fired).
+    /// `nil` only before the first `onAppear`.
+    @State private var lastAppliedEnabled: Bool? = nil
+
+    init(app: Binding<DeviceAppItem>,
+         resolvedArtworkURL: URL?,
+         isEditingLimit: Bool,
+         onToggleEditingLimit: @escaping () -> Void,
+         limitPicker: @escaping () -> some View,
+         onToggle: @escaping (Bool) -> Void) {
+        self._app = app
+        self.resolvedArtworkURL = resolvedArtworkURL
+        self.isEditingLimit = isEditingLimit
+        self.onToggleEditingLimit = onToggleEditingLimit
+        self.limitPicker = { AnyView(limitPicker()) }
+        self.onToggle = onToggle
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 14) {
+                Group {
+                    if let artworkURL = resolvedArtworkURL {
+                        AsyncImage(url: artworkURL) { phase in
+                            switch phase {
+                            case .success(let image):
+                                image
+                                    .resizable()
+                                    .scaledToFill()
+                            default:
+                                // While loading or on failure, fall back to SF symbol
+                                ZStack {
+                                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                        .fill(app.bgColor)
+                                    Image(systemName: app.iconSystemName)
+                                        .font(.system(size: 20, weight: .medium))
+                                        .foregroundStyle(app.brandColor)
+                                }
+                            }
+                        }
+                        .frame(width: 40, height: 40)
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    } else {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .fill(app.bgColor)
+                            Image(systemName: app.iconSystemName)
+                                .font(.system(size: 20, weight: .medium))
+                                .foregroundStyle(app.brandColor)
+                        }
+                        .frame(width: 40, height: 40)
+                    }
+                }
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.black.opacity(0.06), lineWidth: 1)
+                )
+
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text(app.name)
+                            .font(.custom("Manrope", size: 14).weight(.bold))
+                            .foregroundStyle(Color.evOnSurface)
+
+                        Spacer()
+
+                        // Limit pill (tap to expand picker). Disabled when the
+                        // app has no bundle id — there's nothing to limit on.
+                        Button(action: onToggleEditingLimit) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "clock")
+                                    .font(.system(size: 11))
+                                Text(DeviceAppsMockData.formatLimit(app.limitMin))
+                                    .font(.custom("Manrope", size: 11).weight(.heavy))
+                            }
+                            .foregroundStyle(app.enabled ? Color.evPrimary : Color.evOutline)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 4)
+                            .background(
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .fill(app.enabled ? Color.evPrimaryContainer : Color.evSurfaceContainerHigh)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(app.bundleID == nil)
+                        .opacity(app.bundleID == nil ? 0.5 : 1)
+
+                        Toggle("", isOn: Binding(
+                            get: { app.enabled },
+                            set: { newValue in handleToggle(newValue) }
+                        ))
+                        .labelsHidden()
+                        .tint(Color.evSecondary)
+                        // No bundle id → can't set/clear a backend limit; lock off.
+                        .disabled(app.bundleID == nil)
+                    }
+
+                    // Progress bar
+                    progressBar
+
+                    // Status text
+                    HStack {
+                        Text(statusText)
+                            .font(.custom("Inter", size: 10))
+                            .foregroundStyle(app.enabled && app.usedMin >= app.limitMin
+                                             ? Color.evError
+                                             : Color.evOnSurfaceVariant)
+                        Spacer()
+                        if app.enabled && app.usedMin >= app.limitMin {
+                            Text("LIMIT REACHED")
+                                .font(.custom("Inter", size: 10).weight(.heavy))
+                                .tracking(0.8)
+                                .foregroundStyle(Color.evError)
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 14)
+
+            if isEditingLimit {
+                limitPicker()
+                    .padding(.horizontal, 18)
+                    .padding(.bottom, 14)
+            }
+        }
+        .onAppear {
+            if lastAppliedEnabled == nil {
+                lastAppliedEnabled = app.enabled
+            }
+        }
+    }
+
+    /// Layer 3: gesture-diff gate. Only forwards to `onToggle` (which owns
+    /// the network call) when the incoming value actually differs from the
+    /// last value THIS row applied. Every call — fired or suppressed — is
+    /// logged so a future phantom toggle can be pinpointed from the
+    /// on-device `ScreenTimeEventLog` timeline.
+    private func handleToggle(_ newValue: Bool) {
+        let fired = AppLimitToggleGate.decide(lastApplied: lastAppliedEnabled, incoming: newValue) == .fire
+        ScreenTimeEventLog.emit(ScreenTimeEvent(
+            ts: ISO8601DateFormatter().string(from: Date()),
+            emitter: .parentApp,
+            deviceID: nil,
+            dayKey: nil,
+            kind: .decision,
+            source: .perAppLimit,
+            app: app.bundleID ?? app.id,
+            reason: fired ? "toggle_user" : "toggle_suppressed_no_change",
+            nums: nil,
+            transition: ScreenTimeEvent.Transition(
+                before: (lastAppliedEnabled.map { $0 ? "on" : "off" }) ?? "unknown",
+                after: newValue ? "on" : "off"),
+            policyGen: nil,
+            corrID: nil))
+        guard fired else { return }
+        lastAppliedEnabled = newValue
+        onToggle(newValue)
+    }
+
+    private var progressBar: some View {
+        let pct = min(1.0, Double(app.usedMin) / Double(max(app.limitMin, 1)))
+        let color: Color = !app.enabled
+            ? Color.evOutlineVariant
+            : pct >= 1.0 ? Color.evError
+            : pct > 0.75 ? Color(hex: 0xF97316)
+            : Color.evSecondary
+        return GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color.evSurfaceContainerHigh)
+                Capsule()
+                    .fill(color)
+                    .frame(width: geo.size.width * (app.enabled ? pct : 0))
+            }
+        }
+        .frame(height: 4)
+    }
+
+    private var statusText: String {
+        // usedMin is REAL (coarse) per-app usage from the backend usage samples
+        // (merged in onAppear). The formatter shows "X / Y min".
+        EarnedDisplayFormatters.appRowStatusText(
+            limitEnabled: app.enabled,
+            usedMin: app.usedMin,
+            limitMin: app.limitMin
+        )
     }
 }
 

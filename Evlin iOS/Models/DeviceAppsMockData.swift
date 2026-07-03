@@ -140,6 +140,27 @@ enum AppLimitEditDecision: Equatable {
     }
 }
 
+// MARK: - Phantom-toggle hardening (Layer 3): user-gesture diff gate
+
+/// Pure decision for `DeviceAppRow`'s toggle diff-gate: should an incoming
+/// `Toggle(isOn:)` value actually be forwarded to the network-backed
+/// `toggleLimit`, or suppressed as a no-op?
+///
+/// Extracted from `DeviceAppRow.handleToggle` so the gate logic is unit
+/// testable without SwiftUI. `lastApplied == nil` (never seeded, e.g. the
+/// row hasn't appeared yet) always fires — there's nothing to diff against.
+enum AppLimitToggleGate {
+    enum Decision: Equatable {
+        case fire
+        case suppress
+    }
+
+    static func decide(lastApplied: Bool?, incoming: Bool) -> Decision {
+        guard let lastApplied else { return .fire }
+        return lastApplied == incoming ? .suppress : .fire
+    }
+}
+
 enum DeviceAppLimitMerge {
     /// Overlay loaded backend rules onto freshly-built catalog rows (which start
     /// with the hardcoded default `limitMin`, `enabled: true`). Matching is by
