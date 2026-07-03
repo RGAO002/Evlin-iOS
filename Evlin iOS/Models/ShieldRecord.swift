@@ -7,6 +7,7 @@ import CryptoKit
 /// - `.manual`: a parent/reflection-driven lock (the historical, only behavior).
 /// - `.limit`: written by the per-app time-limit subsystem (P4+).
 /// - `.earnedTime`: granted by the earned screen-time subsystem (B1+).
+/// - `.taskPause`: written by the task-pause subsystem.
 ///
 /// String-backed so the JSON payload is human-readable and stable across the
 /// app/extension process boundary. Old persisted records predate this field;
@@ -17,6 +18,7 @@ enum ShieldSource: String, Codable, Sendable, Hashable {
     case manual
     case limit
     case earnedTime
+    case taskPause
 
     /// Unknown-tolerant decode. The synthesized `RawRepresentable` decoder THROWS
     /// on an unrecognized rawValue — e.g. a future `"schedule"` written by a newer

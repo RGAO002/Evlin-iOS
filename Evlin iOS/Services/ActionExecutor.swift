@@ -672,6 +672,7 @@ final class ActionExecutor: @unchecked Sendable {
     static func shieldSources(fromWireLockSource wireSource: String?) -> Set<ShieldSource> {
         switch wireSource {
         case "earned_time": return [.earnedTime]
+        case "task_pause":  return [.taskPause]
         default:            return [.manual]
         }
     }
@@ -769,7 +770,12 @@ final class ActionExecutor: @unchecked Sendable {
                 // lowercase-backend-string key (Wave-1 Task 5 fix).
                 let recordKey = ShieldRecord.makeRecordKey(tier: .savedList, targetKey: id.uuidString)
                 for wireSource in wireSources {
-                    let src: ShieldSource = wireSource == "earned_time" ? .earnedTime : .manual
+                    let src: ShieldSource
+                    switch wireSource {
+                    case "earned_time": src = .earnedTime
+                    case "task_pause":  src = .taskPause
+                    default:            src = .manual
+                    }
                     await ActiveLockStore.shared.removeSource(src, fromRecordKey: recordKey)
                 }
                 // Build a minimal ack — record may still exist with remaining sources.
