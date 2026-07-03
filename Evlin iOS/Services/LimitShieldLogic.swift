@@ -83,6 +83,17 @@ enum LimitShieldLogic {
         ShieldSourceLogic.strippingSource(.limit, from: shields)
     }
 
+    /// Whether an intervalDidStart on a limit activity is a genuine DAY-BOUNDARY
+    /// reset (strip all .limit shields) vs a same-day re-arm restart (skip —
+    /// mid-day re-arms fire intervalDidStart too, and sweeping then frees every
+    /// at-budget app except the one whose command re-shields itself).
+    /// nil storedDayKey (first run/upgrade): NOT a day boundary — set the key and
+    /// skip; the next real midnight differs and sweeps normally.
+    static func isDayBoundaryReset(storedDayKey: String?, today: String) -> Bool {
+        guard let s = storedDayKey, !s.isEmpty else { return false }
+        return s != today
+    }
+
     // MARK: - "Limit reached" notification copy
 
     /// Pure builder for the local "time's up" notification the DeviceActivity

@@ -528,7 +528,27 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
     /// from the App Group shields dict, persist, and recompute so the kid regains
     /// the new day's allowance. NEVER touches `source == .manual` (parent)
     /// shields. Idempotent: if no limit shields exist this is a harmless recompute.
+    ///
+    /// Day-key guard: `intervalDidStart` fires for a limit activity BOTH at the
+    /// real midnight interval boundary AND whenever a per-app limit is re-armed
+    /// mid-day (every set_limit command restarts its DeviceActivity interval).
+    /// Without a guard, any mid-day re-arm sweeps every OTHER app's limit shield,
+    /// silently unlocking apps that are still at/over budget. We persist the last
+    /// day we actually swept (`evlin.limitReset.dayKey`) and only strip when
+    /// today differs from that stored key — see `LimitShieldLogic.isDayBoundaryReset`.
     private func resetLimitShields(activity: String) {
+        let dayKeyKey = "evlin.limitReset.dayKey"
+        let today = todayISODate()
+        let stored = defaults?.string(forKey: dayKeyKey)
+
+        guard LimitShieldLogic.isDayBoundaryReset(storedDayKey: stored, today: today) else {
+            defaults?.set(today, forKey: dayKeyKey)
+            emitEvent(kind: .decision, source: .perAppLimit, app: "device-wide", reason: "rearm_restart_skip")
+            NSLog("[Evlin/Ext] limit reset skipped (same-day re-arm) activity=%@ day=%@", activity, today)
+            return
+        }
+        defaults?.set(today, forKey: dayKeyKey)
+
         let current = loadShields()
         let stripped = LimitShieldLogic.strippingLimitShields(from: current)
         let removedCount = current.count - stripped.count
