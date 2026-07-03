@@ -577,12 +577,26 @@ final class ActionExecutor: @unchecked Sendable {
             // list membership through ensure_selected_set's token_available filter).
             // The kid's own FamilyActivitySelection in DefaultLockGroupStore is the
             // ground truth for "what did the kid actually pick" — union it in
-            // UNCONDITIONALLY so unmatched apps and every category are covered too,
-            // not just when the backend sent zero tokens.
-            let localSelection = DefaultLockGroupStore.load()
-            appTokens.formUnion(localSelection.applicationTokens)
-            categoryTokens.formUnion(localSelection.categoryTokens)
-            webDomainTokens.formUnion(localSelection.webDomainTokens)
+            // so unmatched apps and every category are covered too, not just when
+            // the backend sent zero tokens.
+            //
+            // BUT: `.savedList` is a GENERIC tier shared by arbitrary parent-named
+            // custom lists (SavedListPickerView, chat "lock these 3 apps") AND the
+            // device's one default "Locked set". DefaultLockGroupStore always holds
+            // the DEFAULT lock group's selection, so the union must only fire when
+            // this command actually targets that default group — otherwise locking
+            // any small custom list over-locks everything in the kid's App-Controls
+            // selection. Compare lowercased, consistent with the
+            // `savedList:<targetKey.lowercased()>` recordKey normalization
+            // (ShieldRecord.makeRecordKey).
+            let isDefaultLockGroup = EarnedTimeStore.shared.lockedSetID
+                .map { $0.lowercased() == targetKey.lowercased() } ?? false
+            if isDefaultLockGroup {
+                let localSelection = DefaultLockGroupStore.load()
+                appTokens.formUnion(localSelection.applicationTokens)
+                categoryTokens.formUnion(localSelection.categoryTokens)
+                webDomainTokens.formUnion(localSelection.webDomainTokens)
+            }
             // Legacy blob/local-list fallback stays as a last resort for the
             // (now rare) case where DefaultLockGroupStore itself is empty but an
             // older opaque blob or named local list still carries tokens.

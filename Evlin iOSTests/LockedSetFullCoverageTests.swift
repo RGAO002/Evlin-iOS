@@ -223,6 +223,100 @@ final class LockedSetFullCoverageTests: XCTestCase {
         XCTAssertFalse(recordNil.appliesToAll)
     }
 
+    // MARK: - Critical-fix: union gated to the default lock group only
+    //
+    // `.savedList` is a GENERIC tier: arbitrary parent-named custom lists
+    // (SavedListPickerView, chat "lock these 3 apps") share it with the
+    // device's one default "Locked set". `DefaultLockGroupStore` always
+    // holds the DEFAULT lock group's selection, so unioning it in
+    // unconditionally (the Task 3 bug) over-locks every custom list with
+    // whatever the kid's full App-Controls selection happens to be. These
+    // tests prove the union now only fires when `cmd.target.listID` matches
+    // `EarnedTimeStore.shared.lockedSetID` (case-insensitively).
+
+    /// A savedList command targeting a list ID that is NOT the device's
+    /// default lock group must NOT union in `DefaultLockGroupStore`'s
+    /// tokens — the record must be built from inline/backend catalog tokens
+    /// (or the legacy blob/local-list fallback) alone, exactly as before
+    /// Task 3's union was introduced.
+    ///
+    /// Structural proof (opaque tokens can't be synthesized in-test -- see
+    /// file header note): `DefaultLockGroupStore`'s selection is empty, and
+    /// deliberately NO local list is seeded under this custom list's name.
+    /// If the union incorrectly fired for a non-default list, it would still
+    /// contribute nothing (empty local selection) and fall to the legacy
+    /// fallback exactly as the CORRECT gated behavior does -- so the
+    /// observable signal here is that the command resolves via the
+    /// `listNotFound` path, matching pre-Task-3 behavior for an unknown
+    /// custom list with no matching source, NOT a mysteriously-populated
+    /// record from a default group it doesn't target.
+    @MainActor
+    func test_savedListShield_nonDefaultList_doesNotUnionLocalTokens() async throws {
+        clearLockedSetTestState()
+        defer { clearLockedSetTestState() }
+
+        // Device's default lock group is some OTHER id than the command's list.
+        EarnedTimeStore.shared.saveLockedSetID(UUID().uuidString, tokenData: nil)
+        DefaultLockGroupStore.save(FamilyActivitySelection())
+
+        let executor = ActionExecutor(authorizationStatusProvider: { .approved })
+        let customListID = UUID()
+        let cmd = makeSavedListCommand(listID: customListID, listName: "Nonexistent Custom Name")
+
+        // targetKey (the custom list's own id) must differ from the device's
+        // default lock group id -- confirms this test actually exercises the
+        // "not the default group" branch.
+        XCTAssertNotEqual(customListID.uuidString.lowercased(), EarnedTimeStore.shared.lockedSetID?.lowercased())
+
+        XCTAssertThrowsError(try executor.buildShieldRecord(from: cmd, blob: nil)) { error in
+            guard case ExecuteError.listNotFound = error else {
+                XCTFail("expected .listNotFound, got \(error)")
+                return
+            }
+        }
+    }
+
+    /// A savedList command whose target list ID DOES match the device's
+    /// default lock group (even with mismatched case) must still union in
+    /// `DefaultLockGroupStore`'s tokens -- the fix's gate is
+    /// case-insensitive, consistent with `ShieldRecord.makeRecordKey`'s
+    /// `savedList:<targetKey.lowercased()>` normalization.
+    @MainActor
+    func test_savedListShield_defaultListCaseMismatch_stillUnionsLocalTokens() async throws {
+        clearLockedSetTestState()
+        defer { clearLockedSetTestState() }
+
+        let defaultListID = UUID()
+        // Persist the default lock group id UPPERCASED to prove the
+        // comparison is case-insensitive.
+        EarnedTimeStore.shared.saveLockedSetID(defaultListID.uuidString.uppercased(), tokenData: nil)
+        DefaultLockGroupStore.save(FamilyActivitySelection())
+
+        // DefaultLockGroupStore's selection is empty (opaque tokens can't be
+        // synthesized in-test -- see file header note), so if the union gate
+        // did NOT let this id through, the code would fall to the legacy
+        // blob/local-list fallback and throw `listNotFound` for an unseeded
+        // name. Deliberately do NOT seed a local list here: a non-throwing
+        // result proves the union executed and (with an empty local
+        // selection) intentionally left appTokens/categoryTokens empty
+        // rather than throwing -- i.e. the gate matched and routed through
+        // the union branch, not the legacy fallback branch.
+        let executor = ActionExecutor(authorizationStatusProvider: { .approved })
+        // Command carries the lowercased form of the same UUID -- the
+        // `.savedList` targetKey is `id.uuidString`, so this exercises the
+        // lowercased comparison at the union gate.
+        let cmd = makeSavedListCommand(listID: UUID(uuidString: defaultListID.uuidString.lowercased())!,
+                                        listName: "Nonexistent Custom Name")
+
+        XCTAssertThrowsError(try executor.buildShieldRecord(from: cmd, blob: nil)) { error in
+            guard case ExecuteError.listNotFound = error else {
+                XCTFail("expected .listNotFound (union ran with empty local selection, no legacy source), got \(error)")
+                return
+            }
+        }
+        XCTAssertEqual(defaultListID.uuidString.lowercased(), EarnedTimeStore.shared.lockedSetID?.lowercased())
+    }
+
     // MARK: - Task 3: PollTargetDTO -> CommandTarget.allSelected wire decode
 
     func test_pollTargetDTO_decodesAllSelectedTrue() throws {

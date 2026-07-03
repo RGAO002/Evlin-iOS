@@ -190,14 +190,26 @@ enum NSELockApplier {
             // Device-local union (paper-lock fix, NSE parity with ActionExecutor's
             // buildShieldRecord): DefaultLockGroupStore is the same App-Group-shared
             // ground truth for "what did the kid actually pick" that the main app's
-            // executor and the DeviceActivityMonitor extension both now consult
-            // unconditionally. Union it in here too so NSE-delivered savedList locks
-            // (the force-quit-resilient fast path) also cover unmatched apps/categories,
-            // not just whatever inline tokens the backend happened to enumerate.
-            let localSelection = DefaultLockGroupStore.load()
-            appTokens.formUnion(localSelection.applicationTokens)
-            categoryTokens.formUnion(localSelection.categoryTokens)
-            webDomainTokens.formUnion(localSelection.webDomainTokens)
+            // executor and the DeviceActivityMonitor extension both now consult.
+            // Union it in here too so NSE-delivered savedList locks (the
+            // force-quit-resilient fast path) also cover unmatched apps/categories —
+            // BUT only when this command targets the device's one default "Locked
+            // set". `.savedList` is also used for arbitrary parent-named custom
+            // lists that share nothing with the default group, so unioning
+            // unconditionally would over-lock those. EarnedTimeStore.swift is
+            // compiled into this target too (see project.pbxproj membership
+            // exceptions for EvlinPushApplier), so it can be read directly here,
+            // same App-Group suite `group.com.evlin.ios` as DefaultLockGroupStore.
+            // Compare lowercased, matching the `savedList:<targetKey.lowercased()>`
+            // recordKey normalization (ShieldRecord.makeRecordKey).
+            let isDefaultLockGroup = EarnedTimeStore.shared.lockedSetID
+                .map { $0.lowercased() == targetKey.lowercased() } ?? false
+            if isDefaultLockGroup {
+                let localSelection = DefaultLockGroupStore.load()
+                appTokens.formUnion(localSelection.applicationTokens)
+                categoryTokens.formUnion(localSelection.categoryTokens)
+                webDomainTokens.formUnion(localSelection.webDomainTokens)
+            }
             // No tokens from ANY source → app handles it via blob / LocalAliasStore
             // fallback paths this target intentionally does not link.
             guard !appTokens.isEmpty || !categoryTokens.isEmpty || !webDomainTokens.isEmpty else { return nil }
