@@ -10,6 +10,42 @@ class ChatViewModel: ObservableObject {
     @Published var inputText = ""
     @Published var isThinking = false
     @Published var errorMessage: String?
+    /// Set while a stream's `stage` event is the most recent thing heard from
+    /// the backend (e.g. "Checking tasks…"). Cleared as soon as a text delta,
+    /// the terminal envelope, or an error arrives. ChatView prefers this over
+    /// the generic typing-dots indicator when non-nil.
+    @Published var stageText: String?
+
+    /// Feature flag (spec §14 rollout). Default false: `dispatchChat` behaves
+    /// EXACTLY as before this task when this is false — zero behavior change.
+    var chatStreamingEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: "evlin.chatStreamingEnabled") }
+        set { UserDefaults.standard.set(newValue, forKey: "evlin.chatStreamingEnabled") }
+    }
+
+    /// Deltas are display-only; the terminal envelope's `message` is always
+    /// authoritative (spec §3) — the typewriter's revealed-so-far text is
+    /// discarded/overwritten by `finalize(with:)` regardless of similarity.
+    nonisolated static func reconcileStreamedEnvelope(
+        revealedSoFar: String, envelopeMessage: String
+    ) -> String {
+        envelopeMessage
+    }
+
+    /// Dedup guard for `stageText` — avoids redundant @Published churn / view
+    /// updates when the backend repeats the same stage label.
+    nonisolated static func shouldUpdateStage(current: String?, incoming: String) -> Bool {
+        current != incoming
+    }
+
+    /// Retains the Timer driving the active turn's TypewriterEngine so it
+    /// isn't deallocated mid-stream; invalidated once the engine has fully
+    /// caught up to its buffer after `finalize(with:)`.
+    private var typewriterTimer: Timer?
+    /// Guards `dispatchChatLegacyOnce` so a `.fallbackToLegacy` failure can
+    /// trigger the legacy JSON dispatch at most once per user message (no
+    /// recursion / double-send if something upstream retries).
+    private var legacyFallbackInFlight = false
 
     /// Multi-child gate (MVP): when the paired family has >1 child profile we
     /// send `child_device_id: nil` so the backend disambiguation gate asks
@@ -655,6 +691,33 @@ class ChatViewModel: ObservableObject {
         forceConfirmations: [String],
         skipFastpath: Bool = false,
     ) {
+        if chatStreamingEnabled {
+            legacyFallbackInFlight = false
+            Task { [weak self] in
+                await self?.dispatchChatStreaming(
+                    userMessage: userMessage,
+                    forceConfirmations: forceConfirmations,
+                    skipFastpath: skipFastpath
+                )
+            }
+            return
+        }
+        dispatchChatLegacy(
+            userMessage: userMessage,
+            forceConfirmations: forceConfirmations,
+            skipFastpath: skipFastpath
+        )
+    }
+
+    /// The pre-existing (non-streaming) JSON dispatch, unchanged in behavior.
+    /// Extracted verbatim out of `dispatchChat` so the streaming path's
+    /// `.fallbackToLegacy` failure can invoke it directly without recursing
+    /// back through the `chatStreamingEnabled` gate.
+    private func dispatchChatLegacy(
+        userMessage: String,
+        forceConfirmations: [String],
+        skipFastpath: Bool = false
+    ) {
         // Exclude the seed message from history sent to backend (spec §3.2).
         let history: [[String: String]] = messages.filter { !$0.isSeed }.suffix(10).map { msg in
             ["role": msg.role == .parent ? "parent" : "agent", "content": msg.content]
@@ -712,8 +775,196 @@ class ChatViewModel: ObservableObject {
         }
     }
 
+    /// Streaming twin of `dispatchChatLegacy`. Terminal envelope goes through
+    /// the SAME `processResponse` path; the only difference is the
+    /// pre-envelope display (stage line + incrementally revealed bubble).
     @MainActor
-    private func processResponse(_ resp: APIClient.ChatResponse, userMessage: String, debugTurnID: String? = nil) {
+    private func dispatchChatStreaming(
+        userMessage: String,
+        forceConfirmations: [String],
+        skipFastpath: Bool
+    ) async {
+        errorMessage = nil
+        let body: Data
+        do {
+            body = try makeChatRequestBody(
+                userMessage: userMessage,
+                forceConfirmations: forceConfirmations,
+                skipFastpath: skipFastpath
+            )
+        } catch {
+            errorMessage = error.localizedDescription
+            isThinking = false
+            return
+        }
+        let client = ChatStreamClient(apiClient: apiClient)
+        var engine: TypewriterEngine?
+        var streamBubbleID: UUID?
+        do {
+            for try await ev in client.stream(body: body) {
+                switch ev {
+                case .stage(_, let label):
+                    if Self.shouldUpdateStage(current: stageText, incoming: label) {
+                        stageText = label
+                    }
+                case .textDelta(let t):
+                    stageText = nil
+                    if engine == nil {
+                        let msg = ChatMessage(role: .agent, content: "", timestamp: Date())
+                        messages.append(msg)
+                        streamBubbleID = msg.id
+                        let e = TypewriterEngine()
+                        let bubbleID = msg.id
+                        e.onChange = { [weak self] text in
+                            self?.updateStreamBubble(id: bubbleID, text: text)
+                        }
+                        startTypewriterTimer(e)
+                        engine = e
+                    }
+                    engine?.append(t)
+                case .envelope(let data):
+                    stageText = nil
+                    do {
+                        let decoded = try JSONDecoder().decode(APIClient.ChatResponse.self, from: data)
+                        if let e = engine {
+                            e.finalize(with: Self.reconcileStreamedEnvelope(
+                                revealedSoFar: e.revealed, envelopeMessage: decoded.message))
+                        }
+                        // Same post-decode pipeline as sendChatMessageWithRawData
+                        // (card handlers see rawData; the text bubble goes
+                        // through processResponse with the new reuse param).
+                        lastResponseViaFastpath = decoded.viaFastpath ?? false
+                        handleStreamEnvelope(
+                            decoded, rawData: data,
+                            userMessage: userMessage,
+                            reuseTextBubbleID: streamBubbleID
+                        )
+                    } catch {
+                        errorMessage = error.localizedDescription
+                    }
+                case .error(let message):
+                    stageText = nil
+                    errorMessage = message
+                }
+            }
+        } catch let failure as StreamFailure {
+            stageText = nil
+            switch failure {
+            case .fallbackToLegacy:
+                dispatchChatLegacyOnce(
+                    userMessage: userMessage,
+                    forceConfirmations: forceConfirmations,
+                    skipFastpath: skipFastpath
+                )
+            case .manualRetry(let msg):
+                errorMessage = msg
+            case .signedOut:
+                handleSignedOut()
+            }
+        } catch {
+            stageText = nil
+            errorMessage = error.localizedDescription
+        }
+        invalidateTypewriterTimer()
+        isThinking = false
+    }
+
+    /// Mirrors `sendChatMessageWithRawData`'s post-decode section (dispatchChatLegacy):
+    /// plan-arch card, then app-control card, then the unified `processResponse`
+    /// path — but reusing the streamed text bubble instead of appending a new one.
+    @MainActor
+    private func handleStreamEnvelope(
+        _ resp: APIClient.ChatResponse,
+        rawData: Data,
+        userMessage: String,
+        reuseTextBubbleID: UUID?
+    ) {
+        if tryHandlePlanArchCard(from: rawData, message: resp.message) {
+            isThinking = false
+            return
+        }
+        if tryHandleAppControlCard(from: rawData, response: resp) {
+            isThinking = false
+            return
+        }
+        processResponse(
+            resp,
+            userMessage: userMessage,
+            reuseTextBubbleID: reuseTextBubbleID
+        )
+    }
+
+    /// Runs the existing non-streaming JSON dispatch at most once per user
+    /// message — used as the `.fallbackToLegacy` recovery path so a stream
+    /// endpoint that's unreachable/missing (404/405/501) degrades gracefully
+    /// instead of leaving the parent stuck. Guarded so a caller that retries
+    /// can't trigger a double-send.
+    @MainActor
+    private func dispatchChatLegacyOnce(
+        userMessage: String,
+        forceConfirmations: [String],
+        skipFastpath: Bool
+    ) {
+        guard !legacyFallbackInFlight else { return }
+        legacyFallbackInFlight = true
+        dispatchChatLegacy(
+            userMessage: userMessage,
+            forceConfirmations: forceConfirmations,
+            skipFastpath: skipFastpath
+        )
+    }
+
+    /// Updates the streamed bubble's content in place as the typewriter
+    /// engine reveals more of the buffered text. No-op if the bubble was
+    /// somehow removed mid-stream (e.g. Clear chat).
+    @MainActor
+    private func updateStreamBubble(id: UUID?, text: String) {
+        guard let id, let idx = messages.firstIndex(where: { $0.id == id }) else { return }
+        messages[idx].content = text
+    }
+
+    /// `Timer.scheduledTimer` on the main run loop driving `engine.tick()`
+    /// every 30ms (spec §5.3). Retained on the VM (`typewriterTimer`) so it
+    /// isn't deallocated mid-stream; invalidated once the engine has fully
+    /// caught up to its buffer post-finalize.
+    @MainActor
+    private func startTypewriterTimer(_ engine: TypewriterEngine) {
+        typewriterTimer?.invalidate()
+        typewriterTimer = Timer.scheduledTimer(withTimeInterval: 0.03, repeats: true) { [weak self, weak engine] _ in
+            guard let engine else { self?.invalidateTypewriterTimer(); return }
+            engine.tick()
+            if engine.revealed == engine.bufferForTesting {
+                self?.invalidateTypewriterTimer()
+            }
+        }
+    }
+
+    @MainActor
+    private func invalidateTypewriterTimer() {
+        typewriterTimer?.invalidate()
+        typewriterTimer = nil
+    }
+
+    /// Terminal refresh failure on the stream path (`StreamFailure.signedOut`).
+    /// `ChatStreamClient` calls `refreshAccessTokenSingleFlight` directly
+    /// (bypassing `authedData`, which is what normally posts this
+    /// notification on terminal failure), so this mirrors that same
+    /// signed-out signal for the app-wide `AuthService` observer (see
+    /// APIClient.swift's `.evlinSessionSignedOut`).
+    @MainActor
+    private func handleSignedOut() {
+        KeychainStore.shared.clear()
+        NotificationCenter.default.post(name: .evlinSessionSignedOut, object: nil)
+        errorMessage = "You've been signed out. Please sign in again."
+    }
+
+    @MainActor
+    private func processResponse(
+        _ resp: APIClient.ChatResponse,
+        userMessage: String,
+        debugTurnID: String? = nil,
+        reuseTextBubbleID: UUID? = nil
+    ) {
         let bubbleDebugTurnID = Self.bubbleDebugTurnID(debugTurnID)
         // If a deterministic app-control card was just acted on, the follow-up
         // response is usually a plain queued-command receipt. Do not leave the
@@ -800,19 +1051,31 @@ class ChatViewModel: ObservableObject {
         }
 
         // 3. Plain text (conversational reply, or confirmation_required without card_id)
-        var msg = ChatMessage(
-            role: .agent, content: resp.message, timestamp: Date(),
-            reasoning: resp.reasoning, action: nil, debugTurnID: bubbleDebugTurnID
-        )
         // Restore safety-card heuristic that was lost in d86772c refactor.
         // When the parent asks "is X safe", "where is X", or "X's location",
         // attach the SafetyStatusCard + SafetyActionButtons (location pin +
         // call) to the agent's reply. The card is rendered by ChatView when
         // isSafetyCard == true.
         let lowered = userMessage.lowercased()
-        if lowered.contains("safe") || lowered.contains("where") || lowered.contains("location") {
-            msg.isSafetyCard = true
+        let isSafety = lowered.contains("safe") || lowered.contains("where") || lowered.contains("location")
+
+        // Streaming path: the bubble already exists (typewriter engine wrote
+        // the revealed deltas into it) — update its content + metadata in
+        // place instead of appending a second bubble for the same turn.
+        if let reuseID = reuseTextBubbleID, let idx = messages.firstIndex(where: { $0.id == reuseID }) {
+            messages[idx].content = resp.message
+            messages[idx].reasoning = resp.reasoning
+            messages[idx].debugTurnID = bubbleDebugTurnID
+            if isSafety { messages[idx].isSafetyCard = true }
+            isThinking = false
+            return
         }
+
+        var msg = ChatMessage(
+            role: .agent, content: resp.message, timestamp: Date(),
+            reasoning: resp.reasoning, action: nil, debugTurnID: bubbleDebugTurnID
+        )
+        if isSafety { msg.isSafetyCard = true }
         messages.append(msg)
         isThinking = false
     }
@@ -2461,6 +2724,42 @@ class ChatViewModel: ObservableObject {
         }
     }
 
+    /// Shared request-body builder for BOTH the JSON path
+    /// (`sendChatMessageWithRawData`) and the streaming path
+    /// (`dispatchChatStreaming`) — they must send byte-identical bodies.
+    /// `history` is recomputed from `messages` at call time (spec §3.2:
+    /// excludes the seed message, last 10 turns).
+    private func makeChatRequestBody(
+        userMessage: String,
+        forceConfirmations: [String],
+        skipFastpath: Bool
+    ) throws -> Data {
+        let history: [[String: String]] = messages.filter { !$0.isSeed }.suffix(10).map { msg in
+            ["role": msg.role == .parent ? "parent" : "agent", "content": msg.content]
+        }
+        let familyID = UserDefaults.standard.string(forKey: "evlin.familyID")
+        let storedChildID = UserDefaults.standard.string(forKey: "evlin.childDeviceID")
+        // Multi-child gate: nil out the pinned device id when >1 child so the
+        // backend asks "which child?" instead of silently targeting one device.
+        let cdid = Self.effectiveChildDeviceID(
+            childCount: childCountProvider(),
+            storedChildDeviceID: (storedChildID?.isEmpty == false) ? storedChildID : nil
+        )
+
+        let bodyObj = APIClient.ChatRequest(
+            message: userMessage,
+            child_name: childName,
+            history: history,
+            family_id: familyID,
+            force_confirmations: forceConfirmations,
+            child_device_id: cdid,
+            client_alias_state: currentClientAliasStateCodable(),
+            skip_fastpath: skipFastpath,
+            conversation_id: currentConversationID.uuidString
+        )
+        return try JSONEncoder().encode(bodyObj)
+    }
+
     /// Mirrors APIClient.sendChatMessage but returns the raw HTTP Data alongside
     /// the decoded ChatResponse. Used by dispatchChat so tryHandlePlanArchCard
     /// can inspect card_payload (a plan-arch-only field not in ChatResponse).
@@ -2472,27 +2771,11 @@ class ChatViewModel: ObservableObject {
         forceConfirmations: [String],
         skipFastpath: Bool = false
     ) async throws -> (APIClient.ChatResponse, Data, String?) {
-        let familyID = UserDefaults.standard.string(forKey: "evlin.familyID")
-        let storedChildID = UserDefaults.standard.string(forKey: "evlin.childDeviceID")
-        // Multi-child gate: nil out the pinned device id when >1 child so the
-        // backend asks "which child?" instead of silently targeting one device.
-        let cdid = Self.effectiveChildDeviceID(
-            childCount: childCountProvider(),
-            storedChildDeviceID: (storedChildID?.isEmpty == false) ? storedChildID : nil
+        let encodedBody = try makeChatRequestBody(
+            userMessage: message,
+            forceConfirmations: forceConfirmations,
+            skipFastpath: skipFastpath
         )
-
-        let bodyObj = APIClient.ChatRequest(
-            message: message,
-            child_name: childName,
-            history: history,
-            family_id: familyID,
-            force_confirmations: forceConfirmations,
-            child_device_id: cdid,
-            client_alias_state: currentClientAliasStateCodable(),
-            skip_fastpath: skipFastpath,
-            conversation_id: currentConversationID.uuidString
-        )
-        let encodedBody = try JSONEncoder().encode(bodyObj)
 
         // B4: route through authedRequest/authedData (Bearer + single-flight 401 refresh).
         // The outer retry loop handles transient 5xx; authedData handles 401 internally.

@@ -120,7 +120,10 @@ extension Notification.Name {
 struct ChatMessage: Identifiable, Codable {
     let id: UUID
     let role: ChatRole
-    let content: String
+    /// `var` (not `let`) so the streaming path can update a bubble's text
+    /// in place as the typewriter engine reveals more of the buffered
+    /// delta, instead of appending a new message each tick.
+    var content: String
     let timestamp: Date
     var reasoning: String?
     var debugTurnID: String? = nil

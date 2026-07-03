@@ -426,7 +426,9 @@ struct ChatView: View {
                         .id(message.id)
                     }
 
-                    if viewModel.isThinking {
+                    if let stage = viewModel.stageText {
+                        stageIndicator(stage)
+                    } else if viewModel.isThinking {
                         thinkingIndicator
                     }
 
@@ -1051,6 +1053,18 @@ struct ChatView: View {
     }
 
     // MARK: - Thinking Indicator
+
+    /// Streaming path's pre-envelope status line (e.g. "Checking tasks…"),
+    /// preferred over the generic typing dots while a `stage` event is the
+    /// most recent thing heard from the backend.
+    private func stageIndicator(_ stage: String) -> some View {
+        HStack(spacing: 7) {
+            Circle().fill(Color.evSecondary).frame(width: 7, height: 7)
+                .opacity(0.7)
+            Text(stage).font(.footnote).foregroundStyle(Color.evOnSurfaceVariant)
+        }
+        .padding(.vertical, 6)
+    }
 
     private var thinkingIndicator: some View {
         HStack(spacing: Spacing.lg) {
