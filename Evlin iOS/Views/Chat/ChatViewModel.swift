@@ -45,10 +45,72 @@ class ChatViewModel: ObservableObject {
         current != incoming
     }
 
+    /// A stream that fails before producing user-visible output can safely
+    /// degrade to the legacy JSON endpoint. Once text or the terminal envelope
+    /// has arrived, avoid a second send and surface the failure in-chat.
+    nonisolated static func shouldFallbackToLegacyAfterStreamFailure(
+        hasReceivedText: Bool,
+        hasReceivedEnvelope: Bool
+    ) -> Bool {
+        !hasReceivedText && !hasReceivedEnvelope
+    }
+
+    nonisolated static func visibleStreamErrorMessage(_ detail: String) -> String {
+        let trimmed = detail.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.contains("500") || trimmed.contains("503") {
+            return "The AI model is briefly overloaded. Please tap again in a few seconds."
+        }
+        if trimmed.isEmpty {
+            return "I couldn't finish that reply. Please try again."
+        }
+        return "I couldn't finish that reply. Please try again."
+    }
+
+    nonisolated static func stageClearDelay(
+        elapsed: TimeInterval,
+        minimumVisibleDuration: TimeInterval
+    ) -> TimeInterval {
+        max(0, minimumVisibleDuration - elapsed)
+    }
+
+    nonisolated static func isSafetyStatusPrompt(_ text: String) -> Bool {
+        let lowered = text.lowercased()
+        return lowered.contains("safe")
+            || lowered.contains("where")
+            || lowered.contains("location")
+    }
+
+    /// Local first-stage copy shown immediately after Send, before the backend
+    /// has had a chance to emit a real `stage` SSE event. Backend stages still
+    /// replace this as soon as they arrive.
+    nonisolated static func initialStageLabel(for text: String) -> String {
+        let lowered = text.lowercased()
+        func containsAny(_ needles: [String]) -> Bool {
+            needles.contains { lowered.contains($0) }
+        }
+
+        if containsAny(["calendar", "event", "events", "schedule", "appointment"]) {
+            return "Looking at the calendar…"
+        }
+        if containsAny(["checklist", "check list", "task", "tasks", "daily"]) {
+            return "Checking tasks…"
+        }
+        if containsAny([
+            "screen time", "lock", "block", "unblock", "limit",
+            "youtube", "tiktok", "instagram", "snapchat", " app", "apps", "application"
+        ]) {
+            return "Checking screen time…"
+        }
+        return "Thinking…"
+    }
+
     /// Retains the Timer driving the active turn's TypewriterEngine so it
     /// isn't deallocated mid-stream; invalidated once the engine has fully
     /// caught up to its buffer after `finalize(with:)`.
     private var typewriterTimer: Timer?
+    private let minimumStageVisibleDuration: TimeInterval = 0.65
+    private var stageShownAt: Date?
+    private var stageClearTask: Task<Void, Never>?
     /// STRONG ref to the engine currently being revealed. The engine is created
     /// inside a synchronous scope (`typewriteNonStreamedText`) or an async one
     /// (`dispatchChatStreaming`) that returns BEFORE the reveal finishes; the
@@ -760,7 +822,15 @@ class ChatViewModel: ObservableObject {
                 // (AGENT_PLAN_ARCH=1), surface it via the new renderer path and skip
                 // the legacy proposal/action handling. Backwards-compatible: when
                 // AGENT_PLAN_ARCH=0, card_payload is absent, and this returns false.
-                if await MainActor.run(body: { self.tryHandlePlanArchCard(from: rawData, message: resp.message, debugTurnID: turnID) }) {
+                let attachSafetyCard = Self.isSafetyStatusPrompt(userMessage)
+                if await MainActor.run(body: {
+                    self.tryHandlePlanArchCard(
+                        from: rawData,
+                        message: resp.message,
+                        debugTurnID: turnID,
+                        attachSafetyCard: attachSafetyCard
+                    )
+                }) {
                     await MainActor.run { self.isThinking = false }
                     return
                 }
@@ -768,7 +838,14 @@ class ChatViewModel: ObservableObject {
                 // they take the AppControlCard render path instead of the Brain
                 // CardDispatcher path (their card_id resolves to a CardID but is
                 // intentionally a no-op in renderCard's Brain switches).
-                if await MainActor.run(body: { self.tryHandleAppControlCard(from: rawData, response: resp, debugTurnID: turnID) }) {
+                if await MainActor.run(body: {
+                    self.tryHandleAppControlCard(
+                        from: rawData,
+                        response: resp,
+                        debugTurnID: turnID,
+                        attachSafetyCard: attachSafetyCard
+                    )
+                }) {
                     await MainActor.run { self.isThinking = false }
                     return
                 }
@@ -814,15 +891,19 @@ class ChatViewModel: ObservableObject {
         let client = ChatStreamClient(apiClient: apiClient)
         var engine: TypewriterEngine?
         var streamBubbleID: UUID?
+        var receivedStreamText = false
+        var receivedEnvelope = false
+        showStage(Self.initialStageLabel(for: userMessage))
         do {
             for try await ev in client.stream(body: body) {
                 switch ev {
                 case .stage(_, let label):
-                    if Self.shouldUpdateStage(current: stageText, incoming: label) {
-                        stageText = label
-                    }
+                    showStage(label)
                 case .textDelta(let t):
-                    stageText = nil
+                    clearStageAfterMinimumVisibility()
+                    if !t.isEmpty {
+                        receivedStreamText = true
+                    }
                     if engine == nil {
                         let msg = ChatMessage(role: .agent, content: "", timestamp: Date())
                         messages.append(msg)
@@ -836,13 +917,16 @@ class ChatViewModel: ObservableObject {
                         engine = e
                     }
                     engine?.append(t)
+                    engine?.flushNow()
                 case .envelope(let data):
-                    stageText = nil
+                    clearStageAfterMinimumVisibility()
+                    receivedEnvelope = true
                     do {
                         let decoded = try JSONDecoder().decode(APIClient.ChatResponse.self, from: data)
                         if let e = engine {
                             e.finalize(with: Self.reconcileStreamedEnvelope(
                                 revealedSoFar: e.revealed, envelopeMessage: decoded.message))
+                            e.flushNow()
                         }
                         // Same post-decode pipeline as sendChatMessageWithRawData
                         // (card handlers see rawData; the text bubble goes
@@ -855,17 +939,18 @@ class ChatViewModel: ObservableObject {
                         )
                     } catch {
                         errorMessage = error.localizedDescription
+                        appendVisibleStreamError(error.localizedDescription)
                     }
                 case .error(let message):
-                    stageText = nil
-                    errorMessage = message
+                    clearStageNow()
+                    appendVisibleStreamError(message)
                     // Terminal error with no finalize — stop the reveal so the
                     // timer doesn't idle forever holding the engine.
                     invalidateTypewriterTimer()
                 }
             }
         } catch let failure as StreamFailure {
-            stageText = nil
+            clearStageNow()
             switch failure {
             case .fallbackToLegacy:
                 // Pre-headers failure: no stream engine was started here, and
@@ -875,17 +960,40 @@ class ChatViewModel: ObservableObject {
                     forceConfirmations: forceConfirmations,
                     skipFastpath: skipFastpath
                 )
+                return
             case .manualRetry(let msg):
-                errorMessage = msg
                 invalidateTypewriterTimer()
+                if Self.shouldFallbackToLegacyAfterStreamFailure(
+                    hasReceivedText: receivedStreamText,
+                    hasReceivedEnvelope: receivedEnvelope
+                ) {
+                    dispatchChatLegacyOnce(
+                        userMessage: userMessage,
+                        forceConfirmations: forceConfirmations,
+                        skipFastpath: skipFastpath
+                    )
+                    return
+                }
+                appendVisibleStreamError(msg)
             case .signedOut:
                 handleSignedOut()
                 invalidateTypewriterTimer()
             }
         } catch {
-            stageText = nil
-            errorMessage = error.localizedDescription
+            clearStageNow()
             invalidateTypewriterTimer()
+            if Self.shouldFallbackToLegacyAfterStreamFailure(
+                hasReceivedText: receivedStreamText,
+                hasReceivedEnvelope: receivedEnvelope
+            ) {
+                dispatchChatLegacyOnce(
+                    userMessage: userMessage,
+                    forceConfirmations: forceConfirmations,
+                    skipFastpath: skipFastpath
+                )
+                return
+            }
+            appendVisibleStreamError(error.localizedDescription)
         }
         // DO NOT invalidate the typewriter timer here. The reveal is
         // asynchronous and OUTLIVES this stream loop: on the common
@@ -898,6 +1006,58 @@ class ChatViewModel: ObservableObject {
         isThinking = false
     }
 
+    @MainActor
+    private func appendVisibleStreamError(_ detail: String) {
+        errorMessage = detail
+        messages.append(ChatMessage(
+            role: .agent,
+            content: Self.visibleStreamErrorMessage(detail),
+            timestamp: Date()
+        ))
+        isThinking = false
+    }
+
+    @MainActor
+    private func showStage(_ label: String) {
+        stageClearTask?.cancel()
+        if Self.shouldUpdateStage(current: stageText, incoming: label) {
+            stageText = label
+            stageShownAt = Date()
+        }
+    }
+
+    @MainActor
+    private func clearStageAfterMinimumVisibility() {
+        guard let shownAt = stageShownAt else {
+            clearStageNow()
+            return
+        }
+        let delay = Self.stageClearDelay(
+            elapsed: Date().timeIntervalSince(shownAt),
+            minimumVisibleDuration: minimumStageVisibleDuration
+        )
+        guard delay > 0 else {
+            clearStageNow()
+            return
+        }
+        stageClearTask?.cancel()
+        stageClearTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                self?.clearStageNow()
+            }
+        }
+    }
+
+    @MainActor
+    private func clearStageNow() {
+        stageClearTask?.cancel()
+        stageClearTask = nil
+        stageShownAt = nil
+        stageText = nil
+    }
+
     /// Mirrors `sendChatMessageWithRawData`'s post-decode section (dispatchChatLegacy):
     /// plan-arch card, then app-control card, then the unified `processResponse`
     /// path — but reusing the streamed text bubble instead of appending a new one.
@@ -908,11 +1068,22 @@ class ChatViewModel: ObservableObject {
         userMessage: String,
         reuseTextBubbleID: UUID?
     ) {
-        if tryHandlePlanArchCard(from: rawData, message: resp.message) {
+        let attachSafetyCard = Self.isSafetyStatusPrompt(userMessage)
+        if tryHandlePlanArchCard(
+            from: rawData,
+            message: resp.message,
+            reuseTextBubbleID: reuseTextBubbleID,
+            attachSafetyCard: attachSafetyCard
+        ) {
             isThinking = false
             return
         }
-        if tryHandleAppControlCard(from: rawData, response: resp) {
+        if tryHandleAppControlCard(
+            from: rawData,
+            response: resp,
+            reuseTextBubbleID: reuseTextBubbleID,
+            attachSafetyCard: attachSafetyCard
+        ) {
             isThinking = false
             return
         }
@@ -948,8 +1119,55 @@ class ChatViewModel: ObservableObject {
     /// somehow removed mid-stream (e.g. Clear chat).
     @MainActor
     private func updateStreamBubble(id: UUID?, text: String) {
-        guard let id, let idx = messages.firstIndex(where: { $0.id == id }) else { return }
-        messages[idx].content = text
+        guard let id else { return }
+        mutateMessage(id: id) { message in
+            message.content = text
+        }
+    }
+
+    /// Mutating a field inside a `@Published` array element is easy for SwiftUI
+    /// to miss. Replace the value through the array so `messages` publishes.
+    @MainActor
+    @discardableResult
+    private func mutateMessage(id: UUID, _ mutate: (inout ChatMessage) -> Void) -> Bool {
+        guard let idx = messages.firstIndex(where: { $0.id == id }) else { return false }
+        var next = messages
+        mutate(&next[idx])
+        messages = next
+        return true
+    }
+
+    @MainActor
+    @discardableResult
+    private func appendOrReuseAgentTextBubble(
+        reuseTextBubbleID: UUID?,
+        text: String,
+        debugTurnID: String?,
+        attachSafetyCard: Bool,
+        typewriteWhenAppending: Bool = true
+    ) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let reuseID = reuseTextBubbleID,
+           mutateMessage(id: reuseID, { message in
+               message.debugTurnID = Self.bubbleDebugTurnID(debugTurnID)
+               if attachSafetyCard { message.isSafetyCard = true }
+           }) {
+            return true
+        }
+        guard !trimmed.isEmpty else { return false }
+
+        var message = ChatMessage(
+            role: .agent,
+            content: typewriteWhenAppending && chatStreamingEnabled ? "" : trimmed,
+            timestamp: Date(),
+            debugTurnID: Self.bubbleDebugTurnID(debugTurnID)
+        )
+        if attachSafetyCard { message.isSafetyCard = true }
+        messages.append(message)
+        if typewriteWhenAppending && chatStreamingEnabled {
+            typewriteNonStreamedText(trimmed, bubbleID: message.id)
+        }
+        return true
     }
 
     /// `Timer.scheduledTimer` on the main run loop driving `engine.tick()`
@@ -1095,17 +1313,16 @@ class ChatViewModel: ObservableObject {
         // attach the SafetyStatusCard + SafetyActionButtons (location pin +
         // call) to the agent's reply. The card is rendered by ChatView when
         // isSafetyCard == true.
-        let lowered = userMessage.lowercased()
-        let isSafety = lowered.contains("safe") || lowered.contains("where") || lowered.contains("location")
+        let isSafety = Self.isSafetyStatusPrompt(userMessage)
 
         // Streaming path: the bubble already exists (typewriter engine wrote
         // the revealed deltas into it) — update its content + metadata in
         // place instead of appending a second bubble for the same turn.
-        if let reuseID = reuseTextBubbleID, let idx = messages.firstIndex(where: { $0.id == reuseID }) {
-            messages[idx].content = resp.message
-            messages[idx].reasoning = resp.reasoning
-            messages[idx].debugTurnID = bubbleDebugTurnID
-            if isSafety { messages[idx].isSafetyCard = true }
+        if let reuseID = reuseTextBubbleID, mutateMessage(id: reuseID, { message in
+            message.reasoning = resp.reasoning
+            message.debugTurnID = bubbleDebugTurnID
+            if isSafety { message.isSafetyCard = true }
+        }) {
             isThinking = false
             return
         }
@@ -1153,6 +1370,7 @@ class ChatViewModel: ObservableObject {
         startTypewriterTimer(engine)
         engine.append(text)
         engine.finalize(with: text)
+        engine.flushNow()
     }
 
     @MainActor
@@ -1241,7 +1459,9 @@ class ChatViewModel: ObservableObject {
     func tryHandleAppControlCard(
         from data: Data,
         response: APIClient.ChatResponse,
-        debugTurnID: String? = nil
+        debugTurnID: String? = nil,
+        reuseTextBubbleID: UUID? = nil,
+        attachSafetyCard: Bool = false
     ) -> Bool {
         guard let cardID = response.action?.card_id,
               CardID(rawValue: cardID)?.isAppControlCard == true,
@@ -1258,14 +1478,21 @@ class ChatViewModel: ObservableObject {
         // Append a text bubble only when the backend supplied a meaningful
         // message distinct from the card body (avoids duplicating the card copy).
         let trimmed = response.message.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let reuseID = reuseTextBubbleID,
+           mutateMessage(id: reuseID, { message in
+               message.debugTurnID = Self.bubbleDebugTurnID(debugTurnID)
+               if attachSafetyCard { message.isSafetyCard = true }
+           }) {
+            return true
+        }
         if !trimmed.isEmpty,
            trimmed != model.body.trimmingCharacters(in: .whitespacesAndNewlines) {
-            messages.append(ChatMessage(
-                role: .agent,
-                content: trimmed,
-                timestamp: Date(),
-                debugTurnID: Self.bubbleDebugTurnID(debugTurnID)
-            ))
+            appendOrReuseAgentTextBubble(
+                reuseTextBubbleID: nil,
+                text: trimmed,
+                debugTurnID: debugTurnID,
+                attachSafetyCard: attachSafetyCard
+            )
         }
         return true
     }
@@ -2896,7 +3123,13 @@ class ChatViewModel: ObservableObject {
     /// ALSO appends a chat bubble with the card's title (+ body) so the
     /// parent sees a normal agent reply in the message list while the
     /// PlanArchCardView renders below for interaction.
-    func tryHandlePlanArchCard(from data: Data, message: String? = nil, debugTurnID: String? = nil) -> Bool {
+    func tryHandlePlanArchCard(
+        from data: Data,
+        message: String? = nil,
+        debugTurnID: String? = nil,
+        reuseTextBubbleID: UUID? = nil,
+        attachSafetyCard: Bool = false
+    ) -> Bool {
         let cards = PlanArchCardPayload.decodeAllFromChatResponseData(data)
         guard !cards.isEmpty else { return false }
 
@@ -2910,13 +3143,13 @@ class ChatViewModel: ObservableObject {
         // pass an empty message so the card alone speaks for itself with no
         // redundant chatter above it.
         let trimmedMessage = (message ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmedMessage.isEmpty {
-            self.messages.append(ChatMessage(
-                role: .agent,
-                content: trimmedMessage,
-                timestamp: Date(),
-                debugTurnID: Self.bubbleDebugTurnID(debugTurnID)
-            ))
+        if appendOrReuseAgentTextBubble(
+            reuseTextBubbleID: reuseTextBubbleID,
+            text: trimmedMessage,
+            debugTurnID: debugTurnID,
+            attachSafetyCard: attachSafetyCard
+        ) {
+            return true
         }
         return true
     }

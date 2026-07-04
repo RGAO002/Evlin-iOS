@@ -35,9 +35,9 @@ struct CategoryTagPanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             VStack(alignment: .leading, spacing: 4) {
-                Text("We know it's a hassle, but Apple won't let Evlin read app names — it can only show you the iOS label.")
+                Text("We know it's a hassle, but Apple won't let Evlin read category names — it can only show you the iOS label.")
                     .fixedSize(horizontal: false, vertical: true)
-                Text("To lock \(name) by name, add an alias from the tags below.")
+                Text("To give your agents full control, just tap on the matching tag by name. You’ll only have to do this once!")
                     .fixedSize(horizontal: false, vertical: true)
             }
             .font(.caption)

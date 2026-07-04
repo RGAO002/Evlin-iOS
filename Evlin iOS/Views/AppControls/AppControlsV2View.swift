@@ -142,6 +142,19 @@ struct AppControlsV2View: View {
                 // drop existing items, so the save below can be a plain additive UNION.
                 initialSelection: nil,
                 onSave: { picked in
+                    #if DEBUG
+                    // Bug #3 diagnostic — the phantom "All Apps & Categories" tile is a
+                    // real Apple token that Label(token) renders. This logs exactly what
+                    // the picker returns when the top "All Apps & Categories" cell is
+                    // tapped, so we can write a precise filter (1 umbrella token vs
+                    // N-per-category + 1 sentinel). Remove once the filter lands.
+                    print("[AppControlsV2][pickerSave] includeEntireCategory=\(picked.includeEntireCategory) " +
+                          "apps=\(picked.applicationTokens.count) categories=\(picked.categoryTokens.count)")
+                    for (i, t) in picked.categoryTokens.enumerated() {
+                        let b64 = (try? JSONEncoder().encode(t))?.base64EncodedString().prefix(24) ?? "?"
+                        print("[AppControlsV2][pickerSave]   cat[\(i)] enc=\(b64)…")
+                    }
+                    #endif
                     var merged = DefaultLockGroupStore.load()
                     merged.applicationTokens.formUnion(picked.applicationTokens)
                     merged.categoryTokens.formUnion(picked.categoryTokens)
@@ -333,7 +346,11 @@ struct AppControlsV2View: View {
             if selection.categoryTokens.isEmpty {
                 emptyText("No categories.")
             } else {
-                ForEach(Array(selection.categoryTokens), id: \.self) { token in
+                // `categoryTokens` is a Set (unordered). Deriving the display list
+                // via `Array(...)` gives a hash-order that changes whenever the Set
+                // mutates, so deleting one row visibly reshuffles the rest. Sort by a
+                // stable per-token key so the order is deterministic across reloads.
+                ForEach(stableOrdered(selection.categoryTokens), id: \.self) { token in
                     categoryRow(token)
                 }
             }
@@ -392,7 +409,8 @@ struct AppControlsV2View: View {
                 emptyText("No apps.")
             } else {
                 LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(Array(selection.applicationTokens), id: \.self) { token in
+                    // Same Set→Array reshuffle guard as `categoriesSection`.
+                    ForEach(stableOrdered(selection.applicationTokens), id: \.self) { token in
                         appRow(token)
                     }
                 }
@@ -695,6 +713,19 @@ struct AppControlsV2View: View {
 
     private func reload() {
         selection = DefaultLockGroupStore.load()
+    }
+
+    /// Deterministic display order for a token Set. The tokens are opaque
+    /// `Codable` values, so we sort by their encoded bytes: arbitrary but STABLE
+    /// across launches and unaffected by Set mutations. This stops rows from
+    /// jumping position when a sibling is deleted (the reshuffle bug). Encoding is
+    /// cheap for the handful of tokens a lock group holds.
+    private func stableOrdered<Token: Codable & Hashable>(_ tokens: Set<Token>) -> [Token] {
+        let encoder = JSONEncoder()
+        return tokens
+            .map { (token: $0, key: (try? encoder.encode($0))?.base64EncodedString() ?? "") }
+            .sorted { $0.key < $1.key }
+            .map { $0.token }
     }
 
     // MARK: - Backend alias-key lookup (Fix A)

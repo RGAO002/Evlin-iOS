@@ -295,6 +295,13 @@ struct ChatView: View {
                             if message.isSafetyCard == true {
                                 SafetyStatusCard(childName: viewModel.childName)
                                 SafetyActionButtons()
+                                // Temporary: the safety card above is a preview
+                                // with sample data and its buttons aren't wired
+                                // yet. Remove this note when the feature ships.
+                                Text("Heads up — this is a placeholder for now. Live safety monitoring is coming soon.")
+                                    .font(.evCaption)
+                                    .foregroundStyle(Color.evOnSurfaceVariant)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
                             }
 
                             // Video recommendation card
@@ -857,6 +864,17 @@ struct ChatView: View {
         wasComposerFocused || keyboardOverlap > 0
     }
 
+    static func stageDotPulse(elapsed: TimeInterval, cycle: TimeInterval = 1.6) -> (scale: CGFloat, opacity: Double) {
+        guard cycle > 0 else { return (scale: 0.92, opacity: 0.55) }
+        let rawPhase = elapsed.truncatingRemainder(dividingBy: cycle) / cycle
+        let phase = rawPhase < 0 ? rawPhase + 1 : rawPhase
+        let pulse = sin(phase * .pi)
+        return (
+            scale: CGFloat(0.92 + 0.36 * pulse),
+            opacity: 0.55 + 0.45 * pulse
+        )
+    }
+
     static func scrollBottomDistance(contentMaxY: CGFloat, scrollViewportHeight: CGFloat) -> CGFloat {
         guard scrollViewportHeight > 0 else { return 0 }
         return max(0, contentMaxY - scrollViewportHeight)
@@ -1059,8 +1077,7 @@ struct ChatView: View {
     /// most recent thing heard from the backend.
     private func stageIndicator(_ stage: String) -> some View {
         HStack(spacing: 7) {
-            Circle().fill(Color.evSecondary).frame(width: 7, height: 7)
-                .opacity(0.7)
+            StageBreathingDot()
             Text(stage).font(.footnote).foregroundStyle(Color.evOnSurfaceVariant)
         }
         .padding(.vertical, 6)
@@ -1082,6 +1099,31 @@ struct ChatView: View {
             Spacer()
         }
         .padding(.vertical, Spacing.md)
+    }
+}
+
+private struct StageBreathingDot: View {
+    private let cycle: TimeInterval = 1.6
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: false)) { context in
+            let elapsed = context.date.timeIntervalSinceReferenceDate
+            let pulse = ChatView.stageDotPulse(elapsed: elapsed, cycle: cycle)
+            ZStack {
+                Circle()
+                    .fill(Color.evSecondary.opacity(0.18))
+                    .frame(width: 13, height: 13)
+                    .scaleEffect(0.85 + (pulse.scale - 0.92) * 1.7)
+                    .opacity(max(0, pulse.opacity - 0.35))
+
+                Circle()
+                    .fill(Color.evSecondary)
+                    .frame(width: 7, height: 7)
+                    .scaleEffect(pulse.scale)
+                    .opacity(pulse.opacity)
+            }
+            .frame(width: 16, height: 16)
+        }
     }
 }
 

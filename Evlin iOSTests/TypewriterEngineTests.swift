@@ -16,17 +16,15 @@ final class TypewriterEngineTests: XCTestCase {
         XCTAssertEqual(e.revealed, "abcdef")
     }
 
-    func test_burst_catches_up_geometrically() {
+    func test_large_backlog_advances_without_bursting() {
         let clock = FakeClock()
         let e = TypewriterEngine(clock: clock)
         e.append(String(repeating: "x", count: 600))
         for _ in 0..<6 { clock.now += 0.03; e.tick() }
-        // ceil(backlog/6) per tick: 600→500→416→346→288→240→200 backlog,
-        // i.e. ≥ 350 revealed after 6 ticks. Full drain is finalize's job.
-        XCTAssertGreaterThanOrEqual(e.revealed.count, 350)
+        XCTAssertEqual(e.revealed.count, 18)
         e.finalize(with: String(repeating: "x", count: 600))
         for _ in 0..<6 { clock.now += 0.03; e.tick() }
-        XCTAssertEqual(e.revealed.count, 600)
+        XCTAssertEqual(e.revealed.count, 36)
     }
 
     func test_isComplete_false_until_finalized_even_when_drained() {
@@ -63,15 +61,42 @@ final class TypewriterEngineTests: XCTestCase {
         XCTAssertTrue(e.isComplete)
     }
 
-    func test_finalize_flushes_within_200ms() {
+    func test_flushNow_reveals_first_delta_without_waiting_for_timer() {
+        let clock = FakeClock()
+        let e = TypewriterEngine(clock: clock)
+        var changes: [String] = []
+        e.onChange = { changes.append($0) }
+
+        e.append("Hello")
+        e.flushNow()
+
+        XCTAssertEqual(e.revealed, "H")
+        XCTAssertEqual(changes, ["H"])
+    }
+
+    func test_finalize_reveals_gradually_instead_of_bursting() {
+        let clock = FakeClock()
+        let e = TypewriterEngine(clock: clock)
+        e.append(String(repeating: "x", count: 120))
+        e.finalize(with: String(repeating: "x", count: 120))
+
+        e.tick()
+
+        XCTAssertLessThanOrEqual(e.revealed.count, 3)
+    }
+
+    func test_finalize_keeps_long_replies_incremental() {
         let clock = FakeClock()
         let e = TypewriterEngine(clock: clock, tickInterval: 0.03)
         e.append("partial that will be repla")
         e.tick()
         e.finalize(with: String(repeating: "y", count: 4000))
-        var ticks = 0
-        while e.revealed.count < 4000 { clock.now += 0.03; e.tick(); ticks += 1 }
-        XCTAssertLessThanOrEqual(Double(ticks) * 0.03, 0.2 + 0.001)
+
+        let before = e.revealed.count
+        clock.now += 0.03
+        e.tick()
+
+        XCTAssertLessThanOrEqual(e.revealed.count - before, 3)
     }
 
     func test_finalize_replaces_mismatched_prefix() {
@@ -84,15 +109,17 @@ final class TypewriterEngineTests: XCTestCase {
         XCTAssertEqual(e.revealed, "right text")
     }
 
-    func test_total_reveal_never_slower_than_arrival_plus_200ms() {
+    func test_total_reveal_eventually_completes_after_finalize() {
         let clock = FakeClock()
         let e = TypewriterEngine(clock: clock)
         for i in 0..<50 { clock.now = Double(i) * 0.05; e.append("chunk"); e.tick() }
-        let arrivalEnd = clock.now
         e.finalize(with: e.bufferForTesting)
+        var ticks = 0
         while e.revealed.count < e.bufferForTesting.count {
             clock.now += 0.03; e.tick()
+            ticks += 1
         }
-        XCTAssertLessThanOrEqual(clock.now - arrivalEnd, 0.2 + 0.001)
+        XCTAssertGreaterThan(ticks, 1)
+        XCTAssertTrue(e.isComplete)
     }
 }

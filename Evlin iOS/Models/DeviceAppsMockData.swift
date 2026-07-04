@@ -140,24 +140,14 @@ enum AppLimitEditDecision: Equatable {
     }
 }
 
-// MARK: - Phantom-toggle hardening (Layer 3): user-gesture diff gate
+// MARK: - Phantom-toggle hardening: explicit switch intent
 
-/// Pure decision for `DeviceAppRow`'s toggle diff-gate: should an incoming
-/// `Toggle(isOn:)` value actually be forwarded to the network-backed
-/// `toggleLimit`, or suppressed as a no-op?
-///
-/// Extracted from `DeviceAppRow.handleToggle` so the gate logic is unit
-/// testable without SwiftUI. `lastApplied == nil` (never seeded, e.g. the
-/// row hasn't appeared yet) always fires — there's nothing to diff against.
-enum AppLimitToggleGate {
-    enum Decision: Equatable {
-        case fire
-        case suppress
-    }
-
-    static func decide(lastApplied: Bool?, incoming: Bool) -> Decision {
-        guard let lastApplied else { return .fire }
-        return lastApplied == incoming ? .suppress : .fire
+/// Pure intent helper for `DeviceAppRow`: a direct tap on the row's switch
+/// flips the row's current app-limit state. Network side effects live behind
+/// this explicit tap path, not a SwiftUI `Toggle` binding setter.
+enum AppLimitToggleIntent {
+    static func nextValue(currentEnabled: Bool) -> Bool {
+        !currentEnabled
     }
 }
 

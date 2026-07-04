@@ -24,7 +24,6 @@ nonisolated final class TypewriterEngine: @unchecked Sendable {
     var onChange: ((String) -> Void)?
     private var buffer: String = ""
     private var finalized = false
-    private var finalizeTicksRemaining = 0
     private let tickInterval: TimeInterval
     private let clock: TypewriterClock
 
@@ -46,29 +45,35 @@ nonisolated final class TypewriterEngine: @unchecked Sendable {
         buffer += text
     }
 
+    /// Reveal one step synchronously. The timer still owns the smooth ongoing
+    /// reveal; callers use this when a live delta/envelope arrives so the UI
+    /// never sits on an empty bubble waiting for the next run-loop tick.
+    func flushNow() {
+        tick()
+    }
+
     func finalize(with authoritative: String) {
         finalized = true
         if !authoritative.hasPrefix(revealed) {
             revealed = ""                       // mismatched prefix: envelope wins
         }
         buffer = authoritative
-        // Deadline countdown: whatever the backlog, drain it across the
-        // remaining ticks so the 200 ms guarantee holds for ANY length.
-        finalizeTicksRemaining = max(1, Int((0.2 / tickInterval).rounded(.down)))
     }
 
     func tick() {
         let backlog = buffer.count - revealed.count
         guard backlog > 0 else { return }
-        var step = max(1, Int((Double(backlog) / 6.0).rounded(.up)))
-        if finalized {
-            let ticks = max(1, finalizeTicksRemaining)
-            step = max(step, Int((Double(backlog) / Double(ticks)).rounded(.up)))
-            finalizeTicksRemaining = ticks - 1
-        }
+        let step = Self.revealStep(forBacklog: backlog)
         let end = buffer.index(buffer.startIndex,
                                offsetBy: min(revealed.count + step, buffer.count))
         revealed = String(buffer[..<end])
         onChange?(revealed)
+    }
+
+    nonisolated static func revealStep(forBacklog backlog: Int) -> Int {
+        guard backlog > 0 else { return 0 }
+        if backlog > 240 { return 3 }
+        if backlog > 120 { return 2 }
+        return 1
     }
 }

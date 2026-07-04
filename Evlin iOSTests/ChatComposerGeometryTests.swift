@@ -228,6 +228,19 @@ final class ChatComposerGeometryTests: XCTestCase {
         )
     }
 
+    func testStageDotPulseBreathesSmoothlyWithinSubtleBounds() {
+        let valley = ChatView.stageDotPulse(elapsed: 0, cycle: 1.6)
+        let peak = ChatView.stageDotPulse(elapsed: 0.8, cycle: 1.6)
+        let nextValley = ChatView.stageDotPulse(elapsed: 1.6, cycle: 1.6)
+
+        XCTAssertEqual(valley.scale, 0.92, accuracy: 0.001)
+        XCTAssertEqual(valley.opacity, 0.55, accuracy: 0.001)
+        XCTAssertEqual(peak.scale, 1.28, accuracy: 0.001)
+        XCTAssertEqual(peak.opacity, 1.0, accuracy: 0.001)
+        XCTAssertEqual(nextValley.scale, valley.scale, accuracy: 0.001)
+        XCTAssertEqual(nextValley.opacity, valley.opacity, accuracy: 0.001)
+    }
+
     @MainActor
     func testKeyboardDismissGateSuppressesOnlyTheNextRootTap() {
         let now = Date()

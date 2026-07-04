@@ -40,7 +40,7 @@ struct AppStoreBindPanel: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("We know it's a hassle, but Apple won't let Evlin read app names — it can only show you the iOS label.")
                     .fixedSize(horizontal: false, vertical: true)
-                Text("To lock \(appName) by name, add an alias from the dropdown.")
+                Text("To give your agents full control, search below and pick the matching App Store result. You’ll only have to do this once.")
                     .fixedSize(horizontal: false, vertical: true)
             }
             .font(.caption)
