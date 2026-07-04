@@ -2884,6 +2884,10 @@ extension APIClient {
         let daily_budget_minutes: Int
         let window_start_minute: Int
         let window_end_minute: Int
+        // Without a timezone the backend resolves the rule's "today" as the
+        // SERVER (UTC) date and the usage bar reads an empty day every US
+        // evening. Always send the device's timezone.
+        let timezone: String
         let display_name: String?
     }
 
@@ -2936,6 +2940,7 @@ extension APIClient {
             daily_budget_minutes: dailyBudgetMinutes,
             window_start_minute: 0,
             window_end_minute: 1439,
+            timezone: TimeZone.current.identifier,
             display_name: displayName
         )
         let payload = try JSONEncoder().encode(body)
