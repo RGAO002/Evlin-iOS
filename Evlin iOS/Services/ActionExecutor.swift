@@ -589,6 +589,16 @@ final class ActionExecutor: @unchecked Sendable {
             // selection. Compare lowercased, consistent with the
             // `savedList:<targetKey.lowercased()>` recordKey normalization
             // (ShieldRecord.makeRecordKey).
+            // The command itself can assert default-group identity (backend
+            // `default_lock_group` flag): a fresh family's very first lock
+            // arrives before any earned_time_config ever carried the list id
+            // (the list is empty at provision time), so lockedSetID would be
+            // nil here and the union below would silently paper-lock. Adopt
+            // the id from the flagged command before evaluating the gate.
+            if cmd.target.defaultLockGroup == true,
+               EarnedTimeStore.shared.lockedSetID?.lowercased() != targetKey.lowercased() {
+                EarnedTimeStore.shared.saveLockedSetID(targetKey, tokenData: nil)
+            }
             let isDefaultLockGroup = EarnedTimeStore.shared.lockedSetID
                 .map { $0.lowercased() == targetKey.lowercased() } ?? false
             if isDefaultLockGroup {

@@ -28,6 +28,7 @@ struct ScreenTimeCaptureView: View {
     @State private var pickerShown = false
     @State private var isSaved = false
     @State private var notAuthorized = false
+    @State private var selectionRequired = false
 
     var body: some View {
         EvKidCard(padding: 20) {
@@ -58,10 +59,17 @@ struct ScreenTimeCaptureView: View {
                 }
 
                 // Explanation
-                Text("Tap the button below and allow all categories so Evlin can measure how much screen time you've earned today.")
+                Text("Tap the button below and choose All Apps & Categories so Evlin can measure how much screen time you've earned today.")
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(EvlinKidColors.ink2)
                     .fixedSize(horizontal: false, vertical: true)
+
+                if selectionRequired {
+                    Text("Choose All Apps & Categories before closing this step.")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(EvlinKidColors.amber)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
 
                 if notAuthorized {
                     Text("Screen Time isn't authorized yet. Ask a parent to complete the Screen Time setup step first.")
@@ -117,20 +125,19 @@ struct ScreenTimeCaptureView: View {
             return
         }
         notAuthorized = false
+        selectionRequired = false
         pickerShown = true
     }
 
     private func saveIfReady() {
-        // Save even an empty selection (zero tokens) — the PRESENCE of a saved
-        // value is what satisfies isEarnedTimeReady; the FamilyActivitySelection
-        // with includeEntireCategory:true covers the whole device regardless of
-        // which specific tokens are returned by the system picker.
-        //
-        // Note: we save unconditionally on picker dismiss because the user
-        // explicitly opened the picker via our CTA button. If they cancelled
-        // without tapping categories we still persist the default
-        // includeEntireCategory:true selection — that is the correct behavior
-        // for whole-device monitoring.
+        guard !selection.applicationTokens.isEmpty
+                || !selection.categoryTokens.isEmpty
+                || !selection.webDomainTokens.isEmpty
+        else {
+            selectionRequired = true
+            return
+        }
+
         EarnedTimeStore.shared.saveMeasurementSelection(selection)
         // Arm immediately. Waiting for the next scene activation left the
         // device unmonitored — or worse, still monitored by a stale ladder —

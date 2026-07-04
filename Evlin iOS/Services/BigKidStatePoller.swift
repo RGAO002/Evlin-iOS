@@ -150,6 +150,10 @@ final class BigKidStatePoller: ObservableObject {
         if EarnedBudgetArming.reconcileIdentityTransition() {
             EarnedBudgetArming.armIfReady()
         }
+        // The App-Controls roster survives account switches locally but the
+        // backend's family-scoped "Locked set" doesn't — re-publish it when
+        // the current identity has no backend list yet (cheap no-op otherwise).
+        AppControlsBackendSync.pushDefaultLockGroupIfNeeded()
         do {
             let snapshot = try await fetchState()
             await reconcileReflectionLock(snapshot)
@@ -239,7 +243,19 @@ final class BigKidStatePoller: ObservableObject {
                     capMinutes: inputs.capMinutes,
                     selection: selection
                 )
+            } else {
+                CommandDeliveryDiagnostics.record(
+                    CommandDeliveryDiagnostics.keyEarnedArmAttempt,
+                    "skipped state-poll-no-remaining pool=\(inputs.poolMinutes) cap=\(inputs.capMinutes) offset=\(inputs.offset) \(EarnedBudgetScheduler.selectionSummary(selection))"
+                )
             }
+        } else {
+            let selection = store.measurementSelection
+            let summary = selection.map(EarnedBudgetScheduler.selectionSummary) ?? "(missing)"
+            CommandDeliveryDiagnostics.record(
+                CommandDeliveryDiagnostics.keyEarnedArmAttempt,
+                "skipped state-poll-not-ready lockedSetID=\(store.lockedSetID ?? "(missing)") \(summary)"
+            )
         }
 
         let adjustedRules = AppLimitRuleStore.shared.all().compactMap { rule -> AppLimitRule? in

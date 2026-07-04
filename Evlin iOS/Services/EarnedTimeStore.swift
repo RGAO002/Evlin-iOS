@@ -55,11 +55,22 @@ final class EarnedTimeStore: @unchecked Sendable {
 
     // MARK: - Readiness
 
+    /// True once the measurement selection has at least one token that
+    /// DeviceActivity can measure. A persisted-but-empty selection is not
+    /// enough: it makes setup look complete while total/device usage never
+    /// fires thresholds.
+    var hasMeasurableSelection: Bool {
+        guard let selection = measurementSelection else { return false }
+        return !selection.applicationTokens.isEmpty
+            || !selection.categoryTokens.isEmpty
+            || !selection.webDomainTokens.isEmpty
+    }
+
     /// True once the measurement selection AND the Locked-set identity are
     /// both present. The earned-time feature cannot be enabled until this is
     /// true ([R5/R18/§5.5]).
     var isEarnedTimeReady: Bool {
-        measurementSelection != nil && lockedSetID != nil
+        hasMeasurableSelection && lockedSetID != nil
     }
 
     // MARK: - All-category measurement selection

@@ -30,13 +30,18 @@ class APIClient: ObservableObject {
     /// /family/create is idempotent across timeout-retries (the backend returns
     /// the SAME family/device/code for a repeated install id instead of creating
     /// a duplicate family).
-    static let clientInstallID: String = {
-        let key = "evlin.clientInstallID"
-        if let existing = UserDefaults.standard.string(forKey: key) { return existing }
+    static let clientInstallIDKey = "evlin.clientInstallID"
+
+    static var clientInstallID: String {
+        if let existing = UserDefaults.standard.string(forKey: clientInstallIDKey) { return existing }
         let fresh = UUID().uuidString
-        UserDefaults.standard.set(fresh, forKey: key)
+        UserDefaults.standard.set(fresh, forKey: clientInstallIDKey)
         return fresh
-    }()
+    }
+
+    static func resetClientInstallID() {
+        UserDefaults.standard.removeObject(forKey: clientInstallIDKey)
+    }
 
     /// One-shot migration: 2026-05-07 backend split moved the Evlin Backend
     /// from the old `adaptive-engine` Railway service to its own Render
@@ -416,6 +421,7 @@ struct PollTargetDTO: Decodable {
     let category_hint: String?
     let target_all: Bool?                // new: "shield everything"
     let all_selected: Bool?              // Task 3: kid's saved-list selection was "all" at upload time
+    let default_lock_group: Bool?        // command targets the default "Locked set"
     let original_request: String
     let target_display: String?
     let target_child_id: String?         // new: which child device (multi-child)
@@ -437,6 +443,7 @@ struct PollTargetDTO: Decodable {
         case categoryHint
         case target_all
         case all_selected
+        case default_lock_group
         case original_request
         case target_display
         case target_child_id
@@ -466,6 +473,7 @@ struct PollTargetDTO: Decodable {
                 ?? c.decodeIfPresent(String.self, forKey: .categoryHint)
         target_all = try c.decodeIfPresent(Bool.self, forKey: .target_all)
         all_selected = try c.decodeIfPresent(Bool.self, forKey: .all_selected)
+        default_lock_group = try c.decodeIfPresent(Bool.self, forKey: .default_lock_group)
         original_request = try c.decodeIfPresent(String.self, forKey: .original_request) ?? ""
         target_display = try c.decodeIfPresent(String.self, forKey: .target_display)
         target_child_id = try c.decodeIfPresent(String.self, forKey: .target_child_id)

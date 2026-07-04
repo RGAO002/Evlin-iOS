@@ -12,7 +12,7 @@ struct BigKidHomeView: View {
     // when the ScreenTimeCaptureView calls onDone so the card disappears without
     // requiring a full view rebuild.
     @State private var measurementSelectionCaptured: Bool =
-        EarnedTimeStore.shared.measurementSelection != nil
+        EarnedTimeStore.shared.hasMeasurableSelection
 
     private var doneCount: Int {
         state.tasks.filter { $0.status == .done || $0.bypass?.status == .approved }.count

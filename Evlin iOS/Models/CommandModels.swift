@@ -77,6 +77,13 @@ struct CommandTarget: Codable, Sendable {
     // the unrelated kind=all tier. Optional because most commands (and all
     // pre-Task-1 backends) never send this key.
     var allSelected: Bool? = nil
+    // Default-lock-group identity: true when the backend says this savedList
+    // command targets the device's one default "Locked set" (as opposed to an
+    // arbitrary parent-named custom list). Lets the device adopt lockedSetID
+    // from the lock command itself — a fresh family locks before any
+    // earned_time_config ever carried the list id. Optional: older backends
+    // never send this key.
+    var defaultLockGroup: Bool? = nil
     var originalRequest: String
     var targetDisplay: String?
     var targetChildID: UUID?          // for multi-child

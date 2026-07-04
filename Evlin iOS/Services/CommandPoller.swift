@@ -13,6 +13,8 @@ enum CommandDeliveryDiagnostics {
     static let keyCommandAck = "evlin.delivery.commandAck"
     static let keyDAMHeartbeat = "evlin.delivery.damHeartbeat"
     static let keyEarnedLastThreshold = "evlin.earned.lastThreshold"
+    static let keyEarnedArmAttempt = "evlin.earned.armAttempt"
+    static let keyEarnedIdentityTransition = "evlin.earned.identityTransition"
     static let keyUsageCountingLastSkipped = "evlin.usageCounting.lastSkipped"
     /// SPIKE-ONLY (DAM heartbeat experiment). Capped history of heartbeat
     /// `intervalDidStart` fires written by the extension, so the diagnostics
@@ -344,6 +346,7 @@ final class CommandPoller {
             categoryHint: categoryHint,
             targetAll: poll.target.target_all ?? false,
             allSelected: poll.target.all_selected,
+            defaultLockGroup: poll.target.default_lock_group,
             originalRequest: poll.target.original_request,
             targetDisplay: poll.target.target_display,
             targetChildID: poll.target.target_child_id.flatMap(UUID.init(uuidString:)),
@@ -369,6 +372,26 @@ final class CommandPoller {
             limit: limitRule(from: poll.limit),
             clear: clearLimit(from: poll.clear)
         )
+    }
+
+    /// Instant counter re-arm after a task_pause unshield (2026-07-03). True
+    /// only for a SUCCESSFUL unshield (`.confirmedExact`/`.confirmedFallback`
+    /// with `verb == .unshield`) whose resolved `unlock_sources` include
+    /// `"task_pause"` — i.e. exactly the command `task_lock_service.
+    /// reconcile_task_lock` queues when the last task completes. Any other
+    /// verb/source (manual unlock, limit clear, etc.) is left on the normal
+    /// poll cadence; this seam only targets the task-completion gap.
+    @MainActor
+    static func notifyStateInvalidatedIfTaskPauseUnshield(cmd: LockCommand, result: AckResult) {
+        guard cmd.unlockSources?.contains("task_pause") == true else { return }
+        let verb: AckVerb
+        switch result {
+        case .confirmedExact(let v, _, _): verb = v
+        case .confirmedFallback(let v, _, _, _, _): verb = v
+        case .pendingConfirmation, .failed: return
+        }
+        guard verb == .unshield else { return }
+        NotificationCenter.default.post(name: .bigKidStateInvalidated, object: nil)
     }
 
     /// Map a decoded `set_limit.limit` DTO into the internal `LimitRule` (P3).
@@ -432,6 +455,20 @@ final class CommandPoller {
         }
 
         let result = await ActionExecutor.shared.execute(cmd, blob: blob)
+
+        // Close the resume "free window" (2026-07-03): a task_pause unshield
+        // reaches this device and gets applied via ActionExecutor within
+        // seconds, but the usage counters (EarnedBudgetScheduler /
+        // AppLimitPlanner) only re-arm on the next BigKidStatePoller poll —
+        // up to 10s later. That's a gap where the kid is unlocked but
+        // meters aren't running. Trigger the SAME notification ChatViewModel
+        // posts after a parent write (`.bigKidStateInvalidated`) so any
+        // active BigKidStatePoller runs `refreshNow()` immediately: it
+        // re-fetches `/child/state`, and the authoritative
+        // `usageCountingAllowed` on that snapshot drives both the flag flip
+        // and the re-arm through the poller's existing logic — no need to
+        // duplicate rearm/cap semantics here.
+        Self.notifyStateInvalidatedIfTaskPauseUnshield(cmd: cmd, result: result)
 
         // Map AckResult → ack status + rich detail (verb + effective_state + pending payload).
         // See plan Phase 6 Task 6.4 for the backend schema.
@@ -579,8 +616,8 @@ final class CommandPoller {
     ///
     /// 1. Persists `selected_set.list_id` via EarnedTimeStore (+ re-keys any
     ///    existing savedList shield record via ActiveLockStore.reKeyShieldRecord).
-    /// 2. Re-arms the `evlin.earned.budget` DeviceActivity ladder via
-    ///    EarnedBudgetScheduler.arm(poolMinutes:capMinutes:selection:).
+    /// 2. Preserves the latest counted minutes as a re-arm offset, then resumes
+    ///    the `evlin.earned.budget` DeviceActivity ladder from now.
     /// 3. Acks the command as "confirmed" regardless of missing optional fields.
     ///
     /// Guard: if the device has no measurement selection (earned-time capture
@@ -637,24 +674,39 @@ final class CommandPoller {
                 EarnedTimeStore.shared.backendRemainingAtLastSync = max(0, min(poolMinutes, capMinutes) - est)
             }
             EarnedTimeStore.shared.lastBackendSyncAt = Date()
+            EarnedTimeStore.shared.earnedUsageOffsetMinutes = max(
+                EarnedTimeStore.shared.latestDeviceEstimate ?? 0,
+                EarnedTimeStore.shared.earnedUsageOffsetMinutes
+            )
             guard EarnedTimeStore.shared.usageCountingAllowed else {
                 EarnedBudgetScheduler.shared.stop()
                 return await ackEarnedTimeConfig(commandID: commandID, api: api)
             }
-            if let armOverride = armBudgetOverride {
+            if let armOverride = armBudgetOverride, EarnedTimeStore.shared.hasMeasurableSelection {
                 // Test seam: provide the real selection (or empty) to the override
                 // so tests can verify pool/cap values without DeviceActivity.
-                let selection = EarnedTimeStore.shared.measurementSelection
-                    ?? FamilyActivitySelection()
+                let selection = EarnedTimeStore.shared.measurementSelection!
+                CommandDeliveryDiagnostics.record(
+                    CommandDeliveryDiagnostics.keyEarnedArmAttempt,
+                    "test-arm-override pool=\(poolMinutes) cap=\(capMinutes) \(EarnedBudgetScheduler.selectionSummary(selection))"
+                )
                 armOverride(poolMinutes, capMinutes, selection)
-            } else if let selection = EarnedTimeStore.shared.measurementSelection {
-                EarnedBudgetScheduler.shared.arm(
+            } else if EarnedTimeStore.shared.hasMeasurableSelection,
+                      let selection = EarnedTimeStore.shared.measurementSelection {
+                EarnedBudgetScheduler.shared.armFromNow(
                     poolMinutes: poolMinutes,
                     capMinutes: capMinutes,
                     selection: selection
                 )
+            } else {
+                let selection = EarnedTimeStore.shared.measurementSelection
+                let summary = selection.map(EarnedBudgetScheduler.selectionSummary) ?? "(missing)"
+                CommandDeliveryDiagnostics.record(
+                    CommandDeliveryDiagnostics.keyEarnedArmAttempt,
+                    "skipped config-not-measurable pool=\(poolMinutes) cap=\(capMinutes) lockedSetID=\(EarnedTimeStore.shared.lockedSetID ?? "(missing)") \(summary)"
+                )
             }
-            // If measurementSelection is nil, skip arm() gracefully.
+            // If measurementSelection is missing or empty, skip arm() gracefully.
         }
 
         // Step 3: Ack as confirmed.

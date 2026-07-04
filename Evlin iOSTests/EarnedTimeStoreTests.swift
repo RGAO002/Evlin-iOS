@@ -37,6 +37,23 @@ final class EarnedTimeStoreTests: XCTestCase {
         XCTAssertFalse(store.isEarnedTimeReady)
     }
 
+    func test_hasMeasurableSelection_falseForEmptySavedSelection() {
+        let store = freshStore()
+        store.saveMeasurementSelection(FamilyActivitySelection())
+
+        XCTAssertFalse(store.hasMeasurableSelection)
+    }
+
+    @MainActor
+    func test_identityOwnerComparison_treatsUUIDCaseAsSameIdentity() {
+        let id = UUID()
+
+        XCTAssertTrue(EarnedBudgetArming.isSameDeviceIdentity(
+            id.uuidString.lowercased(),
+            id.uuidString.uppercased()
+        ))
+    }
+
     func test_isEarnedTimeReady_falseWhenOnlyLockedSetIdPresent() {
         let store = freshStore()
         let id = UUID()
@@ -44,11 +61,11 @@ final class EarnedTimeStoreTests: XCTestCase {
         XCTAssertFalse(store.isEarnedTimeReady)
     }
 
-    func test_isEarnedTimeReady_trueWhenBothPresent() {
+    func test_isEarnedTimeReady_falseWhenLockedSetIdAndEmptySelectionPresent() {
         let store = freshStore()
         store.saveMeasurementSelection(FamilyActivitySelection())
         store.saveLockedSetID(UUID().uuidString, tokenData: nil)
-        XCTAssertTrue(store.isEarnedTimeReady)
+        XCTAssertFalse(store.isEarnedTimeReady)
     }
 
     // MARK: - Measurement selection round-trip

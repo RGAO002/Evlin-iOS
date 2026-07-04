@@ -64,6 +64,8 @@ struct CommandDeliveryDiagnosticsView: View {
         Section {
             earnedRow("usageCountingAllowed", store.usageCountingAllowed ? "true" : "false")
             earnedRow("last skipped usage event", CommandDeliveryDiagnostics.read(CommandDeliveryDiagnostics.keyUsageCountingLastSkipped))
+            earnedRow("last identity teardown", CommandDeliveryDiagnostics.read(CommandDeliveryDiagnostics.keyEarnedIdentityTransition))
+            earnedRow("last arm attempt", CommandDeliveryDiagnostics.read(CommandDeliveryDiagnostics.keyEarnedArmAttempt))
             earnedRow("last earned threshold", CommandDeliveryDiagnostics.read(CommandDeliveryDiagnostics.keyEarnedLastThreshold))
             earnedRow("last sample POST", CommandDeliveryDiagnostics.read(EarnedSampleReporter.lastSamplePostDebugKey))
             earnedRow("retry queue", EarnedSampleReporter.retryQueueDebugSummary())
@@ -79,6 +81,8 @@ struct CommandDeliveryDiagnosticsView: View {
 
             Button(role: .destructive) {
                 CommandDeliveryDiagnostics.remove(CommandDeliveryDiagnostics.keyEarnedLastThreshold)
+                CommandDeliveryDiagnostics.remove(CommandDeliveryDiagnostics.keyEarnedArmAttempt)
+                CommandDeliveryDiagnostics.remove(CommandDeliveryDiagnostics.keyEarnedIdentityTransition)
                 CommandDeliveryDiagnostics.remove(CommandDeliveryDiagnostics.keyUsageCountingLastSkipped)
                 CommandDeliveryDiagnostics.remove(EarnedSampleReporter.lastSamplePostDebugKey)
                 EarnedSampleReporter.clearRetryQueue()

@@ -182,36 +182,10 @@ struct Evlin_iOSApp: App {
     /// Arm the earned-budget ladder scheduler when the child device is active and
     /// `EarnedTimeStore` reports readiness (measurement selection + locked-set ID
     /// both present). No-op when not ready or when running in parent mode.
-    ///
-    /// The pool/cap policy is sourced from `EarnedTimeStore.backendRemainingAtLastSync`
-    /// (pool) and a sensible 4-hour daily cap constant until the backend supplies a
-    /// per-child cap. The call is safe to repeat — `EarnedBudgetScheduler.arm` is
-    /// idempotent.
+    /// The shared implementation also tears down state left behind by a
+    /// previous device identity (account/family switch).
     private func armEarnedBudgetIfReady() {
-        // Only arm on the child device.
-        let mode = UserDefaults.standard.string(forKey: "appMode") ?? ""
-        guard mode == "child" else { return }
-
-        let store = EarnedTimeStore.shared
-        guard store.isEarnedTimeReady,
-              let selection = store.measurementSelection
-        else { return }
-        guard store.usageCountingAllowed else {
-            EarnedBudgetScheduler.shared.stop()
-            return
-        }
-
-        // Pool: use backend-synced remaining minutes; fall back to a safe 60-min
-        // default so the ladder is still armed even before the first sync.
-        let pool = store.backendRemainingAtLastSync ?? 60
-        // Daily cap: 240 min (4 h) — the hard ceiling for any single day.
-        let cap = 240
-
-        EarnedBudgetScheduler.shared.arm(
-            poolMinutes: pool,
-            capMinutes: cap,
-            selection: selection
-        )
+        EarnedBudgetArming.armIfReady()
     }
 
     /// When the kid device backgrounds Evlin, keep polling briefly using iOS's

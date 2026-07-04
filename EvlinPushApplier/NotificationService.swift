@@ -202,6 +202,16 @@ enum NSELockApplier {
             // same App-Group suite `group.com.evlin.ios` as DefaultLockGroupStore.
             // Compare lowercased, matching the `savedList:<targetKey.lowercased()>`
             // recordKey normalization (ShieldRecord.makeRecordKey).
+            // The command itself can assert default-group identity (backend
+            // `default_lock_group` flag): a fresh family's very first lock
+            // arrives before any earned_time_config ever carried the list id
+            // (the list is empty at provision time), so lockedSetID would be
+            // nil here and the union below would silently paper-lock. Adopt
+            // the id from the flagged command before evaluating the gate.
+            if cmd.target.defaultLockGroup == true,
+               EarnedTimeStore.shared.lockedSetID?.lowercased() != targetKey.lowercased() {
+                EarnedTimeStore.shared.saveLockedSetID(targetKey, tokenData: nil)
+            }
             let isDefaultLockGroup = EarnedTimeStore.shared.lockedSetID
                 .map { $0.lowercased() == targetKey.lowercased() } ?? false
             if isDefaultLockGroup {
@@ -375,6 +385,7 @@ private struct NSEWireCommand: Decodable {
             categoryHint: categoryHint,
             targetAll: poll.target.target_all ?? false,
             allSelected: poll.target.all_selected,
+            defaultLockGroup: poll.target.default_lock_group,
             originalRequest: poll.target.original_request,
             targetDisplay: poll.target.target_display,
             targetChildID: poll.target.target_child_id.flatMap(UUID.init(uuidString:)),
@@ -406,6 +417,7 @@ private struct NSEWireTarget: Decodable {
     let category_hint: String?
     let target_all: Bool?
     let all_selected: Bool?          // Task 3: kid's saved-list selection was "all" at upload time
+    let default_lock_group: Bool?    // command targets the default "Locked set"
     let original_request: String
     let target_display: String?
     let target_child_id: String?
@@ -424,6 +436,7 @@ private struct NSEWireTarget: Decodable {
         case categoryHint
         case target_all
         case all_selected
+        case default_lock_group
         case original_request
         case target_display
         case target_child_id
@@ -449,6 +462,7 @@ private struct NSEWireTarget: Decodable {
             ?? c.decodeIfPresent(String.self, forKey: .categoryHint)
         target_all = try c.decodeIfPresent(Bool.self, forKey: .target_all)
         all_selected = try c.decodeIfPresent(Bool.self, forKey: .all_selected)
+        default_lock_group = try c.decodeIfPresent(Bool.self, forKey: .default_lock_group)
         original_request = try c.decodeIfPresent(String.self, forKey: .original_request) ?? ""
         target_display = try c.decodeIfPresent(String.self, forKey: .target_display)
         target_child_id = try c.decodeIfPresent(String.self, forKey: .target_child_id)

@@ -138,6 +138,10 @@ struct ProfileView: View {
     // Neutral (non-error) status note, e.g. "queued — will apply when the
     // phone next checks in". Shown in muted text, distinct from lockError.
     @State private var lockNote: String? = nil
+    /// Set when the "Queued …" note is showing: the lock state we're waiting
+    /// for. Once any lock-state refresh observes it, the note clears — the
+    /// receipt must never keep claiming "queued" after the device acked.
+    @State private var pendingLockWant: Bool? = nil
     // B6 carry: once the backend list_id is first learned, remember it so
     // we only call saveLockedSetID + reKeyShieldRecord once per session.
     @State private var knownBackendListID: String? = nil
@@ -391,7 +395,7 @@ struct ProfileView: View {
 
             // B9: pool-cascade sheet host — zero-size ZStack sibling so the
             // sheet modifier doesn't inflate the main VStack modifier chain.
-            PoolCascadeSheetHost(pending: $pendingPoolCascade) { confirmPoolSave($0) }
+            PoolCascadeSheetHost(pending: $pendingPoolCascade) { confirmPoolSave($0, effective: $1) }
         }
         .background(Color.evSurfaceContainerLow)
         .navigationBarBackButtonHidden(true)
@@ -909,6 +913,7 @@ struct ProfileView: View {
         lockNote = applied ? nil : (wantLocked
             ? "Queued — \(displayChild.name)'s phone will lock when it next checks in."
             : "Queued — \(displayChild.name)'s phone will unlock when it next checks in.")
+        pendingLockWant = applied ? nil : wantLocked
         // Push the now-real state to Home.
         await familyStore.refresh()
     }
@@ -934,6 +939,11 @@ struct ProfileView: View {
             localStatus = buttonState.isShielded ? .locked : .unlocked
             // B10: track exhausted separately so toggleDeviceLock can route correctly.
             lastFetchedExhausted = state.exhausted == true
+        }
+        // The awaited state arrived — retire the stale "Queued …" note.
+        if let want = pendingLockWant, buttonState.isShielded == want {
+            lockNote = nil
+            pendingLockWant = nil
         }
     }
 
@@ -1505,11 +1515,12 @@ struct ProfileView: View {
 
     // MARK: - B9: Pool save with cascade gate
 
-    /// Called by PoolCascadeSheetHost when the user taps "Apply Tomorrow".
-    /// Clears the pending state and proceeds with the confirmed save.
-    private func confirmPoolSave(_ newMinutes: Int) {
+    /// Called by PoolCascadeSheetHost with the parent's chosen effective date
+    /// ("today" | "tomorrow"). Clears the pending state and proceeds with the
+    /// confirmed save.
+    private func confirmPoolSave(_ newMinutes: Int, effective: String) {
         pendingPoolCascade = nil
-        savePool(newMinutes: newMinutes, confirmedCascade: true)
+        savePool(newMinutes: newMinutes, confirmedCascade: true, effective: effective)
     }
 
     /// Save the daily pool (earned-time budget) via putEarnedConfig.
@@ -1533,10 +1544,13 @@ struct ProfileView: View {
             return   // DO NOT call putEarnedConfig — wait for confirmation
         }
 
-        // Optimistic local update.
+        // Optimistic local update. A tomorrow-effective save is annotated so
+        // the label doesn't claim a limit that isn't enforced until midnight.
         dailyLimitMinutes = newMinutes
         if let i = rules.firstIndex(where: { $0.id == "screen" }) {
-            rules[i].detail = "\(formatLimit(newMinutes)) limit per day"
+            rules[i].detail = effective == "tomorrow"
+                ? "\(formatLimit(newMinutes)) limit per day from tomorrow"
+                : "\(formatLimit(newMinutes)) limit per day"
         }
         // B9: persist via backend when we have a UUID child id;
         // fall back to UserDefaults for legacy / offline path.
@@ -1811,70 +1825,6 @@ private struct ProfileAddMenu: View {
     }
 }
 
-// MARK: - B9: Pool cascade confirm sheet
-
-/// Presented when lowering the earned-time pool requires cascade confirmation.
-/// Mirrors `CascadeConfirmSheet` in DeviceAppsSheet but lives at the profile level.
-private struct PoolCascadeConfirmSheet: View {
-    let result: EarnedCascadeDecision.Result
-    var onApplyTomorrow: () -> Void = {}
-    var onCancel: () -> Void = {}
-
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        NavigationStack {
-            List {
-                Section {
-                    if result.affectedDevices.isEmpty && result.affectedApps.isEmpty {
-                        Text("Lowering the daily pool may reduce device and app limits.")
-                            .font(.custom("Inter", size: 14))
-                            .foregroundStyle(Color.evOnSurfaceVariant)
-                    }
-                    ForEach(result.affectedDevices, id: \.deviceID) { dev in
-                        Text(dev.description)
-                            .font(.custom("Inter", size: 14))
-                    }
-                    ForEach(result.affectedApps, id: \.bundleID) { app in
-                        Text(app.description)
-                            .font(.custom("Inter", size: 14))
-                    }
-                } header: {
-                    Text("These limits will change")
-                        .font(.custom("Inter", size: 12).weight(.semibold))
-                }
-
-                Section {
-                    Text("The changes take effect at midnight so today's sessions aren't cut short.")
-                        .font(.custom("Inter", size: 13))
-                        .foregroundStyle(Color.evOnSurfaceVariant)
-                }
-            }
-            .navigationTitle("Confirm Changes")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("Cancel") {
-                        onCancel()
-                        dismiss()
-                    }
-                    .foregroundStyle(Color.evPrimary)
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Apply Tomorrow") {
-                        onApplyTomorrow()
-                        dismiss()
-                    }
-                    .font(.custom("Inter", size: 17).weight(.semibold))
-                    .foregroundStyle(Color.evPrimary)
-                }
-            }
-        }
-        .presentationDetents([.medium])
-        .presentationDragIndicator(.visible)
-    }
-}
-
 // MARK: - B9: Pool cascade sheet host
 //
 // A zero-size anchor view carrying the sheet modifier for pool-reduction
@@ -1884,18 +1834,20 @@ private struct PoolCascadeConfirmSheet: View {
 
 private struct PoolCascadeSheetHost: View {
     @Binding var pending: PoolCascadeState?
-    /// Called with confirmed newMinutes when the parent taps "Apply Tomorrow".
-    /// Also dismisses the sheet by setting pending = nil BEFORE calling back.
-    var onSave: (Int) -> Void = { _ in }
+    /// Called with the confirmed newMinutes and the chosen effective date
+    /// ("today" | "tomorrow"). Dismisses the sheet by setting pending = nil
+    /// BEFORE calling back.
+    var onSave: (Int, String) -> Void = { _, _ in }
 
     var body: some View {
         Color.clear
             .frame(width: 0, height: 0)
             .allowsHitTesting(false)
             .sheet(item: $pending) { state in
-                PoolCascadeConfirmSheet(
+                EarnedCascadeConfirmSheet(
                     result: state.decision,
-                    onApplyTomorrow: { onSave(state.newMinutes) },
+                    summary: "Lowering the daily pool may reduce device and app limits.",
+                    onApply: { effective in onSave(state.newMinutes, effective) },
                     onCancel: { pending = nil }
                 )
             }

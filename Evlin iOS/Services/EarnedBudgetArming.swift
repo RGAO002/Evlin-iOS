@@ -25,6 +25,24 @@ enum EarnedBudgetArming {
     /// earned-budget ladder + EarnedTimeStore day state.
     static let identityOwnerKey = "evlin.earned.identityOwner"
 
+    nonisolated static func canonicalDeviceIdentity(_ raw: String?) -> String? {
+        guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty,
+              let uuid = UUID(uuidString: trimmed)
+        else { return nil }
+        return uuid.uuidString.lowercased()
+    }
+
+    nonisolated static func isSameDeviceIdentity(_ lhs: String?, _ rhs: String?) -> Bool {
+        if let left = canonicalDeviceIdentity(lhs),
+           let right = canonicalDeviceIdentity(rhs) {
+            return left == right
+        }
+        let leftRaw = lhs?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let rightRaw = rhs?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return !leftRaw.isEmpty && leftRaw == rightRaw
+    }
+
     /// Detect a child-device identity change and tear down earned-time state
     /// armed under the previous identity: stop the old DeviceActivity ladder
     /// and clear day/usage state so old thresholds can never be billed to the
@@ -37,20 +55,31 @@ enum EarnedBudgetArming {
     /// Returns true when a transition was detected and state was torn down.
     @discardableResult
     static func reconcileIdentityTransition() -> Bool {
-        guard let current = UserDefaults.standard.string(
+        guard let currentRaw = UserDefaults.standard.string(
                 forKey: CommandPoller.childDeviceIDDefaultsKey),
-              !current.isEmpty
+              !currentRaw.isEmpty
         else { return false }
+        let current = canonicalDeviceIdentity(currentRaw) ?? currentRaw
 
         let suite = UserDefaults(suiteName: "group.com.evlin.ios")
-        let owner = suite?.string(forKey: identityOwnerKey)
-        guard owner != current else { return false }
+        let ownerRaw = suite?.string(forKey: identityOwnerKey)
+        if isSameDeviceIdentity(ownerRaw, currentRaw) {
+            if ownerRaw != current {
+                suite?.set(current, forKey: identityOwnerKey)
+            }
+            return false
+        }
 
         defer { suite?.set(current, forKey: identityOwnerKey) }
-        guard let owner, !owner.isEmpty else { return false }
+        guard let ownerRaw, !ownerRaw.isEmpty else { return false }
+        let owner = canonicalDeviceIdentity(ownerRaw) ?? ownerRaw
 
         EarnedBudgetScheduler.shared.stop()
         EarnedTimeStore.shared.clearUsageStateForIdentityChange()
+        CommandDeliveryDiagnostics.record(
+            CommandDeliveryDiagnostics.keyEarnedIdentityTransition,
+            "teardown owner=\(owner) current=\(current)"
+        )
         ScreenTimeEventLog.emit(ScreenTimeEvent(
             ts: ISO8601DateFormatter().string(from: Date()),
             emitter: .kidApp,
@@ -60,7 +89,10 @@ enum EarnedBudgetArming {
             source: .earnedPool,
             app: "device-wide",
             reason: "identity_switch_teardown",
-            nums: nil, transition: nil, policyGen: nil, corrID: nil))
+            nums: nil,
+            transition: .init(before: owner, after: current),
+            policyGen: nil,
+            corrID: nil))
         return true
     }
 
@@ -74,20 +106,54 @@ enum EarnedBudgetArming {
 
         // Only arm on the child device.
         let mode = UserDefaults.standard.string(forKey: "appMode") ?? ""
-        guard mode == "child" else { return }
+        guard mode == "child" else {
+            CommandDeliveryDiagnostics.record(
+                CommandDeliveryDiagnostics.keyEarnedArmAttempt,
+                "skipped appMode=\(mode.isEmpty ? "(empty)" : mode)"
+            )
+            return
+        }
 
         let store = EarnedTimeStore.shared
-        guard store.isEarnedTimeReady,
-              let selection = store.measurementSelection
-        else { return }
+        guard let selection = store.measurementSelection else {
+            CommandDeliveryDiagnostics.record(
+                CommandDeliveryDiagnostics.keyEarnedArmAttempt,
+                "skipped missing-measurement lockedSetID=\(store.lockedSetID ?? "(missing)")"
+            )
+            return
+        }
+        guard store.hasMeasurableSelection else {
+            CommandDeliveryDiagnostics.record(
+                CommandDeliveryDiagnostics.keyEarnedArmAttempt,
+                "skipped empty-measurement lockedSetID=\(store.lockedSetID ?? "(missing)") \(EarnedBudgetScheduler.selectionSummary(selection))"
+            )
+            return
+        }
+        guard store.lockedSetID != nil else {
+            CommandDeliveryDiagnostics.record(
+                CommandDeliveryDiagnostics.keyEarnedArmAttempt,
+                "skipped missing-locked-set \(EarnedBudgetScheduler.selectionSummary(selection))"
+            )
+            return
+        }
         guard store.usageCountingAllowed else {
             EarnedBudgetScheduler.shared.stop()
+            CommandDeliveryDiagnostics.record(
+                CommandDeliveryDiagnostics.keyEarnedArmAttempt,
+                "skipped usage-counting-paused \(EarnedBudgetScheduler.selectionSummary(selection))"
+            )
             return
         }
 
         let inputs = BigKidStatePoller.earnedRearmInputs(store: store)
         store.earnedUsageOffsetMinutes = inputs.offset
-        guard min(inputs.poolMinutes, inputs.capMinutes) - inputs.offset > 0 else { return }
+        guard min(inputs.poolMinutes, inputs.capMinutes) - inputs.offset > 0 else {
+            CommandDeliveryDiagnostics.record(
+                CommandDeliveryDiagnostics.keyEarnedArmAttempt,
+                "skipped no-remaining pool=\(inputs.poolMinutes) cap=\(inputs.capMinutes) offset=\(inputs.offset) \(EarnedBudgetScheduler.selectionSummary(selection))"
+            )
+            return
+        }
 
         EarnedBudgetScheduler.shared.armFromNow(
             poolMinutes: inputs.poolMinutes,

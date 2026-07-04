@@ -111,14 +111,33 @@ final class EarnedBudgetScheduler {
     /// idempotent for the same activity name (stops any prior run first).
     /// The call is a no-op when `poolMinutes` or `capMinutes` is ≤ 0, or when
     /// `thresholds` would produce no events.
+    @discardableResult
     func arm(
         poolMinutes: Int,
         capMinutes: Int,
         selection: FamilyActivitySelection,
         schedule: DeviceActivitySchedule? = nil
-    ) {
+    ) -> Bool {
+        let tokenSummary = Self.selectionSummary(selection)
+        guard selection.applicationTokens.count > 0
+                || selection.categoryTokens.count > 0
+                || selection.webDomainTokens.count > 0
+        else {
+            CommandDeliveryDiagnostics.record(
+                CommandDeliveryDiagnostics.keyEarnedArmAttempt,
+                "skipped empty-selection pool=\(poolMinutes) cap=\(capMinutes) \(tokenSummary)"
+            )
+            return false
+        }
+
         let steps = Self.thresholds(poolMinutes: poolMinutes, capMinutes: capMinutes)
-        guard !steps.isEmpty else { return }
+        guard !steps.isEmpty else {
+            CommandDeliveryDiagnostics.record(
+                CommandDeliveryDiagnostics.keyEarnedArmAttempt,
+                "skipped no-thresholds pool=\(poolMinutes) cap=\(capMinutes) \(tokenSummary)"
+            )
+            return false
+        }
 
         let schedule = schedule ?? Self.dailySchedule()
 
@@ -130,21 +149,36 @@ final class EarnedBudgetScheduler {
             let event = DeviceActivityEvent(
                 applications: selection.applicationTokens,
                 categories: selection.categoryTokens,
+                webDomains: selection.webDomainTokens,
                 threshold: DateComponents(minute: minutes)
             )
             events[name] = event
         }
 
-        try? center.startMonitoring(Self.activityName, during: schedule, events: events)
+        do {
+            try center.startMonitoring(Self.activityName, during: schedule, events: events)
+            CommandDeliveryDiagnostics.record(
+                CommandDeliveryDiagnostics.keyEarnedArmAttempt,
+                "armed events=\(events.count) first=\(steps.first ?? 0) last=\(steps.last ?? 0) pool=\(poolMinutes) cap=\(capMinutes) \(tokenSummary)"
+            )
+            return true
+        } catch {
+            CommandDeliveryDiagnostics.record(
+                CommandDeliveryDiagnostics.keyEarnedArmAttempt,
+                "failed startMonitoring error=\(error.localizedDescription) pool=\(poolMinutes) cap=\(capMinutes) \(tokenSummary)"
+            )
+            return false
+        }
     }
 
+    @discardableResult
     func armFromNow(
         poolMinutes: Int,
         capMinutes: Int,
         selection: FamilyActivitySelection,
         now: Date = Date(),
         calendar: Calendar = .current
-    ) {
+    ) -> Bool {
         arm(
             poolMinutes: poolMinutes,
             capMinutes: capMinutes,
@@ -156,5 +190,9 @@ final class EarnedBudgetScheduler {
     /// Stop monitoring the earned-budget activity (e.g. at end of day / reset).
     func stop() {
         center.stopMonitoring([Self.activityName])
+    }
+
+    nonisolated static func selectionSummary(_ selection: FamilyActivitySelection) -> String {
+        "apps=\(selection.applicationTokens.count) categories=\(selection.categoryTokens.count) web=\(selection.webDomainTokens.count)"
     }
 }

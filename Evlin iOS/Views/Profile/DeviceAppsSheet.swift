@@ -258,13 +258,14 @@ struct DeviceAppsSheet: View {
             get: { pendingCascade.map { CascadeConfirmItem(result: $0) } },
             set: { if $0 == nil { pendingCascade = nil } }
         )) { item in
-            CascadeConfirmSheet(
+            EarnedCascadeConfirmSheet(
                 result: item.result,
-                onApplyTomorrow: {
+                summary: "Lowering this device's limit may reduce app limits.",
+                onApply: { effective in
                     pendingCascade = nil
                     // Re-call putDeviceCap with confirm_cascade (handled in saveDeviceCap).
                     if let cap = deviceCapMinutes {
-                        saveDeviceCap(cap, confirmedCascade: true)
+                        saveDeviceCap(cap, confirmedCascade: true, effective: effective)
                     }
                 },
                 onCancel: { pendingCascade = nil }
@@ -725,28 +726,20 @@ struct DeviceAppsSheet: View {
 /// control identity that let unrelated churn (e.g. the artwork backfill,
 /// see Layer 1) potentially fire another row's toggle-set closure.
 ///
-/// Layer 3 (gesture-diff gate): before forwarding a Toggle change to the
-/// network call, this row compares the incoming value against its own
-/// `lastAppliedEnabled` (seeded on `onAppear`). A change that doesn't
-/// actually differ from the last-applied state is suppressed — nothing is
-/// sent to the network — and BOTH fired and suppressed invocations write a
-/// `ScreenTimeEventLog` diagnostic so a future phantom toggle is provable
-/// from the on-device event timeline instead of merely suspected.
+/// Layer 3 (explicit switch intent): the row renders a button styled like an
+/// iOS switch instead of putting network side effects in a `Toggle` binding
+/// setter. SwiftUI may call a binding setter for reasons other than a direct
+/// touch; this path logs and persists only from the button's tap action.
 private struct DeviceAppRow: View {
     @Binding var app: DeviceAppItem
     let resolvedArtworkURL: URL?
     let isEditingLimit: Bool
     let onToggleEditingLimit: () -> Void
     let limitPicker: () -> AnyView
-    /// Called ONLY when the diff-gate (Layer 3) determines this is a real,
-    /// changed user gesture. Owns the network call + optimistic update in
-    /// the parent (`toggleLimit`) — this row does not touch persistence.
+    /// Called ONLY from the explicit switch tap action. Owns the network call
+    /// + optimistic update in the parent (`toggleLimit`) — this row does not
+    /// touch persistence.
     let onToggle: (Bool) -> Void
-
-    /// Last value this row is known to have actually applied (seeded from
-    /// `app.enabled` on appear, updated whenever a toggle is actually fired).
-    /// `nil` only before the first `onAppear`.
-    @State private var lastAppliedEnabled: Bool? = nil
 
     init(app: Binding<DeviceAppItem>,
          resolvedArtworkURL: URL?,
@@ -831,14 +824,15 @@ private struct DeviceAppRow: View {
                         .disabled(app.bundleID == nil)
                         .opacity(app.bundleID == nil ? 0.5 : 1)
 
-                        Toggle("", isOn: Binding(
-                            get: { app.enabled },
-                            set: { newValue in handleToggle(newValue) }
-                        ))
-                        .labelsHidden()
-                        .tint(Color.evSecondary)
+                        Button(action: handleToggleTap) {
+                            AppLimitSwitchVisual(isOn: app.enabled)
+                        }
+                        .buttonStyle(.plain)
                         // No bundle id → can't set/clear a backend limit; lock off.
                         .disabled(app.bundleID == nil)
+                        .opacity(app.bundleID == nil ? 0.5 : 1)
+                        .accessibilityLabel("\(app.name) limit")
+                        .accessibilityValue(app.enabled ? "On" : "Off")
                     }
 
                     // Progress bar
@@ -870,20 +864,14 @@ private struct DeviceAppRow: View {
                     .padding(.bottom, 14)
             }
         }
-        .onAppear {
-            if lastAppliedEnabled == nil {
-                lastAppliedEnabled = app.enabled
-            }
-        }
     }
 
-    /// Layer 3: gesture-diff gate. Only forwards to `onToggle` (which owns
-    /// the network call) when the incoming value actually differs from the
-    /// last value THIS row applied. Every call — fired or suppressed — is
-    /// logged so a future phantom toggle can be pinpointed from the
-    /// on-device `ScreenTimeEventLog` timeline.
-    private func handleToggle(_ newValue: Bool) {
-        let fired = AppLimitToggleGate.decide(lastApplied: lastAppliedEnabled, incoming: newValue) == .fire
+    /// Layer 3: only a direct tap on this switch button reaches the network
+    /// path. The event is still logged so the parent/kid/backend timeline can
+    /// prove exactly which row initiated a command.
+    private func handleToggleTap() {
+        let previousValue = app.enabled
+        let newValue = AppLimitToggleIntent.nextValue(currentEnabled: previousValue)
         ScreenTimeEventLog.emit(ScreenTimeEvent(
             ts: ISO8601DateFormatter().string(from: Date()),
             emitter: .parentApp,
@@ -892,15 +880,13 @@ private struct DeviceAppRow: View {
             kind: .decision,
             source: .perAppLimit,
             app: app.bundleID ?? app.id,
-            reason: fired ? "toggle_user" : "toggle_suppressed_no_change",
+            reason: "toggle_user",
             nums: nil,
             transition: ScreenTimeEvent.Transition(
-                before: (lastAppliedEnabled.map { $0 ? "on" : "off" }) ?? "unknown",
+                before: previousValue ? "on" : "off",
                 after: newValue ? "on" : "off"),
             policyGen: nil,
             corrID: nil))
-        guard fired else { return }
-        lastAppliedEnabled = newValue
         onToggle(newValue)
     }
 
@@ -933,62 +919,25 @@ private struct DeviceAppRow: View {
     }
 }
 
-// MARK: - B9: Cascade confirm sheet
-
-/// Presented when lowering pool or cap would affect existing device/app rules.
-/// Lists the affected items, defaults to "Apply tomorrow".
-private struct CascadeConfirmSheet: View {
-    let result: EarnedCascadeDecision.Result
-    var onApplyTomorrow: () -> Void = {}
-    var onCancel: () -> Void = {}
-
-    @Environment(\.dismiss) private var dismiss
+private struct AppLimitSwitchVisual: View {
+    let isOn: Bool
 
     var body: some View {
-        NavigationStack {
-            List {
-                Section {
-                    ForEach(result.affectedDevices, id: \.deviceID) { dev in
-                        Text(dev.description)
-                            .font(.custom("Inter", size: 14))
-                    }
-                    ForEach(result.affectedApps, id: \.bundleID) { app in
-                        Text(app.description)
-                            .font(.custom("Inter", size: 14))
-                    }
-                } header: {
-                    Text("These limits will change")
-                        .font(.custom("Inter", size: 12).weight(.semibold))
-                }
-
-                Section {
-                    Text("The changes take effect at midnight so today's sessions aren't cut short.")
-                        .font(.custom("Inter", size: 13))
-                        .foregroundStyle(Color.evOnSurfaceVariant)
-                }
+        RoundedRectangle(cornerRadius: 16, style: .continuous)
+            .fill(isOn ? Color.evSecondary : Color.evSurfaceContainerHigh)
+            .frame(width: 51, height: 31)
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(isOn ? Color.clear : Color.evOutlineVariant.opacity(0.7), lineWidth: 1)
+            )
+            .overlay(alignment: isOn ? .trailing : .leading) {
+                Circle()
+                    .fill(Color.white)
+                    .frame(width: 27, height: 27)
+                    .shadow(color: Color.black.opacity(0.18), radius: 2, x: 0, y: 1)
+                    .padding(2)
             }
-            .navigationTitle("Confirm Changes")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("Cancel") {
-                        onCancel()
-                        dismiss()
-                    }
-                    .foregroundStyle(Color.evPrimary)
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Apply Tomorrow") {
-                        onApplyTomorrow()
-                        dismiss()
-                    }
-                    .font(.custom("Inter", size: 17).weight(.semibold))
-                    .foregroundStyle(Color.evPrimary)
-                }
-            }
-        }
-        .presentationDetents([.medium])
-        .presentationDragIndicator(.visible)
+            .animation(.easeOut(duration: 0.16), value: isOn)
     }
 }
 

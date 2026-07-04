@@ -97,7 +97,9 @@ final class EarnedConfigCommandTests: XCTestCase {
     func test_poller_earnedTimeConfig_doesNotRouteToExecuteShield() async throws {
         let store = EarnedTimeStore.shared
         store.removeAll()
-        // Provide a measurement selection so the arm() path is exercised.
+        // Empty measurement selections must not arm; a persisted empty value
+        // was the bug that made setup look complete while total/device usage
+        // never produced DeviceActivity thresholds.
         store.saveMeasurementSelection(FamilyActivitySelection())
 
         let poller = CommandPoller.shared
@@ -161,10 +163,9 @@ final class EarnedConfigCommandTests: XCTestCase {
                        "earned_time_config must not add shield records " +
                        "(command must not reach executeShield)")
 
-        // arm() must be called once with the correct pool and cap.
-        XCTAssertEqual(armCallCount, 1, "EarnedBudgetScheduler.arm() must be called once")
-        XCTAssertEqual(armedPool, 90, "arm() pool must equal daily_pool_minutes from payload")
-        XCTAssertEqual(armedCap,  60, "arm() cap must equal device_cap_minutes from payload")
+        XCTAssertEqual(armCallCount, 0, "empty measurement selection must not arm")
+        XCTAssertNil(armedPool)
+        XCTAssertNil(armedCap)
         XCTAssertEqual(store.poolMinutes, 90,
                        "pool must persist so task-completion rearming uses the latest policy")
         XCTAssertEqual(store.capMinutes, 60,
@@ -216,7 +217,7 @@ final class EarnedConfigCommandTests: XCTestCase {
         XCTAssertEqual(store.capMinutes, 60)
     }
 
-    func test_poller_consecutiveEarnedTimeConfigsRearmsWithLatestPoolAndCap() async throws {
+    func test_poller_consecutiveEarnedTimeConfigsPersistLatestPoolAndCapWithoutEmptyArm() async throws {
         let store = EarnedTimeStore.shared
         store.removeAll()
         store.saveMeasurementSelection(FamilyActivitySelection())
@@ -266,10 +267,48 @@ final class EarnedConfigCommandTests: XCTestCase {
         await poller.pollOnceForCurrentDevice()
         await poller.pollOnceForCurrentDevice()
 
-        XCTAssertEqual(armCalls.map(\.pool), [120, 60])
-        XCTAssertEqual(armCalls.map(\.cap), [90, 45])
+        XCTAssertTrue(armCalls.isEmpty, "empty measurement selection must not arm")
         XCTAssertEqual(store.poolMinutes, 60)
         XCTAssertEqual(store.capMinutes, 45)
+    }
+
+    func test_poller_earnedTimeConfigPreservesExistingEstimateAsRearmOffset() async throws {
+        let store = EarnedTimeStore.shared
+        store.removeAll()
+        store.saveMeasurementSelection(FamilyActivitySelection())
+        store.latestDeviceEstimate = 25
+        store.earnedUsageOffsetMinutes = 0
+
+        let poller = CommandPoller.shared
+        let savedCommandsOverride  = poller.pollCommandsOverride
+        let savedSaveListOverride  = poller.saveLockedSetIDOverride
+        let savedArmOverride       = poller.armBudgetOverride
+        let savedDeviceIDProvider  = poller.childDeviceIDProvider
+        let savedOneShotOverride   = poller.oneShotPollOverride
+        defer {
+            poller.pollCommandsOverride   = savedCommandsOverride
+            poller.saveLockedSetIDOverride = savedSaveListOverride
+            poller.armBudgetOverride      = savedArmOverride
+            poller.childDeviceIDProvider  = savedDeviceIDProvider
+            poller.oneShotPollOverride    = savedOneShotOverride
+            store.removeAll()
+        }
+
+        let deviceID = UUID(uuidString: "DEADBEEF-0000-0000-0000-000000000006")!
+        poller.childDeviceIDProvider = { deviceID }
+        poller.oneShotPollOverride = nil
+        poller.saveLockedSetIDOverride = { _, _ in }
+        poller.armBudgetOverride = { _, _, _ in }
+        poller.pollCommandsOverride = { _, _ in
+            [try JSONDecoder().decode(PollCommandDTO.self,
+                from: self.makeConfigJSON(poolMinutes: 140, capMinutes: 70,
+                                          remainingMinutes: 115))]
+        }
+
+        await poller.pollOnceForCurrentDevice()
+
+        XCTAssertEqual(store.earnedUsageOffsetMinutes, 25,
+                       "config re-arm must preserve already-counted minutes")
     }
 
     // MARK: - Wave-2 Task 1 veto-staleness fix: backendRemainingAtLastSync source

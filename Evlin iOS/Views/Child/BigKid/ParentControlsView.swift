@@ -27,6 +27,7 @@ struct ParentControlsView: View {
     @State private var notifAuthorized = false
     @State private var showLockList = false
     @State private var showSignOutConfirm = false
+    @State private var showScreenTimeCapture = false
 
     private var deletionBinding: Binding<Bool> {
         Binding(
@@ -42,6 +43,16 @@ struct ParentControlsView: View {
                     Button { showLockList = true } label: {
                         rowLabel(icon: "square.grid.2x2.fill", title: "App Controls",
                                  subtitle: "Choose what Evlin can lock & monitor", trailingChevron: true,
+                                 badgeColor: EvlinKidColors.green700)
+                    }
+                    // Screen Time tracking capture. The kid
+                    // home shows this once (EarnedTimeStore.measurementSelection == nil)
+                    // then it vanishes; this parent-menu row is the durable entry point
+                    // so a parent can (re-)capture whole-device coverage anytime. Both
+                    // surfaces present the SAME ScreenTimeCaptureView.
+                    Button { showScreenTimeCapture = true } label: {
+                        rowLabel(icon: "chart.bar.xaxis", title: "Screen Time Tracking",
+                                 subtitle: "Choose what counts toward daily screen time", trailingChevron: true,
                                  badgeColor: EvlinKidColors.green700)
                     }
                 }
@@ -121,6 +132,24 @@ struct ParentControlsView: View {
                                 Button("Done") { showLockList = false }
                             }
                         }
+                }
+            }
+            .sheet(isPresented: $showScreenTimeCapture) {
+                NavigationStack {
+                    ScrollView {
+                        // Same component the kid-home one-time card uses; onDone
+                        // dismisses the sheet once the selection is saved.
+                        ScreenTimeCaptureView { showScreenTimeCapture = false }
+                            .padding(20)
+                    }
+                    .background(EvlinKidColors.surface2.ignoresSafeArea())
+                    .navigationTitle("Screen Time Tracking")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Done") { showScreenTimeCapture = false }
+                        }
+                    }
                 }
             }
             .alert("Sign out this device?", isPresented: $showSignOutConfirm) {
