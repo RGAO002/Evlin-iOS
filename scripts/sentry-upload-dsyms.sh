@@ -20,6 +20,41 @@ set -eu
 SENTRY_ORG="evlin"
 SENTRY_PROJECT="evlin-ios"
 
+prune_unlinked_sentry_framework() {
+  APP_BUNDLE="${TARGET_BUILD_DIR:-}/${WRAPPER_NAME:-}"
+  SENTRY_FRAMEWORK="${TARGET_BUILD_DIR:-}/${FRAMEWORKS_FOLDER_PATH:-}/Sentry.framework"
+
+  if [ -z "${TARGET_BUILD_DIR:-}" ] || [ -z "${WRAPPER_NAME:-}" ] || [ -z "${FRAMEWORKS_FOLDER_PATH:-}" ]; then
+    return 0
+  fi
+  if [ ! -d "$APP_BUNDLE" ] || [ ! -d "$SENTRY_FRAMEWORK" ]; then
+    return 0
+  fi
+
+  REFERENCING_BINARY="$(
+    find "$APP_BUNDLE" -type f -perm -111 2>/dev/null | while IFS= read -r candidate; do
+      if otool -L "$candidate" 2>/dev/null | grep -q '^[[:space:]].*Sentry.framework/Sentry'; then
+        printf '%s\n' "$candidate"
+        break
+      fi
+    done
+  )"
+
+  if [ -n "$REFERENCING_BINARY" ]; then
+    echo "Keeping Sentry.framework; referenced by $REFERENCING_BINARY"
+    return 0
+  fi
+
+  # Sentry's SwiftPM product is statically linked into the app, but Xcode can
+  # still embed a tiny unreferenced Sentry.framework stub. App Store Connect then
+  # asks for a dSYM for that stub. Remove it only after proving no executable in
+  # the app bundle links against it.
+  echo "Removing unreferenced Sentry.framework stub from app bundle."
+  rm -rf "$SENTRY_FRAMEWORK"
+}
+
+prune_unlinked_sentry_framework
+
 if [ "${SENTRY_SKIP_DSYM_UPLOAD:-0}" = "1" ]; then
   echo "SENTRY_SKIP_DSYM_UPLOAD=1 - skipping dSYM upload."
   exit 0

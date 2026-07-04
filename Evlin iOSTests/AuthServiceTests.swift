@@ -20,7 +20,29 @@ final class AuthServiceTests: XCTestCase {
     }
 
     override func setUp() { super.setUp(); KeychainStore.shared.clear() }
-    override func tearDown() { KeychainStore.shared.clear(); super.tearDown() }
+    override func tearDown() {
+        KeychainStore.shared.clear()
+        for key in Self.familyScopedDefaultsKeys {
+            UserDefaults.standard.removeObject(forKey: key)
+        }
+        super.tearDown()
+    }
+
+    private static let familyScopedDefaultsKeys = [
+        "evlin.accountID",
+        "evlin.parentProfileID",
+        "evlin.childProfileID",
+        "evlin.familyID",
+        "evlin.parentDeviceID",
+        "evlin.childDeviceID",
+        "evlin.childProfileName",
+        "evlin.childBirthYear",
+        "evlin.childGender",
+        "evlin.protectionMode",
+        "evlin.clientInstallID",
+        "onboardingComplete",
+        "appMode",
+    ]
 
     func testRestoreRebuildsCanonicalAccountFromKeychain() throws {
         let fam = UUID(); let acct = UUID()
@@ -44,5 +66,72 @@ final class AuthServiceTests: XCTestCase {
             accessToken: "a", refreshToken: "r", accountID: UUID().uuidString,
             familyID: nil, displayName: nil, needsFamily: true))
         XCTAssertTrue(auth.hasStoredSession)
+    }
+
+    func testSignOutLocallyClearsFamilyScopedDefaults() {
+        let defaults = UserDefaults.standard
+        defaults.set(UUID().uuidString, forKey: "evlin.accountID")
+        defaults.set(UUID().uuidString, forKey: "evlin.parentProfileID")
+        defaults.set(UUID().uuidString, forKey: "evlin.childProfileID")
+        defaults.set(UUID().uuidString, forKey: "evlin.familyID")
+        defaults.set(UUID().uuidString, forKey: "evlin.parentDeviceID")
+        defaults.set(UUID().uuidString, forKey: "evlin.childDeviceID")
+        defaults.set("Liam", forKey: "evlin.childProfileName")
+        defaults.set(2017, forKey: "evlin.childBirthYear")
+        defaults.set("boy", forKey: "evlin.childGender")
+        defaults.set("max", forKey: "evlin.protectionMode")
+        defaults.set(true, forKey: "onboardingComplete")
+        defaults.set("parent", forKey: "appMode")
+
+        makeAuth().signOutLocally()
+
+        for key in Self.familyScopedDefaultsKeys where key != "evlin.clientInstallID" {
+            XCTAssertNil(defaults.object(forKey: key), "\(key) should be cleared on sign-out")
+        }
+    }
+
+    func testSignOutLocallyRotatesKidCreateInstallID() {
+        let first = APIClient.clientInstallID
+        XCTAssertNotNil(UserDefaults.standard.string(forKey: "evlin.clientInstallID"))
+
+        makeAuth().signOutLocally()
+
+        XCTAssertNil(UserDefaults.standard.string(forKey: "evlin.clientInstallID"))
+        let second = APIClient.clientInstallID
+        XCTAssertNotEqual(first, second, "fresh onboarding must not reuse the old child install id")
+    }
+
+    func testPostAuthFamilyCleanupPreservesOnboardingRole() {
+        let defaults = UserDefaults.standard
+        defaults.set("parent", forKey: "appMode")
+        defaults.set(false, forKey: "onboardingComplete")
+        defaults.set(UUID().uuidString, forKey: "evlin.familyID")
+        defaults.set(UUID().uuidString, forKey: "evlin.childDeviceID")
+
+        AuthService.clearFamilyScopedLocalState(clearOnboardingShell: false)
+
+        XCTAssertEqual(defaults.string(forKey: "appMode"), "parent")
+        XCTAssertEqual(defaults.object(forKey: "onboardingComplete") as? Bool, false)
+        XCTAssertNil(defaults.object(forKey: "evlin.familyID"))
+        XCTAssertNil(defaults.object(forKey: "evlin.childDeviceID"))
+    }
+
+    func testCompletedOnboardingRepairsMissingParentModeFromStoredSession() {
+        let familyID = UUID()
+        let repaired = ContentView.repairedCompletedOnboardingMode(
+            onboardingComplete: true,
+            currentAppMode: "",
+            storedTokens: StoredTokens(
+                accessToken: "a",
+                refreshToken: "r",
+                accountID: UUID().uuidString,
+                familyID: familyID.uuidString,
+                displayName: "Parent",
+                needsFamily: false
+            ),
+            childDeviceID: nil
+        )
+
+        XCTAssertEqual(repaired, "parent")
     }
 }

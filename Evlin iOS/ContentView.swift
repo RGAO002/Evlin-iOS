@@ -74,6 +74,38 @@ struct ContentView: View {
                 FloatingModeToggle()
             }
         }
+        .onAppear { repairMissingCompletedModeIfNeeded() }
+    }
+
+    static func repairedCompletedOnboardingMode(
+        onboardingComplete: Bool,
+        currentAppMode: String,
+        storedTokens: StoredTokens?,
+        childDeviceID: String?
+    ) -> String? {
+        guard onboardingComplete,
+              currentAppMode != "parent",
+              currentAppMode != "child"
+        else { return nil }
+        if let storedTokens,
+           storedTokens.needsFamily == false,
+           storedTokens.familyID != nil {
+            return "parent"
+        }
+        if childDeviceID.flatMap(UUID.init(uuidString:)) != nil {
+            return "child"
+        }
+        return nil
+    }
+
+    private func repairMissingCompletedModeIfNeeded() {
+        guard let repaired = Self.repairedCompletedOnboardingMode(
+            onboardingComplete: onboardingComplete,
+            currentAppMode: appMode,
+            storedTokens: KeychainStore.shared.load(),
+            childDeviceID: UserDefaults.standard.string(forKey: "evlin.childDeviceID")
+        ) else { return }
+        appMode = repaired
     }
 }
 

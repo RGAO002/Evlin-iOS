@@ -54,6 +54,15 @@ final class SingleDeviceSession {
                   "evlin.protectionMode", kEmail, kPass, kInstall, kStage] {
             d.removeObject(forKey: k)
         }
+        // Wipe App Group App-Control state too. These live in the shared
+        // `group.com.evlin.ios` defaults, NOT `UserDefaults.standard`, so the loop
+        // above never touches them. Without this, aliases / saved lists / the
+        // catalog index from the PREVIOUS run survive into the new onboarding and
+        // show up as phantom "matched" items — items with a local lookup key but no
+        // backend alias, so they can't actually be locked and never appear in the
+        // parent's Manage aliases. A full kid sign-out already does this
+        // (BigKidRootView.performKidSignOut); the single-device demo re-run did not.
+        LocalAliasStore.shared.removeAllAliases()
         EvlinDemoShortcuts.clearFlag()
         d.set("", forKey: "appMode")
     }

@@ -68,4 +68,8 @@ final class FirstActionsLogicTests: XCTestCase {
             FirstActionsLogic.payoffSubtitle(phase: .landed, kidName: "Ava").localizedCaseInsensitiveContains("applied the lock")
         )
     }
+
+    func testFirstBlockSkipBypassesReceiptPayoff() {
+        XCTAssertEqual(FirstActionsLogic.routeAfterFirstBlockSkip(), .tryReflection)
+    }
 }

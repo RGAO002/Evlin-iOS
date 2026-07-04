@@ -89,11 +89,13 @@ struct OnboardingCoordinator: View {
     /// P2: the exact app (from the kid's lockable catalog) the parent's first
     /// block targets — resolved by the readiness poll on parentWaitingForKid.
     @State private var firstBlockApp: ChildReadinessDTO.App? = nil
-    /// P5: did the kid's phone CONFIRM the first block applied? Set by
-    /// parentFirstActions' onContinue (true only from the .landed payoff;
-    /// false via "Skip for now" after a timeout/failure) and read by
-    /// parentItWorks so it never claims "it landed" when it didn't.
+    /// P5: did the kid's phone CONFIRM the first block applied? Set only when
+    /// parentFirstActions advances into the receipt/payoff screen.
     @State private var firstBlockLanded = false
+    /// True when the parent explicitly skipped the first-block demo. In that
+    /// path we go straight to Reflection, and Back should return to first block
+    /// instead of showing the skipped receipt screen.
+    @State private var skippedFirstBlock = false
 
     // Onboarding v2 (scaffold): when true, `modeSelect` routes into the v2
     // screen sequence (spec §7) instead of the legacy pairing-first flow.
@@ -736,11 +738,21 @@ struct OnboardingCoordinator: View {
                     kidName: kidName,
                     firstBlockApp: firstBlockApp,
                     // P5: thread whether the kid's phone confirmed the lock
-                    // (true from the .landed payoff; false via "Skip for now")
-                    // so parentItWorks renders honest queued copy on a skip.
+                    // before showing the receipt/payoff screen.
                     onContinue: { landed in
                         firstBlockLanded = landed
+                        skippedFirstBlock = false
                         step = .parentItWorks
+                    },
+                    onSkip: {
+                        firstBlockLanded = false
+                        skippedFirstBlock = true
+                        switch FirstActionsLogic.routeAfterFirstBlockSkip() {
+                        case .receiptPayoff:
+                            step = .parentItWorks
+                        case .tryReflection:
+                            step = .parentTryReflection
+                        }
                     },
                     onBack: { step = .parentWaitingForKid },
                     singleDevice: singleDevice
@@ -765,7 +777,7 @@ struct OnboardingCoordinator: View {
                     childDeviceID: pairedChildDeviceID ?? childDeviceID,
                     kidName: kidName,
                     onContinue: { step = .parentSetParentPIN },
-                    onBack: { step = .parentItWorks }
+                    onBack: { step = skippedFirstBlock ? .parentFirstActions : .parentItWorks }
                 )
 
             case .parentSetParentPIN:

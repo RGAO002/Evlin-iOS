@@ -14,6 +14,11 @@ enum FirstActionPhase: Equatable, Sendable {
     case failed
 }
 
+enum FirstActionRoute: Equatable, Sendable {
+    case receiptPayoff
+    case tryReflection
+}
+
 enum FirstActionsLogic {
 
     /// §8 first-block target. The parent can send the first test block only
@@ -44,5 +49,9 @@ enum FirstActionsLogic {
         case .failed:
             return "We couldn't send the test block. Check your connection and try again."
         }
+    }
+
+    static func routeAfterFirstBlockSkip() -> FirstActionRoute {
+        .tryReflection
     }
 }

@@ -109,13 +109,43 @@ final class AuthService {
     func signOutLocally() {
         KeychainStore.shared.clear()
         DeviceIdentity.shared.clear()
+        Self.clearFamilyScopedLocalState()
         state = .signedOut
         // Clear chat so account B never sees account A's messages.
         UserDefaults.standard.removeObject(forKey: "evlin_chat_history")
-        // Drop stale account id so a later ChatViewModel can't re-scope to the
-        // signed-out account's store (C2 / account-isolation fix).
-        UserDefaults.standard.removeObject(forKey: "evlin.accountID")
         NotificationCenter.default.post(name: .evlinClearChat, object: nil)
+    }
+
+    static func clearFamilyScopedLocalState(
+        defaults: UserDefaults = .standard,
+        clearOnboardingShell: Bool = true
+    ) {
+        var keys = [
+            "evlin.accountID",
+            "evlin.parentProfileID",
+            "evlin.childProfileID",
+            "evlin.familyID",
+            DeviceIdentity.parentKey,
+            DeviceIdentity.childKey,
+            "evlin.childProfileName",
+            "evlin.childBirthYear",
+            "evlin.childGender",
+            "evlin.protectionMode",
+            APIClient.clientInstallIDKey,
+        ]
+        if clearOnboardingShell {
+            keys.append(contentsOf: [
+                "onboardingComplete",
+                "appMode",
+            ])
+        }
+        for key in keys {
+            defaults.removeObject(forKey: key)
+        }
+        LocalAliasStore.shared.removeAllAliases()
+        AppLimitRuleStore.shared.removeAll()
+        EarnedTimeStore.shared.removeAll()
+        APIClient.resetClientInstallID()
     }
 
     /// POST /auth/email {email, password, full_name?}. The backend create-or-
@@ -166,6 +196,11 @@ final class AuthService {
             // §15.7 PIN A: `result.account` IS the canonical Codable AuthAccountDTO
             // (decoded directly, UUID-typed, `needsFamily` from INSIDE the account).
             let acct = result.account
+            let previousAccountID = KeychainStore.shared.load()?.accountID
+            if acct.needsFamily || previousAccountID.map({ $0 != acct.id.uuidString }) ?? true {
+                DeviceIdentity.shared.clear()
+                Self.clearFamilyScopedLocalState(clearOnboardingShell: false)
+            }
             // Persist the WHOLE account (§15.7): familyID + displayName included.
             try KeychainStore.shared.save(StoredTokens(
                 accessToken: result.access_token,

@@ -187,11 +187,13 @@ struct ParentSignInStep: View {
             let cred = try await googleCoordinator.signIn()
             await auth.signInWithGoogle(idToken: cred.idToken, fullName: cred.fullName)
             finish(auth)
+        } catch let error as GoogleSignInCoordinator.GoogleSignInError {
+            if let message = error.diagnosticMessage {
+                errorText = message
+            }
         } catch {
-            // GoogleSignIn surfaces cancel as an error too; only show a banner
-            // when no session resulted.
             if auth.account == nil {
-                errorText = "Google sign-in isn't available. Use Apple or email."
+                errorText = "Google sign-in failed: \(error.localizedDescription)"
             } else {
                 finish(auth)
             }
@@ -788,10 +790,11 @@ struct ParentFirstActionsStep: View {
     /// real app, not an all-apps reflection.
     var firstBlockApp: ChildReadinessDTO.App? = nil
     /// P5: carries whether the kid's phone CONFIRMED the lock applied
-    /// (`true` only from the .landed payoff; `false` from "Skip for now" after
-    /// a timeout/failure) so the next screen never claims "it landed" when it
-    /// didn't.
+    /// (`true` only from the .landed payoff) so the next screen never claims
+    /// "it landed" when it didn't. Active skip uses `onSkip` and bypasses the
+    /// receipt screen entirely.
     let onContinue: (_ landed: Bool) -> Void
+    let onSkip: () -> Void
     var onBack: (() -> Void)? = nil
     /// Single Device Mode: the kid CommandPoller is stopped while this device is in parent mode,
     /// so the inline ≤30s ack-poll can only ever time out. Under this flag we skip the dead-wait
@@ -884,7 +887,7 @@ struct ParentFirstActionsStep: View {
                     case .timedOut, .failed:
                         OnboardingV2PrimaryButton("Try again", systemImage: "paperplane.fill",
                                                   role: .parent) { Task { await sendBlock() } }
-                        OnboardingV2SecondaryButton("Skip for now") { onContinue(false) }
+                        OnboardingV2SecondaryButton("Skip for now", action: onSkip)
                     default:
                         OnboardingV2PrimaryButton(
                             phase == .idle ? "Send block" : "Sending…",
@@ -892,14 +895,15 @@ struct ParentFirstActionsStep: View {
                             role: .parent
                         ) { Task { await sendBlock() } }
                         .disabled(phase == .sending || phase == .waitingForKid)
+                        OnboardingV2SecondaryButton("Skip", action: onSkip)
                     }
                 } else {
                     // Escape hatch: the kid's phone may never report a lockable
                     // app (incomplete kid setup, single-device testing), leaving
                     // this screen with no forward path. Let the parent advance
-                    // manually — onContinue(false) means "no confirmed block",
-                    // same honest signal the timeout/fail path sends.
-                    OnboardingV2PrimaryButton("Skip for now", role: .parent) { onContinue(false) }
+                    // manually into the next demo without showing a skipped
+                    // block receipt.
+                    OnboardingV2PrimaryButton("Skip for now", role: .parent, action: onSkip)
                     OnboardingV2SecondaryButton("Back to waiting", action: onBack ?? {})
                 }
                 if let onBack { OnboardingV2BackLink(action: onBack) }
@@ -1115,15 +1119,11 @@ struct ParentTryReflectionStep: View {
     }
 }
 
-// MARK: - 12 · Set the Parent PIN (final — critical)
+// MARK: - 12 · Finish child-device setup
 
-/// Final onboarding screen. The kid-device "Parent Controls" hub is PIN-gated,
-/// but `EvlinPINGateView` CREATES the PIN on first open with no auth
-/// (`isFirstRun = !store.isSet()`) — so whoever opens it first owns it. If the
-/// parent doesn't claim the PIN now, the child can open Parent Controls on
-/// their own phone, set their OWN PIN, and then switch off app blocking +
-/// delete-protection + sign out — locking the parent out entirely. This screen
-/// makes that stakes explicit before setup completes.
+/// Final onboarding screen. Two child-device steps are easy to miss but
+/// foundational: first-time Screen Time Tracking capture for earned-time
+/// accounting, and claiming the Parent Controls PIN before the child can.
 struct ParentSetParentPINStep: View {
     let kidName: String
     var singleDevice: Bool = false
@@ -1141,35 +1141,52 @@ struct ParentSetParentPINStep: View {
             : "On \(kid)'s phone, open Evlin → tap Parent Controls → create your PIN. Do this before you hand the phone back."
     }
 
+    private var trackingText: String {
+        singleDevice
+            ? "After you tap Done, switch to the kid side and open Parent Controls → Screen Time Tracking."
+            : "On \(kid)'s phone, open Evlin → Parent Controls → Screen Time Tracking."
+    }
+
     var body: some View {
         OnboardingV2ScreenContainer(
             role: .parent,
             phase: "5 · Parent finish",
             stepIndex: 12,
             stepTotal: parentTotal,
-            title: "Set your Parent PIN now",
-            subtitle: "This is the most important step — please don't skip it.",
+            title: "Finish setup on \(kid)'s device",
+            subtitle: "Two quick steps keep screen time accurate and Parent Controls protected.",
             content: {
-                VStack(alignment: .leading, spacing: Spacing.lg) {
+                VStack(alignment: .leading, spacing: Spacing.md) {
                     OnboardingV2Card {
-                        VStack(alignment: .leading, spacing: Spacing.sm) {
+                        VStack(alignment: .leading, spacing: Spacing.md) {
                             HStack(spacing: Spacing.sm) {
-                                Image(systemName: "exclamationmark.triangle.fill")
-                                    .foregroundStyle(OnboardingV2Theme.Palette.error)
-                                Text("If you skip this")
+                                Image(systemName: "chart.bar.xaxis")
+                                    .foregroundStyle(OnboardingV2Theme.Palette.secondary)
+                                Text("Enable Screen Time Tracking")
                                     .font(OnboardingV2Theme.Typography.bodyStrong)
                                     .foregroundStyle(OnboardingV2Theme.Palette.onSurface)
                             }
-                            Text("\(kid) can open Parent Controls on their phone and set the PIN themselves — then turn off app blocking, switch off delete-protection, remove Evlin, and lock you out.")
+                            OnboardingV2NumberedStep(number: 1, text: trackingText)
+                            OnboardingV2NumberedStep(
+                                number: 2,
+                                text: "When iOS asks what to monitor, choose All Apps & Categories."
+                            )
+                            Text("You can change this later. Apps and categories selected there are the ones Evlin counts toward daily screen time.")
                                 .onboardingV2BodyXS()
                         }
                     }
                     OnboardingV2Card {
                         VStack(alignment: .leading, spacing: Spacing.sm) {
-                            Text("Do this now")
-                                .font(OnboardingV2Theme.Typography.bodyStrong)
-                                .foregroundStyle(OnboardingV2Theme.Palette.onSurface)
+                            HStack(spacing: Spacing.sm) {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .foregroundStyle(OnboardingV2Theme.Palette.error)
+                                Text("Create your Parent PIN")
+                                    .font(OnboardingV2Theme.Typography.bodyStrong)
+                                    .foregroundStyle(OnboardingV2Theme.Palette.onSurface)
+                            }
                             Text(howText)
+                                .onboardingV2BodyXS()
+                            Text("If you skip this, \(kid) can open Parent Controls first, create their own PIN, and turn off protections.")
                                 .onboardingV2BodyXS()
                         }
                     }
@@ -1190,8 +1207,8 @@ struct ParentSetParentPINStep: View {
 ///
 /// P5: `landed` is threaded from ParentFirstActionsStep via the coordinator —
 /// `true` only when the kid's phone CONFIRMED the lock applied. When the
-/// parent arrives via "Skip for now" (timed out / failed) the copy honestly
-/// says the block is queued instead of claiming "it landed".
+/// parent arrives without a confirmed ack the copy honestly says the block is
+/// queued instead of claiming "it landed".
 struct ParentItWorksStep: View {
     let apiClient: APIClient
     var familyID: UUID? = nil
@@ -1659,7 +1676,7 @@ private struct OnboardingV2NumberedStep: View {
     let text: String
 
     var body: some View {
-        HStack(spacing: OnboardingV2Theme.Metrics.ctaRowSpacing) {
+        HStack(alignment: .top, spacing: OnboardingV2Theme.Metrics.ctaRowSpacing) {
             Circle()
                 .fill(OnboardingV2Theme.Palette.primary)
                 .frame(width: 26, height: 26)
@@ -1668,8 +1685,13 @@ private struct OnboardingV2NumberedStep: View {
                         .font(.system(size: 13, weight: .bold))
                         .foregroundStyle(OnboardingV2Theme.Palette.onPrimary)
                 )
-            Text(text).onboardingV2BodyStrong()
+                .fixedSize()
+            Text(text)
+                .onboardingV2BodyStrong()
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
