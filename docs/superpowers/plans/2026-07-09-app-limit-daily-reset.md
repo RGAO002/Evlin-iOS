@@ -179,7 +179,13 @@ xcodebuild test \
   -project "Evlin iOS.xcodeproj" \
   -scheme "Evlin iOS" \
   -destination 'platform=iOS Simulator,name=iPhone 17' \
-  -only-testing:"Evlin iOSTests/EarnedTimeStoreTests"
+  -parallel-testing-enabled NO \
+  -only-testing:"Evlin iOSTests/EarnedTimeStoreTests/test_appLimitUsageDate_isGregorianAndTimezoneAware" \
+  -only-testing:"Evlin iOSTests/EarnedTimeStoreTests/test_appLimitOffset_persistsWithinSameUsageDate" \
+  -only-testing:"Evlin iOSTests/EarnedTimeStoreTests/test_appLimitOffset_doesNotLeakIntoNextUsageDate" \
+  -only-testing:"Evlin iOSTests/EarnedTimeStoreTests/test_appLimitReported_isMonotoneOnlyWithinUsageDate" \
+  -only-testing:"Evlin iOSTests/EarnedTimeStoreTests/test_appLimitLegacyUnscopedValues_areIgnored" \
+  -only-testing:"Evlin iOSTests/EarnedTimeStoreTests/test_appLimitWrite_prunesSameRuleOldDatesAndLegacyOnly"
 ```
 
 Expected: build/test fails because `appLimitUsageDate(now:timeZone:)` and the `usageDate:` overloads do not exist. Confirm the failure is for the new API, not an unrelated compile error.
@@ -355,7 +361,9 @@ Do not change the existing earned-budget `remainingPolicy` hunk earlier in this 
 
 Run the Step 2 command again.
 
-Expected: `EarnedTimeStoreTests` passes, including the six new tests.
+Expected: all six new `EarnedTimeStoreTests` cases pass. The command remains
+serial because the tests intentionally share the App Group `UserDefaults` suite;
+parallel simulator clones would race each other's `removeAll()` teardown.
 
 - [ ] **Step 7: Verify both targets use one date implementation**
 
