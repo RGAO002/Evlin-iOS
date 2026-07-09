@@ -301,25 +301,31 @@ final class EarnedTimeStore: @unchecked Sendable {
         "\(prefix)\(ruleID.uuidString.lowercased()).\(usageDate)"
     }
 
-    private func pruneAppLimitUsageKeys(ruleID: UUID, keeping usageDate: String) {
-        guard let suite = defaults else { return }
+    private func prepareAppLimitUsageWrite(ruleID: UUID, usageDate: String) -> Bool {
+        guard let suite = defaults else { return true }
         let id = ruleID.uuidString.lowercased()
         let offsetRoot = appLimitUsageOffsetPrefix + id
         let reportedRoot = appLimitReportedPrefix + id
-        let keep = Set([
-            "\(offsetRoot).\(usageDate)",
-            "\(reportedRoot).\(usageDate)",
-        ])
+        let roots = [offsetRoot, reportedRoot]
+        let keys = suite.dictionaryRepresentation().keys
+        let scopedDates = keys.compactMap { key -> String? in
+            roots.compactMap { root -> String? in
+                guard key.hasPrefix(root + ".") else { return nil }
+                return String(key.dropFirst(root.count + 1))
+            }.first
+        }
 
-        suite.dictionaryRepresentation().keys
-            .filter { key in
-                let belongsToRule = key == offsetRoot
-                    || key.hasPrefix(offsetRoot + ".")
-                    || key == reportedRoot
-                    || key.hasPrefix(reportedRoot + ".")
-                return belongsToRule && !keep.contains(key)
-            }
-            .forEach { suite.removeObject(forKey: $0) }
+        guard !scopedDates.contains(where: { $0 > usageDate }) else { return false }
+
+        keys.filter { key in
+            roots.contains(key)
+                || roots.contains { root in
+                    key.hasPrefix(root + ".")
+                        && String(key.dropFirst(root.count + 1)) < usageDate
+                }
+        }
+        .forEach { suite.removeObject(forKey: $0) }
+        return true
     }
 
     func appLimitUsageOffsetMinutes(ruleID: UUID, usageDate: String) -> Int {
@@ -337,7 +343,7 @@ final class EarnedTimeStore: @unchecked Sendable {
         usageDate: String,
         usedMinutes: Int
     ) {
-        pruneAppLimitUsageKeys(ruleID: ruleID, keeping: usageDate)
+        guard prepareAppLimitUsageWrite(ruleID: ruleID, usageDate: usageDate) else { return }
         let key = appLimitUsageKey(
             prefix: appLimitUsageOffsetPrefix,
             ruleID: ruleID,
@@ -362,7 +368,7 @@ final class EarnedTimeStore: @unchecked Sendable {
         usageDate: String,
         usedMinutes: Int
     ) {
-        pruneAppLimitUsageKeys(ruleID: ruleID, keeping: usageDate)
+        guard prepareAppLimitUsageWrite(ruleID: ruleID, usageDate: usageDate) else { return }
         let key = appLimitUsageKey(
             prefix: appLimitReportedPrefix,
             ruleID: ruleID,

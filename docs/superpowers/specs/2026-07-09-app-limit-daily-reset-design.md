@@ -38,11 +38,17 @@ Legacy unscoped keys will not be migrated. They carry no date, so assigning them
 to the current day could repeat the false-lock incident. Existing identity-reset
 cleanup will continue removing both legacy and date-scoped keys by prefix.
 
-Date-scoped keys must remain bounded. Whenever either offset or reported usage
-is written for `(ruleID, usageDate)`, the store first removes that rule's offset
-and reported keys for every other date, including the legacy unscoped keys.
-This write-path pruning needs no timer and keeps at most the current date's two
-usage keys per rule.
+Whenever either offset or reported usage is written for `(ruleID, usageDate)`,
+the store inspects both date-scoped roots for that rule. If it observes a newer
+stored date, it suppresses the incoming stale write without removing or setting
+any key. Otherwise it removes only that rule's legacy unscoped keys and keys
+strictly older than the incoming date; it never removes a newer date key.
+
+The app and extension do not use a cross-process lock. Under a narrow
+interleaving, an older writer can miss a concurrently-created newer key and add
+an extra older key after the current writer's cleanup. The next current-date
+write prunes that older key. Current-date reads remain correct because values
+are date-scoped, and cleanup never deletes newer state.
 
 ## Data Flow
 
@@ -53,15 +59,20 @@ usage keys per rule.
 4. It records the reported high-water mark for `(ruleID, usageDate)`.
 5. The state poller's same-day re-arm reads and updates the same date-scoped
    values.
-6. On the next date, no matching keys exist, so the effective offset and
-   reported value are both zero.
+6. On the next date, no matching keys exist for that date, so the effective
+   offset and reported value are both zero. A rare extra older physical key is
+   ignored by current-date reads and removed by the next current-date write.
 
 ## Compatibility And Safety
 
 - Same-day task pauses and monitor re-arms keep already-counted usage.
 - A new day cannot inherit yesterday's offset or reported high-water mark.
 - Existing legacy values are ignored rather than guessed into a date.
-- A write for a new date removes that rule's older date-scoped and legacy keys.
+- Newer-date state wins: an observed stale write is suppressed.
+- Cleanup removes only that rule's legacy and strictly older date-scoped keys;
+  it never removes newer state.
+- A concurrent interleaving may leave an extra older key temporarily, but the
+  next current-date write removes it without affecting current reads.
 - Account/family identity teardown still sweeps all per-app usage keys.
 - This patch does not change DeviceActivity enforcement thresholds, backend
   aggregation, or lock precedence.
@@ -79,6 +90,8 @@ Tests against the real App Group `UserDefaults` will prove:
 - the app and extension use the same Gregorian/POSIX usage-date helper;
 - writing a new date removes the same rule's older date and legacy keys without
   removing another rule's keys.
+- writing D+1 offset and reported values, then attempting D offset and reported
+  writes, preserves D+1 and leaves D reads at zero.
 
 The iOS app and DeviceActivity monitor extension must both compile after the
 change.

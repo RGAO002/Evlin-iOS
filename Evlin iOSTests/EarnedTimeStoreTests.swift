@@ -374,7 +374,15 @@ final class EarnedTimeStoreTests: XCTestCase {
 
         store.setAppLimitUsageOffset(ruleID: ruleA, usageDate: day1, usedMinutes: 20)
         store.recordAppLimitUsage(ruleID: ruleA, usageDate: day1, usedMinutes: 45)
+        XCTAssertEqual(
+            store.appLimitUsageOffsetMinutes(ruleID: ruleA, usageDate: day1), 20
+        )
+        store.setAppLimitUsageOffset(ruleID: ruleA, usageDate: day1, usedMinutes: 25)
+        XCTAssertEqual(
+            store.appLimitReportedMinutes(ruleID: ruleA, usageDate: day1), 45
+        )
         store.setAppLimitUsageOffset(ruleID: ruleB, usageDate: day1, usedMinutes: 7)
+        store.recordAppLimitUsage(ruleID: ruleB, usageDate: day1, usedMinutes: 12)
         suite.set(88, forKey: "evlin.appLimitUsageOffset.\(idA)")
         suite.set(88, forKey: "evlin.appLimitReported.\(idA)")
 
@@ -389,6 +397,43 @@ final class EarnedTimeStoreTests: XCTestCase {
         )
         XCTAssertEqual(
             suite.integer(forKey: "evlin.appLimitUsageOffset.\(idB).\(day1)"), 7
+        )
+        XCTAssertEqual(
+            suite.integer(forKey: "evlin.appLimitReported.\(idB).\(day1)"), 12
+        )
+    }
+
+    func test_appLimitWrite_doesNotLetStaleDateEraseNewerUsage() {
+        let store = freshStore()
+        let ruleID = UUID()
+        let staleDate = "2026-07-08"
+        let currentDate = "2026-07-09"
+
+        store.setAppLimitUsageOffset(
+            ruleID: ruleID, usageDate: currentDate, usedMinutes: 20
+        )
+        store.recordAppLimitUsage(
+            ruleID: ruleID, usageDate: currentDate, usedMinutes: 45
+        )
+
+        store.setAppLimitUsageOffset(
+            ruleID: ruleID, usageDate: staleDate, usedMinutes: 5
+        )
+        store.recordAppLimitUsage(
+            ruleID: ruleID, usageDate: staleDate, usedMinutes: 10
+        )
+
+        XCTAssertEqual(
+            store.appLimitUsageOffsetMinutes(ruleID: ruleID, usageDate: currentDate), 20
+        )
+        XCTAssertEqual(
+            store.appLimitReportedMinutes(ruleID: ruleID, usageDate: currentDate), 45
+        )
+        XCTAssertEqual(
+            store.appLimitUsageOffsetMinutes(ruleID: ruleID, usageDate: staleDate), 0
+        )
+        XCTAssertEqual(
+            store.appLimitReportedMinutes(ruleID: ruleID, usageDate: staleDate), 0
         )
     }
 }

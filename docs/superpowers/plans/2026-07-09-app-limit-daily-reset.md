@@ -4,7 +4,7 @@
 
 **Goal:** Prevent yesterday's per-app usage offset and reported high-water mark from being added to today's DeviceActivity thresholds.
 
-**Architecture:** Keep the existing App Group store, but scope per-app usage keys by `(ruleID, usageDate)`. `EarnedTimeStore`, already compiled into both the app and monitor extension, becomes the sole Gregorian/POSIX local-date formatter and prunes stale keys for a rule on every write. The monitor extension and state poller both pass the shared usage date through the existing same-day re-arm flow.
+**Architecture:** Keep the existing App Group store, but scope per-app usage keys by `(ruleID, usageDate)`. `EarnedTimeStore`, already compiled into both the app and monitor extension, becomes the sole Gregorian/POSIX local-date formatter. Before a write it suppresses an observed stale date and otherwise prunes only that rule's legacy and strictly older keys, so no cleanup can delete newer state. The monitor extension and state poller both pass the shared usage date through the existing same-day re-arm flow.
 
 **Tech Stack:** Swift, XCTest, FamilyControls, DeviceActivity, App Group `UserDefaults`, Xcode 26.3.
 
@@ -15,7 +15,9 @@
 - A different usage date must read offset `0` and reported high-water mark `0`.
 - Use one shared formatter with `Calendar(identifier: .gregorian)`, `Locale(identifier: "en_US_POSIX")`, and `TimeZone.current`.
 - Do not migrate legacy unscoped values; remove them on the next write for that rule.
-- On write, retain at most the current date's offset and reported keys for that rule; never remove another rule's keys.
+- Newer-date state wins: suppress an incoming write when a newer date is observed for either root of that rule.
+- Cleanup is strictly backward-only: remove that rule's legacy and older date keys, never newer date keys or another rule's keys.
+- Do not add a cross-process lock. A rare interleaving may leave an extra older key; the next current-date write removes it without affecting current-date reads.
 - Keep the existing prefixes `evlin.appLimitUsageOffset.` and `evlin.appLimitReported.`.
 - Do not change enforcement thresholds, lock precedence, backend aggregation, or timezone authority.
 - Preserve all pre-existing worktree changes. `BigKidStatePoller.swift` already contains an unrelated earned-budget hunk; edit and stage only the usage-date hunk.
@@ -151,7 +153,11 @@ Append these tests inside `EarnedTimeStoreTests` before its final closing brace:
 
         store.setAppLimitUsageOffset(ruleID: ruleA, usageDate: day1, usedMinutes: 20)
         store.recordAppLimitUsage(ruleID: ruleA, usageDate: day1, usedMinutes: 45)
+        XCTAssertEqual(store.appLimitUsageOffsetMinutes(ruleID: ruleA, usageDate: day1), 20)
+        store.setAppLimitUsageOffset(ruleID: ruleA, usageDate: day1, usedMinutes: 25)
+        XCTAssertEqual(store.appLimitReportedMinutes(ruleID: ruleA, usageDate: day1), 45)
         store.setAppLimitUsageOffset(ruleID: ruleB, usageDate: day1, usedMinutes: 7)
+        store.recordAppLimitUsage(ruleID: ruleB, usageDate: day1, usedMinutes: 12)
         suite.set(88, forKey: "evlin.appLimitUsageOffset.\(idA)")
         suite.set(88, forKey: "evlin.appLimitReported.\(idA)")
 
@@ -167,6 +173,26 @@ Append these tests inside `EarnedTimeStoreTests` before its final closing brace:
         XCTAssertEqual(
             suite.integer(forKey: "evlin.appLimitUsageOffset.\(idB).\(day1)"), 7
         )
+        XCTAssertEqual(
+            suite.integer(forKey: "evlin.appLimitReported.\(idB).\(day1)"), 12
+        )
+    }
+
+    func test_appLimitWrite_doesNotLetStaleDateEraseNewerUsage() {
+        let store = freshStore()
+        let ruleID = UUID()
+        let staleDate = "2026-07-08"
+        let currentDate = "2026-07-09"
+
+        store.setAppLimitUsageOffset(ruleID: ruleID, usageDate: currentDate, usedMinutes: 20)
+        store.recordAppLimitUsage(ruleID: ruleID, usageDate: currentDate, usedMinutes: 45)
+        store.setAppLimitUsageOffset(ruleID: ruleID, usageDate: staleDate, usedMinutes: 5)
+        store.recordAppLimitUsage(ruleID: ruleID, usageDate: staleDate, usedMinutes: 10)
+
+        XCTAssertEqual(store.appLimitUsageOffsetMinutes(ruleID: ruleID, usageDate: currentDate), 20)
+        XCTAssertEqual(store.appLimitReportedMinutes(ruleID: ruleID, usageDate: currentDate), 45)
+        XCTAssertEqual(store.appLimitUsageOffsetMinutes(ruleID: ruleID, usageDate: staleDate), 0)
+        XCTAssertEqual(store.appLimitReportedMinutes(ruleID: ruleID, usageDate: staleDate), 0)
     }
 ```
 
@@ -185,10 +211,13 @@ xcodebuild test \
   -only-testing:"Evlin iOSTests/EarnedTimeStoreTests/test_appLimitOffset_doesNotLeakIntoNextUsageDate" \
   -only-testing:"Evlin iOSTests/EarnedTimeStoreTests/test_appLimitReported_isMonotoneOnlyWithinUsageDate" \
   -only-testing:"Evlin iOSTests/EarnedTimeStoreTests/test_appLimitLegacyUnscopedValues_areIgnored" \
-  -only-testing:"Evlin iOSTests/EarnedTimeStoreTests/test_appLimitWrite_prunesSameRuleOldDatesAndLegacyOnly"
+  -only-testing:"Evlin iOSTests/EarnedTimeStoreTests/test_appLimitWrite_prunesSameRuleOldDatesAndLegacyOnly" \
+  -only-testing:"Evlin iOSTests/EarnedTimeStoreTests/test_appLimitWrite_doesNotLetStaleDateEraseNewerUsage"
 ```
 
-Expected: build/test fails because `appLimitUsageDate(now:timeZone:)` and the `usageDate:` overloads do not exist. Confirm the failure is for the new API, not an unrelated compile error.
+Expected: on `a034d90`, the stale-order regression fails because the D writes
+delete the D+1 values and leave nonzero D reads. Confirm this behavioral RED is
+not an unrelated build or test-infrastructure failure.
 
 - [ ] **Step 3: Implement the shared date helper and date-scoped store**
 
@@ -215,25 +244,31 @@ Replace the four existing unscoped per-app methods in `EarnedTimeStore.swift` wi
         "\(prefix)\(ruleID.uuidString.lowercased()).\(usageDate)"
     }
 
-    private func pruneAppLimitUsageKeys(ruleID: UUID, keeping usageDate: String) {
-        guard let suite = defaults else { return }
+    private func prepareAppLimitUsageWrite(ruleID: UUID, usageDate: String) -> Bool {
+        guard let suite = defaults else { return true }
         let id = ruleID.uuidString.lowercased()
         let offsetRoot = appLimitUsageOffsetPrefix + id
         let reportedRoot = appLimitReportedPrefix + id
-        let keep = Set([
-            "\(offsetRoot).\(usageDate)",
-            "\(reportedRoot).\(usageDate)",
-        ])
+        let roots = [offsetRoot, reportedRoot]
+        let keys = suite.dictionaryRepresentation().keys
+        let scopedDates = keys.compactMap { key -> String? in
+            roots.compactMap { root -> String? in
+                guard key.hasPrefix(root + ".") else { return nil }
+                return String(key.dropFirst(root.count + 1))
+            }.first
+        }
 
-        suite.dictionaryRepresentation().keys
-            .filter { key in
-                let belongsToRule = key == offsetRoot
-                    || key.hasPrefix(offsetRoot + ".")
-                    || key == reportedRoot
-                    || key.hasPrefix(reportedRoot + ".")
-                return belongsToRule && !keep.contains(key)
-            }
-            .forEach { suite.removeObject(forKey: $0) }
+        guard !scopedDates.contains(where: { $0 > usageDate }) else { return false }
+
+        keys.filter { key in
+            roots.contains(key)
+                || roots.contains { root in
+                    key.hasPrefix(root + ".")
+                        && String(key.dropFirst(root.count + 1)) < usageDate
+                }
+        }
+        .forEach { suite.removeObject(forKey: $0) }
+        return true
     }
 
     func appLimitUsageOffsetMinutes(ruleID: UUID, usageDate: String) -> Int {
@@ -251,7 +286,7 @@ Replace the four existing unscoped per-app methods in `EarnedTimeStore.swift` wi
         usageDate: String,
         usedMinutes: Int
     ) {
-        pruneAppLimitUsageKeys(ruleID: ruleID, keeping: usageDate)
+        guard prepareAppLimitUsageWrite(ruleID: ruleID, usageDate: usageDate) else { return }
         let key = appLimitUsageKey(
             prefix: appLimitUsageOffsetPrefix,
             ruleID: ruleID,
@@ -276,7 +311,7 @@ Replace the four existing unscoped per-app methods in `EarnedTimeStore.swift` wi
         usageDate: String,
         usedMinutes: Int
     ) {
-        pruneAppLimitUsageKeys(ruleID: ruleID, keeping: usageDate)
+        guard prepareAppLimitUsageWrite(ruleID: ruleID, usageDate: usageDate) else { return }
         let key = appLimitUsageKey(
             prefix: appLimitReportedPrefix,
             ruleID: ruleID,
@@ -361,7 +396,7 @@ Do not change the existing earned-budget `remainingPolicy` hunk earlier in this 
 
 Run the Step 2 command again.
 
-Expected: all six new `EarnedTimeStoreTests` cases pass. The command remains
+Expected: all seven new `EarnedTimeStoreTests` cases pass. The command remains
 serial because the tests intentionally share the App Group `UserDefaults` suite;
 parallel simulator clones would race each other's `removeAll()` teardown.
 
