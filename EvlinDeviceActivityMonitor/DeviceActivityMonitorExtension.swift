@@ -16,13 +16,9 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
 
     /// Build the canonical day key "YYYY-MM-DD@<tz>" in the device's current tz.
     private func currentDayKey() -> String {
-        let tz = TimeZone.current
-        let f = DateFormatter()
-        f.calendar = Calendar(identifier: .gregorian)
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = tz
-        f.dateFormat = "yyyy-MM-dd"
-        return "\(f.string(from: Date()))@\(tz.identifier)"
+        let timeZone = TimeZone.current
+        let date = EarnedTimeStore.appLimitUsageDate(timeZone: timeZone)
+        return "\(date)@\(timeZone.identifier)"
     }
 
     /// Emit a ScreenTimeEvent from the extension (emitter = kid_extension).
@@ -243,7 +239,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         // (used == budget). This makes the bar read "reached" even for tiny
         // budgets that have no measurement thresholds. Additive — the shield is
         // untouched; usage reporting is a separate concern.
-        let usageDate = todayISODate()
+        let usageDate = EarnedTimeStore.appLimitUsageDate()
         postAppLimitUsageSample(
             ruleID: ruleId,
             thresholdMinutes: rule.budgetMinutes,
@@ -275,13 +271,20 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
     ) {
         guard let baseURL = ExtensionConfig.baseURL,
               let deviceID = ExtensionConfig.childId else { return }
-        let usageDate = todayISODate()
+        let usageDate = EarnedTimeStore.appLimitUsageDate()
         let tz = TimeZone.current.identifier
-        let offset = EarnedTimeStore.shared.appLimitUsageOffsetMinutes(ruleID: ruleID)
+        let offset = EarnedTimeStore.shared.appLimitUsageOffsetMinutes(
+            ruleID: ruleID,
+            usageDate: usageDate
+        )
         let isBudgetSample = clientSampleID?.hasSuffix(":budget") == true
         let adjustedThreshold = isBudgetSample ? thresholdMinutes : min(1440, offset + thresholdMinutes)
         let adjustedEstimate = isBudgetSample ? estimatedMinutes : min(1440, offset + estimatedMinutes)
-        EarnedTimeStore.shared.recordAppLimitUsage(ruleID: ruleID, usedMinutes: adjustedEstimate)
+        EarnedTimeStore.shared.recordAppLimitUsage(
+            ruleID: ruleID,
+            usageDate: usageDate,
+            usedMinutes: adjustedEstimate
+        )
         Task {
             await AppLimitUsageReporter.drainRetryQueue(baseURL: baseURL)
             await AppLimitUsageReporter.report(
@@ -370,7 +373,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         // Drain any queued retries + fire the new sample.
         if let baseURL = ExtensionConfig.baseURL,
            let deviceID = ExtensionConfig.childId {
-            let usageDate = todayISODate()
+            let usageDate = EarnedTimeStore.appLimitUsageDate()
             let tz = TimeZone.current.identifier
             Task {
                 await EarnedSampleReporter.drainRetryQueue(baseURL: baseURL)
@@ -396,7 +399,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         // ⇒ always fired). See EarnedGateTautologyTests.
         let poolMinutes = earnedStore.poolMinutes ?? 240
         let capMinutes  = earnedStore.capMinutes  ?? 240
-        let usageDateForOverride = todayISODate()
+        let usageDateForOverride = EarnedTimeStore.appLimitUsageDate()
 
         guard EarnedSampleReporter.shouldApplyEarnedShieldFresh(
             adjustedN: adjustedN,
@@ -532,16 +535,6 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         emitEvent(kind: .reset, source: .earnedPool, app: "device-wide", reason: "interval_reset")
     }
 
-    /// ISO-8601 date string for today in the device's local timezone.
-    /// Matches the `usage_date` field the backend expects.
-    private func todayISODate() -> String {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd"
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = TimeZone.current
-        return f.string(from: Date())
-    }
-
     /// Daily-reset enforcement (P7). Strip EVERY `source == .limit` ShieldRecord
     /// from the App Group shields dict, persist, and recompute so the kid regains
     /// the new day's allowance. NEVER touches `source == .manual` (parent)
@@ -556,7 +549,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
     /// today differs from that stored key — see `LimitShieldLogic.isDayBoundaryReset`.
     private func resetLimitShields(activity: String) {
         let dayKeyKey = "evlin.limitReset.dayKey"
-        let today = todayISODate()
+        let today = EarnedTimeStore.appLimitUsageDate()
         let stored = defaults?.string(forKey: dayKeyKey)
 
         guard LimitShieldLogic.isDayBoundaryReset(storedDayKey: stored, today: today) else {

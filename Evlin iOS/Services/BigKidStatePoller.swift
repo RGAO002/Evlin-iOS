@@ -258,12 +258,23 @@ final class BigKidStatePoller: ObservableObject {
             )
         }
 
+        let appLimitUsageDate = EarnedTimeStore.appLimitUsageDate()
         let adjustedRules = AppLimitRuleStore.shared.all().compactMap { rule -> AppLimitRule? in
             let used = max(
-                store.appLimitUsageOffsetMinutes(ruleID: rule.id),
-                store.appLimitReportedMinutes(ruleID: rule.id)
+                store.appLimitUsageOffsetMinutes(
+                    ruleID: rule.id,
+                    usageDate: appLimitUsageDate
+                ),
+                store.appLimitReportedMinutes(
+                    ruleID: rule.id,
+                    usageDate: appLimitUsageDate
+                )
             )
-            store.setAppLimitUsageOffset(ruleID: rule.id, usedMinutes: used)
+            store.setAppLimitUsageOffset(
+                ruleID: rule.id,
+                usageDate: appLimitUsageDate,
+                usedMinutes: used
+            )
             let remaining = rule.budgetMinutes - used
             guard remaining > 0 else { return nil }
             return AppLimitRule(

@@ -281,27 +281,94 @@ final class EarnedTimeStore: @unchecked Sendable {
         }
     }
 
-    func appLimitUsageOffsetMinutes(ruleID: UUID) -> Int {
-        let key = appLimitUsageOffsetPrefix + ruleID.uuidString.lowercased()
+    static func appLimitUsageDate(
+        now: Date = Date(),
+        timeZone: TimeZone = .current
+    ) -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = timeZone
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: now)
+    }
+
+    private func appLimitUsageKey(
+        prefix: String,
+        ruleID: UUID,
+        usageDate: String
+    ) -> String {
+        "\(prefix)\(ruleID.uuidString.lowercased()).\(usageDate)"
+    }
+
+    private func pruneAppLimitUsageKeys(ruleID: UUID, keeping usageDate: String) {
+        guard let suite = defaults else { return }
+        let id = ruleID.uuidString.lowercased()
+        let offsetRoot = appLimitUsageOffsetPrefix + id
+        let reportedRoot = appLimitReportedPrefix + id
+        let keep = Set([
+            "\(offsetRoot).\(usageDate)",
+            "\(reportedRoot).\(usageDate)",
+        ])
+
+        suite.dictionaryRepresentation().keys
+            .filter { key in
+                let belongsToRule = key == offsetRoot
+                    || key.hasPrefix(offsetRoot + ".")
+                    || key == reportedRoot
+                    || key.hasPrefix(reportedRoot + ".")
+                return belongsToRule && !keep.contains(key)
+            }
+            .forEach { suite.removeObject(forKey: $0) }
+    }
+
+    func appLimitUsageOffsetMinutes(ruleID: UUID, usageDate: String) -> Int {
+        let key = appLimitUsageKey(
+            prefix: appLimitUsageOffsetPrefix,
+            ruleID: ruleID,
+            usageDate: usageDate
+        )
         guard defaults?.object(forKey: key) != nil else { return 0 }
         return max(0, defaults?.integer(forKey: key) ?? 0)
     }
 
-    func setAppLimitUsageOffset(ruleID: UUID, usedMinutes: Int) {
-        let key = appLimitUsageOffsetPrefix + ruleID.uuidString.lowercased()
+    func setAppLimitUsageOffset(
+        ruleID: UUID,
+        usageDate: String,
+        usedMinutes: Int
+    ) {
+        pruneAppLimitUsageKeys(ruleID: ruleID, keeping: usageDate)
+        let key = appLimitUsageKey(
+            prefix: appLimitUsageOffsetPrefix,
+            ruleID: ruleID,
+            usageDate: usageDate
+        )
         defaults?.set(max(0, usedMinutes), forKey: key)
         defaults?.synchronize()
     }
 
-    func appLimitReportedMinutes(ruleID: UUID) -> Int {
-        let key = appLimitReportedPrefix + ruleID.uuidString.lowercased()
+    func appLimitReportedMinutes(ruleID: UUID, usageDate: String) -> Int {
+        let key = appLimitUsageKey(
+            prefix: appLimitReportedPrefix,
+            ruleID: ruleID,
+            usageDate: usageDate
+        )
         guard defaults?.object(forKey: key) != nil else { return 0 }
         return max(0, defaults?.integer(forKey: key) ?? 0)
     }
 
-    func recordAppLimitUsage(ruleID: UUID, usedMinutes: Int) {
-        let key = appLimitReportedPrefix + ruleID.uuidString.lowercased()
-        let current = appLimitReportedMinutes(ruleID: ruleID)
+    func recordAppLimitUsage(
+        ruleID: UUID,
+        usageDate: String,
+        usedMinutes: Int
+    ) {
+        pruneAppLimitUsageKeys(ruleID: ruleID, keeping: usageDate)
+        let key = appLimitUsageKey(
+            prefix: appLimitReportedPrefix,
+            ruleID: ruleID,
+            usageDate: usageDate
+        )
+        let current = appLimitReportedMinutes(ruleID: ruleID, usageDate: usageDate)
         defaults?.set(max(current, usedMinutes), forKey: key)
         defaults?.synchronize()
     }

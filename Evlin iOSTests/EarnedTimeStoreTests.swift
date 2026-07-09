@@ -265,4 +265,130 @@ final class EarnedTimeStoreTests: XCTestCase {
         XCTAssertTrue(store.usageCountingAllowed)
         XCTAssertFalse(store.isEarnedTimeReady)
     }
+
+    // MARK: - Per-app usage day scoping
+
+    func test_appLimitUsageDate_isGregorianAndTimezoneAware() throws {
+        var components = DateComponents()
+        components.calendar = Calendar(identifier: .gregorian)
+        components.timeZone = TimeZone(secondsFromGMT: 0)
+        components.year = 2026
+        components.month = 7
+        components.day = 9
+        components.hour = 23
+        components.minute = 30
+        let instant = try XCTUnwrap(components.date)
+
+        XCTAssertEqual(
+            EarnedTimeStore.appLimitUsageDate(
+                now: instant,
+                timeZone: try XCTUnwrap(TimeZone(identifier: "America/Los_Angeles"))
+            ),
+            "2026-07-09"
+        )
+        XCTAssertEqual(
+            EarnedTimeStore.appLimitUsageDate(
+                now: instant,
+                timeZone: try XCTUnwrap(TimeZone(identifier: "Asia/Bangkok"))
+            ),
+            "2026-07-10"
+        )
+    }
+
+    func test_appLimitOffset_persistsWithinSameUsageDate() {
+        let store = freshStore()
+        let ruleID = UUID()
+
+        store.setAppLimitUsageOffset(
+            ruleID: ruleID, usageDate: "2026-07-08", usedMinutes: 20
+        )
+
+        XCTAssertEqual(
+            store.appLimitUsageOffsetMinutes(ruleID: ruleID, usageDate: "2026-07-08"),
+            20
+        )
+    }
+
+    func test_appLimitOffset_doesNotLeakIntoNextUsageDate() {
+        let store = freshStore()
+        let ruleID = UUID()
+
+        store.setAppLimitUsageOffset(
+            ruleID: ruleID, usageDate: "2026-07-08", usedMinutes: 20
+        )
+
+        XCTAssertEqual(
+            store.appLimitUsageOffsetMinutes(ruleID: ruleID, usageDate: "2026-07-09"),
+            0
+        )
+    }
+
+    func test_appLimitReported_isMonotoneOnlyWithinUsageDate() {
+        let store = freshStore()
+        let ruleID = UUID()
+
+        store.recordAppLimitUsage(
+            ruleID: ruleID, usageDate: "2026-07-08", usedMinutes: 45
+        )
+        store.recordAppLimitUsage(
+            ruleID: ruleID, usageDate: "2026-07-08", usedMinutes: 30
+        )
+
+        XCTAssertEqual(
+            store.appLimitReportedMinutes(ruleID: ruleID, usageDate: "2026-07-08"),
+            45
+        )
+        XCTAssertEqual(
+            store.appLimitReportedMinutes(ruleID: ruleID, usageDate: "2026-07-09"),
+            0
+        )
+    }
+
+    func test_appLimitLegacyUnscopedValues_areIgnored() throws {
+        let store = freshStore()
+        let ruleID = UUID()
+        let suite = try XCTUnwrap(UserDefaults(suiteName: "group.com.evlin.ios"))
+        let id = ruleID.uuidString.lowercased()
+        suite.set(99, forKey: "evlin.appLimitUsageOffset.\(id)")
+        suite.set(99, forKey: "evlin.appLimitReported.\(id)")
+
+        XCTAssertEqual(
+            store.appLimitUsageOffsetMinutes(ruleID: ruleID, usageDate: "2026-07-09"),
+            0
+        )
+        XCTAssertEqual(
+            store.appLimitReportedMinutes(ruleID: ruleID, usageDate: "2026-07-09"),
+            0
+        )
+    }
+
+    func test_appLimitWrite_prunesSameRuleOldDatesAndLegacyOnly() throws {
+        let store = freshStore()
+        let ruleA = UUID()
+        let ruleB = UUID()
+        let day1 = "2026-07-08"
+        let day2 = "2026-07-09"
+        let suite = try XCTUnwrap(UserDefaults(suiteName: "group.com.evlin.ios"))
+        let idA = ruleA.uuidString.lowercased()
+        let idB = ruleB.uuidString.lowercased()
+
+        store.setAppLimitUsageOffset(ruleID: ruleA, usageDate: day1, usedMinutes: 20)
+        store.recordAppLimitUsage(ruleID: ruleA, usageDate: day1, usedMinutes: 45)
+        store.setAppLimitUsageOffset(ruleID: ruleB, usageDate: day1, usedMinutes: 7)
+        suite.set(88, forKey: "evlin.appLimitUsageOffset.\(idA)")
+        suite.set(88, forKey: "evlin.appLimitReported.\(idA)")
+
+        store.setAppLimitUsageOffset(ruleID: ruleA, usageDate: day2, usedMinutes: 5)
+
+        XCTAssertNil(suite.object(forKey: "evlin.appLimitUsageOffset.\(idA).\(day1)"))
+        XCTAssertNil(suite.object(forKey: "evlin.appLimitReported.\(idA).\(day1)"))
+        XCTAssertNil(suite.object(forKey: "evlin.appLimitUsageOffset.\(idA)"))
+        XCTAssertNil(suite.object(forKey: "evlin.appLimitReported.\(idA)"))
+        XCTAssertEqual(
+            suite.integer(forKey: "evlin.appLimitUsageOffset.\(idA).\(day2)"), 5
+        )
+        XCTAssertEqual(
+            suite.integer(forKey: "evlin.appLimitUsageOffset.\(idB).\(day1)"), 7
+        )
+    }
 }
