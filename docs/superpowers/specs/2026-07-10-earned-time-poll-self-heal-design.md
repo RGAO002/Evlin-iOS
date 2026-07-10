@@ -100,7 +100,10 @@ present, it is built from the same active config, cap, child day, and device day
 used by the parent summary. `device_cap_minutes` is the explicit cap when one
 exists, otherwise the daily pool. `remaining_minutes` and
 `estimated_minutes` are authoritative server values for the canonical usage
-date.
+date. In this payload, `estimated_minutes` means the maximum usage threshold
+the server has accepted for that device and usage date. It is not a remaining
+estimate and it does not include a client-side threshold that is still in
+flight.
 
 The iOS fields are optional for rollout compatibility. If
 `usage_counting_allowed` is absent, iOS falls back to the conservative local
@@ -139,11 +142,21 @@ skip because the set is missing, and the next poll self-heals after the async
 publication completes. It also restores an acknowledged config command that
 was subsequently cleared by identity teardown.
 
+Poll reconciliation is monotonic only within one canonical usage date. The
+store records the usage date that owns the accepted estimate and offset. For a
+poll whose `usage_date` matches that stored date, the accepted baseline becomes
+`max(localAccepted, serverEstimated)`, so a stale read cannot move the odometer
+backward before a re-arm. When the canonical `usage_date` changes, the old
+baseline does not participate: estimate and offset reset to the new day's
+server estimate. A `counted: false` sample response is the only same-day path
+allowed to lower the local accepted baseline, because it explicitly removes a
+client-side phantom that the server did not count.
+
 For every successful sample POST, iOS decodes `counted` and the server
 `estimated_minutes`:
 
 - `counted: true`: retain the monotonic maximum of the local and server
-  accepted estimates.
+  accepted estimates for the response `usage_date`.
 - `counted: false`: replace the local estimate and re-arm offset with the
   server estimate, record a `backend_counting_paused` diagnostic, and do not
   enqueue a retry.
@@ -157,6 +170,9 @@ behavior.
 - Missing optional runtime state never clears a previously valid policy.
 - Invalid or incomplete runtime values are ignored and diagnosed; they do not
   arm a zero/negative ladder.
+- A poll may lower accepted estimate/offset only when its canonical usage date
+  differs from the stored accepted-usage date. A same-date poll always uses a
+  monotonic maximum.
 - A paused sample is never retried, because later billing would charge usage
   that occurred while the clock was intentionally stopped.
 - A network failure remains retryable and does not alter the accepted local
@@ -169,11 +185,15 @@ Backend tests must prove:
 
 1. `/child/state` returns `usage_counting_allowed=false` for an active
    reflection and true after resolution.
-2. Runtime state returns exact pool, explicit/fallback cap, remaining, estimate,
+2. For the same child device UUID, `/child/state.usage_counting_allowed` and a
+   concurrent sample response's `counted` value agree while paused and while
+   allowed. Both paths must call the shared gate with the device UUID, not the
+   child-profile UUID.
+3. Runtime state returns exact pool, explicit/fallback cap, remaining, estimate,
    canonical usage date, and timezone.
-3. A paused sample returns HTTP 200 with `counted=false` and creates no sample
+4. A paused sample returns HTTP 200 with `counted=false` and creates no sample
    or day rows.
-4. A normal sample returns `counted=true` and persists the ledger.
+5. A normal sample returns `counted=true` and persists the ledger.
 
 iOS tests must prove:
 
@@ -181,11 +201,15 @@ iOS tests must prove:
    use the compatibility fallback.
 2. Reflection presence disables counting in the fallback path.
 3. A poll writes exact runtime policy before attempting a re-arm.
-4. An allowed poll retries `armIfReady` after identity/list readiness changes,
+4. A stale same-date poll cannot lower accepted estimate or offset; a canonical
+   usage-date change resets both to the new server estimate.
+5. An allowed poll retries `armIfReady` after identity/list readiness changes,
    while the arm signature prevents repeated DeviceActivity replacement.
-5. `counted=false` reconciles estimate and offset to the server value without a
+6. `counted=false` reconciles estimate and offset to the server value without a
    retry; counted and out-of-order responses preserve monotonic accepted usage.
-6. Existing task-pause stop/re-arm tests remain green.
+7. The false gate invokes the existing three-counter stop path: earned ladder,
+   device-total activity, and per-app activities all stop. Existing task-pause
+   stop/re-arm tests remain green under the reflection-aware server gate.
 
 ## Deployment And One-Time Recovery
 
@@ -194,6 +218,13 @@ install the fixed iOS build on the child device.
 
 After both sides are running, perform a one-time local recovery for
 `gruoping@gmail.com`:
+
+The affected child device was directly inspected on 2026-07-10 and stored
+`evlin.baseURL = http://192.168.1.175:8000/api/v1`; this incident and its reset
+therefore target the local PostgreSQL database and local backend only. Render
+is out of scope. Any later reset against `evlin-backend.onrender.com` is a
+separate production operation requiring explicit approval after its account
+and device are re-identified.
 
 1. Delete only today's earned-time samples, child-day, and device-day rows for
    this family in the local database.
