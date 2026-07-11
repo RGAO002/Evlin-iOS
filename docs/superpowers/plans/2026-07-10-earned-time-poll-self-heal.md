@@ -17,6 +17,8 @@
 - Treat `estimated_minutes` as the maximum threshold accepted by the backend for one device and canonical usage date, not as remaining time.
 - Same-date accepted usage is monotonic except for an explicit `counted: false` response; a canonical usage-date change resets the accepted baseline to the server value.
 - Missing optional runtime fields must preserve stored policy and use the compatibility gate: all tasks complete and no active reflection request.
+- Backend runtime responses accept the established `0...1440` pool/cap domain. The current iOS compatibility guard deliberately ignores pool/cap `0`, so zero policies are not synchronized through runtime yet and previously stored local policy remains unchanged.
+- Clamp runtime `estimated_minutes` to `0...1440` before response-model construction so polluted legacy data cannot turn `/child/state` into a validation 500; this is response hardening, not database correction.
 - A false gate must stop all three counter systems: earned-time ladder, device-total activity, and per-app activities.
 - Do not change five-minute threshold granularity, per-app daily semantics, lock precedence, task-lock behavior, or reflection UX.
 - Do not add an automatic historical correction or migration feature.
@@ -254,8 +256,8 @@ Add to `app/schemas/bigkid.py`:
 class EarnedTimeRuntimeState(BaseModel):
     usage_date: date
     timezone: str
-    daily_pool_minutes: int = Field(ge=1, le=1440)
-    device_cap_minutes: int = Field(ge=1, le=1440)
+    daily_pool_minutes: int = Field(ge=0, le=1440)
+    device_cap_minutes: int = Field(ge=0, le=1440)
     remaining_minutes: int = Field(ge=0, le=1440)
     estimated_minutes: int = Field(ge=0, le=1440)
 
@@ -298,7 +300,8 @@ async def _earned_time_runtime_for_device(
     )
     explicit_cap = device_entry.cap_minutes if device_entry is not None else None
     cap = explicit_cap if explicit_cap is not None else summary.daily_pool_minutes
-    estimate = device_entry.estimated_minutes if device_entry is not None else 0
+    raw_estimate = device_entry.estimated_minutes if device_entry is not None else 0
+    estimate = min(max(0, raw_estimate), 1440)
     remaining_to_cap = max(0, cap - estimate)
     return EarnedTimeRuntimeState(
         usage_date=summary.usage_date,
@@ -331,6 +334,15 @@ return ChildStateResponse(
 ```
 
 Do not feed `child_device.child_profile_id` to the gate.
+
+Immediately after `device = await session.get(Device, child)`, return the same terminal response used by the route's presence guard if the row disappeared in the intervening race window:
+
+```python
+if device is None:
+    raise HTTPException(status_code=410, detail="family_removed")
+```
+
+Tests must cover zero pool, explicit zero cap, an over-1440 legacy estimate clamped in the runtime payload, and a device disappearing between `family_device_exists` and `session.get` returning the existing `410 family_removed` contract.
 
 - [ ] **Step 6: Run backend gate/runtime regression tests**
 
