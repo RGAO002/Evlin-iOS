@@ -600,6 +600,112 @@ final class EarnedSampleReporterResponseTests: XCTestCase {
         XCTAssertTrue(EarnedSampleReporter.loadRetryQueue(suiteName: isolatedSuite).isEmpty)
     }
 
+    func test_staleSuccessAfterNewDay_isAcceptedWithoutMutationOrRetry() {
+        let isolatedSuite = makeIsolatedSuiteName()
+        defer { removeIsolatedSuite(isolatedSuite) }
+        let store = EarnedTimeStore(suiteName: isolatedSuite)
+        _ = store.reconcileAcceptedUsage(
+            usageDate: "2026-07-11",
+            serverEstimatedMinutes: 8,
+            allowSameDayDecrease: false
+        )
+        let data = Data(
+            #"{"usage_date":"2026-07-10","estimated_minutes":0,"counted":false}"#.utf8
+        )
+
+        let result = EarnedSampleReporter.processSuccessfulResponse(
+            data,
+            store: store,
+            suiteName: isolatedSuite
+        )
+
+        XCTAssertEqual(result, .acceptedWithoutReconciliation)
+        assertAcceptedUsage(store, date: "2026-07-11", minutes: 8)
+        XCTAssertTrue(EarnedSampleReporter.loadRetryQueue(suiteName: isolatedSuite).isEmpty)
+        XCTAssertTrue(lastDebugValue(in: isolatedSuite).contains("stale_response"))
+    }
+
+    func test_invalidUsageDateSuccess_isAcceptedWithoutMutationOrRetry() {
+        assertSemanticallyInvalidResponse(
+            #"{"usage_date":"2026-02-30","estimated_minutes":10,"counted":true}"#
+        )
+    }
+
+    func test_negativeEstimateSuccess_isAcceptedWithoutMutationOrRetry() {
+        assertSemanticallyInvalidResponse(
+            #"{"usage_date":"2026-07-10","estimated_minutes":-1,"counted":true}"#
+        )
+    }
+
+    func test_estimateAboveDailyMaximumSuccess_isAcceptedWithoutMutationOrRetry() {
+        assertSemanticallyInvalidResponse(
+            #"{"usage_date":"2026-07-10","estimated_minutes":1441,"counted":true}"#
+        )
+    }
+
+    func test_report_200SuccessReconcilesImmediately() async {
+        let isolatedSuite = makeIsolatedSuiteName()
+        defer { removeIsolatedSuite(isolatedSuite) }
+        EarnedSampleReporterURLProtocol.responseData = Data(
+            #"{"usage_date":"2026-07-10","estimated_minutes":9,"counted":true}"#.utf8
+        )
+        EarnedSampleReporterURLProtocol.statusCode = 200
+        URLProtocol.registerClass(EarnedSampleReporterURLProtocol.self)
+        defer {
+            URLProtocol.unregisterClass(EarnedSampleReporterURLProtocol.self)
+            EarnedSampleReporterURLProtocol.reset()
+        }
+
+        await EarnedSampleReporter.report(
+            baseURL: URL(string: "https://earned-sample-reporter.test")!,
+            deviceID: UUID(),
+            usageDate: "2026-07-10",
+            timezone: "America/New_York",
+            thresholdMinutes: 10,
+            estimatedMinutes: 10,
+            suiteName: isolatedSuite
+        )
+
+        assertAcceptedUsage(
+            EarnedTimeStore(suiteName: isolatedSuite),
+            date: "2026-07-10",
+            minutes: 9
+        )
+        XCTAssertTrue(EarnedSampleReporter.loadRetryQueue(suiteName: isolatedSuite).isEmpty)
+    }
+
+    func test_report_409MalformedSuccess_isAcceptedWithoutRetry() async {
+        let isolatedSuite = makeIsolatedSuiteName()
+        defer { removeIsolatedSuite(isolatedSuite) }
+        let store = EarnedTimeStore(suiteName: isolatedSuite)
+        _ = store.reconcileAcceptedUsage(
+            usageDate: "2026-07-10",
+            serverEstimatedMinutes: 12,
+            allowSameDayDecrease: false
+        )
+        EarnedSampleReporterURLProtocol.responseData = Data("not-json".utf8)
+        EarnedSampleReporterURLProtocol.statusCode = 409
+        URLProtocol.registerClass(EarnedSampleReporterURLProtocol.self)
+        defer {
+            URLProtocol.unregisterClass(EarnedSampleReporterURLProtocol.self)
+            EarnedSampleReporterURLProtocol.reset()
+        }
+
+        await EarnedSampleReporter.report(
+            baseURL: URL(string: "https://earned-sample-reporter.test")!,
+            deviceID: UUID(),
+            usageDate: "2026-07-10",
+            timezone: "America/New_York",
+            thresholdMinutes: 15,
+            estimatedMinutes: 15,
+            suiteName: isolatedSuite
+        )
+
+        assertAcceptedUsage(store, date: "2026-07-10", minutes: 12)
+        XCTAssertTrue(EarnedSampleReporter.loadRetryQueue(suiteName: isolatedSuite).isEmpty)
+        XCTAssertTrue(lastDebugValue(in: isolatedSuite).contains("response_decode_failed"))
+    }
+
     func test_retryDrain_uncountedSuccessRemovesEntryInsteadOfRequeueing() async {
         let isolatedSuite = makeIsolatedSuiteName()
         defer { removeIsolatedSuite(isolatedSuite) }
@@ -639,6 +745,98 @@ final class EarnedSampleReporterResponseTests: XCTestCase {
         XCTAssertEqual(store.acceptedEstimateMinutes, 0)
         XCTAssertEqual(store.latestDeviceEstimate, 0)
         XCTAssertEqual(store.earnedUsageOffsetMinutes, 0)
+    }
+
+    func test_retryDrain_staleSuccessAfterNewDayRemovesEntryWithoutRollback() async {
+        let isolatedSuite = makeIsolatedSuiteName()
+        defer { removeIsolatedSuite(isolatedSuite) }
+        let store = EarnedTimeStore(suiteName: isolatedSuite)
+        _ = store.reconcileAcceptedUsage(
+            usageDate: "2026-07-11",
+            serverEstimatedMinutes: 8,
+            allowSameDayDecrease: false
+        )
+        EarnedSampleReporter.enqueueRetry(
+            EarnedSampleReporter.RetryEntry(
+                deviceID: UUID(),
+                usageDate: "2026-07-10",
+                timezone: "America/New_York",
+                thresholdMinutes: 10,
+                estimatedMinutes: 10,
+                observedAt: "2026-07-10T12:00:00Z"
+            ),
+            suiteName: isolatedSuite
+        )
+        EarnedSampleReporterURLProtocol.responseData = Data(
+            #"{"usage_date":"2026-07-10","estimated_minutes":10,"counted":true}"#.utf8
+        )
+        EarnedSampleReporterURLProtocol.statusCode = 200
+        URLProtocol.registerClass(EarnedSampleReporterURLProtocol.self)
+        defer {
+            URLProtocol.unregisterClass(EarnedSampleReporterURLProtocol.self)
+            EarnedSampleReporterURLProtocol.reset()
+        }
+
+        await EarnedSampleReporter.drainRetryQueue(
+            baseURL: URL(string: "https://earned-sample-reporter.test")!,
+            suiteName: isolatedSuite
+        )
+
+        XCTAssertTrue(EarnedSampleReporter.loadRetryQueue(suiteName: isolatedSuite).isEmpty)
+        assertAcceptedUsage(store, date: "2026-07-11", minutes: 8)
+        XCTAssertTrue(lastDebugValue(in: isolatedSuite).contains("stale_response"))
+    }
+
+    private func assertSemanticallyInvalidResponse(
+        _ json: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let isolatedSuite = makeIsolatedSuiteName()
+        defer { removeIsolatedSuite(isolatedSuite) }
+        let store = EarnedTimeStore(suiteName: isolatedSuite)
+        _ = store.reconcileAcceptedUsage(
+            usageDate: "2026-07-10",
+            serverEstimatedMinutes: 12,
+            allowSameDayDecrease: false
+        )
+
+        let result = EarnedSampleReporter.processSuccessfulResponse(
+            Data(json.utf8),
+            store: store,
+            suiteName: isolatedSuite
+        )
+
+        XCTAssertEqual(result, .acceptedWithoutReconciliation, file: file, line: line)
+        assertAcceptedUsage(store, date: "2026-07-10", minutes: 12, file: file, line: line)
+        XCTAssertTrue(
+            EarnedSampleReporter.loadRetryQueue(suiteName: isolatedSuite).isEmpty,
+            file: file,
+            line: line
+        )
+        XCTAssertTrue(
+            lastDebugValue(in: isolatedSuite).contains("response_semantically_invalid"),
+            file: file,
+            line: line
+        )
+    }
+
+    private func assertAcceptedUsage(
+        _ store: EarnedTimeStore,
+        date: String,
+        minutes: Int,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertEqual(store.acceptedUsageDate, date, file: file, line: line)
+        XCTAssertEqual(store.acceptedEstimateMinutes, minutes, file: file, line: line)
+        XCTAssertEqual(store.latestDeviceEstimate, minutes, file: file, line: line)
+        XCTAssertEqual(store.earnedUsageOffsetMinutes, minutes, file: file, line: line)
+    }
+
+    private func lastDebugValue(in suiteName: String) -> String {
+        UserDefaults(suiteName: suiteName)?
+            .string(forKey: EarnedSampleReporter.lastSamplePostDebugKey) ?? ""
     }
 
     private func makeIsolatedSuiteName() -> String {

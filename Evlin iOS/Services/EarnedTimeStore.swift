@@ -29,6 +29,12 @@ import FamilyControls
 ///   - `earned.usageCountingOffset`        — Int counted minutes before a task pause
 nonisolated final class EarnedTimeStore: @unchecked Sendable {
     static let shared = EarnedTimeStore()
+    private static let acceptedUsageReconciliationLock = NSLock()
+
+    enum AcceptedUsageReconciliation: Equatable {
+        case reconciled(Int)
+        case stale(acceptedUsageDate: String)
+    }
 
     private let defaults: UserDefaults?
 
@@ -314,6 +320,48 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
         serverEstimatedMinutes: Int,
         allowSameDayDecrease: Bool
     ) -> Int {
+        Self.withAcceptedUsageReconciliationLock {
+            reconcileAcceptedUsageLocked(
+                usageDate: usageDate,
+                serverEstimatedMinutes: serverEstimatedMinutes,
+                allowSameDayDecrease: allowSameDayDecrease
+            )
+        }
+    }
+
+    func reconcileAcceptedUsageIfNotStale(
+        usageDate: String,
+        serverEstimatedMinutes: Int,
+        allowSameDayDecrease: Bool
+    ) -> AcceptedUsageReconciliation {
+        Self.withAcceptedUsageReconciliationLock {
+            if let currentDate = acceptedUsageDate,
+               Self.isCanonicalUsageDate(currentDate),
+               usageDate < currentDate {
+                return .stale(acceptedUsageDate: currentDate)
+            }
+            return .reconciled(reconcileAcceptedUsageLocked(
+                usageDate: usageDate,
+                serverEstimatedMinutes: serverEstimatedMinutes,
+                allowSameDayDecrease: allowSameDayDecrease
+            ))
+        }
+    }
+
+    @discardableResult
+    static func withAcceptedUsageReconciliationLock<T>(
+        _ body: () throws -> T
+    ) rethrows -> T {
+        acceptedUsageReconciliationLock.lock()
+        defer { acceptedUsageReconciliationLock.unlock() }
+        return try body()
+    }
+
+    private func reconcileAcceptedUsageLocked(
+        usageDate: String,
+        serverEstimatedMinutes: Int,
+        allowSameDayDecrease: Bool
+    ) -> Int {
         let server = max(0, serverEstimatedMinutes)
         let sameDay = acceptedUsageDate == usageDate
         let accepted: Int
@@ -333,6 +381,17 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
         earnedUsageOffsetMinutes = accepted
         defaults?.synchronize()
         return accepted
+    }
+
+    private static func isCanonicalUsageDate(_ value: String) -> Bool {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyy-MM-dd"
+        formatter.isLenient = false
+        guard let date = formatter.date(from: value) else { return false }
+        return formatter.string(from: date) == value
     }
 
     static func appLimitUsageDate(

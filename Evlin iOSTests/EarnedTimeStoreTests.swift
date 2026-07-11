@@ -255,6 +255,52 @@ final class EarnedTimeStoreTests: XCTestCase {
         }
     }
 
+    func test_reconcileAcceptedUsageIfNotStale_rejectsOlderDateWithoutMutation() {
+        withIsolatedStore { store in
+            _ = store.reconcileAcceptedUsage(
+                usageDate: "2026-07-11",
+                serverEstimatedMinutes: 8,
+                allowSameDayDecrease: false
+            )
+
+            let result = store.reconcileAcceptedUsageIfNotStale(
+                usageDate: "2026-07-10",
+                serverEstimatedMinutes: 100,
+                allowSameDayDecrease: true
+            )
+
+            XCTAssertEqual(result, .stale(acceptedUsageDate: "2026-07-11"))
+            XCTAssertEqual(store.acceptedUsageDate, "2026-07-11")
+            XCTAssertEqual(store.acceptedEstimateMinutes, 8)
+            XCTAssertEqual(store.latestDeviceEstimate, 8)
+            XCTAssertEqual(store.earnedUsageOffsetMinutes, 8)
+        }
+    }
+
+    func test_reconcileAcceptedUsageLock_serializesSameProcessCriticalSections() {
+        let firstEntered = DispatchSemaphore(value: 0)
+        let releaseFirst = DispatchSemaphore(value: 0)
+        let secondEntered = DispatchSemaphore(value: 0)
+
+        DispatchQueue.global().async {
+            let _: Void = EarnedTimeStore.withAcceptedUsageReconciliationLock {
+                firstEntered.signal()
+                releaseFirst.wait()
+            }
+        }
+        XCTAssertEqual(firstEntered.wait(timeout: .now() + 1), .success)
+
+        DispatchQueue.global().async {
+            let _: Void = EarnedTimeStore.withAcceptedUsageReconciliationLock {
+                secondEntered.signal()
+            }
+        }
+        XCTAssertEqual(secondEntered.wait(timeout: .now() + 0.1), .timedOut)
+
+        releaseFirst.signal()
+        XCTAssertEqual(secondEntered.wait(timeout: .now() + 1), .success)
+    }
+
     // MARK: - usage counting gate
 
     func test_usageCountingAllowed_defaultsToTrueBeforeChildStateArrives() {

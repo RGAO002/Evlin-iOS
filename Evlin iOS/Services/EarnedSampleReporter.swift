@@ -45,26 +45,47 @@ enum EarnedSampleReporter {
             recordDebug("post success response_decode_failed", suiteName: suiteName)
             return .acceptedWithoutReconciliation
         }
+        guard isCanonicalUsageDate(snapshot.usageDate),
+              (0...1_440).contains(snapshot.estimatedMinutes)
+        else {
+            recordDebug(
+                "post success response_semantically_invalid date=\(snapshot.usageDate) estimate=\(snapshot.estimatedMinutes)",
+                suiteName: suiteName
+            )
+            return .acceptedWithoutReconciliation
+        }
+        let reconciliation = store.reconcileAcceptedUsageIfNotStale(
+            usageDate: snapshot.usageDate,
+            serverEstimatedMinutes: snapshot.estimatedMinutes,
+            allowSameDayDecrease: snapshot.counted == false
+        )
+        if case .stale(let acceptedDate) = reconciliation {
+            recordDebug(
+                "post success stale_response date=\(snapshot.usageDate) accepted_date=\(acceptedDate)",
+                suiteName: suiteName
+            )
+            return .acceptedWithoutReconciliation
+        }
 
         if snapshot.counted == false {
-            store.reconcileAcceptedUsage(
-                usageDate: snapshot.usageDate,
-                serverEstimatedMinutes: snapshot.estimatedMinutes,
-                allowSameDayDecrease: true
-            )
             recordDebug(
                 "backend_counting_paused date=\(snapshot.usageDate) estimate=\(snapshot.estimatedMinutes)",
                 suiteName: suiteName
             )
             return .paused
         }
-
-        store.reconcileAcceptedUsage(
-            usageDate: snapshot.usageDate,
-            serverEstimatedMinutes: snapshot.estimatedMinutes,
-            allowSameDayDecrease: false
-        )
         return .counted
+    }
+
+    private static func isCanonicalUsageDate(_ value: String) -> Bool {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyy-MM-dd"
+        formatter.isLenient = false
+        guard let date = formatter.date(from: value) else { return false }
+        return formatter.string(from: date) == value
     }
 
     // MARK: - Sample body builder (pure)
