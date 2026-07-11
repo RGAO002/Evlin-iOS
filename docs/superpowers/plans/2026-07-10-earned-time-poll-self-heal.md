@@ -18,6 +18,10 @@
 - Same-date accepted usage is monotonic except for an explicit `counted: false` response; a canonical usage-date change resets the accepted baseline to the server value.
 - Reconcile a successful sample body only when `usage_date` is an exact Gregorian `yyyy-MM-dd` value and `estimated_minutes` is within `0...1440`; semantically invalid 2xx/409 bodies are accepted without mutation or retry.
 - A valid successful response older than the store's current accepted usage date is stale and must be accepted without mutation or retry; retry drain must never roll accepted usage back to a prior day.
+- Earned arming has one production entry point, `EarnedBudgetArming.armIfReady()`. Transition/skipped recovery may re-arm device-total and per-app counters but must not directly call the earned scheduler.
+- The earned arm signature includes device identity, canonical usage date, policy, selection fingerprint, and accepted usage offset. A changed accepted offset must replace the raw ladder; an unchanged signature must not restart monitoring on a stable poll.
+- Identity teardown may stop and clear state before fetching child state, but it must not arm until the fetched runtime and authoritative gate have been applied.
+- Child-state runtime reconciliation validates canonical date/timezone and `0...1440` bounds, rejects stale dates before writing any policy field, and prevents overlapping refreshes from applying out of order.
 - Missing optional runtime fields must preserve stored policy and use the compatibility gate: all tasks complete and no active reflection request.
 - Backend runtime responses accept the established `0...1440` pool/cap domain. The current iOS compatibility guard deliberately ignores pool/cap `0`, so zero policies are not synchronized through runtime yet and previously stored local policy remains unchanged.
 - Clamp runtime `estimated_minutes` to `0...1440` before response-model construction so polluted legacy data cannot turn `/child/state` into a validation 500; this is response hardening, not database correction.
@@ -736,8 +740,14 @@ The cached diff must include the pre-existing retry-filter hunks only if they ar
 **Files:**
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS/Services/BigKidStatePoller.swift`
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS/Services/CommandPoller.swift`
+- Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS/Services/EarnedBudgetArming.swift`
+- Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS/Services/EarnedBudgetScheduler.swift`
+- Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS/Services/EarnedTimeStore.swift`
 - Test: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/BigKidStatePollerTests.swift`
 - Test: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/EarnedConfigCommandTests.swift`
+- Test: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/EarnedBudgetSchedulerTests.swift`
+- Test: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/EarnedBudgetArmingTests.swift`
+- Test: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/EarnedTimeStoreTests.swift`
 
 **Interfaces:**
 - Consumes: Task 3 runtime model and accepted-baseline store API.
