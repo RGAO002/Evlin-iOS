@@ -23,6 +23,12 @@
 - Do not modify Render data. The recovery target is the local backend used by `gruoping@gmail.com` at `http://192.168.1.175:8000/api/v1`.
 - Preserve all pre-existing dirty-worktree changes. Inspect diffs before editing; stage only named paths and, where a target file already contains unrelated edits, stage only this plan's hunks with `git add -p`.
 - Run iOS focused tests serially with `-parallel-testing-enabled NO`; do not rely on the broad `EarnedTimeStoreTests` suite running in parallel because existing extra store instances can trigger a double-free.
+- Execute Tasks 1-5 sequentially in the existing main working directories. Do not create a worktree: required prerequisite edits exist only as uncommitted changes in those directories.
+- Before Task 1, record `git stash create` recovery SHAs for both repositories without applying or clearing the worktrees.
+- Implementer and reviewer subagents must not delegate. They may touch only the task's named files in the existing main working directory.
+- For dirty target files, derive an exact patch from the task diff and stage it with `git apply --cached`, or use scripted `git add -p`; every review gate must inspect `git diff --cached` and reject unrelated pre-existing hunks.
+- Task 6 is controller-only. No subagent may restart services, modify the local database, copy App Group data, install on a physical device, or run the physical acceptance test.
+- In Task 6, stop before the recovery transaction's `COMMIT` and require the user to confirm the printed family, child profile, child device, timezone, usage date, and affected row counts.
 
 ---
 
@@ -389,7 +395,7 @@ XCTAssertNil(noTasksNoReflection.earnedTimeRuntime)
 
 - [ ] **Step 2: Add failing accepted-baseline store tests**
 
-Use a fresh suite per test and assert all three invariants:
+Use a fresh suite per test and assert all three invariants. A test-created store must not coexist with or access `EarnedTimeStore.shared` in the same test; run these tests serially and release the local store before deleting its suite:
 
 ```swift
 func test_reconcileAcceptedUsage_isMonotoneWithinUsageDate() {
@@ -477,7 +483,23 @@ Reuse `BigKidState.usageCountingAllowed(for:)`, whose exact predicate is `task.s
 
 - [ ] **Step 5: Implement the accepted baseline in `EarnedTimeStore`**
 
-Add App Group keys and properties:
+First change the stored defaults dependency into an explicit test seam while preserving the production default:
+
+```swift
+final class EarnedTimeStore: @unchecked Sendable {
+    static let shared = EarnedTimeStore()
+
+    private let defaults: UserDefaults?
+
+    init(suiteName: String = "group.com.evlin.ios") {
+        defaults = UserDefaults(suiteName: suiteName)
+    }
+}
+```
+
+Production and extension call sites continue using `EarnedTimeStore()` or `.shared`, both of which resolve to the real App Group. Tests create exactly one local `EarnedTimeStore(suiteName:)` at a time, never access `.shared` in that test, run serially, set the local reference to `nil` before `removePersistentDomain(forName:)`, and clean the suite in `tearDown`.
+
+Then add App Group keys and properties:
 
 ```swift
 private let acceptedUsageDateKey = "earned.acceptedUsageDate"
@@ -520,6 +542,8 @@ func reconcileAcceptedUsage(
     acceptedUsageDate = usageDate
     acceptedEstimateMinutes = accepted
     if !sameDay || allowSameDayDecrease {
+        // An authoritative new-day or paused response deliberately clears a
+        // raw extension estimate that the backend did not accept.
         latestDeviceEstimate = accepted
     } else {
         latestDeviceEstimate = max(latestDeviceEstimate ?? 0, accepted)
@@ -842,7 +866,7 @@ let offset = max(accepted, EarnedTimeStore.shared.earnedUsageOffsetMinutes)
 EarnedTimeStore.shared.earnedUsageOffsetMinutes = offset
 ```
 
-Do not include `latestDeviceEstimate` in config re-arm math. That property remains a raw extension observation and may represent a backend-rejected threshold.
+Do not include `latestDeviceEstimate` in config re-arm math. It originates as a raw extension observation, but reconciliation deliberately overwrites it on a new canonical day or `counted:false` response to clear phantom usage. Only `acceptedEstimateMinutes` is the re-arm authority.
 
 - [ ] **Step 8: Run focused iOS tests**
 
@@ -955,8 +979,8 @@ First identify the account/family/device again; do not rely only on previously o
 
 ```sql
 SELECT a.email, a.family_id, d.id AS child_device_id, d.child_profile_id
-FROM accounts a
-JOIN devices d ON d.family_id = a.family_id
+FROM evlin_accounts a
+JOIN evlin_devices d ON d.family_id = a.family_id
 WHERE lower(a.email) = lower('gruoping@gmail.com')
   AND d.mode = 'child';
 ```
