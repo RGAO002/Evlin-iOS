@@ -16,6 +16,8 @@
 - Keep paused sample responses at HTTP 200; distinguish them with `counted: false` and never retry them.
 - Treat `estimated_minutes` as the maximum threshold accepted by the backend for one device and canonical usage date, not as remaining time.
 - Same-date accepted usage is monotonic except for an explicit `counted: false` response; a canonical usage-date change resets the accepted baseline to the server value.
+- Reconcile a successful sample body only when `usage_date` is an exact Gregorian `yyyy-MM-dd` value and `estimated_minutes` is within `0...1440`; semantically invalid 2xx/409 bodies are accepted without mutation or retry.
+- A valid successful response older than the store's current accepted usage date is stale and must be accepted without mutation or retry; retry drain must never roll accepted usage back to a prior day.
 - Missing optional runtime fields must preserve stored policy and use the compatibility gate: all tasks complete and no active reflection request.
 - Backend runtime responses accept the established `0...1440` pool/cap domain. The current iOS compatibility guard deliberately ignores pool/cap `0`, so zero policies are not synchronized through runtime yet and previously stored local policy remains unchanged.
 - Clamp runtime `estimated_minutes` to `0...1440` before response-model construction so polluted legacy data cannot turn `/child/state` into a validation 500; this is response hardening, not database correction.
