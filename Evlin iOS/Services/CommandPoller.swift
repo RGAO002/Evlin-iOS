@@ -675,7 +675,7 @@ final class CommandPoller {
             }
             EarnedTimeStore.shared.lastBackendSyncAt = Date()
             EarnedTimeStore.shared.earnedUsageOffsetMinutes = max(
-                EarnedTimeStore.shared.latestDeviceEstimate ?? 0,
+                EarnedTimeStore.shared.acceptedEstimateMinutes ?? 0,
                 EarnedTimeStore.shared.earnedUsageOffsetMinutes
             )
             guard EarnedTimeStore.shared.usageCountingAllowed else {

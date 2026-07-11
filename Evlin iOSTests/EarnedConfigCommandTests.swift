@@ -272,11 +272,13 @@ final class EarnedConfigCommandTests: XCTestCase {
         XCTAssertEqual(store.capMinutes, 45)
     }
 
-    func test_poller_earnedTimeConfigPreservesExistingEstimateAsRearmOffset() async throws {
+    func test_poller_earnedTimeConfigUsesAcceptedEstimateInsteadOfRawPhantom() async throws {
         let store = EarnedTimeStore.shared
         store.removeAll()
         store.saveMeasurementSelection(FamilyActivitySelection())
         store.latestDeviceEstimate = 25
+        store.acceptedUsageDate = "2026-07-10"
+        store.acceptedEstimateMinutes = 0
         store.earnedUsageOffsetMinutes = 0
 
         let poller = CommandPoller.shared
@@ -301,14 +303,16 @@ final class EarnedConfigCommandTests: XCTestCase {
         poller.armBudgetOverride = { _, _, _ in }
         poller.pollCommandsOverride = { _, _ in
             [try JSONDecoder().decode(PollCommandDTO.self,
-                from: self.makeConfigJSON(poolMinutes: 140, capMinutes: 70,
+                from: self.makeConfigJSON(poolMinutes: 120, capMinutes: 120,
                                           remainingMinutes: 115))]
         }
 
         await poller.pollOnceForCurrentDevice()
 
-        XCTAssertEqual(store.earnedUsageOffsetMinutes, 25,
-                       "config re-arm must preserve already-counted minutes")
+        XCTAssertEqual(store.poolMinutes, 120)
+        XCTAssertEqual(store.capMinutes, 120)
+        XCTAssertEqual(store.earnedUsageOffsetMinutes, 0,
+                       "raw extension usage must not become the config re-arm baseline")
     }
 
     // MARK: - Wave-2 Task 1 veto-staleness fix: backendRemainingAtLastSync source

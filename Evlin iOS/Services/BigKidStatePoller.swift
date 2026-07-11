@@ -29,7 +29,9 @@ final class BigKidStatePoller: ObservableObject {
     private let fetchState: () async throws -> ChildStateResponse
     private let reconcileReflectionLock: (ChildStateResponse) async -> Void
     private let applySnapshot: (ChildStateResponse, BigKidState) -> Void
+    private let syncEarnedRuntime: (EarnedTimeRuntime?) -> Void
     private let setUsageCountingAllowed: (Bool) -> Bool
+    private let ensureEarnedArmed: () -> Void
     private let rearmUsageCounters: () -> Void
     private let stopUsageCounters: () -> Void
     private let reportEffectiveState: () async -> Void
@@ -64,7 +66,9 @@ final class BigKidStatePoller: ObservableObject {
         self.applySnapshot = { snapshot, state in
             state.apply(snapshot)
         }
+        self.syncEarnedRuntime = Self.syncEarnedRuntimeFromSnapshot
         self.setUsageCountingAllowed = Self.writeUsageCountingAllowed
+        self.ensureEarnedArmed = { EarnedBudgetArming.armIfReady() }
         self.rearmUsageCounters = Self.rearmUsageCountersFromStoredPolicy
         self.stopUsageCounters = Self.stopUsageCountersForTaskPause
         self.reportEffectiveState = {
@@ -84,7 +88,9 @@ final class BigKidStatePoller: ObservableObject {
         applySnapshot: @escaping (ChildStateResponse, BigKidState) -> Void = { snapshot, state in
             state.apply(snapshot)
         },
+        syncEarnedRuntime: @escaping (EarnedTimeRuntime?) -> Void = BigKidStatePoller.syncEarnedRuntimeFromSnapshot,
         setUsageCountingAllowed: @escaping (Bool) -> Bool = BigKidStatePoller.writeUsageCountingAllowed,
+        ensureEarnedArmed: @escaping () -> Void = {},
         rearmUsageCounters: @escaping () -> Void = {},
         stopUsageCounters: @escaping () -> Void = {},
         reportEffectiveState: @escaping () async -> Void = {}
@@ -94,7 +100,9 @@ final class BigKidStatePoller: ObservableObject {
         self.fetchState = fetchState
         self.reconcileReflectionLock = reconcileReflectionLock
         self.applySnapshot = applySnapshot
+        self.syncEarnedRuntime = syncEarnedRuntime
         self.setUsageCountingAllowed = setUsageCountingAllowed
+        self.ensureEarnedArmed = ensureEarnedArmed
         self.rearmUsageCounters = rearmUsageCounters
         self.stopUsageCounters = stopUsageCounters
         self.reportEffectiveState = reportEffectiveState
@@ -158,16 +166,20 @@ final class BigKidStatePoller: ObservableObject {
             let snapshot = try await fetchState()
             await reconcileReflectionLock(snapshot)
             applySnapshot(snapshot, state)
-            let wasCountingAllowed = setUsageCountingAllowed(snapshot.effectiveUsageCountingAllowed)
-            let shouldRecoverSkippedUsage = snapshot.effectiveUsageCountingAllowed
-                && Self.hasSkippedUnfinishedUsageEvent()
-            if !snapshot.effectiveUsageCountingAllowed && wasCountingAllowed {
+            syncEarnedRuntime(snapshot.earnedTimeRuntime)
+
+            let allowed = snapshot.effectiveUsageCountingAllowed
+            let wasCountingAllowed = setUsageCountingAllowed(allowed)
+            let shouldRecoverSkippedUsage = allowed && Self.hasSkippedUnfinishedUsageEvent()
+            if !allowed {
                 stopUsageCounters()
-            }
-            if snapshot.effectiveUsageCountingAllowed && (!wasCountingAllowed || shouldRecoverSkippedUsage) {
-                rearmUsageCounters()
-                if shouldRecoverSkippedUsage {
-                    CommandDeliveryDiagnostics.remove(CommandDeliveryDiagnostics.keyUsageCountingLastSkipped)
+            } else {
+                ensureEarnedArmed()
+                if !wasCountingAllowed || shouldRecoverSkippedUsage {
+                    rearmUsageCounters()
+                    if shouldRecoverSkippedUsage {
+                        CommandDeliveryDiagnostics.remove(CommandDeliveryDiagnostics.keyUsageCountingLastSkipped)
+                    }
                 }
             }
             await reportEffectiveState()
@@ -210,15 +222,47 @@ final class BigKidStatePoller: ObservableObject {
         return previous
     }
 
+    private static func syncEarnedRuntimeFromSnapshot(_ runtime: EarnedTimeRuntime?) {
+        guard let runtime,
+              runtime.dailyPoolMinutes > 0,
+              runtime.deviceCapMinutes > 0,
+              runtime.remainingMinutes >= 0,
+              runtime.estimatedMinutes >= 0
+        else { return }
+
+        let store = EarnedTimeStore.shared
+        store.poolMinutes = runtime.dailyPoolMinutes
+        store.capMinutes = runtime.deviceCapMinutes
+        store.backendRemainingAtLastSync = runtime.remainingMinutes
+        store.lastBackendSyncAt = Date()
+        _ = store.reconcileAcceptedUsage(
+            usageDate: runtime.usageDate,
+            serverEstimatedMinutes: runtime.estimatedMinutes,
+            allowSameDayDecrease: false
+        )
+    }
+
     private static func hasSkippedUnfinishedUsageEvent() -> Bool {
         CommandDeliveryDiagnostics.read(CommandDeliveryDiagnostics.keyUsageCountingLastSkipped)
             .contains("unfinished_tasks=true")
     }
 
     private static func stopUsageCountersForTaskPause() {
-        EarnedBudgetScheduler.shared.stop()
-        BigKidActivityScheduler.shared.stop()
-        _ = AppLimitPlanner().arm(rules: [])
+        stopUsageCounters(
+            stopEarned: { EarnedBudgetScheduler.shared.stop() },
+            stopDeviceTotal: { BigKidActivityScheduler.shared.stop() },
+            stopPerApp: { _ = AppLimitPlanner().arm(rules: []) }
+        )
+    }
+
+    static func stopUsageCounters(
+        stopEarned: () -> Void,
+        stopDeviceTotal: () -> Void,
+        stopPerApp: () -> Void
+    ) {
+        stopEarned()
+        stopDeviceTotal()
+        stopPerApp()
     }
 
     // Pure seam (Fix 4 test 6): the real pool/cap/offset the re-arm uses.
