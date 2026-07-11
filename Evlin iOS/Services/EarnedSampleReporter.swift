@@ -21,6 +21,52 @@ enum EarnedSampleReporter {
     static let retryQueueKey = "evlin.earnedSampleRetryQueue"
     static let lastSamplePostDebugKey = "evlin.earned.lastSamplePost"
 
+    private struct SampleSnapshot: Decodable {
+        let usageDate: String
+        let estimatedMinutes: Int
+        let counted: Bool?
+    }
+
+    enum SuccessDisposition: Equatable {
+        case counted
+        case paused
+        case acceptedWithoutReconciliation
+    }
+
+    @discardableResult
+    static func processSuccessfulResponse(
+        _ data: Data,
+        store: EarnedTimeStore = .shared,
+        suiteName: String = "group.com.evlin.ios"
+    ) -> SuccessDisposition {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        guard let snapshot = try? decoder.decode(SampleSnapshot.self, from: data) else {
+            recordDebug("post success response_decode_failed", suiteName: suiteName)
+            return .acceptedWithoutReconciliation
+        }
+
+        if snapshot.counted == false {
+            store.reconcileAcceptedUsage(
+                usageDate: snapshot.usageDate,
+                serverEstimatedMinutes: snapshot.estimatedMinutes,
+                allowSameDayDecrease: true
+            )
+            recordDebug(
+                "backend_counting_paused date=\(snapshot.usageDate) estimate=\(snapshot.estimatedMinutes)",
+                suiteName: suiteName
+            )
+            return .paused
+        }
+
+        store.reconcileAcceptedUsage(
+            usageDate: snapshot.usageDate,
+            serverEstimatedMinutes: snapshot.estimatedMinutes,
+            allowSameDayDecrease: false
+        )
+        return .counted
+    }
+
     // MARK: - Sample body builder (pure)
 
     /// Build the JSON-serializable body for `POST /child/earned-time/sample`.
@@ -109,12 +155,18 @@ enum EarnedSampleReporter {
         }
 
         do {
-            let (_, response) = try await URLSession.shared.data(for: req)
+            let (data, response) = try await URLSession.shared.data(for: req)
             let status = (response as? HTTPURLResponse)?.statusCode ?? -1
             // 2xx or 409 (already exists — idempotent) are both successes.
             let success = (status >= 200 && status < 300) || status == 409
             recordDebug("post t\(thresholdMinutes) status=\(status) success=\(success)", suiteName: suiteName)
-            if !success {
+            if success {
+                processSuccessfulResponse(
+                    data,
+                    store: EarnedTimeStore(suiteName: suiteName),
+                    suiteName: suiteName
+                )
+            } else {
                 enqueueRetry(RetryEntry(
                     deviceID: deviceID,
                     usageDate: usageDate,
@@ -168,9 +220,16 @@ enum EarnedSampleReporter {
 
             let success: Bool
             do {
-                let (_, response) = try await URLSession.shared.data(for: req)
+                let (data, response) = try await URLSession.shared.data(for: req)
                 let status = (response as? HTTPURLResponse)?.statusCode ?? -1
                 success = (status >= 200 && status < 300) || status == 409
+                if success {
+                    processSuccessfulResponse(
+                        data,
+                        store: EarnedTimeStore(suiteName: suiteName),
+                        suiteName: suiteName
+                    )
+                }
             } catch {
                 success = false
             }

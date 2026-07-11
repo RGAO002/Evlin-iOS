@@ -495,3 +495,189 @@ final class EarnedSampleReporterTests: XCTestCase {
         )
     }
 }
+
+@MainActor
+final class EarnedSampleReporterResponseTests: XCTestCase {
+    func test_countedSuccess_preservesSameDayMonotonicAcceptedUsage() {
+        let isolatedSuite = makeIsolatedSuiteName()
+        defer { removeIsolatedSuite(isolatedSuite) }
+        let store = EarnedTimeStore(suiteName: isolatedSuite)
+        _ = store.reconcileAcceptedUsage(
+            usageDate: "2026-07-10",
+            serverEstimatedMinutes: 15,
+            allowSameDayDecrease: false
+        )
+        let data = Data(
+            #"{"usage_date":"2026-07-10","estimated_minutes":5,"counted":true}"#.utf8
+        )
+
+        let result = EarnedSampleReporter.processSuccessfulResponse(
+            data,
+            store: store,
+            suiteName: isolatedSuite
+        )
+
+        XCTAssertEqual(result, .counted)
+        XCTAssertEqual(store.acceptedEstimateMinutes, 15)
+        XCTAssertEqual(store.latestDeviceEstimate, 15)
+        XCTAssertEqual(store.earnedUsageOffsetMinutes, 15)
+    }
+
+    func test_successWithOmittedCounted_preservesSameDayMonotonicAcceptedUsage() {
+        let isolatedSuite = makeIsolatedSuiteName()
+        defer { removeIsolatedSuite(isolatedSuite) }
+        let store = EarnedTimeStore(suiteName: isolatedSuite)
+        _ = store.reconcileAcceptedUsage(
+            usageDate: "2026-07-10",
+            serverEstimatedMinutes: 15,
+            allowSameDayDecrease: false
+        )
+        let data = Data(
+            #"{"usage_date":"2026-07-10","estimated_minutes":5}"#.utf8
+        )
+
+        let result = EarnedSampleReporter.processSuccessfulResponse(
+            data,
+            store: store,
+            suiteName: isolatedSuite
+        )
+
+        XCTAssertEqual(result, .counted)
+        XCTAssertEqual(store.acceptedEstimateMinutes, 15)
+        XCTAssertEqual(store.latestDeviceEstimate, 15)
+        XCTAssertEqual(store.earnedUsageOffsetMinutes, 15)
+    }
+
+    func test_uncountedSuccess_reconcilesPhantomWithoutRetry() {
+        let isolatedSuite = makeIsolatedSuiteName()
+        defer { removeIsolatedSuite(isolatedSuite) }
+        let store = EarnedTimeStore(suiteName: isolatedSuite)
+        _ = store.reconcileAcceptedUsage(
+            usageDate: "2026-07-10",
+            serverEstimatedMinutes: 10,
+            allowSameDayDecrease: false
+        )
+        let data = Data(
+            #"{"usage_date":"2026-07-10","estimated_minutes":0,"counted":false}"#.utf8
+        )
+
+        let result = EarnedSampleReporter.processSuccessfulResponse(
+            data,
+            store: store,
+            suiteName: isolatedSuite
+        )
+
+        XCTAssertEqual(result, .paused)
+        XCTAssertEqual(store.acceptedEstimateMinutes, 0)
+        XCTAssertEqual(store.latestDeviceEstimate, 0)
+        XCTAssertEqual(store.earnedUsageOffsetMinutes, 0)
+        XCTAssertTrue(EarnedSampleReporter.loadRetryQueue(suiteName: isolatedSuite).isEmpty)
+        let lastDebugValue = UserDefaults(suiteName: isolatedSuite)?
+            .string(forKey: EarnedSampleReporter.lastSamplePostDebugKey) ?? ""
+        XCTAssertTrue(lastDebugValue.contains("backend_counting_paused"))
+    }
+
+    func test_malformedSuccess_isAcceptedWithoutReconciliationOrRetry() {
+        let isolatedSuite = makeIsolatedSuiteName()
+        defer { removeIsolatedSuite(isolatedSuite) }
+        let store = EarnedTimeStore(suiteName: isolatedSuite)
+        _ = store.reconcileAcceptedUsage(
+            usageDate: "2026-07-10",
+            serverEstimatedMinutes: 12,
+            allowSameDayDecrease: false
+        )
+
+        let result = EarnedSampleReporter.processSuccessfulResponse(
+            Data("not-json".utf8),
+            store: store,
+            suiteName: isolatedSuite
+        )
+
+        XCTAssertEqual(result, .acceptedWithoutReconciliation)
+        XCTAssertEqual(store.acceptedEstimateMinutes, 12)
+        XCTAssertEqual(store.latestDeviceEstimate, 12)
+        XCTAssertEqual(store.earnedUsageOffsetMinutes, 12)
+        XCTAssertTrue(EarnedSampleReporter.loadRetryQueue(suiteName: isolatedSuite).isEmpty)
+    }
+
+    func test_retryDrain_uncountedSuccessRemovesEntryInsteadOfRequeueing() async {
+        let isolatedSuite = makeIsolatedSuiteName()
+        defer { removeIsolatedSuite(isolatedSuite) }
+        let store = EarnedTimeStore(suiteName: isolatedSuite)
+        _ = store.reconcileAcceptedUsage(
+            usageDate: "2026-07-10",
+            serverEstimatedMinutes: 10,
+            allowSameDayDecrease: false
+        )
+        EarnedSampleReporter.enqueueRetry(
+            EarnedSampleReporter.RetryEntry(
+                deviceID: UUID(),
+                usageDate: "2026-07-10",
+                timezone: "America/New_York",
+                thresholdMinutes: 10,
+                estimatedMinutes: 10,
+                observedAt: "2026-07-10T12:00:00Z"
+            ),
+            suiteName: isolatedSuite
+        )
+        EarnedSampleReporterURLProtocol.responseData = Data(
+            #"{"usage_date":"2026-07-10","estimated_minutes":0,"counted":false}"#.utf8
+        )
+        EarnedSampleReporterURLProtocol.statusCode = 200
+        URLProtocol.registerClass(EarnedSampleReporterURLProtocol.self)
+        defer {
+            URLProtocol.unregisterClass(EarnedSampleReporterURLProtocol.self)
+            EarnedSampleReporterURLProtocol.reset()
+        }
+
+        await EarnedSampleReporter.drainRetryQueue(
+            baseURL: URL(string: "https://earned-sample-reporter.test")!,
+            suiteName: isolatedSuite
+        )
+
+        XCTAssertTrue(EarnedSampleReporter.loadRetryQueue(suiteName: isolatedSuite).isEmpty)
+        XCTAssertEqual(store.acceptedEstimateMinutes, 0)
+        XCTAssertEqual(store.latestDeviceEstimate, 0)
+        XCTAssertEqual(store.earnedUsageOffsetMinutes, 0)
+    }
+
+    private func makeIsolatedSuiteName() -> String {
+        "group.com.evlin.ios.tests.EarnedSampleReporterTests.\(UUID().uuidString)"
+    }
+
+    private func removeIsolatedSuite(_ suiteName: String) {
+        UserDefaults.standard.removePersistentDomain(forName: suiteName)
+    }
+}
+
+private final class EarnedSampleReporterURLProtocol: URLProtocol {
+    static var responseData = Data()
+    static var statusCode = 200
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        request.url?.host == "earned-sample-reporter.test"
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: Self.statusCode,
+            httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Self.responseData)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+
+    static func reset() {
+        responseData = Data()
+        statusCode = 200
+    }
+}
