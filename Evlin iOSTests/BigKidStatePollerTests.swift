@@ -183,9 +183,9 @@ final class BigKidStatePollerTests: XCTestCase {
             reconcileReflectionLock: { _ in },
             applySnapshot: { _, _ in events.append("apply") },
             syncEarnedRuntime: { _ in events.append("runtime") },
-            setUsageCountingAllowed: {
+            setUsageCountingAllowed: { allowed in
                 events.append("gate")
-                return $0
+                return allowed
             },
             ensureEarnedArmed: { events.append("arm") }
         )
@@ -193,6 +193,71 @@ final class BigKidStatePollerTests: XCTestCase {
         await poller.refreshNow()
 
         XCTAssertEqual(events, ["apply", "runtime", "gate", "arm"])
+    }
+
+    func test_refresh_identityTransitionDoesNotArmBeforeRuntimeAndGate() async {
+        let runtime = EarnedTimeRuntime(
+            usageDate: "2026-07-11",
+            timezone: "America/New_York",
+            dailyPoolMinutes: 120,
+            deviceCapMinutes: 90,
+            remainingMinutes: 75,
+            estimatedMinutes: 15
+        )
+        let response = snapshot(usageCountingAllowed: true, runtime: runtime)
+        let state = BigKidState(snapshot: response)
+        var events: [String] = []
+        let poller = BigKidStatePoller(
+            state: state,
+            fetchState: {
+                events.append("fetch")
+                return response
+            },
+            reconcileReflectionLock: { _ in },
+            reconcileIdentityTransition: {
+                events.append("identity")
+                return true
+            },
+            applySnapshot: { _, _ in events.append("apply") },
+            syncEarnedRuntime: { _ in events.append("runtime") },
+            setUsageCountingAllowed: { _ in
+                events.append("gate")
+                return false
+            },
+            ensureEarnedArmed: { events.append("arm") }
+        )
+
+        await poller.refreshNow()
+
+        XCTAssertEqual(events, ["identity", "fetch", "apply", "runtime", "gate", "arm"])
+    }
+
+    func test_refresh_suppressesOverlappingFetch() async {
+        let response = snapshot(usageCountingAllowed: true)
+        let state = BigKidState(snapshot: response)
+        var fetchCount = 0
+        var resumeFetch: CheckedContinuation<ChildStateResponse, Never>?
+        let poller = BigKidStatePoller(
+            state: state,
+            fetchState: {
+                fetchCount += 1
+                return await withCheckedContinuation { continuation in
+                    resumeFetch = continuation
+                }
+            },
+            reconcileReflectionLock: { _ in }
+        )
+
+        let firstRefresh = Task { await poller.refreshNow() }
+        while resumeFetch == nil {
+            await Task.yield()
+        }
+
+        await poller.refreshNow()
+
+        XCTAssertEqual(fetchCount, 1)
+        resumeFetch?.resume(returning: response)
+        await firstRefresh.value
     }
 
     func test_refresh_persistsValidRuntimeAndMonotonicAcceptedEstimate() async {
@@ -299,6 +364,52 @@ final class BigKidStatePollerTests: XCTestCase {
 
         XCTAssertEqual(earnedArmCount, 2)
         XCTAssertEqual(otherRearmCount, 0)
+    }
+
+    func test_refresh_transitionArmsEarnedOnceAndRecoversOtherCountersOnce() async {
+        EarnedTimeStore.shared.usageCountingAllowed = false
+        let response = snapshot(usageCountingAllowed: true)
+        let state = BigKidState(snapshot: response)
+        var earnedArmCount = 0
+        var otherRearmCount = 0
+        let poller = BigKidStatePoller(
+            state: state,
+            fetchState: { response },
+            reconcileReflectionLock: { _ in },
+            ensureEarnedArmed: { earnedArmCount += 1 },
+            rearmUsageCounters: { otherRearmCount += 1 }
+        )
+
+        await poller.refreshNow()
+
+        XCTAssertEqual(earnedArmCount, 1)
+        XCTAssertEqual(otherRearmCount, 1)
+    }
+
+    func test_earnedRearmInputs_useAcceptedBaselineAndIgnoreRawLatestEstimate() {
+        let store = EarnedTimeStore.shared
+        store.removeAll()
+        store.poolMinutes = 120
+        store.capMinutes = 100
+        store.latestDeviceEstimate = 25
+        store.acceptedEstimateMinutes = 7
+        store.earnedUsageOffsetMinutes = 5
+
+        let inputs = BigKidStatePoller.earnedRearmInputs(store: store)
+
+        XCTAssertEqual(inputs.poolMinutes, 120)
+        XCTAssertEqual(inputs.capMinutes, 100)
+        XCTAssertEqual(inputs.offset, 7)
+    }
+
+    func test_earnedRearmInputs_preserveStoredOffsetWhenAcceptedBaselineIsMissing() {
+        let store = EarnedTimeStore.shared
+        store.removeAll()
+        store.latestDeviceEstimate = 25
+        store.acceptedEstimateMinutes = nil
+        store.earnedUsageOffsetMinutes = 3
+
+        XCTAssertEqual(BigKidStatePoller.earnedRearmInputs(store: store).offset, 3)
     }
 
     func test_refresh_stopsCountersOnEveryStableFalsePoll() async {

@@ -28,6 +28,7 @@ final class BigKidStatePoller: ObservableObject {
     private let state: BigKidState
     private let fetchState: () async throws -> ChildStateResponse
     private let reconcileReflectionLock: (ChildStateResponse) async -> Void
+    private let reconcileIdentityTransition: () -> Bool
     private let applySnapshot: (ChildStateResponse, BigKidState) -> Void
     private let syncEarnedRuntime: (EarnedTimeRuntime?) -> Void
     private let setUsageCountingAllowed: (Bool) -> Bool
@@ -37,6 +38,7 @@ final class BigKidStatePoller: ObservableObject {
     private let reportEffectiveState: () async -> Void
     private var task: Task<Void, Never>?
     private var invalidationObserver: NSObjectProtocol?
+    private var isFetchInFlight = false
 
     /// Reflection Lockdown glue. Runs after each state apply: reconciles the
     /// dedicated reflection ShieldRecord against the snapshot, schedules its
@@ -63,13 +65,14 @@ final class BigKidStatePoller: ObservableObject {
                 await reflectionLockApplier.reconcile(snapshot: snapshot, childID: childID)
             }
         }
+        self.reconcileIdentityTransition = EarnedBudgetArming.reconcileIdentityTransition
         self.applySnapshot = { snapshot, state in
             state.apply(snapshot)
         }
         self.syncEarnedRuntime = Self.syncEarnedRuntimeFromSnapshot
         self.setUsageCountingAllowed = Self.writeUsageCountingAllowed
         self.ensureEarnedArmed = { EarnedBudgetArming.armIfReady() }
-        self.rearmUsageCounters = Self.rearmUsageCountersFromStoredPolicy
+        self.rearmUsageCounters = Self.rearmOtherUsageCountersFromStoredPolicy
         self.stopUsageCounters = Self.stopUsageCountersForTaskPause
         self.reportEffectiveState = {
             guard let snapshot = await CommandPoller.globalEffectiveStateDictionary() else { return }
@@ -85,6 +88,7 @@ final class BigKidStatePoller: ObservableObject {
         state: BigKidState,
         fetchState: @escaping () async throws -> ChildStateResponse,
         reconcileReflectionLock: @escaping (ChildStateResponse) async -> Void,
+        reconcileIdentityTransition: @escaping () -> Bool = { false },
         applySnapshot: @escaping (ChildStateResponse, BigKidState) -> Void = { snapshot, state in
             state.apply(snapshot)
         },
@@ -99,6 +103,7 @@ final class BigKidStatePoller: ObservableObject {
         self.state = state
         self.fetchState = fetchState
         self.reconcileReflectionLock = reconcileReflectionLock
+        self.reconcileIdentityTransition = reconcileIdentityTransition
         self.applySnapshot = applySnapshot
         self.syncEarnedRuntime = syncEarnedRuntime
         self.setUsageCountingAllowed = setUsageCountingAllowed
@@ -151,13 +156,15 @@ final class BigKidStatePoller: ObservableObject {
     }
 
     private func fetchOnce() async {
+        guard !isFetchInFlight else { return }
+        isFetchInFlight = true
+        defer { isFetchInFlight = false }
+
         // Re-pairing under a new family can happen while the app stays
         // foregrounded (no scene-activation arm pass runs). Catch the identity
         // change here — within one poll tick — so the previous family's ladder
         // is stopped before it can bill usage to the new family.
-        if EarnedBudgetArming.reconcileIdentityTransition() {
-            EarnedBudgetArming.armIfReady()
-        }
+        _ = reconcileIdentityTransition()
         // The App-Controls roster survives account switches locally but the
         // backend's family-scoped "Locked set" doesn't — re-publish it when
         // the current identity has no backend list yet (cheap no-op otherwise).
@@ -223,22 +230,14 @@ final class BigKidStatePoller: ObservableObject {
     }
 
     private static func syncEarnedRuntimeFromSnapshot(_ runtime: EarnedTimeRuntime?) {
-        guard let runtime,
-              runtime.dailyPoolMinutes > 0,
-              runtime.deviceCapMinutes > 0,
-              runtime.remainingMinutes >= 0,
-              runtime.estimatedMinutes >= 0
-        else { return }
-
-        let store = EarnedTimeStore.shared
-        store.poolMinutes = runtime.dailyPoolMinutes
-        store.capMinutes = runtime.deviceCapMinutes
-        store.backendRemainingAtLastSync = runtime.remainingMinutes
-        store.lastBackendSyncAt = Date()
-        _ = store.reconcileAcceptedUsage(
+        guard let runtime else { return }
+        _ = EarnedTimeStore.shared.reconcileRuntimePolicy(
             usageDate: runtime.usageDate,
-            serverEstimatedMinutes: runtime.estimatedMinutes,
-            allowSameDayDecrease: false
+            timezoneIdentifier: runtime.timezone,
+            poolMinutes: runtime.dailyPoolMinutes,
+            capMinutes: runtime.deviceCapMinutes,
+            remainingMinutes: runtime.remainingMinutes,
+            estimatedMinutes: runtime.estimatedMinutes
         )
     }
 
@@ -267,39 +266,17 @@ final class BigKidStatePoller: ObservableObject {
 
     // Pure seam (Fix 4 test 6): the real pool/cap/offset the re-arm uses.
     nonisolated static func earnedRearmInputs(store: EarnedTimeStore) -> (poolMinutes: Int, capMinutes: Int, offset: Int) {
-        let offset = max(store.latestDeviceEstimate ?? 0, store.earnedUsageOffsetMinutes)
+        let offset = max(store.acceptedEstimateMinutes ?? 0, store.earnedUsageOffsetMinutes)
         let pool = store.poolMinutes ?? 60
         let cap  = store.capMinutes ?? pool
         return (pool, cap, offset)
     }
 
-    private static func rearmUsageCountersFromStoredPolicy() {
+    private static func rearmOtherUsageCountersFromStoredPolicy() {
         let store = EarnedTimeStore.shared
 
-        if store.isEarnedTimeReady, let selection = store.measurementSelection {
-            let inputs = Self.earnedRearmInputs(store: store)
-            store.earnedUsageOffsetMinutes = inputs.offset
-            // Arm at the REAL pool/cap; the offset is applied by the extension
-            // (adjustedN = offset + rawN), so the ladder itself keeps real budgets.
-            if min(inputs.poolMinutes, inputs.capMinutes) - inputs.offset > 0 {
-                EarnedBudgetScheduler.shared.armFromNow(
-                    poolMinutes: inputs.poolMinutes,
-                    capMinutes: inputs.capMinutes,
-                    selection: selection
-                )
-            } else {
-                CommandDeliveryDiagnostics.record(
-                    CommandDeliveryDiagnostics.keyEarnedArmAttempt,
-                    "skipped state-poll-no-remaining pool=\(inputs.poolMinutes) cap=\(inputs.capMinutes) offset=\(inputs.offset) \(EarnedBudgetScheduler.selectionSummary(selection))"
-                )
-            }
-        } else {
-            let selection = store.measurementSelection
-            let summary = selection.map(EarnedBudgetScheduler.selectionSummary) ?? "(missing)"
-            CommandDeliveryDiagnostics.record(
-                CommandDeliveryDiagnostics.keyEarnedArmAttempt,
-                "skipped state-poll-not-ready lockedSetID=\(store.lockedSetID ?? "(missing)") \(summary)"
-            )
+        if store.hasMeasurableSelection, let selection = store.measurementSelection {
+            BigKidActivityScheduler.shared.start(appsToMeasure: selection)
         }
 
         let appLimitUsageDate = EarnedTimeStore.appLimitUsageDate()

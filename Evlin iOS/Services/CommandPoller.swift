@@ -130,6 +130,10 @@ final class CommandPoller {
     /// DeviceActivity entitlements. Nil in production.
     var armBudgetOverride: ((Int, Int, FamilyActivitySelection) -> Void)?
 
+    /// Allows config tests to exercise the arm path with an empty synthetic
+    /// selection while production continues to require measurable tokens.
+    var hasMeasurableSelectionOverride: (() -> Bool)?
+
     /// How often to poll while iOS grants background execution after the app
     /// leaves foreground. Tunable in tests.
     var backgroundPollIntervalNanoseconds: UInt64 = 5_000_000_000
@@ -660,6 +664,10 @@ final class CommandPoller {
         if poolMinutes > 0, capMinutes > 0 {
             EarnedTimeStore.shared.poolMinutes = poolMinutes
             EarnedTimeStore.shared.capMinutes = capMinutes
+            let acceptedOffset = max(
+                EarnedTimeStore.shared.acceptedEstimateMinutes ?? 0,
+                EarnedTimeStore.shared.earnedUsageOffsetMinutes
+            )
             // Wave-2 Task 1 veto-staleness fix: prefer the server-authoritative
             // `remaining_minutes` carried on the wire (pool − used, computed
             // backend-side). Falling back to a device-derived estimate here is
@@ -670,34 +678,59 @@ final class CommandPoller {
             if let wireRemaining = cfg?.remaining_minutes {
                 EarnedTimeStore.shared.backendRemainingAtLastSync = max(0, wireRemaining)
             } else {
-                let est = EarnedTimeStore.shared.latestDeviceEstimate ?? 0
-                EarnedTimeStore.shared.backendRemainingAtLastSync = max(0, min(poolMinutes, capMinutes) - est)
+                EarnedTimeStore.shared.backendRemainingAtLastSync = max(
+                    0,
+                    min(poolMinutes, capMinutes) - acceptedOffset
+                )
             }
             EarnedTimeStore.shared.lastBackendSyncAt = Date()
-            EarnedTimeStore.shared.earnedUsageOffsetMinutes = max(
-                EarnedTimeStore.shared.acceptedEstimateMinutes ?? 0,
-                EarnedTimeStore.shared.earnedUsageOffsetMinutes
-            )
+            EarnedTimeStore.shared.earnedUsageOffsetMinutes = acceptedOffset
+            let offset = EarnedTimeStore.shared.earnedUsageOffsetMinutes
             guard EarnedTimeStore.shared.usageCountingAllowed else {
                 EarnedBudgetScheduler.shared.stop()
                 return await ackEarnedTimeConfig(commandID: commandID, api: api)
             }
-            if let armOverride = armBudgetOverride, EarnedTimeStore.shared.hasMeasurableSelection {
+            guard let remainingPolicy = EarnedBudgetScheduler.remainingPolicy(
+                poolMinutes: poolMinutes,
+                capMinutes: capMinutes,
+                offsetMinutes: offset
+            ) else {
+                CommandDeliveryDiagnostics.record(
+                    CommandDeliveryDiagnostics.keyEarnedArmAttempt,
+                    "skipped config-no-remaining pool=\(poolMinutes) cap=\(capMinutes) offset=\(offset)"
+                )
+                return await ackEarnedTimeConfig(commandID: commandID, api: api)
+            }
+            let hasMeasurableSelection = hasMeasurableSelectionOverride?()
+                ?? EarnedTimeStore.shared.hasMeasurableSelection
+            if let armOverride = armBudgetOverride, hasMeasurableSelection {
                 // Test seam: provide the real selection (or empty) to the override
                 // so tests can verify pool/cap values without DeviceActivity.
                 let selection = EarnedTimeStore.shared.measurementSelection!
                 CommandDeliveryDiagnostics.record(
                     CommandDeliveryDiagnostics.keyEarnedArmAttempt,
-                    "test-arm-override pool=\(poolMinutes) cap=\(capMinutes) \(EarnedBudgetScheduler.selectionSummary(selection))"
+                    "test-arm-override pool=\(remainingPolicy.poolMinutes) cap=\(remainingPolicy.capMinutes) offset=\(offset) \(EarnedBudgetScheduler.selectionSummary(selection))"
                 )
-                armOverride(poolMinutes, capMinutes, selection)
-            } else if EarnedTimeStore.shared.hasMeasurableSelection,
+                armOverride(remainingPolicy.poolMinutes, remainingPolicy.capMinutes, selection)
+            } else if hasMeasurableSelection,
                       let selection = EarnedTimeStore.shared.measurementSelection {
-                EarnedBudgetScheduler.shared.armFromNow(
-                    poolMinutes: poolMinutes,
-                    capMinutes: capMinutes,
+                let armed = EarnedBudgetScheduler.shared.armFromNow(
+                    poolMinutes: remainingPolicy.poolMinutes,
+                    capMinutes: remainingPolicy.capMinutes,
                     selection: selection
                 )
+                if armed {
+                    let currentDeviceID = UserDefaults.standard.string(
+                        forKey: CommandPoller.childDeviceIDDefaultsKey
+                    ) ?? ""
+                    EarnedBudgetArming.rememberCurrentArmSignature(
+                        deviceID: currentDeviceID,
+                        poolMinutes: poolMinutes,
+                        capMinutes: capMinutes,
+                        offsetMinutes: offset,
+                        selection: selection
+                    )
+                }
             } else {
                 let selection = EarnedTimeStore.shared.measurementSelection
                 let summary = selection.map(EarnedBudgetScheduler.selectionSummary) ?? "(missing)"

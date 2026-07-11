@@ -301,6 +301,112 @@ final class EarnedTimeStoreTests: XCTestCase {
         XCTAssertEqual(secondEntered.wait(timeout: .now() + 1), .success)
     }
 
+    // MARK: - Child-state runtime policy
+
+    func test_reconcileRuntimePolicy_validSnapshotWritesPolicyAndMonotonicAcceptedUsage() {
+        withIsolatedStore { store in
+            _ = store.reconcileAcceptedUsage(
+                usageDate: "2026-07-11",
+                serverEstimatedMinutes: 20,
+                allowSameDayDecrease: false
+            )
+            let syncedAt = Date(timeIntervalSince1970: 1_700_000_000)
+
+            let result = store.reconcileRuntimePolicy(
+                usageDate: "2026-07-11",
+                timezoneIdentifier: "America/New_York",
+                poolMinutes: 120,
+                capMinutes: 90,
+                remainingMinutes: 75,
+                estimatedMinutes: 15,
+                syncedAt: syncedAt
+            )
+
+            XCTAssertEqual(result, .reconciled(20))
+            XCTAssertEqual(store.poolMinutes, 120)
+            XCTAssertEqual(store.capMinutes, 90)
+            XCTAssertEqual(store.backendRemainingAtLastSync, 75)
+            XCTAssertEqual(store.lastBackendSyncAt, syncedAt)
+            XCTAssertEqual(store.acceptedUsageDate, "2026-07-11")
+            XCTAssertEqual(store.acceptedEstimateMinutes, 20)
+            XCTAssertEqual(store.earnedUsageOffsetMinutes, 20)
+        }
+    }
+
+    func test_reconcileRuntimePolicy_staleSnapshotWritesNoPolicyFields() {
+        withIsolatedStore { store in
+            _ = store.reconcileRuntimePolicy(
+                usageDate: "2026-07-11",
+                timezoneIdentifier: "America/New_York",
+                poolMinutes: 120,
+                capMinutes: 100,
+                remainingMinutes: 80,
+                estimatedMinutes: 20,
+                syncedAt: Date(timeIntervalSince1970: 200)
+            )
+
+            let result = store.reconcileRuntimePolicy(
+                usageDate: "2026-07-10",
+                timezoneIdentifier: "America/New_York",
+                poolMinutes: 30,
+                capMinutes: 25,
+                remainingMinutes: 5,
+                estimatedMinutes: 25,
+                syncedAt: Date(timeIntervalSince1970: 300)
+            )
+
+            XCTAssertEqual(result, .stale(acceptedUsageDate: "2026-07-11"))
+            XCTAssertEqual(store.poolMinutes, 120)
+            XCTAssertEqual(store.capMinutes, 100)
+            XCTAssertEqual(store.backendRemainingAtLastSync, 80)
+            XCTAssertEqual(store.lastBackendSyncAt, Date(timeIntervalSince1970: 200))
+            XCTAssertEqual(store.acceptedUsageDate, "2026-07-11")
+            XCTAssertEqual(store.acceptedEstimateMinutes, 20)
+        }
+    }
+
+    func test_reconcileRuntimePolicy_rejectsMalformedRuntimeWithoutWrites() {
+        withIsolatedStore { store in
+            store.poolMinutes = 90
+            store.capMinutes = 60
+            store.backendRemainingAtLastSync = 42
+            store.lastBackendSyncAt = Date(timeIntervalSince1970: 100)
+
+            let invalidInputs: [(String, String, Int, Int, Int, Int)] = [
+                ("2026-7-11", "America/New_York", 120, 120, 100, 20),
+                ("2026-02-30", "America/New_York", 120, 120, 100, 20),
+                ("2026-07-11", "Not/A_Timezone", 120, 120, 100, 20),
+                ("2026-07-11", "America/New_York", 0, 120, 100, 20),
+                ("2026-07-11", "America/New_York", 1441, 120, 100, 20),
+                ("2026-07-11", "America/New_York", 120, 0, 100, 20),
+                ("2026-07-11", "America/New_York", 120, 1441, 100, 20),
+                ("2026-07-11", "America/New_York", 120, 120, -1, 20),
+                ("2026-07-11", "America/New_York", 120, 120, 1441, 20),
+                ("2026-07-11", "America/New_York", 120, 120, 100, -1),
+                ("2026-07-11", "America/New_York", 120, 120, 100, 1441),
+            ]
+
+            for input in invalidInputs {
+                XCTAssertEqual(store.reconcileRuntimePolicy(
+                    usageDate: input.0,
+                    timezoneIdentifier: input.1,
+                    poolMinutes: input.2,
+                    capMinutes: input.3,
+                    remainingMinutes: input.4,
+                    estimatedMinutes: input.5,
+                    syncedAt: Date(timeIntervalSince1970: 999)
+                ), .invalid)
+            }
+
+            XCTAssertEqual(store.poolMinutes, 90)
+            XCTAssertEqual(store.capMinutes, 60)
+            XCTAssertEqual(store.backendRemainingAtLastSync, 42)
+            XCTAssertEqual(store.lastBackendSyncAt, Date(timeIntervalSince1970: 100))
+            XCTAssertNil(store.acceptedUsageDate)
+            XCTAssertNil(store.acceptedEstimateMinutes)
+        }
+    }
+
     // MARK: - usage counting gate
 
     func test_usageCountingAllowed_defaultsToTrueBeforeChildStateArrives() {

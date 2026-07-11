@@ -1,5 +1,6 @@
 import Foundation
 import FamilyControls
+import CryptoKit
 
 /// Shared entry points for arming the earned-budget DeviceActivity ladder and
 /// for tearing down earned-time state when the child-device identity changes
@@ -24,6 +25,7 @@ enum EarnedBudgetArming {
     /// App-Group key remembering which child-device identity last owned the
     /// earned-budget ladder + EarnedTimeStore day state.
     static let identityOwnerKey = "evlin.earned.identityOwner"
+    static let armSignatureKey = "evlin.earned.armSignature"
 
     nonisolated static func canonicalDeviceIdentity(_ raw: String?) -> String? {
         guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -41,6 +43,87 @@ enum EarnedBudgetArming {
         let leftRaw = lhs?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let rightRaw = rhs?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return !leftRaw.isEmpty && leftRaw == rightRaw
+    }
+
+    nonisolated static func makeArmSignature(
+        deviceID: String,
+        usageDate: String,
+        timezoneIdentifier: String,
+        poolMinutes: Int,
+        capMinutes: Int,
+        offsetMinutes: Int,
+        selectionFingerprint: String
+    ) -> String {
+        [
+            canonicalDeviceIdentity(deviceID) ?? deviceID,
+            usageDate,
+            timezoneIdentifier,
+            "pool=\(poolMinutes)",
+            "cap=\(capMinutes)",
+            "offset=\(max(0, offsetMinutes))",
+            "selection=\(selectionFingerprint)",
+        ].joined(separator: "|")
+    }
+
+    nonisolated static func shouldStartMonitoring(
+        previousSignature: String?,
+        nextSignature: String,
+        force: Bool
+    ) -> Bool {
+        force || previousSignature != nextSignature
+    }
+
+    private static func currentUsageDate(now: Date = Date(), timeZone: TimeZone = .current) -> String {
+        let f = DateFormatter()
+        f.calendar = Calendar(identifier: .gregorian)
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = timeZone
+        f.dateFormat = "yyyy-MM-dd"
+        return f.string(from: now)
+    }
+
+    private static func selectionFingerprint(_ selection: FamilyActivitySelection) -> String {
+        guard let data = try? JSONEncoder().encode(selection) else {
+            return EarnedBudgetScheduler.selectionSummary(selection)
+        }
+        let digest = SHA256.hash(data: data)
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func currentArmSignature(
+        deviceID: String,
+        poolMinutes: Int,
+        capMinutes: Int,
+        offsetMinutes: Int,
+        selection: FamilyActivitySelection
+    ) -> String {
+        makeArmSignature(
+            deviceID: deviceID,
+            usageDate: currentUsageDate(),
+            timezoneIdentifier: TimeZone.current.identifier,
+            poolMinutes: poolMinutes,
+            capMinutes: capMinutes,
+            offsetMinutes: offsetMinutes,
+            selectionFingerprint: selectionFingerprint(selection)
+        )
+    }
+
+    static func rememberCurrentArmSignature(
+        deviceID: String,
+        poolMinutes: Int,
+        capMinutes: Int,
+        offsetMinutes: Int,
+        selection: FamilyActivitySelection
+    ) {
+        guard !deviceID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        let signature = currentArmSignature(
+            deviceID: deviceID,
+            poolMinutes: poolMinutes,
+            capMinutes: capMinutes,
+            offsetMinutes: offsetMinutes,
+            selection: selection
+        )
+        UserDefaults(suiteName: "group.com.evlin.ios")?.set(signature, forKey: armSignatureKey)
     }
 
     /// Detect a child-device identity change and tear down earned-time state
@@ -75,6 +158,7 @@ enum EarnedBudgetArming {
         let owner = canonicalDeviceIdentity(ownerRaw) ?? ownerRaw
 
         EarnedBudgetScheduler.shared.stop()
+        suite?.removeObject(forKey: armSignatureKey)
         EarnedTimeStore.shared.clearUsageStateForIdentityChange()
         CommandDeliveryDiagnostics.record(
             CommandDeliveryDiagnostics.keyEarnedIdentityTransition,
@@ -101,7 +185,7 @@ enum EarnedBudgetArming {
     /// call repeatedly — arming replaces any previously armed ladder. The
     /// pool/cap policy is sourced from `EarnedTimeStore`, preserving already
     /// counted minutes as a re-arm offset before resuming from now.
-    static func armIfReady() {
+    static func armIfReady(force: Bool = false) {
         reconcileIdentityTransition()
 
         // Only arm on the child device.
@@ -113,6 +197,17 @@ enum EarnedBudgetArming {
             )
             return
         }
+        guard let currentRaw = UserDefaults.standard.string(
+                forKey: CommandPoller.childDeviceIDDefaultsKey),
+              !currentRaw.isEmpty
+        else {
+            CommandDeliveryDiagnostics.record(
+                CommandDeliveryDiagnostics.keyEarnedArmAttempt,
+                "skipped missing-child-device-id"
+            )
+            return
+        }
+        let current = canonicalDeviceIdentity(currentRaw) ?? currentRaw
 
         let store = EarnedTimeStore.shared
         guard let selection = store.measurementSelection else {
@@ -147,7 +242,11 @@ enum EarnedBudgetArming {
 
         let inputs = BigKidStatePoller.earnedRearmInputs(store: store)
         store.earnedUsageOffsetMinutes = inputs.offset
-        guard min(inputs.poolMinutes, inputs.capMinutes) - inputs.offset > 0 else {
+        guard let remainingPolicy = EarnedBudgetScheduler.remainingPolicy(
+            poolMinutes: inputs.poolMinutes,
+            capMinutes: inputs.capMinutes,
+            offsetMinutes: inputs.offset
+        ) else {
             CommandDeliveryDiagnostics.record(
                 CommandDeliveryDiagnostics.keyEarnedArmAttempt,
                 "skipped no-remaining pool=\(inputs.poolMinutes) cap=\(inputs.capMinutes) offset=\(inputs.offset) \(EarnedBudgetScheduler.selectionSummary(selection))"
@@ -155,10 +254,33 @@ enum EarnedBudgetArming {
             return
         }
 
-        EarnedBudgetScheduler.shared.armFromNow(
+        let signature = currentArmSignature(
+            deviceID: current,
             poolMinutes: inputs.poolMinutes,
             capMinutes: inputs.capMinutes,
+            offsetMinutes: inputs.offset,
             selection: selection
         )
+        let defaults = UserDefaults(suiteName: "group.com.evlin.ios")
+        guard shouldStartMonitoring(
+            previousSignature: defaults?.string(forKey: armSignatureKey),
+            nextSignature: signature,
+            force: force
+        ) else {
+            CommandDeliveryDiagnostics.record(
+                CommandDeliveryDiagnostics.keyEarnedArmAttempt,
+                "skipped already-armed pool=\(inputs.poolMinutes) cap=\(inputs.capMinutes) offset=\(inputs.offset) \(EarnedBudgetScheduler.selectionSummary(selection))"
+            )
+            return
+        }
+
+        let armed = EarnedBudgetScheduler.shared.armFromNow(
+            poolMinutes: remainingPolicy.poolMinutes,
+            capMinutes: remainingPolicy.capMinutes,
+            selection: selection
+        )
+        if armed {
+            defaults?.set(signature, forKey: armSignatureKey)
+        }
     }
 }

@@ -187,12 +187,14 @@ final class EarnedConfigCommandTests: XCTestCase {
         let savedCommandsOverride  = poller.pollCommandsOverride
         let savedSaveListOverride  = poller.saveLockedSetIDOverride
         let savedArmOverride       = poller.armBudgetOverride
+        let savedMeasurableOverride = poller.hasMeasurableSelectionOverride
         let savedDeviceIDProvider  = poller.childDeviceIDProvider
         let savedOneShotOverride   = poller.oneShotPollOverride
         defer {
             poller.pollCommandsOverride   = savedCommandsOverride
             poller.saveLockedSetIDOverride = savedSaveListOverride
             poller.armBudgetOverride      = savedArmOverride
+            poller.hasMeasurableSelectionOverride = savedMeasurableOverride
             poller.childDeviceIDProvider  = savedDeviceIDProvider
             poller.oneShotPollOverride    = savedOneShotOverride
             store.removeAll()
@@ -285,12 +287,14 @@ final class EarnedConfigCommandTests: XCTestCase {
         let savedCommandsOverride  = poller.pollCommandsOverride
         let savedSaveListOverride  = poller.saveLockedSetIDOverride
         let savedArmOverride       = poller.armBudgetOverride
+        let savedMeasurableOverride = poller.hasMeasurableSelectionOverride
         let savedDeviceIDProvider  = poller.childDeviceIDProvider
         let savedOneShotOverride   = poller.oneShotPollOverride
         defer {
             poller.pollCommandsOverride   = savedCommandsOverride
             poller.saveLockedSetIDOverride = savedSaveListOverride
             poller.armBudgetOverride      = savedArmOverride
+            poller.hasMeasurableSelectionOverride = savedMeasurableOverride
             poller.childDeviceIDProvider  = savedDeviceIDProvider
             poller.oneShotPollOverride    = savedOneShotOverride
             store.removeAll()
@@ -300,7 +304,11 @@ final class EarnedConfigCommandTests: XCTestCase {
         poller.childDeviceIDProvider = { deviceID }
         poller.oneShotPollOverride = nil
         poller.saveLockedSetIDOverride = { _, _ in }
-        poller.armBudgetOverride = { _, _, _ in }
+        poller.hasMeasurableSelectionOverride = { true }
+        var armedPolicy: (pool: Int, cap: Int)?
+        poller.armBudgetOverride = { pool, cap, _ in
+            armedPolicy = (pool, cap)
+        }
         poller.pollCommandsOverride = { _, _ in
             [try JSONDecoder().decode(PollCommandDTO.self,
                 from: self.makeConfigJSON(poolMinutes: 120, capMinutes: 120,
@@ -313,6 +321,56 @@ final class EarnedConfigCommandTests: XCTestCase {
         XCTAssertEqual(store.capMinutes, 120)
         XCTAssertEqual(store.earnedUsageOffsetMinutes, 0,
                        "raw extension usage must not become the config re-arm baseline")
+        XCTAssertEqual(armedPolicy?.pool, 120)
+        XCTAssertEqual(armedPolicy?.cap, 120)
+    }
+
+    func test_poller_earnedTimeConfigArmsFromNonBucketAcceptedOffset() async throws {
+        let store = EarnedTimeStore.shared
+        store.removeAll()
+        store.saveMeasurementSelection(FamilyActivitySelection())
+        store.latestDeviceEstimate = 25
+        store.acceptedUsageDate = "2026-07-10"
+        store.acceptedEstimateMinutes = 7
+        store.earnedUsageOffsetMinutes = 3
+
+        let poller = CommandPoller.shared
+        let savedCommandsOverride = poller.pollCommandsOverride
+        let savedSaveListOverride = poller.saveLockedSetIDOverride
+        let savedArmOverride = poller.armBudgetOverride
+        let savedMeasurableOverride = poller.hasMeasurableSelectionOverride
+        let savedDeviceIDProvider = poller.childDeviceIDProvider
+        let savedOneShotOverride = poller.oneShotPollOverride
+        defer {
+            poller.pollCommandsOverride = savedCommandsOverride
+            poller.saveLockedSetIDOverride = savedSaveListOverride
+            poller.armBudgetOverride = savedArmOverride
+            poller.hasMeasurableSelectionOverride = savedMeasurableOverride
+            poller.childDeviceIDProvider = savedDeviceIDProvider
+            poller.oneShotPollOverride = savedOneShotOverride
+            store.removeAll()
+        }
+
+        let deviceID = UUID(uuidString: "DEADBEEF-0000-0000-0000-000000000007")!
+        poller.childDeviceIDProvider = { deviceID }
+        poller.oneShotPollOverride = nil
+        poller.saveLockedSetIDOverride = { _, _ in }
+        poller.hasMeasurableSelectionOverride = { true }
+        var armedPolicy: (pool: Int, cap: Int)?
+        poller.armBudgetOverride = { pool, cap, _ in
+            armedPolicy = (pool, cap)
+        }
+        poller.pollCommandsOverride = { _, _ in
+            [try JSONDecoder().decode(PollCommandDTO.self,
+                from: self.makeConfigJSON(poolMinutes: 120, capMinutes: 120,
+                                          remainingMinutes: 113))]
+        }
+
+        await poller.pollOnceForCurrentDevice()
+
+        XCTAssertEqual(store.earnedUsageOffsetMinutes, 7)
+        XCTAssertEqual(armedPolicy?.pool, 113)
+        XCTAssertEqual(armedPolicy?.cap, 113)
     }
 
     // MARK: - Wave-2 Task 1 veto-staleness fix: backendRemainingAtLastSync source
@@ -362,13 +420,15 @@ final class EarnedConfigCommandTests: XCTestCase {
                        "wire remaining_minutes must win over the derived estimate")
     }
 
-    /// Old-shape payloads (no `remaining_minutes`) must still fall back to the
-    /// derived formula so pre-upgrade backends keep working.
-    func test_poller_earnedTimeConfig_fallsBackToDerivedWhenWireAbsent() async throws {
+    /// Old-shape payloads (no `remaining_minutes`) derive remaining from the
+    /// accepted baseline, never from an unaccepted raw extension estimate.
+    func test_poller_earnedTimeConfig_fallsBackToAcceptedOffsetWhenWireAbsent() async throws {
         let store = EarnedTimeStore.shared
         store.removeAll()
         store.saveMeasurementSelection(FamilyActivitySelection())
-        store.latestDeviceEstimate = 5
+        store.latestDeviceEstimate = 25
+        store.acceptedEstimateMinutes = 7
+        store.earnedUsageOffsetMinutes = 3
 
         let poller = CommandPoller.shared
         let savedCommandsOverride  = poller.pollCommandsOverride
@@ -399,7 +459,7 @@ final class EarnedConfigCommandTests: XCTestCase {
 
         await poller.pollOnceForCurrentDevice()
 
-        XCTAssertEqual(store.backendRemainingAtLastSync, 55,
-                       "no wire value present -> falls back to min(pool,cap) - estimate")
+        XCTAssertEqual(store.backendRemainingAtLastSync, 53,
+                       "no wire value present -> min(pool,cap) - accepted offset")
     }
 }

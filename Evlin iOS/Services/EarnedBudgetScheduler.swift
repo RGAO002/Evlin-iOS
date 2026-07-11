@@ -72,6 +72,16 @@ final class EarnedBudgetScheduler {
         return result
     }
 
+    nonisolated static func remainingPolicy(
+        poolMinutes: Int,
+        capMinutes: Int,
+        offsetMinutes: Int
+    ) -> (poolMinutes: Int, capMinutes: Int)? {
+        let remainingCeiling = min(poolMinutes, capMinutes) - max(0, offsetMinutes)
+        guard remainingCeiling > 0 else { return nil }
+        return (remainingCeiling, remainingCeiling)
+    }
+
     // MARK: - Arming
 
     nonisolated static func dailySchedule() -> DeviceActivitySchedule {

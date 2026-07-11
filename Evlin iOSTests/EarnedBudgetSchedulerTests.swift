@@ -111,6 +111,37 @@ final class EarnedBudgetSchedulerTests: XCTestCase {
         }
     }
 
+    func test_remainingPolicyArmsOnlyUncountedWindowAfterOffset() {
+        let policy = EarnedBudgetScheduler.remainingPolicy(
+            poolMinutes: 20,
+            capMinutes: 20,
+            offsetMinutes: 5
+        )
+
+        XCTAssertEqual(policy?.poolMinutes, 15)
+        XCTAssertEqual(policy?.capMinutes, 15)
+        XCTAssertEqual(
+            EarnedBudgetScheduler.thresholds(
+                poolMinutes: policy?.poolMinutes ?? 0,
+                capMinutes: policy?.capMinutes ?? 0
+            ),
+            [5, 10, 15]
+        )
+    }
+
+    func test_remainingPolicyReturnsNilWhenOffsetAlreadyExhausted() {
+        XCTAssertNil(EarnedBudgetScheduler.remainingPolicy(
+            poolMinutes: 20,
+            capMinutes: 20,
+            offsetMinutes: 20
+        ))
+        XCTAssertNil(EarnedBudgetScheduler.remainingPolicy(
+            poolMinutes: 20,
+            capMinutes: 15,
+            offsetMinutes: 15
+        ))
+    }
+
     func test_resumeScheduleStartsAtNowAndDoesNotRepeatFromMidnight() {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(identifier: "America/New_York")!

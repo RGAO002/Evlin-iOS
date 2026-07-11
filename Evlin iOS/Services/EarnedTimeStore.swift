@@ -36,6 +36,12 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
         case stale(acceptedUsageDate: String)
     }
 
+    enum RuntimePolicyReconciliation: Equatable {
+        case reconciled(Int)
+        case stale(acceptedUsageDate: String)
+        case invalid
+    }
+
     private let defaults: UserDefaults?
 
     init(suiteName: String = "group.com.evlin.ios") {
@@ -345,6 +351,43 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
                 serverEstimatedMinutes: serverEstimatedMinutes,
                 allowSameDayDecrease: allowSameDayDecrease
             ))
+        }
+    }
+
+    func reconcileRuntimePolicy(
+        usageDate: String,
+        timezoneIdentifier: String,
+        poolMinutes: Int,
+        capMinutes: Int,
+        remainingMinutes: Int,
+        estimatedMinutes: Int,
+        syncedAt: Date = Date()
+    ) -> RuntimePolicyReconciliation {
+        Self.withAcceptedUsageReconciliationLock {
+            guard Self.isCanonicalUsageDate(usageDate),
+                  TimeZone(identifier: timezoneIdentifier) != nil,
+                  (1...1440).contains(poolMinutes),
+                  (1...1440).contains(capMinutes),
+                  (0...1440).contains(remainingMinutes),
+                  (0...1440).contains(estimatedMinutes)
+            else { return .invalid }
+
+            if let currentDate = acceptedUsageDate,
+               Self.isCanonicalUsageDate(currentDate),
+               usageDate < currentDate {
+                return .stale(acceptedUsageDate: currentDate)
+            }
+
+            self.poolMinutes = poolMinutes
+            self.capMinutes = capMinutes
+            backendRemainingAtLastSync = remainingMinutes
+            lastBackendSyncAt = syncedAt
+            let accepted = reconcileAcceptedUsageLocked(
+                usageDate: usageDate,
+                serverEstimatedMinutes: estimatedMinutes,
+                allowSameDayDecrease: false
+            )
+            return .reconciled(accepted)
         }
     }
 
