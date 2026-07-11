@@ -304,6 +304,17 @@ final class EarnedTimeStoreTests: XCTestCase {
         XCTAssertNil(store.lockedSetListAliasKey)
     }
 
+    func test_clearUsageStateForIdentityChange_clearsAcceptedUsage() {
+        let store = freshStore()
+        store.acceptedUsageDate = "2026-07-10"
+        store.acceptedEstimateMinutes = 10
+
+        store.clearUsageStateForIdentityChange()
+
+        XCTAssertNil(store.acceptedUsageDate)
+        XCTAssertNil(store.acceptedEstimateMinutes)
+    }
+
     // MARK: - removeAll (teardown helper)
 
     func test_removeAll_clearsEverything() {
