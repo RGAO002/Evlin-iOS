@@ -158,13 +158,13 @@ final class BigKidStatePoller: ObservableObject {
             let snapshot = try await fetchState()
             await reconcileReflectionLock(snapshot)
             applySnapshot(snapshot, state)
-            let wasCountingAllowed = setUsageCountingAllowed(snapshot.usageCountingAllowed)
-            let shouldRecoverSkippedUsage = snapshot.usageCountingAllowed
+            let wasCountingAllowed = setUsageCountingAllowed(snapshot.effectiveUsageCountingAllowed)
+            let shouldRecoverSkippedUsage = snapshot.effectiveUsageCountingAllowed
                 && Self.hasSkippedUnfinishedUsageEvent()
-            if !snapshot.usageCountingAllowed && wasCountingAllowed {
+            if !snapshot.effectiveUsageCountingAllowed && wasCountingAllowed {
                 stopUsageCounters()
             }
-            if snapshot.usageCountingAllowed && (!wasCountingAllowed || shouldRecoverSkippedUsage) {
+            if snapshot.effectiveUsageCountingAllowed && (!wasCountingAllowed || shouldRecoverSkippedUsage) {
                 rearmUsageCounters()
                 if shouldRecoverSkippedUsage {
                     CommandDeliveryDiagnostics.remove(CommandDeliveryDiagnostics.keyUsageCountingLastSkipped)

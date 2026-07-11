@@ -57,7 +57,8 @@ final class BigKidState {
 }
 
 extension ChildStateResponse {
-    var usageCountingAllowed: Bool {
-        BigKidState.usageCountingAllowed(for: tasks)
+    var effectiveUsageCountingAllowed: Bool {
+        usageCountingAllowed
+            ?? (BigKidState.usageCountingAllowed(for: tasks) && reflectionRequest == nil)
     }
 }

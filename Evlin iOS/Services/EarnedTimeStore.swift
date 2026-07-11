@@ -21,16 +21,20 @@ import FamilyControls
 ///   - `earned.overridden.<usageDate>`     — Bool override flag per date string
 ///   - `earned.backendRemainingAtLastSync` — Int minutes from last backend sync
 ///   - `earned.latestDeviceEstimate`       — Int minutes from extension's latest estimate
+///   - `earned.acceptedUsageDate`          — Canonical backend usage date for accepted estimate
+///   - `earned.acceptedEstimateMinutes`    — Int backend-accepted cumulative usage
 ///   - `earned.poolMinutes`                — Int total earned pool for today (from backend)
 ///   - `earned.capMinutes`                 — Int hard parent-set cap (from backend)
 ///   - `evlin.usageCountingAllowed`        — Bool gate written from /child/state
 ///   - `earned.usageCountingOffset`        — Int counted minutes before a task pause
-final class EarnedTimeStore: @unchecked Sendable {
+nonisolated final class EarnedTimeStore: @unchecked Sendable {
     static let shared = EarnedTimeStore()
 
-    private let defaults = UserDefaults(suiteName: "group.com.evlin.ios")
+    private let defaults: UserDefaults?
 
-    init() {}
+    init(suiteName: String = "group.com.evlin.ios") {
+        defaults = UserDefaults(suiteName: suiteName)
+    }
 
     // MARK: - Keys
 
@@ -42,6 +46,8 @@ final class EarnedTimeStore: @unchecked Sendable {
     private let backendKey       = "earned.backendRemainingAtLastSync"
     private let lastBackendSyncAtKey = "earned.lastBackendSyncAt"
     private let estimateKey      = "earned.latestDeviceEstimate"
+    private let acceptedUsageDateKey = "earned.acceptedUsageDate"
+    private let acceptedEstimateKey = "earned.acceptedEstimateMinutes"
     private let poolKey          = "earned.poolMinutes"
     private let capKey           = "earned.capMinutes"
     private let usageCountingAllowedKey = "evlin.usageCountingAllowed"
@@ -214,6 +220,27 @@ final class EarnedTimeStore: @unchecked Sendable {
         }
     }
 
+    /// Backend-accepted usage is the future re-arm authority. The latest device
+    /// estimate remains a raw extension observation until reconciliation.
+    var acceptedUsageDate: String? {
+        get { defaults?.string(forKey: acceptedUsageDateKey) }
+        set { defaults?.set(newValue, forKey: acceptedUsageDateKey) }
+    }
+
+    var acceptedEstimateMinutes: Int? {
+        get {
+            guard defaults?.object(forKey: acceptedEstimateKey) != nil else { return nil }
+            return max(0, defaults?.integer(forKey: acceptedEstimateKey) ?? 0)
+        }
+        set {
+            if let newValue {
+                defaults?.set(max(0, newValue), forKey: acceptedEstimateKey)
+            } else {
+                defaults?.removeObject(forKey: acceptedEstimateKey)
+            }
+        }
+    }
+
     // MARK: - Pool + cap
 
     /// The total earned pool for today (minutes), as last written by the backend sync.
@@ -279,6 +306,33 @@ final class EarnedTimeStore: @unchecked Sendable {
             defaults?.set(max(0, newValue), forKey: earnedUsageOffsetKey)
             defaults?.synchronize()
         }
+    }
+
+    @discardableResult
+    func reconcileAcceptedUsage(
+        usageDate: String,
+        serverEstimatedMinutes: Int,
+        allowSameDayDecrease: Bool
+    ) -> Int {
+        let server = max(0, serverEstimatedMinutes)
+        let sameDay = acceptedUsageDate == usageDate
+        let accepted: Int
+        if !sameDay || allowSameDayDecrease {
+            accepted = server
+        } else {
+            accepted = max(acceptedEstimateMinutes ?? 0, server)
+        }
+        acceptedUsageDate = usageDate
+        acceptedEstimateMinutes = accepted
+        if !sameDay || allowSameDayDecrease {
+            // New-day and paused responses remove raw usage the backend did not accept.
+            latestDeviceEstimate = accepted
+        } else {
+            latestDeviceEstimate = max(latestDeviceEstimate ?? 0, accepted)
+        }
+        earnedUsageOffsetMinutes = accepted
+        defaults?.synchronize()
+        return accepted
     }
 
     static func appLimitUsageDate(
@@ -401,7 +455,8 @@ final class EarnedTimeStore: @unchecked Sendable {
     func clearUsageStateForIdentityChange() {
         [lockedSetIDKey, lockedSetDataKey, lockedSetListAliasKeyKey,
          lockedSetAllSelectedKey,
-         backendKey, lastBackendSyncAtKey, estimateKey, poolKey, capKey, usageCountingAllowedKey,
+         backendKey, lastBackendSyncAtKey, estimateKey, acceptedUsageDateKey,
+         acceptedEstimateKey, poolKey, capKey, usageCountingAllowedKey,
          earnedUsageOffsetKey].forEach { defaults?.removeObject(forKey: $0) }
         // Sweep any per-date override flags and per-app usage offsets.
         if let suite = defaults {

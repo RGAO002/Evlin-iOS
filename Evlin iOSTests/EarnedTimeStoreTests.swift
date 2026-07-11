@@ -13,6 +13,8 @@ import FamilyControls
 /// field the extension needs for its offline tripwire.
 final class EarnedTimeStoreTests: XCTestCase {
 
+    private var isolatedSuiteName: String?
+
     private func freshStore() -> EarnedTimeStore {
         let s = EarnedTimeStore.shared
         s.removeAll()
@@ -20,8 +22,20 @@ final class EarnedTimeStoreTests: XCTestCase {
     }
 
     override func tearDown() {
-        EarnedTimeStore.shared.removeAll()
+        if let isolatedSuiteName {
+            UserDefaults.standard.removePersistentDomain(forName: isolatedSuiteName)
+            self.isolatedSuiteName = nil
+        } else {
+            EarnedTimeStore.shared.removeAll()
+        }
         super.tearDown()
+    }
+
+    private func withIsolatedStore(_ body: (EarnedTimeStore) -> Void) {
+        let suiteName = "EarnedTimeStoreTests.\(UUID().uuidString)"
+        UserDefaults.standard.removePersistentDomain(forName: suiteName)
+        isolatedSuiteName = suiteName
+        body(EarnedTimeStore(suiteName: suiteName))
     }
 
     // MARK: - isEarnedTimeReady
@@ -194,6 +208,53 @@ final class EarnedTimeStoreTests: XCTestCase {
         XCTAssertEqual(reloaded.latestDeviceEstimate, 7)
     }
 
+    // MARK: - Accepted usage baseline
+
+    func test_reconcileAcceptedUsage_isMonotoneWithinUsageDate() {
+        withIsolatedStore { store in
+            XCTAssertEqual(store.reconcileAcceptedUsage(
+                usageDate: "2026-07-10", serverEstimatedMinutes: 15,
+                allowSameDayDecrease: false
+            ), 15)
+            XCTAssertEqual(store.reconcileAcceptedUsage(
+                usageDate: "2026-07-10", serverEstimatedMinutes: 5,
+                allowSameDayDecrease: false
+            ), 15)
+            XCTAssertEqual(store.acceptedEstimateMinutes, 15)
+            XCTAssertEqual(store.earnedUsageOffsetMinutes, 15)
+        }
+    }
+
+    func test_reconcileAcceptedUsage_newDateResetsToServer() {
+        withIsolatedStore { store in
+            _ = store.reconcileAcceptedUsage(
+                usageDate: "2026-07-10", serverEstimatedMinutes: 40,
+                allowSameDayDecrease: false
+            )
+            XCTAssertEqual(store.reconcileAcceptedUsage(
+                usageDate: "2026-07-11", serverEstimatedMinutes: 0,
+                allowSameDayDecrease: false
+            ), 0)
+            XCTAssertEqual(store.latestDeviceEstimate, 0)
+            XCTAssertEqual(store.earnedUsageOffsetMinutes, 0)
+        }
+    }
+
+    func test_reconcileAcceptedUsage_pausedResponseMayLowerSameDate() {
+        withIsolatedStore { store in
+            _ = store.reconcileAcceptedUsage(
+                usageDate: "2026-07-10", serverEstimatedMinutes: 10,
+                allowSameDayDecrease: false
+            )
+            XCTAssertEqual(store.reconcileAcceptedUsage(
+                usageDate: "2026-07-10", serverEstimatedMinutes: 0,
+                allowSameDayDecrease: true
+            ), 0)
+            XCTAssertEqual(store.latestDeviceEstimate, 0)
+            XCTAssertEqual(store.earnedUsageOffsetMinutes, 0)
+        }
+    }
+
     // MARK: - usage counting gate
 
     func test_usageCountingAllowed_defaultsToTrueBeforeChildStateArrives() {
@@ -253,6 +314,8 @@ final class EarnedTimeStoreTests: XCTestCase {
         store.backendRemainingAtLastSync = 30
         store.latestDeviceEstimate = 10
         store.usageCountingAllowed = false
+        store.acceptedUsageDate = "2026-07-10"
+        store.acceptedEstimateMinutes = 10
 
         store.removeAll()
 
@@ -262,6 +325,8 @@ final class EarnedTimeStoreTests: XCTestCase {
         XCTAssertFalse(store.isOverridden(forUsageDate: "2026-06-23"))
         XCTAssertNil(store.backendRemainingAtLastSync)
         XCTAssertNil(store.latestDeviceEstimate)
+        XCTAssertNil(store.acceptedUsageDate)
+        XCTAssertNil(store.acceptedEstimateMinutes)
         XCTAssertTrue(store.usageCountingAllowed)
         XCTAssertFalse(store.isEarnedTimeReady)
     }

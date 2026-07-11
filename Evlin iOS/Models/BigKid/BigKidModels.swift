@@ -121,6 +121,15 @@ struct ResolvedReflection: Codable, Equatable, Sendable {
     enum Resolution: String, Codable, Equatable, Sendable { case approved, cancelled }
 }
 
+struct EarnedTimeRuntime: Codable, Equatable, Sendable {
+    let usageDate: String
+    let timezone: String
+    let dailyPoolMinutes: Int
+    let deviceCapMinutes: Int
+    let remainingMinutes: Int
+    let estimatedMinutes: Int
+}
+
 struct ReflectionRequest: Codable, Equatable, Sendable, Identifiable {
     let id: UUID
     let reason: String
@@ -173,6 +182,34 @@ struct ChildStateResponse: Codable, Equatable, Sendable {
     let dailyCompleteAcknowledged: Bool
     let screenTimeFinishedAcknowledged: Bool
     let lastResolvedReflection: ResolvedReflection?
+    let usageCountingAllowed: Bool?
+    let earnedTimeRuntime: EarnedTimeRuntime?
+
+    init(
+        childName: String,
+        minutesLeft: Int,
+        minutesMax: Int,
+        tasks: [BigKidTask],
+        reflectionRequest: ReflectionRequest?,
+        notifyParentCooldownEndsAt: Date?,
+        dailyCompleteAcknowledged: Bool,
+        screenTimeFinishedAcknowledged: Bool,
+        lastResolvedReflection: ResolvedReflection?,
+        usageCountingAllowed: Bool? = nil,
+        earnedTimeRuntime: EarnedTimeRuntime? = nil
+    ) {
+        self.childName = childName
+        self.minutesLeft = minutesLeft
+        self.minutesMax = minutesMax
+        self.tasks = tasks
+        self.reflectionRequest = reflectionRequest
+        self.notifyParentCooldownEndsAt = notifyParentCooldownEndsAt
+        self.dailyCompleteAcknowledged = dailyCompleteAcknowledged
+        self.screenTimeFinishedAcknowledged = screenTimeFinishedAcknowledged
+        self.lastResolvedReflection = lastResolvedReflection
+        self.usageCountingAllowed = usageCountingAllowed
+        self.earnedTimeRuntime = earnedTimeRuntime
+    }
 }
 
 // MARK: - Decoder configuration

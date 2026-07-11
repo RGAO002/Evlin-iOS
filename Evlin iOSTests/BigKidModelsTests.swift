@@ -2,6 +2,46 @@ import XCTest
 @testable import Evlin_iOS
 
 final class BigKidModelsTests: XCTestCase {
+    func test_childState_decodesAuthoritativeGateAndRuntime() throws {
+        let data = Data(#"{"child_name":"Giannis","minutes_left":0,"minutes_max":0,"tasks":[],"reflection_request":null,"notify_parent_cooldown_ends_at":null,"daily_complete_acknowledged":false,"screen_time_finished_acknowledged":false,"last_resolved_reflection":null,"usage_counting_allowed":false,"earned_time_runtime":{"usage_date":"2026-07-10","timezone":"America/New_York","daily_pool_minutes":120,"device_cap_minutes":90,"remaining_minutes":75,"estimated_minutes":15}}"#.utf8)
+        let state = try JSONDecoder.bigKid.decode(ChildStateResponse.self, from: data)
+
+        XCTAssertEqual(state.usageCountingAllowed, false)
+        XCTAssertEqual(state.earnedTimeRuntime?.usageDate, "2026-07-10")
+        XCTAssertEqual(state.earnedTimeRuntime?.dailyPoolMinutes, 120)
+        XCTAssertEqual(state.effectiveUsageCountingAllowed, false)
+    }
+
+    func test_childState_legacySnapshotsUseCompatibilityGate() throws {
+        func decode(tasks: String, reflectionRequest: String = "null") throws -> ChildStateResponse {
+            let data = Data("""
+            {
+              "child_name": "Giannis",
+              "minutes_left": 0,
+              "minutes_max": 0,
+              "tasks": \(tasks),
+              "reflection_request": \(reflectionRequest),
+              "notify_parent_cooldown_ends_at": null,
+              "daily_complete_acknowledged": false,
+              "screen_time_finished_acknowledged": false,
+              "last_resolved_reflection": null
+            }
+            """.utf8)
+            return try JSONDecoder.bigKid.decode(ChildStateResponse.self, from: data)
+        }
+
+        let unfinishedTaskJSON = #"[{"id":"11111111-1111-1111-1111-111111111111","title":"Make bed","description":"Smooth covers","category":"Chores","due":null,"status":"todo","phase":"input","redo_reason":null,"evidence_photo_urls":[],"evidence_note":null,"bypass":null}]"#
+        let activeReflectionJSON = #"{"id":"22222222-2222-2222-2222-222222222222","reason":"Test","display_reason":null,"topic_label":null,"video_id":"video","video_title":"Title","writing_prompt":"Prompt","quiz":[],"steps_completed":[],"quiz_score":null,"essay_text":null,"status":"pending","parent_note":null,"submitted_at":null,"approved_at":null,"parent_redo_note":null,"last_nudge_at":null,"reflection_lock_cap_expires_at":null,"lock_applied_at":null}"#
+        let noTasksNoReflection = try decode(tasks: "[]")
+        let unfinishedTask = try decode(tasks: unfinishedTaskJSON)
+        let activeReflection = try decode(tasks: "[]", reflectionRequest: activeReflectionJSON)
+
+        XCTAssertTrue(noTasksNoReflection.effectiveUsageCountingAllowed)
+        XCTAssertFalse(unfinishedTask.effectiveUsageCountingAllowed)
+        XCTAssertFalse(activeReflection.effectiveUsageCountingAllowed)
+        XCTAssertNil(noTasksNoReflection.earnedTimeRuntime)
+    }
+
     func testDecodesChildStateResponse() throws {
         let json = """
         {
