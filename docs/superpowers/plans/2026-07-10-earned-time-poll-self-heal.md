@@ -19,7 +19,7 @@
 - Reconcile a successful sample body only when `usage_date` is an exact Gregorian `yyyy-MM-dd` value and `estimated_minutes` is within `0...1440`; semantically invalid 2xx/409 bodies are accepted without mutation or retry.
 - A valid successful response older than the store's current accepted usage date is stale and must be accepted without mutation or retry; retry drain must never roll accepted usage back to a prior day.
 - Earned arming has one production entry point, `EarnedBudgetArming.armIfReady()`. Transition/skipped recovery may re-arm device-total and per-app counters but must not directly call the earned scheduler.
-- The earned arm signature includes device identity, canonical usage date, policy, selection fingerprint, and accepted usage offset. A changed accepted offset must replace the raw ladder; an unchanged signature must not restart monitoring on a stable poll.
+- The earned arm signature includes device identity, canonical usage date, policy, selection fingerprint, and the running ladder offset. Accepted usage advancing alone does not replace that ladder; a real policy/date/selection/stop invalidation installs a replacement from the accepted offset.
 - Identity teardown may stop and clear state before fetching child state, but it must not arm until the fetched runtime and authoritative gate have been applied.
 - Child-state runtime reconciliation validates canonical date/timezone and `0...1440` bounds, rejects stale dates before writing any policy field, and prevents overlapping refreshes from applying out of order.
 - Sample and poll reconciliation update backend-accepted usage but never mutate the offset owned by the running ladder. Persist a new offset only after a replacement ladder starts successfully.
