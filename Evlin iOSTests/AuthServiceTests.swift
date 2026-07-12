@@ -14,10 +14,12 @@ final class AuthServiceTests: XCTestCase {
     // workaround for the runtime bug.
     private static var retained: [AuthService] = []
     @MainActor private func makeAuth(
+        terminalSessionPersistence: (() -> Void)? = nil,
         terminalSessionTeardown: (() -> Void)? = nil
     ) -> AuthService {
         let svc = AuthService(
             api: APIClient(),
+            terminalSessionPersistence: terminalSessionPersistence,
             terminalSessionTeardown: terminalSessionTeardown
         )
         Self.retained.append(svc)
@@ -141,28 +143,64 @@ final class AuthServiceTests: XCTestCase {
         XCTAssertNil(appGroup.string(forKey: "evlin.childId"))
     }
 
-    func testTerminalSessionNotificationSynchronouslyTearsDownBeforeSignedOutState() throws {
+    func testTerminalSessionNotificationSynchronouslyPersistsFailClosedBeforePostReturns() async throws {
         let suiteName = "AuthServiceTests.\(UUID().uuidString)"
         let appGroup = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defer { appGroup.removePersistentDomain(forName: suiteName) }
-        appGroup.set(UUID().uuidString, forKey: "evlin.childId")
-        var events: [String] = []
-        let auth = makeAuth(terminalSessionTeardown: {
-            AuthService.clearFamilyScopedLocalState(
-                appGroupDefaults: appGroup,
-                teardownEarned: {
-                    events.append("teardown")
-                    XCTAssertNotNil(appGroup.string(forKey: "evlin.childId"))
-                }
-            )
-        })
+        let deviceID = UUID()
+        let generation = EarnedActivityGeneration.Generation(
+            activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
+            deviceID: deviceID.uuidString,
+            offsetMinutes: 0,
+            armSignature: "auth-terminal",
+            usageDate: "2026-07-12",
+            timezoneIdentifier: "America/New_York"
+        )
+        XCTAssertTrue(EarnedActivityGeneration.persistLifecycle(
+            .init(active: generation, pending: nil),
+            defaults: appGroup
+        ))
+        appGroup.set(deviceID.uuidString, forKey: "evlin.childId")
+        let teardown = expectation(description: "main teardown")
+        let auth = makeAuth(
+            terminalSessionPersistence: {
+                AuthService.persistTerminalFailClosed(appGroupDefaults: appGroup)
+            },
+            terminalSessionTeardown: {
+                teardown.fulfill()
+            }
+        )
+        let postReturned = expectation(description: "background post returned")
+        DispatchQueue.global().async {
+            NotificationCenter.default.post(name: .evlinSessionSignedOut, object: nil)
+            XCTAssertNil(appGroup.string(forKey: "evlin.childId"))
+            let lifecycle = EarnedActivityGeneration.loadLifecycle(defaults: appGroup)
+            XCTAssertEqual(lifecycle?.isStopped, true)
+            XCTAssertNil(lifecycle?.active)
+            XCTAssertTrue(lifecycle?.retiringActivityNames.contains(generation.activityName) == true)
+            postReturned.fulfill()
+        }
+
+        await fulfillment(of: [postReturned, teardown], timeout: 1.0)
+
+        XCTAssertEqual(auth.state, .signedOut)
+    }
+
+    func testTerminalObserverDeinitRemovesNotificationToken() {
+        var callbackCount = 0
+        var observer: AuthTerminalSessionObserver? = AuthTerminalSessionObserver(
+            center: .default,
+            onNotification: { callbackCount += 1 }
+        )
 
         NotificationCenter.default.post(name: .evlinSessionSignedOut, object: nil)
-        if auth.state == .signedOut { events.append("signed-out") }
+        XCTAssertEqual(callbackCount, 1)
 
-        XCTAssertEqual(events, ["teardown", "signed-out"])
-        XCTAssertNil(appGroup.string(forKey: "evlin.childId"))
-        XCTAssertEqual(auth.state, .signedOut)
+        observer = nil
+        XCTAssertNil(observer)
+        NotificationCenter.default.post(name: .evlinSessionSignedOut, object: nil)
+
+        XCTAssertEqual(callbackCount, 1)
     }
 
     func testCompletedOnboardingRepairsMissingParentModeFromStoredSession() {

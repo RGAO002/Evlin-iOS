@@ -3,6 +3,17 @@ import XCTest
 
 @MainActor
 final class BigKidStatePollerTests: XCTestCase {
+    private func authoritativeRuntime() -> EarnedTimeRuntime {
+        EarnedTimeRuntime(
+            usageDate: "2026-07-11",
+            timezone: "America/New_York",
+            dailyPoolMinutes: 120,
+            deviceCapMinutes: 90,
+            remainingMinutes: 75,
+            estimatedMinutes: 15
+        )
+    }
+
     private func snapshot(
         usageCountingAllowed: Bool,
         runtime: EarnedTimeRuntime? = nil,
@@ -375,6 +386,37 @@ final class BigKidStatePollerTests: XCTestCase {
         XCTAssertNil(poller.lastFetchedAt)
     }
 
+    func test_refresh_discardsThrown410WhenChildIdentityChangesDuringFetch() async {
+        let oldID = UUID(uuidString: "B21411CB-63A5-4489-BC68-BF8AC26EE15B")!
+        let newID = UUID(uuidString: "0D45589A-722C-4E43-A06E-7501F484A46C")!
+        let state = BigKidState(snapshot: snapshot(usageCountingAllowed: true))
+        var currentID = oldID
+        var resumeFetch: CheckedContinuation<Void, Never>?
+        var events: [String] = []
+        let poller = BigKidStatePoller(
+            state: state,
+            expectedChildID: oldID,
+            currentChildID: { currentID },
+            fetchState: {
+                await withCheckedContinuation { resumeFetch = $0 }
+                throw BigKidAPIError(status: 410, detail: "family_removed")
+            },
+            reconcileReflectionLock: { _ in },
+            failOpenFamily: { events.append("fail-open") },
+            requestFreshPoll: { events.append("fresh-poll") }
+        )
+
+        let refresh = Task { await poller.refreshNow() }
+        while resumeFetch == nil { await Task.yield() }
+        currentID = newID
+        resumeFetch?.resume()
+        await refresh.value
+
+        XCTAssertEqual(events, ["fresh-poll"])
+        XCTAssertFalse(poller.familyRemoved)
+        XCTAssertNil(poller.lastError)
+    }
+
     func test_nilRuntimeProbesLockAndAllowsCompatibilityReadiness() {
         let suiteName = "BigKidStatePollerTests.\(UUID().uuidString)"
         defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
@@ -382,7 +424,93 @@ final class BigKidStatePollerTests: XCTestCase {
 
         XCTAssertEqual(
             BigKidStatePoller.reconcileEarnedRuntime(nil, store: store),
-            .reconciled(0)
+            .runtimeUnavailable
+        )
+    }
+
+    func test_nilRuntimeClearsEarnedReadinessWithoutSuppressingAuthoritativeGate() async {
+        let deviceID = UUID()
+        let response = snapshot(usageCountingAllowed: true, runtime: nil)
+        let state = BigKidState(snapshot: response)
+        var events: [String] = []
+        let poller = BigKidStatePoller(
+            state: state,
+            expectedChildID: deviceID,
+            currentChildID: { deviceID },
+            fetchState: { response },
+            reconcileReflectionLock: { _ in },
+            syncEarnedRuntime: { _ in .runtimeUnavailable },
+            setUsageCountingAllowed: { _ in events.append("gate"); return true },
+            markAuthoritativeReady: { _ in events.append("ready") },
+            clearAuthoritativeReadiness: { events.append("clear") },
+            ensureEarnedArmed: { events.append("arm") },
+            stopUsageCounters: { events.append("stop") }
+        )
+
+        await poller.refreshNow()
+
+        XCTAssertEqual(events, ["clear", "gate"])
+        XCTAssertNil(poller.lastError)
+    }
+
+    func test_counterRecoverySurvivesPollerRecreationUntilRearmSucceeds() async {
+        let suiteName = "BigKidStatePollerTests.\(UUID().uuidString)"
+        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let recoveryStore = EarnedTimeStore(suiteName: suiteName)
+        let deviceID = UUID()
+        recoveryStore.setCounterRecoveryRequired(true, deviceID: deviceID)
+        let response = snapshot(usageCountingAllowed: true)
+        let state = BigKidState(snapshot: response)
+        var attempts: [Bool] = []
+
+        func makePoller(result: Bool) -> BigKidStatePoller {
+            BigKidStatePoller(
+                state: state,
+                expectedChildID: deviceID,
+                currentChildID: { deviceID },
+                fetchState: { response },
+                reconcileReflectionLock: { _ in },
+                syncEarnedRuntime: { _ in .reconciled(0) },
+                setUsageCountingAllowed: { _ in true },
+                rearmUsageCountersResult: {
+                    attempts.append(result)
+                    return result
+                },
+                isCounterRecoveryRequired: {
+                    recoveryStore.isCounterRecoveryRequired(deviceID: $0)
+                },
+                setCounterRecoveryRequired: {
+                    recoveryStore.setCounterRecoveryRequired($1, deviceID: $0)
+                }
+            )
+        }
+
+        await makePoller(result: false).refreshNow()
+        XCTAssertTrue(recoveryStore.isCounterRecoveryRequired(deviceID: deviceID))
+
+        await makePoller(result: true).refreshNow()
+        XCTAssertFalse(recoveryStore.isCounterRecoveryRequired(deviceID: deviceID))
+        XCTAssertEqual(attempts, [false, true])
+    }
+
+    func test_counterRecoveryRequiresDeviceTotalAndPerAppSuccess() {
+        XCTAssertFalse(
+            BigKidStatePoller.counterRearmSucceeded(
+                deviceTotalArmed: false,
+                perAppResult: .armed(activityCount: 1, eventCount: 2)
+            )
+        )
+        XCTAssertFalse(
+            BigKidStatePoller.counterRearmSucceeded(
+                deviceTotalArmed: true,
+                perAppResult: .partiallyArmed(armed: 1, failed: 1)
+            )
+        )
+        XCTAssertTrue(
+            BigKidStatePoller.counterRearmSucceeded(
+                deviceTotalArmed: true,
+                perAppResult: .armed(activityCount: 1, eventCount: 2)
+            )
         )
     }
 
@@ -503,7 +631,11 @@ final class BigKidStatePollerTests: XCTestCase {
     func test_refresh_usesAuthoritativeGateInsteadOfDerivedTaskState() async {
         EarnedTimeStore.shared.usageCountingAllowed = false
         let pendingTask = BigKidTask.fixture(status: .submitted, phase: .submitted)
-        let response = snapshot(usageCountingAllowed: true, tasks: [pendingTask])
+        let response = snapshot(
+            usageCountingAllowed: true,
+            runtime: authoritativeRuntime(),
+            tasks: [pendingTask]
+        )
         let state = BigKidState(snapshot: response)
         var armed = 0
         let poller = BigKidStatePoller(
@@ -521,7 +653,10 @@ final class BigKidStatePollerTests: XCTestCase {
 
     func test_refresh_retriesEarnedArmOnEveryStableAllowedPoll() async {
         EarnedTimeStore.shared.usageCountingAllowed = true
-        let response = snapshot(usageCountingAllowed: true)
+        let response = snapshot(
+            usageCountingAllowed: true,
+            runtime: authoritativeRuntime()
+        )
         let state = BigKidState(snapshot: response)
         var earnedArmCount = 0
         var otherRearmCount = 0
@@ -542,7 +677,10 @@ final class BigKidStatePollerTests: XCTestCase {
 
     func test_refresh_transitionArmsEarnedOnceAndRecoversOtherCountersOnce() async {
         EarnedTimeStore.shared.usageCountingAllowed = false
-        let response = snapshot(usageCountingAllowed: true)
+        let response = snapshot(
+            usageCountingAllowed: true,
+            runtime: authoritativeRuntime()
+        )
         let state = BigKidState(snapshot: response)
         var earnedArmCount = 0
         var otherRearmCount = 0

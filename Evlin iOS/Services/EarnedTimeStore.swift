@@ -478,6 +478,7 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
 
     enum RuntimePolicyReconciliation: Equatable {
         case reconciled(Int)
+        case runtimeUnavailable
         case stale(acceptedUsageDate: String)
         case invalid
         case lockUnavailable
@@ -485,6 +486,7 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
 
     enum LocalThresholdReconciliation: Equatable {
         case reconciled
+        case identityMismatch
         case lockUnavailable
     }
 
@@ -546,6 +548,8 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
     private let earnedUsageOffsetKey = "earned.usageCountingOffset"
     private let appLimitUsageOffsetPrefix = "evlin.appLimitUsageOffset."
     private let appLimitReportedPrefix = "evlin.appLimitReported."
+    private let pendingUncountedPrefix = "earned.pendingUncountedReconciliation."
+    private let counterRecoveryPrefix = "earned.counterRecoveryRequired."
 
     private func overrideKey(for usageDate: String) -> String {
         "earned.overridden.\(usageDate)"
@@ -865,25 +869,37 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
     }
 
     func recordLocalThresholdEstimate(
-        _ estimatedMinutes: Int
+        _ estimatedMinutes: Int,
+        expectedDeviceID: UUID? = nil,
+        beforeCommit: () -> Void = {}
     ) -> LocalThresholdReconciliation {
-        let previousEstimate = defaults?.object(forKey: estimateKey)
-        let committed = withReconciliationTransaction {
+        let committed: LocalThresholdReconciliation? = withReconciliationTransaction(
+            rollbackKeys: [estimateKey]
+        ) {
+            guard mirrorMatches(expectedDeviceID) else { return .identityMismatch }
+            let previousEstimate = defaults?.object(forKey: estimateKey)
             let estimate = min(1_440, max(0, estimatedMinutes))
             let current = defaults?.integer(forKey: estimateKey) ?? 0
             defaults?.set(max(current, estimate), forKey: estimateKey)
-            return true
-        } ?? false
-        guard committed else {
-            if let previousEstimate {
-                defaults?.set(previousEstimate, forKey: estimateKey)
-            } else {
-                defaults?.removeObject(forKey: estimateKey)
+            beforeCommit()
+            guard mirrorMatches(expectedDeviceID) else {
+                if let previousEstimate {
+                    defaults?.set(previousEstimate, forKey: estimateKey)
+                } else {
+                    defaults?.removeObject(forKey: estimateKey)
+                }
+                return .identityMismatch
             }
-            defaults?.synchronize()
-            return .lockUnavailable
+            return .reconciled
         }
-        return .reconciled
+        return committed ?? .lockUnavailable
+    }
+
+    private func mirrorMatches(_ expectedDeviceID: UUID?) -> Bool {
+        guard let expectedDeviceID else { return true }
+        return EarnedActivityGeneration.canonicalDeviceID(
+            defaults?.string(forKey: "evlin.childId")
+        ) == expectedDeviceID.uuidString.lowercased()
     }
 
     @discardableResult
@@ -892,7 +908,7 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
         serverEstimatedMinutes: Int,
         allowSameDayDecrease: Bool
     ) -> Int {
-        withReconciliationTransaction {
+        withReconciliationTransaction(rollbackKeys: acceptedUsageRollbackKeys) {
             reconcileAcceptedUsageLocked(
                 usageDate: usageDate,
                 serverEstimatedMinutes: serverEstimatedMinutes,
@@ -906,7 +922,7 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
         serverEstimatedMinutes: Int,
         allowSameDayDecrease: Bool
     ) -> AcceptedUsageReconciliation {
-        withReconciliationTransaction {
+        withReconciliationTransaction(rollbackKeys: acceptedUsageRollbackKeys) {
             if let currentDate = acceptedUsageDate,
                Self.isCanonicalUsageDate(currentDate),
                usageDate < currentDate {
@@ -929,7 +945,7 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
         estimatedMinutes: Int,
         syncedAt: Date = Date()
     ) -> RuntimePolicyReconciliation {
-        withReconciliationTransaction {
+        withReconciliationTransaction(rollbackKeys: runtimePolicyRollbackKeys) {
             guard Self.isCanonicalUsageDate(usageDate),
                   TimeZone(identifier: timezoneIdentifier) != nil,
                   (1...1440).contains(poolMinutes),
@@ -944,6 +960,18 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
                 return .stale(acceptedUsageDate: currentDate)
             }
 
+            let mirroredDeviceID = EarnedActivityGeneration.canonicalDeviceID(
+                defaults?.string(forKey: "evlin.childId")
+            )
+            let pendingKey = mirroredDeviceID.map {
+                pendingUncountedPrefix + $0
+            }
+            let pendingDate = pendingKey.flatMap { defaults?.string(forKey: $0) }
+            let allowPendingDecrease = pendingDate == usageDate
+            if let pendingDate, pendingDate < usageDate, let pendingKey {
+                defaults?.removeObject(forKey: pendingKey)
+            }
+
             self.poolMinutes = poolMinutes
             self.capMinutes = capMinutes
             defaults?.set(timezoneIdentifier, forKey: runtimeTimezoneKey)
@@ -952,14 +980,69 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
             let accepted = reconcileAcceptedUsageLocked(
                 usageDate: usageDate,
                 serverEstimatedMinutes: estimatedMinutes,
-                allowSameDayDecrease: false
+                allowSameDayDecrease: allowPendingDecrease
             )
+            if allowPendingDecrease, let pendingKey {
+                defaults?.removeObject(forKey: pendingKey)
+            }
             return .reconciled(accepted)
         } ?? .lockUnavailable
     }
 
+    func markPendingUncountedReconciliation(deviceID: UUID, usageDate: String) {
+        guard Self.isCanonicalUsageDate(usageDate) else { return }
+        defaults?.set(
+            usageDate,
+            forKey: pendingUncountedPrefix + deviceID.uuidString.lowercased()
+        )
+        defaults?.synchronize()
+    }
+
+    func hasPendingUncountedReconciliation(
+        deviceID: UUID,
+        usageDate: String
+    ) -> Bool {
+        defaults?.string(
+            forKey: pendingUncountedPrefix + deviceID.uuidString.lowercased()
+        ) == usageDate
+    }
+
+    func setCounterRecoveryRequired(_ required: Bool, deviceID: UUID) {
+        let key = counterRecoveryPrefix + deviceID.uuidString.lowercased()
+        if required {
+            defaults?.set(true, forKey: key)
+        } else {
+            defaults?.removeObject(forKey: key)
+        }
+        defaults?.synchronize()
+    }
+
+    func isCounterRecoveryRequired(deviceID: UUID) -> Bool {
+        defaults?.bool(
+            forKey: counterRecoveryPrefix + deviceID.uuidString.lowercased()
+        ) ?? false
+    }
+
+    private var acceptedUsageRollbackKeys: [String] {
+        [acceptedUsageDateKey, acceptedEstimateKey, estimateKey]
+    }
+
+    private var runtimePolicyRollbackKeys: [String] {
+        var keys = [
+            poolKey, capKey, runtimeTimezoneKey, backendKey, lastBackendSyncAtKey,
+            acceptedUsageDateKey, acceptedEstimateKey, estimateKey,
+        ]
+        if let mirrored = EarnedActivityGeneration.canonicalDeviceID(
+            defaults?.string(forKey: "evlin.childId")
+        ) {
+            keys.append(pendingUncountedPrefix + mirrored)
+        }
+        return keys
+    }
+
     @discardableResult
     private func withReconciliationTransaction<T>(
+        rollbackKeys: [String] = [],
         _ body: () -> T
     ) -> T? {
         let outcome = reconciliationLock.withLock {
@@ -975,8 +1058,16 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
                     code: 0
                 )
             }
+            let before = snapshotDefaults(defaults, keys: rollbackKeys)
             let value = body()
+            let written = snapshotDefaults(defaults, keys: rollbackKeys)
             guard synchronizeDefaults(defaults) else {
+                restoreDefaults(
+                    defaults,
+                    from: before,
+                    whereCurrentMatches: written
+                )
+                defaults.synchronize()
                 return EarnedTransactionOutcome<T>.unavailable(
                     stage: "post_synchronize",
                     code: 0
@@ -991,6 +1082,46 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
              .unavailable(let stage, let code):
             recordReconciliationFailure(stage: stage, code: code)
             return nil
+        }
+    }
+
+    private struct DefaultsSnapshotValue {
+        let key: String
+        let value: Any?
+    }
+
+    private func snapshotDefaults(
+        _ defaults: UserDefaults,
+        keys: [String]
+    ) -> [DefaultsSnapshotValue] {
+        keys.map { DefaultsSnapshotValue(key: $0, value: defaults.object(forKey: $0)) }
+    }
+
+    private func restoreDefaults(
+        _ defaults: UserDefaults,
+        from before: [DefaultsSnapshotValue],
+        whereCurrentMatches written: [DefaultsSnapshotValue]
+    ) {
+        for prior in before {
+            let expectedWritten = written.first { $0.key == prior.key }?.value
+            guard defaultsValuesEqual(
+                defaults.object(forKey: prior.key),
+                expectedWritten
+            ) else { continue }
+            if let value = prior.value {
+                defaults.set(value, forKey: prior.key)
+            } else {
+                defaults.removeObject(forKey: prior.key)
+            }
+        }
+    }
+
+    private func defaultsValuesEqual(_ lhs: Any?, _ rhs: Any?) -> Bool {
+        switch (lhs, rhs) {
+        case (nil, nil): return true
+        case (nil, _), (_, nil): return false
+        case (let left?, let right?):
+            return (left as AnyObject).isEqual(right)
         }
     }
 
@@ -1181,6 +1312,8 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
                     $0.hasPrefix(prefix)
                     || $0.hasPrefix(appLimitUsageOffsetPrefix)
                     || $0.hasPrefix(appLimitReportedPrefix)
+                    || $0.hasPrefix(pendingUncountedPrefix)
+                    || $0.hasPrefix(counterRecoveryPrefix)
                 }
                 .forEach { suite.removeObject(forKey: $0) }
         }

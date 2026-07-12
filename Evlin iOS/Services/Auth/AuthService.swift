@@ -1,6 +1,38 @@
 import Foundation
 import Observation
 
+nonisolated final class AuthTerminalSessionObserver: @unchecked Sendable {
+    private let center: NotificationCenter
+    private let lock = NSLock()
+    private var token: NSObjectProtocol?
+
+    init(
+        center: NotificationCenter,
+        onNotification: @escaping () -> Void
+    ) {
+        self.center = center
+        token = center.addObserver(
+            forName: Notification.Name("evlin.session.signedOut"),
+            object: nil,
+            queue: nil
+        ) { _ in
+            onNotification()
+        }
+    }
+
+    func invalidate() {
+        lock.lock()
+        let token = self.token
+        self.token = nil
+        lock.unlock()
+        if let token { center.removeObserver(token) }
+    }
+
+    deinit {
+        invalidate()
+    }
+}
+
 // NOTE (§15.7 PIN A / Task 11): the canonical `AuthAccountDTO` is declared ONCE,
 // in `APIClient.swift` (Task 10 had to introduce it there because its
 // `AuthResultDTO.account` + single-flight refresher consume it before this file
@@ -38,28 +70,67 @@ final class AuthService {
 
     private let api: APIClient
     private let terminalSessionTeardown: () -> Void
+    nonisolated(unsafe) private var terminalSessionObserver: AuthTerminalSessionObserver?
+    nonisolated private static let terminalPersistenceLock = NSLock()
 
     init(
         api: APIClient,
+        terminalSessionPersistence: (() -> Void)? = nil,
         terminalSessionTeardown: (() -> Void)? = nil
     ) {
         self.api = api
         self.terminalSessionTeardown = terminalSessionTeardown ?? {
             AuthService.clearFamilyScopedLocalState()
         }
-        // Listen for terminal refresh failure published by APIClient (§14.7).
-        NotificationCenter.default.addObserver(
-            forName: .evlinSessionSignedOut, object: nil, queue: .main
-        ) { [weak self] _ in
-            MainActor.assumeIsolated {
+        let persistFailClosed = terminalSessionPersistence ?? {
+            AuthService.persistTerminalFailClosed()
+        }
+        terminalSessionObserver = AuthTerminalSessionObserver(
+            center: .default
+        ) { [weak self] in
+            persistFailClosed()
+            Task { @MainActor [weak self] in
                 self?.handleTerminalSessionSignOut()
             }
         }
     }
 
+    deinit {
+        terminalSessionObserver?.invalidate()
+    }
+
     private func handleTerminalSessionSignOut() {
         terminalSessionTeardown()
         state = .signedOut
+    }
+
+    nonisolated static func persistTerminalFailClosed(
+        appGroupDefaults: UserDefaults? = UserDefaults(
+            suiteName: EarnedTimeStore.appGroupSuiteName
+        )
+    ) {
+        terminalPersistenceLock.lock()
+        defer { terminalPersistenceLock.unlock() }
+        guard let appGroupDefaults else { return }
+
+        let lifecycle = EarnedActivityGeneration.loadLifecycle(defaults: appGroupDefaults)
+        let targets = EarnedActivityGeneration.stopTargets(lifecycle: lifecycle)
+        _ = EarnedActivityGeneration.persistLifecycle(
+            .init(
+                active: nil,
+                pending: nil,
+                retiringActivityNames: targets,
+                isStopped: true
+            ),
+            defaults: appGroupDefaults
+        )
+        appGroupDefaults.removeObject(
+            forKey: EarnedActivityGeneration.activeActivityNameKey
+        )
+        appGroupDefaults.removeObject(forKey: "evlin.earned.armSignature")
+        appGroupDefaults.set(false, forKey: "evlin.usageCountingAllowed")
+        appGroupDefaults.removeObject(forKey: "evlin.childId")
+        appGroupDefaults.synchronize()
     }
 
     /// Restore session from the Keychain at launch. Does not hit the network;

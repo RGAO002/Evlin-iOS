@@ -90,6 +90,7 @@ struct Evlin_iOSApp: App {
                     refreshParentPushRegistrationIfNeeded()
                     startPollerIfPaired()
                     armEarnedBudgetIfReady()
+                    drainEarnedSampleRetryQueueIfNeeded()
                 }
                 .onChange(of: scenePhase) { _, phase in
                     switch phase {
@@ -97,6 +98,7 @@ struct Evlin_iOSApp: App {
                         refreshParentPushRegistrationIfNeeded()
                         startPollerIfPaired()
                         armEarnedBudgetIfReady()
+                        drainEarnedSampleRetryQueueIfNeeded()
                         Task { await ScreenTimeEventUploader.uploadPending() }
                     case .background:
                         startBackgroundPollerIfPaired()
@@ -186,6 +188,13 @@ struct Evlin_iOSApp: App {
     /// previous device identity (account/family switch).
     private func armEarnedBudgetIfReady() {
         EarnedBudgetArming.armIfReady()
+    }
+
+    private func drainEarnedSampleRetryQueueIfNeeded() {
+        guard appMode == "child" else { return }
+        Task {
+            await EarnedSampleReporter.drainRetryQueueFromStoredConfig()
+        }
     }
 
     /// When the kid device backgrounds Evlin, keep polling briefly using iOS's

@@ -508,4 +508,57 @@ final class EarnedConfigCommandTests: XCTestCase {
         XCTAssertEqual(store.backendRemainingAtLastSync, 53,
                        "no wire value present -> min(pool,cap) - accepted offset")
     }
+
+    func test_poller_discardsConfigAfterIdentityChangesDuringRekey() async throws {
+        let store = EarnedTimeStore.shared
+        store.removeAll()
+        let poller = CommandPoller.shared
+        let savedCommands = poller.pollCommandsOverride
+        let savedSave = poller.saveLockedSetIDOverride
+        let savedRekey = poller.rekeyShieldRecordOverride
+        let savedAck = poller.ackEarnedTimeConfigOverride
+        let savedDevice = poller.childDeviceIDProvider
+        let savedOneShot = poller.oneShotPollOverride
+        defer {
+            poller.pollCommandsOverride = savedCommands
+            poller.saveLockedSetIDOverride = savedSave
+            poller.rekeyShieldRecordOverride = savedRekey
+            poller.ackEarnedTimeConfigOverride = savedAck
+            poller.childDeviceIDProvider = savedDevice
+            poller.oneShotPollOverride = savedOneShot
+            store.removeAll()
+        }
+
+        let oldID = UUID(uuidString: "DEADBEEF-0000-0000-0000-000000000020")!
+        let newID = UUID(uuidString: "DEADBEEF-0000-0000-0000-000000000021")!
+        var currentID = oldID
+        var resumeRekey: CheckedContinuation<Void, Never>?
+        var ackCount = 0
+        var fetchCount = 0
+        poller.childDeviceIDProvider = { currentID }
+        poller.oneShotPollOverride = nil
+        poller.saveLockedSetIDOverride = { _, _ in }
+        poller.rekeyShieldRecordOverride = { _, _ in
+            await withCheckedContinuation { resumeRekey = $0 }
+        }
+        poller.ackEarnedTimeConfigOverride = { _, _ in ackCount += 1 }
+        poller.pollCommandsOverride = { _, _ in
+            fetchCount += 1
+            return fetchCount == 1
+                ? [try JSONDecoder().decode(PollCommandDTO.self, from: self.makeConfigJSON())]
+                : []
+        }
+
+        let poll = Task { await poller.pollOnceForCurrentDevice() }
+        while resumeRekey == nil { await Task.yield() }
+        currentID = newID
+        resumeRekey?.resume()
+        await poll.value
+
+        XCTAssertNil(store.poolMinutes)
+        XCTAssertNil(store.capMinutes)
+        XCTAssertNil(store.backendRemainingAtLastSync)
+        XCTAssertEqual(ackCount, 0)
+        XCTAssertEqual(fetchCount, 2)
+    }
 }

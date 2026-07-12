@@ -11,8 +11,9 @@ final class BigKidActivityScheduler {
     private let eventName = DeviceActivityEvent.Name("evlin.bigkid.chunk")
     private let commandHeartbeatName = DeviceActivityName("evlin.command.heartbeat")
 
+    @discardableResult
     func start(threshold minutes: Int = BigKidTimeReporter.chunkMinutes,
-               appsToMeasure: FamilyActivitySelection) {
+               appsToMeasure: FamilyActivitySelection) -> Bool {
         let schedule = DeviceActivitySchedule(
             intervalStart: DateComponents(hour: 0, minute: 0),
             intervalEnd: DateComponents(hour: 23, minute: 59),
@@ -24,9 +25,17 @@ final class BigKidActivityScheduler {
             webDomains: appsToMeasure.webDomainTokens,
             threshold: DateComponents(minute: minutes)
         )
-        try? center.startMonitoring(activityName,
-                                    during: schedule,
-                                    events: [eventName: event])
+        do {
+            try center.startMonitoring(
+                activityName,
+                during: schedule,
+                events: [eventName: event]
+            )
+            return true
+        } catch {
+            NSLog("[Evlin] device_total_arm_FAILED error=%@", error.localizedDescription)
+            return false
+        }
     }
 
     func stop() {

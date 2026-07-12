@@ -33,6 +33,30 @@ final class CommandPollerTests: XCTestCase {
         poller.pollCommandsOverride = savedPollCommandsOverride
     }
 
+    private func earnedConfigCommand() throws -> PollCommandDTO {
+        let json = """
+        {
+          "command_id": "11111111-0000-0000-0000-000000000001",
+          "action": "earned_time_config",
+          "tier": "earnedTime",
+          "target": { "target_type": "earnedTime", "original_request": "" },
+          "issued_at": "2026-07-12T10:00:00.000000+00:00",
+          "earned_time_config": {
+            "child_profile_id": "BBBBBBBB-0000-0000-0000-000000000001",
+            "child_device_id": "CCCCCCCC-0000-0000-0000-000000000001",
+            "effective_date": "2026-07-12",
+            "usage_date": "2026-07-12",
+            "timezone": "America/New_York",
+            "daily_pool_minutes": 90,
+            "device_cap_minutes": 60,
+            "earned_bucket_minutes": 10,
+            "selected_set": { "list_id": "AAAAAAAA-0000-0000-0000-000000000001" }
+          }
+        }
+        """
+        return try JSONDecoder().decode(PollCommandDTO.self, from: Data(json.utf8))
+    }
+
     /// With a paired child device id present, the one-shot poll routes that
     /// exact id into the poll path (the same path the foreground timer drives).
     func testPollOnceForCurrentDeviceRoutesStoredDeviceIDIntoPollPath() async {
@@ -76,6 +100,42 @@ final class CommandPollerTests: XCTestCase {
         await poller.pollOnceForCurrentDevice()
 
         XCTAssertEqual(pollCount, 2, "Concurrent wake should trigger one follow-up poll, not get dropped")
+    }
+
+    func testDelayedFetchDiscardsCommandsWhenStoredIdentityChanges() async throws {
+        let oldID = UUID(uuidString: "ABCDEF00-0000-0000-0000-000000000010")!
+        let newID = UUID(uuidString: "ABCDEF00-0000-0000-0000-000000000011")!
+        var currentID = oldID
+        var resumeFetch: CheckedContinuation<[PollCommandDTO], Never>?
+        var fetchCount = 0
+        var saveCount = 0
+        let store = EarnedTimeStore.shared
+        store.removeAll()
+        defer {
+            poller.saveLockedSetIDOverride = nil
+            store.removeAll()
+        }
+        poller.childDeviceIDProvider = { currentID }
+        poller.oneShotPollOverride = nil
+        poller.saveLockedSetIDOverride = { _, _ in saveCount += 1 }
+        poller.pollCommandsOverride = { _, _ in
+            fetchCount += 1
+            if fetchCount == 1 {
+                return await withCheckedContinuation { resumeFetch = $0 }
+            }
+            return []
+        }
+
+        let poll = Task { await poller.pollOnceForCurrentDevice() }
+        while resumeFetch == nil { await Task.yield() }
+        currentID = newID
+        resumeFetch?.resume(returning: [try earnedConfigCommand()])
+        await poll.value
+
+        XCTAssertEqual(saveCount, 0)
+        XCTAssertNil(store.poolMinutes)
+        XCTAssertNil(store.capMinutes)
+        XCTAssertEqual(fetchCount, 2)
     }
 
     /// No paired child device id → safe no-op. A backgrounded push on a device

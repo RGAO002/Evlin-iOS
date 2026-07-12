@@ -1,5 +1,44 @@
 import Foundation
 
+nonisolated private final class EarnedSampleRetryQueueLock: @unchecked Sendable {
+    static let shared = EarnedSampleRetryQueueLock()
+    private let processLock = NSLock()
+
+    func withLock<T>(suiteName: String, _ body: () -> T) -> T? {
+        processLock.lock()
+        defer { processLock.unlock() }
+
+        let directory: URL
+        if suiteName == EarnedTimeStore.appGroupSuiteName,
+           let container = FileManager.default.containerURL(
+               forSecurityApplicationGroupIdentifier: EarnedTimeStore.appGroupSuiteName
+           ) {
+            directory = container
+        } else {
+            directory = FileManager.default.temporaryDirectory
+        }
+        let safeSuite = suiteName.map { character in
+            character.isLetter || character.isNumber ? character : "_"
+        }
+        let url = directory.appendingPathComponent("earned-sample-retry-\(String(safeSuite)).lock")
+        let descriptor = open(
+            url.path,
+            O_CREAT | O_RDWR | O_CLOEXEC,
+            mode_t(S_IRUSR | S_IWUSR)
+        )
+        guard descriptor >= 0 else { return nil }
+        guard flock(descriptor, LOCK_EX) == 0 else {
+            close(descriptor)
+            return nil
+        }
+        defer {
+            flock(descriptor, LOCK_UN)
+            close(descriptor)
+        }
+        return body()
+    }
+}
+
 /// B5 — Lean earned-time sample reporter.
 ///
 /// Responsibilities:
@@ -83,6 +122,12 @@ enum EarnedSampleReporter {
             allowSameDayDecrease: snapshot.counted == false
         )
         if reconciliation == .lockUnavailable {
+            if snapshot.counted == false, let expectedDeviceID {
+                store.markPendingUncountedReconciliation(
+                    deviceID: expectedDeviceID,
+                    usageDate: snapshot.usageDate
+                )
+            }
             recordDebug(
                 "post success reconciliation_deferred lock_unavailable date=\(snapshot.usageDate)",
                 suiteName: suiteName
@@ -247,12 +292,14 @@ enum EarnedSampleReporter {
     static func drainRetryQueue(
         baseURL: URL,
         suiteName: String = sharedSuiteName,
-        onlyDeviceID: UUID? = nil
+        onlyDeviceID: UUID? = nil,
+        requestData: @escaping (URLRequest) async throws -> (Data, URLResponse) = {
+            try await URLSession.shared.data(for: $0)
+        }
     ) async {
         let queue = loadRetryQueue(suiteName: suiteName)
         guard !queue.isEmpty else { return }
         let partitioned = partitionRetryQueue(queue, onlyDeviceID: onlyDeviceID)
-        saveRetryQueue(partitioned.deferred, suiteName: suiteName)
 
         for entry in partitioned.eligible {
             let body = makeSampleBody(
@@ -268,13 +315,12 @@ enum EarnedSampleReporter {
                 childDeviceID: entry.deviceID,
                 body: body
             ) else {
-                enqueueRetry(entry, suiteName: suiteName)
                 continue
             }
 
             let success: Bool
             do {
-                let (data, response) = try await URLSession.shared.data(for: req)
+                let (data, response) = try await requestData(req)
                 let status = (response as? HTTPURLResponse)?.statusCode ?? -1
                 success = (status >= 200 && status < 300) || status == 409
                 if success {
@@ -290,12 +336,18 @@ enum EarnedSampleReporter {
             }
 
             if !success {
-                enqueueRetry(entry, suiteName: suiteName)
+                continue
             }
+            removeAcceptedRetry(entry, suiteName: suiteName)
         }
     }
 
-    static func drainRetryQueueFromStoredConfig(suiteName: String = sharedSuiteName) async {
+    static func drainRetryQueueFromStoredConfig(
+        suiteName: String = sharedSuiteName,
+        requestData: @escaping (URLRequest) async throws -> (Data, URLResponse) = {
+            try await URLSession.shared.data(for: $0)
+        }
+    ) async {
         let defaults = UserDefaults(suiteName: suiteName)
         guard let baseRaw = defaults?.string(forKey: "evlin.baseURL"),
               let baseURL = URL(string: baseRaw),
@@ -305,12 +357,17 @@ enum EarnedSampleReporter {
             recordDebug("drain skipped missing stored baseURL/childId", suiteName: suiteName)
             return
         }
-        await drainRetryQueue(baseURL: baseURL, suiteName: suiteName, onlyDeviceID: childID)
+        await drainRetryQueue(
+            baseURL: baseURL,
+            suiteName: suiteName,
+            onlyDeviceID: childID,
+            requestData: requestData
+        )
     }
 
     // MARK: - Retry queue (App Group)
 
-    struct RetryEntry: Codable, Sendable {
+    struct RetryEntry: Codable, Equatable, Sendable {
         let deviceID: UUID
         let usageDate: String
         let timezone: String
@@ -320,20 +377,24 @@ enum EarnedSampleReporter {
     }
 
     static func enqueueRetry(_ entry: RetryEntry, suiteName: String = "group.com.evlin.ios") {
-        var queue = loadRetryQueue(suiteName: suiteName)
-        queue.append(entry)
-        saveRetryQueue(queue, suiteName: suiteName)
+        _ = withRetryQueueLock(suiteName: suiteName) { defaults in
+            var queue = loadRetryQueueUnlocked(defaults: defaults)
+            queue.append(entry)
+            return saveRetryQueueUnlocked(queue, defaults: defaults)
+        }
     }
 
     static func loadRetryQueue(suiteName: String = "group.com.evlin.ios") -> [RetryEntry] {
-        guard let data = UserDefaults(suiteName: suiteName)?.data(forKey: retryQueueKey),
-              let queue = try? JSONDecoder().decode([RetryEntry].self, from: data)
-        else { return [] }
-        return queue
+        withRetryQueueLock(suiteName: suiteName) { defaults in
+            loadRetryQueueUnlocked(defaults: defaults)
+        } ?? []
     }
 
     static func clearRetryQueue(suiteName: String = "group.com.evlin.ios") {
-        UserDefaults(suiteName: suiteName)?.removeObject(forKey: retryQueueKey)
+        _ = withRetryQueueLock(suiteName: suiteName) { defaults in
+            defaults.removeObject(forKey: retryQueueKey)
+            return defaults.synchronize() && defaults.object(forKey: retryQueueKey) == nil
+        }
     }
 
     static func retryQueueDebugSummary(suiteName: String = "group.com.evlin.ios") -> String {
@@ -359,9 +420,44 @@ enum EarnedSampleReporter {
         return (eligible, deferred)
     }
 
-    private static func saveRetryQueue(_ queue: [RetryEntry], suiteName: String) {
-        guard let data = try? JSONEncoder().encode(queue) else { return }
-        UserDefaults(suiteName: suiteName)?.set(data, forKey: retryQueueKey)
+    private static func removeAcceptedRetry(_ entry: RetryEntry, suiteName: String) {
+        _ = withRetryQueueLock(suiteName: suiteName) { defaults in
+            var queue = loadRetryQueueUnlocked(defaults: defaults)
+            guard let index = queue.firstIndex(of: entry) else { return true }
+            queue.remove(at: index)
+            return saveRetryQueueUnlocked(queue, defaults: defaults)
+        }
+    }
+
+    private static func withRetryQueueLock<T>(
+        suiteName: String,
+        _ body: (UserDefaults) -> T
+    ) -> T? {
+        EarnedSampleRetryQueueLock.shared.withLock(suiteName: suiteName) {
+            guard let defaults = UserDefaults(suiteName: suiteName) else { return nil }
+            defaults.synchronize()
+            return body(defaults)
+        } ?? nil
+    }
+
+    private static func loadRetryQueueUnlocked(defaults: UserDefaults) -> [RetryEntry] {
+        guard let data = defaults.data(forKey: retryQueueKey),
+              let queue = try? JSONDecoder().decode([RetryEntry].self, from: data)
+        else { return [] }
+        return queue
+    }
+
+    private static func saveRetryQueueUnlocked(
+        _ queue: [RetryEntry],
+        defaults: UserDefaults
+    ) -> Bool {
+        guard let data = try? JSONEncoder().encode(queue) else { return false }
+        defaults.set(data, forKey: retryQueueKey)
+        guard defaults.synchronize(),
+              let readback = defaults.data(forKey: retryQueueKey),
+              let decoded = try? JSONDecoder().decode([RetryEntry].self, from: readback)
+        else { return false }
+        return decoded == queue
     }
 
     private static func recordDebug(_ message: String, suiteName: String) {

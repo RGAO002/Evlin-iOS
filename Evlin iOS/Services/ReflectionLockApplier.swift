@@ -20,18 +20,30 @@ final class ReflectionLockApplier {
     private let defaults = UserDefaults(suiteName: "group.com.evlin.ios")
     private let stickyKey = "evlin.reflectionLockSticky"
     private let scheduleFailureKey = "evlin.reflectionLockScheduleFailure"
+    private let currentChildID: () -> UUID?
+    private let afterLocalMutation: () async -> Void
 
-    init(store: ActiveLockStore = .shared, scheduler: LockScheduler) {
-        self.store = store; self.scheduler = scheduler
+    init(
+        store: ActiveLockStore = .shared,
+        scheduler: LockScheduler,
+        currentChildID: @escaping () -> UUID? = { nil },
+        afterLocalMutation: @escaping () async -> Void = {}
+    ) {
+        self.store = store
+        self.scheduler = scheduler
+        self.currentChildID = currentChildID
+        self.afterLocalMutation = afterLocalMutation
     }
 
     func reconcile(snapshot: ChildStateResponse, childID: UUID, now: Date = Date()) async {
+        guard identityIsCurrent(childID) else { return }
         let sticky = loadSticky()
         let r = snapshot.reflectionRequest
         let heldRecordKey = sticky.heldRID.map { "all:reflection:\($0.uuidString)" }
         var currentExpiry: Date? = nil
         if let key = heldRecordKey {
             currentExpiry = await store.allCurrent().shields.first(where: { $0.recordKey == key })?.expiresAt
+            guard identityIsCurrent(childID) else { return }
         }
         let (decision, next) = ReflectionLockReconciler.decide(
             reflectionRID: r?.id, status: r?.status, serverCap: r?.reflectionLockCapExpiresAt,
@@ -40,8 +52,14 @@ final class ReflectionLockApplier {
         switch decision {
         case .noop: break
         case .apply(let rid, let expiresAt):
+            guard identityIsCurrent(childID) else { return }
             let rec = ReflectionLockRecordFactory.make(rid: rid, expiresAt: expiresAt, childID: childID)
             _ = await store.addShield(rec, force: true)   // force so re-arm overwrites, no confirm prompt
+            await afterLocalMutation()
+            guard identityIsCurrent(childID) else {
+                await removeReflectionRecordIfOwned(rec)
+                return
+            }
             scheduleOrDiagnose(rec, rid: rid)
             // §8.1 (Plan 7): first-sight honest payoff — tell the backend the kid
             // device APPLIED the all-apps reflection lock so the parent's
@@ -49,20 +67,50 @@ final class ReflectionLockApplier {
             // server-side; never blocks the lock.
             postLockAppliedBestEffort(childID: childID, rid: rid)
         case .release(let rid):
-            _ = await store.removeShield(recordKey: "all:reflection:\(rid.uuidString)")
+            let key = "all:reflection:\(rid.uuidString)"
+            let held = await store.allCurrent().shields.first { $0.recordKey == key }
+            guard identityIsCurrent(childID) else { return }
+            if held?.targetChildID == childID {
+                _ = await store.removeShield(recordKey: key)
+            }
+            guard identityIsCurrent(childID) else { return }
             let name = ReflectionLockRecordFactory
                 .make(rid: rid, expiresAt: now, childID: childID).deviceActivityName
             scheduler.cancel(deviceActivityName: name)
         case .swap(let releaseRID, let applyRID, let expiresAt):
-            _ = await store.removeShield(recordKey: "all:reflection:\(releaseRID.uuidString)")
+            let releaseKey = "all:reflection:\(releaseRID.uuidString)"
+            let held = await store.allCurrent().shields.first { $0.recordKey == releaseKey }
+            guard identityIsCurrent(childID) else { return }
+            if held?.targetChildID == childID {
+                _ = await store.removeShield(recordKey: releaseKey)
+            }
+            guard identityIsCurrent(childID) else { return }
             scheduler.cancel(deviceActivityName: ReflectionLockRecordFactory
                 .make(rid: releaseRID, expiresAt: now, childID: childID).deviceActivityName)
             let rec = ReflectionLockRecordFactory.make(rid: applyRID, expiresAt: expiresAt, childID: childID)
             _ = await store.addShield(rec, force: true)
+            await afterLocalMutation()
+            guard identityIsCurrent(childID) else {
+                await removeReflectionRecordIfOwned(rec)
+                return
+            }
             scheduleOrDiagnose(rec, rid: applyRID)
             postLockAppliedBestEffort(childID: childID, rid: applyRID)
         }
+        guard identityIsCurrent(childID) else { return }
         saveSticky(next)
+    }
+
+    private func identityIsCurrent(_ expectedChildID: UUID) -> Bool {
+        currentChildID().map { $0 == expectedChildID } ?? true
+    }
+
+    private func removeReflectionRecordIfOwned(_ record: ShieldRecord) async {
+        let current = await store.allCurrent().shields.first {
+            $0.recordKey == record.recordKey
+        }
+        guard current?.targetChildID == record.targetChildID else { return }
+        _ = await store.removeShield(recordKey: record.recordKey)
     }
 
     /// §8.1 first-sight hook (Plan 7): fire-and-forget POST
@@ -78,7 +126,9 @@ final class ReflectionLockApplier {
             do {
                 try await APIClient().postReflectionLockApplied(
                     childDeviceID: childID, reflectionID: rid)
-                defaults?.set(true, forKey: markerKey)
+                if identityIsCurrent(childID) {
+                    defaults?.set(true, forKey: markerKey)
+                }
             } catch {
                 // Non-fatal: the lock is applied locally regardless; the parent
                 // payoff just won't flip until a later reconcile re-posts.

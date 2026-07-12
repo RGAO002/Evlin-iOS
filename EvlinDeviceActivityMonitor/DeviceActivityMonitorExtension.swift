@@ -373,6 +373,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         }
 
         let earnedStore = EarnedTimeStore.shared
+        guard let generationDeviceID = UUID(uuidString: generation.deviceID) else { return }
 
         // Stale-ladder firewall. A legitimately armed ladder never carries a
         // raw threshold above min(pool, cap) (`EarnedBudgetScheduler.thresholds`
@@ -396,31 +397,35 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             rawThresholdMinutes: n,
             runningOffsetMinutes: offset
         )
-        let localReconciliation = earnedStore.recordLocalThresholdEstimate(adjustedN)
+        let localReconciliation = earnedStore.recordLocalThresholdEstimate(
+            adjustedN,
+            expectedDeviceID: generationDeviceID
+        )
         let decision = EarnedSampleReporter.thresholdHandlingDecision(
             thresholdMinutes: adjustedN,
             localReconciliationAvailable: localReconciliation == .reconciled
         )
 
         let ts = ISO8601DateFormatter().string(from: Date())
-        defaults?.set(
-            "\(ts) event=\(eventName) activity=\(activity.rawValue) raw=\(n) adjusted=\(adjustedN) offset=\(offset)",
-            forKey: "evlin.earned.lastThreshold"
-        )
+        if authorizedEarnedGeneration(activityName: activity.rawValue)?.deviceID == generation.deviceID {
+            defaults?.set(
+                "\(ts) event=\(eventName) activity=\(activity.rawValue) raw=\(n) adjusted=\(adjustedN) offset=\(offset)",
+                forKey: "evlin.earned.lastThreshold"
+            )
+        }
 
         // Drain any queued retries + fire the new sample.
-        if let baseURL = ExtensionConfig.baseURL,
-           let deviceID = ExtensionConfig.childId {
+        if let baseURL = ExtensionConfig.baseURL {
             let usageDate = generation.usageDate
             let tz = generation.timezoneIdentifier
             Task {
                 await EarnedSampleReporter.drainRetryQueue(
                     baseURL: baseURL,
-                    onlyDeviceID: deviceID
+                    onlyDeviceID: generationDeviceID
                 )
                 await EarnedSampleReporter.report(
                     baseURL: baseURL,
-                    deviceID: deviceID,
+                    deviceID: generationDeviceID,
                     usageDate: usageDate,
                     timezone: tz,
                     thresholdMinutes: adjustedN,
@@ -429,7 +434,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             }
         } else {
             defaults?.set(
-                "\(ts) missing baseURL or childId for event=\(eventName) baseURL=\(String(describing: ExtensionConfig.baseURL)) childId=\(String(describing: ExtensionConfig.childId))",
+                "\(ts) missing baseURL for event=\(eventName) baseURL=\(String(describing: ExtensionConfig.baseURL)) generationDeviceID=\(generation.deviceID)",
                 forKey: EarnedSampleReporter.lastSamplePostDebugKey
             )
         }
@@ -438,6 +443,9 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             NSLog("[Evlin/Ext] earned threshold reported with local reconciliation deferred")
             emitEvent(kind: .decision, source: .earnedPool, app: "device-wide",
                       reason: "local_reconciliation_deferred")
+            return
+        }
+        guard authorizedEarnedGeneration(activityName: activity.rawValue)?.deviceID == generation.deviceID else {
             return
         }
 
@@ -470,6 +478,9 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         ) {
             emitEvent(kind: .drop, source: .earnedPool, app: "device-wide",
                       reason: "backend_headroom_veto")
+            return
+        }
+        guard authorizedEarnedGeneration(activityName: activity.rawValue)?.deviceID == generation.deviceID else {
             return
         }
 

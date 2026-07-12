@@ -125,6 +125,10 @@ final class CommandPoller {
     /// touching real App Group UserDefaults. Nil in production.
     var saveLockedSetIDOverride: ((String, Data?) -> Void)?
 
+    /// Test seams around the suspension and ack points in earned config handling.
+    var rekeyShieldRecordOverride: ((String, String) async -> Void)?
+    var ackEarnedTimeConfigOverride: ((UUID, APIClient) async -> Void)?
+
     /// Test-only capture of the remaining policy an earned config would arm.
     /// Production always routes through `EarnedBudgetArming.armIfReady()`.
     var armBudgetOverride: ((Int, Int, FamilyActivitySelection) -> Void)?
@@ -228,20 +232,36 @@ final class CommandPoller {
                 // callbacks can be delayed or missed. Polling is our foreground
                 // fallback so timed shields/blocks don't stay applied forever.
                 _ = await ActiveLockStore.shared.sweepExpired()
+                guard isExpectedDeviceCurrent(deviceID) else {
+                    coalescePollForCurrentIdentity(expectedDeviceID: deviceID)
+                    continue
+                }
                 let cmds: [PollCommandDTO]
                 if let override = pollCommandsOverride {
                     cmds = try await override(deviceID, api)
                 } else {
                     cmds = try await api.pollCommands(deviceID: deviceID)
                 }
+                guard isExpectedDeviceCurrent(deviceID) else {
+                    coalescePollForCurrentIdentity(expectedDeviceID: deviceID)
+                    continue
+                }
                 CommandDeliveryDiagnostics.record(
                     CommandDeliveryDiagnostics.keyCommandPoll,
                     "ok device=\(deviceID.uuidString) commands=\(cmds.count)"
                 )
                 for poll in cmds {
-                    await execute(poll: poll, api: api)
+                    guard isExpectedDeviceCurrent(deviceID) else {
+                        coalescePollForCurrentIdentity(expectedDeviceID: deviceID)
+                        break
+                    }
+                    await execute(poll: poll, expectedDeviceID: deviceID, api: api)
                 }
             } catch {
+                guard isExpectedDeviceCurrent(deviceID) else {
+                    coalescePollForCurrentIdentity(expectedDeviceID: deviceID)
+                    continue
+                }
                 // Plan 8 (§15.3): a terminal `410 family_removed` from the kid
                 // command read-path means this device's family was deleted. FAIL
                 // OPEN — release every Evlin shield/block, clear the reflection
@@ -265,6 +285,20 @@ final class CommandPoller {
                 SentrySDK.capture(error: error)
             }
         } while pendingPollAfterCurrent
+    }
+
+    private func isExpectedDeviceCurrent(_ expectedDeviceID: UUID) -> Bool {
+        currentDeviceID == expectedDeviceID && childDeviceIDProvider() == expectedDeviceID
+    }
+
+    private func coalescePollForCurrentIdentity(expectedDeviceID: UUID) {
+        guard let current = childDeviceIDProvider(), current != expectedDeviceID else { return }
+        currentDeviceID = current
+        pendingPollAfterCurrent = true
+        CommandDeliveryDiagnostics.record(
+            CommandDeliveryDiagnostics.keyCommandPoll,
+            "discarded stale_device=\(expectedDeviceID.uuidString) current=\(current.uuidString)"
+        )
     }
 
     /// One-shot poll for the current child device WITHOUT starting the timer.
@@ -442,11 +476,19 @@ final class CommandPoller {
         return hours * 60 + minutes
     }
 
-    private func execute(poll: PollCommandDTO, api: APIClient) async {
+    private func execute(poll: PollCommandDTO, expectedDeviceID: UUID, api: APIClient) async {
+        guard isExpectedDeviceCurrent(expectedDeviceID) else {
+            coalescePollForCurrentIdentity(expectedDeviceID: expectedDeviceID)
+            return
+        }
         // A4: Intercept earned_time_config BEFORE lockCommand() so the command
         // never reaches ActionExecutor. Handle inline and ack confirmed.
         if poll.action == CommandAction.earnedTimeConfig.rawValue {
-            await handleEarnedTimeConfig(poll: poll, api: api)
+            await handleEarnedTimeConfig(
+                poll: poll,
+                expectedDeviceID: expectedDeviceID,
+                api: api
+            )
             return
         }
 
@@ -455,9 +497,17 @@ final class CommandPoller {
         var blob: Data? = nil
         if cmd.target.hasPendingBlob {
             blob = try? await api.fetchPendingBlob(commandID: cmd.id)
+            guard isExpectedDeviceCurrent(expectedDeviceID) else {
+                coalescePollForCurrentIdentity(expectedDeviceID: expectedDeviceID)
+                return
+            }
         }
 
         let result = await ActionExecutor.shared.execute(cmd, blob: blob)
+        guard isExpectedDeviceCurrent(expectedDeviceID) else {
+            coalescePollForCurrentIdentity(expectedDeviceID: expectedDeviceID)
+            return
+        }
 
         // Close the resume "free window" (2026-07-03): a task_pause unshield
         // reaches this device and gets applied via ActionExecutor within
@@ -550,12 +600,14 @@ final class CommandPoller {
         if status == "confirmed" {
             var d = ackDetail ?? [:]
             if let global = await Self.globalEffectiveStateDictionary() {
+                guard isExpectedDeviceCurrent(expectedDeviceID) else { return }
                 d["global_effective_state"] = global
             }
             ackDetail = d
         }
 
         do {
+            guard isExpectedDeviceCurrent(expectedDeviceID) else { return }
             try await api.ack(commandID: cmd.id, status: status, detail: ackDetail)
             CommandDeliveryDiagnostics.record(
                 CommandDeliveryDiagnostics.keyCommandAck,
@@ -625,7 +677,15 @@ final class CommandPoller {
     ///
     /// Guard: if the device has no measurement selection (earned-time capture
     /// never ran), arm() is skipped but the command is still acked confirmed.
-    private func handleEarnedTimeConfig(poll: PollCommandDTO, api: APIClient) async {
+    private func handleEarnedTimeConfig(
+        poll: PollCommandDTO,
+        expectedDeviceID: UUID,
+        api: APIClient
+    ) async {
+        guard isExpectedDeviceCurrent(expectedDeviceID) else {
+            coalescePollForCurrentIdentity(expectedDeviceID: expectedDeviceID)
+            return
+        }
         let cfg = poll.earned_time_config
         let commandID = poll.command_id
 
@@ -648,10 +708,18 @@ final class CommandPoller {
             // if this payload later gains `all_selected`, wire it the same way.
             // Re-key any shield record stored under an old/provisional id.
             if existing != listID {
-                await ActiveLockStore.shared.reKeyShieldRecord(
-                    fromLocalID: existing,
-                    toBackendID: listID
-                )
+                if let rekeyShieldRecordOverride {
+                    await rekeyShieldRecordOverride(existing, listID)
+                } else {
+                    await ActiveLockStore.shared.reKeyShieldRecord(
+                        fromLocalID: existing,
+                        toBackendID: listID
+                    )
+                }
+                guard isExpectedDeviceCurrent(expectedDeviceID) else {
+                    coalescePollForCurrentIdentity(expectedDeviceID: expectedDeviceID)
+                    return
+                }
             }
         }
 
@@ -685,16 +753,24 @@ final class CommandPoller {
             EarnedTimeStore.shared.lastBackendSyncAt = Date()
             guard EarnedTimeStore.shared.usageCountingAllowed else {
                 EarnedBudgetArming.stopAndInvalidateSignature()
-                return await ackEarnedTimeConfig(commandID: commandID, api: api)
+                return await ackEarnedTimeConfig(
+                    commandID: commandID,
+                    expectedDeviceID: expectedDeviceID,
+                    api: api
+                )
             }
-            guard let currentDeviceID,
-                  EarnedTimeStore.shared.isAuthoritativeStateReady(deviceID: currentDeviceID)
+            guard isExpectedDeviceCurrent(expectedDeviceID),
+                  EarnedTimeStore.shared.isAuthoritativeStateReady(deviceID: expectedDeviceID)
             else {
                 CommandDeliveryDiagnostics.record(
                     CommandDeliveryDiagnostics.keyEarnedArmAttempt,
                     "skipped config-authoritative-state-not-ready"
                 )
-                return await ackEarnedTimeConfig(commandID: commandID, api: api)
+                return await ackEarnedTimeConfig(
+                    commandID: commandID,
+                    expectedDeviceID: expectedDeviceID,
+                    api: api
+                )
             }
             if let armOverride = armBudgetOverride {
                 let hasMeasurableSelection = hasMeasurableSelectionOverride?()
@@ -718,10 +794,23 @@ final class CommandPoller {
         }
 
         // Step 3: Ack as confirmed.
-        await ackEarnedTimeConfig(commandID: commandID, api: api)
+        await ackEarnedTimeConfig(
+            commandID: commandID,
+            expectedDeviceID: expectedDeviceID,
+            api: api
+        )
     }
 
-    private func ackEarnedTimeConfig(commandID: UUID, api: APIClient) async {
+    private func ackEarnedTimeConfig(
+        commandID: UUID,
+        expectedDeviceID: UUID,
+        api: APIClient
+    ) async {
+        guard isExpectedDeviceCurrent(expectedDeviceID) else { return }
+        if let ackEarnedTimeConfigOverride {
+            await ackEarnedTimeConfigOverride(commandID, api)
+            return
+        }
         do {
             try await api.ack(commandID: commandID, status: "confirmed", detail: nil)
             CommandDeliveryDiagnostics.record(

@@ -156,4 +156,34 @@ final class ReflectionLockApplierTests: XCTestCase {
             .string(forKey: "evlin.reflectionLockScheduleFailure")
         XCTAssertNotNil(recorded, "a failed schedule must be surfaced, not swallowed")
     }
+
+    func test_identityChangeAfterApplySuspensionRemovesOldFamilyReflectionRecord() async {
+        let store = ActiveLockStore()
+        let spy = LockSchedulerSpy()
+        let oldID = UUID()
+        let newID = UUID()
+        var currentID = oldID
+        var resumeMutation: CheckedContinuation<Void, Never>?
+        let applier = ReflectionLockApplier(
+            store: store,
+            scheduler: LockScheduler(activityScheduler: spy),
+            currentChildID: { currentID },
+            afterLocalMutation: {
+                await withCheckedContinuation { resumeMutation = $0 }
+            }
+        )
+        let rid = UUID()
+
+        let reconcile = Task {
+            await applier.reconcile(snapshot: pendingSnapshot(rid: rid), childID: oldID)
+        }
+        while resumeMutation == nil { await Task.yield() }
+        currentID = newID
+        resumeMutation?.resume()
+        await reconcile.value
+
+        let shields = await store.allCurrent().shields
+        XCTAssertFalse(shields.contains { $0.recordKey == "all:reflection:\(rid.uuidString)" })
+        XCTAssertTrue(spy.started.isEmpty)
+    }
 }

@@ -38,9 +38,12 @@ final class BigKidStatePoller: ObservableObject {
     private let markAuthoritativeReady: (UUID) -> Void
     private let clearAuthoritativeReadiness: () -> Void
     private let ensureEarnedArmed: () -> Void
-    private let rearmUsageCounters: () -> Void
+    private let rearmUsageCounters: () -> Bool
     private let stopUsageCounters: () -> Void
+    private let isCounterRecoveryRequired: (UUID) -> Bool
+    private let setCounterRecoveryRequired: (UUID, Bool) -> Void
     private let reportEffectiveState: () async -> Void
+    private let failOpenFamily: () async -> Void
     private let requestFreshPoll: () -> Void
     private var task: Task<Void, Never>?
     private var invalidationObserver: NSObjectProtocol?
@@ -53,7 +56,12 @@ final class BigKidStatePoller: ObservableObject {
     /// dedicated reflection ShieldRecord against the snapshot, schedules its
     /// DAM auto-removal, and records (never swallows) a schedule failure.
     private let reflectionLockApplier = ReflectionLockApplier(
-        scheduler: LockScheduler(activityScheduler: DeviceActivityCenterScheduler()))
+        scheduler: LockScheduler(activityScheduler: DeviceActivityCenterScheduler()),
+        currentChildID: {
+            UserDefaults.standard.string(forKey: CommandPoller.childDeviceIDDefaultsKey)
+                .flatMap(UUID.init(uuidString:))
+        }
+    )
 
     /// Polling cadence. 10s keeps a foregrounded kid device's worst-case
     /// reflection-delivery latency under ten seconds without explicit
@@ -74,10 +82,7 @@ final class BigKidStatePoller: ObservableObject {
         self.fetchState = { try await client.fetchState() }
         let reflectionLockApplier = self.reflectionLockApplier
         self.reconcileReflectionLock = { snapshot in
-            if let raw = UserDefaults.standard.string(forKey: CommandPoller.childDeviceIDDefaultsKey),
-               let childID = UUID(uuidString: raw) {
-                await reflectionLockApplier.reconcile(snapshot: snapshot, childID: childID)
-            }
+            await reflectionLockApplier.reconcile(snapshot: snapshot, childID: client.childId)
         }
         self.reconcileIdentityTransition = EarnedBudgetArming.reconcileIdentityTransition
         self.applySnapshot = { snapshot, state in
@@ -97,6 +102,12 @@ final class BigKidStatePoller: ObservableObject {
         self.ensureEarnedArmed = { EarnedBudgetArming.armIfReady() }
         self.rearmUsageCounters = Self.rearmOtherUsageCountersFromStoredPolicy
         self.stopUsageCounters = Self.stopUsageCountersForTaskPause
+        self.isCounterRecoveryRequired = {
+            EarnedTimeStore.shared.isCounterRecoveryRequired(deviceID: $0)
+        }
+        self.setCounterRecoveryRequired = {
+            EarnedTimeStore.shared.setCounterRecoveryRequired($1, deviceID: $0)
+        }
         self.reportEffectiveState = {
             guard let snapshot = await CommandPoller.globalEffectiveStateDictionary() else { return }
             do {
@@ -105,6 +116,7 @@ final class BigKidStatePoller: ObservableObject {
                 print("[BigKidStatePoller] report effective state failed: \(error)")
             }
         }
+        self.failOpenFamily = { await FamilyGoneDetector.failOpen() }
         self.requestFreshPoll = {
             NotificationCenter.default.post(name: .bigKidStateInvalidated, object: nil)
         }
@@ -127,8 +139,12 @@ final class BigKidStatePoller: ObservableObject {
         clearAuthoritativeReadiness: @escaping () -> Void = {},
         ensureEarnedArmed: @escaping () -> Void = {},
         rearmUsageCounters: @escaping () -> Void = {},
+        rearmUsageCountersResult: (() -> Bool)? = nil,
         stopUsageCounters: @escaping () -> Void = {},
+        isCounterRecoveryRequired: @escaping (UUID) -> Bool = { _ in false },
+        setCounterRecoveryRequired: @escaping (UUID, Bool) -> Void = { _, _ in },
         reportEffectiveState: @escaping () async -> Void = {},
+        failOpenFamily: @escaping () async -> Void = { await FamilyGoneDetector.failOpen() },
         requestFreshPoll: @escaping () -> Void = {}
     ) {
         self.client = BigKidAPIClient(baseURL: URL(string: "https://example.invalid")!, childId: UUID())
@@ -145,9 +161,15 @@ final class BigKidStatePoller: ObservableObject {
         self.markAuthoritativeReady = markAuthoritativeReady
         self.clearAuthoritativeReadiness = clearAuthoritativeReadiness
         self.ensureEarnedArmed = ensureEarnedArmed
-        self.rearmUsageCounters = rearmUsageCounters
+        self.rearmUsageCounters = rearmUsageCountersResult ?? {
+            rearmUsageCounters()
+            return true
+        }
         self.stopUsageCounters = stopUsageCounters
+        self.isCounterRecoveryRequired = isCounterRecoveryRequired
+        self.setCounterRecoveryRequired = setCounterRecoveryRequired
         self.reportEffectiveState = reportEffectiveState
+        self.failOpenFamily = failOpenFamily
         self.requestFreshPoll = requestFreshPoll
     }
 
@@ -246,8 +268,17 @@ final class BigKidStatePoller: ObservableObject {
             }
             applySnapshot(snapshot, state)
             let runtimeReconciliation = syncEarnedRuntime(snapshot.earnedTimeRuntime)
-            guard case .reconciled = runtimeReconciliation else {
+            let runtimeIsAuthoritative: Bool
+            if runtimeReconciliation == .runtimeUnavailable {
+                runtimeIsAuthoritative = false
+                clearAuthoritativeReadiness()
+            } else if case .reconciled = runtimeReconciliation {
+                runtimeIsAuthoritative = true
+            } else {
                 requiresCounterRecovery = true
+                if let expectedChildID {
+                    setCounterRecoveryRequired(expectedChildID, true)
+                }
                 clearAuthoritativeReadiness()
                 stopUsageCounters()
                 lastError = "Screen time sync deferred"
@@ -257,27 +288,44 @@ final class BigKidStatePoller: ObservableObject {
 
             let allowed = snapshot.effectiveUsageCountingAllowed
             let wasCountingAllowed = setUsageCountingAllowed(allowed)
-            if let expectedChildID {
+            if runtimeIsAuthoritative, let expectedChildID {
                 markAuthoritativeReady(expectedChildID)
             }
             let shouldRecoverSkippedUsage = allowed && Self.hasSkippedUnfinishedUsageEvent()
             if !allowed {
                 stopUsageCounters()
                 requiresCounterRecovery = false
+                if let expectedChildID {
+                    setCounterRecoveryRequired(expectedChildID, false)
+                }
             } else {
-                ensureEarnedArmed()
-                if !wasCountingAllowed || shouldRecoverSkippedUsage || requiresCounterRecovery {
-                    rearmUsageCounters()
-                    if shouldRecoverSkippedUsage {
+                if runtimeIsAuthoritative {
+                    ensureEarnedArmed()
+                }
+                let hasDurableRecovery = expectedChildID.map(isCounterRecoveryRequired) ?? false
+                if !wasCountingAllowed || shouldRecoverSkippedUsage
+                    || requiresCounterRecovery || hasDurableRecovery {
+                    if let expectedChildID {
+                        setCounterRecoveryRequired(expectedChildID, true)
+                    }
+                    let recovered = rearmUsageCounters()
+                    requiresCounterRecovery = !recovered
+                    if let expectedChildID, recovered {
+                        setCounterRecoveryRequired(expectedChildID, false)
+                    }
+                    if shouldRecoverSkippedUsage && recovered {
                         CommandDeliveryDiagnostics.remove(CommandDeliveryDiagnostics.keyUsageCountingLastSkipped)
                     }
                 }
-                requiresCounterRecovery = false
             }
             await reportEffectiveState()
             lastFetchedAt = Date()
             lastError = nil
         } catch {
+            guard isExpectedIdentityCurrent(expectedChildID) else {
+                requestPollForCurrentIdentity()
+                return
+            }
             // Plan 8 (§15.3): a terminal `410 family_removed` means this kid's
             // family was deleted. FAIL OPEN — release every Evlin shield/block,
             // clear the reflection sticky + reset pairing — then stop the loop so
@@ -285,7 +333,7 @@ final class BigKidStatePoller: ObservableObject {
             if FamilyGoneDetector.isFamilyGone(error: error) {
                 print("[BigKidStatePoller] family_removed → failing open")
                 familyRemoved = true
-                await FamilyGoneDetector.failOpen()
+                await failOpenFamily()
                 lastError = nil
                 stop()
                 return
@@ -337,12 +385,12 @@ final class BigKidStatePoller: ObservableObject {
     ) -> EarnedTimeStore.RuntimePolicyReconciliation {
         guard let runtime else {
             return store.reconciliationLockIsAvailable()
-                ? .reconciled(store.acceptedEstimateMinutes ?? 0)
+                ? .runtimeUnavailable
                 : .lockUnavailable
         }
         if runtime.dailyPoolMinutes == 0 || runtime.deviceCapMinutes == 0 {
             return store.reconciliationLockIsAvailable()
-                ? .reconciled(store.acceptedEstimateMinutes ?? 0)
+                ? .runtimeUnavailable
                 : .lockUnavailable
         }
         return store.reconcileRuntimePolicy(
@@ -389,11 +437,14 @@ final class BigKidStatePoller: ObservableObject {
         return (pool, cap, offset)
     }
 
-    private static func rearmOtherUsageCountersFromStoredPolicy() {
+    private static func rearmOtherUsageCountersFromStoredPolicy() -> Bool {
         let store = EarnedTimeStore.shared
 
+        let deviceTotalArmed: Bool
         if store.hasMeasurableSelection, let selection = store.measurementSelection {
-            BigKidActivityScheduler.shared.start(appsToMeasure: selection)
+            deviceTotalArmed = BigKidActivityScheduler.shared.start(appsToMeasure: selection)
+        } else {
+            deviceTotalArmed = false
         }
 
         let appLimitUsageDate = EarnedTimeStore.appLimitUsageDate()
@@ -426,6 +477,23 @@ final class BigKidStatePoller: ObservableObject {
                 expiresAt: rule.expiresAt
             )
         }
-        _ = AppLimitPlanner().arm(rules: adjustedRules)
+        let perAppResult = AppLimitPlanner().arm(rules: adjustedRules)
+        return counterRearmSucceeded(
+            deviceTotalArmed: deviceTotalArmed,
+            perAppResult: perAppResult
+        )
+    }
+
+    nonisolated static func counterRearmSucceeded(
+        deviceTotalArmed: Bool,
+        perAppResult: AppLimitPlanResult
+    ) -> Bool {
+        guard deviceTotalArmed else { return false }
+        switch perAppResult {
+        case .armed:
+            return true
+        case .partiallyArmed, .quotaExceeded:
+            return false
+        }
     }
 }

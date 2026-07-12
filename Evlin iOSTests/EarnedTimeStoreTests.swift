@@ -222,7 +222,50 @@ final class EarnedTimeStoreTests: XCTestCase {
         )
 
         XCTAssertEqual(result, .lockUnavailable)
-        XCTAssertEqual(store.acceptedEstimateMinutes, 10, "body ran, but failure was not reported as success")
+        XCTAssertNil(store.acceptedEstimateMinutes)
+        XCTAssertNil(store.acceptedUsageDate)
+        XCTAssertNil(store.latestDeviceEstimate)
+    }
+
+    func test_runtimePostSynchronizeFailureRollsBackEveryRuntimeField() {
+        let suiteName = "EarnedTimeStoreTests.\(UUID().uuidString)"
+        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let seeded = EarnedTimeStore(suiteName: suiteName)
+        let oldSync = Date(timeIntervalSince1970: 100)
+        XCTAssertEqual(seeded.reconcileRuntimePolicy(
+            usageDate: "2026-07-12",
+            timezoneIdentifier: "America/New_York",
+            poolMinutes: 90,
+            capMinutes: 60,
+            remainingMinutes: 40,
+            estimatedMinutes: 20,
+            syncedAt: oldSync
+        ), .reconciled(20))
+        var outcomes = [true, false]
+        let failing = EarnedTimeStore(
+            suiteName: suiteName,
+            synchronizeDefaults: { _ in outcomes.removeFirst() }
+        )
+
+        let result = failing.reconcileRuntimePolicy(
+            usageDate: "2026-07-12",
+            timezoneIdentifier: "America/Los_Angeles",
+            poolMinutes: 30,
+            capMinutes: 25,
+            remainingMinutes: 5,
+            estimatedMinutes: 25,
+            syncedAt: Date(timeIntervalSince1970: 200)
+        )
+
+        XCTAssertEqual(result, .lockUnavailable)
+        XCTAssertEqual(seeded.poolMinutes, 90)
+        XCTAssertEqual(seeded.capMinutes, 60)
+        XCTAssertEqual(seeded.runtimeTimezoneIdentifier, "America/New_York")
+        XCTAssertEqual(seeded.backendRemainingAtLastSync, 40)
+        XCTAssertEqual(seeded.lastBackendSyncAt, oldSync)
+        XCTAssertEqual(seeded.acceptedUsageDate, "2026-07-12")
+        XCTAssertEqual(seeded.acceptedEstimateMinutes, 20)
+        XCTAssertEqual(seeded.latestDeviceEstimate, 20)
     }
 
     func test_localThresholdLockFailureDoesNotMutateEstimate() {
@@ -252,6 +295,28 @@ final class EarnedTimeStoreTests: XCTestCase {
 
         XCTAssertEqual(failing.recordLocalThresholdEstimate(300), .lockUnavailable)
         XCTAssertEqual(seeded.latestDeviceEstimate, 25)
+    }
+
+    func test_localThresholdRollbackDoesNotOverwriteCompetingNewerEstimate() {
+        let suiteName = "EarnedTimeStoreTests.\(UUID().uuidString)"
+        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let competing = EarnedTimeStore(suiteName: suiteName)
+        competing.latestDeviceEstimate = 25
+        var synchronizeCount = 0
+        let failing = EarnedTimeStore(
+            suiteName: suiteName,
+            synchronizeDefaults: { _ in
+                synchronizeCount += 1
+                if synchronizeCount == 2 {
+                    competing.latestDeviceEstimate = 400
+                    return false
+                }
+                return true
+            }
+        )
+
+        XCTAssertEqual(failing.recordLocalThresholdEstimate(300), .lockUnavailable)
+        XCTAssertEqual(competing.latestDeviceEstimate, 400)
     }
 
     func test_futureLifecycleVersionIsCorruptAndCannotAuthorizeCallback() throws {
@@ -412,6 +477,68 @@ final class EarnedTimeStoreTests: XCTestCase {
         }
     }
 
+    func test_counterRecoveryMarkerPersistsPerDeviceAndClearsOnIdentityReset() {
+        withIsolatedStore { store in
+            let deviceID = UUID()
+            let otherID = UUID()
+
+            store.setCounterRecoveryRequired(true, deviceID: deviceID)
+
+            XCTAssertTrue(store.isCounterRecoveryRequired(deviceID: deviceID))
+            XCTAssertFalse(store.isCounterRecoveryRequired(deviceID: otherID))
+            store.clearUsageStateForIdentityChange()
+            XCTAssertFalse(store.isCounterRecoveryRequired(deviceID: deviceID))
+        }
+    }
+
+    func test_pendingUncountedMarkerNeverAppliesAcrossIdentityOrDate() throws {
+        let suiteName = "EarnedTimeStoreTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let oldID = UUID()
+        let newID = UUID()
+        let store = EarnedTimeStore(suiteName: suiteName)
+        defaults.set(oldID.uuidString, forKey: "evlin.childId")
+        _ = store.reconcileAcceptedUsage(
+            usageDate: "2026-07-12",
+            serverEstimatedMinutes: 25,
+            allowSameDayDecrease: false
+        )
+        store.markPendingUncountedReconciliation(
+            deviceID: oldID,
+            usageDate: "2026-07-12"
+        )
+
+        defaults.set(newID.uuidString, forKey: "evlin.childId")
+        XCTAssertEqual(store.reconcileRuntimePolicy(
+            usageDate: "2026-07-12",
+            timezoneIdentifier: "America/New_York",
+            poolMinutes: 60,
+            capMinutes: 60,
+            remainingMinutes: 60,
+            estimatedMinutes: 0
+        ), .reconciled(25))
+        XCTAssertEqual(store.acceptedEstimateMinutes, 25)
+        XCTAssertTrue(store.hasPendingUncountedReconciliation(
+            deviceID: oldID,
+            usageDate: "2026-07-12"
+        ))
+
+        defaults.set(oldID.uuidString, forKey: "evlin.childId")
+        XCTAssertEqual(store.reconcileRuntimePolicy(
+            usageDate: "2026-07-13",
+            timezoneIdentifier: "America/New_York",
+            poolMinutes: 60,
+            capMinutes: 60,
+            remainingMinutes: 60,
+            estimatedMinutes: 0
+        ), .reconciled(0))
+        XCTAssertFalse(store.hasPendingUncountedReconciliation(
+            deviceID: oldID,
+            usageDate: "2026-07-12"
+        ))
+    }
+
     // MARK: - isEarnedTimeReady
 
     func test_isEarnedTimeReady_falseWhenNeitherPresent() {
@@ -440,6 +567,29 @@ final class EarnedTimeStoreTests: XCTestCase {
             id.uuidString.lowercased(),
             id.uuidString.uppercased()
         ))
+    }
+
+    func test_localThresholdRollsBackUnderLockWhenMirrorChangesBeforeCommit() throws {
+        let suiteName = "EarnedTimeStoreTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = EarnedTimeStore(suiteName: suiteName)
+        let oldID = UUID()
+        let newID = UUID()
+        defaults.set(oldID.uuidString, forKey: "evlin.childId")
+        store.latestDeviceEstimate = 25
+
+        let result = store.recordLocalThresholdEstimate(
+            60,
+            expectedDeviceID: oldID,
+            beforeCommit: {
+                defaults.set(newID.uuidString, forKey: "evlin.childId")
+            }
+        )
+
+        XCTAssertEqual(result, .identityMismatch)
+        XCTAssertEqual(store.latestDeviceEstimate, 25)
+        XCTAssertEqual(defaults.string(forKey: "evlin.childId"), newID.uuidString)
     }
 
     func test_isEarnedTimeReady_falseWhenOnlyLockedSetIdPresent() {

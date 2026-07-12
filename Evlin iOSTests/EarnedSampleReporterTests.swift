@@ -279,6 +279,30 @@ final class EarnedSampleReporterTests: XCTestCase {
         XCTAssertTrue(EarnedSampleReporter.loadRetryQueue(suiteName: suiteName).isEmpty)
     }
 
+    func test_concurrentRetryEnqueuesDoNotOverwriteEntries() {
+        let isolatedSuite = "EarnedSampleReporterTests.\(UUID().uuidString)"
+        defer { UserDefaults.standard.removePersistentDomain(forName: isolatedSuite) }
+        let deviceID = UUID()
+
+        DispatchQueue.concurrentPerform(iterations: 80) { index in
+            EarnedSampleReporter.enqueueRetry(
+                EarnedSampleReporter.RetryEntry(
+                    deviceID: deviceID,
+                    usageDate: "2026-07-12",
+                    timezone: "America/New_York",
+                    thresholdMinutes: index,
+                    estimatedMinutes: index,
+                    observedAt: "2026-07-12T12:00:\(index)Z"
+                ),
+                suiteName: isolatedSuite
+            )
+        }
+
+        let queue = EarnedSampleReporter.loadRetryQueue(suiteName: isolatedSuite)
+        XCTAssertEqual(queue.count, 80)
+        XCTAssertEqual(Set(queue.map(\.thresholdMinutes)), Set(0..<80))
+    }
+
     // MARK: - 3. Tripwire math
 
     func test_effectiveCap_latestPlusRemaining_roundedUp_thenCappedAtMinPoolCap() {
@@ -664,6 +688,53 @@ final class EarnedSampleReporterResponseTests: XCTestCase {
         XCTAssertTrue(lastDebugValue(in: isolatedSuite).contains("reconciliation_deferred"))
     }
 
+    func test_uncountedLockMissPersistsMarkerThatRecreatedStoreConsumesOnRuntime() {
+        let isolatedSuite = makeIsolatedSuiteName()
+        defer { removeIsolatedSuite(isolatedSuite) }
+        let deviceID = UUID()
+        let defaults = UserDefaults(suiteName: isolatedSuite)
+        defaults?.set(deviceID.uuidString, forKey: "evlin.childId")
+        let seeded = EarnedTimeStore(suiteName: isolatedSuite)
+        _ = seeded.reconcileAcceptedUsage(
+            usageDate: "2026-07-12",
+            serverEstimatedMinutes: 25,
+            allowSameDayDecrease: false
+        )
+        let unavailable = EarnedTimeStore(
+            suiteName: isolatedSuite,
+            lockSelection: .unavailable("test_lock_unavailable")
+        )
+
+        let result = EarnedSampleReporter.processSuccessfulResponse(
+            Data(#"{"usage_date":"2026-07-12","estimated_minutes":0,"counted":false}"#.utf8),
+            expectedDeviceID: deviceID,
+            store: unavailable,
+            suiteName: isolatedSuite
+        )
+
+        XCTAssertEqual(result, .deferred)
+        XCTAssertTrue(seeded.hasPendingUncountedReconciliation(
+            deviceID: deviceID,
+            usageDate: "2026-07-12"
+        ))
+
+        let recreated = EarnedTimeStore(suiteName: isolatedSuite)
+        XCTAssertEqual(recreated.reconcileRuntimePolicy(
+            usageDate: "2026-07-12",
+            timezoneIdentifier: "America/New_York",
+            poolMinutes: 60,
+            capMinutes: 60,
+            remainingMinutes: 60,
+            estimatedMinutes: 0
+        ), .reconciled(0))
+        XCTAssertEqual(recreated.acceptedEstimateMinutes, 0)
+        XCTAssertEqual(recreated.latestDeviceEstimate, 0)
+        XCTAssertFalse(recreated.hasPendingUncountedReconciliation(
+            deviceID: deviceID,
+            usageDate: "2026-07-12"
+        ))
+    }
+
     func test_malformedSuccess_isAcceptedWithoutReconciliationOrRetry() {
         let isolatedSuite = makeIsolatedSuiteName()
         defer { removeIsolatedSuite(isolatedSuite) }
@@ -878,6 +949,100 @@ final class EarnedSampleReporterResponseTests: XCTestCase {
         XCTAssertTrue(EarnedSampleReporter.loadRetryQueue(suiteName: isolatedSuite).isEmpty)
         assertAcceptedUsage(store, date: "2026-07-11", minutes: 8)
         XCTAssertTrue(lastDebugValue(in: isolatedSuite).contains("stale_response"))
+    }
+
+    func test_retryDrainLeavesEntryQueuedDuringAwaitAndPreservesConcurrentEnqueue() async throws {
+        let isolatedSuite = makeIsolatedSuiteName()
+        defer { removeIsolatedSuite(isolatedSuite) }
+        let deviceID = UUID()
+        let first = EarnedSampleReporter.RetryEntry(
+            deviceID: deviceID,
+            usageDate: "2026-07-12",
+            timezone: "America/New_York",
+            thresholdMinutes: 60,
+            estimatedMinutes: 60,
+            observedAt: "2026-07-12T12:00:00Z"
+        )
+        let concurrent = EarnedSampleReporter.RetryEntry(
+            deviceID: deviceID,
+            usageDate: "2026-07-12",
+            timezone: "America/New_York",
+            thresholdMinutes: 65,
+            estimatedMinutes: 65,
+            observedAt: "2026-07-12T12:05:00Z"
+        )
+        EarnedSampleReporter.enqueueRetry(first, suiteName: isolatedSuite)
+        var resumeRequest: CheckedContinuation<Void, Never>?
+
+        let drain = Task {
+            await EarnedSampleReporter.drainRetryQueue(
+                baseURL: URL(string: "https://earned-sample-reporter.test")!,
+                suiteName: isolatedSuite,
+                onlyDeviceID: deviceID,
+                requestData: { request in
+                    await withCheckedContinuation { resumeRequest = $0 }
+                    let response = HTTPURLResponse(
+                        url: try XCTUnwrap(request.url),
+                        statusCode: 200,
+                        httpVersion: nil,
+                        headerFields: nil
+                    )!
+                    return (Data(#"{"usage_date":"2026-07-12","estimated_minutes":60,"counted":true}"#.utf8), response)
+                }
+            )
+        }
+        while resumeRequest == nil { await Task.yield() }
+
+        XCTAssertEqual(EarnedSampleReporter.loadRetryQueue(suiteName: isolatedSuite), [first])
+        EarnedSampleReporter.enqueueRetry(concurrent, suiteName: isolatedSuite)
+        resumeRequest?.resume()
+        await drain.value
+
+        XCTAssertEqual(EarnedSampleReporter.loadRetryQueue(suiteName: isolatedSuite), [concurrent])
+    }
+
+    func test_terminalDeferredEntryDrainsFromStoredConfigOnForeground() async throws {
+        let isolatedSuite = makeIsolatedSuiteName()
+        defer { removeIsolatedSuite(isolatedSuite) }
+        let deviceID = UUID()
+        let defaults = UserDefaults(suiteName: isolatedSuite)
+        defaults?.set("https://earned-sample-reporter.test", forKey: "evlin.baseURL")
+        defaults?.set(deviceID.uuidString, forKey: "evlin.childId")
+        let decision = EarnedSampleReporter.thresholdHandlingDecision(
+            thresholdMinutes: 60,
+            localReconciliationAvailable: false
+        )
+        XCTAssertTrue(decision.shouldReport)
+        XCTAssertFalse(decision.shouldApplyLocalShield)
+        EarnedSampleReporter.enqueueRetry(
+            .init(
+                deviceID: deviceID,
+                usageDate: "2026-07-12",
+                timezone: "America/New_York",
+                thresholdMinutes: 60,
+                estimatedMinutes: 60,
+                observedAt: "2026-07-12T12:00:00Z"
+            ),
+            suiteName: isolatedSuite
+        )
+        var postedDeviceID: String?
+
+        await EarnedSampleReporter.drainRetryQueueFromStoredConfig(
+            suiteName: isolatedSuite,
+            requestData: { request in
+                postedDeviceID = request.value(forHTTPHeaderField: "X-Evlin-Child-Device-ID")
+                let response = HTTPURLResponse(
+                    url: try XCTUnwrap(request.url),
+                    statusCode: 409,
+                    httpVersion: nil,
+                    headerFields: nil
+                )!
+                return (Data(), response)
+            }
+        )
+
+        XCTAssertEqual(postedDeviceID, deviceID.uuidString)
+        XCTAssertTrue(EarnedSampleReporter.loadRetryQueue(suiteName: isolatedSuite).isEmpty)
     }
 
     private func assertSemanticallyInvalidResponse(
