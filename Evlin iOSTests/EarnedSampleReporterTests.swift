@@ -198,6 +198,94 @@ final class EarnedSampleReporterTests: XCTestCase {
         XCTAssertEqual(queue.map(\.thresholdMinutes), [10, 20, 30])
     }
 
+    func test_enqueueRetry_logicallyDeduplicatesObservedAtVariants() {
+        let isolatedSuite = "EarnedSampleReporterTests.\(UUID().uuidString)"
+        defer {
+            EarnedSampleReporter.clearRetryQueue(suiteName: isolatedSuite)
+            UserDefaults.standard.removePersistentDomain(forName: isolatedSuite)
+        }
+        let deviceID = UUID()
+        let first = EarnedSampleReporter.RetryEntry(
+            deviceID: deviceID,
+            usageDate: "2026-07-12",
+            timezone: "America/New_York",
+            thresholdMinutes: 60,
+            estimatedMinutes: 60,
+            observedAt: "2026-07-12T12:00:00Z"
+        )
+        let duplicate = EarnedSampleReporter.RetryEntry(
+            deviceID: deviceID,
+            usageDate: first.usageDate,
+            timezone: first.timezone,
+            thresholdMinutes: first.thresholdMinutes,
+            estimatedMinutes: first.estimatedMinutes,
+            observedAt: "2026-07-12T12:05:00Z"
+        )
+
+        XCTAssertTrue(EarnedSampleReporter.enqueueRetry(first, suiteName: isolatedSuite))
+        XCTAssertTrue(EarnedSampleReporter.enqueueRetry(duplicate, suiteName: isolatedSuite))
+
+        XCTAssertEqual(EarnedSampleReporter.loadRetryQueue(suiteName: isolatedSuite), [first])
+        let firstID = EarnedSampleReporter.makeSampleBody(
+            deviceID: first.deviceID,
+            usageDate: first.usageDate,
+            timezone: first.timezone,
+            thresholdMinutes: first.thresholdMinutes,
+            estimatedMinutes: first.estimatedMinutes,
+            observedAt: first.observedAt
+        )["client_sample_id"] as? String
+        let duplicateID = EarnedSampleReporter.makeSampleBody(
+            deviceID: duplicate.deviceID,
+            usageDate: duplicate.usageDate,
+            timezone: duplicate.timezone,
+            thresholdMinutes: duplicate.thresholdMinutes,
+            estimatedMinutes: duplicate.estimatedMinutes,
+            observedAt: duplicate.observedAt
+        )["client_sample_id"] as? String
+        XCTAssertEqual(firstID, duplicateID)
+    }
+
+    func test_enqueueRetryPrimaryPersistenceFaultsRecoverThroughDurableFallback() async throws {
+        for fault in EarnedSampleReporter.RetryQueueFault.allCases {
+            let isolatedSuite = "EarnedSampleReporterTests.\(UUID().uuidString)"
+            defer {
+                EarnedSampleReporter.clearRetryQueue(suiteName: isolatedSuite)
+                UserDefaults.standard.removePersistentDomain(forName: isolatedSuite)
+            }
+            let entry = EarnedSampleReporter.RetryEntry(
+                deviceID: UUID(),
+                usageDate: "2026-07-12",
+                timezone: "America/New_York",
+                thresholdMinutes: 65,
+                estimatedMinutes: 65,
+                observedAt: "2026-07-12T12:05:00Z"
+            )
+
+            XCTAssertTrue(EarnedSampleReporter.enqueueRetry(
+                entry,
+                suiteName: isolatedSuite,
+                faultInjection: fault
+            ), "fault \(fault) must fall back durably")
+            XCTAssertEqual(EarnedSampleReporter.loadRetryQueue(suiteName: isolatedSuite), [entry])
+
+            await EarnedSampleReporter.drainRetryQueue(
+                baseURL: URL(string: "https://earned-sample-reporter.test")!,
+                suiteName: isolatedSuite,
+                onlyDeviceID: entry.deviceID,
+                requestData: { request in
+                    let response = HTTPURLResponse(
+                        url: try XCTUnwrap(request.url),
+                        statusCode: 409,
+                        httpVersion: nil,
+                        headerFields: nil
+                    )!
+                    return (Data(), response)
+                }
+            )
+            XCTAssertTrue(EarnedSampleReporter.loadRetryQueue(suiteName: isolatedSuite).isEmpty)
+        }
+    }
+
     func test_retryQueueDebugSummary_reportsPendingCountAndNewestThreshold() {
         let deviceID = UUID()
         XCTAssertEqual(EarnedSampleReporter.retryQueueDebugSummary(suiteName: suiteName), "0 pending")

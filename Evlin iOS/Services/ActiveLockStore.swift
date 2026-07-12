@@ -2,6 +2,36 @@ import Foundation
 import FamilyControls
 import ManagedSettings
 
+nonisolated private final class ActiveLockPersistenceLock: @unchecked Sendable {
+    static let shared = ActiveLockPersistenceLock()
+    private let processLock = NSLock()
+
+    func withLock<T>(_ body: () -> T) -> T? {
+        processLock.lock()
+        defer { processLock.unlock() }
+
+        let directory = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: "group.com.evlin.ios"
+        ) ?? FileManager.default.temporaryDirectory
+        let url = directory.appendingPathComponent("active-lock-store.lock")
+        let descriptor = open(
+            url.path,
+            O_CREAT | O_RDWR | O_CLOEXEC,
+            mode_t(S_IRUSR | S_IWUSR)
+        )
+        guard descriptor >= 0 else { return nil }
+        guard flock(descriptor, LOCK_EX) == 0 else {
+            close(descriptor)
+            return nil
+        }
+        defer {
+            flock(descriptor, LOCK_UN)
+            close(descriptor)
+        }
+        return body()
+    }
+}
+
 /// Single source of truth for active shields + blocks on this device.
 /// See spec §3 for full design.
 ///
@@ -16,6 +46,12 @@ actor ActiveLockStore {
     struct RekeyMutation: Sendable, Equatable {
         let original: ShieldRecord
         let migrated: ShieldRecord
+    }
+
+    struct ShieldMutationReceipt: Sendable, Equatable {
+        let recordKey: String
+        let before: ShieldRecord?
+        let after: ShieldRecord
     }
 
     private var shieldRecords: [String: ShieldRecord] = [:]
@@ -48,6 +84,60 @@ actor ActiveLockStore {
         persist()
         recomputeAndApply()
         return .added
+    }
+
+    /// Persist a shield mutation and return the exact durable before/after values.
+    /// Stale-command rollback must use this receipt instead of a separate read.
+    func addShieldWithReceipt(
+        _ new: ShieldRecord,
+        force: Bool = false
+    ) -> (result: AddShieldResult, receipt: ShieldMutationReceipt)? {
+        ActiveLockPersistenceLock.shared.withLock {
+            guard reloadDurableState() else { return nil }
+            let normalized = normalizeShieldRecord(new).record
+            let before = shieldRecords[normalized.recordKey]
+            let result = addShield(normalized, force: force)
+            guard persistAndVerify(), reloadDurableState(),
+                  let after = shieldRecords[normalized.recordKey]
+            else {
+                _ = reloadDurableState()
+                recomputeAndApply()
+                return nil
+            }
+            return (
+                result,
+                ShieldMutationReceipt(
+                    recordKey: normalized.recordKey,
+                    before: before,
+                    after: after
+                )
+            )
+        } ?? nil
+    }
+
+    /// Compare-and-swap rollback against durable state. A newer command or
+    /// extension write at the same key wins and is never overwritten.
+    @discardableResult
+    func rollbackShieldMutation(_ receipt: ShieldMutationReceipt) -> Bool {
+        ActiveLockPersistenceLock.shared.withLock {
+            guard reloadDurableState() else { return false }
+            guard shieldRecords[receipt.recordKey] == receipt.after else {
+                recomputeAndApply()
+                return false
+            }
+            if let before = receipt.before {
+                shieldRecords[receipt.recordKey] = before
+            } else {
+                shieldRecords.removeValue(forKey: receipt.recordKey)
+            }
+            guard persistAndVerify() else {
+                _ = reloadDurableState()
+                recomputeAndApply()
+                return false
+            }
+            recomputeAndApply()
+            return true
+        } ?? false
     }
 
     @discardableResult
@@ -352,50 +442,69 @@ actor ActiveLockStore {
         fromLocalID localID: String,
         toBackendID backendID: String
     ) -> RekeyMutation? {
-        guard localID != backendID else { return nil }
+        ActiveLockPersistenceLock.shared.withLock {
+            guard reloadDurableState(), localID != backendID else { return nil }
 
-        let oldKey = ShieldRecord.makeRecordKey(tier: .savedList, targetKey: localID)
-        let newKey = ShieldRecord.makeRecordKey(tier: .savedList, targetKey: backendID)
+            let oldKey = ShieldRecord.makeRecordKey(tier: .savedList, targetKey: localID)
+            let newKey = ShieldRecord.makeRecordKey(tier: .savedList, targetKey: backendID)
 
-        // Idempotent: if the new key already exists, the migration already ran.
-        if shieldRecords[newKey] != nil { return nil }
+            // Idempotent: if the new key already exists, the migration already ran.
+            if shieldRecords[newKey] != nil { return nil }
 
-        // Find the old record.
-        guard let old = shieldRecords[oldKey] else { return nil }
+            // Find the old record.
+            guard let old = shieldRecords[oldKey] else { return nil }
 
-        // Build the migrated record — same content, new key + targetKey.
-        let migrated = ShieldRecord(
-            recordKey: newKey,
-            tier: .savedList,
-            targetKey: backendID,
-            displayName: old.displayName,
-            lastCommandID: old.lastCommandID,
-            appTokens: old.appTokens,
-            categoryTokens: old.categoryTokens,
-            webDomainTokens: old.webDomainTokens,
-            appliesToAll: old.appliesToAll,
-            issuedAt: old.issuedAt,
-            expiresAt: old.expiresAt,
-            originalRequest: old.originalRequest,
-            targetChildID: old.targetChildID,
-            sources: old.sources
-        )
+            // Build the migrated record — same content, new key + targetKey.
+            let migrated = ShieldRecord(
+                recordKey: newKey,
+                tier: .savedList,
+                targetKey: backendID,
+                displayName: old.displayName,
+                lastCommandID: old.lastCommandID,
+                appTokens: old.appTokens,
+                categoryTokens: old.categoryTokens,
+                webDomainTokens: old.webDomainTokens,
+                appliesToAll: old.appliesToAll,
+                issuedAt: old.issuedAt,
+                expiresAt: old.expiresAt,
+                originalRequest: old.originalRequest,
+                targetChildID: old.targetChildID,
+                sources: old.sources
+            )
 
-        shieldRecords.removeValue(forKey: oldKey)
-        shieldRecords[newKey] = migrated
-        persist()
-        recomputeAndApply()
-        return RekeyMutation(original: old, migrated: migrated)
+            shieldRecords.removeValue(forKey: oldKey)
+            shieldRecords[newKey] = migrated
+            guard persistAndVerify(), reloadDurableState(),
+                  let durableMigrated = shieldRecords[newKey]
+            else {
+                _ = reloadDurableState()
+                recomputeAndApply()
+                return nil
+            }
+            recomputeAndApply()
+            return RekeyMutation(original: old, migrated: durableMigrated)
+        } ?? nil
     }
 
     func rollbackRekey(_ mutation: RekeyMutation) {
-        guard shieldRecords[mutation.migrated.recordKey] == mutation.migrated,
-              shieldRecords[mutation.original.recordKey] == nil
-        else { return }
-        shieldRecords.removeValue(forKey: mutation.migrated.recordKey)
-        shieldRecords[mutation.original.recordKey] = mutation.original
-        persist()
-        recomputeAndApply()
+        _ = ActiveLockPersistenceLock.shared.withLock {
+            guard reloadDurableState(),
+                  shieldRecords[mutation.migrated.recordKey] == mutation.migrated,
+                  shieldRecords[mutation.original.recordKey] == nil
+            else {
+                recomputeAndApply()
+                return false
+            }
+            shieldRecords.removeValue(forKey: mutation.migrated.recordKey)
+            shieldRecords[mutation.original.recordKey] = mutation.original
+            guard persistAndVerify() else {
+                _ = reloadDurableState()
+                recomputeAndApply()
+                return false
+            }
+            recomputeAndApply()
+            return true
+        }
     }
 
     /// Remove a single source from the record at `recordKey`. If the record's
@@ -601,6 +710,59 @@ actor ActiveLockStore {
         if let data = try? encoder.encode(blockRecords) {
             defaults?.set(data, forKey: blocksKey)
         }
+    }
+
+    private func persistAndVerify() -> Bool {
+        guard let defaults else { return false }
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        guard let shieldsData = try? encoder.encode(shieldRecords),
+              let blocksData = try? encoder.encode(blockRecords)
+        else { return false }
+        defaults.set(shieldsData, forKey: shieldsKey)
+        defaults.set(blocksData, forKey: blocksKey)
+        guard defaults.synchronize() else { return false }
+        return defaults.data(forKey: shieldsKey) == shieldsData
+            && defaults.data(forKey: blocksKey) == blocksData
+    }
+
+    /// Replace the actor snapshot with the complete persisted dictionaries.
+    /// Missing keys are legitimate empty stores; decode failures fail closed.
+    private func reloadDurableState() -> Bool {
+        guard let defaults else { return false }
+        defaults.synchronize()
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+
+        let durableShields: [String: ShieldRecord]
+        if let data = defaults.data(forKey: shieldsKey) {
+            if let decoded = try? decoder.decode([String: ShieldRecord].self, from: data) {
+                durableShields = decoded
+            } else if let decoded = try? PropertyListDecoder().decode([String: ShieldRecord].self, from: data) {
+                durableShields = decoded
+            } else {
+                return false
+            }
+        } else {
+            durableShields = [:]
+        }
+
+        let durableBlocks: [String: BlockRecord]
+        if let data = defaults.data(forKey: blocksKey) {
+            if let decoded = try? decoder.decode([String: BlockRecord].self, from: data) {
+                durableBlocks = decoded
+            } else if let decoded = try? PropertyListDecoder().decode([String: BlockRecord].self, from: data) {
+                durableBlocks = decoded
+            } else {
+                return false
+            }
+        } else {
+            durableBlocks = [:]
+        }
+
+        shieldRecords = durableShields.mapValues { normalizeShieldRecord($0).record }
+        blockRecords = durableBlocks
+        return true
     }
 
     private func restore() {

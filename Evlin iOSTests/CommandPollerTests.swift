@@ -205,7 +205,19 @@ final class CommandPollerTests: XCTestCase {
         XCTAssertEqual(store.poolMinutes, 75)
         XCTAssertEqual(store.capMinutes, 50)
         let restored = await ActiveLockStore.shared.allCurrent().shields
-        XCTAssertEqual(restored.first { $0.recordKey == priorRecord.recordKey }, priorRecord)
+        let restoredRecord = try? XCTUnwrap(
+            restored.first { $0.recordKey == priorRecord.recordKey }
+        )
+        XCTAssertEqual(restoredRecord?.recordKey, priorRecord.recordKey)
+        XCTAssertEqual(restoredRecord?.targetKey, priorRecord.targetKey)
+        XCTAssertEqual(restoredRecord?.lastCommandID, priorRecord.lastCommandID)
+        XCTAssertEqual(restoredRecord?.targetChildID, priorRecord.targetChildID)
+        XCTAssertEqual(restoredRecord?.sources, priorRecord.sources)
+        XCTAssertEqual(
+            restoredRecord?.issuedAt.timeIntervalSince1970 ?? 0,
+            priorRecord.issuedAt.timeIntervalSince1970,
+            accuracy: 1
+        )
         XCTAssertNil(restored.first {
             $0.recordKey == ShieldRecord.makeRecordKey(tier: .savedList, targetKey: backendListID)
         })

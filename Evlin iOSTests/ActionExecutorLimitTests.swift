@@ -535,7 +535,7 @@ final class ActionExecutorLimitTests: XCTestCase {
                       "the parent's manual shield must be preserved")
     }
 
-    func testClearLimitIdentityChangeAfterRearmRestoresRuleShieldAndMonitoringPlan() async {
+    func testClearLimitIdentityTeardownAfterRearmDoesNotRestoreOldFamilyState() async {
         let spy = LimitSchedulerSpy()
         let ruleID = UUID()
         let childID = UUID()
@@ -568,7 +568,6 @@ final class ActionExecutorLimitTests: XCTestCase {
         AppLimitRuleStore.shared.upsert(rule)
         _ = await ActiveLockStore.shared.addShield(shield)
         _ = AppLimitPlanner(scheduler: spy).arm(rules: [rule])
-        let priorMonitoringPlan = spy.activeActivities
         var currentID = childID
         var reachedCheckpoint = false
         let executor = ActionExecutor(
@@ -578,6 +577,8 @@ final class ActionExecutorLimitTests: XCTestCase {
                 guard checkpoint == .clearLimitRearmed else { return }
                 reachedCheckpoint = true
                 currentID = UUID()
+                AppLimitRuleStore.shared.removeAll()
+                _ = AppLimitPlanner(scheduler: spy).arm(rules: [])
             }
         )
 
@@ -589,14 +590,10 @@ final class ActionExecutorLimitTests: XCTestCase {
 
         XCTAssertTrue(reachedCheckpoint)
         XCTAssertEqual(result, .failed(.execution("stale_identity")))
-        XCTAssertEqual(AppLimitRuleStore.shared.rule(forID: ruleID), rule)
-        let restoredShields = await ActiveLockStore.shared.allCurrent().shields
-        let restoredShield = restoredShields.first { $0.recordKey == shield.recordKey }
-        XCTAssertEqual(restoredShield?.recordKey, shield.recordKey)
-        XCTAssertEqual(restoredShield?.targetChildID, shield.targetChildID)
-        XCTAssertEqual(restoredShield?.sources, shield.sources)
-        XCTAssertEqual(restoredShield?.lastCommandID, shield.lastCommandID)
-        XCTAssertEqual(spy.activeActivities, priorMonitoringPlan)
+        XCTAssertNil(AppLimitRuleStore.shared.rule(forID: ruleID))
+        let shields = await ActiveLockStore.shared.allCurrent().shields
+        XCTAssertFalse(shields.contains { $0.recordKey == shield.recordKey })
+        XCTAssertTrue(spy.activeActivities.isEmpty)
     }
 
     func testApplyLimitRuleFromCommandImmediatelyShieldsWhenUsedTodayAlreadyReachedBudget() async {

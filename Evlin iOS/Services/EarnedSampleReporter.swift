@@ -60,6 +60,12 @@ enum EarnedSampleReporter {
     static let lastSamplePostDebugKey = "evlin.earned.lastSamplePost"
     nonisolated private static let sharedSuiteName = "group.com.evlin.ios"
 
+    enum RetryQueueFault: CaseIterable, Sendable {
+        case lockUnavailable
+        case synchronizeFailed
+        case readbackFailed
+    }
+
     private struct SampleSnapshot: Decodable {
         let usageDate: String
         let estimatedMinutes: Int
@@ -411,19 +417,33 @@ enum EarnedSampleReporter {
     @discardableResult
     static func enqueueRetry(
         _ entry: RetryEntry,
-        suiteName: String = "group.com.evlin.ios"
+        suiteName: String = "group.com.evlin.ios",
+        faultInjection: RetryQueueFault? = nil
     ) -> Bool {
-        withRetryQueueLock(suiteName: suiteName) { defaults in
-            var queue = loadRetryQueueUnlocked(defaults: defaults)
-            queue.append(entry)
-            return saveRetryQueueUnlocked(queue, defaults: defaults)
-        } ?? false
+        let primarySaved: Bool
+        if faultInjection == .lockUnavailable {
+            primarySaved = false
+        } else {
+            primarySaved = withRetryQueueLock(suiteName: suiteName) { defaults in
+                let queue = deduplicatedRetryEntries(
+                    loadRetryQueueUnlocked(defaults: defaults) + [entry]
+                )
+                return saveRetryQueueUnlocked(
+                    queue,
+                    defaults: defaults,
+                    faultInjection: faultInjection
+                )
+            } ?? false
+        }
+        if primarySaved { return true }
+        return persistFallback(entry, suiteName: suiteName)
     }
 
     static func loadRetryQueue(suiteName: String = "group.com.evlin.ios") -> [RetryEntry] {
-        withRetryQueueLock(suiteName: suiteName) { defaults in
+        let primary = withRetryQueueLock(suiteName: suiteName) { defaults in
             loadRetryQueueUnlocked(defaults: defaults)
         } ?? []
+        return deduplicatedRetryEntries(primary + loadFallbackEntries(suiteName: suiteName))
     }
 
     static func clearRetryQueue(suiteName: String = "group.com.evlin.ios") {
@@ -431,6 +451,7 @@ enum EarnedSampleReporter {
             defaults.removeObject(forKey: retryQueueKey)
             return defaults.synchronize() && defaults.object(forKey: retryQueueKey) == nil
         }
+        clearFallbackEntries(suiteName: suiteName)
     }
 
     static func retryQueueDebugSummary(suiteName: String = "group.com.evlin.ios") -> String {
@@ -459,10 +480,10 @@ enum EarnedSampleReporter {
     private static func removeAcceptedRetry(_ entry: RetryEntry, suiteName: String) {
         _ = withRetryQueueLock(suiteName: suiteName) { defaults in
             var queue = loadRetryQueueUnlocked(defaults: defaults)
-            guard let index = queue.firstIndex(of: entry) else { return true }
-            queue.remove(at: index)
+            queue.removeAll { logicalRetryKey($0) == logicalRetryKey(entry) }
             return saveRetryQueueUnlocked(queue, defaults: defaults)
         }
+        removeFallback(entry, suiteName: suiteName)
     }
 
     private static func withRetryQueueLock<T>(
@@ -480,20 +501,108 @@ enum EarnedSampleReporter {
         guard let data = defaults.data(forKey: retryQueueKey),
               let queue = try? JSONDecoder().decode([RetryEntry].self, from: data)
         else { return [] }
-        return queue
+        return deduplicatedRetryEntries(queue)
     }
 
     private static func saveRetryQueueUnlocked(
         _ queue: [RetryEntry],
-        defaults: UserDefaults
+        defaults: UserDefaults,
+        faultInjection: RetryQueueFault? = nil
     ) -> Bool {
         guard let data = try? JSONEncoder().encode(queue) else { return false }
         defaults.set(data, forKey: retryQueueKey)
-        guard defaults.synchronize(),
-              let readback = defaults.data(forKey: retryQueueKey),
+        if faultInjection == .synchronizeFailed { return false }
+        guard defaults.synchronize() else { return false }
+        if faultInjection == .readbackFailed { return false }
+        guard let readback = defaults.data(forKey: retryQueueKey),
               let decoded = try? JSONDecoder().decode([RetryEntry].self, from: readback)
         else { return false }
         return decoded == queue
+    }
+
+    private static func logicalRetryKey(_ entry: RetryEntry) -> String {
+        "\(entry.deviceID.uuidString.lowercased()):\(entry.usageDate):t\(entry.thresholdMinutes)"
+    }
+
+    private static func deduplicatedRetryEntries(_ entries: [RetryEntry]) -> [RetryEntry] {
+        var seen = Set<String>()
+        return entries.filter { seen.insert(logicalRetryKey($0)).inserted }
+    }
+
+    private static func fallbackDirectory(suiteName: String) -> URL? {
+        let base: URL
+        if suiteName == sharedSuiteName,
+           let container = FileManager.default.containerURL(
+               forSecurityApplicationGroupIdentifier: sharedSuiteName
+           ) {
+            base = container
+        } else {
+            base = FileManager.default.temporaryDirectory
+        }
+        let safeSuite = suiteName.map { character in
+            character.isLetter || character.isNumber ? character : "_"
+        }
+        let directory = base.appendingPathComponent(
+            "earned-sample-retry-fallback-\(String(safeSuite))",
+            isDirectory: true
+        )
+        do {
+            try FileManager.default.createDirectory(
+                at: directory,
+                withIntermediateDirectories: true
+            )
+            return directory
+        } catch {
+            return nil
+        }
+    }
+
+    private static func fallbackURL(_ entry: RetryEntry, suiteName: String) -> URL? {
+        fallbackDirectory(suiteName: suiteName)?.appendingPathComponent(
+            "\(logicalRetryKey(entry)).json"
+        )
+    }
+
+    private static func persistFallback(_ entry: RetryEntry, suiteName: String) -> Bool {
+        guard let url = fallbackURL(entry, suiteName: suiteName),
+              let data = try? JSONEncoder().encode(entry)
+        else { return false }
+        do {
+            try data.write(to: url, options: .atomic)
+            guard (try? Data(contentsOf: url)) == data else { return false }
+            let descriptor = open(url.path, O_RDONLY | O_CLOEXEC)
+            guard descriptor >= 0 else { return false }
+            defer { close(descriptor) }
+            return fsync(descriptor) == 0
+        } catch {
+            return false
+        }
+    }
+
+    private static func loadFallbackEntries(suiteName: String) -> [RetryEntry] {
+        guard let directory = fallbackDirectory(suiteName: suiteName),
+              let urls = try? FileManager.default.contentsOfDirectory(
+                  at: directory,
+                  includingPropertiesForKeys: nil
+              )
+        else { return [] }
+        return urls
+            .filter { $0.pathExtension == "json" }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+            .compactMap { url in
+                guard let data = try? Data(contentsOf: url) else { return nil }
+                return try? JSONDecoder().decode(RetryEntry.self, from: data)
+            }
+    }
+
+    private static func removeFallback(_ entry: RetryEntry, suiteName: String) {
+        guard let url = fallbackURL(entry, suiteName: suiteName) else { return }
+        try? FileManager.default.removeItem(at: url)
+    }
+
+    private static func clearFallbackEntries(suiteName: String) {
+        guard let directory = fallbackDirectory(suiteName: suiteName) else { return }
+        try? FileManager.default.removeItem(at: directory)
     }
 
     private static func recordDebug(_ message: String, suiteName: String) {

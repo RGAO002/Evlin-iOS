@@ -231,7 +231,6 @@ final class ActionExecutor: @unchecked Sendable {
             let cleared = await ActiveLockStore.shared.unshieldAll()
             afterMutationCheckpoint(.unshieldRemoved)
             guard identity.isCurrent else {
-                await restoreRemovedShields(cleared, identity: identity)
                 return Self.staleIdentityResult
             }
             cancelAllScheduled()
@@ -241,7 +240,6 @@ final class ActionExecutor: @unchecked Sendable {
             let cleared = await ActiveLockStore.shared.unblockAll()
             afterMutationCheckpoint(.unblockRemoved)
             guard identity.isCurrent else {
-                await restoreRemovedBlocks(cleared, identity: identity)
                 return Self.staleIdentityResult
             }
             return .confirmedExact(verb: .unblockAll, displayName: "\(cleared.count) block(s) cleared", effectiveState: nil)
@@ -266,40 +264,9 @@ final class ActionExecutor: @unchecked Sendable {
     }
 
     private func rollbackAddedShield(
-        _ record: ShieldRecord,
-        prior: ShieldRecord?,
-        identity: CommandIdentityContext
+        _ receipt: ActiveLockStore.ShieldMutationReceipt
     ) async {
-        let current = await ActiveLockStore.shared.allCurrent().shields
-            .first { $0.recordKey == record.recordKey }
-        guard current?.targetChildID == identity.expectedChildID else { return }
-        if let prior {
-            _ = await ActiveLockStore.shared.addShield(prior, force: true)
-        } else {
-            _ = await ActiveLockStore.shared.removeShield(recordKey: record.recordKey)
-        }
-    }
-
-    private func restoreRemovedShields(
-        _ records: [ShieldRecord],
-        identity: CommandIdentityContext
-    ) async {
-        for record in records {
-            let exists = await ActiveLockStore.shared.allCurrent().shields
-                .contains { $0.recordKey == record.recordKey }
-            if !exists { _ = await ActiveLockStore.shared.addShield(record, force: true) }
-        }
-    }
-
-    private func restoreRemovedBlocks(
-        _ records: [BlockRecord],
-        identity: CommandIdentityContext
-    ) async {
-        for record in records {
-            let exists = await ActiveLockStore.shared.allCurrent().blocks
-                .contains { $0.bundleID == record.bundleID }
-            if !exists { _ = await ActiveLockStore.shared.addBlock(record) }
-        }
+        _ = await ActiveLockStore.shared.rollbackShieldMutation(receipt)
     }
 
     private func rollbackAddedBlock(_ record: BlockRecord, result: AddBlockResult) async {
@@ -464,8 +431,6 @@ final class ActionExecutor: @unchecked Sendable {
         if let expectedChildID = identity.expectedChildID {
             record.targetChildID = expectedChildID
         }
-        let priorShield = await ActiveLockStore.shared.allCurrent().shields
-            .first { $0.recordKey == record.recordKey }
         guard identity.isCurrent else {
             rollback(prior: priorRule, ruleId: rule.id)
             return Self.staleIdentityResult
@@ -474,9 +439,12 @@ final class ActionExecutor: @unchecked Sendable {
             rollback(prior: priorRule, ruleId: rule.id)
             return Self.staleIdentityResult
         }
-        _ = await ActiveLockStore.shared.addShield(record)
+        guard let shieldMutation = await ActiveLockStore.shared.addShieldWithReceipt(record) else {
+            rollback(prior: priorRule, ruleId: rule.id)
+            return .failed(.execution("lock_store_unavailable"))
+        }
         guard identity.isCurrent else {
-            await rollbackAddedShield(record, prior: priorShield, identity: identity)
+            await rollbackAddedShield(shieldMutation.receipt)
             rollback(prior: priorRule, ruleId: rule.id)
             return Self.staleIdentityResult
         }
@@ -518,60 +486,23 @@ final class ActionExecutor: @unchecked Sendable {
         let appTokens = existing?.appTokens ?? []
         let bundleID = existing?.bundleID ?? cmd.target.bundleID
         guard await prepareForMutation(identity) else { return Self.staleIdentityResult }
-        let removedShields = await ActiveLockStore.shared.removeLimitShields(
+        _ = await ActiveLockStore.shared.removeLimitShields(
             appTokens: appTokens,
             bundleID: bundleID
         )
-        guard identity.isCurrent else {
-            await rollbackClearedLimit(
-                existingRule: existing,
-                ruleID: clear.ruleId,
-                removedShields: removedShields,
-                identity: identity
-            )
-            return Self.staleIdentityResult
-        }
+        guard identity.isCurrent else { return Self.staleIdentityResult }
 
         // Re-arm without the removed rule. Self-healing discovery stops the
         // vanished window activity.
         guard identity.isCurrent else { return Self.staleIdentityResult }
         ruleStore.remove(ruleId: clear.ruleId)
-        guard identity.isCurrent else {
-            await rollbackClearedLimit(
-                existingRule: existing,
-                ruleID: clear.ruleId,
-                removedShields: removedShields,
-                identity: identity
-            )
-            return Self.staleIdentityResult
-        }
+        guard identity.isCurrent else { return Self.staleIdentityResult }
         _ = makeLimitPlanner().arm(rules: ruleStore.all())
         afterMutationCheckpoint(.clearLimitRearmed)
-        guard identity.isCurrent else {
-            await rollbackClearedLimit(
-                existingRule: existing,
-                ruleID: clear.ruleId,
-                removedShields: removedShields,
-                identity: identity
-            )
-            return Self.staleIdentityResult
-        }
+        guard identity.isCurrent else { return Self.staleIdentityResult }
 
         let display = cmd.target.targetDisplay ?? existing?.displayName ?? cmd.target.bundleID ?? "App"
         return .confirmedExact(verb: .clearLimit, displayName: display, effectiveState: nil)
-    }
-
-    private func rollbackClearedLimit(
-        existingRule: AppLimitRule?,
-        ruleID: UUID,
-        removedShields: [ShieldRecord],
-        identity: CommandIdentityContext
-    ) async {
-        if ruleStore.rule(forID: ruleID) == nil, let existingRule {
-            ruleStore.upsert(existingRule)
-        }
-        await restoreRemovedShields(removedShields, identity: identity)
-        _ = makeLimitPlanner().arm(rules: ruleStore.all())
     }
 
     /// Direct receipt-action unlock path. This intentionally bypasses chat/AI
@@ -632,8 +563,6 @@ final class ActionExecutor: @unchecked Sendable {
                 persistDefaultLockGroupIdentity: identity.expectedChildID == nil
             )
             let force = cmd.target.forceDowngrade
-            let prior = await ActiveLockStore.shared.allCurrent().shields
-                .first { $0.recordKey == record.recordKey }
             guard identity.isCurrent else { return Self.staleIdentityResult }
             guard await prepareForMutation(identity) else { return Self.staleIdentityResult }
             if let deferredLockedSetID,
@@ -641,16 +570,20 @@ final class ActionExecutor: @unchecked Sendable {
                 guard identity.isCurrent else { return Self.staleIdentityResult }
                 EarnedTimeStore.shared.saveLockedSetID(deferredLockedSetID, tokenData: nil)
             }
-            let result = await ActiveLockStore.shared.addShield(record, force: force)
+            guard let shieldMutation = await ActiveLockStore.shared.addShieldWithReceipt(
+                record,
+                force: force
+            ) else {
+                return .failed(.execution("lock_store_unavailable"))
+            }
+            let result = shieldMutation.result
             afterMutationCheckpoint(.shieldPersisted)
             guard identity.isCurrent else {
                 await rollbackShieldCommand(
-                    record: record,
-                    prior: prior,
+                    receipt: shieldMutation.receipt,
                     deferredLockedSetID: deferredLockedSetID,
                     priorLockedSetID: priorLockedSetID,
-                    priorLockedSetTokenData: priorLockedSetTokenData,
-                    identity: identity
+                    priorLockedSetTokenData: priorLockedSetTokenData
                 )
                 return Self.staleIdentityResult
             }
@@ -664,12 +597,10 @@ final class ActionExecutor: @unchecked Sendable {
                 afterMutationCheckpoint(.shieldEffectiveStateResolved)
                 guard identity.isCurrent else {
                     await rollbackShieldCommand(
-                        record: record,
-                        prior: prior,
+                        receipt: shieldMutation.receipt,
                         deferredLockedSetID: deferredLockedSetID,
                         priorLockedSetID: priorLockedSetID,
-                        priorLockedSetTokenData: priorLockedSetTokenData,
-                        identity: identity
+                        priorLockedSetTokenData: priorLockedSetTokenData
                     )
                     return Self.staleIdentityResult
                 }
@@ -693,12 +624,10 @@ final class ActionExecutor: @unchecked Sendable {
                 afterMutationCheckpoint(.shieldEffectiveStateResolved)
                 guard identity.isCurrent else {
                     await rollbackShieldCommand(
-                        record: record,
-                        prior: prior,
+                        receipt: shieldMutation.receipt,
                         deferredLockedSetID: deferredLockedSetID,
                         priorLockedSetID: priorLockedSetID,
-                        priorLockedSetTokenData: priorLockedSetTokenData,
-                        identity: identity
+                        priorLockedSetTokenData: priorLockedSetTokenData
                     )
                     return Self.staleIdentityResult
                 }
@@ -728,14 +657,12 @@ final class ActionExecutor: @unchecked Sendable {
     }
 
     private func rollbackShieldCommand(
-        record: ShieldRecord,
-        prior: ShieldRecord?,
+        receipt: ActiveLockStore.ShieldMutationReceipt,
         deferredLockedSetID: String?,
         priorLockedSetID: String?,
-        priorLockedSetTokenData: Data?,
-        identity: CommandIdentityContext
+        priorLockedSetTokenData: Data?
     ) async {
-        await rollbackAddedShield(record, prior: prior, identity: identity)
+        await rollbackAddedShield(receipt)
         if let deferredLockedSetID {
             EarnedTimeStore.shared.restoreLockedSetIDIfCurrent(
                 deferredLockedSetID,
@@ -1118,14 +1045,11 @@ final class ActionExecutor: @unchecked Sendable {
                     case "task_pause":  src = .taskPause
                     default:            src = .manual
                     }
-                    let prior = await ActiveLockStore.shared.allCurrent().shields
-                        .first { $0.recordKey == recordKey }
                     guard identity.isCurrent else { return Self.staleIdentityResult }
                     guard await prepareForMutation(identity) else { return Self.staleIdentityResult }
                     await ActiveLockStore.shared.removeSource(src, fromRecordKey: recordKey)
                     afterMutationCheckpoint(.unshieldRemoved)
                     guard identity.isCurrent else {
-                        if let prior { await restoreRemovedShields([prior], identity: identity) }
                         return Self.staleIdentityResult
                     }
                 }
@@ -1287,7 +1211,6 @@ final class ActionExecutor: @unchecked Sendable {
                     .removeCategoryShieldsByDisplayName(hint)
                 afterMutationCheckpoint(.unshieldRemoved)
                 guard identity.isCurrent else {
-                    await restoreRemovedShields(removedByName, identity: identity)
                     return Self.staleIdentityResult
                 }
                 if let match = strongestShield(in: removedByName) {
@@ -1299,7 +1222,6 @@ final class ActionExecutor: @unchecked Sendable {
                     )
                     afterMutationCheckpoint(.unshieldEffectiveStateResolved)
                     guard identity.isCurrent else {
-                        await restoreRemovedShields(removedByName, identity: identity)
                         return Self.staleIdentityResult
                     }
                     for record in removedByName {
@@ -1321,7 +1243,6 @@ final class ActionExecutor: @unchecked Sendable {
         }
         afterMutationCheckpoint(.unshieldRemoved)
         guard identity.isCurrent else {
-            await restoreRemovedShields([removed.record], identity: identity)
             return Self.staleIdentityResult
         }
 
@@ -1344,7 +1265,6 @@ final class ActionExecutor: @unchecked Sendable {
                 for: AppQuery(categoryHint: targetKey)
             )
             guard identity.isCurrent else {
-                await restoreRemovedShields([removed.record], identity: identity)
                 return Self.staleIdentityResult
             }
             eff = effectiveStateFrom(
@@ -1363,7 +1283,6 @@ final class ActionExecutor: @unchecked Sendable {
                     for: AppQuery(token: token)
                 )
                 guard identity.isCurrent else {
-                    await restoreRemovedShields([removed.record], identity: identity)
                     return Self.staleIdentityResult
                 }
                 for r in s.stillCovered { union[r.recordKey] = r }
@@ -1375,7 +1294,6 @@ final class ActionExecutor: @unchecked Sendable {
             for _ in removed.record.categoryTokens {
                 let s = await ActiveLockStore.shared.effectiveState(for: AppQuery())
                 guard identity.isCurrent else {
-                    await restoreRemovedShields([removed.record], identity: identity)
                     return Self.staleIdentityResult
                 }
                 // `all`-tier always matches AppQuery(). This catches the edge case.
@@ -1394,7 +1312,6 @@ final class ActionExecutor: @unchecked Sendable {
 
         afterMutationCheckpoint(.unshieldEffectiveStateResolved)
         guard identity.isCurrent else {
-            await restoreRemovedShields([removed.record], identity: identity)
             return Self.staleIdentityResult
         }
         cancelScheduled(recordKey: recordKey)
@@ -1422,13 +1339,11 @@ final class ActionExecutor: @unchecked Sendable {
             }
             afterMutationCheckpoint(.unshieldRemoved)
             guard identity.isCurrent else {
-                await restoreRemovedShields([removed.record], identity: identity)
                 return Self.staleIdentityResult
             }
             let post = await ActiveLockStore.shared.effectiveState(for: query)
             afterMutationCheckpoint(.unshieldEffectiveStateResolved)
             guard identity.isCurrent else {
-                await restoreRemovedShields([removed.record], identity: identity)
                 return Self.staleIdentityResult
             }
             cancelScheduled(recordKey: exactAppShield.recordKey)
@@ -1476,7 +1391,6 @@ final class ActionExecutor: @unchecked Sendable {
         }
         afterMutationCheckpoint(.unblockRemoved)
         guard identity.isCurrent else {
-            await restoreRemovedBlocks([removed.record], identity: identity)
             return Self.staleIdentityResult
         }
         let eff = effectiveStateFrom(

@@ -162,6 +162,41 @@ final class RecordKeyMigrationTests: XCTestCase {
         XCTAssertEqual(afterSecond[0].recordKey, "savedList:\(backendID.lowercased())", "key must stay on backendID")
     }
 
+    @MainActor
+    func test_rollbackRekeyDoesNotOverwriteNewerDurableExtensionWrite() async throws {
+        let localID = UUID().uuidString
+        let backendID = UUID().uuidString
+        persistShieldRecord(localID: localID, sources: [.manual], expiresAt: nil)
+        let lockStore = ActiveLockStore()
+        let possibleMutation = await lockStore.reKeyShieldRecord(
+            fromLocalID: localID,
+            toBackendID: backendID
+        )
+        let mutation = try XCTUnwrap(possibleMutation)
+        let newer = ShieldRecord(
+            recordKey: mutation.migrated.recordKey,
+            tier: mutation.migrated.tier,
+            targetKey: mutation.migrated.targetKey,
+            displayName: mutation.migrated.displayName,
+            lastCommandID: UUID(),
+            appTokens: mutation.migrated.appTokens,
+            categoryTokens: mutation.migrated.categoryTokens,
+            webDomainTokens: mutation.migrated.webDomainTokens,
+            appliesToAll: mutation.migrated.appliesToAll,
+            issuedAt: mutation.migrated.issuedAt,
+            expiresAt: mutation.migrated.expiresAt,
+            originalRequest: mutation.migrated.originalRequest,
+            targetChildID: mutation.migrated.targetChildID,
+            sources: mutation.migrated.sources.union([.limit])
+        )
+        persistShieldDictionary([newer.recordKey: newer])
+
+        await lockStore.rollbackRekey(mutation)
+
+        let durable = await ActiveLockStore().allCurrent().shields
+        XCTAssertEqual(durable, [newer])
+    }
+
     // MARK: - Test 3: manual + remote resolve to the same savedList:<backendID>
 
     /// After the migration, `DefaultLockGroup.shared.recordKey` must return
@@ -183,6 +218,15 @@ final class RecordKeyMigrationTests: XCTestCase {
         // Post-sync: `DefaultLockGroup.shared.id` must return the backend id.
         XCTAssertEqual(DefaultLockGroup.shared.id, backendID, "post-sync: id must be backend id")
         XCTAssertEqual(DefaultLockGroup.shared.recordKey, "savedList:\(backendID.lowercased())")
+    }
+
+    private func persistShieldDictionary(_ records: [String: ShieldRecord]) {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try! encoder.encode(records)
+        let defaults = UserDefaults(suiteName: suite)
+        defaults?.set(data, forKey: shieldsKey)
+        defaults?.synchronize()
     }
 
     // MARK: - Test 4: pre-sync fallback uses local UUID

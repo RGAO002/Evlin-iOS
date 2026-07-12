@@ -146,7 +146,7 @@ final class ActionExecutorTests: XCTestCase {
         XCTAssertTrue(spy.started.isEmpty)
     }
 
-    func testIdentityChangeAfterUnshieldEffectiveStateReadRestoresRemovedShield() async {
+    func testIdentityTeardownAfterUnshieldEffectiveStateReadDoesNotRestoreOldFamilyShield() async {
         let oldID = UUID()
         let record = makeCategoryShield(childID: oldID)
         _ = await ActiveLockStore.shared.addShield(record)
@@ -157,6 +157,7 @@ final class ActionExecutorTests: XCTestCase {
             afterMutationCheckpoint: { checkpoint in
                 guard checkpoint == .unshieldEffectiveStateResolved else { return }
                 reachedCheckpoint = true
+                self.clearPersistedRestrictionsForIdentityTeardown()
                 currentID = UUID()
             }
         )
@@ -169,11 +170,95 @@ final class ActionExecutorTests: XCTestCase {
 
         XCTAssertTrue(reachedCheckpoint)
         XCTAssertEqual(result, .failed(.execution("stale_identity")))
-        let restoredShields = await ActiveLockStore.shared.allCurrent().shields
-        XCTAssertEqual(
-            restoredShields.first { $0.recordKey == record.recordKey },
-            record
+        let shields = await ActiveLockStore.shared.allCurrent().shields
+        XCTAssertFalse(shields.contains { $0.recordKey == record.recordKey })
+    }
+
+    func testIdentityTeardownAfterUnblockRemovalDoesNotRestoreOldFamilyBlock() async {
+        let oldID = UUID()
+        let bundleID = "com.example.old-family-block"
+        _ = await ActiveLockStore.shared.addBlock(BlockRecord(
+            bundleID: bundleID,
+            displayName: "Old Family App",
+            blockedAt: Date(),
+            lastCommandID: UUID(),
+            originalRequest: "old family block",
+            targetChildID: oldID,
+            expiresAt: nil
+        ))
+        var currentID = oldID
+        let executor = ActionExecutor(
+            authorizationStatusProvider: { .approved },
+            afterMutationCheckpoint: { checkpoint in
+                guard checkpoint == .unblockRemoved else { return }
+                self.clearPersistedRestrictionsForIdentityTeardown()
+                currentID = UUID()
+            }
         )
+        let command = LockCommand(
+            id: UUID(),
+            action: .unblock,
+            tier: .exactApp,
+            target: CommandTarget(
+                bundleID: bundleID,
+                originalRequest: "unblock old family app",
+                targetDisplay: "Old Family App",
+                targetChildID: oldID
+            ),
+            durationMinutes: nil,
+            issuedAt: Date()
+        )
+
+        let result = await executor.execute(
+            command,
+            expectedChildID: oldID,
+            identityIsCurrent: { $0 == currentID }
+        )
+
+        XCTAssertEqual(result, .failed(.execution("stale_identity")))
+        let blocks = await ActiveLockStore.shared.allCurrent().blocks
+        XCTAssertFalse(blocks.contains { $0.bundleID == bundleID })
+    }
+
+    func testShieldRollbackDoesNotOverwriteNewerDurableSameRecordWrite() async throws {
+        let oldID = UUID()
+        let newerID = UUID()
+        let recordKey = ShieldRecord.makeRecordKey(tier: .all, targetKey: "all")
+        let newerRecord = ShieldRecord(
+            recordKey: recordKey,
+            tier: .all,
+            targetKey: "all",
+            displayName: "New Family Lock",
+            lastCommandID: UUID(),
+            appTokens: [],
+            categoryTokens: [],
+            webDomainTokens: [],
+            appliesToAll: true,
+            issuedAt: Date(timeIntervalSince1970: 2_000),
+            expiresAt: nil,
+            originalRequest: "new family lock",
+            targetChildID: newerID,
+            sources: [.manual]
+        )
+        var currentID = oldID
+        let executor = ActionExecutor(
+            authorizationStatusProvider: { .approved },
+            afterMutationCheckpoint: { checkpoint in
+                guard checkpoint == .shieldEffectiveStateResolved else { return }
+                self.persistShieldRecords([recordKey: newerRecord])
+                currentID = newerID
+            }
+        )
+
+        let result = await executor.execute(
+            makeAllShieldCommand(childID: oldID, minutes: 15),
+            expectedChildID: oldID,
+            identityIsCurrent: { $0 == currentID }
+        )
+
+        XCTAssertEqual(result, .failed(.execution("stale_identity")))
+        let durable = await ActiveLockStore().allCurrent().shields
+        XCTAssertEqual(durable.first { $0.recordKey == recordKey }, newerRecord)
     }
 
     @MainActor
@@ -321,6 +406,22 @@ final class ActionExecutorTests: XCTestCase {
         let defaults = UserDefaults(suiteName: "group.com.evlin.ios")
         defaults?.removeObject(forKey: "evlin.blockRecords")
         defaults?.removeObject(forKey: "evlin.shieldRecords")
+    }
+
+    private func persistShieldRecords(_ records: [String: ShieldRecord]) {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try! encoder.encode(records)
+        let defaults = UserDefaults(suiteName: "group.com.evlin.ios")
+        defaults?.set(data, forKey: "evlin.shieldRecords")
+        defaults?.synchronize()
+    }
+
+    private func clearPersistedRestrictionsForIdentityTeardown() {
+        let defaults = UserDefaults(suiteName: "group.com.evlin.ios")
+        defaults?.removeObject(forKey: "evlin.shieldRecords")
+        defaults?.removeObject(forKey: "evlin.blockRecords")
+        defaults?.synchronize()
     }
 
     private func expectedBlockActivityName(bundleID: String) -> String {
