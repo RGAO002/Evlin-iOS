@@ -22,6 +22,11 @@
 - The earned arm signature includes device identity, canonical usage date, policy, selection fingerprint, and accepted usage offset. A changed accepted offset must replace the raw ladder; an unchanged signature must not restart monitoring on a stable poll.
 - Identity teardown may stop and clear state before fetching child state, but it must not arm until the fetched runtime and authoritative gate have been applied.
 - Child-state runtime reconciliation validates canonical date/timezone and `0...1440` bounds, rejects stale dates before writing any policy field, and prevents overlapping refreshes from applying out of order.
+- Sample and poll reconciliation update backend-accepted usage but never mutate the offset owned by the running ladder. Persist a new offset only after a replacement ladder starts successfully.
+- Stable polling must not replace a ladder merely because accepted usage advanced. Stop/gate transitions invalidate the signature; config/date/selection/identity changes install from the accepted offset.
+- Every replacement uses a fresh persisted `evlin.earned.budget.<generation>` activity name. Stop and identity teardown stop the persisted generation plus the legacy fixed activity; the extension recognizes the generated prefix.
+- An overlapping child-state invalidation coalesces into exactly one follow-up fetch instead of being discarded.
+- Multi-device labels and bars use the same effective remaining value: `min(device remaining-to-cap, shared pool remaining)` when both exist.
 - Missing optional runtime fields must preserve stored policy and use the compatibility gate: all tasks complete and no active reflection request.
 - Backend runtime responses accept the established `0...1440` pool/cap domain. The current iOS compatibility guard deliberately ignores pool/cap `0`, so zero policies are not synchronized through runtime yet and previously stored local policy remains unchanged.
 - Clamp runtime `estimated_minutes` to `0...1440` before response-model construction so polluted legacy data cannot turn `/child/state` into a validation 500; this is response hardening, not database correction.
@@ -35,8 +40,8 @@
 - Before Task 1, record `git stash create` recovery SHAs for both repositories without applying or clearing the worktrees.
 - Implementer and reviewer subagents must not delegate. They may touch only the task's named files in the existing main working directory.
 - For dirty target files, derive an exact patch from the task diff and stage it with `git apply --cached`, or use scripted `git add -p`; every review gate must inspect `git diff --cached` and reject unrelated pre-existing hunks.
-- Task 6 is controller-only. No subagent may restart services, modify the local database, copy App Group data, install on a physical device, or run the physical acceptance test.
-- In Task 6, stop before the recovery transaction's `COMMIT` and require the user to confirm the printed family, child profile, child device, timezone, usage date, and affected row counts.
+- Task 7 is controller-only. No subagent may restart services, modify the local database, copy App Group data, install on a physical device, or run the physical acceptance test.
+- In Task 7, stop before the recovery transaction's `COMMIT` and require the user to confirm the printed family, child profile, child device, timezone, usage date, and affected row counts.
 
 ---
 
@@ -735,7 +740,7 @@ The cached diff must include the pre-existing retry-filter hunks only if they ar
 
 ---
 
-### Task 5: Reconcile Runtime Before Gate And Self-Heal Arming
+### Task 5: Reconcile Runtime And Install Generation-Safe Earned Monitoring
 
 **Files:**
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS/Services/BigKidStatePoller.swift`
@@ -743,6 +748,7 @@ The cached diff must include the pre-existing retry-filter hunks only if they ar
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS/Services/EarnedBudgetArming.swift`
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS/Services/EarnedBudgetScheduler.swift`
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS/Services/EarnedTimeStore.swift`
+- Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/EvlinDeviceActivityMonitor/DeviceActivityMonitorExtension.swift`
 - Test: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/BigKidStatePollerTests.swift`
 - Test: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/EarnedConfigCommandTests.swift`
 - Test: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/EarnedBudgetSchedulerTests.swift`
@@ -751,7 +757,7 @@ The cached diff must include the pre-existing retry-filter hunks only if they ar
 
 **Interfaces:**
 - Consumes: Task 3 runtime model and accepted-baseline store API.
-- Produces: ordered poll flow `runtime sync -> authoritative gate -> stop/rearm`, plus config handling that never reintroduces raw phantom usage.
+- Produces: ordered poll flow `runtime sync -> authoritative gate -> stop/rearm`, one generation-safe production arming path, and an accepted baseline separate from the running ladder offset.
 
 - [ ] **Step 1: Preserve and inspect pre-existing poller/config edits**
 
@@ -760,7 +766,7 @@ git diff -- 'Evlin iOS/Services/BigKidStatePoller.swift' \
   'Evlin iOS/Services/CommandPoller.swift'
 ```
 
-Keep the current `remainingPolicy` and arm-signature changes intact. This task layers runtime reconciliation and accepted-baseline selection on top of them.
+Integrate the current `remainingPolicy` and arm-signature work into the committed implementation. The result must be coherent from a clean checkout; no correctness-critical definition may remain only in the dirty worktree.
 
 - [ ] **Step 2: Add failing poll ordering and self-heal tests**
 
@@ -844,15 +850,13 @@ private static func syncEarnedRuntime(_ runtime: EarnedTimeRuntime?) {
           runtime.estimatedMinutes >= 0
     else { return }
 
-    let store = EarnedTimeStore.shared
-    store.poolMinutes = runtime.dailyPoolMinutes
-    store.capMinutes = runtime.deviceCapMinutes
-    store.backendRemainingAtLastSync = runtime.remainingMinutes
-    store.lastBackendSyncAt = Date()
-    _ = store.reconcileAcceptedUsage(
+    _ = EarnedTimeStore.shared.reconcileRuntimePolicy(
         usageDate: runtime.usageDate,
-        serverEstimatedMinutes: runtime.estimatedMinutes,
-        allowSameDayDecrease: false
+        timezoneIdentifier: runtime.timezone,
+        poolMinutes: runtime.dailyPoolMinutes,
+        capMinutes: runtime.deviceCapMinutes,
+        remainingMinutes: runtime.remainingMinutes,
+        estimatedMinutes: runtime.estimatedMinutes
     )
 }
 ```
@@ -880,29 +884,67 @@ if !wasAllowed || shouldRecoverSkippedUsage {
 
 Production `ensureEarnedArmed` is `{ EarnedBudgetArming.armIfReady() }`. Preserve existing transition recovery for device-total and per-app counters. The existing earned arm signature is the deduplication boundary; do not add a second poll timestamp throttle.
 
-- [ ] **Step 7: Derive config offset from accepted usage**
+- [ ] **Step 7: Separate accepted usage from the running ladder offset**
 
-In `CommandPoller.handleEarnedTimeConfig`, replace the raw estimate maximum:
+Accepted reconciliation must not write `earnedUsageOffsetMinutes`. That key belongs to the currently installed raw ladder:
 
 ```swift
-let accepted = EarnedTimeStore.shared.acceptedEstimateMinutes ?? 0
-let offset = max(accepted, EarnedTimeStore.shared.earnedUsageOffsetMinutes)
-EarnedTimeStore.shared.earnedUsageOffsetMinutes = offset
+acceptedUsageDate = usageDate
+acceptedEstimateMinutes = accepted
+// Keep latestDeviceEstimate reconciliation for diagnostics/phantom removal.
+// Do not mutate earnedUsageOffsetMinutes here.
 ```
 
-Do not include `latestDeviceEstimate` in config re-arm math. It originates as a raw extension observation, but reconciliation deliberately overwrites it on a new canonical day or `counted:false` response to clear phantom usage. Only `acceptedEstimateMinutes` is the re-arm authority.
+Add a regression that advances accepted usage from 0 to 5 while the running offset remains 0; a subsequent raw `t10` must remain adjusted 10, not 15. `latestDeviceEstimate` is never an offset authority.
 
-- [ ] **Step 8: Run focused iOS tests**
+- [ ] **Step 8: Make replacement generation-safe and idempotent**
 
-Run the Step 4 command again. Expected: PASS, including existing task-pause transition and remaining-policy tests.
+Add pure generated-name helpers:
 
-- [ ] **Step 9: Interactively stage only Task 5 hunks and commit**
+```swift
+static let legacyActivityName = "evlin.earned.budget"
+static let generatedActivityPrefix = "evlin.earned.budget."
+
+nonisolated static func generatedActivityName(id: UUID) -> String {
+    generatedActivityPrefix + id.uuidString.lowercased()
+}
+
+nonisolated static func isEarnedActivityName(_ raw: String) -> Bool {
+    raw == legacyActivityName || raw.hasPrefix(generatedActivityPrefix)
+}
+```
+
+Persist the active generation in the App Group. A successful replacement uses a fresh generated activity, then stops the prior generation and legacy fixed name. `stop()` stops the persisted generation plus legacy and removes the active-generation key. A failed start preserves the prior generation, offset, and signature. Change the extension's earned interval check from exact equality to `isEarnedActivityName`.
+
+The signature describes the **running** offset. Advancing accepted usage alone must leave an unchanged running signature and skip. If signature/policy/date/selection is invalidated, choose the accepted estimate as the replacement offset and persist it only after the generated monitor starts successfully.
+
+- [ ] **Step 9: Centralize stop and config arming**
+
+Add `EarnedBudgetArming.stopAndInvalidateSignature()` and use it for false-gate polls, paused config, and identity teardown. This closes false-to-true recovery.
+
+Production `CommandPoller` persists config and calls `EarnedBudgetArming.armIfReady()`; it must not call `EarnedBudgetScheduler.armFromNow` directly. A test-only override may capture calculated remaining policy. Transition/skipped recovery re-arms only device-total and per-app counters.
+
+- [ ] **Step 10: Coalesce overlapping refreshes**
+
+An overlapping `refreshNow()` sets a pending flag. After the active fetch and heartbeat complete, execute one follow-up fetch, collapsing multiple invalidations. Test two or more overlapping requests produce exactly two fetches.
+
+- [ ] **Step 11: Run focused iOS tests**
+
+Run Task 5's five serial suites: `BigKidStatePollerTests`, `EarnedConfigCommandTests`, `EarnedBudgetSchedulerTests`, `EarnedBudgetArmingTests`, and the named accepted/runtime `EarnedTimeStoreTests`. Then run the simulator build. Expected: PASS.
+
+- [ ] **Step 12: Stage Task 5 and commit**
 
 ```bash
 git add -p 'Evlin iOS/Services/BigKidStatePoller.swift'
 git add -p 'Evlin iOS/Services/CommandPoller.swift'
+git add -p 'Evlin iOS/Services/EarnedBudgetArming.swift'
+git add -p 'Evlin iOS/Services/EarnedBudgetScheduler.swift'
+git add -p 'Evlin iOS/Services/EarnedTimeStore.swift'
 git add 'Evlin iOSTests/BigKidStatePollerTests.swift' \
-  'Evlin iOSTests/EarnedConfigCommandTests.swift'
+  'Evlin iOSTests/EarnedConfigCommandTests.swift' \
+  'Evlin iOSTests/EarnedBudgetSchedulerTests.swift' \
+  'Evlin iOSTests/EarnedBudgetArmingTests.swift' \
+  'Evlin iOSTests/EarnedTimeStoreTests.swift'
 git diff --cached --check
 git diff --cached
 git commit -m "fix: self-heal earned policy from child state"
@@ -910,10 +952,77 @@ git commit -m "fix: self-heal earned policy from child state"
 
 ---
 
-### Task 6: Cross-Repository Verification And Local Account Recovery
+### Task 6: Align Multi-Device Labels With Shared-Pool Bars
 
 **Files:**
-- Verify: both repositories' target files from Tasks 1-5
+- Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS/Services/EarnedDisplayFormatters.swift`
+- Test: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/EarnedDisplayTests.swift`
+
+**Interfaces:**
+- Consumes: parent summary `remaining_minutes` and each device's `remaining_to_cap_minutes`.
+- Produces: one effective per-device remaining value used consistently by label and bar.
+
+- [ ] **Step 1: Add the failing positive shared-pool clamp test**
+
+```swift
+func test_deviceRemainingLabel_clampsPositiveDeviceCapToSharedPool() {
+    XCTAssertEqual(
+        EarnedDisplayFormatters.deviceRemainingLabel(
+            remainingToCapMinutes: 120,
+            overallRemainingMinutes: 35,
+            fallbackOverallLabel: "35m left"
+        ),
+        "35 mins left"
+    )
+}
+```
+
+Retain the existing exhausted and missing-device fallbacks. Add a paired assertion proving the label and `deviceRemainingFraction` both represent effective remaining 35 rather than mixing cap-only text with a pool-clamped bar.
+
+- [ ] **Step 2: Run the focused test and verify failure**
+
+```bash
+xcodebuild test -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' \
+  -destination 'platform=iOS Simulator,name=iPhone 17' \
+  -parallel-testing-enabled NO \
+  -only-testing:'Evlin iOSTests/EarnedDisplayTests'
+```
+
+Expected: the new test receives `120 mins left` before the fix.
+
+- [ ] **Step 3: Use effective remaining in the label**
+
+```swift
+if let remainingToCapMinutes, let overallRemainingMinutes {
+    return deviceEstimateLabel(
+        estimatedMinutesLeft: min(remainingToCapMinutes, overallRemainingMinutes)
+    )
+}
+if let remainingToCapMinutes {
+    return deviceEstimateLabel(estimatedMinutesLeft: remainingToCapMinutes)
+}
+return fallbackOverallLabel
+```
+
+- [ ] **Step 4: Run display tests and build**
+
+Run the Step 2 command, then a simulator build. Expected: PASS and `BUILD SUCCEEDED`.
+
+- [ ] **Step 5: Commit the two Task 6 files**
+
+```bash
+git add 'Evlin iOS/Services/EarnedDisplayFormatters.swift' \
+  'Evlin iOSTests/EarnedDisplayTests.swift'
+git diff --cached --check
+git commit -m "fix: align device remaining with shared pool"
+```
+
+---
+
+### Task 7: Cross-Repository Verification And Local Account Recovery
+
+**Files:**
+- Verify: both repositories' target files from Tasks 1-6
 - Operational data only: local PostgreSQL `ale_db` and K-device App Group `group.com.evlin.ios`
 - Do not create or commit a product reset endpoint or migration.
 
@@ -982,12 +1091,12 @@ Expected: health/API requests succeed at `http://192.168.1.175:8000/api/v1`; lea
 
 - [ ] **Step 6: Back up and inspect the K-device App Group before reset**
 
-Use the previously identified child device `F5946523-B50E-55D4-9305-4690E89929E0`:
+Use the affected iPad `767F867E-8CA2-59C4-B487-41D55B671095`:
 
 ```bash
 mkdir -p /tmp/evlin-earned-recovery
 xcrun devicectl device copy from \
-  --device F5946523-B50E-55D4-9305-4690E89929E0 \
+  --device 767F867E-8CA2-59C4-B487-41D55B671095 \
   --domain-type appGroupDataContainer \
   --domain-identifier group.com.evlin.ios \
   --source Library/Preferences/group.com.evlin.ios.plist \
@@ -1006,7 +1115,8 @@ SELECT a.email, a.family_id, d.id AS child_device_id, d.child_profile_id
 FROM evlin_accounts a
 JOIN evlin_devices d ON d.family_id = a.family_id
 WHERE lower(a.email) = lower('gruoping@gmail.com')
-  AND d.mode = 'child';
+  AND d.mode = 'child'
+ORDER BY d.created_at;
 ```
 
 Run this transaction against local `ale_db`. It derives today's date in the active config timezone, refuses to proceed unless exactly one child device matches, prints the target and pre-delete counts, and deletes only the three earned ledger tables:
@@ -1034,12 +1144,25 @@ JOIN LATERAL (
     ORDER BY c.effective_date DESC
     LIMIT 1
 ) AS cfg ON true
-WHERE lower(a.email) = lower('gruoping@gmail.com');
+WHERE lower(a.email) = lower('gruoping@gmail.com')
+  AND d.id = '81635fc2-6c2f-4f78-bfbb-9bb5215b00e1'::uuid
+  AND d.label = 'iPad';
 
 DO $$
 BEGIN
     IF (SELECT count(*) FROM evlin_recovery_target) <> 1 THEN
         RAISE EXCEPTION 'recovery target must contain exactly one child device';
+    END IF;
+    IF EXISTS (
+        SELECT 1
+        FROM evlin_earned_time_device_days d, evlin_recovery_target t
+        WHERE d.family_id=t.family_id
+          AND d.child_profile_id=t.child_profile_id
+          AND d.usage_date=t.usage_date
+          AND d.child_device_id<>t.child_device_id
+          AND d.estimated_minutes>0
+    ) THEN
+        RAISE EXCEPTION 'another child device has real usage; recompute the shared child-day instead of deleting it';
     END IF;
 END $$;
 
@@ -1090,6 +1213,7 @@ earned.poolMinutes
 earned.capMinutes
 earned.usageCountingOffset
 evlin.earned.armSignature
+evlin.earned.activeActivityName
 evlin.usageCountingAllowed
 evlin.earned.lastSamplePost
 evlin.earned.lastThreshold
@@ -1101,7 +1225,7 @@ Terminate the Evlin app process, copy the edited plist back into the same App Gr
 
 - [ ] **Step 9: Install and launch the fixed K build**
 
-Build/run the `Evlin iOS` scheme on Liam's iPhone from Xcode, or install the verified device build with `devicectl`. Confirm the diagnostics page shows:
+Build/run the `Evlin iOS` scheme on Ruoping's iPad from Xcode, or install the verified device build with `devicectl`. Confirm the diagnostics page shows:
 
 ```text
 baseURL = http://192.168.1.175:8000/api/v1
@@ -1144,6 +1268,11 @@ Add a concise result note to the task/PR description containing test command out
 - [ ] Runtime policy is persisted before gate/re-arm decisions.
 - [ ] False polls stop all three counters even when the previous gate was already false.
 - [ ] Allowed stable polls retry earned arming and rely on the existing signature for idempotence.
+- [ ] Advancing accepted usage does not mutate the running ladder offset or replace a stable monitor.
+- [ ] Every real replacement uses a fresh generated activity name and stops prior/legacy activity names.
+- [ ] False-gate stops invalidate the signature and false-to-true installs one new ladder.
+- [ ] Overlapping refreshes coalesce into one follow-up fetch.
+- [ ] Multi-device labels and bars use the same effective shared-pool-clamped remaining value.
 - [ ] Missing runtime fields preserve old-server compatibility.
 - [ ] Local recovery preserves measurement selection, Locked tokens, pairing, and app-control rules.
 - [ ] Render data remains untouched.

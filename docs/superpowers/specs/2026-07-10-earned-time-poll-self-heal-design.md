@@ -25,6 +25,16 @@ gate while iOS derives its gate only from tasks, the sample response does not
 say whether it was counted, and `/child/state` cannot restore the exact policy
 that identity teardown deliberately clears.
 
+A second confirmed incident on 2026-07-11 exposed the monitor-lifecycle side of
+the same subsystem. A newly paired iPad emitted 17 thresholds from `t5` through
+`t85` in eight minutes, including out-of-order thresholds in the same second.
+Its App Group log showed an old-to-new device identity transition followed by
+`intervalDidStart` roughly every eleven seconds. The fixed
+`evlin.earned.budget` activity name was repeatedly reused across identities and
+re-arms, allowing DeviceActivity to replay usage accumulated before onboarding.
+The backend correctly attributed those samples to the new iPad; the samples
+themselves were false.
+
 ## Goals
 
 1. Use one backend-authoritative metering gate for unfinished tasks and active
@@ -37,6 +47,12 @@ that identity teardown deliberately clears.
    does not count toward Total Pool, Device Limit, or Per-App Limit.
 5. Reset the affected local test account once after the fix; do not ship a
    general automatic history-correction or migration feature.
+6. Give every earned monitor installation a fresh generation identity so a
+   previous account, device identity, or ladder cannot replay thresholds.
+7. Keep backend-accepted usage separate from the offset owned by the currently
+   running raw ladder.
+8. Make multi-device rows show effective usable time, not a cap-only number
+   beside a shared-pool-clamped progress bar.
 
 ## Non-Goals
 
@@ -152,6 +168,35 @@ server estimate. A `counted: false` sample response is the only same-day path
 allowed to lower the local accepted baseline, because it explicitly removes a
 client-side phantom that the server did not count.
 
+`acceptedEstimateMinutes` and `earnedUsageOffsetMinutes` are different state:
+
+- accepted estimate is the backend ledger high-water mark for the canonical
+  day;
+- usage offset is the base added by the **currently installed** raw ladder.
+
+Sample and poll reconciliation update accepted usage but never mutate the
+running ladder's offset. `EarnedBudgetArming.armIfReady()` chooses the accepted
+estimate as the new offset only when it actually installs a replacement ladder;
+it persists that offset only after installation succeeds. While the app is
+backgrounded, the old ladder therefore continues reporting correct cumulative
+raw thresholds instead of adding a newly advanced accepted value a second time.
+
+Stopping earned monitoring also invalidates its arm signature. A later
+false-to-true gate transition must install a ladder even when policy and
+selection are unchanged. Config handling and child-state polling share
+`EarnedBudgetArming.armIfReady()` as the sole production earned-arm entry point.
+
+Each successful installation uses a new activity name under
+`evlin.earned.budget.<generation>`. The active generation is persisted in the
+App Group; stop/identity teardown stops both that generation and the legacy
+fixed name. The extension recognizes the earned activity prefix. Reusing the
+same event names is safe because event state is scoped by the fresh activity.
+
+Stable allowed polls do not replace a running ladder merely because accepted
+usage advanced. Policy/date/selection changes, an invalidated signature, or an
+explicit force cause a generation replacement. Overlapping refresh requests
+coalesce into one follow-up refresh instead of being discarded.
+
 For every successful sample POST, iOS decodes `counted` and the server
 `estimated_minutes`:
 
@@ -210,6 +255,19 @@ iOS tests must prove:
 7. The false gate invokes the existing three-counter stop path: earned ladder,
    device-total activity, and per-app activities all stop. Existing task-pause
    stop/re-arm tests remain green under the reflection-aware server gate.
+8. A counted `t5` response can advance accepted usage while the running offset
+   remains zero; the next raw `t10` therefore remains 10 while backgrounded.
+9. Stop invalidates the signature; false-to-true reinstalls exactly one earned
+   ladder. Config and state-poll paths cannot call the scheduler directly.
+10. Every real replacement receives a fresh generation activity name, stops
+    the prior/legacy names, and the extension recognizes generated names.
+11. Stable polls do not re-arm solely because accepted usage advances; policy,
+    date, selection, and gate transitions do re-arm with the accepted offset.
+12. A refresh arriving during an in-flight refresh causes one coalesced follow-
+    up fetch.
+13. A device row label and bar both use
+    `min(remaining_to_cap_minutes, overall_remaining_minutes)` when both values
+    exist.
 
 ## Deployment And One-Time Recovery
 
