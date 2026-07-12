@@ -58,6 +58,7 @@ final class ReflectionLockApplier {
             await afterLocalMutation()
             guard identityIsCurrent(childID) else {
                 await removeReflectionRecordIfOwned(rec)
+                clearReflectionStickyIfHeld(in: [rid])
                 return
             }
             scheduleOrDiagnose(rec, rid: rid)
@@ -92,6 +93,7 @@ final class ReflectionLockApplier {
             await afterLocalMutation()
             guard identityIsCurrent(childID) else {
                 await removeReflectionRecordIfOwned(rec)
+                clearReflectionStickyIfHeld(in: [releaseRID, applyRID])
                 return
             }
             scheduleOrDiagnose(rec, rid: applyRID)
@@ -102,7 +104,7 @@ final class ReflectionLockApplier {
     }
 
     private func identityIsCurrent(_ expectedChildID: UUID) -> Bool {
-        currentChildID().map { $0 == expectedChildID } ?? true
+        currentChildID() == expectedChildID
     }
 
     private func removeReflectionRecordIfOwned(_ record: ShieldRecord) async {
@@ -111,6 +113,12 @@ final class ReflectionLockApplier {
         }
         guard current?.targetChildID == record.targetChildID else { return }
         _ = await store.removeShield(recordKey: record.recordKey)
+    }
+
+    private func clearReflectionStickyIfHeld(in reflectionIDs: Set<UUID>) {
+        let sticky = loadSticky()
+        guard let heldRID = sticky.heldRID, reflectionIDs.contains(heldRID) else { return }
+        defaults?.removeObject(forKey: stickyKey)
     }
 
     /// §8.1 first-sight hook (Plan 7): fire-and-forget POST

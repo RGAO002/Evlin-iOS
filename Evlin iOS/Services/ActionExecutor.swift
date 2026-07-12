@@ -132,8 +132,26 @@ struct DeviceActivityCenterScheduler: DeviceActivityScheduling {
 final class ActionExecutor: @unchecked Sendable {
     static let shared = ActionExecutor()
 
+    private struct CommandIdentityContext {
+        let expectedChildID: UUID?
+        let identityIsCurrent: ((UUID) -> Bool)?
+
+        var isCurrent: Bool {
+            guard let expectedChildID else { return true }
+            return identityIsCurrent?(expectedChildID) ?? true
+        }
+
+        static let unrestricted = CommandIdentityContext(
+            expectedChildID: nil,
+            identityIsCurrent: nil
+        )
+    }
+
+    private static let staleIdentityResult = AckResult.failed(.execution("stale_identity"))
+
     private let activityScheduler: DeviceActivityScheduling
     private let authorizationStatusProvider: () -> AuthorizationStatus
+    private let beforeMutation: () async -> Void
 
     /// Per-app limit dependencies (P6). The planner is built per-arm via
     /// `makeLimitPlanner` rather than stored, for two reasons: (1) the planner is
@@ -158,48 +176,114 @@ final class ActionExecutor: @unchecked Sendable {
             AuthorizationCenter.shared.authorizationStatus
         },
         ruleStore: AppLimitRuleStore = .shared,
-        makeLimitPlanner: (@Sendable () -> AppLimitPlanner)? = nil
+        makeLimitPlanner: (@Sendable () -> AppLimitPlanner)? = nil,
+        beforeMutation: @escaping () async -> Void = {}
     ) {
         self.activityScheduler = activityScheduler
         self.authorizationStatusProvider = authorizationStatusProvider
         self.ruleStore = ruleStore
+        self.beforeMutation = beforeMutation
         // Default factory builds a planner sharing this executor's scheduler so
         // arming + the executor's own shield/block scheduling hit the same backend.
         self.makeLimitPlanner = makeLimitPlanner ?? { AppLimitPlanner(scheduler: activityScheduler) }
     }
 
-    func execute(_ cmd: LockCommand, blob: Data? = nil) async -> AckResult {
+    func execute(
+        _ cmd: LockCommand,
+        blob: Data? = nil,
+        expectedChildID: UUID? = nil,
+        identityIsCurrent: ((UUID) -> Bool)? = nil
+    ) async -> AckResult {
+        let identity = CommandIdentityContext(
+            expectedChildID: expectedChildID,
+            identityIsCurrent: identityIsCurrent
+        )
+        guard identity.isCurrent else { return Self.staleIdentityResult }
         guard authorizationStatusProvider() == .approved else {
             return .failed(.notAuthorized)
         }
 
         switch cmd.action {
         case .shield:
-            return await executeShield(cmd: cmd, blob: blob)
+            return await executeShield(cmd: cmd, blob: blob, identity: identity)
         case .block:
-            return await executeBlock(cmd: cmd)
+            return await executeBlock(cmd: cmd, identity: identity)
         case .unshield:
-            return await executeUnshield(cmd: cmd)
+            return await executeUnshield(cmd: cmd, identity: identity)
         case .unblock:
-            return await executeUnblock(cmd: cmd)
+            return await executeUnblock(cmd: cmd, identity: identity)
         case .unshieldAll:
+            guard await prepareForMutation(identity) else { return Self.staleIdentityResult }
             let cleared = await ActiveLockStore.shared.unshieldAll()
+            guard identity.isCurrent else {
+                await restoreRemovedShields(cleared, identity: identity)
+                return Self.staleIdentityResult
+            }
+            guard identity.isCurrent else { return Self.staleIdentityResult }
             cancelAllScheduled()
             return .confirmedExact(verb: .unshieldAll, displayName: "\(cleared.count) shield(s) cleared", effectiveState: nil)
         case .unblockAll:
+            guard await prepareForMutation(identity) else { return Self.staleIdentityResult }
             let cleared = await ActiveLockStore.shared.unblockAll()
+            guard identity.isCurrent else {
+                await restoreRemovedBlocks(cleared, identity: identity)
+                return Self.staleIdentityResult
+            }
             return .confirmedExact(verb: .unblockAll, displayName: "\(cleared.count) block(s) cleared", effectiveState: nil)
         case .expandLibrary:
             return .failed(.execution("expand_library handled in UI"))
         case .setLimit:
-            return await executeSetLimit(cmd)
+            return await executeSetLimit(cmd, identity: identity)
         case .clearLimit:
-            return await executeClearLimit(cmd)
+            return await executeClearLimit(cmd, identity: identity)
         case .earnedTimeConfig:
             // A4: this case is intercepted in CommandPoller.execute(poll:api:) BEFORE
             // ActionExecutor is called. If it somehow arrives here, fail gracefully
             // rather than misrouting to shield or crashing.
             return .failed(.execution("earned_time_config must not reach ActionExecutor"))
+        }
+    }
+
+    private func prepareForMutation(_ identity: CommandIdentityContext) async -> Bool {
+        guard identity.isCurrent else { return false }
+        await beforeMutation()
+        return identity.isCurrent
+    }
+
+    private func rollbackAddedShield(
+        _ record: ShieldRecord,
+        prior: ShieldRecord?,
+        identity: CommandIdentityContext
+    ) async {
+        let current = await ActiveLockStore.shared.allCurrent().shields
+            .first { $0.recordKey == record.recordKey }
+        guard current?.targetChildID == identity.expectedChildID else { return }
+        if let prior {
+            _ = await ActiveLockStore.shared.addShield(prior, force: true)
+        } else {
+            _ = await ActiveLockStore.shared.removeShield(recordKey: record.recordKey)
+        }
+    }
+
+    private func restoreRemovedShields(
+        _ records: [ShieldRecord],
+        identity: CommandIdentityContext
+    ) async {
+        for record in records where record.targetChildID != identity.expectedChildID {
+            let exists = await ActiveLockStore.shared.allCurrent().shields
+                .contains { $0.recordKey == record.recordKey }
+            if !exists { _ = await ActiveLockStore.shared.addShield(record, force: true) }
+        }
+    }
+
+    private func restoreRemovedBlocks(
+        _ records: [BlockRecord],
+        identity: CommandIdentityContext
+    ) async {
+        for record in records where record.targetChildID != identity.expectedChildID {
+            let exists = await ActiveLockStore.shared.allCurrent().blocks
+                .contains { $0.bundleID == record.bundleID }
+            if !exists { _ = await ActiveLockStore.shared.addBlock(record) }
         }
     }
 
@@ -210,7 +294,10 @@ final class ActionExecutor: @unchecked Sendable {
     /// first so the planner reads it from the store, and if the planner reports
     /// `.quotaExceeded` (it guarantees it armed NOTHING) the just-upserted rule is
     /// rolled back so the store never keeps a rule that didn't apply.
-    private func executeSetLimit(_ cmd: LockCommand) async -> AckResult {
+    private func executeSetLimit(
+        _ cmd: LockCommand,
+        identity: CommandIdentityContext
+    ) async -> AckResult {
         // 1. Guard a decoded limit payload. A nil here is a malformed/undecoded
         //    command — NEVER ack success (the parent would read a silent no-op as
         //    "limit applied").
@@ -246,7 +333,8 @@ final class ActionExecutor: @unchecked Sendable {
         return await applyLimitRuleFromCommand(
             rule,
             displayName: display,
-            usedTodayMinutes: limit.usedTodayMinutes
+            usedTodayMinutes: limit.usedTodayMinutes,
+            identity: identity
         )
     }
 
@@ -265,7 +353,11 @@ final class ActionExecutor: @unchecked Sendable {
     /// Split out from `executeSetLimit` so the atomic rollback-on-quota is
     /// exercisable without a picker-minted `ApplicationToken` (tokens can't be
     /// constructed in a unit test).
-    func applyLimitRule(_ rule: AppLimitRule, displayName: String) -> AckResult {
+    func applyLimitRule(
+        _ rule: AppLimitRule,
+        displayName: String,
+        identityIsCurrent: () -> Bool = { true }
+    ) -> AckResult {
         // Snapshot the value at this id BEFORE upsert. For an UPDATE (same
         // rule_id, changed budget/window) `upsert` overwrites the prior rule, so
         // a rollback that just `remove`d would DELETE the previously-valid rule
@@ -273,7 +365,13 @@ final class ActionExecutor: @unchecked Sendable {
         // re-armed the new windows, so store and device would diverge. Restoring
         // this snapshot (and re-arming from it) keeps both consistent.
         let prior = ruleStore.rule(forID: rule.id)
+        guard identityIsCurrent() else { return Self.staleIdentityResult }
         ruleStore.upsert(rule)
+        guard identityIsCurrent() else {
+            rollback(prior: prior, ruleId: rule.id)
+            return Self.staleIdentityResult
+        }
+        guard identityIsCurrent() else { return Self.staleIdentityResult }
         let result = makeLimitPlanner().arm(rules: ruleStore.all())
         switch result {
         case .armed:
@@ -304,18 +402,61 @@ final class ActionExecutor: @unchecked Sendable {
         displayName: String,
         usedTodayMinutes: Int?
     ) async -> AckResult {
-        let result = applyLimitRule(rule, displayName: displayName)
+        await applyLimitRuleFromCommand(
+            rule,
+            displayName: displayName,
+            usedTodayMinutes: usedTodayMinutes,
+            identity: .unrestricted
+        )
+    }
+
+    private func applyLimitRuleFromCommand(
+        _ rule: AppLimitRule,
+        displayName: String,
+        usedTodayMinutes: Int?,
+        identity: CommandIdentityContext
+    ) async -> AckResult {
+        guard await prepareForMutation(identity) else { return Self.staleIdentityResult }
+        let priorRule = ruleStore.rule(forID: rule.id)
+        guard identity.isCurrent else { return Self.staleIdentityResult }
+        let result = applyLimitRule(
+            rule,
+            displayName: displayName,
+            identityIsCurrent: { identity.isCurrent }
+        )
+        guard identity.isCurrent else {
+            rollback(prior: priorRule, ruleId: rule.id)
+            return Self.staleIdentityResult
+        }
         guard case .confirmedExact = result,
               let usedTodayMinutes,
               usedTodayMinutes >= rule.budgetMinutes,
-              let record = LimitShieldLogic.applyingLimit(
+              var record = LimitShieldLogic.applyingLimit(
                 to: [:],
                 rule: rule
               )[LimitShieldLogic.recordKey(for: rule)]
         else {
             return result
         }
+        if let expectedChildID = identity.expectedChildID {
+            record.targetChildID = expectedChildID
+        }
+        let priorShield = await ActiveLockStore.shared.allCurrent().shields
+            .first { $0.recordKey == record.recordKey }
+        guard identity.isCurrent else {
+            rollback(prior: priorRule, ruleId: rule.id)
+            return Self.staleIdentityResult
+        }
+        guard await prepareForMutation(identity) else {
+            rollback(prior: priorRule, ruleId: rule.id)
+            return Self.staleIdentityResult
+        }
         _ = await ActiveLockStore.shared.addShield(record)
+        guard identity.isCurrent else {
+            await rollbackAddedShield(record, prior: priorShield, identity: identity)
+            rollback(prior: priorRule, ruleId: rule.id)
+            return Self.staleIdentityResult
+        }
         return result
     }
 
@@ -337,7 +478,10 @@ final class ActionExecutor: @unchecked Sendable {
     /// auto-applied (never touching `.manual` parent shields), then re-arm so the
     /// planner's self-healing pass stops the now-vanished `evlin.limit.window.*`
     /// activity. Removing a non-existent rule is idempotent → still confirms.
-    private func executeClearLimit(_ cmd: LockCommand) async -> AckResult {
+    private func executeClearLimit(
+        _ cmd: LockCommand,
+        identity: CommandIdentityContext
+    ) async -> AckResult {
         guard let clear = cmd.clear else {
             return .failed(.malformed)
         }
@@ -345,17 +489,35 @@ final class ActionExecutor: @unchecked Sendable {
         // Capture the rule (if present) BEFORE removal so we know which app's
         // limit shield to drop.
         let existing = ruleStore.rule(forID: clear.ruleId)
-        ruleStore.remove(ruleId: clear.ruleId)
 
         // Drop the limit shield for that rule's app. Only touches source == .limit
         // records — a parent's source == .manual shield on the same app is kept.
         let appTokens = existing?.appTokens ?? []
         let bundleID = existing?.bundleID ?? cmd.target.bundleID
-        _ = await ActiveLockStore.shared.removeLimitShields(appTokens: appTokens, bundleID: bundleID)
+        guard await prepareForMutation(identity) else { return Self.staleIdentityResult }
+        let removedShields = await ActiveLockStore.shared.removeLimitShields(
+            appTokens: appTokens,
+            bundleID: bundleID
+        )
+        guard identity.isCurrent else {
+            await restoreRemovedShields(removedShields, identity: identity)
+            return Self.staleIdentityResult
+        }
 
         // Re-arm without the removed rule. Self-healing discovery stops the
         // vanished window activity.
+        guard identity.isCurrent else { return Self.staleIdentityResult }
+        ruleStore.remove(ruleId: clear.ruleId)
+        guard identity.isCurrent else {
+            if let existing { ruleStore.upsert(existing) }
+            return Self.staleIdentityResult
+        }
+        guard identity.isCurrent else { return Self.staleIdentityResult }
         _ = makeLimitPlanner().arm(rules: ruleStore.all())
+        guard identity.isCurrent else {
+            if let existing { ruleStore.upsert(existing) }
+            return Self.staleIdentityResult
+        }
 
         let display = cmd.target.targetDisplay ?? existing?.displayName ?? cmd.target.bundleID ?? "App"
         return .confirmedExact(verb: .clearLimit, displayName: display, effectiveState: nil)
@@ -397,11 +559,49 @@ final class ActionExecutor: @unchecked Sendable {
 
     // MARK: - Shield
 
-    private func executeShield(cmd: LockCommand, blob: Data?) async -> AckResult {
+    private func executeShield(
+        cmd: LockCommand,
+        blob: Data?,
+        identity: CommandIdentityContext
+    ) async -> AckResult {
         do {
-            let record = try buildShieldRecord(from: cmd, blob: blob)
+            guard identity.isCurrent else { return Self.staleIdentityResult }
+            let priorLockedSetID = EarnedTimeStore.shared.lockedSetID
+            let priorLockedSetTokenData = EarnedTimeStore.shared.lockedSetTokenData
+            let deferredLockedSetID = identity.expectedChildID != nil
+                && cmd.tier == .savedList
+                && cmd.target.defaultLockGroup == true
+                ? cmd.target.listID?.uuidString
+                : nil
+            let record = try buildShieldRecord(
+                from: cmd,
+                blob: blob,
+                expectedChildID: identity.expectedChildID,
+                identityIsCurrent: { identity.isCurrent },
+                persistDefaultLockGroupIdentity: identity.expectedChildID == nil
+            )
             let force = cmd.target.forceDowngrade
+            let prior = await ActiveLockStore.shared.allCurrent().shields
+                .first { $0.recordKey == record.recordKey }
+            guard identity.isCurrent else { return Self.staleIdentityResult }
+            guard await prepareForMutation(identity) else { return Self.staleIdentityResult }
+            if let deferredLockedSetID,
+               priorLockedSetID?.caseInsensitiveCompare(deferredLockedSetID) != .orderedSame {
+                guard identity.isCurrent else { return Self.staleIdentityResult }
+                EarnedTimeStore.shared.saveLockedSetID(deferredLockedSetID, tokenData: nil)
+            }
             let result = await ActiveLockStore.shared.addShield(record, force: force)
+            guard identity.isCurrent else {
+                await rollbackAddedShield(record, prior: prior, identity: identity)
+                if let deferredLockedSetID {
+                    EarnedTimeStore.shared.restoreLockedSetIDIfCurrent(
+                        deferredLockedSetID,
+                        priorID: priorLockedSetID,
+                        priorTokenData: priorLockedSetTokenData
+                    )
+                }
+                return Self.staleIdentityResult
+            }
             switch result {
             case .added, .upgradedToPermanent, .extendedTimed:
                 if let expiresAt = record.expiresAt {
@@ -412,10 +612,12 @@ final class ActionExecutor: @unchecked Sendable {
                     // shows in Xcode console + write a marker to App Group
                     // UserDefaults so we can read it from the chat UI later.
                     do {
+                        guard identity.isCurrent else { return Self.staleIdentityResult }
                         try scheduleRelock(recordKey: record.recordKey, expiresAt: expiresAt)
                         let ok = "schedule_ok recordKey=\(record.recordKey) " +
                                  "expiresAt=\(ISO8601DateFormatter().string(from: expiresAt))"
                         NSLog("[Evlin] %@", ok)
+                        guard identity.isCurrent else { return Self.staleIdentityResult }
                         UserDefaults(suiteName: "group.com.evlin.ios")?.set(
                             ok, forKey: "evlin.lastScheduleResult"
                         )
@@ -424,6 +626,7 @@ final class ActionExecutor: @unchecked Sendable {
                                   "expiresAt=\(ISO8601DateFormatter().string(from: expiresAt)) " +
                                   "error=\(error.localizedDescription)"
                         NSLog("[Evlin] %@", err)
+                        guard identity.isCurrent else { return Self.staleIdentityResult }
                         UserDefaults(suiteName: "group.com.evlin.ios")?.set(
                             err, forKey: "evlin.lastScheduleResult"
                         )
@@ -431,6 +634,7 @@ final class ActionExecutor: @unchecked Sendable {
                 }
                 // Audit-only window log (best-effort, off the hot path). A
                 // write failure here must never affect the lock or receipt.
+                guard identity.isCurrent else { return Self.staleIdentityResult }
                 LockWindowStore.append(LockWindowRecord(
                     recordKey: record.recordKey,
                     displayName: record.displayName,
@@ -440,10 +644,20 @@ final class ActionExecutor: @unchecked Sendable {
                     issuedAt: record.issuedAt,
                     expiresAt: record.expiresAt
                 ))
-                let eff = await currentEffectiveState(forShieldRecord: record, cmd: cmd)
+                let eff = await currentEffectiveState(
+                    forShieldRecord: record,
+                    cmd: cmd,
+                    identity: identity
+                )
+                guard identity.isCurrent else { return Self.staleIdentityResult }
                 return buildConfirmReceipt(verb: .shield, cmd: cmd, record: record, effectiveState: eff)
             case .noOpShorterThanExisting, .noOpAlreadyPermanent:
-                let eff = await currentEffectiveState(forShieldRecord: record, cmd: cmd)
+                let eff = await currentEffectiveState(
+                    forShieldRecord: record,
+                    cmd: cmd,
+                    identity: identity
+                )
+                guard identity.isCurrent else { return Self.staleIdentityResult }
                 return .confirmedExact(verb: .shield, displayName: "\(record.displayName) already covered", effectiveState: eff)
             case .needsConfirmation(let reason):
                 let context: [String: String]
@@ -462,6 +676,7 @@ final class ActionExecutor: @unchecked Sendable {
                 return .pendingConfirmation(cardID: "B1", context: context)
             }
         } catch let err as ExecuteError {
+            if case .staleIdentity = err { return Self.staleIdentityResult }
             return .failed(err.ackFailure)
         } catch {
             return .failed(.execution(error.localizedDescription))
@@ -491,7 +706,12 @@ final class ActionExecutor: @unchecked Sendable {
         }
     }
 
-    private func currentEffectiveState(forShieldRecord record: ShieldRecord, cmd: LockCommand) async -> AckEffectiveState? {
+    private func currentEffectiveState(
+        forShieldRecord record: ShieldRecord,
+        cmd: LockCommand,
+        identity: CommandIdentityContext = .unrestricted
+    ) async -> AckEffectiveState? {
+        guard identity.isCurrent else { return nil }
         let query: AppQuery
         if cmd.tier == .exactApp, let resolved = try? resolveExactApp(from: cmd.target) {
             let bundleForQuery = canonicalBundleID(for: cmd.target)
@@ -504,6 +724,7 @@ final class ActionExecutor: @unchecked Sendable {
             query = AppQuery(bundleID: nil, categoryHint: cmd.target.categoryHint?.lowercased())
         }
         let state = await ActiveLockStore.shared.effectiveState(for: query)
+        guard identity.isCurrent else { return nil }
         return AckEffectiveState(
             isBlocked: state.blockedAfter,
             shieldsCovering: state.stillCovered.map {
@@ -537,7 +758,13 @@ final class ActionExecutor: @unchecked Sendable {
 
     // internal (not private): exercised directly by LockedSetFullCoverageTests
     // via @testable import, matching the plan's Task 3 test-access approach.
-    func buildShieldRecord(from cmd: LockCommand, blob: Data?) throws -> ShieldRecord {
+    func buildShieldRecord(
+        from cmd: LockCommand,
+        blob: Data?,
+        expectedChildID: UUID? = nil,
+        identityIsCurrent: () -> Bool = { true },
+        persistDefaultLockGroupIdentity: Bool = true
+    ) throws -> ShieldRecord {
         let tier = cmd.tier ?? .category
         let targetKey: String
         var appTokens: Set<ApplicationToken> = []
@@ -595,12 +822,15 @@ final class ActionExecutor: @unchecked Sendable {
             // (the list is empty at provision time), so lockedSetID would be
             // nil here and the union below would silently paper-lock. Adopt
             // the id from the flagged command before evaluating the gate.
-            if cmd.target.defaultLockGroup == true,
+            if persistDefaultLockGroupIdentity,
+               cmd.target.defaultLockGroup == true,
                EarnedTimeStore.shared.lockedSetID?.lowercased() != targetKey.lowercased() {
+                guard identityIsCurrent() else { throw ExecuteError.staleIdentity }
                 EarnedTimeStore.shared.saveLockedSetID(targetKey, tokenData: nil)
             }
-            let isDefaultLockGroup = EarnedTimeStore.shared.lockedSetID
-                .map { $0.lowercased() == targetKey.lowercased() } ?? false
+            let isDefaultLockGroup = cmd.target.defaultLockGroup == true
+                || EarnedTimeStore.shared.lockedSetID
+                    .map { $0.lowercased() == targetKey.lowercased() } == true
             if isDefaultLockGroup {
                 let localSelection = DefaultLockGroupStore.load()
                 appTokens.formUnion(localSelection.applicationTokens)
@@ -672,7 +902,7 @@ final class ActionExecutor: @unchecked Sendable {
             issuedAt: cmd.issuedAt,
             expiresAt: expiresAt,
             originalRequest: cmd.target.originalRequest,
-            targetChildID: cmd.target.targetChildID ?? UUID(),
+            targetChildID: expectedChildID ?? cmd.target.targetChildID ?? UUID(),
             sources: Self.shieldSources(fromWireLockSource: cmd.lockSource)
         )
     }
@@ -689,7 +919,10 @@ final class ActionExecutor: @unchecked Sendable {
 
     // MARK: - Block
 
-    private func executeBlock(cmd: LockCommand) async -> AckResult {
+    private func executeBlock(
+        cmd: LockCommand,
+        identity: CommandIdentityContext
+    ) async -> AckResult {
         guard let bundleID = cmd.target.bundleID else {
             return .failed(.malformed)
         }
@@ -706,14 +939,28 @@ final class ActionExecutor: @unchecked Sendable {
             blockedAt: cmd.issuedAt,
             lastCommandID: cmd.id,
             originalRequest: cmd.target.originalRequest,
-            targetChildID: cmd.target.targetChildID ?? UUID(),
+            targetChildID: identity.expectedChildID ?? cmd.target.targetChildID ?? UUID(),
             expiresAt: expiresAt
         )
+        guard await prepareForMutation(identity) else {
+            return Self.staleIdentityResult
+        }
         let result = await ActiveLockStore.shared.addBlock(record)
+        guard identity.isCurrent else {
+            if case .added = result {
+                let current = await ActiveLockStore.shared.allCurrent().blocks
+                    .first { $0.bundleID == record.bundleID }
+                if current?.lastCommandID == record.lastCommandID {
+                    _ = await ActiveLockStore.shared.removeBlock(bundleID: record.bundleID)
+                }
+            }
+            return Self.staleIdentityResult
+        }
         // Schedule auto-unblock for timed blocks. The DeviceActivityMonitor
         // extension fires intervalDidEnd at expiry and removes the record.
         // Don't swallow with try? — see executeShield for rationale.
         if let exp = expiresAt {
+            guard identity.isCurrent else { return Self.staleIdentityResult }
             do {
                 try scheduleAutoUnblock(bundleID: bundleID, expiresAt: exp)
                 NSLog("[Evlin] block_schedule_ok bundleID=%@ expiresAt=%@",
@@ -729,6 +976,7 @@ final class ActionExecutor: @unchecked Sendable {
         }
         let query = AppQuery(bundleID: bundleID, categoryHint: nil)
         let state = await ActiveLockStore.shared.effectiveState(for: query)
+        guard identity.isCurrent else { return Self.staleIdentityResult }
         let eff = effectiveStateFrom(state.stillCovered, isBlocked: true, possibleSavedList: state.possibleSavedListCoverage)
         switch result {
         case .added:
@@ -766,7 +1014,10 @@ final class ActionExecutor: @unchecked Sendable {
 
     // MARK: - Unshield — spec §4.4
 
-    private func executeUnshield(cmd: LockCommand) async -> AckResult {
+    private func executeUnshield(
+        cmd: LockCommand,
+        identity: CommandIdentityContext
+    ) async -> AckResult {
         guard let tier = cmd.tier else { return .failed(.malformed) }
 
         switch tier {
@@ -786,13 +1037,25 @@ final class ActionExecutor: @unchecked Sendable {
                     case "task_pause":  src = .taskPause
                     default:            src = .manual
                     }
+                    let prior = await ActiveLockStore.shared.allCurrent().shields
+                        .first { $0.recordKey == recordKey }
+                    guard identity.isCurrent else { return Self.staleIdentityResult }
+                    guard await prepareForMutation(identity) else { return Self.staleIdentityResult }
                     await ActiveLockStore.shared.removeSource(src, fromRecordKey: recordKey)
+                    guard identity.isCurrent else {
+                        if let prior { await restoreRemovedShields([prior], identity: identity) }
+                        return Self.staleIdentityResult
+                    }
                 }
                 // Build a minimal ack — record may still exist with remaining sources.
                 let displayName = cmd.target.listName ?? cmd.target.targetDisplay ?? "saved list"
                 return .confirmedExact(verb: .unshield, displayName: displayName, effectiveState: nil)
             }
-            return await removeExplicit(tier: .savedList, targetKey: id.uuidString)
+            return await removeExplicit(
+                tier: .savedList,
+                targetKey: id.uuidString,
+                identity: identity
+            )
         case .category:
             guard let hint = cmd.target.categoryHint else { return .failed(.nothingToUnlock) }
             // Pass the best human-readable category name (categoryHint /
@@ -802,12 +1065,13 @@ final class ActionExecutor: @unchecked Sendable {
             return await removeExplicit(
                 tier: .category,
                 targetKey: hint.lowercased(),
-                categoryDisplayHint: categoryLookupName(from: cmd.target)
+                categoryDisplayHint: categoryLookupName(from: cmd.target),
+                identity: identity
             )
         case .all:
-            return await removeExplicit(tier: .all, targetKey: "all")
+            return await removeExplicit(tier: .all, targetKey: "all", identity: identity)
         case .allApps:
-            return await removeExplicit(tier: .allApps, targetKey: "all")
+            return await removeExplicit(tier: .allApps, targetKey: "all", identity: identity)
         case .exactApp:
             guard let resolved = try? resolveExactApp(from: cmd.target, requireActiveToken: false) else {
                 return .failed(.applicationNotConfigured(resolveExactAppFailureReference(from: cmd.target)))
@@ -818,7 +1082,8 @@ final class ActionExecutor: @unchecked Sendable {
                 bundleID: bundleForQuery,
                 token: resolved.token,
                 displayName: display,
-                categoryHint: cmd.target.categoryHint
+                categoryHint: cmd.target.categoryHint,
+                identity: identity
             )
         }
     }
@@ -915,13 +1180,16 @@ final class ActionExecutor: @unchecked Sendable {
     private func removeExplicit(
         tier: ShieldTier,
         targetKey: String,
-        categoryDisplayHint: String? = nil
+        categoryDisplayHint: String? = nil,
+        identity: CommandIdentityContext
     ) async -> AckResult {
         // For `.savedList` callers (e.g. the `id.uuidString` fallback at :743)
         // `makeRecordKey` lowercases the targetKey so this lines up with the
         // extension's lowercase-backend-string key regardless of case here.
         let recordKey = ShieldRecord.makeRecordKey(tier: tier, targetKey: targetKey)
+        guard await prepareForMutation(identity) else { return Self.staleIdentityResult }
         guard let removed = await ActiveLockStore.shared.removeShield(recordKey: recordKey) else {
+            guard identity.isCurrent else { return Self.staleIdentityResult }
             // Token-keyed removal found nothing. For a category unshield this is
             // the BAD command shape: it carried only a lowercase `category_hint`
             // (no resolvable category token), so the recordKey (`category:<hint>`)
@@ -932,8 +1200,13 @@ final class ActionExecutor: @unchecked Sendable {
             if tier == .category,
                let hint = categoryDisplayHint?.trimmingCharacters(in: .whitespacesAndNewlines),
                !hint.isEmpty {
+                guard await prepareForMutation(identity) else { return Self.staleIdentityResult }
                 let removedByName = await ActiveLockStore.shared
                     .removeCategoryShieldsByDisplayName(hint)
+                guard identity.isCurrent else {
+                    await restoreRemovedShields(removedByName, identity: identity)
+                    return Self.staleIdentityResult
+                }
                 if let match = strongestShield(in: removedByName) {
                     for r in removedByName {
                         cancelScheduled(recordKey: r.recordKey)
@@ -944,6 +1217,7 @@ final class ActionExecutor: @unchecked Sendable {
                     let post = await ActiveLockStore.shared.effectiveState(
                         for: AppQuery(categoryHint: match.displayName.lowercased())
                     )
+                    guard identity.isCurrent else { return Self.staleIdentityResult }
                     let eff = effectiveStateFrom(
                         post.stillCovered,
                         isBlocked: post.blockedAfter,
@@ -958,6 +1232,11 @@ final class ActionExecutor: @unchecked Sendable {
             }
             return .failed(.nothingToUnlock)
         }
+        guard identity.isCurrent else {
+            await restoreRemovedShields([removed.record], identity: identity)
+            return Self.staleIdentityResult
+        }
+        guard identity.isCurrent else { return Self.staleIdentityResult }
         cancelScheduled(recordKey: recordKey)
 
         // P2 fix: narrow the post-query so the "Still shielded by …" disclosure
@@ -978,6 +1257,7 @@ final class ActionExecutor: @unchecked Sendable {
             let post = await ActiveLockStore.shared.effectiveState(
                 for: AppQuery(categoryHint: targetKey)
             )
+            guard identity.isCurrent else { return Self.staleIdentityResult }
             eff = effectiveStateFrom(
                 post.stillCovered,
                 isBlocked: post.blockedAfter,
@@ -993,6 +1273,7 @@ final class ActionExecutor: @unchecked Sendable {
                 let s = await ActiveLockStore.shared.effectiveState(
                     for: AppQuery(token: token)
                 )
+                guard identity.isCurrent else { return Self.staleIdentityResult }
                 for r in s.stillCovered { union[r.recordKey] = r }
                 if s.blockedAfter { blockedAny = true }
                 if s.possibleSavedListCoverage { possibleList = true }
@@ -1001,6 +1282,7 @@ final class ActionExecutor: @unchecked Sendable {
             // but we can still check if any `all`-tier or same-category shield remains.
             for _ in removed.record.categoryTokens {
                 let s = await ActiveLockStore.shared.effectiveState(for: AppQuery())
+                guard identity.isCurrent else { return Self.staleIdentityResult }
                 // `all`-tier always matches AppQuery(). This catches the edge case.
                 for r in s.stillCovered where r.appliesToAll { union[r.recordKey] = r }
             }
@@ -1022,18 +1304,28 @@ final class ActionExecutor: @unchecked Sendable {
         bundleID: String?,
         token: ApplicationToken?,
         displayName: String,
-        categoryHint: String?
+        categoryHint: String?,
+        identity: CommandIdentityContext
     ) async -> AckResult {
         let tk = token ?? bundleID.flatMap { LocalAliasStore.shared.applicationToken(forLookupKey: $0) }
         let query = AppQuery(bundleID: bundleID, token: tk, categoryHint: categoryHint?.lowercased())
         let state = await ActiveLockStore.shared.effectiveState(for: query)
+        guard identity.isCurrent else { return Self.staleIdentityResult }
 
         if let exactAppShield = state.shieldsCovering.first(where: { $0.tier == .exactApp }) {
+            guard await prepareForMutation(identity) else { return Self.staleIdentityResult }
             guard let removed = await ActiveLockStore.shared.removeShield(recordKey: exactAppShield.recordKey) else {
+                guard identity.isCurrent else { return Self.staleIdentityResult }
                 return .failed(.nothingToUnlock)
             }
+            guard identity.isCurrent else {
+                await restoreRemovedShields([removed.record], identity: identity)
+                return Self.staleIdentityResult
+            }
+            guard identity.isCurrent else { return Self.staleIdentityResult }
             cancelScheduled(recordKey: exactAppShield.recordKey)
             let post = await ActiveLockStore.shared.effectiveState(for: query)
+            guard identity.isCurrent else { return Self.staleIdentityResult }
             let eff = effectiveStateFrom(post.stillCovered, isBlocked: post.blockedAfter, possibleSavedList: post.possibleSavedListCoverage)
             return .confirmedExact(verb: .unshield, displayName: removed.record.displayName, effectiveState: eff)
         }
@@ -1063,13 +1355,22 @@ final class ActionExecutor: @unchecked Sendable {
 
     // MARK: - Unblock
 
-    private func executeUnblock(cmd: LockCommand) async -> AckResult {
+    private func executeUnblock(
+        cmd: LockCommand,
+        identity: CommandIdentityContext
+    ) async -> AckResult {
         guard let bid = cmd.target.bundleID else { return .failed(.malformed) }
+        guard await prepareForMutation(identity) else { return Self.staleIdentityResult }
         guard let removed = await ActiveLockStore.shared.removeBlock(
             bundleID: bid,
             categoryHint: cmd.target.categoryHint
         ) else {
+            guard identity.isCurrent else { return Self.staleIdentityResult }
             return .failed(.nothingToUnlock)
+        }
+        guard identity.isCurrent else {
+            await restoreRemovedBlocks([removed.record], identity: identity)
+            return Self.staleIdentityResult
         }
         let eff = effectiveStateFrom(
             removed.stillShieldedBy,
@@ -1121,6 +1422,7 @@ private func sha256Hex16(_ data: Data) -> String {
 
 enum ExecuteError: Error {
     case malformed
+    case staleIdentity
     case listNotFound(String)
     case categoryNotConfigured(String)
     case applicationNotConfigured(String)
@@ -1129,6 +1431,7 @@ enum ExecuteError: Error {
     var ackFailure: AckFailure {
         switch self {
         case .malformed: return .malformed
+        case .staleIdentity: return .execution("stale_identity")
         case .listNotFound(let n): return .listNotFound(n)
         case .categoryNotConfigured(let n): return .categoryNotConfigured(n)
         case .applicationNotConfigured(let n): return .applicationNotConfigured(n)

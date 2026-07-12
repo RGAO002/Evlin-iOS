@@ -31,6 +31,27 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         )
     }
 
+    private func earnedGenerationIsActive(
+        _ generation: EarnedActivityGeneration.Generation
+    ) -> Bool {
+        EarnedActivityGeneration.isAuthorized(
+            generation: generation,
+            defaults: defaults
+        )
+    }
+
+    @discardableResult
+    private func performIfEarnedGenerationActive(
+        _ generation: EarnedActivityGeneration.Generation,
+        _ operation: () -> Void
+    ) -> Bool {
+        EarnedActivityGeneration.performIfAuthorized(
+            generation: generation,
+            defaults: defaults,
+            operation
+        )
+    }
+
     /// Emit a ScreenTimeEvent from the extension (emitter = kid_extension).
     private func emitEvent(kind: ScreenTimeEvent.Kind,
                            source: ScreenTimeEvent.Source?,
@@ -72,11 +93,10 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         // records (a record with {.manual, .earnedTime} must survive with {.manual}).
         // This mirrors the limit daily-reset path above but is source-specific.
         if EarnedActivityGeneration.isEarnedActivityName(raw) {
-            guard authorizedEarnedGeneration(activityName: raw) != nil else {
-                NSLog("[Evlin/Ext] rejected inactive earned interval activity=%@", raw)
-                return
+            guard let generation = authorizedEarnedGeneration(activityName: raw) else { return }
+            _ = performIfEarnedGenerationActive(generation) {
+                resetEarnedTimeShields(activity: raw)
             }
-            resetEarnedTimeShields(activity: raw)
             return
         }
 
@@ -193,12 +213,11 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
            EarnedActivityGeneration.isEarnedActivityName(activity.rawValue) {
             guard let generation = authorizedEarnedGeneration(
                 activityName: activity.rawValue
-            ) else {
-                NSLog("[Evlin/Ext] rejected inactive earned threshold activity=%@ event=%@",
-                      activity.rawValue, event.rawValue)
-                return
-            }
-            guard usageCountingAllowed(eventName: event.rawValue) else { return }
+            ) else { return }
+            guard usageCountingAllowed(
+                eventName: event.rawValue,
+                earnedGeneration: generation
+            ) else { return }
             handleEarnedThreshold(
                 eventName: event.rawValue,
                 activity: activity,
@@ -207,13 +226,23 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         }
     }
 
-    private func usageCountingAllowed(eventName: String) -> Bool {
+    private func usageCountingAllowed(
+        eventName: String,
+        earnedGeneration: EarnedActivityGeneration.Generation? = nil
+    ) -> Bool {
         guard EarnedTimeStore.shared.usageCountingAllowed else {
-            let ts = ISO8601DateFormatter().string(from: Date())
-            defaults?.set("\(ts) skipped usage event=\(eventName) unfinished_tasks=true",
-                          forKey: "evlin.usageCounting.lastSkipped")
-            NSLog("[Evlin/Ext] skipped usage event=%@ because unfinished tasks remain", eventName)
-            emitEvent(kind: .drop, source: nil, app: eventName, reason: "usage_counting_disabled")
+            let recordSkip = {
+                let ts = ISO8601DateFormatter().string(from: Date())
+                self.defaults?.set("\(ts) skipped usage event=\(eventName) unfinished_tasks=true",
+                                   forKey: "evlin.usageCounting.lastSkipped")
+                NSLog("[Evlin/Ext] skipped usage event=%@ because unfinished tasks remain", eventName)
+                self.emitEvent(kind: .drop, source: nil, app: eventName, reason: "usage_counting_disabled")
+            }
+            if let earnedGeneration {
+                _ = performIfEarnedGenerationActive(earnedGeneration, recordSkip)
+            } else {
+                recordSkip()
+            }
             return false
         }
         return true
@@ -374,6 +403,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
 
         let earnedStore = EarnedTimeStore.shared
         guard let generationDeviceID = UUID(uuidString: generation.deviceID) else { return }
+        guard earnedGenerationIsActive(generation) else { return }
 
         // Stale-ladder firewall. A legitimately armed ladder never carries a
         // raw threshold above min(pool, cap) (`EarnedBudgetScheduler.thresholds`
@@ -384,10 +414,12 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         if let pool = earnedStore.poolMinutes {
             let cap = earnedStore.capMinutes ?? pool
             if n > min(pool, cap) {
-                NSLog("[Evlin/Ext] earned t%d exceeds min(pool %d, cap %d) — stale ladder, dropped",
-                      n, pool, cap)
-                emitEvent(kind: .decision, source: .earnedPool, app: "device-wide",
-                          reason: "stale_ladder_drop")
+                _ = performIfEarnedGenerationActive(generation) {
+                    NSLog("[Evlin/Ext] earned t%d exceeds min(pool %d, cap %d) — stale ladder, dropped",
+                          n, pool, cap)
+                    emitEvent(kind: .decision, source: .earnedPool, app: "device-wide",
+                              reason: "stale_ladder_drop")
+                }
                 return
             }
         }
@@ -397,6 +429,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             rawThresholdMinutes: n,
             runningOffsetMinutes: offset
         )
+        guard earnedGenerationIsActive(generation) else { return }
         let localReconciliation = earnedStore.recordLocalThresholdEstimate(
             adjustedN,
             expectedDeviceID: generationDeviceID
@@ -407,7 +440,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         )
 
         let ts = ISO8601DateFormatter().string(from: Date())
-        if authorizedEarnedGeneration(activityName: activity.rawValue)?.deviceID == generation.deviceID {
+        _ = performIfEarnedGenerationActive(generation) {
             defaults?.set(
                 "\(ts) event=\(eventName) activity=\(activity.rawValue) raw=\(n) adjusted=\(adjustedN) offset=\(offset)",
                 forKey: "evlin.earned.lastThreshold"
@@ -419,35 +452,47 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             let usageDate = generation.usageDate
             let tz = generation.timezoneIdentifier
             Task {
+                let authorizationIsCurrent = {
+                    EarnedActivityGeneration.isAuthorized(
+                        generation: generation,
+                        defaults: UserDefaults(suiteName: EarnedTimeStore.appGroupSuiteName)
+                    )
+                }
+                guard authorizationIsCurrent() else { return }
                 await EarnedSampleReporter.drainRetryQueue(
                     baseURL: baseURL,
-                    onlyDeviceID: generationDeviceID
+                    onlyDeviceID: generationDeviceID,
+                    authorizationIsCurrent: authorizationIsCurrent
                 )
+                guard authorizationIsCurrent() else { return }
                 await EarnedSampleReporter.report(
                     baseURL: baseURL,
                     deviceID: generationDeviceID,
                     usageDate: usageDate,
                     timezone: tz,
                     thresholdMinutes: adjustedN,
-                    estimatedMinutes: adjustedN
+                    estimatedMinutes: adjustedN,
+                    authorizationIsCurrent: authorizationIsCurrent
                 )
             }
         } else {
-            defaults?.set(
-                "\(ts) missing baseURL for event=\(eventName) baseURL=\(String(describing: ExtensionConfig.baseURL)) generationDeviceID=\(generation.deviceID)",
-                forKey: EarnedSampleReporter.lastSamplePostDebugKey
-            )
+            _ = performIfEarnedGenerationActive(generation) {
+                defaults?.set(
+                    "\(ts) missing baseURL for event=\(eventName) baseURL=\(String(describing: ExtensionConfig.baseURL)) generationDeviceID=\(generation.deviceID)",
+                    forKey: EarnedSampleReporter.lastSamplePostDebugKey
+                )
+            }
         }
 
         guard decision.shouldApplyLocalShield else {
-            NSLog("[Evlin/Ext] earned threshold reported with local reconciliation deferred")
-            emitEvent(kind: .decision, source: .earnedPool, app: "device-wide",
-                      reason: "local_reconciliation_deferred")
+            _ = performIfEarnedGenerationActive(generation) {
+                NSLog("[Evlin/Ext] earned threshold reported with local reconciliation deferred")
+                emitEvent(kind: .decision, source: .earnedPool, app: "device-wide",
+                          reason: "local_reconciliation_deferred")
+            }
             return
         }
-        guard authorizedEarnedGeneration(activityName: activity.rawValue)?.deviceID == generation.deviceID else {
-            return
-        }
+        guard earnedGenerationIsActive(generation) else { return }
 
         // Fresh-at-fire-time gate (Fix 4). The tripwire is the parent-set budget
         // read fresh from the store — NOT latestEstimate+backendRemaining (which
@@ -464,8 +509,10 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             usageDate: usageDateForOverride,
             store: earnedStore
         ) else {
-            emitEvent(kind: .decision, source: .earnedPool, app: "device-wide",
-                      reason: "pool_under_cap")
+            _ = performIfEarnedGenerationActive(generation) {
+                emitEvent(kind: .decision, source: .earnedPool, app: "device-wide",
+                          reason: "pool_under_cap")
+            }
             return
         }
 
@@ -476,17 +523,22 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             lastBackendSyncAt: earnedStore.lastBackendSyncAt,
             now: Date()
         ) {
-            emitEvent(kind: .drop, source: .earnedPool, app: "device-wide",
-                      reason: "backend_headroom_veto")
+            _ = performIfEarnedGenerationActive(generation) {
+                emitEvent(kind: .drop, source: .earnedPool, app: "device-wide",
+                          reason: "backend_headroom_veto")
+            }
             return
         }
-        guard authorizedEarnedGeneration(activityName: activity.rawValue)?.deviceID == generation.deviceID else {
-            return
-        }
+        guard earnedGenerationIsActive(generation) else { return }
 
         let boundSource: ScreenTimeEvent.Source =
             (capMinutes < poolMinutes && adjustedN >= capMinutes) ? .deviceCap : .earnedPool
-        applyEarnedTimeShield(earnedStore: earnedStore, thresholdN: adjustedN, source: boundSource)
+        applyEarnedTimeShield(
+            earnedStore: earnedStore,
+            thresholdN: adjustedN,
+            source: boundSource,
+            generation: generation
+        )
     }
 
     /// Apply the `.earnedTime` shield over the Locked-set tokens.
@@ -496,9 +548,17 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
     /// `ShieldSourceLogic.unioning`, persists, and recomputes.
     ///
     /// Pure App Group path — no actor, no `ActiveLockStore`.
-    private func applyEarnedTimeShield(earnedStore: EarnedTimeStore, thresholdN: Int, source: ScreenTimeEvent.Source) {
+    private func applyEarnedTimeShield(
+        earnedStore: EarnedTimeStore,
+        thresholdN: Int,
+        source: ScreenTimeEvent.Source,
+        generation: EarnedActivityGeneration.Generation
+    ) {
+        guard earnedGenerationIsActive(generation) else { return }
         guard let lockedSetID = earnedStore.lockedSetID else {
-            NSLog("[Evlin/Ext] earned shield: no lockedSetID in store — cannot shield")
+            _ = performIfEarnedGenerationActive(generation) {
+                NSLog("[Evlin/Ext] earned shield: no lockedSetID in store — cannot shield")
+            }
             return
         }
 
@@ -553,20 +613,22 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             current[recordKey] = record
         }
 
-        if let data = encodeShields(current) {
-            defaults?.set(data, forKey: shieldsKey)
-        }
-        recomputeAndApplyShields(current)
+        _ = performIfEarnedGenerationActive(generation) {
+            if let data = encodeShields(current) {
+                defaults?.set(data, forKey: shieldsKey)
+            }
+            recomputeAndApplyShields(current)
 
-        let ts = ISO8601DateFormatter().string(from: Date())
-        defaults?.set(
-            "earned_shielded_at=\(ts) t=\(thresholdN) key=\(recordKey)",
-            forKey: "evlin.lastEarnedShield"
-        )
-        NSLog("[Evlin/Ext] earned time cap reached t%d — .earnedTime shield applied", thresholdN)
-        emitEvent(kind: .lock, source: source, app: "device-wide",
-                  reason: source == .deviceCap ? "cap_exhausted" : "pool_exhausted",
-                  transition: .init(before: "shielded:false", after: "shielded:true"))
+            let ts = ISO8601DateFormatter().string(from: Date())
+            defaults?.set(
+                "earned_shielded_at=\(ts) t=\(thresholdN) key=\(recordKey)",
+                forKey: "evlin.lastEarnedShield"
+            )
+            NSLog("[Evlin/Ext] earned time cap reached t%d — .earnedTime shield applied", thresholdN)
+            emitEvent(kind: .lock, source: source, app: "device-wide",
+                      reason: source == .deviceCap ? "cap_exhausted" : "pool_exhausted",
+                      transition: .init(before: "shielded:false", after: "shielded:true"))
+        }
     }
 
     /// B5 daily reset: strip ONLY `.earnedTime` from every shield record.

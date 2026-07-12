@@ -152,15 +152,17 @@ enum EarnedBudgetArming {
             suiteName: EarnedTimeStore.appGroupSuiteName
         ),
         store: EarnedTimeStore = .shared,
-        stopMonitoring: (() -> Void)? = nil
+        stopMonitoring: (() -> Void)? = nil,
+        beforeUsageClear: () -> Void = {}
     ) {
         stopAndInvalidateSignature(
             defaults: appGroupDefaults,
             stopMonitoring: stopMonitoring
         )
-        store.clearUsageStateForIdentityChange()
         appGroupDefaults?.removeObject(forKey: "evlin.childId")
         appGroupDefaults?.synchronize()
+        beforeUsageClear()
+        store.clearUsageStateForIdentityChange()
     }
 
     static func mirrorChildIdentity(
@@ -243,6 +245,8 @@ enum EarnedBudgetArming {
         let owner = canonicalDeviceIdentity(ownerRaw) ?? ownerRaw
 
         stopAndInvalidateSignature(defaults: suite)
+        suite?.removeObject(forKey: "evlin.childId")
+        suite?.synchronize()
         EarnedTimeStore.shared.clearUsageStateForIdentityChange()
         CommandDeliveryDiagnostics.record(
             CommandDeliveryDiagnostics.keyEarnedIdentityTransition,

@@ -35,6 +35,114 @@ final class ActionExecutorTests: XCTestCase {
         XCTAssertGreaterThan(interval, 0)
     }
 
+    func testIdentityChangeWhileMutationIsDelayedCannotPersistOldBlock() async {
+        let oldID = UUID()
+        let newID = UUID()
+        var currentID = oldID
+        var resumeMutation: CheckedContinuation<Void, Never>?
+        let spy = DeviceActivitySchedulerSpy()
+        let executor = ActionExecutor(
+            activityScheduler: spy,
+            authorizationStatusProvider: { .approved },
+            beforeMutation: {
+                await withCheckedContinuation { resumeMutation = $0 }
+            }
+        )
+        let command = makeBlockCommand(
+            bundleID: "com.example.old-family",
+            minutes: 15
+        )
+
+        let execution = Task {
+            await executor.execute(
+                command,
+                expectedChildID: oldID,
+                identityIsCurrent: { $0 == currentID }
+            )
+        }
+        while resumeMutation == nil { await Task.yield() }
+        currentID = newID
+        resumeMutation?.resume()
+        let result = await execution.value
+
+        XCTAssertEqual(result, .failed(.execution("stale_identity")))
+        let blocks = await ActiveLockStore.shared.allCurrent().blocks
+        XCTAssertFalse(blocks.contains { $0.bundleID == "com.example.old-family" })
+        XCTAssertTrue(spy.started.isEmpty)
+    }
+
+    @MainActor
+    func testIdentityChangeBeforeSavedListMutationCannotPersistOldConfig() async {
+        let store = EarnedTimeStore.shared
+        let defaults = UserDefaults(suiteName: EarnedTimeStore.appGroupSuiteName)
+        let originalID = store.lockedSetID
+        let originalTokenData = store.lockedSetTokenData
+        let originalSavedListTokens = defaults?.object(forKey: "evlin.savedListTokens")
+        defer {
+            if let originalID {
+                store.saveLockedSetID(originalID, tokenData: originalTokenData)
+            } else {
+                defaults?.removeObject(forKey: "earned.lockedSetID")
+                defaults?.removeObject(forKey: "earned.lockedSetTokenData")
+            }
+            if let originalSavedListTokens {
+                defaults?.set(originalSavedListTokens, forKey: "evlin.savedListTokens")
+            } else {
+                defaults?.removeObject(forKey: "evlin.savedListTokens")
+            }
+            defaults?.synchronize()
+        }
+
+        let priorListID = UUID()
+        let commandListID = UUID()
+        let oldChildID = UUID()
+        let newChildID = UUID()
+        var currentChildID = oldChildID
+        var resumeMutation: CheckedContinuation<Void, Never>?
+        store.saveLockedSetID(priorListID.uuidString, tokenData: nil)
+        DefaultLockGroupStore.save(FamilyActivitySelection())
+
+        let executor = ActionExecutor(
+            authorizationStatusProvider: { .approved },
+            beforeMutation: {
+                await withCheckedContinuation { resumeMutation = $0 }
+            }
+        )
+        var target = CommandTarget(
+            listName: "Locked set",
+            listID: commandListID,
+            originalRequest: "lock Locked set",
+            targetDisplay: "Locked set",
+            targetChildID: oldChildID
+        )
+        target.defaultLockGroup = true
+        let command = LockCommand(
+            id: UUID(),
+            action: .shield,
+            tier: .savedList,
+            target: target,
+            durationMinutes: nil,
+            issuedAt: Date()
+        )
+
+        let execution = Task {
+            await executor.execute(
+                command,
+                expectedChildID: oldChildID,
+                identityIsCurrent: { $0 == currentChildID }
+            )
+        }
+        while resumeMutation == nil { await Task.yield() }
+        let persistedWhileSuspended = store.lockedSetID
+        currentChildID = newChildID
+        resumeMutation?.resume()
+        let result = await execution.value
+
+        XCTAssertEqual(result, .failed(.execution("stale_identity")))
+        XCTAssertEqual(persistedWhileSuspended, priorListID.uuidString)
+        XCTAssertEqual(store.lockedSetID, priorListID.uuidString)
+    }
+
     private func makeBlockCommand(bundleID: String, minutes: Int) -> LockCommand {
         LockCommand(
             id: UUID(),

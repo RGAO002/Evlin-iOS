@@ -20,17 +20,23 @@ final class CommandPollerTests: XCTestCase {
     private var savedDeviceIDProvider: (() -> UUID?)!
     private var savedPollOverride: ((UUID, APIClient) async -> Void)?
     private var savedPollCommandsOverride: ((UUID, APIClient) async throws -> [PollCommandDTO])?
+    private var savedLockedSetIDOverride: ((String, Data?) -> Void)?
+    private var savedRekeyOverride: ((String, String) async -> Void)?
 
     override func setUp() async throws {
         savedDeviceIDProvider = poller.childDeviceIDProvider
         savedPollOverride = poller.oneShotPollOverride
         savedPollCommandsOverride = poller.pollCommandsOverride
+        savedLockedSetIDOverride = poller.saveLockedSetIDOverride
+        savedRekeyOverride = poller.rekeyShieldRecordOverride
     }
 
     override func tearDown() async throws {
         poller.childDeviceIDProvider = savedDeviceIDProvider
         poller.oneShotPollOverride = savedPollOverride
         poller.pollCommandsOverride = savedPollCommandsOverride
+        poller.saveLockedSetIDOverride = savedLockedSetIDOverride
+        poller.rekeyShieldRecordOverride = savedRekeyOverride
     }
 
     private func earnedConfigCommand() throws -> PollCommandDTO {
@@ -136,6 +142,44 @@ final class CommandPollerTests: XCTestCase {
         XCTAssertNil(store.poolMinutes)
         XCTAssertNil(store.capMinutes)
         XCTAssertEqual(fetchCount, 2)
+    }
+
+    func testEarnedConfigDoesNotPersistNewListWhenIdentityChangesDuringRekey() async throws {
+        let oldID = UUID()
+        let newID = UUID()
+        var currentID = oldID
+        var resumeRekey: CheckedContinuation<Void, Never>?
+        var fetchCount = 0
+        let store = EarnedTimeStore.shared
+        store.removeAll()
+        defer { store.removeAll() }
+        let priorListID = UUID().uuidString
+        store.saveLockedSetID(priorListID, tokenData: nil)
+        store.poolMinutes = 75
+        store.capMinutes = 50
+
+        poller.childDeviceIDProvider = { currentID }
+        poller.oneShotPollOverride = nil
+        poller.saveLockedSetIDOverride = nil
+        poller.pollCommandsOverride = { _, _ in
+            fetchCount += 1
+            return fetchCount == 1 ? [try self.earnedConfigCommand()] : []
+        }
+        poller.rekeyShieldRecordOverride = { existing, _ in
+            XCTAssertEqual(existing, priorListID)
+            await withCheckedContinuation { resumeRekey = $0 }
+        }
+
+        let poll = Task { await poller.pollOnceForCurrentDevice() }
+        while resumeRekey == nil { await Task.yield() }
+        XCTAssertEqual(store.lockedSetID, priorListID)
+        currentID = newID
+        resumeRekey?.resume()
+        await poll.value
+
+        XCTAssertEqual(store.lockedSetID, priorListID)
+        XCTAssertEqual(store.poolMinutes, 75)
+        XCTAssertEqual(store.capMinutes, 50)
     }
 
     /// No paired child device id → safe no-op. A backgrounded push on a device

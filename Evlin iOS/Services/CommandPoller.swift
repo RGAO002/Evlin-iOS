@@ -503,7 +503,14 @@ final class CommandPoller {
             }
         }
 
-        let result = await ActionExecutor.shared.execute(cmd, blob: blob)
+        let result = await ActionExecutor.shared.execute(
+            cmd,
+            blob: blob,
+            expectedChildID: expectedDeviceID,
+            identityIsCurrent: { [weak self] deviceID in
+                self?.isExpectedDeviceCurrent(deviceID) == true
+            }
+        )
         guard isExpectedDeviceCurrent(expectedDeviceID) else {
             coalescePollForCurrentIdentity(expectedDeviceID: expectedDeviceID)
             return
@@ -692,11 +699,6 @@ final class CommandPoller {
         // Step 1: Persist locked-set list_id + re-key any existing shield record.
         if let listID = cfg?.selected_set?.list_id, !listID.isEmpty {
             let existing = EarnedTimeStore.shared.lockedSetID ?? ""
-            if let override = saveLockedSetIDOverride {
-                override(listID, nil)
-            } else {
-                EarnedTimeStore.shared.saveLockedSetID(listID, tokenData: nil)
-            }
             // Task 3 (paper-lock fix): would also persist
             // EarnedTimeStore.shared.saveLockedSetAllSelected(...) here, but
             // `PollEarnedConfigSelectedSetDTO` (this handler's only response
@@ -720,6 +722,15 @@ final class CommandPoller {
                     coalescePollForCurrentIdentity(expectedDeviceID: expectedDeviceID)
                     return
                 }
+            }
+            guard isExpectedDeviceCurrent(expectedDeviceID) else {
+                coalescePollForCurrentIdentity(expectedDeviceID: expectedDeviceID)
+                return
+            }
+            if let override = saveLockedSetIDOverride {
+                override(listID, nil)
+            } else {
+                EarnedTimeStore.shared.saveLockedSetID(listID, tokenData: nil)
             }
         }
 

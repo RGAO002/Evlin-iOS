@@ -87,7 +87,8 @@ enum EarnedSampleReporter {
         _ data: Data,
         expectedDeviceID: UUID? = nil,
         store: EarnedTimeStore = .shared,
-        suiteName: String = "group.com.evlin.ios"
+        suiteName: String = "group.com.evlin.ios",
+        beforeReconciliationCommit: () -> Void = {}
     ) -> SuccessDisposition {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
@@ -119,8 +120,17 @@ enum EarnedSampleReporter {
         let reconciliation = store.reconcileAcceptedUsageIfNotStale(
             usageDate: snapshot.usageDate,
             serverEstimatedMinutes: snapshot.estimatedMinutes,
-            allowSameDayDecrease: snapshot.counted == false
+            allowSameDayDecrease: snapshot.counted == false,
+            expectedDeviceID: expectedDeviceID,
+            beforeCommit: beforeReconciliationCommit
         )
+        if reconciliation == .identityMismatch {
+            recordDebug(
+                "post success identity_mismatch_during_reconciliation date=\(snapshot.usageDate)",
+                suiteName: suiteName
+            )
+            return .identityMismatch
+        }
         if reconciliation == .lockUnavailable {
             if snapshot.counted == false, let expectedDeviceID {
                 store.markPendingUncountedReconciliation(
@@ -221,7 +231,8 @@ enum EarnedSampleReporter {
         timezone: String,
         thresholdMinutes: Int,
         estimatedMinutes: Int,
-        suiteName: String = "group.com.evlin.ios"
+        suiteName: String = "group.com.evlin.ios",
+        authorizationIsCurrent: @escaping () -> Bool = { true }
     ) async {
         let observedAt = ISO8601DateFormatter().string(from: Date())
         let body = makeSampleBody(
@@ -238,6 +249,7 @@ enum EarnedSampleReporter {
             childDeviceID: deviceID,
             body: body
         ) else {
+            guard authorizationIsCurrent() else { return }
             enqueueRetry(RetryEntry(
                 deviceID: deviceID,
                 usageDate: usageDate,
@@ -250,8 +262,10 @@ enum EarnedSampleReporter {
             return
         }
 
+        guard authorizationIsCurrent() else { return }
         do {
             let (data, response) = try await URLSession.shared.data(for: req)
+            guard authorizationIsCurrent() else { return }
             let status = (response as? HTTPURLResponse)?.statusCode ?? -1
             // 2xx or 409 (already exists — idempotent) are both successes.
             let success = (status >= 200 && status < 300) || status == 409
@@ -274,6 +288,7 @@ enum EarnedSampleReporter {
                 ), suiteName: suiteName)
             }
         } catch {
+            guard authorizationIsCurrent() else { return }
             recordDebug("enqueue network_error t\(thresholdMinutes) error=\(error.localizedDescription)", suiteName: suiteName)
             enqueueRetry(RetryEntry(
                 deviceID: deviceID,
@@ -293,6 +308,7 @@ enum EarnedSampleReporter {
         baseURL: URL,
         suiteName: String = sharedSuiteName,
         onlyDeviceID: UUID? = nil,
+        authorizationIsCurrent: @escaping () -> Bool = { true },
         requestData: @escaping (URLRequest) async throws -> (Data, URLResponse) = {
             try await URLSession.shared.data(for: $0)
         }
@@ -302,6 +318,7 @@ enum EarnedSampleReporter {
         let partitioned = partitionRetryQueue(queue, onlyDeviceID: onlyDeviceID)
 
         for entry in partitioned.eligible {
+            guard authorizationIsCurrent() else { return }
             let body = makeSampleBody(
                 deviceID: entry.deviceID,
                 usageDate: entry.usageDate,
@@ -318,26 +335,33 @@ enum EarnedSampleReporter {
                 continue
             }
 
-            let success: Bool
+            let shouldRemove: Bool
             do {
+                guard authorizationIsCurrent() else { return }
                 let (data, response) = try await requestData(req)
+                guard authorizationIsCurrent() else { return }
                 let status = (response as? HTTPURLResponse)?.statusCode ?? -1
-                success = (status >= 200 && status < 300) || status == 409
-                if success {
-                    processSuccessfulResponse(
+                let httpSucceeded = (status >= 200 && status < 300) || status == 409
+                if httpSucceeded {
+                    let disposition = processSuccessfulResponse(
                         data,
                         expectedDeviceID: entry.deviceID,
                         store: EarnedTimeStore(suiteName: suiteName),
                         suiteName: suiteName
                     )
+                    shouldRemove = disposition != .identityMismatch
+                } else {
+                    shouldRemove = false
                 }
             } catch {
-                success = false
+                guard authorizationIsCurrent() else { return }
+                shouldRemove = false
             }
 
-            if !success {
+            if !shouldRemove {
                 continue
             }
+            guard authorizationIsCurrent() else { return }
             removeAcceptedRetry(entry, suiteName: suiteName)
         }
     }

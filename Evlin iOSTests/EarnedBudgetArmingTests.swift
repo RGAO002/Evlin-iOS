@@ -205,6 +205,97 @@ final class EarnedBudgetArmingTests: XCTestCase {
         XCTAssertEqual(defaults.string(forKey: "evlin.childId"), newID.uuidString.lowercased())
     }
 
+    func test_identityTeardownStopsAndRemovesMirrorBeforeClearingUsage() {
+        let suiteName = "EarnedBudgetArmingTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = EarnedTimeStore(suiteName: suiteName)
+        let oldID = UUID()
+        let generation = EarnedActivityGeneration.Generation(
+            activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
+            deviceID: oldID.uuidString,
+            offsetMinutes: 10,
+            armSignature: "old-generation",
+            usageDate: "2026-07-12",
+            timezoneIdentifier: "America/New_York"
+        )
+        defaults.set(oldID.uuidString, forKey: "evlin.childId")
+        XCTAssertTrue(EarnedActivityGeneration.persistLifecycle(
+            .init(active: generation, pending: nil),
+            defaults: defaults
+        ))
+        store.latestDeviceEstimate = 45
+
+        EarnedBudgetArming.teardownFamilyIdentity(
+            appGroupDefaults: defaults,
+            store: store,
+            stopMonitoring: {},
+            beforeUsageClear: {
+                XCTAssertNil(defaults.string(forKey: "evlin.childId"))
+                XCTAssertEqual(
+                    EarnedActivityGeneration.loadLifecycle(defaults: defaults)?.isStopped,
+                    true
+                )
+                XCTAssertNil(EarnedActivityGeneration.authorizedCallback(
+                    activityName: generation.activityName,
+                    currentDeviceID: defaults.string(forKey: "evlin.childId"),
+                    lifecycle: EarnedActivityGeneration.loadLifecycle(defaults: defaults)
+                ))
+            }
+        )
+
+        XCTAssertNil(store.latestDeviceEstimate)
+    }
+
+    func test_callbackAuthorizedBeforeTeardownCannotMutateAfterContinuationResumes() async {
+        let suiteName = "EarnedBudgetArmingTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = EarnedTimeStore(suiteName: suiteName)
+        let oldID = UUID()
+        let generation = EarnedActivityGeneration.Generation(
+            activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
+            deviceID: oldID.uuidString,
+            offsetMinutes: 0,
+            armSignature: "old-generation",
+            usageDate: "2026-07-12",
+            timezoneIdentifier: "America/New_York"
+        )
+        defaults.set(oldID.uuidString, forKey: "evlin.childId")
+        XCTAssertTrue(EarnedActivityGeneration.persistLifecycle(
+            .init(active: generation, pending: nil),
+            defaults: defaults
+        ))
+        var resumeCallback: CheckedContinuation<Void, Never>?
+        var didMutate = false
+
+        let callback = Task {
+            XCTAssertEqual(EarnedActivityGeneration.authorizedCallback(
+                activityName: generation.activityName,
+                currentDeviceID: defaults.string(forKey: "evlin.childId"),
+                lifecycle: EarnedActivityGeneration.loadLifecycle(defaults: defaults)
+            ), generation)
+            await withCheckedContinuation { resumeCallback = $0 }
+            return EarnedActivityGeneration.performIfAuthorized(
+                generation: generation,
+                defaults: defaults
+            ) {
+                didMutate = true
+            }
+        }
+        while resumeCallback == nil { await Task.yield() }
+        EarnedBudgetArming.teardownFamilyIdentity(
+            appGroupDefaults: defaults,
+            store: store,
+            stopMonitoring: {}
+        )
+        resumeCallback?.resume()
+
+        let callbackAuthorized = await callback.value
+        XCTAssertFalse(callbackAuthorized)
+        XCTAssertFalse(didMutate)
+    }
+
     func test_authoritativeReadinessGateRejectsMissingAndMismatchedDeviceMarkers() {
         let suiteName = "EarnedBudgetArmingTests.\(UUID().uuidString)"
         defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }

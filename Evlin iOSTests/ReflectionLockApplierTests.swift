@@ -59,8 +59,16 @@ final class ReflectionLockApplierTests: XCTestCase {
             lastResolvedReflection: ResolvedReflection(rid: rid, resolution: resolution))
     }
 
-    private func makeApplier(store: ActiveLockStore, spy: LockSchedulerSpy) -> ReflectionLockApplier {
-        ReflectionLockApplier(store: store, scheduler: LockScheduler(activityScheduler: spy))
+    private func makeApplier(
+        store: ActiveLockStore,
+        spy: LockSchedulerSpy,
+        childID: UUID
+    ) -> ReflectionLockApplier {
+        ReflectionLockApplier(
+            store: store,
+            scheduler: LockScheduler(activityScheduler: spy),
+            currentChildID: { childID }
+        )
     }
 
     // MARK: - apply
@@ -80,9 +88,9 @@ final class ReflectionLockApplierTests: XCTestCase {
     func test_apply_active_pending_creates_record_and_schedules() async {
         let store = ActiveLockStore()
         let spy = LockSchedulerSpy()
-        let applier = makeApplier(store: store, spy: spy)
         let rid = UUID()
         let childID = UUID()
+        let applier = makeApplier(store: store, spy: spy, childID: childID)
 
         await applier.reconcile(snapshot: pendingSnapshot(rid: rid), childID: childID)
 
@@ -97,9 +105,9 @@ final class ReflectionLockApplierTests: XCTestCase {
     func test_release_on_resolved_removes_record_and_cancels() async {
         let store = ActiveLockStore()
         let spy = LockSchedulerSpy()
-        let applier = makeApplier(store: store, spy: spy)
         let rid = UUID()
         let childID = UUID()
+        let applier = makeApplier(store: store, spy: spy, childID: childID)
 
         // First apply so a record + sticky exist.
         await applier.reconcile(snapshot: pendingSnapshot(rid: rid), childID: childID)
@@ -118,9 +126,9 @@ final class ReflectionLockApplierTests: XCTestCase {
     func test_release_preserves_existing_blocks() async {
         let store = ActiveLockStore()
         let spy = LockSchedulerSpy()
-        let applier = makeApplier(store: store, spy: spy)
         let rid = UUID()
         let childID = UUID()
+        let applier = makeApplier(store: store, spy: spy, childID: childID)
         let block = BlockRecord(
             bundleID: "com.burbn.instagram",
             displayName: "Instagram",
@@ -148,21 +156,21 @@ final class ReflectionLockApplierTests: XCTestCase {
         let store = ActiveLockStore()
         let spy = LockSchedulerSpy()
         spy.errorToThrow = NSError(domain: "t", code: 1)
-        let applier = makeApplier(store: store, spy: spy)
+        let childID = UUID()
+        let applier = makeApplier(store: store, spy: spy, childID: childID)
 
-        await applier.reconcile(snapshot: pendingSnapshot(rid: UUID()), childID: UUID())
+        await applier.reconcile(snapshot: pendingSnapshot(rid: UUID()), childID: childID)
 
         let recorded = UserDefaults(suiteName: "group.com.evlin.ios")?
             .string(forKey: "evlin.reflectionLockScheduleFailure")
         XCTAssertNotNil(recorded, "a failed schedule must be surfaced, not swallowed")
     }
 
-    func test_identityChangeAfterApplySuspensionRemovesOldFamilyReflectionRecord() async {
+    func test_missingIdentityAfterApplySuspensionRemovesOldFamilyReflectionRecord() async {
         let store = ActiveLockStore()
         let spy = LockSchedulerSpy()
         let oldID = UUID()
-        let newID = UUID()
-        var currentID = oldID
+        var currentID: UUID? = oldID
         var resumeMutation: CheckedContinuation<Void, Never>?
         let applier = ReflectionLockApplier(
             store: store,
@@ -173,17 +181,25 @@ final class ReflectionLockApplierTests: XCTestCase {
             }
         )
         let rid = UUID()
+        groupDefaults?.set(
+            try? JSONEncoder().encode(ReflectionLockSticky(
+                heldRID: rid,
+                capExpiresAt: Date().addingTimeInterval(120)
+            )),
+            forKey: stickyKey
+        )
 
         let reconcile = Task {
             await applier.reconcile(snapshot: pendingSnapshot(rid: rid), childID: oldID)
         }
         while resumeMutation == nil { await Task.yield() }
-        currentID = newID
+        currentID = nil
         resumeMutation?.resume()
         await reconcile.value
 
         let shields = await store.allCurrent().shields
         XCTAssertFalse(shields.contains { $0.recordKey == "all:reflection:\(rid.uuidString)" })
         XCTAssertTrue(spy.started.isEmpty)
+        XCTAssertNil(groupDefaults?.data(forKey: stickyKey))
     }
 }

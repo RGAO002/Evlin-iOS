@@ -122,6 +122,31 @@ nonisolated enum EarnedActivityGeneration {
         return activityName.hasPrefix(generatedActivityPrefix) ? active : nil
     }
 
+    static func isAuthorized(
+        generation: Generation,
+        defaults: UserDefaults?
+    ) -> Bool {
+        defaults?.synchronize()
+        return authorizedCallback(
+            activityName: generation.activityName,
+            currentDeviceID: defaults?.string(forKey: "evlin.childId"),
+            lifecycle: loadLifecycle(defaults: defaults)
+        ) == generation
+    }
+
+    @discardableResult
+    static func performIfAuthorized(
+        generation: Generation,
+        defaults: UserDefaults?,
+        _ operation: () -> Void
+    ) -> Bool {
+        guard isAuthorized(generation: generation, defaults: defaults) else {
+            return false
+        }
+        operation()
+        return true
+    }
+
     static func loadLifecycle(defaults: UserDefaults?) -> Lifecycle? {
         guard let data = defaults?.data(forKey: lifecycleKey),
               let lifecycle = try? JSONDecoder().decode(Lifecycle.self, from: data),
@@ -473,6 +498,7 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
     enum AcceptedUsageReconciliation: Equatable {
         case reconciled(Int)
         case stale(acceptedUsageDate: String)
+        case identityMismatch
         case lockUnavailable
     }
 
@@ -647,6 +673,23 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
             defaults?.removeObject(forKey: lockedSetDataKey)
         }
         defaults?.synchronize()
+    }
+
+    func restoreLockedSetIDIfCurrent(
+        _ expectedCurrentID: String,
+        priorID: String?,
+        priorTokenData: Data?
+    ) {
+        guard lockedSetID?.caseInsensitiveCompare(expectedCurrentID) == .orderedSame else {
+            return
+        }
+        if let priorID {
+            saveLockedSetID(priorID, tokenData: priorTokenData)
+        } else {
+            defaults?.removeObject(forKey: lockedSetIDKey)
+            defaults?.removeObject(forKey: lockedSetDataKey)
+            defaults?.synchronize()
+        }
     }
 
     /// True when the backend's `all_selected` flag (Task 1/2 plumbing) says
@@ -920,9 +963,16 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
     func reconcileAcceptedUsageIfNotStale(
         usageDate: String,
         serverEstimatedMinutes: Int,
-        allowSameDayDecrease: Bool
+        allowSameDayDecrease: Bool,
+        expectedDeviceID: UUID? = nil,
+        beforeCommit: () -> Void = {}
     ) -> AcceptedUsageReconciliation {
-        withReconciliationTransaction(rollbackKeys: acceptedUsageRollbackKeys) {
+        withReconciliationTransaction(
+            rollbackKeys: acceptedUsageRollbackKeys,
+            expectedDeviceID: expectedDeviceID,
+            identityMismatchValue: { .identityMismatch },
+            beforeCommit: beforeCommit
+        ) {
             if let currentDate = acceptedUsageDate,
                Self.isCanonicalUsageDate(currentDate),
                usageDate < currentDate {
@@ -1043,6 +1093,9 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
     @discardableResult
     private func withReconciliationTransaction<T>(
         rollbackKeys: [String] = [],
+        expectedDeviceID: UUID? = nil,
+        identityMismatchValue: (() -> T)? = nil,
+        beforeCommit: () -> Void = {},
         _ body: () -> T
     ) -> T? {
         let outcome = reconciliationLock.withLock {
@@ -1058,9 +1111,22 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
                     code: 0
                 )
             }
+            if !mirrorMatches(expectedDeviceID), let identityMismatchValue {
+                return EarnedTransactionOutcome<T>.committed(identityMismatchValue())
+            }
             let before = snapshotDefaults(defaults, keys: rollbackKeys)
             let value = body()
             let written = snapshotDefaults(defaults, keys: rollbackKeys)
+            beforeCommit()
+            if !mirrorMatches(expectedDeviceID), let identityMismatchValue {
+                restoreDefaults(
+                    defaults,
+                    from: before,
+                    whereCurrentMatches: written
+                )
+                defaults.synchronize()
+                return EarnedTransactionOutcome<T>.committed(identityMismatchValue())
+            }
             guard synchronizeDefaults(defaults) else {
                 restoreDefaults(
                     defaults,
@@ -1072,6 +1138,15 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
                     stage: "post_synchronize",
                     code: 0
                 )
+            }
+            if !mirrorMatches(expectedDeviceID), let identityMismatchValue {
+                restoreDefaults(
+                    defaults,
+                    from: before,
+                    whereCurrentMatches: written
+                )
+                defaults.synchronize()
+                return EarnedTransactionOutcome<T>.committed(identityMismatchValue())
             }
             return .committed(value)
         }

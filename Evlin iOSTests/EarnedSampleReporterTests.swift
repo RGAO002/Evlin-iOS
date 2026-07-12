@@ -585,6 +585,45 @@ final class EarnedSampleReporterResponseTests: XCTestCase {
         XCTAssertNil(store.acceptedEstimateMinutes)
         XCTAssertTrue(EarnedSampleReporter.loadRetryQueue(suiteName: isolatedSuite).isEmpty)
     }
+
+    func test_identitySwitchInsideSuccessfulResponseTransactionCannotRestoreOldUsage() {
+        let isolatedSuite = makeIsolatedSuiteName()
+        defer { removeIsolatedSuite(isolatedSuite) }
+        let oldID = UUID()
+        let newID = UUID()
+        let defaults = UserDefaults(suiteName: isolatedSuite)
+        defaults?.set(oldID.uuidString, forKey: "evlin.childId")
+        let store = EarnedTimeStore(suiteName: isolatedSuite)
+        _ = store.reconcileAcceptedUsage(
+            usageDate: "2026-07-12",
+            serverEstimatedMinutes: 25,
+            allowSameDayDecrease: false
+        )
+
+        let result = EarnedSampleReporter.processSuccessfulResponse(
+            Data(#"{"usage_date":"2026-07-12","estimated_minutes":300,"counted":true}"#.utf8),
+            expectedDeviceID: oldID,
+            store: store,
+            suiteName: isolatedSuite,
+            beforeReconciliationCommit: {
+                defaults?.removeObject(forKey: "evlin.childId")
+                store.clearUsageStateForIdentityChange()
+                defaults?.set(newID.uuidString, forKey: "evlin.childId")
+            }
+        )
+
+        XCTAssertEqual(result, .identityMismatch)
+        XCTAssertNil(store.acceptedUsageDate)
+        XCTAssertNil(store.acceptedEstimateMinutes)
+        XCTAssertNil(store.latestDeviceEstimate)
+        XCTAssertEqual(
+            EarnedActivityGeneration.canonicalDeviceID(
+                defaults?.string(forKey: "evlin.childId")
+            ),
+            newID.uuidString.lowercased()
+        )
+    }
+
     func test_countedSuccess_preservesSameDayMonotonicAcceptedUsage() {
         let isolatedSuite = makeIsolatedSuiteName()
         defer { removeIsolatedSuite(isolatedSuite) }
@@ -955,6 +994,10 @@ final class EarnedSampleReporterResponseTests: XCTestCase {
         let isolatedSuite = makeIsolatedSuiteName()
         defer { removeIsolatedSuite(isolatedSuite) }
         let deviceID = UUID()
+        UserDefaults(suiteName: isolatedSuite)?.set(
+            deviceID.uuidString,
+            forKey: "evlin.childId"
+        )
         let first = EarnedSampleReporter.RetryEntry(
             deviceID: deviceID,
             usageDate: "2026-07-12",
@@ -999,6 +1042,52 @@ final class EarnedSampleReporterResponseTests: XCTestCase {
         await drain.value
 
         XCTAssertEqual(EarnedSampleReporter.loadRetryQueue(suiteName: isolatedSuite), [concurrent])
+    }
+
+    func test_retryDrainKeepsOldEntryQueuedWhenAuthorizationStopsDuringRequest() async throws {
+        let isolatedSuite = makeIsolatedSuiteName()
+        defer { removeIsolatedSuite(isolatedSuite) }
+        let deviceID = UUID()
+        let entry = EarnedSampleReporter.RetryEntry(
+            deviceID: deviceID,
+            usageDate: "2026-07-12",
+            timezone: "America/New_York",
+            thresholdMinutes: 60,
+            estimatedMinutes: 60,
+            observedAt: "2026-07-12T12:00:00Z"
+        )
+        EarnedSampleReporter.enqueueRetry(entry, suiteName: isolatedSuite)
+        var isAuthorized = true
+        var resumeRequest: CheckedContinuation<Void, Never>?
+
+        let drain = Task {
+            await EarnedSampleReporter.drainRetryQueue(
+                baseURL: URL(string: "https://earned-sample-reporter.test")!,
+                suiteName: isolatedSuite,
+                onlyDeviceID: deviceID,
+                authorizationIsCurrent: { isAuthorized },
+                requestData: { request in
+                    await withCheckedContinuation { resumeRequest = $0 }
+                    let response = HTTPURLResponse(
+                        url: try XCTUnwrap(request.url),
+                        statusCode: 200,
+                        httpVersion: nil,
+                        headerFields: nil
+                    )!
+                    return (
+                        Data(#"{"usage_date":"2026-07-12","estimated_minutes":60,"counted":true}"#.utf8),
+                        response
+                    )
+                }
+            )
+        }
+        while resumeRequest == nil { await Task.yield() }
+        isAuthorized = false
+        resumeRequest?.resume()
+        await drain.value
+
+        XCTAssertEqual(EarnedSampleReporter.loadRetryQueue(suiteName: isolatedSuite), [entry])
+        XCTAssertNil(EarnedTimeStore(suiteName: isolatedSuite).acceptedEstimateMinutes)
     }
 
     func test_terminalDeferredEntryDrainsFromStoredConfigOnForeground() async throws {
