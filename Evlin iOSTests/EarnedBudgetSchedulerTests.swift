@@ -10,6 +10,7 @@ final class EarnedBudgetSchedulerTests: XCTestCase {
 
     private func generation(
         id: String,
+        deviceID: String = "b21411cb-63a5-4489-bc68-bf8ac26ee15b",
         offset: Int = 5,
         signature: String = "signature",
         usageDate: String = "2026-07-11",
@@ -19,6 +20,7 @@ final class EarnedBudgetSchedulerTests: XCTestCase {
             activityName: EarnedActivityGeneration.generatedActivityName(
                 id: UUID(uuidString: id)!
             ),
+            deviceID: deviceID,
             offsetMinutes: offset,
             armSignature: signature,
             usageDate: usageDate,
@@ -34,13 +36,25 @@ final class EarnedBudgetSchedulerTests: XCTestCase {
         XCTAssertEqual(
             EarnedActivityGeneration.authorizedCallback(
                 activityName: active.activityName,
+                currentDeviceID: active.deviceID,
                 lifecycle: lifecycle
             ),
             active
         )
         XCTAssertNil(EarnedActivityGeneration.authorizedCallback(
             activityName: stale.activityName,
+            currentDeviceID: active.deviceID,
             lifecycle: lifecycle
+        ))
+    }
+
+    func test_callbackFirewallRejectsActiveGenerationForDifferentChildDevice() {
+        let active = generation(id: "10101010-1010-1010-1010-101010101010")
+
+        XCTAssertNil(EarnedActivityGeneration.authorizedCallback(
+            activityName: active.activityName,
+            currentDeviceID: "0d45589a-722c-4e43-a06e-7501f484a46c",
+            lifecycle: .init(active: active, pending: nil)
         ))
     }
 
@@ -49,10 +63,12 @@ final class EarnedBudgetSchedulerTests: XCTestCase {
 
         XCTAssertNil(EarnedActivityGeneration.authorizedCallback(
             activityName: pending.activityName,
+            currentDeviceID: pending.deviceID,
             lifecycle: .init(active: nil, pending: pending)
         ))
         XCTAssertNil(EarnedActivityGeneration.authorizedCallback(
             activityName: pending.activityName,
+            currentDeviceID: pending.deviceID,
             lifecycle: .init(active: nil, pending: nil)
         ))
     }
@@ -60,6 +76,7 @@ final class EarnedBudgetSchedulerTests: XCTestCase {
     func test_legacyCallbackRequiresExplicitActiveLegacyProof() {
         let legacy = EarnedActivityGeneration.Generation(
             activityName: EarnedActivityGeneration.legacyActivityName,
+            deviceID: "b21411cb-63a5-4489-bc68-bf8ac26ee15b",
             offsetMinutes: 10,
             armSignature: "legacy-signature",
             usageDate: "2026-07-11",
@@ -69,14 +86,17 @@ final class EarnedBudgetSchedulerTests: XCTestCase {
 
         XCTAssertEqual(EarnedActivityGeneration.authorizedCallback(
             activityName: EarnedActivityGeneration.legacyActivityName,
+            currentDeviceID: legacy.deviceID,
             lifecycle: .init(active: legacy, pending: nil)
         ), legacy)
         XCTAssertNil(EarnedActivityGeneration.authorizedCallback(
             activityName: EarnedActivityGeneration.legacyActivityName,
+            currentDeviceID: legacy.deviceID,
             lifecycle: .init(active: generated, pending: nil)
         ))
         XCTAssertNil(EarnedActivityGeneration.authorizedCallback(
             activityName: EarnedActivityGeneration.legacyActivityName,
+            currentDeviceID: legacy.deviceID,
             lifecycle: .init(active: nil, pending: nil)
         ))
     }
@@ -87,6 +107,7 @@ final class EarnedBudgetSchedulerTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suiteName) }
         let legacy = EarnedActivityGeneration.Generation(
             activityName: EarnedActivityGeneration.legacyActivityName,
+            deviceID: "b21411cb-63a5-4489-bc68-bf8ac26ee15b",
             offsetMinutes: 10,
             armSignature: "legacy-signature",
             usageDate: "2026-07-11",
@@ -99,6 +120,7 @@ final class EarnedBudgetSchedulerTests: XCTestCase {
         XCTAssertEqual(lifecycle?.active, legacy)
         XCTAssertEqual(EarnedActivityGeneration.authorizedCallback(
             activityName: EarnedActivityGeneration.legacyActivityName,
+            currentDeviceID: legacy.deviceID,
             lifecycle: lifecycle
         ), legacy)
     }
@@ -116,6 +138,7 @@ final class EarnedBudgetSchedulerTests: XCTestCase {
         XCTAssertEqual(lifecycle.pending, pending)
         XCTAssertNil(EarnedActivityGeneration.authorizedCallback(
             activityName: pending.activityName,
+            currentDeviceID: pending.deviceID,
             lifecycle: lifecycle
         ))
     }
@@ -178,8 +201,71 @@ final class EarnedBudgetSchedulerTests: XCTestCase {
         )
         XCTAssertNil(EarnedActivityGeneration.authorizedCallback(
             activityName: prior.activityName,
+            currentDeviceID: active.deviceID,
             lifecycle: EarnedActivityGeneration.loadLifecycle(defaults: defaults)
         ))
+    }
+
+    func test_persistenceFailurePreventsStartMonitoring() {
+        let next = generation(id: "56565656-5656-5656-5656-565656565656")
+        var startCount = 0
+
+        let installed = EarnedActivityGeneration.installReplacement(
+            next,
+            defaults: nil,
+            startMonitoring: { _ in startCount += 1 },
+            stopMonitoring: { _ in }
+        )
+
+        XCTAssertFalse(installed)
+        XCTAssertEqual(startCount, 0)
+    }
+
+    func test_corruptLifecycleRecoveryStopsAllBreadcrumbNamesAndLeavesStoppedProof() throws {
+        let suiteName = "EarnedBudgetSchedulerTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let active = generation(id: "67676767-6767-6767-6767-676767676767")
+        let pending = generation(id: "78787878-7878-7878-7878-787878787878")
+        defaults.set(
+            [active.activityName, pending.activityName],
+            forKey: EarnedActivityGeneration.lifecycleBreadcrumbsKey
+        )
+        defaults.set(Data("corrupt".utf8), forKey: EarnedActivityGeneration.lifecycleKey)
+        var stopped: [String] = []
+
+        EarnedActivityGeneration.recoverPending(
+            defaults: defaults,
+            stopMonitoring: { stopped = $0 }
+        )
+
+        XCTAssertEqual(Set(stopped), Set([
+            active.activityName,
+            pending.activityName,
+            EarnedActivityGeneration.legacyActivityName,
+        ]))
+        XCTAssertEqual(
+            EarnedActivityGeneration.loadLifecycle(defaults: defaults)?.isStopped,
+            true
+        )
+    }
+
+    func test_lifecycleDecodeDefaultsNewVersionedFieldsForMigration() throws {
+        let activeName = EarnedActivityGeneration.generatedActivityName(
+            id: UUID(uuidString: "89898989-8989-8989-8989-898989898989")!
+        )
+        let json = """
+        {"active":{"activityName":"\(activeName)","deviceID":"b21411cb-63a5-4489-bc68-bf8ac26ee15b","offsetMinutes":5,"armSignature":"sig","usageDate":"2026-07-11","timezoneIdentifier":"America/New_York"},"pending":null}
+        """
+
+        let decoded = try JSONDecoder().decode(
+            EarnedActivityGeneration.Lifecycle.self,
+            from: Data(json.utf8)
+        )
+
+        XCTAssertEqual(decoded.version, 1)
+        XCTAssertFalse(decoded.isStopped)
+        XCTAssertTrue(decoded.retiringActivityNames.isEmpty)
     }
 
     func test_successfulInstallPromotesBeforeRetiringPriorAndLegacy() throws {
@@ -342,9 +428,13 @@ final class EarnedBudgetSchedulerTests: XCTestCase {
         XCTAssertEqual(lifecycleWhenStopped?.retiringActivityNames, stopped)
         XCTAssertNil(EarnedActivityGeneration.authorizedCallback(
             activityName: active.activityName,
+            currentDeviceID: active.deviceID,
             lifecycle: lifecycleWhenStopped
         ))
-        XCTAssertNil(EarnedActivityGeneration.loadLifecycle(defaults: defaults))
+        XCTAssertEqual(
+            EarnedActivityGeneration.loadLifecycle(defaults: defaults)?.isStopped,
+            true
+        )
         XCTAssertNil(defaults.string(forKey: EarnedActivityGeneration.activeActivityNameKey))
     }
 
@@ -404,6 +494,15 @@ final class EarnedBudgetSchedulerTests: XCTestCase {
         // Even with a very large pool/cap the count stays ≤ guardEventCount
         let result = EarnedBudgetScheduler.thresholds(poolMinutes: 10_000, capMinutes: 10_000)
         XCTAssertLessThanOrEqual(result.count, EarnedBudgetScheduler.guardEventCount)
+    }
+
+    func test_thresholds_300MinutePolicyRetainsExactTerminalWithin48Events() {
+        let result = EarnedBudgetScheduler.thresholds(poolMinutes: 300, capMinutes: 300)
+
+        XCTAssertLessThanOrEqual(result.count, 48)
+        XCTAssertEqual(result.last, 300)
+        XCTAssertEqual(result, result.sorted())
+        XCTAssertEqual(Set(result).count, result.count)
     }
 
     // MARK: - Threshold list never exceeds min(pool, cap)

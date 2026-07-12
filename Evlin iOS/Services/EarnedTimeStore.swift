@@ -9,9 +9,12 @@ nonisolated enum EarnedActivityGeneration {
     static let generatedActivityPrefix = "evlin.earned.budget."
     static let activeActivityNameKey = "evlin.earned.activeActivityName"
     static let lifecycleKey = "evlin.earned.activityLifecycle"
+    static let lifecycleBreadcrumbsKey = "evlin.earned.activityBreadcrumbs"
+    static let currentLifecycleVersion = 2
 
     struct Generation: Codable, Equatable, Sendable {
         let activityName: String
+        let deviceID: String
         let offsetMinutes: Int
         let armSignature: String
         let usageDate: String
@@ -19,6 +22,7 @@ nonisolated enum EarnedActivityGeneration {
 
         var isValid: Bool {
             isEarnedActivityName(activityName)
+                && canonicalDeviceID(deviceID) != nil
                 && offsetMinutes >= 0
                 && !armSignature.isEmpty
                 && EarnedTimeStore.isCanonicalUsageDate(usageDate)
@@ -27,13 +31,46 @@ nonisolated enum EarnedActivityGeneration {
     }
 
     struct Lifecycle: Codable, Equatable, Sendable {
+        var version: Int
         var active: Generation?
         var pending: Generation?
-        var retiringActivityNames: [String] = []
+        var retiringActivityNames: [String]
+        var isStopped: Bool
+
+        init(
+            version: Int = EarnedActivityGeneration.currentLifecycleVersion,
+            active: Generation?,
+            pending: Generation?,
+            retiringActivityNames: [String] = [],
+            isStopped: Bool = false
+        ) {
+            self.version = version
+            self.active = active
+            self.pending = pending
+            self.retiringActivityNames = retiringActivityNames
+            self.isStopped = isStopped
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case version, active, pending, retiringActivityNames, isStopped
+        }
+
+        init(from decoder: Decoder) throws {
+            let values = try decoder.container(keyedBy: CodingKeys.self)
+            version = try values.decodeIfPresent(Int.self, forKey: .version) ?? 1
+            active = try values.decodeIfPresent(Generation.self, forKey: .active)
+            pending = try values.decodeIfPresent(Generation.self, forKey: .pending)
+            retiringActivityNames = try values.decodeIfPresent(
+                [String].self,
+                forKey: .retiringActivityNames
+            ) ?? []
+            isStopped = try values.decodeIfPresent(Bool.self, forKey: .isStopped) ?? false
+        }
 
         var isValid: Bool {
             let reservedNames = [active?.activityName, pending?.activityName].compactMap { $0 }
-            return active?.isValid != false
+            return version >= 1
+                && active?.isValid != false
                 && pending?.isValid != false
                 && (active == nil
                     || pending == nil
@@ -41,7 +78,15 @@ nonisolated enum EarnedActivityGeneration {
                 && retiringActivityNames.allSatisfy(isEarnedActivityName)
                 && Set(retiringActivityNames).count == retiringActivityNames.count
                 && retiringActivityNames.allSatisfy { !reservedNames.contains($0) }
+                && (!isStopped || (active == nil && pending == nil))
         }
+    }
+
+    static func canonicalDeviceID(_ raw: String?) -> String? {
+        guard let raw,
+              let id = UUID(uuidString: raw.trimmingCharacters(in: .whitespacesAndNewlines))
+        else { return nil }
+        return id.uuidString.lowercased()
     }
 
     static func generatedActivityName(id: UUID) -> String {
@@ -54,12 +99,14 @@ nonisolated enum EarnedActivityGeneration {
 
     static func authorizedCallback(
         activityName: String,
+        currentDeviceID: String?,
         lifecycle: Lifecycle?
     ) -> Generation? {
         guard let lifecycle,
               lifecycle.isValid,
               let active = lifecycle.active,
-              active.activityName == activityName
+              active.activityName == activityName,
+              canonicalDeviceID(active.deviceID) == canonicalDeviceID(currentDeviceID)
         else { return nil }
 
         if activityName == legacyActivityName {
@@ -76,37 +123,50 @@ nonisolated enum EarnedActivityGeneration {
         return lifecycle
     }
 
-    static func persistLifecycle(_ lifecycle: Lifecycle, defaults: UserDefaults?) {
-        guard lifecycle.isValid else { return }
+    @discardableResult
+    static func persistLifecycle(_ lifecycle: Lifecycle, defaults: UserDefaults?) -> Bool {
+        guard lifecycle.isValid, let defaults else { return false }
         guard lifecycle.active != nil
                 || lifecycle.pending != nil
                 || !lifecycle.retiringActivityNames.isEmpty
+                || lifecycle.isStopped
         else {
-            defaults?.removeObject(forKey: lifecycleKey)
-            defaults?.synchronize()
-            return
+            defaults.removeObject(forKey: lifecycleKey)
+            defaults.removeObject(forKey: lifecycleBreadcrumbsKey)
+            return defaults.synchronize()
         }
-        guard
+        let breadcrumbs = stopTargets(lifecycle: lifecycle)
+        defaults.set(breadcrumbs, forKey: lifecycleBreadcrumbsKey)
+        guard defaults.synchronize(),
+              defaults.stringArray(forKey: lifecycleBreadcrumbsKey) == breadcrumbs,
               let data = try? JSONEncoder().encode(lifecycle)
-        else { return }
-        defaults?.set(data, forKey: lifecycleKey)
-        defaults?.synchronize()
+        else { return false }
+        defaults.set(data, forKey: lifecycleKey)
+        guard defaults.synchronize(), defaults.data(forKey: lifecycleKey) == data else {
+            return false
+        }
+        return true
     }
 
-    static func persistPending(_ generation: Generation, defaults: UserDefaults?) {
-        guard generation.isValid else { return }
+    @discardableResult
+    static func persistPending(_ generation: Generation, defaults: UserDefaults?) -> Bool {
+        guard generation.isValid else { return false }
         var lifecycle = loadLifecycle(defaults: defaults)
             ?? Lifecycle(active: nil, pending: nil, retiringActivityNames: [])
         lifecycle.pending = generation
-        persistLifecycle(lifecycle, defaults: defaults)
+        lifecycle.isStopped = false
+        return persistLifecycle(lifecycle, defaults: defaults)
     }
 
     static func migrateActiveIfNeeded(
         _ generation: Generation,
         defaults: UserDefaults?
     ) {
-        guard loadLifecycle(defaults: defaults) == nil, generation.isValid else { return }
-        persistLifecycle(
+        guard defaults?.data(forKey: lifecycleKey) == nil,
+              loadLifecycle(defaults: defaults) == nil,
+              generation.isValid
+        else { return }
+        _ = persistLifecycle(
             .init(active: generation, pending: nil, retiringActivityNames: []),
             defaults: defaults
         )
@@ -116,7 +176,24 @@ nonisolated enum EarnedActivityGeneration {
         defaults: UserDefaults?,
         stopMonitoring: ([String]) -> Void
     ) {
-        guard var lifecycle = loadLifecycle(defaults: defaults) else { return }
+        guard let defaults else { return }
+        guard var lifecycle = loadLifecycle(defaults: defaults) else {
+            let hasCorruptLifecycle = defaults.data(forKey: lifecycleKey) != nil
+            let breadcrumbs = loadBreadcrumbs(defaults: defaults)
+            guard hasCorruptLifecycle || !breadcrumbs.isEmpty else { return }
+            let targets = uniqueTargets(
+                breadcrumbs
+                    + [defaults.string(forKey: activeActivityNameKey), legacyActivityName]
+                        .compactMap { $0 }
+            )
+            if !targets.isEmpty { stopMonitoring(targets) }
+            defaults.removeObject(forKey: activeActivityNameKey)
+            _ = persistLifecycle(
+                .init(active: nil, pending: nil, isStopped: true),
+                defaults: defaults
+            )
+            return
+        }
         var targets = lifecycle.retiringActivityNames
         if let pending = lifecycle.pending,
            !targets.contains(pending.activityName) {
@@ -126,7 +203,8 @@ nonisolated enum EarnedActivityGeneration {
         stopMonitoring(targets)
         lifecycle.pending = nil
         lifecycle.retiringActivityNames = []
-        persistLifecycle(lifecycle, defaults: defaults)
+        if lifecycle.active == nil { lifecycle.isStopped = true }
+        _ = persistLifecycle(lifecycle, defaults: defaults)
     }
 
     static func stopTargets(activeActivityName: String?) -> [String] {
@@ -151,6 +229,18 @@ nonisolated enum EarnedActivityGeneration {
         return targets
     }
 
+    static func loadBreadcrumbs(defaults: UserDefaults?) -> [String] {
+        uniqueTargets(defaults?.stringArray(forKey: lifecycleBreadcrumbsKey) ?? [])
+    }
+
+    private static func uniqueTargets(_ names: [String]) -> [String] {
+        var result: [String] = []
+        for name in names where isEarnedActivityName(name) && !result.contains(name) {
+            result.append(name)
+        }
+        return result
+    }
+
     @discardableResult
     static func installReplacement(
         _ next: Generation,
@@ -163,16 +253,17 @@ nonisolated enum EarnedActivityGeneration {
         else { return false }
 
         recoverPending(defaults: defaults, stopMonitoring: stopMonitoring)
-        persistPending(next, defaults: defaults)
+        let previousLifecycle = loadLifecycle(defaults: defaults)
+        guard persistPending(next, defaults: defaults) else { return false }
         do {
             try startMonitoring(next.activityName)
         } catch {
             stopMonitoring([next.activityName])
-            if var lifecycle = loadLifecycle(defaults: defaults),
-               lifecycle.pending == next {
-                lifecycle.pending = nil
-                persistLifecycle(lifecycle, defaults: defaults)
-            }
+            _ = persistLifecycle(
+                previousLifecycle
+                    ?? .init(active: nil, pending: nil, isStopped: true),
+                defaults: defaults
+            )
             return false
         }
 
@@ -188,7 +279,11 @@ nonisolated enum EarnedActivityGeneration {
         lifecycle.active = next
         lifecycle.pending = nil
         lifecycle.retiringActivityNames = targets
-        persistLifecycle(lifecycle, defaults: defaults)
+        lifecycle.isStopped = false
+        guard persistLifecycle(lifecycle, defaults: defaults) else {
+            stopMonitoring([next.activityName])
+            return false
+        }
         defaults?.set(next.activityName, forKey: activeActivityNameKey)
         defaults?.synchronize()
 
@@ -198,36 +293,44 @@ nonisolated enum EarnedActivityGeneration {
         if var promoted = loadLifecycle(defaults: defaults),
            promoted.active == next {
             promoted.retiringActivityNames = []
-            persistLifecycle(promoted, defaults: defaults)
+            _ = persistLifecycle(promoted, defaults: defaults)
         }
         return true
     }
 
+    @discardableResult
     static func stopPersisted(
         defaults: UserDefaults?,
         stopMonitoring: ([String]) -> Void
-    ) {
+    ) -> Bool {
         let lifecycle = loadLifecycle(defaults: defaults)
         let persistedName = defaults?.string(forKey: activeActivityNameKey)
-        var targets = stopTargets(lifecycle: lifecycle)
+        var targets = uniqueTargets(
+            stopTargets(lifecycle: lifecycle)
+                + loadBreadcrumbs(defaults: defaults)
+        )
         if let persistedName,
            !targets.contains(persistedName),
            isEarnedActivityName(persistedName) {
             targets.insert(persistedName, at: 0)
         }
-        persistLifecycle(
+        guard persistLifecycle(
             .init(
                 active: nil,
                 pending: nil,
-                retiringActivityNames: targets
+                retiringActivityNames: targets,
+                isStopped: true
             ),
             defaults: defaults
-        )
+        ) else { return false }
         defaults?.removeObject(forKey: activeActivityNameKey)
         defaults?.synchronize()
         stopMonitoring(targets)
-        defaults?.removeObject(forKey: lifecycleKey)
-        defaults?.synchronize()
+        _ = persistLifecycle(
+            .init(active: nil, pending: nil, isStopped: true),
+            defaults: defaults
+        )
+        return true
     }
 }
 
@@ -239,17 +342,24 @@ nonisolated private enum EarnedLockOutcome<Value> {
 nonisolated private final class EarnedReconciliationLock: @unchecked Sendable {
     private static let fallback = NSLock()
     private let selection: EarnedTimeStore.ReconciliationLockSelection
+    private let useInProcessLock: Bool
 
-    init(selection: EarnedTimeStore.ReconciliationLockSelection) {
+    init(
+        selection: EarnedTimeStore.ReconciliationLockSelection,
+        useInProcessLock: Bool
+    ) {
         self.selection = selection
+        self.useInProcessLock = useInProcessLock
     }
 
     func withLock<T>(_ body: () -> T) -> EarnedLockOutcome<T> {
-        Self.fallback.lock()
-        defer { Self.fallback.unlock() }
+        if useInProcessLock { Self.fallback.lock() }
+        defer { if useInProcessLock { Self.fallback.unlock() } }
         switch selection {
         case .inProcess:
             return .acquired(body())
+        case .unavailable(let reason):
+            return .unavailable(stage: reason, code: 0)
         case .file(let url):
             let descriptor = open(
                 url.path,
@@ -308,6 +418,7 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
     enum ReconciliationLockSelection: Equatable, Sendable {
         case file(URL)
         case inProcess
+        case unavailable(String)
     }
 
     struct UsageContext: Equatable, Sendable {
@@ -333,7 +444,8 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
 
     init(
         suiteName: String = EarnedTimeStore.appGroupSuiteName,
-        lockSelection: ReconciliationLockSelection? = nil
+        lockSelection: ReconciliationLockSelection? = nil,
+        useInProcessLock: Bool = true
     ) {
         defaults = UserDefaults(suiteName: suiteName)
         let containerURL = suiteName == Self.appGroupSuiteName
@@ -341,11 +453,12 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
                 forSecurityApplicationGroupIdentifier: Self.appGroupSuiteName
             )
             : nil
-        reconciliationLock = EarnedReconciliationLock(selection:
-            lockSelection ?? Self.reconciliationLockSelection(
+        reconciliationLock = EarnedReconciliationLock(
+            selection: lockSelection ?? Self.reconciliationLockSelection(
                 suiteName: suiteName,
                 containerURL: containerURL
-            )
+            ),
+            useInProcessLock: useInProcessLock
         )
     }
 
@@ -353,9 +466,10 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
         suiteName: String,
         containerURL: URL?
     ) -> ReconciliationLockSelection {
-        guard suiteName == appGroupSuiteName, let containerURL else {
+        guard suiteName == appGroupSuiteName else {
             return .inProcess
         }
+        guard let containerURL else { return .unavailable("missing_app_group_container") }
         return .file(containerURL.appendingPathComponent("earned-runtime.lock"))
     }
 
@@ -768,6 +882,17 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
             NSLog("[Evlin/Earned] reconciliation lock unavailable %@", diagnostic)
             return nil
         }
+    }
+
+    func reconciliationLockIsAvailable() -> Bool {
+        withReconciliationTransaction { true } ?? false
+    }
+
+    func withReconciliationLockForTesting(_ body: () -> Void) -> Bool {
+        withReconciliationTransaction {
+            body()
+            return true
+        } ?? false
     }
 
     private func reconcileAcceptedUsageLocked(

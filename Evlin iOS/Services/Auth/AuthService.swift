@@ -118,8 +118,21 @@ final class AuthService {
 
     static func clearFamilyScopedLocalState(
         defaults: UserDefaults = .standard,
-        clearOnboardingShell: Bool = true
+        appGroupDefaults: UserDefaults? = UserDefaults(
+            suiteName: EarnedTimeStore.appGroupSuiteName
+        ),
+        clearOnboardingShell: Bool = true,
+        teardownEarned: (() -> Void)? = nil
     ) {
+        if let teardownEarned {
+            teardownEarned()
+        } else {
+            EarnedBudgetArming.teardownFamilyIdentity(
+                appGroupDefaults: appGroupDefaults
+            )
+        }
+        appGroupDefaults?.removeObject(forKey: "evlin.childId")
+        appGroupDefaults?.synchronize()
         var keys = [
             "evlin.accountID",
             "evlin.parentProfileID",

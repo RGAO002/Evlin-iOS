@@ -30,7 +30,7 @@ final class BigKidStatePoller: ObservableObject {
     private let reconcileReflectionLock: (ChildStateResponse) async -> Void
     private let reconcileIdentityTransition: () -> Bool
     private let applySnapshot: (ChildStateResponse, BigKidState) -> Void
-    private let syncEarnedRuntime: (EarnedTimeRuntime?) -> Void
+    private let syncEarnedRuntime: (EarnedTimeRuntime?) -> EarnedTimeStore.RuntimePolicyReconciliation?
     private let setUsageCountingAllowed: (Bool) -> Bool
     private let ensureEarnedArmed: () -> Void
     private let rearmUsageCounters: () -> Void
@@ -93,7 +93,7 @@ final class BigKidStatePoller: ObservableObject {
         applySnapshot: @escaping (ChildStateResponse, BigKidState) -> Void = { snapshot, state in
             state.apply(snapshot)
         },
-        syncEarnedRuntime: @escaping (EarnedTimeRuntime?) -> Void = BigKidStatePoller.syncEarnedRuntimeFromSnapshot,
+        syncEarnedRuntime: @escaping (EarnedTimeRuntime?) -> EarnedTimeStore.RuntimePolicyReconciliation? = BigKidStatePoller.syncEarnedRuntimeFromSnapshot,
         setUsageCountingAllowed: @escaping (Bool) -> Bool = BigKidStatePoller.writeUsageCountingAllowed,
         ensureEarnedArmed: @escaping () -> Void = {},
         rearmUsageCounters: @escaping () -> Void = {},
@@ -187,7 +187,13 @@ final class BigKidStatePoller: ObservableObject {
             let snapshot = try await fetchState()
             await reconcileReflectionLock(snapshot)
             applySnapshot(snapshot, state)
-            syncEarnedRuntime(snapshot.earnedTimeRuntime)
+            let runtimeReconciliation = syncEarnedRuntime(snapshot.earnedTimeRuntime)
+            if runtimeReconciliation == .lockUnavailable {
+                stopUsageCounters()
+                lastError = "Screen time sync deferred"
+                print("[BigKidStatePoller] earned runtime reconciliation lock unavailable")
+                return
+            }
 
             let allowed = snapshot.effectiveUsageCountingAllowed
             let wasCountingAllowed = setUsageCountingAllowed(allowed)
@@ -243,9 +249,11 @@ final class BigKidStatePoller: ObservableObject {
         return previous
     }
 
-    private static func syncEarnedRuntimeFromSnapshot(_ runtime: EarnedTimeRuntime?) {
-        guard let runtime else { return }
-        _ = EarnedTimeStore.shared.reconcileRuntimePolicy(
+    private static func syncEarnedRuntimeFromSnapshot(
+        _ runtime: EarnedTimeRuntime?
+    ) -> EarnedTimeStore.RuntimePolicyReconciliation? {
+        guard let runtime else { return nil }
+        return EarnedTimeStore.shared.reconcileRuntimePolicy(
             usageDate: runtime.usageDate,
             timezoneIdentifier: runtime.timezone,
             poolMinutes: runtime.dailyPoolMinutes,

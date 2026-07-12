@@ -578,6 +578,29 @@ final class EarnedSampleReporterResponseTests: XCTestCase {
         XCTAssertTrue(lastDebugValue.contains("backend_counting_paused"))
     }
 
+    func test_uncountedSuccessWithUnavailableLockIsDeferredWithoutRetry() {
+        let isolatedSuite = makeIsolatedSuiteName()
+        defer { removeIsolatedSuite(isolatedSuite) }
+        let store = EarnedTimeStore(
+            suiteName: isolatedSuite,
+            lockSelection: .unavailable("test_lock_unavailable")
+        )
+        let data = Data(
+            #"{"usage_date":"2026-07-10","estimated_minutes":0,"counted":false}"#.utf8
+        )
+
+        let result = EarnedSampleReporter.processSuccessfulResponse(
+            data,
+            store: store,
+            suiteName: isolatedSuite
+        )
+
+        XCTAssertEqual(result, .deferred)
+        XCTAssertNil(store.acceptedEstimateMinutes)
+        XCTAssertTrue(EarnedSampleReporter.loadRetryQueue(suiteName: isolatedSuite).isEmpty)
+        XCTAssertTrue(lastDebugValue(in: isolatedSuite).contains("reconciliation_deferred"))
+    }
+
     func test_malformedSuccess_isAcceptedWithoutReconciliationOrRetry() {
         let isolatedSuite = makeIsolatedSuiteName()
         defer { removeIsolatedSuite(isolatedSuite) }

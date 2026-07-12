@@ -73,6 +73,14 @@ enum EarnedBudgetArming {
         force || previousSignature != nextSignature
     }
 
+    nonisolated static func previousArmSignature(
+        lifecycle: EarnedActivityGeneration.Lifecycle?,
+        scalarSignature: String?
+    ) -> String? {
+        guard lifecycle?.isStopped != true else { return nil }
+        return lifecycle?.active?.armSignature ?? scalarSignature
+    }
+
     private static func selectionFingerprint(_ selection: FamilyActivitySelection) -> String {
         guard let data = try? JSONEncoder().encode(selection) else {
             return EarnedBudgetScheduler.selectionSummary(selection)
@@ -128,14 +136,69 @@ enum EarnedBudgetArming {
         stopMonitoring: (() -> Void)? = nil
     ) {
         if let stopMonitoring {
-            stopMonitoring()
+            _ = EarnedActivityGeneration.stopPersisted(
+                defaults: defaults,
+                stopMonitoring: { _ in stopMonitoring() }
+            )
         } else {
             EarnedBudgetScheduler.shared.stop()
         }
-        defaults?.removeObject(forKey: EarnedActivityGeneration.lifecycleKey)
-        defaults?.removeObject(forKey: EarnedActivityGeneration.activeActivityNameKey)
         defaults?.removeObject(forKey: armSignatureKey)
         defaults?.synchronize()
+    }
+
+    static func teardownFamilyIdentity(
+        appGroupDefaults: UserDefaults? = UserDefaults(
+            suiteName: EarnedTimeStore.appGroupSuiteName
+        ),
+        store: EarnedTimeStore = .shared,
+        stopMonitoring: (() -> Void)? = nil
+    ) {
+        stopAndInvalidateSignature(
+            defaults: appGroupDefaults,
+            stopMonitoring: stopMonitoring
+        )
+        store.clearUsageStateForIdentityChange()
+        appGroupDefaults?.removeObject(forKey: "evlin.childId")
+        appGroupDefaults?.synchronize()
+    }
+
+    static func mirrorChildIdentity(
+        _ childID: UUID,
+        appGroupDefaults: UserDefaults? = UserDefaults(
+            suiteName: EarnedTimeStore.appGroupSuiteName
+        ),
+        hasGenerationState: Bool? = nil,
+        stopMonitoring: (() -> Void)? = nil
+    ) {
+        let next = childID.uuidString.lowercased()
+        let current = EarnedActivityGeneration.canonicalDeviceID(
+            appGroupDefaults?.string(forKey: "evlin.childId")
+        )
+        let lifecycle = EarnedActivityGeneration.loadLifecycle(defaults: appGroupDefaults)
+        let boundDeviceMismatch = [
+            lifecycle?.active?.deviceID,
+            lifecycle?.pending?.deviceID,
+        ]
+        .compactMap(EarnedActivityGeneration.canonicalDeviceID)
+        .contains { $0 != next }
+        let inferredGenerationState = lifecycle?.active != nil
+            || lifecycle?.pending != nil
+            || lifecycle?.retiringActivityNames.isEmpty == false
+            || appGroupDefaults?.data(forKey: EarnedActivityGeneration.lifecycleKey) != nil
+            || !EarnedActivityGeneration.loadBreadcrumbs(defaults: appGroupDefaults).isEmpty
+            || appGroupDefaults?.string(
+                forKey: EarnedActivityGeneration.activeActivityNameKey
+            ) != nil
+        if hasGenerationState ?? inferredGenerationState,
+           current != next || boundDeviceMismatch {
+            stopAndInvalidateSignature(
+                defaults: appGroupDefaults,
+                stopMonitoring: stopMonitoring
+            )
+        }
+        appGroupDefaults?.set(next, forKey: "evlin.childId")
+        appGroupDefaults?.synchronize()
     }
 
     /// Detect a child-device identity change and tear down earned-time state
@@ -269,7 +332,8 @@ enum EarnedBudgetArming {
             offsetMinutes: scalarOffset,
             selection: selection
         )
-        if EarnedActivityGeneration.loadLifecycle(defaults: defaults) == nil {
+        if EarnedActivityGeneration.loadLifecycle(defaults: defaults) == nil,
+           defaults?.data(forKey: EarnedActivityGeneration.lifecycleKey) == nil {
             let persistedName = defaults?.string(
                 forKey: EarnedActivityGeneration.activeActivityNameKey
             )
@@ -286,6 +350,7 @@ enum EarnedBudgetArming {
                 EarnedActivityGeneration.migrateActiveIfNeeded(
                     .init(
                         activityName: migrationName,
+                        deviceID: current,
                         offsetMinutes: scalarOffset,
                         armSignature: scalarSignature ?? migrationSignature,
                         usageDate: usageDate,
@@ -295,8 +360,8 @@ enum EarnedBudgetArming {
                 )
             }
         }
-        let activeGeneration = EarnedActivityGeneration
-            .loadLifecycle(defaults: defaults)?.active
+        let lifecycle = EarnedActivityGeneration.loadLifecycle(defaults: defaults)
+        let activeGeneration = lifecycle?.active
         let runningOffset = activeGeneration?.offsetMinutes ?? scalarOffset
         if let activeGeneration {
             store.earnedUsageOffsetMinutes = activeGeneration.offsetMinutes
@@ -317,8 +382,10 @@ enum EarnedBudgetArming {
             selection: selection
         )
         guard shouldStartMonitoring(
-            previousSignature: activeGeneration?.armSignature
-                ?? defaults?.string(forKey: armSignatureKey),
+            previousSignature: previousArmSignature(
+                lifecycle: lifecycle,
+                scalarSignature: defaults?.string(forKey: armSignatureKey)
+            ),
             nextSignature: stableSignature,
             force: force
         ) else {
@@ -356,6 +423,7 @@ enum EarnedBudgetArming {
         )
         let replacementGeneration = EarnedActivityGeneration.Generation(
             activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
+            deviceID: current,
             offsetMinutes: replacementOffset,
             armSignature: replacementSignature,
             usageDate: usageDate,

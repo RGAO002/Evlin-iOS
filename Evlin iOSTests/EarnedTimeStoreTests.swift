@@ -50,6 +50,64 @@ final class EarnedTimeStoreTests: XCTestCase {
         )
     }
 
+    func test_productionSuiteWithoutContainerIsExplicitlyUnavailable() {
+        XCTAssertEqual(
+            EarnedTimeStore.reconciliationLockSelection(
+                suiteName: EarnedTimeStore.appGroupSuiteName,
+                containerURL: nil
+            ),
+            .unavailable("missing_app_group_container")
+        )
+    }
+
+    func test_explicitFileLockSerializesIndependentStoresAndPreservesMonotonicUsage() {
+        let suiteName = "EarnedTimeStoreTests.\(UUID().uuidString)"
+        UserDefaults.standard.removePersistentDomain(forName: suiteName)
+        isolatedSuiteName = suiteName
+        let lockURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("earned-lock-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: lockURL) }
+        let first = EarnedTimeStore(
+            suiteName: suiteName,
+            lockSelection: .file(lockURL),
+            useInProcessLock: false
+        )
+        let second = EarnedTimeStore(
+            suiteName: suiteName,
+            lockSelection: .file(lockURL),
+            useInProcessLock: false
+        )
+        let firstEntered = DispatchSemaphore(value: 0)
+        let releaseFirst = DispatchSemaphore(value: 0)
+        let secondEntered = DispatchSemaphore(value: 0)
+
+        DispatchQueue.global().async {
+            XCTAssertTrue(first.withReconciliationLockForTesting {
+                firstEntered.signal()
+                releaseFirst.wait()
+            })
+        }
+        XCTAssertEqual(firstEntered.wait(timeout: .now() + 1), .success)
+        DispatchQueue.global().async {
+            XCTAssertTrue(second.withReconciliationLockForTesting {
+                secondEntered.signal()
+            })
+        }
+        XCTAssertEqual(secondEntered.wait(timeout: .now() + 0.1), .timedOut)
+        releaseFirst.signal()
+        XCTAssertEqual(secondEntered.wait(timeout: .now() + 1), .success)
+
+        DispatchQueue.concurrentPerform(iterations: 200) { index in
+            _ = (index.isMultiple(of: 2) ? first : second).reconcileAcceptedUsage(
+                usageDate: "2026-07-11",
+                serverEstimatedMinutes: index.isMultiple(of: 3) ? 100 : 5,
+                allowSameDayDecrease: false
+            )
+        }
+        XCTAssertEqual(first.acceptedEstimateMinutes, 100)
+        XCTAssertEqual(second.acceptedEstimateMinutes, 100)
+    }
+
     func test_independentStoresCannotLowerSameDayAcceptedUsageUnderConcurrentWrites() {
         let suiteName = "EarnedTimeStoreTests.\(UUID().uuidString)"
         UserDefaults.standard.removePersistentDomain(forName: suiteName)

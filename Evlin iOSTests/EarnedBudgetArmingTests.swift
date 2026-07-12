@@ -84,6 +84,7 @@ final class EarnedBudgetArmingTests: XCTestCase {
             .init(
                 active: .init(
                     activityName: EarnedActivityGeneration.legacyActivityName,
+                    deviceID: "b21411cb-63a5-4489-bc68-bf8ac26ee15b",
                     offsetMinutes: 5,
                     armSignature: "stable-signature",
                     usageDate: "2026-07-11",
@@ -102,18 +103,84 @@ final class EarnedBudgetArmingTests: XCTestCase {
 
         XCTAssertEqual(stopCount, 1)
         XCTAssertNil(defaults.string(forKey: EarnedBudgetArming.armSignatureKey))
-        XCTAssertNil(EarnedActivityGeneration.loadLifecycle(defaults: defaults))
+        let stoppedLifecycle = EarnedActivityGeneration.loadLifecycle(defaults: defaults)
+        XCTAssertEqual(stoppedLifecycle?.isStopped, true)
         XCTAssertTrue(EarnedBudgetArming.shouldStartMonitoring(
-            previousSignature: defaults.string(forKey: EarnedBudgetArming.armSignatureKey),
+            previousSignature: EarnedBudgetArming.previousArmSignature(
+                lifecycle: stoppedLifecycle,
+                scalarSignature: defaults.string(forKey: EarnedBudgetArming.armSignatureKey)
+            ),
             nextSignature: "stable-signature",
             force: false
         ))
         defaults.set("stable-signature", forKey: EarnedBudgetArming.armSignatureKey)
-        XCTAssertFalse(EarnedBudgetArming.shouldStartMonitoring(
-            previousSignature: defaults.string(forKey: EarnedBudgetArming.armSignatureKey),
+        XCTAssertTrue(EarnedBudgetArming.shouldStartMonitoring(
+            previousSignature: EarnedBudgetArming.previousArmSignature(
+                lifecycle: stoppedLifecycle,
+                scalarSignature: defaults.string(forKey: EarnedBudgetArming.armSignatureKey)
+            ),
             nextSignature: "stable-signature",
             force: false
         ))
+    }
+
+    func test_interruptedStopTombstonePreventsLegacyMigrationAndForcesInstall() {
+        let suiteName = "EarnedBudgetArmingTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set("stale-signature", forKey: EarnedBudgetArming.armSignatureKey)
+        var stopped: [String] = []
+
+        EarnedActivityGeneration.stopPersisted(
+            defaults: defaults,
+            stopMonitoring: { stopped = $0 }
+        )
+        let stoppedLifecycle = EarnedActivityGeneration.loadLifecycle(defaults: defaults)
+        let legacy = EarnedActivityGeneration.Generation(
+            activityName: EarnedActivityGeneration.legacyActivityName,
+            deviceID: "b21411cb-63a5-4489-bc68-bf8ac26ee15b",
+            offsetMinutes: 5,
+            armSignature: "stale-signature",
+            usageDate: "2026-07-11",
+            timezoneIdentifier: "America/New_York"
+        )
+        EarnedActivityGeneration.migrateActiveIfNeeded(legacy, defaults: defaults)
+
+        XCTAssertTrue(stopped.contains(EarnedActivityGeneration.legacyActivityName))
+        XCTAssertEqual(stoppedLifecycle?.isStopped, true)
+        XCTAssertNil(EarnedActivityGeneration.authorizedCallback(
+            activityName: EarnedActivityGeneration.legacyActivityName,
+            currentDeviceID: legacy.deviceID,
+            lifecycle: EarnedActivityGeneration.loadLifecycle(defaults: defaults)
+        ))
+        XCTAssertNil(EarnedBudgetArming.previousArmSignature(
+            lifecycle: EarnedActivityGeneration.loadLifecycle(defaults: defaults),
+            scalarSignature: defaults.string(forKey: EarnedBudgetArming.armSignatureKey)
+        ))
+    }
+
+    func test_identityMirrorStopsOldGenerationBeforeWritingNewChildID() {
+        let suiteName = "EarnedBudgetArmingTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let oldID = UUID(uuidString: "b21411cb-63a5-4489-bc68-bf8ac26ee15b")!
+        let newID = UUID(uuidString: "0d45589a-722c-4e43-a06e-7501f484a46c")!
+        defaults.set(oldID.uuidString, forKey: "evlin.childId")
+        var events: [String] = []
+
+        EarnedBudgetArming.mirrorChildIdentity(
+            newID,
+            appGroupDefaults: defaults,
+            hasGenerationState: true,
+            stopMonitoring: {
+                events.append("stop")
+                XCTAssertEqual(defaults.string(forKey: "evlin.childId"), oldID.uuidString)
+            }
+        )
+        events.append("mirror")
+
+        XCTAssertEqual(events, ["stop", "mirror"])
+        XCTAssertEqual(defaults.string(forKey: "evlin.childId"), newID.uuidString.lowercased())
     }
 
     func test_armSignatureSkipsWhenIdentityDatePolicySelectionAndOffsetAreUnchanged() {

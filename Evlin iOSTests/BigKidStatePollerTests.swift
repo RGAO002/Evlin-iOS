@@ -182,7 +182,10 @@ final class BigKidStatePollerTests: XCTestCase {
             fetchState: { response },
             reconcileReflectionLock: { _ in },
             applySnapshot: { _, _ in events.append("apply") },
-            syncEarnedRuntime: { _ in events.append("runtime") },
+            syncEarnedRuntime: { _ in
+                events.append("runtime")
+                return .reconciled(15)
+            },
             setUsageCountingAllowed: { allowed in
                 events.append("gate")
                 return allowed
@@ -219,7 +222,10 @@ final class BigKidStatePollerTests: XCTestCase {
                 return true
             },
             applySnapshot: { _, _ in events.append("apply") },
-            syncEarnedRuntime: { _ in events.append("runtime") },
+            syncEarnedRuntime: { _ in
+                events.append("runtime")
+                return .reconciled(15)
+            },
             setUsageCountingAllowed: { _ in
                 events.append("gate")
                 return false
@@ -230,6 +236,39 @@ final class BigKidStatePollerTests: XCTestCase {
         await poller.refreshNow()
 
         XCTAssertEqual(events, ["identity", "fetch", "apply", "runtime", "gate", "arm"])
+    }
+
+    func test_refresh_lockUnavailableStopsBeforeGateArmAndHeartbeat() async {
+        let runtime = EarnedTimeRuntime(
+            usageDate: "2026-07-11",
+            timezone: "America/New_York",
+            dailyPoolMinutes: 120,
+            deviceCapMinutes: 90,
+            remainingMinutes: 75,
+            estimatedMinutes: 15
+        )
+        let response = snapshot(usageCountingAllowed: true, runtime: runtime)
+        let state = BigKidState(snapshot: response)
+        var events: [String] = []
+        let poller = BigKidStatePoller(
+            state: state,
+            fetchState: { response },
+            reconcileReflectionLock: { _ in },
+            applySnapshot: { _, _ in events.append("apply") },
+            syncEarnedRuntime: { _ in
+                events.append("runtime")
+                return .lockUnavailable
+            },
+            setUsageCountingAllowed: { _ in events.append("gate"); return true },
+            ensureEarnedArmed: { events.append("arm") },
+            stopUsageCounters: { events.append("stop") },
+            reportEffectiveState: { events.append("heartbeat") }
+        )
+
+        await poller.refreshNow()
+
+        XCTAssertEqual(events, ["apply", "runtime", "stop"])
+        XCTAssertEqual(poller.lastError, "Screen time sync deferred")
     }
 
     func test_refresh_coalescesMultipleOverlapsIntoOneFollowUpFetch() async {

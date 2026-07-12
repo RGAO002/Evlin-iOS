@@ -35,22 +35,45 @@ enum FamilyGoneDetector {
     /// `ActiveLockStore.unshieldAll()` + `unblockAll()` (the shipped release
     /// path) and clears the `ReflectionLockSticky` so the reconciler won't re-arm.
     @MainActor
-    static func failOpen() async {
+    static func failOpen(
+        defaults: UserDefaults = .standard,
+        appGroupDefaults: UserDefaults? = UserDefaults(
+            suiteName: EarnedTimeStore.appGroupSuiteName
+        ),
+        releaseRestrictions: (() async -> Void)? = nil,
+        teardownEarned: (() -> Void)? = nil
+    ) async {
+        if let teardownEarned {
+            teardownEarned()
+        } else {
+            EarnedBudgetArming.teardownFamilyIdentity(
+                appGroupDefaults: appGroupDefaults
+            )
+        }
+        appGroupDefaults?.removeObject(forKey: "evlin.childId")
+        appGroupDefaults?.synchronize()
+
+        // Earned monitoring is invalidated synchronously before any suspension
+        // point can expose a newly mirrored identity to an old callback.
+
         // 1. Drop every shield + block (reflection lock included — it's an
         //    `.all`-tier ShieldRecord, so unshieldAll() releases it too).
-        _ = await ActiveLockStore.shared.unshieldAll()
-        _ = await ActiveLockStore.shared.unblockAll()
+        if let releaseRestrictions {
+            await releaseRestrictions()
+        } else {
+            _ = await ActiveLockStore.shared.unshieldAll()
+            _ = await ActiveLockStore.shared.unblockAll()
+        }
 
         // 2. Clear the reflection sticky so a stale held RID can't make the
         //    reconciler re-apply a lock on a later (spurious) poll.
-        let appGroup = UserDefaults(suiteName: "group.com.evlin.ios")
-        appGroup?.removeObject(forKey: "evlin.reflectionLockSticky")
+        appGroupDefaults?.removeObject(forKey: "evlin.reflectionLockSticky")
 
         // 3. Reset kid pairing state. Drop the child device id (the key every
         //    poller reads) + the family id so the kid app stops polling a dead
         //    family. Leave `appMode`/`onboardingComplete` so the device returns
         //    to a clean unpaired shell rather than crash-looping.
-        UserDefaults.standard.removeObject(forKey: CommandPoller.childDeviceIDDefaultsKey)
-        UserDefaults.standard.removeObject(forKey: "evlin.familyID")
+        defaults.removeObject(forKey: CommandPoller.childDeviceIDDefaultsKey)
+        defaults.removeObject(forKey: "evlin.familyID")
     }
 }

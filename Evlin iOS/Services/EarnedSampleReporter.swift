@@ -31,6 +31,7 @@ enum EarnedSampleReporter {
         case counted
         case paused
         case acceptedWithoutReconciliation
+        case deferred
     }
 
     @discardableResult
@@ -59,6 +60,13 @@ enum EarnedSampleReporter {
             serverEstimatedMinutes: snapshot.estimatedMinutes,
             allowSameDayDecrease: snapshot.counted == false
         )
+        if reconciliation == .lockUnavailable {
+            recordDebug(
+                "post success reconciliation_deferred lock_unavailable date=\(snapshot.usageDate)",
+                suiteName: suiteName
+            )
+            return .deferred
+        }
         if case .stale(let acceptedDate) = reconciliation {
             recordDebug(
                 "post success stale_response date=\(snapshot.usageDate) accepted_date=\(acceptedDate)",

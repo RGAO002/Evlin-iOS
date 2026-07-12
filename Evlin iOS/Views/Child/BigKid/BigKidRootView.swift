@@ -45,8 +45,11 @@ struct BigKidRootView: View {
         // EvlinDeviceActivityMonitor extension can hit /child/time-consumption
         // when DeviceActivityEvent thresholds fire (Phase 10).
         if let groupDefaults = UserDefaults(suiteName: "group.com.evlin.ios") {
+            EarnedBudgetArming.mirrorChildIdentity(
+                childId,
+                appGroupDefaults: groupDefaults
+            )
             groupDefaults.set(baseURL.absoluteString, forKey: "evlin.baseURL")
-            groupDefaults.set(childId.uuidString, forKey: "evlin.childId")
         }
     }
 
@@ -297,9 +300,11 @@ struct BigKidRootView: View {
 
     /// Local-reset sign out: release enforcement → stop polling → clear local
     /// state → route back to onboarding. No backend call. MUST be async because
-    /// ActiveLockStore is an actor (await), and awaiting first preserves the order.
+    /// Earned monitoring is invalidated synchronously before restriction release.
     @MainActor
     private func performKidSignOut() async {
+        EarnedBudgetArming.teardownFamilyIdentity()
+
         _ = await ActiveLockStore.shared.unshieldAll()
         _ = await ActiveLockStore.shared.unblockAll()
         ScreenTimeManager.shared.setDeletionProtectionEnabled(false)

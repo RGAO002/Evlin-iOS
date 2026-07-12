@@ -26,6 +26,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         defaults?.synchronize()
         return EarnedActivityGeneration.authorizedCallback(
             activityName: activityName,
+            currentDeviceID: defaults?.string(forKey: "evlin.childId"),
             lifecycle: EarnedActivityGeneration.loadLifecycle(defaults: defaults)
         )
     }
@@ -195,6 +196,10 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             ) else {
                 NSLog("[Evlin/Ext] rejected inactive earned threshold activity=%@ event=%@",
                       activity.rawValue, event.rawValue)
+                return
+            }
+            guard EarnedTimeStore.shared.reconciliationLockIsAvailable() else {
+                NSLog("[Evlin/Ext] rejected earned threshold: reconciliation lock unavailable")
                 return
             }
             guard usageCountingAllowed(eventName: event.rawValue) else { return }

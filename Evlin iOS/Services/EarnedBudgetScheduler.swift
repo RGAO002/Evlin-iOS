@@ -65,7 +65,10 @@ final class EarnedBudgetScheduler {
 
         // Guard: cap at guardEventCount slots (safety valve).
         if result.count > guardEventCount {
-            result = Array(result.prefix(guardEventCount))
+            result = Array(result.prefix(guardEventCount - 1))
+            if result.last != ceiling {
+                result.append(ceiling)
+            }
         }
 
         return result

@@ -116,6 +116,26 @@ final class AuthServiceTests: XCTestCase {
         XCTAssertNil(defaults.object(forKey: "evlin.childDeviceID"))
     }
 
+    func testFamilyScopedCleanupStopsEarnedBeforeClearingMirroredChild() throws {
+        let suiteName = "AuthServiceTests.\(UUID().uuidString)"
+        let appGroup = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { appGroup.removePersistentDomain(forName: suiteName) }
+        appGroup.set(UUID().uuidString, forKey: "evlin.childId")
+        var events: [String] = []
+
+        AuthService.clearFamilyScopedLocalState(
+            appGroupDefaults: appGroup,
+            teardownEarned: {
+                events.append("stop")
+                XCTAssertNotNil(appGroup.string(forKey: "evlin.childId"))
+            }
+        )
+        events.append("cleared")
+
+        XCTAssertEqual(events, ["stop", "cleared"])
+        XCTAssertNil(appGroup.string(forKey: "evlin.childId"))
+    }
+
     func testCompletedOnboardingRepairsMissingParentModeFromStoredSession() {
         let familyID = UUID()
         let repaired = ContentView.repairedCompletedOnboardingMode(
