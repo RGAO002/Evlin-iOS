@@ -13,8 +13,13 @@ final class AuthServiceTests: XCTestCase {
     // AuthService production type is unchanged; this is purely a test-harness
     // workaround for the runtime bug.
     private static var retained: [AuthService] = []
-    @MainActor private func makeAuth() -> AuthService {
-        let svc = AuthService(api: APIClient())
+    @MainActor private func makeAuth(
+        terminalSessionTeardown: (() -> Void)? = nil
+    ) -> AuthService {
+        let svc = AuthService(
+            api: APIClient(),
+            terminalSessionTeardown: terminalSessionTeardown
+        )
         Self.retained.append(svc)
         return svc
     }
@@ -134,6 +139,30 @@ final class AuthServiceTests: XCTestCase {
 
         XCTAssertEqual(events, ["stop", "cleared"])
         XCTAssertNil(appGroup.string(forKey: "evlin.childId"))
+    }
+
+    func testTerminalSessionNotificationSynchronouslyTearsDownBeforeSignedOutState() throws {
+        let suiteName = "AuthServiceTests.\(UUID().uuidString)"
+        let appGroup = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { appGroup.removePersistentDomain(forName: suiteName) }
+        appGroup.set(UUID().uuidString, forKey: "evlin.childId")
+        var events: [String] = []
+        let auth = makeAuth(terminalSessionTeardown: {
+            AuthService.clearFamilyScopedLocalState(
+                appGroupDefaults: appGroup,
+                teardownEarned: {
+                    events.append("teardown")
+                    XCTAssertNotNil(appGroup.string(forKey: "evlin.childId"))
+                }
+            )
+        })
+
+        NotificationCenter.default.post(name: .evlinSessionSignedOut, object: nil)
+        if auth.state == .signedOut { events.append("signed-out") }
+
+        XCTAssertEqual(events, ["teardown", "signed-out"])
+        XCTAssertNil(appGroup.string(forKey: "evlin.childId"))
+        XCTAssertEqual(auth.state, .signedOut)
     }
 
     func testCompletedOnboardingRepairsMissingParentModeFromStoredSession() {

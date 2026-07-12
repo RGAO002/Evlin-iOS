@@ -183,6 +183,50 @@ final class EarnedBudgetArmingTests: XCTestCase {
         XCTAssertEqual(defaults.string(forKey: "evlin.childId"), newID.uuidString.lowercased())
     }
 
+    func test_identityMirrorClearsPriorAuthoritativeReadinessBeforeWritingNewChildID() {
+        let suiteName = "EarnedBudgetArmingTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = EarnedTimeStore(suiteName: suiteName)
+        let oldID = UUID()
+        let newID = UUID()
+        defaults.set(oldID.uuidString, forKey: "evlin.childId")
+        store.markAuthoritativeStateReady(deviceID: oldID)
+
+        EarnedBudgetArming.mirrorChildIdentity(
+            newID,
+            appGroupDefaults: defaults,
+            readinessStore: store,
+            hasGenerationState: false
+        )
+
+        XCTAssertFalse(store.isAuthoritativeStateReady(deviceID: oldID))
+        XCTAssertFalse(store.isAuthoritativeStateReady(deviceID: newID))
+        XCTAssertEqual(defaults.string(forKey: "evlin.childId"), newID.uuidString.lowercased())
+    }
+
+    func test_authoritativeReadinessGateRejectsMissingAndMismatchedDeviceMarkers() {
+        let suiteName = "EarnedBudgetArmingTests.\(UUID().uuidString)"
+        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let store = EarnedTimeStore(suiteName: suiteName)
+        let current = UUID()
+
+        XCTAssertFalse(EarnedBudgetArming.canArmAuthoritativeState(
+            deviceID: current,
+            store: store
+        ))
+        store.markAuthoritativeStateReady(deviceID: UUID())
+        XCTAssertFalse(EarnedBudgetArming.canArmAuthoritativeState(
+            deviceID: current,
+            store: store
+        ))
+        store.markAuthoritativeStateReady(deviceID: current)
+        XCTAssertTrue(EarnedBudgetArming.canArmAuthoritativeState(
+            deviceID: current,
+            store: store
+        ))
+    }
+
     func test_armSignatureSkipsWhenIdentityDatePolicySelectionAndOffsetAreUnchanged() {
         let base = EarnedBudgetArming.makeArmSignature(
             deviceID: "device-a",

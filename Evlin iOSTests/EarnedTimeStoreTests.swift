@@ -178,6 +178,179 @@ final class EarnedTimeStoreTests: XCTestCase {
         )
     }
 
+    func test_transactionWithNilDefaultsDoesNotRunBody() {
+        var bodyRan = false
+        let store = EarnedTimeStore(
+            suiteName: "EarnedTimeStoreTests.nil-defaults",
+            defaultsFactory: { _ in nil }
+        )
+
+        let acquired = store.withReconciliationLockForTesting { bodyRan = true }
+
+        XCTAssertFalse(acquired)
+        XCTAssertFalse(bodyRan)
+    }
+
+    func test_failedPreReadSynchronizeDoesNotRunTransactionBody() {
+        let suiteName = "EarnedTimeStoreTests.\(UUID().uuidString)"
+        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        var bodyRan = false
+        let store = EarnedTimeStore(
+            suiteName: suiteName,
+            synchronizeDefaults: { _ in false }
+        )
+
+        let acquired = store.withReconciliationLockForTesting { bodyRan = true }
+
+        XCTAssertFalse(acquired)
+        XCTAssertFalse(bodyRan)
+    }
+
+    func test_failedPostWriteSynchronizeReturnsLockUnavailableAfterBody() {
+        let suiteName = "EarnedTimeStoreTests.\(UUID().uuidString)"
+        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        var outcomes = [true, false]
+        let store = EarnedTimeStore(
+            suiteName: suiteName,
+            synchronizeDefaults: { _ in outcomes.removeFirst() }
+        )
+
+        let result = store.reconcileAcceptedUsageIfNotStale(
+            usageDate: "2026-07-12",
+            serverEstimatedMinutes: 10,
+            allowSameDayDecrease: false
+        )
+
+        XCTAssertEqual(result, .lockUnavailable)
+        XCTAssertEqual(store.acceptedEstimateMinutes, 10, "body ran, but failure was not reported as success")
+    }
+
+    func test_localThresholdLockFailureDoesNotMutateEstimate() {
+        let suiteName = "EarnedTimeStoreTests.\(UUID().uuidString)"
+        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let seeded = EarnedTimeStore(suiteName: suiteName)
+        seeded.latestDeviceEstimate = 25
+        let unavailable = EarnedTimeStore(
+            suiteName: suiteName,
+            lockSelection: .unavailable("test_lock_unavailable")
+        )
+
+        XCTAssertEqual(unavailable.recordLocalThresholdEstimate(300), .lockUnavailable)
+        XCTAssertEqual(seeded.latestDeviceEstimate, 25)
+    }
+
+    func test_localThresholdPostSynchronizeFailureRestoresPriorEstimate() {
+        let suiteName = "EarnedTimeStoreTests.\(UUID().uuidString)"
+        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let seeded = EarnedTimeStore(suiteName: suiteName)
+        seeded.latestDeviceEstimate = 25
+        var outcomes = [true, false]
+        let failing = EarnedTimeStore(
+            suiteName: suiteName,
+            synchronizeDefaults: { _ in outcomes.removeFirst() }
+        )
+
+        XCTAssertEqual(failing.recordLocalThresholdEstimate(300), .lockUnavailable)
+        XCTAssertEqual(seeded.latestDeviceEstimate, 25)
+    }
+
+    func test_futureLifecycleVersionIsCorruptAndCannotAuthorizeCallback() throws {
+        let suiteName = "EarnedTimeStoreTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let generation = EarnedActivityGeneration.Generation(
+            activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
+            deviceID: UUID().uuidString,
+            offsetMinutes: 0,
+            armSignature: "future-signature",
+            usageDate: "2026-07-12",
+            timezoneIdentifier: "America/New_York"
+        )
+        let future = EarnedActivityGeneration.Lifecycle(
+            version: EarnedActivityGeneration.currentLifecycleVersion + 1,
+            active: generation,
+            pending: nil
+        )
+        let futureData = try JSONEncoder().encode(future)
+        defaults.set(futureData, forKey: EarnedActivityGeneration.lifecycleKey)
+        defaults.set([generation.activityName], forKey: EarnedActivityGeneration.lifecycleBreadcrumbsKey)
+        var stopped: [String] = []
+
+        XCTAssertThrowsError(try JSONDecoder().decode(
+            EarnedActivityGeneration.Lifecycle.self,
+            from: futureData
+        ))
+        XCTAssertNil(EarnedActivityGeneration.loadLifecycle(defaults: defaults))
+        XCTAssertNil(EarnedActivityGeneration.authorizedCallback(
+            activityName: generation.activityName,
+            currentDeviceID: generation.deviceID,
+            lifecycle: future
+        ))
+        EarnedActivityGeneration.recoverPending(
+            defaults: defaults,
+            stopMonitoring: { stopped = $0 }
+        )
+
+        XCTAssertTrue(stopped.contains(generation.activityName))
+        XCTAssertEqual(EarnedActivityGeneration.loadLifecycle(defaults: defaults)?.isStopped, true)
+    }
+
+    func test_promotionPersistenceFailureStopsNewGenerationAndRestoresPriorState() throws {
+        let suiteName = "EarnedTimeStoreTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let prior = EarnedActivityGeneration.Generation(
+            activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
+            deviceID: UUID().uuidString,
+            offsetMinutes: 10,
+            armSignature: "prior-signature",
+            usageDate: "2026-07-12",
+            timezoneIdentifier: "America/New_York"
+        )
+        let priorLifecycle = EarnedActivityGeneration.Lifecycle(active: prior, pending: nil)
+        XCTAssertTrue(EarnedActivityGeneration.persistLifecycle(priorLifecycle, defaults: defaults))
+        defaults.set(prior.activityName, forKey: EarnedActivityGeneration.activeActivityNameKey)
+        let next = EarnedActivityGeneration.Generation(
+            activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
+            deviceID: prior.deviceID,
+            offsetMinutes: 20,
+            armSignature: "next-signature",
+            usageDate: "2026-07-12",
+            timezoneIdentifier: "America/New_York"
+        )
+        var persistAttempt = 0
+        var stopped: [[String]] = []
+
+        let installed = EarnedActivityGeneration.installReplacement(
+            next,
+            defaults: defaults,
+            startMonitoring: { _ in },
+            stopMonitoring: { stopped.append($0) },
+            persistLifecycle: { lifecycle, defaults in
+                persistAttempt += 1
+                if persistAttempt == 2 {
+                    defaults?.removeObject(forKey: EarnedActivityGeneration.lifecycleKey)
+                    defaults?.removeObject(forKey: EarnedActivityGeneration.lifecycleBreadcrumbsKey)
+                    defaults?.removeObject(forKey: EarnedActivityGeneration.activeActivityNameKey)
+                    return false
+                }
+                return EarnedActivityGeneration.persistLifecycle(lifecycle, defaults: defaults)
+            }
+        )
+
+        XCTAssertFalse(installed)
+        XCTAssertEqual(stopped, [[next.activityName]])
+        XCTAssertEqual(EarnedActivityGeneration.loadLifecycle(defaults: defaults), priorLifecycle)
+        XCTAssertEqual(
+            defaults.stringArray(forKey: EarnedActivityGeneration.lifecycleBreadcrumbsKey),
+            EarnedActivityGeneration.stopTargets(lifecycle: priorLifecycle)
+        )
+        XCTAssertEqual(
+            defaults.string(forKey: EarnedActivityGeneration.activeActivityNameKey),
+            prior.activityName
+        )
+    }
+
     func test_runtimeTimezonePersistsAndDrivesUsageDateWhenDeviceTimezoneDiffers() {
         withIsolatedStore { store in
             let result = store.reconcileRuntimePolicy(
@@ -222,6 +395,20 @@ final class EarnedTimeStoreTests: XCTestCase {
             store.clearUsageStateForIdentityChange()
 
             XCTAssertNil(store.runtimeTimezoneIdentifier)
+        }
+    }
+
+    func test_authoritativeReadinessRequiresExactDeviceAndClearsOnIdentityReset() {
+        withIsolatedStore { store in
+            let readyID = UUID()
+            let otherID = UUID()
+
+            store.markAuthoritativeStateReady(deviceID: readyID)
+
+            XCTAssertTrue(store.isAuthoritativeStateReady(deviceID: readyID))
+            XCTAssertFalse(store.isAuthoritativeStateReady(deviceID: otherID))
+            store.clearUsageStateForIdentityChange()
+            XCTAssertFalse(store.isAuthoritativeStateReady(deviceID: readyID))
         }
     }
 

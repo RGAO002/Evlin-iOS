@@ -20,6 +20,7 @@ enum EarnedSampleReporter {
 
     static let retryQueueKey = "evlin.earnedSampleRetryQueue"
     static let lastSamplePostDebugKey = "evlin.earned.lastSamplePost"
+    nonisolated private static let sharedSuiteName = "group.com.evlin.ios"
 
     private struct SampleSnapshot: Decodable {
         let usageDate: String
@@ -32,11 +33,20 @@ enum EarnedSampleReporter {
         case paused
         case acceptedWithoutReconciliation
         case deferred
+        case identityMismatch
+    }
+
+    struct ThresholdHandlingDecision: Equatable {
+        let thresholdMinutes: Int
+        let shouldReport: Bool
+        let shouldMutateLocalEstimate: Bool
+        let shouldApplyLocalShield: Bool
     }
 
     @discardableResult
     static func processSuccessfulResponse(
         _ data: Data,
+        expectedDeviceID: UUID? = nil,
         store: EarnedTimeStore = .shared,
         suiteName: String = "group.com.evlin.ios"
     ) -> SuccessDisposition {
@@ -54,6 +64,18 @@ enum EarnedSampleReporter {
                 suiteName: suiteName
             )
             return .acceptedWithoutReconciliation
+        }
+        if let expectedDeviceID {
+            let mirrored = EarnedActivityGeneration.canonicalDeviceID(
+                UserDefaults(suiteName: suiteName)?.string(forKey: "evlin.childId")
+            )
+            guard mirrored == expectedDeviceID.uuidString.lowercased() else {
+                recordDebug(
+                    "post success identity_mismatch expected=\(expectedDeviceID.uuidString.lowercased()) current=\(mirrored ?? "(missing)")",
+                    suiteName: suiteName
+                )
+                return .identityMismatch
+            }
         }
         let reconciliation = store.reconcileAcceptedUsageIfNotStale(
             usageDate: snapshot.usageDate,
@@ -192,6 +214,7 @@ enum EarnedSampleReporter {
             if success {
                 processSuccessfulResponse(
                     data,
+                    expectedDeviceID: deviceID,
                     store: EarnedTimeStore(suiteName: suiteName),
                     suiteName: suiteName
                 )
@@ -223,13 +246,15 @@ enum EarnedSampleReporter {
     /// an infinite-grow loop if the queue is partially drained.
     static func drainRetryQueue(
         baseURL: URL,
-        suiteName: String = "group.com.evlin.ios"
+        suiteName: String = sharedSuiteName,
+        onlyDeviceID: UUID? = nil
     ) async {
         let queue = loadRetryQueue(suiteName: suiteName)
         guard !queue.isEmpty else { return }
-        clearRetryQueue(suiteName: suiteName)
+        let partitioned = partitionRetryQueue(queue, onlyDeviceID: onlyDeviceID)
+        saveRetryQueue(partitioned.deferred, suiteName: suiteName)
 
-        for entry in queue {
+        for entry in partitioned.eligible {
             let body = makeSampleBody(
                 deviceID: entry.deviceID,
                 usageDate: entry.usageDate,
@@ -255,6 +280,7 @@ enum EarnedSampleReporter {
                 if success {
                     processSuccessfulResponse(
                         data,
+                        expectedDeviceID: entry.deviceID,
                         store: EarnedTimeStore(suiteName: suiteName),
                         suiteName: suiteName
                     )
@@ -267,6 +293,19 @@ enum EarnedSampleReporter {
                 enqueueRetry(entry, suiteName: suiteName)
             }
         }
+    }
+
+    static func drainRetryQueueFromStoredConfig(suiteName: String = sharedSuiteName) async {
+        let defaults = UserDefaults(suiteName: suiteName)
+        guard let baseRaw = defaults?.string(forKey: "evlin.baseURL"),
+              let baseURL = URL(string: baseRaw),
+              let childRaw = defaults?.string(forKey: "evlin.childId"),
+              let childID = UUID(uuidString: childRaw)
+        else {
+            recordDebug("drain skipped missing stored baseURL/childId", suiteName: suiteName)
+            return
+        }
+        await drainRetryQueue(baseURL: baseURL, suiteName: suiteName, onlyDeviceID: childID)
     }
 
     // MARK: - Retry queue (App Group)
@@ -303,6 +342,23 @@ enum EarnedSampleReporter {
         return "\(queue.count) pending; newest t\(newest.thresholdMinutes) observed \(newest.observedAt)"
     }
 
+    static func partitionRetryQueue(
+        _ queue: [RetryEntry],
+        onlyDeviceID: UUID?
+    ) -> (eligible: [RetryEntry], deferred: [RetryEntry]) {
+        guard let onlyDeviceID else { return (queue, []) }
+        var eligible: [RetryEntry] = []
+        var deferred: [RetryEntry] = []
+        for entry in queue {
+            if entry.deviceID == onlyDeviceID {
+                eligible.append(entry)
+            } else {
+                deferred.append(entry)
+            }
+        }
+        return (eligible, deferred)
+    }
+
     private static func saveRetryQueue(_ queue: [RetryEntry], suiteName: String) {
         guard let data = try? JSONEncoder().encode(queue) else { return }
         UserDefaults(suiteName: suiteName)?.set(data, forKey: retryQueueKey)
@@ -314,6 +370,18 @@ enum EarnedSampleReporter {
     }
 
     // MARK: - Tripwire math (pure)
+
+    static func thresholdHandlingDecision(
+        thresholdMinutes: Int,
+        localReconciliationAvailable: Bool
+    ) -> ThresholdHandlingDecision {
+        ThresholdHandlingDecision(
+            thresholdMinutes: thresholdMinutes,
+            shouldReport: true,
+            shouldMutateLocalEstimate: localReconciliationAvailable,
+            shouldApplyLocalShield: localReconciliationAvailable
+        )
+    }
 
     /// Compute the effective cap threshold for earned-time enforcement.
     ///

@@ -198,10 +198,6 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
                       activity.rawValue, event.rawValue)
                 return
             }
-            guard EarnedTimeStore.shared.reconciliationLockIsAvailable() else {
-                NSLog("[Evlin/Ext] rejected earned threshold: reconciliation lock unavailable")
-                return
-            }
             guard usageCountingAllowed(eventName: event.rawValue) else { return }
             handleEarnedThreshold(
                 eventName: event.rawValue,
@@ -400,7 +396,11 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             rawThresholdMinutes: n,
             runningOffsetMinutes: offset
         )
-        earnedStore.latestDeviceEstimate = adjustedN
+        let localReconciliation = earnedStore.recordLocalThresholdEstimate(adjustedN)
+        let decision = EarnedSampleReporter.thresholdHandlingDecision(
+            thresholdMinutes: adjustedN,
+            localReconciliationAvailable: localReconciliation == .reconciled
+        )
 
         let ts = ISO8601DateFormatter().string(from: Date())
         defaults?.set(
@@ -414,7 +414,10 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             let usageDate = generation.usageDate
             let tz = generation.timezoneIdentifier
             Task {
-                await EarnedSampleReporter.drainRetryQueue(baseURL: baseURL)
+                await EarnedSampleReporter.drainRetryQueue(
+                    baseURL: baseURL,
+                    onlyDeviceID: deviceID
+                )
                 await EarnedSampleReporter.report(
                     baseURL: baseURL,
                     deviceID: deviceID,
@@ -429,6 +432,13 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
                 "\(ts) missing baseURL or childId for event=\(eventName) baseURL=\(String(describing: ExtensionConfig.baseURL)) childId=\(String(describing: ExtensionConfig.childId))",
                 forKey: EarnedSampleReporter.lastSamplePostDebugKey
             )
+        }
+
+        guard decision.shouldApplyLocalShield else {
+            NSLog("[Evlin/Ext] earned threshold reported with local reconciliation deferred")
+            emitEvent(kind: .decision, source: .earnedPool, app: "device-wide",
+                      reason: "local_reconciliation_deferred")
+            return
         }
 
         // Fresh-at-fire-time gate (Fix 4). The tripwire is the parent-set budget

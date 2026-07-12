@@ -26,20 +26,28 @@ final class BigKidStatePoller: ObservableObject {
 
     private let client: BigKidAPIClient
     private let state: BigKidState
+    private let expectedChildID: UUID?
+    private let currentChildID: () -> UUID?
     private let fetchState: () async throws -> ChildStateResponse
     private let reconcileReflectionLock: (ChildStateResponse) async -> Void
     private let reconcileIdentityTransition: () -> Bool
     private let applySnapshot: (ChildStateResponse, BigKidState) -> Void
-    private let syncEarnedRuntime: (EarnedTimeRuntime?) -> EarnedTimeStore.RuntimePolicyReconciliation?
+    private let mirrorChildIdentity: (UUID) -> Void
+    private let syncEarnedRuntime: (EarnedTimeRuntime?) -> EarnedTimeStore.RuntimePolicyReconciliation
     private let setUsageCountingAllowed: (Bool) -> Bool
+    private let markAuthoritativeReady: (UUID) -> Void
+    private let clearAuthoritativeReadiness: () -> Void
     private let ensureEarnedArmed: () -> Void
     private let rearmUsageCounters: () -> Void
     private let stopUsageCounters: () -> Void
     private let reportEffectiveState: () async -> Void
+    private let requestFreshPoll: () -> Void
     private var task: Task<Void, Never>?
     private var invalidationObserver: NSObjectProtocol?
     private var isFetchInFlight = false
     private var pendingRefreshAfterCurrent = false
+    private var requiresCounterRecovery = false
+    private var requestedRefreshForIdentityMismatch = false
 
     /// Reflection Lockdown glue. Runs after each state apply: reconciles the
     /// dedicated reflection ShieldRecord against the snapshot, schedules its
@@ -58,6 +66,11 @@ final class BigKidStatePoller: ObservableObject {
     init(client: BigKidAPIClient, state: BigKidState) {
         self.client = client
         self.state = state
+        self.expectedChildID = client.childId
+        self.currentChildID = {
+            UserDefaults.standard.string(forKey: CommandPoller.childDeviceIDDefaultsKey)
+                .flatMap(UUID.init(uuidString:))
+        }
         self.fetchState = { try await client.fetchState() }
         let reflectionLockApplier = self.reflectionLockApplier
         self.reconcileReflectionLock = { snapshot in
@@ -70,8 +83,17 @@ final class BigKidStatePoller: ObservableObject {
         self.applySnapshot = { snapshot, state in
             state.apply(snapshot)
         }
+        self.mirrorChildIdentity = { childID in
+            EarnedBudgetArming.mirrorChildIdentity(childID)
+        }
         self.syncEarnedRuntime = Self.syncEarnedRuntimeFromSnapshot
         self.setUsageCountingAllowed = Self.writeUsageCountingAllowed
+        self.markAuthoritativeReady = {
+            EarnedTimeStore.shared.markAuthoritativeStateReady(deviceID: $0)
+        }
+        self.clearAuthoritativeReadiness = {
+            EarnedTimeStore.shared.clearAuthoritativeStateReadiness()
+        }
         self.ensureEarnedArmed = { EarnedBudgetArming.armIfReady() }
         self.rearmUsageCounters = Self.rearmOtherUsageCountersFromStoredPolicy
         self.stopUsageCounters = Self.stopUsageCountersForTaskPause
@@ -83,35 +105,50 @@ final class BigKidStatePoller: ObservableObject {
                 print("[BigKidStatePoller] report effective state failed: \(error)")
             }
         }
+        self.requestFreshPoll = {
+            NotificationCenter.default.post(name: .bigKidStateInvalidated, object: nil)
+        }
     }
 
     init(
         state: BigKidState,
+        expectedChildID: UUID? = nil,
+        currentChildID: @escaping () -> UUID? = { nil },
         fetchState: @escaping () async throws -> ChildStateResponse,
         reconcileReflectionLock: @escaping (ChildStateResponse) async -> Void,
         reconcileIdentityTransition: @escaping () -> Bool = { false },
         applySnapshot: @escaping (ChildStateResponse, BigKidState) -> Void = { snapshot, state in
             state.apply(snapshot)
         },
-        syncEarnedRuntime: @escaping (EarnedTimeRuntime?) -> EarnedTimeStore.RuntimePolicyReconciliation? = BigKidStatePoller.syncEarnedRuntimeFromSnapshot,
+        mirrorChildIdentity: @escaping (UUID) -> Void = { _ in },
+        syncEarnedRuntime: @escaping (EarnedTimeRuntime?) -> EarnedTimeStore.RuntimePolicyReconciliation = BigKidStatePoller.syncEarnedRuntimeFromSnapshot,
         setUsageCountingAllowed: @escaping (Bool) -> Bool = BigKidStatePoller.writeUsageCountingAllowed,
+        markAuthoritativeReady: @escaping (UUID) -> Void = { _ in },
+        clearAuthoritativeReadiness: @escaping () -> Void = {},
         ensureEarnedArmed: @escaping () -> Void = {},
         rearmUsageCounters: @escaping () -> Void = {},
         stopUsageCounters: @escaping () -> Void = {},
-        reportEffectiveState: @escaping () async -> Void = {}
+        reportEffectiveState: @escaping () async -> Void = {},
+        requestFreshPoll: @escaping () -> Void = {}
     ) {
         self.client = BigKidAPIClient(baseURL: URL(string: "https://example.invalid")!, childId: UUID())
         self.state = state
+        self.expectedChildID = expectedChildID
+        self.currentChildID = currentChildID
         self.fetchState = fetchState
         self.reconcileReflectionLock = reconcileReflectionLock
         self.reconcileIdentityTransition = reconcileIdentityTransition
         self.applySnapshot = applySnapshot
+        self.mirrorChildIdentity = mirrorChildIdentity
         self.syncEarnedRuntime = syncEarnedRuntime
         self.setUsageCountingAllowed = setUsageCountingAllowed
+        self.markAuthoritativeReady = markAuthoritativeReady
+        self.clearAuthoritativeReadiness = clearAuthoritativeReadiness
         self.ensureEarnedArmed = ensureEarnedArmed
         self.rearmUsageCounters = rearmUsageCounters
         self.stopUsageCounters = stopUsageCounters
         self.reportEffectiveState = reportEffectiveState
+        self.requestFreshPoll = requestFreshPoll
     }
 
     deinit {
@@ -174,6 +211,12 @@ final class BigKidStatePoller: ObservableObject {
     }
 
     private func performFetchOnce() async {
+        let expectedChildID = self.expectedChildID
+        guard isExpectedIdentityCurrent(expectedChildID) else {
+            requestPollForCurrentIdentity()
+            return
+        }
+        requestedRefreshForIdentityMismatch = false
         // Re-pairing under a new family can happen while the app stays
         // foregrounded (no scene-activation arm pass runs). Catch the identity
         // change here — within one poll tick — so the previous family's ladder
@@ -185,29 +228,51 @@ final class BigKidStatePoller: ObservableObject {
         AppControlsBackendSync.pushDefaultLockGroupIfNeeded()
         do {
             let snapshot = try await fetchState()
+            guard isExpectedIdentityCurrent(expectedChildID) else {
+                requestPollForCurrentIdentity()
+                return
+            }
             await reconcileReflectionLock(snapshot)
+            guard isExpectedIdentityCurrent(expectedChildID) else {
+                requestPollForCurrentIdentity()
+                return
+            }
+            if let expectedChildID {
+                mirrorChildIdentity(expectedChildID)
+            }
+            guard isExpectedIdentityCurrent(expectedChildID) else {
+                requestPollForCurrentIdentity()
+                return
+            }
             applySnapshot(snapshot, state)
             let runtimeReconciliation = syncEarnedRuntime(snapshot.earnedTimeRuntime)
-            if runtimeReconciliation == .lockUnavailable {
+            guard case .reconciled = runtimeReconciliation else {
+                requiresCounterRecovery = true
+                clearAuthoritativeReadiness()
                 stopUsageCounters()
                 lastError = "Screen time sync deferred"
-                print("[BigKidStatePoller] earned runtime reconciliation lock unavailable")
+                print("[BigKidStatePoller] earned runtime reconciliation deferred: \(runtimeReconciliation)")
                 return
             }
 
             let allowed = snapshot.effectiveUsageCountingAllowed
             let wasCountingAllowed = setUsageCountingAllowed(allowed)
+            if let expectedChildID {
+                markAuthoritativeReady(expectedChildID)
+            }
             let shouldRecoverSkippedUsage = allowed && Self.hasSkippedUnfinishedUsageEvent()
             if !allowed {
                 stopUsageCounters()
+                requiresCounterRecovery = false
             } else {
                 ensureEarnedArmed()
-                if !wasCountingAllowed || shouldRecoverSkippedUsage {
+                if !wasCountingAllowed || shouldRecoverSkippedUsage || requiresCounterRecovery {
                     rearmUsageCounters()
                     if shouldRecoverSkippedUsage {
                         CommandDeliveryDiagnostics.remove(CommandDeliveryDiagnostics.keyUsageCountingLastSkipped)
                     }
                 }
+                requiresCounterRecovery = false
             }
             await reportEffectiveState()
             lastFetchedAt = Date()
@@ -228,6 +293,17 @@ final class BigKidStatePoller: ObservableObject {
             print("[BigKidStatePoller] fetchState failed: \(error)")
             lastError = Self.userFacingMessage(for: error)
         }
+    }
+
+    private func isExpectedIdentityCurrent(_ expectedChildID: UUID?) -> Bool {
+        guard let expectedChildID else { return true }
+        return currentChildID() == expectedChildID
+    }
+
+    private func requestPollForCurrentIdentity() {
+        guard !requestedRefreshForIdentityMismatch else { return }
+        requestedRefreshForIdentityMismatch = true
+        requestFreshPoll()
     }
 
     private static func userFacingMessage(for error: Error) -> String {
@@ -251,9 +327,25 @@ final class BigKidStatePoller: ObservableObject {
 
     private static func syncEarnedRuntimeFromSnapshot(
         _ runtime: EarnedTimeRuntime?
-    ) -> EarnedTimeStore.RuntimePolicyReconciliation? {
-        guard let runtime else { return nil }
-        return EarnedTimeStore.shared.reconcileRuntimePolicy(
+    ) -> EarnedTimeStore.RuntimePolicyReconciliation {
+        reconcileEarnedRuntime(runtime, store: .shared)
+    }
+
+    static func reconcileEarnedRuntime(
+        _ runtime: EarnedTimeRuntime?,
+        store: EarnedTimeStore
+    ) -> EarnedTimeStore.RuntimePolicyReconciliation {
+        guard let runtime else {
+            return store.reconciliationLockIsAvailable()
+                ? .reconciled(store.acceptedEstimateMinutes ?? 0)
+                : .lockUnavailable
+        }
+        if runtime.dailyPoolMinutes == 0 || runtime.deviceCapMinutes == 0 {
+            return store.reconciliationLockIsAvailable()
+                ? .reconciled(store.acceptedEstimateMinutes ?? 0)
+                : .lockUnavailable
+        }
+        return store.reconcileRuntimePolicy(
             usageDate: runtime.usageDate,
             timezoneIdentifier: runtime.timezone,
             poolMinutes: runtime.dailyPoolMinutes,

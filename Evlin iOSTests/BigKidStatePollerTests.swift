@@ -176,12 +176,16 @@ final class BigKidStatePollerTests: XCTestCase {
         )
         let response = snapshot(usageCountingAllowed: true, runtime: runtime)
         let state = BigKidState(snapshot: response)
+        let deviceID = UUID()
         var events: [String] = []
         let poller = BigKidStatePoller(
             state: state,
+            expectedChildID: deviceID,
+            currentChildID: { deviceID },
             fetchState: { response },
             reconcileReflectionLock: { _ in },
             applySnapshot: { _, _ in events.append("apply") },
+            mirrorChildIdentity: { _ in events.append("mirror") },
             syncEarnedRuntime: { _ in
                 events.append("runtime")
                 return .reconciled(15)
@@ -190,12 +194,13 @@ final class BigKidStatePollerTests: XCTestCase {
                 events.append("gate")
                 return allowed
             },
+            markAuthoritativeReady: { _ in events.append("ready") },
             ensureEarnedArmed: { events.append("arm") }
         )
 
         await poller.refreshNow()
 
-        XCTAssertEqual(events, ["apply", "runtime", "gate", "arm"])
+        XCTAssertEqual(events, ["mirror", "apply", "runtime", "gate", "ready", "arm"])
     }
 
     func test_refresh_identityTransitionDoesNotArmBeforeRuntimeAndGate() async {
@@ -249,17 +254,22 @@ final class BigKidStatePollerTests: XCTestCase {
         )
         let response = snapshot(usageCountingAllowed: true, runtime: runtime)
         let state = BigKidState(snapshot: response)
+        let deviceID = UUID()
         var events: [String] = []
         let poller = BigKidStatePoller(
             state: state,
+            expectedChildID: deviceID,
+            currentChildID: { deviceID },
             fetchState: { response },
             reconcileReflectionLock: { _ in },
             applySnapshot: { _, _ in events.append("apply") },
+            mirrorChildIdentity: { _ in events.append("mirror") },
             syncEarnedRuntime: { _ in
                 events.append("runtime")
                 return .lockUnavailable
             },
             setUsageCountingAllowed: { _ in events.append("gate"); return true },
+            clearAuthoritativeReadiness: { events.append("clear-ready") },
             ensureEarnedArmed: { events.append("arm") },
             stopUsageCounters: { events.append("stop") },
             reportEffectiveState: { events.append("heartbeat") }
@@ -267,8 +277,127 @@ final class BigKidStatePollerTests: XCTestCase {
 
         await poller.refreshNow()
 
-        XCTAssertEqual(events, ["apply", "runtime", "stop"])
+        XCTAssertEqual(events, ["mirror", "apply", "runtime", "clear-ready", "stop"])
         XCTAssertEqual(poller.lastError, "Screen time sync deferred")
+    }
+
+    func test_refresh_invalidRuntimeFailsClosedBeforeGateReadinessAndArm() async {
+        let deviceID = UUID()
+        let response = snapshot(usageCountingAllowed: true)
+        let state = BigKidState(snapshot: response)
+        var events: [String] = []
+        let poller = BigKidStatePoller(
+            state: state,
+            expectedChildID: deviceID,
+            currentChildID: { deviceID },
+            fetchState: { response },
+            reconcileReflectionLock: { _ in },
+            applySnapshot: { _, _ in events.append("apply") },
+            mirrorChildIdentity: { _ in events.append("mirror") },
+            syncEarnedRuntime: { _ in events.append("runtime"); return .invalid },
+            setUsageCountingAllowed: { _ in events.append("gate"); return true },
+            markAuthoritativeReady: { _ in events.append("ready") },
+            clearAuthoritativeReadiness: { events.append("clear-ready") },
+            ensureEarnedArmed: { events.append("arm") },
+            stopUsageCounters: { events.append("stop") }
+        )
+
+        await poller.refreshNow()
+
+        XCTAssertEqual(events, ["mirror", "apply", "runtime", "clear-ready", "stop"])
+    }
+
+    func test_refresh_successAfterTransientLockFailureRecoversAllCountersEvenWhenGateStayedTrue() async {
+        EarnedTimeStore.shared.usageCountingAllowed = true
+        let response = snapshot(usageCountingAllowed: true)
+        let state = BigKidState(snapshot: response)
+        var reconciliations: [EarnedTimeStore.RuntimePolicyReconciliation] = [
+            .lockUnavailable,
+            .reconciled(0),
+        ]
+        var events: [String] = []
+        let poller = BigKidStatePoller(
+            state: state,
+            fetchState: { response },
+            reconcileReflectionLock: { _ in },
+            syncEarnedRuntime: { _ in reconciliations.removeFirst() },
+            setUsageCountingAllowed: { allowed in
+                let previous = EarnedTimeStore.shared.usageCountingAllowed
+                EarnedTimeStore.shared.usageCountingAllowed = allowed
+                return previous
+            },
+            ensureEarnedArmed: { events.append("earned-arm") },
+            rearmUsageCounters: { events.append("other-arm") },
+            stopUsageCounters: { events.append("stop-all") }
+        )
+
+        await poller.refreshNow()
+        await poller.refreshNow()
+
+        XCTAssertEqual(events, ["stop-all", "earned-arm", "other-arm"])
+        XCTAssertTrue(EarnedTimeStore.shared.usageCountingAllowed)
+    }
+
+    func test_refresh_discardsSuspendedFetchWhenGlobalChildIdentityChanges() async {
+        let oldID = UUID(uuidString: "B21411CB-63A5-4489-BC68-BF8AC26EE15B")!
+        let newID = UUID(uuidString: "0D45589A-722C-4E43-A06E-7501F484A46C")!
+        let response = snapshot(usageCountingAllowed: true)
+        let state = BigKidState(snapshot: response)
+        var currentID = oldID
+        var resumeFetch: CheckedContinuation<ChildStateResponse, Never>?
+        var events: [String] = []
+        let poller = BigKidStatePoller(
+            state: state,
+            expectedChildID: oldID,
+            currentChildID: { currentID },
+            fetchState: {
+                await withCheckedContinuation { continuation in
+                    resumeFetch = continuation
+                }
+            },
+            reconcileReflectionLock: { _ in events.append("reflection") },
+            applySnapshot: { _, _ in events.append("apply") },
+            mirrorChildIdentity: { _ in events.append("mirror") },
+            syncEarnedRuntime: { _ in events.append("runtime"); return .reconciled(0) },
+            setUsageCountingAllowed: { _ in events.append("gate"); return true },
+            markAuthoritativeReady: { _ in events.append("ready") },
+            ensureEarnedArmed: { events.append("arm") },
+            requestFreshPoll: { events.append("fresh-poll") }
+        )
+
+        let refresh = Task { await poller.refreshNow() }
+        while resumeFetch == nil { await Task.yield() }
+        currentID = newID
+        resumeFetch?.resume(returning: response)
+        await refresh.value
+
+        XCTAssertEqual(events, ["fresh-poll"])
+        XCTAssertNil(poller.lastFetchedAt)
+    }
+
+    func test_nilRuntimeProbesLockAndAllowsCompatibilityReadiness() {
+        let suiteName = "BigKidStatePollerTests.\(UUID().uuidString)"
+        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let store = EarnedTimeStore(suiteName: suiteName)
+
+        XCTAssertEqual(
+            BigKidStatePoller.reconcileEarnedRuntime(nil, store: store),
+            .reconciled(0)
+        )
+    }
+
+    func test_nilRuntimeFailsClosedWhenCompatibilityLockProbeIsUnavailable() {
+        let suiteName = "BigKidStatePollerTests.\(UUID().uuidString)"
+        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let store = EarnedTimeStore(
+            suiteName: suiteName,
+            lockSelection: .unavailable("test_lock_unavailable")
+        )
+
+        XCTAssertEqual(
+            BigKidStatePoller.reconcileEarnedRuntime(nil, store: store),
+            .lockUnavailable
+        )
     }
 
     func test_refresh_coalescesMultipleOverlapsIntoOneFollowUpFetch() async {

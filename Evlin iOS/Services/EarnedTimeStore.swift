@@ -58,6 +58,13 @@ nonisolated enum EarnedActivityGeneration {
         init(from decoder: Decoder) throws {
             let values = try decoder.container(keyedBy: CodingKeys.self)
             version = try values.decodeIfPresent(Int.self, forKey: .version) ?? 1
+            guard (1...EarnedActivityGeneration.currentLifecycleVersion).contains(version) else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .version,
+                    in: values,
+                    debugDescription: "Unsupported earned lifecycle version \(version)"
+                )
+            }
             active = try values.decodeIfPresent(Generation.self, forKey: .active)
             pending = try values.decodeIfPresent(Generation.self, forKey: .pending)
             retiringActivityNames = try values.decodeIfPresent(
@@ -69,7 +76,7 @@ nonisolated enum EarnedActivityGeneration {
 
         var isValid: Bool {
             let reservedNames = [active?.activityName, pending?.activityName].compactMap { $0 }
-            return version >= 1
+            return (1...EarnedActivityGeneration.currentLifecycleVersion).contains(version)
                 && active?.isValid != false
                 && pending?.isValid != false
                 && (active == nil
@@ -246,7 +253,10 @@ nonisolated enum EarnedActivityGeneration {
         _ next: Generation,
         defaults: UserDefaults?,
         startMonitoring: (String) throws -> Void,
-        stopMonitoring: ([String]) -> Void
+        stopMonitoring: ([String]) -> Void,
+        persistLifecycle: (Lifecycle, UserDefaults?) -> Bool = { lifecycle, defaults in
+            EarnedActivityGeneration.persistLifecycle(lifecycle, defaults: defaults)
+        }
     ) -> Bool {
         guard next.isValid,
               next.activityName.hasPrefix(generatedActivityPrefix)
@@ -254,16 +264,43 @@ nonisolated enum EarnedActivityGeneration {
 
         recoverPending(defaults: defaults, stopMonitoring: stopMonitoring)
         let previousLifecycle = loadLifecycle(defaults: defaults)
-        guard persistPending(next, defaults: defaults) else { return false }
+        let previousBreadcrumbs = defaults?.stringArray(forKey: lifecycleBreadcrumbsKey)
+        let previousActiveName = defaults?.string(forKey: activeActivityNameKey)
+        var pendingLifecycle = previousLifecycle
+            ?? Lifecycle(active: nil, pending: nil, retiringActivityNames: [])
+        pendingLifecycle.pending = next
+        pendingLifecycle.isStopped = false
+        guard persistLifecycle(pendingLifecycle, defaults) else { return false }
+
+        func restorePreviousState() {
+            let rollback = previousLifecycle
+                ?? Lifecycle(active: nil, pending: nil, isStopped: true)
+            if persistLifecycle(rollback, defaults) {
+                if let previousBreadcrumbs {
+                    defaults?.set(previousBreadcrumbs, forKey: lifecycleBreadcrumbsKey)
+                } else {
+                    defaults?.removeObject(forKey: lifecycleBreadcrumbsKey)
+                }
+                if let previousActiveName {
+                    defaults?.set(previousActiveName, forKey: activeActivityNameKey)
+                } else {
+                    defaults?.removeObject(forKey: activeActivityNameKey)
+                }
+                _ = defaults?.synchronize()
+                return
+            }
+            _ = EarnedActivityGeneration.persistLifecycle(
+                .init(active: nil, pending: nil, isStopped: true),
+                defaults: defaults
+            )
+            defaults?.removeObject(forKey: activeActivityNameKey)
+            _ = defaults?.synchronize()
+        }
         do {
             try startMonitoring(next.activityName)
         } catch {
             stopMonitoring([next.activityName])
-            _ = persistLifecycle(
-                previousLifecycle
-                    ?? .init(active: nil, pending: nil, isStopped: true),
-                defaults: defaults
-            )
+            restorePreviousState()
             return false
         }
 
@@ -271,6 +308,7 @@ nonisolated enum EarnedActivityGeneration {
               lifecycle.pending == next
         else {
             stopMonitoring([next.activityName])
+            restorePreviousState()
             return false
         }
         let previous = lifecycle.active
@@ -280,8 +318,9 @@ nonisolated enum EarnedActivityGeneration {
         lifecycle.pending = nil
         lifecycle.retiringActivityNames = targets
         lifecycle.isStopped = false
-        guard persistLifecycle(lifecycle, defaults: defaults) else {
+        guard persistLifecycle(lifecycle, defaults) else {
             stopMonitoring([next.activityName])
+            restorePreviousState()
             return false
         }
         defaults?.set(next.activityName, forKey: activeActivityNameKey)
@@ -293,7 +332,7 @@ nonisolated enum EarnedActivityGeneration {
         if var promoted = loadLifecycle(defaults: defaults),
            promoted.active == next {
             promoted.retiringActivityNames = []
-            _ = persistLifecycle(promoted, defaults: defaults)
+            _ = persistLifecycle(promoted, defaults)
         }
         return true
     }
@@ -336,6 +375,11 @@ nonisolated enum EarnedActivityGeneration {
 
 nonisolated private enum EarnedLockOutcome<Value> {
     case acquired(Value)
+    case unavailable(stage: String, code: Int32)
+}
+
+nonisolated private enum EarnedTransactionOutcome<Value> {
+    case committed(Value)
     case unavailable(stage: String, code: Int32)
 }
 
@@ -439,15 +483,24 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
         case lockUnavailable
     }
 
+    enum LocalThresholdReconciliation: Equatable {
+        case reconciled
+        case lockUnavailable
+    }
+
     private let defaults: UserDefaults?
     private let reconciliationLock: EarnedReconciliationLock
+    private let synchronizeDefaults: (UserDefaults) -> Bool
 
     init(
         suiteName: String = EarnedTimeStore.appGroupSuiteName,
         lockSelection: ReconciliationLockSelection? = nil,
-        useInProcessLock: Bool = true
+        useInProcessLock: Bool = true,
+        defaultsFactory: (String) -> UserDefaults? = { UserDefaults(suiteName: $0) },
+        synchronizeDefaults: @escaping (UserDefaults) -> Bool = { $0.synchronize() }
     ) {
-        defaults = UserDefaults(suiteName: suiteName)
+        defaults = defaultsFactory(suiteName)
+        self.synchronizeDefaults = synchronizeDefaults
         let containerURL = suiteName == Self.appGroupSuiteName
             ? FileManager.default.containerURL(
                 forSecurityApplicationGroupIdentifier: Self.appGroupSuiteName
@@ -489,6 +542,7 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
     private let poolKey          = "earned.poolMinutes"
     private let capKey           = "earned.capMinutes"
     private let usageCountingAllowedKey = "evlin.usageCountingAllowed"
+    private let authoritativeStateReadyDeviceIDKey = "evlin.earned.authoritativeReadyDeviceID"
     private let earnedUsageOffsetKey = "earned.usageCountingOffset"
     private let appLimitUsageOffsetPrefix = "evlin.appLimitUsageOffset."
     private let appLimitReportedPrefix = "evlin.appLimitReported."
@@ -515,6 +569,25 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
     /// true ([R5/R18/§5.5]).
     var isEarnedTimeReady: Bool {
         hasMeasurableSelection && lockedSetID != nil
+    }
+
+    func markAuthoritativeStateReady(deviceID: UUID) {
+        defaults?.set(
+            deviceID.uuidString.lowercased(),
+            forKey: authoritativeStateReadyDeviceIDKey
+        )
+        defaults?.synchronize()
+    }
+
+    func clearAuthoritativeStateReadiness() {
+        defaults?.removeObject(forKey: authoritativeStateReadyDeviceIDKey)
+        defaults?.synchronize()
+    }
+
+    func isAuthoritativeStateReady(deviceID: UUID) -> Bool {
+        EarnedActivityGeneration.canonicalDeviceID(
+            defaults?.string(forKey: authoritativeStateReadyDeviceIDKey)
+        ) == deviceID.uuidString.lowercased()
     }
 
     // MARK: - All-category measurement selection
@@ -791,6 +864,28 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
         min(1440, max(0, runningOffsetMinutes) + max(0, rawThresholdMinutes))
     }
 
+    func recordLocalThresholdEstimate(
+        _ estimatedMinutes: Int
+    ) -> LocalThresholdReconciliation {
+        let previousEstimate = defaults?.object(forKey: estimateKey)
+        let committed = withReconciliationTransaction {
+            let estimate = min(1_440, max(0, estimatedMinutes))
+            let current = defaults?.integer(forKey: estimateKey) ?? 0
+            defaults?.set(max(current, estimate), forKey: estimateKey)
+            return true
+        } ?? false
+        guard committed else {
+            if let previousEstimate {
+                defaults?.set(previousEstimate, forKey: estimateKey)
+            } else {
+                defaults?.removeObject(forKey: estimateKey)
+            }
+            defaults?.synchronize()
+            return .lockUnavailable
+        }
+        return .reconciled
+    }
+
     @discardableResult
     func reconcileAcceptedUsage(
         usageDate: String,
@@ -868,20 +963,42 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
         _ body: () -> T
     ) -> T? {
         let outcome = reconciliationLock.withLock {
-            defaults?.synchronize()
-            defer { defaults?.synchronize() }
-            return body()
+            guard let defaults else {
+                return EarnedTransactionOutcome<T>.unavailable(
+                    stage: "defaults_unavailable",
+                    code: 0
+                )
+            }
+            guard synchronizeDefaults(defaults) else {
+                return EarnedTransactionOutcome<T>.unavailable(
+                    stage: "pre_synchronize",
+                    code: 0
+                )
+            }
+            let value = body()
+            guard synchronizeDefaults(defaults) else {
+                return EarnedTransactionOutcome<T>.unavailable(
+                    stage: "post_synchronize",
+                    code: 0
+                )
+            }
+            return .committed(value)
         }
         switch outcome {
-        case .acquired(let value):
+        case .acquired(.committed(let value)):
             return value
-        case .unavailable(let stage, let code):
-            let diagnostic = "\(ISO8601DateFormatter().string(from: Date())) stage=\(stage) errno=\(code)"
-            defaults?.set(diagnostic, forKey: Self.reconciliationLockFailureKey)
-            defaults?.synchronize()
-            NSLog("[Evlin/Earned] reconciliation lock unavailable %@", diagnostic)
+        case .acquired(.unavailable(let stage, let code)),
+             .unavailable(let stage, let code):
+            recordReconciliationFailure(stage: stage, code: code)
             return nil
         }
+    }
+
+    private func recordReconciliationFailure(stage: String, code: Int32) {
+        let diagnostic = "\(ISO8601DateFormatter().string(from: Date())) stage=\(stage) errno=\(code)"
+        defaults?.set(diagnostic, forKey: Self.reconciliationLockFailureKey)
+        defaults?.synchronize()
+        NSLog("[Evlin/Earned] reconciliation lock unavailable %@", diagnostic)
     }
 
     func reconciliationLockIsAvailable() -> Bool {
@@ -1053,7 +1170,9 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
          lockedSetAllSelectedKey,
          backendKey, lastBackendSyncAtKey, estimateKey, acceptedUsageDateKey,
          acceptedEstimateKey, runtimeTimezoneKey, poolKey, capKey, usageCountingAllowedKey,
-         earnedUsageOffsetKey].forEach { defaults?.removeObject(forKey: $0) }
+         authoritativeStateReadyDeviceIDKey, earnedUsageOffsetKey].forEach {
+            defaults?.removeObject(forKey: $0)
+        }
         // Sweep any per-date override flags and per-app usage offsets.
         if let suite = defaults {
             let prefix = "earned.overridden."

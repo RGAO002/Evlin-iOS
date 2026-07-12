@@ -687,6 +687,15 @@ final class CommandPoller {
                 EarnedBudgetArming.stopAndInvalidateSignature()
                 return await ackEarnedTimeConfig(commandID: commandID, api: api)
             }
+            guard let currentDeviceID,
+                  EarnedTimeStore.shared.isAuthoritativeStateReady(deviceID: currentDeviceID)
+            else {
+                CommandDeliveryDiagnostics.record(
+                    CommandDeliveryDiagnostics.keyEarnedArmAttempt,
+                    "skipped config-authoritative-state-not-ready"
+                )
+                return await ackEarnedTimeConfig(commandID: commandID, api: api)
+            }
             if let armOverride = armBudgetOverride {
                 let hasMeasurableSelection = hasMeasurableSelectionOverride?()
                     ?? EarnedTimeStore.shared.hasMeasurableSelection

@@ -37,15 +37,29 @@ final class AuthService {
     }
 
     private let api: APIClient
+    private let terminalSessionTeardown: () -> Void
 
-    init(api: APIClient) {
+    init(
+        api: APIClient,
+        terminalSessionTeardown: (() -> Void)? = nil
+    ) {
         self.api = api
+        self.terminalSessionTeardown = terminalSessionTeardown ?? {
+            AuthService.clearFamilyScopedLocalState()
+        }
         // Listen for terminal refresh failure published by APIClient (§14.7).
         NotificationCenter.default.addObserver(
             forName: .evlinSessionSignedOut, object: nil, queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in self?.state = .signedOut }
+            MainActor.assumeIsolated {
+                self?.handleTerminalSessionSignOut()
+            }
         }
+    }
+
+    private func handleTerminalSessionSignOut() {
+        terminalSessionTeardown()
+        state = .signedOut
     }
 
     /// Restore session from the Keychain at launch. Does not hit the network;

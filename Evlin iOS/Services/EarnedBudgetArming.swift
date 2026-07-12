@@ -168,6 +168,7 @@ enum EarnedBudgetArming {
         appGroupDefaults: UserDefaults? = UserDefaults(
             suiteName: EarnedTimeStore.appGroupSuiteName
         ),
+        readinessStore: EarnedTimeStore = .shared,
         hasGenerationState: Bool? = nil,
         stopMonitoring: (() -> Void)? = nil
     ) {
@@ -190,15 +191,24 @@ enum EarnedBudgetArming {
             || appGroupDefaults?.string(
                 forKey: EarnedActivityGeneration.activeActivityNameKey
             ) != nil
-        if hasGenerationState ?? inferredGenerationState,
-           current != next || boundDeviceMismatch {
-            stopAndInvalidateSignature(
-                defaults: appGroupDefaults,
-                stopMonitoring: stopMonitoring
-            )
+        if current != next || boundDeviceMismatch {
+            readinessStore.clearAuthoritativeStateReadiness()
+            if hasGenerationState ?? inferredGenerationState {
+                stopAndInvalidateSignature(
+                    defaults: appGroupDefaults,
+                    stopMonitoring: stopMonitoring
+                )
+            }
         }
         appGroupDefaults?.set(next, forKey: "evlin.childId")
         appGroupDefaults?.synchronize()
+    }
+
+    nonisolated static func canArmAuthoritativeState(
+        deviceID: UUID,
+        store: EarnedTimeStore
+    ) -> Bool {
+        store.isAuthoritativeStateReady(deviceID: deviceID)
     }
 
     /// Detect a child-device identity change and tear down earned-time state
@@ -283,8 +293,20 @@ enum EarnedBudgetArming {
             return
         }
         let current = canonicalDeviceIdentity(currentRaw) ?? currentRaw
+        guard let currentDeviceID = UUID(uuidString: currentRaw) else { return }
 
         let store = EarnedTimeStore.shared
+        let defaults = UserDefaults(suiteName: EarnedTimeStore.appGroupSuiteName)
+        guard EarnedActivityGeneration.canonicalDeviceID(
+            defaults?.string(forKey: "evlin.childId")
+        ) == current,
+        canArmAuthoritativeState(deviceID: currentDeviceID, store: store) else {
+            CommandDeliveryDiagnostics.record(
+                CommandDeliveryDiagnostics.keyEarnedArmAttempt,
+                "skipped authoritative-state-not-ready device=\(current)"
+            )
+            return
+        }
         guard let selection = store.measurementSelection else {
             CommandDeliveryDiagnostics.record(
                 CommandDeliveryDiagnostics.keyEarnedArmAttempt,
@@ -320,7 +342,6 @@ enum EarnedBudgetArming {
         let usageContext = store.usageContext()
         let usageDate = usageContext.usageDate
         let timezoneIdentifier = usageContext.timezoneIdentifier
-        let defaults = UserDefaults(suiteName: EarnedTimeStore.appGroupSuiteName)
         let scalarOffset = store.earnedUsageOffsetMinutes
         let scalarSignature = defaults?.string(forKey: armSignatureKey)
         let migrationSignature = currentArmSignature(
