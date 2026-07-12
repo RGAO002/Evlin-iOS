@@ -80,6 +80,19 @@ final class EarnedBudgetArmingTests: XCTestCase {
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
         defaults.set("stable-signature", forKey: EarnedBudgetArming.armSignatureKey)
+        EarnedActivityGeneration.persistLifecycle(
+            .init(
+                active: .init(
+                    activityName: EarnedActivityGeneration.legacyActivityName,
+                    offsetMinutes: 5,
+                    armSignature: "stable-signature",
+                    usageDate: "2026-07-11",
+                    timezoneIdentifier: "America/New_York"
+                ),
+                pending: nil
+            ),
+            defaults: defaults
+        )
         var stopCount = 0
 
         EarnedBudgetArming.stopAndInvalidateSignature(
@@ -89,6 +102,7 @@ final class EarnedBudgetArmingTests: XCTestCase {
 
         XCTAssertEqual(stopCount, 1)
         XCTAssertNil(defaults.string(forKey: EarnedBudgetArming.armSignatureKey))
+        XCTAssertNil(EarnedActivityGeneration.loadLifecycle(defaults: defaults))
         XCTAssertTrue(EarnedBudgetArming.shouldStartMonitoring(
             previousSignature: defaults.string(forKey: EarnedBudgetArming.armSignatureKey),
             nextSignature: "stable-signature",
@@ -161,5 +175,28 @@ final class EarnedBudgetArmingTests: XCTestCase {
             selectionFingerprint: "selection-b"
         ))
         XCTAssertTrue(EarnedBudgetArming.shouldStartMonitoring(previousSignature: base, nextSignature: base, force: true))
+    }
+
+    func test_policyTimezoneChangesArmSignatureEvenWhenDeviceTimezoneDoesNot() {
+        let eastern = EarnedBudgetArming.makeArmSignature(
+            deviceID: "device-a",
+            usageDate: "2026-07-11",
+            timezoneIdentifier: "America/New_York",
+            poolMinutes: 60,
+            capMinutes: 45,
+            offsetMinutes: 5,
+            selectionFingerprint: "selection-a"
+        )
+        let pacific = EarnedBudgetArming.makeArmSignature(
+            deviceID: "device-a",
+            usageDate: "2026-07-11",
+            timezoneIdentifier: "America/Los_Angeles",
+            poolMinutes: 60,
+            capMinutes: 45,
+            offsetMinutes: 5,
+            selectionFingerprint: "selection-a"
+        )
+
+        XCTAssertNotEqual(eastern, pacific)
     }
 }

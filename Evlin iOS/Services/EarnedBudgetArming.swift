@@ -73,15 +73,6 @@ enum EarnedBudgetArming {
         force || previousSignature != nextSignature
     }
 
-    private static func currentUsageDate(now: Date = Date(), timeZone: TimeZone = .current) -> String {
-        let f = DateFormatter()
-        f.calendar = Calendar(identifier: .gregorian)
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = timeZone
-        f.dateFormat = "yyyy-MM-dd"
-        return f.string(from: now)
-    }
-
     private static func selectionFingerprint(_ selection: FamilyActivitySelection) -> String {
         guard let data = try? JSONEncoder().encode(selection) else {
             return EarnedBudgetScheduler.selectionSummary(selection)
@@ -141,6 +132,8 @@ enum EarnedBudgetArming {
         } else {
             EarnedBudgetScheduler.shared.stop()
         }
+        defaults?.removeObject(forKey: EarnedActivityGeneration.lifecycleKey)
+        defaults?.removeObject(forKey: EarnedActivityGeneration.activeActivityNameKey)
         defaults?.removeObject(forKey: armSignatureKey)
         defaults?.synchronize()
     }
@@ -205,6 +198,7 @@ enum EarnedBudgetArming {
     /// counted minutes as a re-arm offset before resuming from now.
     static func armIfReady(force: Bool = false) {
         reconcileIdentityTransition()
+        EarnedBudgetScheduler.shared.recoverInterruptedTransition()
 
         // Only arm on the child device.
         let mode = UserDefaults.standard.string(forKey: "appMode") ?? ""
@@ -260,9 +254,59 @@ enum EarnedBudgetArming {
 
         let poolMinutes = store.poolMinutes ?? 60
         let capMinutes = store.capMinutes ?? poolMinutes
-        let runningOffset = store.earnedUsageOffsetMinutes
-        let usageDate = store.acceptedUsageDate ?? currentUsageDate()
-        let timezoneIdentifier = TimeZone.current.identifier
+        let usageContext = store.usageContext()
+        let usageDate = usageContext.usageDate
+        let timezoneIdentifier = usageContext.timezoneIdentifier
+        let defaults = UserDefaults(suiteName: EarnedTimeStore.appGroupSuiteName)
+        let scalarOffset = store.earnedUsageOffsetMinutes
+        let scalarSignature = defaults?.string(forKey: armSignatureKey)
+        let migrationSignature = currentArmSignature(
+            deviceID: current,
+            usageDate: usageDate,
+            timezoneIdentifier: timezoneIdentifier,
+            poolMinutes: poolMinutes,
+            capMinutes: capMinutes,
+            offsetMinutes: scalarOffset,
+            selection: selection
+        )
+        if EarnedActivityGeneration.loadLifecycle(defaults: defaults) == nil {
+            let persistedName = defaults?.string(
+                forKey: EarnedActivityGeneration.activeActivityNameKey
+            )
+            let migrationName: String? = {
+                if let persistedName,
+                   persistedName.hasPrefix(EarnedActivityGeneration.generatedActivityPrefix) {
+                    return persistedName
+                }
+                return scalarSignature == nil
+                    ? nil
+                    : EarnedActivityGeneration.legacyActivityName
+            }()
+            if let migrationName {
+                EarnedActivityGeneration.migrateActiveIfNeeded(
+                    .init(
+                        activityName: migrationName,
+                        offsetMinutes: scalarOffset,
+                        armSignature: scalarSignature ?? migrationSignature,
+                        usageDate: usageDate,
+                        timezoneIdentifier: timezoneIdentifier
+                    ),
+                    defaults: defaults
+                )
+            }
+        }
+        let activeGeneration = EarnedActivityGeneration
+            .loadLifecycle(defaults: defaults)?.active
+        let runningOffset = activeGeneration?.offsetMinutes ?? scalarOffset
+        if let activeGeneration {
+            store.earnedUsageOffsetMinutes = activeGeneration.offsetMinutes
+            defaults?.set(activeGeneration.armSignature, forKey: armSignatureKey)
+            defaults?.set(
+                activeGeneration.activityName,
+                forKey: EarnedActivityGeneration.activeActivityNameKey
+            )
+            defaults?.synchronize()
+        }
         let stableSignature = currentArmSignature(
             deviceID: current,
             usageDate: usageDate,
@@ -272,9 +316,9 @@ enum EarnedBudgetArming {
             offsetMinutes: runningOffset,
             selection: selection
         )
-        let defaults = UserDefaults(suiteName: "group.com.evlin.ios")
         guard shouldStartMonitoring(
-            previousSignature: defaults?.string(forKey: armSignatureKey),
+            previousSignature: activeGeneration?.armSignature
+                ?? defaults?.string(forKey: armSignatureKey),
             nextSignature: stableSignature,
             force: force
         ) else {
@@ -310,6 +354,13 @@ enum EarnedBudgetArming {
             offsetMinutes: replacementOffset,
             selection: selection
         )
+        let replacementGeneration = EarnedActivityGeneration.Generation(
+            activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
+            offsetMinutes: replacementOffset,
+            armSignature: replacementSignature,
+            usageDate: usageDate,
+            timezoneIdentifier: timezoneIdentifier
+        )
         _ = installReplacement(
             replacementOffset: replacementOffset,
             replacementSignature: replacementSignature,
@@ -319,7 +370,9 @@ enum EarnedBudgetArming {
                 EarnedBudgetScheduler.shared.armFromNow(
                     poolMinutes: remainingPolicy.poolMinutes,
                     capMinutes: remainingPolicy.capMinutes,
-                    selection: selection
+                    selection: selection,
+                    generation: replacementGeneration,
+                    timeZone: TimeZone(identifier: timezoneIdentifier) ?? .current
                 )
             }
         )

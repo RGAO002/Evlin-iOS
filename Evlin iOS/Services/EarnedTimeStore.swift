@@ -1,5 +1,6 @@
 import Foundation
 import FamilyControls
+import Darwin
 
 /// Shared activity naming and App Group persistence used by both the app and
 /// DeviceActivity extension targets.
@@ -7,6 +8,41 @@ nonisolated enum EarnedActivityGeneration {
     static let legacyActivityName = "evlin.earned.budget"
     static let generatedActivityPrefix = "evlin.earned.budget."
     static let activeActivityNameKey = "evlin.earned.activeActivityName"
+    static let lifecycleKey = "evlin.earned.activityLifecycle"
+
+    struct Generation: Codable, Equatable, Sendable {
+        let activityName: String
+        let offsetMinutes: Int
+        let armSignature: String
+        let usageDate: String
+        let timezoneIdentifier: String
+
+        var isValid: Bool {
+            isEarnedActivityName(activityName)
+                && offsetMinutes >= 0
+                && !armSignature.isEmpty
+                && EarnedTimeStore.isCanonicalUsageDate(usageDate)
+                && TimeZone(identifier: timezoneIdentifier) != nil
+        }
+    }
+
+    struct Lifecycle: Codable, Equatable, Sendable {
+        var active: Generation?
+        var pending: Generation?
+        var retiringActivityNames: [String] = []
+
+        var isValid: Bool {
+            let reservedNames = [active?.activityName, pending?.activityName].compactMap { $0 }
+            return active?.isValid != false
+                && pending?.isValid != false
+                && (active == nil
+                    || pending == nil
+                    || active?.activityName != pending?.activityName)
+                && retiringActivityNames.allSatisfy(isEarnedActivityName)
+                && Set(retiringActivityNames).count == retiringActivityNames.count
+                && retiringActivityNames.allSatisfy { !reservedNames.contains($0) }
+        }
+    }
 
     static func generatedActivityName(id: UUID) -> String {
         generatedActivityPrefix + id.uuidString.lowercased()
@@ -14,6 +50,83 @@ nonisolated enum EarnedActivityGeneration {
 
     static func isEarnedActivityName(_ raw: String) -> Bool {
         raw == legacyActivityName || raw.hasPrefix(generatedActivityPrefix)
+    }
+
+    static func authorizedCallback(
+        activityName: String,
+        lifecycle: Lifecycle?
+    ) -> Generation? {
+        guard let lifecycle,
+              lifecycle.isValid,
+              let active = lifecycle.active,
+              active.activityName == activityName
+        else { return nil }
+
+        if activityName == legacyActivityName {
+            return active
+        }
+        return activityName.hasPrefix(generatedActivityPrefix) ? active : nil
+    }
+
+    static func loadLifecycle(defaults: UserDefaults?) -> Lifecycle? {
+        guard let data = defaults?.data(forKey: lifecycleKey),
+              let lifecycle = try? JSONDecoder().decode(Lifecycle.self, from: data),
+              lifecycle.isValid
+        else { return nil }
+        return lifecycle
+    }
+
+    static func persistLifecycle(_ lifecycle: Lifecycle, defaults: UserDefaults?) {
+        guard lifecycle.isValid else { return }
+        guard lifecycle.active != nil
+                || lifecycle.pending != nil
+                || !lifecycle.retiringActivityNames.isEmpty
+        else {
+            defaults?.removeObject(forKey: lifecycleKey)
+            defaults?.synchronize()
+            return
+        }
+        guard
+              let data = try? JSONEncoder().encode(lifecycle)
+        else { return }
+        defaults?.set(data, forKey: lifecycleKey)
+        defaults?.synchronize()
+    }
+
+    static func persistPending(_ generation: Generation, defaults: UserDefaults?) {
+        guard generation.isValid else { return }
+        var lifecycle = loadLifecycle(defaults: defaults)
+            ?? Lifecycle(active: nil, pending: nil, retiringActivityNames: [])
+        lifecycle.pending = generation
+        persistLifecycle(lifecycle, defaults: defaults)
+    }
+
+    static func migrateActiveIfNeeded(
+        _ generation: Generation,
+        defaults: UserDefaults?
+    ) {
+        guard loadLifecycle(defaults: defaults) == nil, generation.isValid else { return }
+        persistLifecycle(
+            .init(active: generation, pending: nil, retiringActivityNames: []),
+            defaults: defaults
+        )
+    }
+
+    static func recoverPending(
+        defaults: UserDefaults?,
+        stopMonitoring: ([String]) -> Void
+    ) {
+        guard var lifecycle = loadLifecycle(defaults: defaults) else { return }
+        var targets = lifecycle.retiringActivityNames
+        if let pending = lifecycle.pending,
+           !targets.contains(pending.activityName) {
+            targets.insert(pending.activityName, at: 0)
+        }
+        guard !targets.isEmpty else { return }
+        stopMonitoring(targets)
+        lifecycle.pending = nil
+        lifecycle.retiringActivityNames = []
+        persistLifecycle(lifecycle, defaults: defaults)
     }
 
     static func stopTargets(activeActivityName: String?) -> [String] {
@@ -27,38 +140,136 @@ nonisolated enum EarnedActivityGeneration {
         return targets
     }
 
+    static func stopTargets(lifecycle: Lifecycle?) -> [String] {
+        var targets: [String] = []
+        ([lifecycle?.pending?.activityName]
+            + (lifecycle?.retiringActivityNames.map(Optional.some) ?? [])
+            + [lifecycle?.active?.activityName, legacyActivityName]).forEach { name in
+            guard let name, !name.isEmpty, !targets.contains(name) else { return }
+            targets.append(name)
+        }
+        return targets
+    }
+
     @discardableResult
     static func installReplacement(
-        id: UUID = UUID(),
+        _ next: Generation,
         defaults: UserDefaults?,
         startMonitoring: (String) throws -> Void,
         stopMonitoring: ([String]) -> Void
-    ) -> String? {
-        let previous = defaults?.string(forKey: activeActivityNameKey)
-        let next = generatedActivityName(id: id)
+    ) -> Bool {
+        guard next.isValid,
+              next.activityName.hasPrefix(generatedActivityPrefix)
+        else { return false }
+
+        recoverPending(defaults: defaults, stopMonitoring: stopMonitoring)
+        persistPending(next, defaults: defaults)
         do {
-            try startMonitoring(next)
+            try startMonitoring(next.activityName)
         } catch {
-            return nil
+            stopMonitoring([next.activityName])
+            if var lifecycle = loadLifecycle(defaults: defaults),
+               lifecycle.pending == next {
+                lifecycle.pending = nil
+                persistLifecycle(lifecycle, defaults: defaults)
+            }
+            return false
         }
 
-        let targets = stopTargets(activeActivityName: previous).filter { $0 != next }
+        guard var lifecycle = loadLifecycle(defaults: defaults),
+              lifecycle.pending == next
+        else {
+            stopMonitoring([next.activityName])
+            return false
+        }
+        let previous = lifecycle.active
+        let targets = stopTargets(activeActivityName: previous?.activityName)
+            .filter { $0 != next.activityName }
+        lifecycle.active = next
+        lifecycle.pending = nil
+        lifecycle.retiringActivityNames = targets
+        persistLifecycle(lifecycle, defaults: defaults)
+        defaults?.set(next.activityName, forKey: activeActivityNameKey)
+        defaults?.synchronize()
+
         if !targets.isEmpty {
             stopMonitoring(targets)
         }
-        defaults?.set(next, forKey: activeActivityNameKey)
-        defaults?.synchronize()
-        return next
+        if var promoted = loadLifecycle(defaults: defaults),
+           promoted.active == next {
+            promoted.retiringActivityNames = []
+            persistLifecycle(promoted, defaults: defaults)
+        }
+        return true
     }
 
     static func stopPersisted(
         defaults: UserDefaults?,
         stopMonitoring: ([String]) -> Void
     ) {
-        let active = defaults?.string(forKey: activeActivityNameKey)
-        stopMonitoring(stopTargets(activeActivityName: active))
+        let lifecycle = loadLifecycle(defaults: defaults)
+        let persistedName = defaults?.string(forKey: activeActivityNameKey)
+        var targets = stopTargets(lifecycle: lifecycle)
+        if let persistedName,
+           !targets.contains(persistedName),
+           isEarnedActivityName(persistedName) {
+            targets.insert(persistedName, at: 0)
+        }
+        persistLifecycle(
+            .init(
+                active: nil,
+                pending: nil,
+                retiringActivityNames: targets
+            ),
+            defaults: defaults
+        )
         defaults?.removeObject(forKey: activeActivityNameKey)
         defaults?.synchronize()
+        stopMonitoring(targets)
+        defaults?.removeObject(forKey: lifecycleKey)
+        defaults?.synchronize()
+    }
+}
+
+nonisolated private enum EarnedLockOutcome<Value> {
+    case acquired(Value)
+    case unavailable(stage: String, code: Int32)
+}
+
+nonisolated private final class EarnedReconciliationLock: @unchecked Sendable {
+    private static let fallback = NSLock()
+    private let selection: EarnedTimeStore.ReconciliationLockSelection
+
+    init(selection: EarnedTimeStore.ReconciliationLockSelection) {
+        self.selection = selection
+    }
+
+    func withLock<T>(_ body: () -> T) -> EarnedLockOutcome<T> {
+        Self.fallback.lock()
+        defer { Self.fallback.unlock() }
+        switch selection {
+        case .inProcess:
+            return .acquired(body())
+        case .file(let url):
+            let descriptor = open(
+                url.path,
+                O_CREAT | O_RDWR | O_CLOEXEC,
+                mode_t(S_IRUSR | S_IWUSR)
+            )
+            guard descriptor >= 0 else {
+                return .unavailable(stage: "open", code: errno)
+            }
+            guard flock(descriptor, LOCK_EX) == 0 else {
+                let code = errno
+                close(descriptor)
+                return .unavailable(stage: "flock", code: code)
+            }
+            defer {
+                flock(descriptor, LOCK_UN)
+                close(descriptor)
+            }
+            return .acquired(body())
+        }
     }
 }
 
@@ -90,24 +301,62 @@ nonisolated enum EarnedActivityGeneration {
 ///   - `earned.usageCountingOffset`        — Int counted minutes before a task pause
 ///   - `evlin.earned.activeActivityName`    — Current generated DeviceActivity name
 nonisolated final class EarnedTimeStore: @unchecked Sendable {
+    static let appGroupSuiteName = "group.com.evlin.ios"
+    static let reconciliationLockFailureKey = "earned.reconciliationLockFailure"
     static let shared = EarnedTimeStore()
-    private static let acceptedUsageReconciliationLock = NSLock()
+
+    enum ReconciliationLockSelection: Equatable, Sendable {
+        case file(URL)
+        case inProcess
+    }
+
+    struct UsageContext: Equatable, Sendable {
+        let usageDate: String
+        let timezoneIdentifier: String
+    }
 
     enum AcceptedUsageReconciliation: Equatable {
         case reconciled(Int)
         case stale(acceptedUsageDate: String)
+        case lockUnavailable
     }
 
     enum RuntimePolicyReconciliation: Equatable {
         case reconciled(Int)
         case stale(acceptedUsageDate: String)
         case invalid
+        case lockUnavailable
     }
 
     private let defaults: UserDefaults?
+    private let reconciliationLock: EarnedReconciliationLock
 
-    init(suiteName: String = "group.com.evlin.ios") {
+    init(
+        suiteName: String = EarnedTimeStore.appGroupSuiteName,
+        lockSelection: ReconciliationLockSelection? = nil
+    ) {
         defaults = UserDefaults(suiteName: suiteName)
+        let containerURL = suiteName == Self.appGroupSuiteName
+            ? FileManager.default.containerURL(
+                forSecurityApplicationGroupIdentifier: Self.appGroupSuiteName
+            )
+            : nil
+        reconciliationLock = EarnedReconciliationLock(selection:
+            lockSelection ?? Self.reconciliationLockSelection(
+                suiteName: suiteName,
+                containerURL: containerURL
+            )
+        )
+    }
+
+    static func reconciliationLockSelection(
+        suiteName: String,
+        containerURL: URL?
+    ) -> ReconciliationLockSelection {
+        guard suiteName == appGroupSuiteName, let containerURL else {
+            return .inProcess
+        }
+        return .file(containerURL.appendingPathComponent("earned-runtime.lock"))
     }
 
     // MARK: - Keys
@@ -122,6 +371,7 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
     private let estimateKey      = "earned.latestDeviceEstimate"
     private let acceptedUsageDateKey = "earned.acceptedUsageDate"
     private let acceptedEstimateKey = "earned.acceptedEstimateMinutes"
+    private let runtimeTimezoneKey = "earned.runtimeTimezoneIdentifier"
     private let poolKey          = "earned.poolMinutes"
     private let capKey           = "earned.capMinutes"
     private let usageCountingAllowedKey = "evlin.usageCountingAllowed"
@@ -315,6 +565,44 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
         }
     }
 
+    var runtimeTimezoneIdentifier: String? {
+        guard let identifier = defaults?.string(forKey: runtimeTimezoneKey),
+              TimeZone(identifier: identifier) != nil
+        else { return nil }
+        return identifier
+    }
+
+    func usageContext(
+        now: Date = Date(),
+        fallbackTimeZone: TimeZone = .current
+    ) -> UsageContext {
+        let timezoneIdentifier = runtimeTimezoneIdentifier ?? fallbackTimeZone.identifier
+        let timeZone = TimeZone(identifier: timezoneIdentifier) ?? fallbackTimeZone
+        let usageDate: String
+        if let acceptedUsageDate,
+           Self.isCanonicalUsageDate(acceptedUsageDate) {
+            usageDate = acceptedUsageDate
+        } else {
+            usageDate = Self.appLimitUsageDate(now: now, timeZone: timeZone)
+        }
+        return UsageContext(
+            usageDate: usageDate,
+            timezoneIdentifier: timeZone.identifier
+        )
+    }
+
+    func currentPolicyDateContext(
+        now: Date = Date(),
+        fallbackTimeZone: TimeZone = .current
+    ) -> UsageContext {
+        let timezoneIdentifier = runtimeTimezoneIdentifier ?? fallbackTimeZone.identifier
+        let timeZone = TimeZone(identifier: timezoneIdentifier) ?? fallbackTimeZone
+        return UsageContext(
+            usageDate: Self.appLimitUsageDate(now: now, timeZone: timeZone),
+            timezoneIdentifier: timeZone.identifier
+        )
+    }
+
     // MARK: - Pool + cap
 
     /// The total earned pool for today (minutes), as last written by the backend sync.
@@ -395,13 +683,13 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
         serverEstimatedMinutes: Int,
         allowSameDayDecrease: Bool
     ) -> Int {
-        Self.withAcceptedUsageReconciliationLock {
+        withReconciliationTransaction {
             reconcileAcceptedUsageLocked(
                 usageDate: usageDate,
                 serverEstimatedMinutes: serverEstimatedMinutes,
                 allowSameDayDecrease: allowSameDayDecrease
             )
-        }
+        } ?? (acceptedEstimateMinutes ?? 0)
     }
 
     func reconcileAcceptedUsageIfNotStale(
@@ -409,7 +697,7 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
         serverEstimatedMinutes: Int,
         allowSameDayDecrease: Bool
     ) -> AcceptedUsageReconciliation {
-        Self.withAcceptedUsageReconciliationLock {
+        withReconciliationTransaction {
             if let currentDate = acceptedUsageDate,
                Self.isCanonicalUsageDate(currentDate),
                usageDate < currentDate {
@@ -420,7 +708,7 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
                 serverEstimatedMinutes: serverEstimatedMinutes,
                 allowSameDayDecrease: allowSameDayDecrease
             ))
-        }
+        } ?? .lockUnavailable
     }
 
     func reconcileRuntimePolicy(
@@ -432,7 +720,7 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
         estimatedMinutes: Int,
         syncedAt: Date = Date()
     ) -> RuntimePolicyReconciliation {
-        Self.withAcceptedUsageReconciliationLock {
+        withReconciliationTransaction {
             guard Self.isCanonicalUsageDate(usageDate),
                   TimeZone(identifier: timezoneIdentifier) != nil,
                   (1...1440).contains(poolMinutes),
@@ -449,6 +737,7 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
 
             self.poolMinutes = poolMinutes
             self.capMinutes = capMinutes
+            defaults?.set(timezoneIdentifier, forKey: runtimeTimezoneKey)
             backendRemainingAtLastSync = remainingMinutes
             lastBackendSyncAt = syncedAt
             let accepted = reconcileAcceptedUsageLocked(
@@ -457,16 +746,28 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
                 allowSameDayDecrease: false
             )
             return .reconciled(accepted)
-        }
+        } ?? .lockUnavailable
     }
 
     @discardableResult
-    static func withAcceptedUsageReconciliationLock<T>(
-        _ body: () throws -> T
-    ) rethrows -> T {
-        acceptedUsageReconciliationLock.lock()
-        defer { acceptedUsageReconciliationLock.unlock() }
-        return try body()
+    private func withReconciliationTransaction<T>(
+        _ body: () -> T
+    ) -> T? {
+        let outcome = reconciliationLock.withLock {
+            defaults?.synchronize()
+            defer { defaults?.synchronize() }
+            return body()
+        }
+        switch outcome {
+        case .acquired(let value):
+            return value
+        case .unavailable(let stage, let code):
+            let diagnostic = "\(ISO8601DateFormatter().string(from: Date())) stage=\(stage) errno=\(code)"
+            defaults?.set(diagnostic, forKey: Self.reconciliationLockFailureKey)
+            defaults?.synchronize()
+            NSLog("[Evlin/Earned] reconciliation lock unavailable %@", diagnostic)
+            return nil
+        }
     }
 
     private func reconcileAcceptedUsageLocked(
@@ -494,7 +795,7 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
         return accepted
     }
 
-    private static func isCanonicalUsageDate(_ value: String) -> Bool {
+    static func isCanonicalUsageDate(_ value: String) -> Bool {
         let formatter = DateFormatter()
         formatter.calendar = Calendar(identifier: .gregorian)
         formatter.locale = Locale(identifier: "en_US_POSIX")
@@ -626,7 +927,7 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
         [lockedSetIDKey, lockedSetDataKey, lockedSetListAliasKeyKey,
          lockedSetAllSelectedKey,
          backendKey, lastBackendSyncAtKey, estimateKey, acceptedUsageDateKey,
-         acceptedEstimateKey, poolKey, capKey, usageCountingAllowedKey,
+         acceptedEstimateKey, runtimeTimezoneKey, poolKey, capKey, usageCountingAllowedKey,
          earnedUsageOffsetKey].forEach { defaults?.removeObject(forKey: $0) }
         // Sweep any per-date override flags and per-app usage offsets.
         if let suite = defaults {

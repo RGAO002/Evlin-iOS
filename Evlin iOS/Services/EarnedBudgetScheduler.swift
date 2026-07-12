@@ -83,23 +83,42 @@ final class EarnedBudgetScheduler {
 
     // MARK: - Arming
 
-    nonisolated static func dailySchedule() -> DeviceActivitySchedule {
-        DeviceActivitySchedule(
-            intervalStart: DateComponents(hour: 0, minute: 0),
-            intervalEnd: DateComponents(hour: 23, minute: 59),
+    nonisolated static func dailySchedule(
+        timeZone: TimeZone = .current,
+        calendar: Calendar = Calendar(identifier: .gregorian)
+    ) -> DeviceActivitySchedule {
+        var policyCalendar = calendar
+        policyCalendar.timeZone = timeZone
+        var startComponents = DateComponents()
+        startComponents.calendar = policyCalendar
+        startComponents.timeZone = timeZone
+        startComponents.hour = 0
+        startComponents.minute = 0
+        var endComponents = DateComponents()
+        endComponents.calendar = policyCalendar
+        endComponents.timeZone = timeZone
+        endComponents.hour = 23
+        endComponents.minute = 59
+        return DeviceActivitySchedule(
+            intervalStart: startComponents,
+            intervalEnd: endComponents,
             repeats: true
         )
     }
 
     nonisolated static func resumeSchedule(
         startingAt start: Date,
-        calendar: Calendar = .current
+        timeZone: TimeZone? = nil,
+        calendar: Calendar = Calendar(identifier: .gregorian)
     ) -> DeviceActivitySchedule {
-        let startComponents = calendar.dateComponents(
+        var policyCalendar = calendar
+        let policyTimeZone = timeZone ?? calendar.timeZone
+        policyCalendar.timeZone = policyTimeZone
+        let startComponents = policyCalendar.dateComponents(
             [.calendar, .timeZone, .year, .month, .day, .hour, .minute, .second],
             from: start
         )
-        var endComponents = calendar.dateComponents(
+        var endComponents = policyCalendar.dateComponents(
             [.calendar, .timeZone, .year, .month, .day],
             from: start
         )
@@ -124,8 +143,9 @@ final class EarnedBudgetScheduler {
         poolMinutes: Int,
         capMinutes: Int,
         selection: FamilyActivitySelection,
+        generation: EarnedActivityGeneration.Generation,
         schedule: DeviceActivitySchedule? = nil,
-        generationID: UUID = UUID()
+        policyTimeZone: TimeZone = .current
     ) -> Bool {
         let tokenSummary = Self.selectionSummary(selection)
         guard selection.applicationTokens.count > 0
@@ -148,7 +168,7 @@ final class EarnedBudgetScheduler {
             return false
         }
 
-        let schedule = schedule ?? Self.dailySchedule()
+        let schedule = schedule ?? Self.dailySchedule(timeZone: policyTimeZone)
 
         // Build one event per threshold step, each measuring the full
         // all-category selection (applicationTokens + categoryTokens).
@@ -164,8 +184,8 @@ final class EarnedBudgetScheduler {
             events[name] = event
         }
 
-        let installedName = EarnedActivityGeneration.installReplacement(
-            id: generationID,
+        let installed = EarnedActivityGeneration.installReplacement(
+            generation,
             defaults: defaults,
             startMonitoring: { rawName in
                 try center.startMonitoring(
@@ -178,10 +198,10 @@ final class EarnedBudgetScheduler {
                 center.stopMonitoring(rawNames.map { DeviceActivityName($0) })
             }
         )
-        if let installedName {
+        if installed {
             CommandDeliveryDiagnostics.record(
                 CommandDeliveryDiagnostics.keyEarnedArmAttempt,
-                "armed activity=\(installedName) events=\(events.count) first=\(steps.first ?? 0) last=\(steps.last ?? 0) pool=\(poolMinutes) cap=\(capMinutes) \(tokenSummary)"
+                "armed activity=\(generation.activityName) events=\(events.count) first=\(steps.first ?? 0) last=\(steps.last ?? 0) pool=\(poolMinutes) cap=\(capMinutes) \(tokenSummary)"
             )
             return true
         } else {
@@ -198,16 +218,31 @@ final class EarnedBudgetScheduler {
         poolMinutes: Int,
         capMinutes: Int,
         selection: FamilyActivitySelection,
+        generation: EarnedActivityGeneration.Generation,
         now: Date = Date(),
-        calendar: Calendar = .current,
-        generationID: UUID = UUID()
+        timeZone: TimeZone = .current,
+        calendar: Calendar = Calendar(identifier: .gregorian)
     ) -> Bool {
         arm(
             poolMinutes: poolMinutes,
             capMinutes: capMinutes,
             selection: selection,
-            schedule: Self.resumeSchedule(startingAt: now, calendar: calendar),
-            generationID: generationID
+            generation: generation,
+            schedule: Self.resumeSchedule(
+                startingAt: now,
+                timeZone: timeZone,
+                calendar: calendar
+            ),
+            policyTimeZone: timeZone
+        )
+    }
+
+    func recoverInterruptedTransition() {
+        EarnedActivityGeneration.recoverPending(
+            defaults: defaults,
+            stopMonitoring: { rawNames in
+                center.stopMonitoring(rawNames.map { DeviceActivityName($0) })
+            }
         )
     }
 

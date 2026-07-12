@@ -14,11 +14,20 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
     private let defaults = UserDefaults(suiteName: "group.com.evlin.ios")
     private let store = ManagedSettingsStore()
 
-    /// Build the canonical day key "YYYY-MM-DD@<tz>" in the device's current tz.
+    /// Build the canonical day key in the backend policy timezone when known.
     private func currentDayKey() -> String {
-        let timeZone = TimeZone.current
-        let date = EarnedTimeStore.appLimitUsageDate(timeZone: timeZone)
-        return "\(date)@\(timeZone.identifier)"
+        let context = EarnedTimeStore.shared.currentPolicyDateContext()
+        return "\(context.usageDate)@\(context.timezoneIdentifier)"
+    }
+
+    private func authorizedEarnedGeneration(
+        activityName: String
+    ) -> EarnedActivityGeneration.Generation? {
+        defaults?.synchronize()
+        return EarnedActivityGeneration.authorizedCallback(
+            activityName: activityName,
+            lifecycle: EarnedActivityGeneration.loadLifecycle(defaults: defaults)
+        )
     }
 
     /// Emit a ScreenTimeEvent from the extension (emitter = kid_extension).
@@ -62,6 +71,10 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         // records (a record with {.manual, .earnedTime} must survive with {.manual}).
         // This mirrors the limit daily-reset path above but is source-specific.
         if EarnedActivityGeneration.isEarnedActivityName(raw) {
+            guard authorizedEarnedGeneration(activityName: raw) != nil else {
+                NSLog("[Evlin/Ext] rejected inactive earned interval activity=%@", raw)
+                return
+            }
             resetEarnedTimeShields(activity: raw)
             return
         }
@@ -177,8 +190,19 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         //      shield over the Locked-set tokens (pure App Group path, no actor).
         if event.rawValue.hasPrefix("evlin.earned.t"),
            EarnedActivityGeneration.isEarnedActivityName(activity.rawValue) {
+            guard let generation = authorizedEarnedGeneration(
+                activityName: activity.rawValue
+            ) else {
+                NSLog("[Evlin/Ext] rejected inactive earned threshold activity=%@ event=%@",
+                      activity.rawValue, event.rawValue)
+                return
+            }
             guard usageCountingAllowed(eventName: event.rawValue) else { return }
-            handleEarnedThreshold(eventName: event.rawValue, activity: activity)
+            handleEarnedThreshold(
+                eventName: event.rawValue,
+                activity: activity,
+                generation: generation
+            )
         }
     }
 
@@ -240,7 +264,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         // (used == budget). This makes the bar read "reached" even for tiny
         // budgets that have no measurement thresholds. Additive — the shield is
         // untouched; usage reporting is a separate concern.
-        let usageDate = EarnedTimeStore.appLimitUsageDate()
+        let usageDate = EarnedTimeStore.shared.currentPolicyDateContext().usageDate
         postAppLimitUsageSample(
             ruleID: ruleId,
             thresholdMinutes: rule.budgetMinutes,
@@ -272,8 +296,9 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
     ) {
         guard let baseURL = ExtensionConfig.baseURL,
               let deviceID = ExtensionConfig.childId else { return }
-        let usageDate = EarnedTimeStore.appLimitUsageDate()
-        let tz = TimeZone.current.identifier
+        let context = EarnedTimeStore.shared.currentPolicyDateContext()
+        let usageDate = context.usageDate
+        let tz = context.timezoneIdentifier
         let offset = EarnedTimeStore.shared.appLimitUsageOffsetMinutes(
             ruleID: ruleID,
             usageDate: usageDate
@@ -335,7 +360,11 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
     ///
     /// Uses NO actor (App Group direct read/write only), matching how `applyLimitShield`
     /// uses `loadShields` → `LimitShieldLogic` → `recomputeAndApplyShields`.
-    private func handleEarnedThreshold(eventName: String, activity: DeviceActivityName) {
+    private func handleEarnedThreshold(
+        eventName: String,
+        activity: DeviceActivityName,
+        generation: EarnedActivityGeneration.Generation
+    ) {
         let suffix = String(eventName.dropFirst("evlin.earned.t".count))
         guard let n = Int(suffix) else {
             NSLog("[Evlin/Ext] earned threshold: unparseable N in '%@'", eventName)
@@ -361,7 +390,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             }
         }
 
-        let offset = earnedStore.earnedUsageOffsetMinutes
+        let offset = generation.offsetMinutes
         let adjustedN = EarnedTimeStore.adjustedEarnedThreshold(
             rawThresholdMinutes: n,
             runningOffsetMinutes: offset
@@ -377,8 +406,8 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         // Drain any queued retries + fire the new sample.
         if let baseURL = ExtensionConfig.baseURL,
            let deviceID = ExtensionConfig.childId {
-            let usageDate = EarnedTimeStore.appLimitUsageDate()
-            let tz = TimeZone.current.identifier
+            let usageDate = generation.usageDate
+            let tz = generation.timezoneIdentifier
             Task {
                 await EarnedSampleReporter.drainRetryQueue(baseURL: baseURL)
                 await EarnedSampleReporter.report(
@@ -403,7 +432,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         // ⇒ always fired). See EarnedGateTautologyTests.
         let poolMinutes = earnedStore.poolMinutes ?? 240
         let capMinutes  = earnedStore.capMinutes  ?? 240
-        let usageDateForOverride = EarnedTimeStore.appLimitUsageDate()
+        let usageDateForOverride = generation.usageDate
 
         guard EarnedSampleReporter.shouldApplyEarnedShieldFresh(
             adjustedN: adjustedN,
@@ -553,7 +582,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
     /// today differs from that stored key — see `LimitShieldLogic.isDayBoundaryReset`.
     private func resetLimitShields(activity: String) {
         let dayKeyKey = "evlin.limitReset.dayKey"
-        let today = EarnedTimeStore.appLimitUsageDate()
+        let today = EarnedTimeStore.shared.currentPolicyDateContext().usageDate
         let stored = defaults?.string(forKey: dayKeyKey)
 
         guard LimitShieldLogic.isDayBoundaryReset(storedDayKey: stored, today: today) else {

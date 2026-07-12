@@ -38,6 +38,135 @@ final class EarnedTimeStoreTests: XCTestCase {
         body(EarnedTimeStore(suiteName: suiteName))
     }
 
+    func test_productionSuiteSelectsSharedAppGroupLockFile() {
+        let container = URL(fileURLWithPath: "/tmp/earned-app-group", isDirectory: true)
+
+        XCTAssertEqual(
+            EarnedTimeStore.reconciliationLockSelection(
+                suiteName: EarnedTimeStore.appGroupSuiteName,
+                containerURL: container
+            ),
+            .file(container.appendingPathComponent("earned-runtime.lock"))
+        )
+    }
+
+    func test_independentStoresCannotLowerSameDayAcceptedUsageUnderConcurrentWrites() {
+        let suiteName = "EarnedTimeStoreTests.\(UUID().uuidString)"
+        UserDefaults.standard.removePersistentDomain(forName: suiteName)
+        isolatedSuiteName = suiteName
+        let first = EarnedTimeStore(suiteName: suiteName)
+        let second = EarnedTimeStore(suiteName: suiteName)
+
+        DispatchQueue.concurrentPerform(iterations: 400) { index in
+            let store = index.isMultiple(of: 2) ? first : second
+            _ = store.reconcileAcceptedUsage(
+                usageDate: "2026-07-11",
+                serverEstimatedMinutes: index.isMultiple(of: 3) ? 100 : 5,
+                allowSameDayDecrease: false
+            )
+        }
+
+        XCTAssertEqual(first.acceptedEstimateMinutes, 100)
+        XCTAssertEqual(second.acceptedEstimateMinutes, 100)
+    }
+
+    func test_lockOpenFailureIsDiagnosticAndFailClosedWithoutRuntimeWrites() throws {
+        let suiteName = "EarnedTimeStoreTests.\(UUID().uuidString)"
+        UserDefaults.standard.removePersistentDomain(forName: suiteName)
+        isolatedSuiteName = suiteName
+        let seeded = EarnedTimeStore(suiteName: suiteName)
+        XCTAssertEqual(seeded.reconcileRuntimePolicy(
+            usageDate: "2026-07-11",
+            timezoneIdentifier: "America/New_York",
+            poolMinutes: 60,
+            capMinutes: 45,
+            remainingMinutes: 30,
+            estimatedMinutes: 20
+        ), .reconciled(20))
+        let failing = EarnedTimeStore(
+            suiteName: suiteName,
+            lockSelection: .file(
+                URL(fileURLWithPath: "/dev/null/earned-runtime.lock")
+            )
+        )
+
+        XCTAssertEqual(failing.reconcileAcceptedUsage(
+            usageDate: "2026-07-11",
+            serverEstimatedMinutes: 0,
+            allowSameDayDecrease: true
+        ), 20)
+        XCTAssertEqual(failing.reconcileAcceptedUsageIfNotStale(
+            usageDate: "2026-07-11",
+            serverEstimatedMinutes: 0,
+            allowSameDayDecrease: true
+        ), .lockUnavailable)
+        XCTAssertEqual(failing.reconcileRuntimePolicy(
+            usageDate: "2026-07-11",
+            timezoneIdentifier: "America/Los_Angeles",
+            poolMinutes: 10,
+            capMinutes: 10,
+            remainingMinutes: 5,
+            estimatedMinutes: 0
+        ), .lockUnavailable)
+
+        XCTAssertEqual(seeded.acceptedEstimateMinutes, 20)
+        XCTAssertEqual(seeded.poolMinutes, 60)
+        XCTAssertEqual(seeded.capMinutes, 45)
+        XCTAssertEqual(seeded.runtimeTimezoneIdentifier, "America/New_York")
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        XCTAssertTrue(
+            defaults.string(forKey: EarnedTimeStore.reconciliationLockFailureKey)?
+                .contains("stage=open") == true
+        )
+    }
+
+    func test_runtimeTimezonePersistsAndDrivesUsageDateWhenDeviceTimezoneDiffers() {
+        withIsolatedStore { store in
+            let result = store.reconcileRuntimePolicy(
+                usageDate: "2026-07-11",
+                timezoneIdentifier: "America/Los_Angeles",
+                poolMinutes: 60,
+                capMinutes: 45,
+                remainingMinutes: 30,
+                estimatedMinutes: 15
+            )
+
+            XCTAssertEqual(result, .reconciled(15))
+            XCTAssertEqual(store.runtimeTimezoneIdentifier, "America/Los_Angeles")
+            XCTAssertEqual(
+                store.usageContext(),
+                .init(usageDate: "2026-07-11", timezoneIdentifier: "America/Los_Angeles")
+            )
+
+            store.acceptedUsageDate = nil
+            let instant = Date(timeIntervalSince1970: 1_783_827_000) // 2026-07-12T03:30:00Z
+            XCTAssertEqual(
+                store.usageContext(
+                    now: instant,
+                    fallbackTimeZone: TimeZone(identifier: "Asia/Tokyo")!
+                ),
+                .init(usageDate: "2026-07-11", timezoneIdentifier: "America/Los_Angeles")
+            )
+        }
+    }
+
+    func test_identityResetClearsRuntimeTimezone() {
+        withIsolatedStore { store in
+            _ = store.reconcileRuntimePolicy(
+                usageDate: "2026-07-11",
+                timezoneIdentifier: "America/New_York",
+                poolMinutes: 60,
+                capMinutes: 45,
+                remainingMinutes: 30,
+                estimatedMinutes: 15
+            )
+
+            store.clearUsageStateForIdentityChange()
+
+            XCTAssertNil(store.runtimeTimezoneIdentifier)
+        }
+    }
+
     // MARK: - isEarnedTimeReady
 
     func test_isEarnedTimeReady_falseWhenNeitherPresent() {
@@ -301,30 +430,6 @@ final class EarnedTimeStoreTests: XCTestCase {
             XCTAssertEqual(store.latestDeviceEstimate, 8)
             XCTAssertEqual(store.earnedUsageOffsetMinutes, 3)
         }
-    }
-
-    func test_reconcileAcceptedUsageLock_serializesSameProcessCriticalSections() {
-        let firstEntered = DispatchSemaphore(value: 0)
-        let releaseFirst = DispatchSemaphore(value: 0)
-        let secondEntered = DispatchSemaphore(value: 0)
-
-        DispatchQueue.global().async {
-            let _: Void = EarnedTimeStore.withAcceptedUsageReconciliationLock {
-                firstEntered.signal()
-                releaseFirst.wait()
-            }
-        }
-        XCTAssertEqual(firstEntered.wait(timeout: .now() + 1), .success)
-
-        DispatchQueue.global().async {
-            let _: Void = EarnedTimeStore.withAcceptedUsageReconciliationLock {
-                secondEntered.signal()
-            }
-        }
-        XCTAssertEqual(secondEntered.wait(timeout: .now() + 0.1), .timedOut)
-
-        releaseFirst.signal()
-        XCTAssertEqual(secondEntered.wait(timeout: .now() + 1), .success)
     }
 
     // MARK: - Child-state runtime policy
