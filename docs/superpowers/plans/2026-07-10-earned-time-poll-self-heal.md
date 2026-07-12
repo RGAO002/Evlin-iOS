@@ -754,6 +754,8 @@ The cached diff must include the pre-existing retry-filter hunks only if they ar
 - Test: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/EarnedBudgetSchedulerTests.swift`
 - Test: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/EarnedBudgetArmingTests.swift`
 - Test: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/EarnedTimeStoreTests.swift`
+- Test: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/EarnedSampleReporterTests.swift`
+- Test: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/EarnedGateTautologyTests.swift`
 
 **Interfaces:**
 - Consumes: Task 3 runtime model and accepted-baseline store API.

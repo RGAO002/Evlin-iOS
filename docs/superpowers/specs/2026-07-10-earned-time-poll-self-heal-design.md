@@ -159,14 +159,16 @@ publication completes. It also restores an acknowledged config command that
 was subsequently cleared by identity teardown.
 
 Poll reconciliation is monotonic only within one canonical usage date. The
-store records the usage date that owns the accepted estimate and offset. For a
-poll whose `usage_date` matches that stored date, the accepted baseline becomes
+store records the usage date that owns the accepted estimate. For a poll whose
+`usage_date` matches that stored date, the accepted baseline becomes
 `max(localAccepted, serverEstimated)`, so a stale read cannot move the odometer
 backward before a re-arm. When the canonical `usage_date` changes, the old
-baseline does not participate: estimate and offset reset to the new day's
+baseline does not participate: the accepted estimate resets to the new day's
 server estimate. A `counted: false` sample response is the only same-day path
-allowed to lower the local accepted baseline, because it explicitly removes a
-client-side phantom that the server did not count.
+allowed to lower that accepted baseline, because it explicitly removes a
+client-side phantom that the server did not count. Neither path mutates the
+offset owned by an already-running ladder; the accepted value becomes the
+offset only if a replacement ladder is subsequently installed.
 
 `acceptedEstimateMinutes` and `earnedUsageOffsetMinutes` are different state:
 
@@ -202,9 +204,10 @@ For every successful sample POST, iOS decodes `counted` and the server
 
 - `counted: true`: retain the monotonic maximum of the local and server
   accepted estimates for the response `usage_date`.
-- `counted: false`: replace the local estimate and re-arm offset with the
-  server estimate, record a `backend_counting_paused` diagnostic, and do not
-  enqueue a retry.
+- `counted: false`: replace the local accepted estimate with the server
+  estimate, leave the currently installed ladder offset unchanged, record a
+  `backend_counting_paused` diagnostic, and do not enqueue a retry. A future
+  replacement ladder uses the reconciled accepted estimate as its new offset.
 
 The explicit flag avoids treating an out-of-order but counted response as a
 rejection. Network failures and non-success statuses retain the existing retry
@@ -215,9 +218,10 @@ behavior.
 - Missing optional runtime state never clears a previously valid policy.
 - Invalid or incomplete runtime values are ignored and diagnosed; they do not
   arm a zero/negative ladder.
-- A poll may lower accepted estimate/offset only when its canonical usage date
+- A poll may lower the accepted estimate only when its canonical usage date
   differs from the stored accepted-usage date. A same-date poll always uses a
-  monotonic maximum.
+  monotonic maximum. Poll reconciliation never mutates the running ladder
+  offset.
 - A paused sample is never retried, because later billing would charge usage
   that occurred while the clock was intentionally stopped.
 - A network failure remains retryable and does not alter the accepted local
@@ -246,12 +250,14 @@ iOS tests must prove:
    use the compatibility fallback.
 2. Reflection presence disables counting in the fallback path.
 3. A poll writes exact runtime policy before attempting a re-arm.
-4. A stale same-date poll cannot lower accepted estimate or offset; a canonical
-   usage-date change resets both to the new server estimate.
+4. A stale same-date poll cannot lower the accepted estimate; a canonical
+   usage-date change resets the accepted estimate to the new server value while
+   leaving the running ladder offset unchanged until a replacement succeeds.
 5. An allowed poll retries `armIfReady` after identity/list readiness changes,
    while the arm signature prevents repeated DeviceActivity replacement.
-6. `counted=false` reconciles estimate and offset to the server value without a
-   retry; counted and out-of-order responses preserve monotonic accepted usage.
+6. `counted=false` reconciles the accepted estimate to the server value without
+   a retry and leaves the running ladder offset unchanged; counted and
+   out-of-order responses preserve monotonic accepted usage.
 7. The false gate invokes the existing three-counter stop path: earned ladder,
    device-total activity, and per-app activities all stop. Existing task-pause
    stop/re-arm tests remain green under the reflection-aware server gate.
