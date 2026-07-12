@@ -117,6 +117,64 @@ final class ActionExecutorTests: XCTestCase {
         XCTAssertTrue(spy.started.isEmpty)
     }
 
+    func testBlockRollbackDoesNotOverwriteNewerDurableSameBundleWrite() async {
+        let oldID = UUID()
+        let newerID = UUID()
+        let bundleID = "com.example.same-block"
+        let newerRecord = BlockRecord(
+            bundleID: bundleID,
+            displayName: "New Family Block",
+            blockedAt: Date(timeIntervalSince1970: 2_000),
+            lastCommandID: UUID(),
+            originalRequest: "new family block",
+            targetChildID: newerID,
+            expiresAt: nil
+        )
+        var currentID = oldID
+        let executor = ActionExecutor(
+            authorizationStatusProvider: { .approved },
+            afterMutationCheckpoint: { checkpoint in
+                guard checkpoint == .blockEffectiveStateResolved else { return }
+                self.persistBlockRecords([bundleID: newerRecord])
+                currentID = newerID
+            }
+        )
+
+        let result = await executor.execute(
+            makeBlockCommand(bundleID: bundleID, minutes: 15),
+            expectedChildID: oldID,
+            identityIsCurrent: { $0 == currentID }
+        )
+
+        XCTAssertEqual(result, .failed(.execution("stale_identity")))
+        let durable = await ActiveLockStore().allCurrent().blocks
+        XCTAssertEqual(durable.first { $0.bundleID == bundleID }, newerRecord)
+    }
+
+    func testIdentityChangeInsideBlockStartMonitoringCancelsNewScheduleAndRollsBack() async {
+        let oldID = UUID()
+        var currentID = oldID
+        let spy = DeviceActivitySchedulerSpy()
+        spy.onStart = { currentID = UUID() }
+        let executor = ActionExecutor(
+            activityScheduler: spy,
+            authorizationStatusProvider: { .approved }
+        )
+        let bundleID = "com.example.post-schedule-block"
+
+        let result = await executor.execute(
+            makeBlockCommand(bundleID: bundleID, minutes: 15),
+            expectedChildID: oldID,
+            identityIsCurrent: { $0 == currentID }
+        )
+
+        XCTAssertEqual(result, .failed(.execution("stale_identity")))
+        let blocks = await ActiveLockStore.shared.allCurrent().blocks
+        XCTAssertTrue(blocks.isEmpty)
+        XCTAssertTrue(spy.activeActivities.isEmpty)
+        XCTAssertTrue(spy.stopped.contains { $0 == [DeviceActivityName(expectedBlockActivityName(bundleID: bundleID))] })
+    }
+
     func testIdentityChangeAfterShieldEffectiveStateReadRollsBackShieldAndSchedule() async {
         let oldID = UUID()
         var currentID = oldID
@@ -144,6 +202,30 @@ final class ActionExecutorTests: XCTestCase {
         let shieldsAfterRollback = await ActiveLockStore.shared.allCurrent().shields
         XCTAssertTrue(shieldsAfterRollback.isEmpty)
         XCTAssertTrue(spy.started.isEmpty)
+    }
+
+    func testIdentityChangeInsideShieldStartMonitoringCancelsNewScheduleAndRollsBack() async {
+        let oldID = UUID()
+        var currentID = oldID
+        let spy = DeviceActivitySchedulerSpy()
+        spy.onStart = { currentID = UUID() }
+        let executor = ActionExecutor(
+            activityScheduler: spy,
+            authorizationStatusProvider: { .approved }
+        )
+        let command = makeAllShieldCommand(childID: oldID, minutes: 15)
+
+        let result = await executor.execute(
+            command,
+            expectedChildID: oldID,
+            identityIsCurrent: { $0 == currentID }
+        )
+
+        XCTAssertEqual(result, .failed(.execution("stale_identity")))
+        let shields = await ActiveLockStore.shared.allCurrent().shields
+        XCTAssertTrue(shields.isEmpty)
+        XCTAssertTrue(spy.activeActivities.isEmpty)
+        XCTAssertTrue(spy.stopped.contains { $0?.count == 1 })
     }
 
     func testIdentityTeardownAfterUnshieldEffectiveStateReadDoesNotRestoreOldFamilyShield() async {
@@ -417,6 +499,15 @@ final class ActionExecutorTests: XCTestCase {
         defaults?.synchronize()
     }
 
+    private func persistBlockRecords(_ records: [String: BlockRecord]) {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try! encoder.encode(records)
+        let defaults = UserDefaults(suiteName: "group.com.evlin.ios")
+        defaults?.set(data, forKey: "evlin.blockRecords")
+        defaults?.synchronize()
+    }
+
     private func clearPersistedRestrictionsForIdentityTeardown() {
         let defaults = UserDefaults(suiteName: "group.com.evlin.ios")
         defaults?.removeObject(forKey: "evlin.shieldRecords")
@@ -455,10 +546,12 @@ private final class DeviceActivitySchedulerSpy: DeviceActivityScheduling {
     /// Live armed set backing `monitoredActivities()` — added on start, removed
     /// on stop.
     private(set) var activeActivities: Set<DeviceActivityName> = []
+    var onStart: () -> Void = {}
 
     func startMonitoring(_ name: DeviceActivityName, during schedule: DeviceActivitySchedule) throws {
         started.append((name, schedule))
         activeActivities.insert(name)
+        onStart()
     }
 
     func startMonitoring(
@@ -468,6 +561,7 @@ private final class DeviceActivitySchedulerSpy: DeviceActivityScheduling {
     ) throws {
         startedWithEvents.append((activity, schedule, events))
         activeActivities.insert(activity)
+        onStart()
     }
 
     func stopMonitoring(_ activities: [DeviceActivityName]) {

@@ -98,14 +98,16 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         // This mirrors the limit daily-reset path above but is source-specific.
         if EarnedActivityGeneration.isEarnedActivityName(raw) {
             guard let generation = authorizedEarnedGeneration(activityName: raw) else { return }
-            _ = performIfEarnedGenerationActive(
-                generation,
-                mutationKeys: [shieldsKey],
-                rollbackExternalState: {
-                    recomputeAndApplyShields(loadShields())
+            _ = ActiveLockPersistenceLock.shared.withLock {
+                _ = performIfEarnedGenerationActive(
+                    generation,
+                    mutationKeys: [shieldsKey],
+                    rollbackExternalState: {
+                        recomputeAndApplyShields(loadShields())
+                    }
+                ) {
+                    resetEarnedTimeShields(activity: raw)
                 }
-            ) {
-                resetEarnedTimeShields(activity: raw)
             }
             return
         }
@@ -286,12 +288,14 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         // no-ops (the extension can't and must not request authorization).
         postLimitReachedNotification(ruleId: ruleId, rule: rule)
 
-        let current = loadShields()
-        let updated = LimitShieldLogic.applyingLimit(to: current, rule: rule)
-        if let data = encodeShields(updated) {
-            defaults?.set(data, forKey: shieldsKey)
+        _ = ActiveLockPersistenceLock.shared.withLock {
+            let current = loadShields()
+            let updated = LimitShieldLogic.applyingLimit(to: current, rule: rule)
+            if let data = encodeShields(updated) {
+                defaults?.set(data, forKey: shieldsKey)
+            }
+            recomputeAndApplyShields(updated)
         }
-        recomputeAndApplyShields(updated)
 
         let ts = ISO8601DateFormatter().string(from: Date())
         defaults?.set(
@@ -586,74 +590,76 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         // stays in lockstep with any future normalization in `makeRecordKey`
         // (Wave-1 Task 5: helper now lowercases the savedList segment).
         let recordKey = ShieldRecord.makeRecordKey(tier: .savedList, targetKey: lockedSetID)
-        var current = loadShields()
+        _ = ActiveLockPersistenceLock.shared.withLock {
+            var current = loadShields()
 
-        // Build the record if it doesn't exist yet; union .earnedTime if it does.
-        if let existing = current[recordKey] {
-            current[recordKey] = ShieldSourceLogic.unioning(existing, intoSources: [.earnedTime])
-        } else {
-            // Device-local union (paper-lock fix): earnedStore.lockedSetTokenData
-            // is never actually populated anywhere in the app today (both
-            // saveLockedSetID call sites pass tokenData: nil — ProfileView.swift,
-            // CommandPoller.swift), so this blob decode was dead code. Read the
-            // kid's live FamilyActivitySelection from DefaultLockGroupStore instead —
-            // same ground-truth source ActionExecutor now uses on the parent-lock path.
-            var appTokens: Set<ApplicationToken> = []
-            var catTokens:  Set<ActivityCategoryToken> = []
-            var webTokens:  Set<WebDomainToken> = []
-            let localSelection = DefaultLockGroupStore.load()
-            appTokens = localSelection.applicationTokens
-            catTokens = localSelection.categoryTokens
-            webTokens = localSelection.webDomainTokens
-            // Legacy blob fallback, kept for completeness if a future writer
-            // ever does populate lockedSetTokenData ahead of DefaultLockGroupStore.
-            if appTokens.isEmpty && catTokens.isEmpty,
-               let blob = earnedStore.lockedSetTokenData,
-               let sel = try? JSONDecoder().decode(FamilyActivitySelection.self, from: blob) {
-                appTokens = sel.applicationTokens
-                catTokens = sel.categoryTokens
-                webTokens = sel.webDomainTokens
+            // Build the record if it doesn't exist yet; union .earnedTime if it does.
+            if let existing = current[recordKey] {
+                current[recordKey] = ShieldSourceLogic.unioning(existing, intoSources: [.earnedTime])
+            } else {
+                // Device-local union (paper-lock fix): earnedStore.lockedSetTokenData
+                // is never actually populated anywhere in the app today (both
+                // saveLockedSetID call sites pass tokenData: nil — ProfileView.swift,
+                // CommandPoller.swift), so this blob decode was dead code. Read the
+                // kid's live FamilyActivitySelection from DefaultLockGroupStore instead —
+                // same ground-truth source ActionExecutor now uses on the parent-lock path.
+                var appTokens: Set<ApplicationToken> = []
+                var catTokens:  Set<ActivityCategoryToken> = []
+                var webTokens:  Set<WebDomainToken> = []
+                let localSelection = DefaultLockGroupStore.load()
+                appTokens = localSelection.applicationTokens
+                catTokens = localSelection.categoryTokens
+                webTokens = localSelection.webDomainTokens
+                // Legacy blob fallback, kept for completeness if a future writer
+                // ever does populate lockedSetTokenData ahead of DefaultLockGroupStore.
+                if appTokens.isEmpty && catTokens.isEmpty,
+                   let blob = earnedStore.lockedSetTokenData,
+                   let sel = try? JSONDecoder().decode(FamilyActivitySelection.self, from: blob) {
+                    appTokens = sel.applicationTokens
+                    catTokens = sel.categoryTokens
+                    webTokens = sel.webDomainTokens
+                }
+                let record = ShieldRecord(
+                    recordKey: recordKey,
+                    tier: .savedList,
+                    targetKey: lockedSetID,
+                    displayName: "Locked Set",
+                    lastCommandID: UUID(),
+                    appTokens: appTokens,
+                    categoryTokens: catTokens,
+                    webDomainTokens: webTokens,
+                    appliesToAll: earnedStore.lockedSetAllSelected,
+                    issuedAt: Date(),
+                    expiresAt: nil,
+                    originalRequest: "earned time cap reached: t\(thresholdN)",
+                    targetChildID: ExtensionConfig.childId ?? UUID(),
+                    sources: [.earnedTime]
+                )
+                current[recordKey] = record
             }
-            let record = ShieldRecord(
-                recordKey: recordKey,
-                tier: .savedList,
-                targetKey: lockedSetID,
-                displayName: "Locked Set",
-                lastCommandID: UUID(),
-                appTokens: appTokens,
-                categoryTokens: catTokens,
-                webDomainTokens: webTokens,
-                appliesToAll: earnedStore.lockedSetAllSelected,
-                issuedAt: Date(),
-                expiresAt: nil,
-                originalRequest: "earned time cap reached: t\(thresholdN)",
-                targetChildID: ExtensionConfig.childId ?? UUID(),
-                sources: [.earnedTime]
-            )
-            current[recordKey] = record
-        }
 
-        _ = performIfEarnedGenerationActive(
-            generation,
-            mutationKeys: [shieldsKey, "evlin.lastEarnedShield"],
-            rollbackExternalState: {
-                recomputeAndApplyShields(loadShields())
-            }
-        ) {
-            if let data = encodeShields(current) {
-                defaults?.set(data, forKey: shieldsKey)
-            }
-            recomputeAndApplyShields(current)
+            _ = performIfEarnedGenerationActive(
+                generation,
+                mutationKeys: [shieldsKey, "evlin.lastEarnedShield"],
+                rollbackExternalState: {
+                    recomputeAndApplyShields(loadShields())
+                }
+            ) {
+                if let data = encodeShields(current) {
+                    defaults?.set(data, forKey: shieldsKey)
+                }
+                recomputeAndApplyShields(current)
 
-            let ts = ISO8601DateFormatter().string(from: Date())
-            defaults?.set(
-                "earned_shielded_at=\(ts) t=\(thresholdN) key=\(recordKey)",
-                forKey: "evlin.lastEarnedShield"
-            )
-            NSLog("[Evlin/Ext] earned time cap reached t%d — .earnedTime shield applied", thresholdN)
-            emitEvent(kind: .lock, source: source, app: "device-wide",
-                      reason: source == .deviceCap ? "cap_exhausted" : "pool_exhausted",
-                      transition: .init(before: "shielded:false", after: "shielded:true"))
+                let ts = ISO8601DateFormatter().string(from: Date())
+                defaults?.set(
+                    "earned_shielded_at=\(ts) t=\(thresholdN) key=\(recordKey)",
+                    forKey: "evlin.lastEarnedShield"
+                )
+                NSLog("[Evlin/Ext] earned time cap reached t%d — .earnedTime shield applied", thresholdN)
+                emitEvent(kind: .lock, source: source, app: "device-wide",
+                          reason: source == .deviceCap ? "cap_exhausted" : "pool_exhausted",
+                          transition: .init(before: "shielded:false", after: "shielded:true"))
+            }
         }
     }
 
@@ -707,18 +713,23 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         }
         defaults?.set(today, forKey: dayKeyKey)
 
-        let current = loadShields()
-        let stripped = LimitShieldLogic.strippingLimitShields(from: current)
-        let removedCount = current.count - stripped.count
-        if let data = encodeShields(stripped) {
-            defaults?.set(data, forKey: shieldsKey)
+        var removedCount = 0
+        var remainingCount = 0
+        _ = ActiveLockPersistenceLock.shared.withLock {
+            let current = loadShields()
+            let stripped = LimitShieldLogic.strippingLimitShields(from: current)
+            removedCount = current.count - stripped.count
+            remainingCount = stripped.count
+            if let data = encodeShields(stripped) {
+                defaults?.set(data, forKey: shieldsKey)
+            }
+            recomputeAndApplyShields(stripped)
         }
-        recomputeAndApplyShields(stripped)
 
         let ts = ISO8601DateFormatter().string(from: Date())
         defaults?.set(
             "limit_reset_at=\(ts) activity=\(activity) removed=\(removedCount)"
-                + " remaining=\(stripped.count)",
+                + " remaining=\(remainingCount)",
             forKey: "evlin.lastLimitReset"
         )
         NSLog("[Evlin/Ext] limit daily reset activity=%@ removed=%d", activity, removedCount)
@@ -735,6 +746,12 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
 
     @discardableResult
     private func removeShieldByHashAndRecompute(hashHex: String) -> Bool {
+        ActiveLockPersistenceLock.shared.withLock {
+            removeShieldByHashAndRecomputeLocked(hashHex: hashHex)
+        } ?? false
+    }
+
+    private func removeShieldByHashAndRecomputeLocked(hashHex: String) -> Bool {
         // Read whatever the App Group says is current. If main-app sweepExpired
         // already pre-empted us, this dict may already be missing the hashed
         // record — that's fine, we still need to force-recompute the store
@@ -854,6 +871,12 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
     /// from whatever's left.
     @discardableResult
     private func removeBlockByHashAndRecompute(hashHex: String) -> Bool {
+        ActiveLockPersistenceLock.shared.withLock {
+            removeBlockByHashAndRecomputeLocked(hashHex: hashHex)
+        } ?? false
+    }
+
+    private func removeBlockByHashAndRecomputeLocked(hashHex: String) -> Bool {
         guard let blockData = defaults?.data(forKey: blocksKey),
               var blocks = decodeBlocks(from: blockData)
         else { return false }

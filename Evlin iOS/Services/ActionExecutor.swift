@@ -137,6 +137,7 @@ final class ActionExecutor: @unchecked Sendable {
         case shieldEffectiveStateResolved
         case blockPersisted
         case blockEffectiveStateResolved
+        case setLimitPersisted
         case unshieldRemoved
         case unshieldEffectiveStateResolved
         case unblockRemoved
@@ -269,12 +270,10 @@ final class ActionExecutor: @unchecked Sendable {
         _ = await ActiveLockStore.shared.rollbackShieldMutation(receipt)
     }
 
-    private func rollbackAddedBlock(_ record: BlockRecord, result: AddBlockResult) async {
-        guard case .added = result else { return }
-        let current = await ActiveLockStore.shared.allCurrent().blocks
-            .first { $0.bundleID == record.bundleID }
-        guard current?.lastCommandID == record.lastCommandID else { return }
-        _ = await ActiveLockStore.shared.removeBlock(bundleID: record.bundleID)
+    private func rollbackAddedBlock(
+        _ receipt: ActiveLockStore.BlockMutationReceipt
+    ) async {
+        _ = await ActiveLockStore.shared.rollbackBlockMutation(receipt)
     }
 
     // MARK: - Per-app limit (P6)
@@ -357,8 +356,9 @@ final class ActionExecutor: @unchecked Sendable {
         let prior = ruleStore.rule(forID: rule.id)
         guard identityIsCurrent() else { return Self.staleIdentityResult }
         ruleStore.upsert(rule)
+        afterMutationCheckpoint(.setLimitPersisted)
         guard identityIsCurrent() else {
-            rollback(prior: prior, ruleId: rule.id)
+            rollback(applied: rule, prior: prior)
             return Self.staleIdentityResult
         }
         guard identityIsCurrent() else { return Self.staleIdentityResult }
@@ -369,13 +369,13 @@ final class ActionExecutor: @unchecked Sendable {
         case .quotaExceeded(let windows, let slotsNeeded, let cap):
             // Validation failed before arming (planner armed NOTHING), but for an
             // UPDATE the store now holds the new rule — restore the prior value.
-            rollback(prior: prior, ruleId: rule.id)
+            rollback(applied: rule, prior: prior)
             return .failed(.limitQuotaExceeded(windows: windows, slotsNeeded: slotsNeeded, cap: cap))
         case .partiallyArmed(let armed, let failed):
             // The rule didn't fully apply — do not ack success. Restore the prior
             // rule AND re-arm from the restored set so the device matches the
             // store again (the failed pass had already stopped + re-armed windows).
-            rollback(prior: prior, ruleId: rule.id)
+            rollback(applied: rule, prior: prior)
             return .failed(.execution(
                 "per-app limit partially armed (\(armed) ok, \(failed) failed); not applied"
             ))
@@ -415,7 +415,7 @@ final class ActionExecutor: @unchecked Sendable {
             identityIsCurrent: { identity.isCurrent }
         )
         guard identity.isCurrent else {
-            rollback(prior: priorRule, ruleId: rule.id)
+            rollback(applied: rule, prior: priorRule)
             return Self.staleIdentityResult
         }
         guard case .confirmedExact = result,
@@ -432,20 +432,20 @@ final class ActionExecutor: @unchecked Sendable {
             record.targetChildID = expectedChildID
         }
         guard identity.isCurrent else {
-            rollback(prior: priorRule, ruleId: rule.id)
+            rollback(applied: rule, prior: priorRule)
             return Self.staleIdentityResult
         }
         guard await prepareForMutation(identity) else {
-            rollback(prior: priorRule, ruleId: rule.id)
+            rollback(applied: rule, prior: priorRule)
             return Self.staleIdentityResult
         }
         guard let shieldMutation = await ActiveLockStore.shared.addShieldWithReceipt(record) else {
-            rollback(prior: priorRule, ruleId: rule.id)
+            rollback(applied: rule, prior: priorRule)
             return .failed(.execution("lock_store_unavailable"))
         }
         guard identity.isCurrent else {
             await rollbackAddedShield(shieldMutation.receipt)
-            rollback(prior: priorRule, ruleId: rule.id)
+            rollback(applied: rule, prior: priorRule)
             return Self.staleIdentityResult
         }
         return result
@@ -456,11 +456,12 @@ final class ActionExecutor: @unchecked Sendable {
     /// back; otherwise the rule was newly inserted, so remove it. A fresh planner
     /// per arm is fine — P5's self-healing stop-union picks up the just-armed new
     /// windows from the live activity set and stops the ones no longer in the set.
-    private func rollback(prior: AppLimitRule?, ruleId: UUID) {
+    private func rollback(applied: AppLimitRule, prior: AppLimitRule?) {
+        guard ruleStore.rule(forID: applied.id) == applied else { return }
         if let prior {
             ruleStore.upsert(prior)
         } else {
-            ruleStore.remove(ruleId: ruleId)
+            ruleStore.remove(ruleId: applied.id)
         }
         _ = makeLimitPlanner().arm(rules: ruleStore.all())
     }
@@ -604,7 +605,18 @@ final class ActionExecutor: @unchecked Sendable {
                     )
                     return Self.staleIdentityResult
                 }
-                scheduleShieldExpiryIfNeeded(record)
+                if scheduleShieldExpiryIfNeeded(record) {
+                    guard identity.isCurrent else {
+                        cancelScheduled(recordKey: record.recordKey)
+                        await rollbackShieldCommand(
+                            receipt: shieldMutation.receipt,
+                            deferredLockedSetID: deferredLockedSetID,
+                            priorLockedSetID: priorLockedSetID,
+                            priorLockedSetTokenData: priorLockedSetTokenData
+                        )
+                        return Self.staleIdentityResult
+                    }
+                }
                 LockWindowStore.append(LockWindowRecord(
                     recordKey: record.recordKey,
                     displayName: record.displayName,
@@ -672,8 +684,8 @@ final class ActionExecutor: @unchecked Sendable {
         }
     }
 
-    private func scheduleShieldExpiryIfNeeded(_ record: ShieldRecord) {
-        guard let expiresAt = record.expiresAt else { return }
+    private func scheduleShieldExpiryIfNeeded(_ record: ShieldRecord) -> Bool {
+        guard let expiresAt = record.expiresAt else { return false }
         do {
             try scheduleRelock(recordKey: record.recordKey, expiresAt: expiresAt)
             let message = "schedule_ok recordKey=\(record.recordKey) "
@@ -683,6 +695,7 @@ final class ActionExecutor: @unchecked Sendable {
                 message,
                 forKey: "evlin.lastScheduleResult"
             )
+            return true
         } catch {
             let message = "schedule_FAILED recordKey=\(record.recordKey) "
                 + "expiresAt=\(ISO8601DateFormatter().string(from: expiresAt)) "
@@ -692,6 +705,7 @@ final class ActionExecutor: @unchecked Sendable {
                 message,
                 forKey: "evlin.lastScheduleResult"
             )
+            return false
         }
     }
 
@@ -957,17 +971,20 @@ final class ActionExecutor: @unchecked Sendable {
         guard await prepareForMutation(identity) else {
             return Self.staleIdentityResult
         }
-        let result = await ActiveLockStore.shared.addBlock(record)
+        guard let blockMutation = await ActiveLockStore.shared.addBlockWithReceipt(record) else {
+            return .failed(.execution("lock_store_unavailable"))
+        }
+        let result = blockMutation.result
         afterMutationCheckpoint(.blockPersisted)
         guard identity.isCurrent else {
-            await rollbackAddedBlock(record, result: result)
+            await rollbackAddedBlock(blockMutation.receipt)
             return Self.staleIdentityResult
         }
         let query = AppQuery(bundleID: bundleID, categoryHint: nil)
         let state = await ActiveLockStore.shared.effectiveState(for: query)
         afterMutationCheckpoint(.blockEffectiveStateResolved)
         guard identity.isCurrent else {
-            await rollbackAddedBlock(record, result: result)
+            await rollbackAddedBlock(blockMutation.receipt)
             return Self.staleIdentityResult
         }
         // Schedule only after the final suspension and identity check.
@@ -976,6 +993,11 @@ final class ActionExecutor: @unchecked Sendable {
                 try scheduleAutoUnblock(bundleID: bundleID, expiresAt: exp)
                 NSLog("[Evlin] block_schedule_ok bundleID=%@ expiresAt=%@",
                       bundleID, ISO8601DateFormatter().string(from: exp))
+                guard identity.isCurrent else {
+                    cancelScheduledBlock(bundleID: bundleID)
+                    await rollbackAddedBlock(blockMutation.receipt)
+                    return Self.staleIdentityResult
+                }
             } catch {
                 NSLog("[Evlin] block_schedule_FAILED bundleID=%@ error=%@",
                       bundleID, error.localizedDescription)
@@ -1018,6 +1040,12 @@ final class ActionExecutor: @unchecked Sendable {
         let data = bundleID.data(using: .utf8) ?? Data()
         let bytes = sha256Hex16(data)
         return "evlin.block.\(bytes)"
+    }
+
+    private func cancelScheduledBlock(bundleID: String) {
+        activityScheduler.stopMonitoring([
+            DeviceActivityName(deviceActivityNameForBlock(bundleID: bundleID))
+        ])
     }
 
     // MARK: - Unshield — spec §4.4

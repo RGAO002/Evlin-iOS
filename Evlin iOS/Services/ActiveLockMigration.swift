@@ -10,6 +10,12 @@ enum ActiveLockMigration {
     static let blocksKey = "evlin.blockRecords"
 
     static func runIfNeeded() {
+        _ = ActiveLockPersistenceLock.shared.withLock {
+            runIfNeededLocked()
+        }
+    }
+
+    private static func runIfNeededLocked() {
         let defaults = UserDefaults(suiteName: "group.com.evlin.ios")
         guard let legacyData = defaults?.data(forKey: legacyKey) else { return }
 

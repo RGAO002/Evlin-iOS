@@ -324,6 +324,52 @@ final class ActionExecutorLimitTests: XCTestCase {
         XCTAssertEqual(restored?.window, priorWindow, "must NOT keep the updated window")
     }
 
+    func testSetLimitIdentityTeardownAfterApplyDoesNotRestoreOldRuleOrSchedule() async {
+        let spy = LimitSchedulerSpy()
+        let ruleID = UUID()
+        let prior = AppLimitRule(
+            id: ruleID,
+            appTokens: [],
+            bundleID: "com.example.old-limit",
+            displayName: "Old Limit",
+            budgetMinutes: 30,
+            window: AppLimitWindow(startMinute: 0, endMinute: 1439, repeats: true, timezone: nil),
+            effectiveFrom: Date(timeIntervalSince1970: 0),
+            expiresAt: nil
+        )
+        let applied = AppLimitRule(
+            id: ruleID,
+            appTokens: [],
+            bundleID: prior.bundleID,
+            displayName: prior.displayName,
+            budgetMinutes: 60,
+            window: prior.window,
+            effectiveFrom: prior.effectiveFrom,
+            expiresAt: nil
+        )
+        AppLimitRuleStore.shared.upsert(prior)
+        var identityIsCurrent = true
+        let executor = ActionExecutor(
+            activityScheduler: spy,
+            authorizationStatusProvider: { .approved },
+            afterMutationCheckpoint: { checkpoint in
+                guard checkpoint == .setLimitPersisted else { return }
+                AppLimitRuleStore.shared.removeAll()
+                identityIsCurrent = false
+            }
+        )
+
+        let result = executor.applyLimitRule(
+            applied,
+            displayName: applied.displayName,
+            identityIsCurrent: { identityIsCurrent }
+        )
+
+        XCTAssertEqual(result, .failed(.execution("stale_identity")))
+        XCTAssertNil(AppLimitRuleStore.shared.rule(forID: ruleID))
+        XCTAssertTrue(spy.activeActivities.isEmpty)
+    }
+
     // MARK: - repeats derivation: only "daily" recurs; unknown → non-repeating
 
     /// The `set_limit` window-build derives `repeats` POSITIVELY from

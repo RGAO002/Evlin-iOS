@@ -7,7 +7,7 @@ import Foundation
 /// at which point the extension removes the record and recomputes the
 /// effective shield/block state.
 /// See spec §3.1.
-struct BlockRecord: Codable, Sendable {
+struct BlockRecord: Codable, Sendable, Equatable {
     let bundleID: String      // unique key in ActiveLockStore
     let displayName: String
     let blockedAt: Date

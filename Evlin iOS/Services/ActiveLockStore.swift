@@ -2,36 +2,6 @@ import Foundation
 import FamilyControls
 import ManagedSettings
 
-nonisolated private final class ActiveLockPersistenceLock: @unchecked Sendable {
-    static let shared = ActiveLockPersistenceLock()
-    private let processLock = NSLock()
-
-    func withLock<T>(_ body: () -> T) -> T? {
-        processLock.lock()
-        defer { processLock.unlock() }
-
-        let directory = FileManager.default.containerURL(
-            forSecurityApplicationGroupIdentifier: "group.com.evlin.ios"
-        ) ?? FileManager.default.temporaryDirectory
-        let url = directory.appendingPathComponent("active-lock-store.lock")
-        let descriptor = open(
-            url.path,
-            O_CREAT | O_RDWR | O_CLOEXEC,
-            mode_t(S_IRUSR | S_IWUSR)
-        )
-        guard descriptor >= 0 else { return nil }
-        guard flock(descriptor, LOCK_EX) == 0 else {
-            close(descriptor)
-            return nil
-        }
-        defer {
-            flock(descriptor, LOCK_UN)
-            close(descriptor)
-        }
-        return body()
-    }
-}
-
 /// Single source of truth for active shields + blocks on this device.
 /// See spec §3 for full design.
 ///
@@ -54,6 +24,12 @@ actor ActiveLockStore {
         let after: ShieldRecord
     }
 
+    struct BlockMutationReceipt: Sendable, Equatable {
+        let bundleID: String
+        let before: BlockRecord?
+        let after: BlockRecord
+    }
+
     private var shieldRecords: [String: ShieldRecord] = [:]
     private var blockRecords: [String: BlockRecord] = [:]
     private let store = ManagedSettingsStore()
@@ -62,7 +38,9 @@ actor ActiveLockStore {
     private let blocksKey = "evlin.blockRecords"
 
     init() {
-        restore()
+        _ = ActiveLockPersistenceLock.shared.withLock {
+            restore()
+        }
     }
 
     // MARK: - Shield API
@@ -74,16 +52,18 @@ actor ActiveLockStore {
     /// `force_confirmations: ["B1"]` in the request.
     @discardableResult
     func addShield(_ new: ShieldRecord, force: Bool = false) -> AddShieldResult {
-        reconcileLimitShieldsFromDisk()
-        let new = normalizeShieldRecord(new).record
-        if let existing = shieldRecords[new.recordKey], !force {
-            return mergeShield(existing: existing, new: new)
-        }
-        // force=true OR no existing record → overwrite
-        shieldRecords[new.recordKey] = new
-        persist()
-        recomputeAndApply()
-        return .added
+        ActiveLockPersistenceLock.shared.withLock {
+            reconcileLimitShieldsFromDisk()
+            let new = normalizeShieldRecord(new).record
+            if let existing = shieldRecords[new.recordKey], !force {
+                return mergeShield(existing: existing, new: new)
+            }
+            // force=true OR no existing record → overwrite
+            shieldRecords[new.recordKey] = new
+            persist()
+            recomputeAndApply()
+            return .added
+        } ?? .noOpShorterThanExisting
     }
 
     /// Persist a shield mutation and return the exact durable before/after values.
@@ -142,23 +122,27 @@ actor ActiveLockStore {
 
     @discardableResult
     func removeShield(recordKey: String) -> RemovedShield? {
-        reconcileLimitShieldsFromDisk()
-        guard let record = shieldRecords.removeValue(forKey: recordKey) else { return nil }
-        persist()
-        recomputeAndApply()
-        let stillCovered = findRemainingCoverage(of: record)
-        let blocked = false
-        return RemovedShield(record: record, stillCovered: stillCovered, blockedAfter: blocked)
+        ActiveLockPersistenceLock.shared.withLock {
+            reconcileLimitShieldsFromDisk()
+            guard let record = shieldRecords.removeValue(forKey: recordKey) else { return nil }
+            persist()
+            recomputeAndApply()
+            let stillCovered = findRemainingCoverage(of: record)
+            let blocked = false
+            return RemovedShield(record: record, stillCovered: stillCovered, blockedAfter: blocked)
+        } ?? nil
     }
 
     @discardableResult
     func unshieldAll() -> [ShieldRecord] {
-        reconcileLimitShieldsFromDisk()
-        let removed = Array(shieldRecords.values)
-        shieldRecords.removeAll()
-        persist()
-        recomputeAndApply()
-        return removed
+        ActiveLockPersistenceLock.shared.withLock {
+            reconcileLimitShieldsFromDisk()
+            let removed = Array(shieldRecords.values)
+            shieldRecords.removeAll()
+            persist()
+            recomputeAndApply()
+            return removed
+        } ?? []
     }
 
     /// Resilience fallback for an unshield of a CATEGORY whose token the command
@@ -175,20 +159,22 @@ actor ActiveLockStore {
     /// matches — the caller keeps its existing `.nothingToUnlock` path.
     @discardableResult
     func removeCategoryShieldsByDisplayName(_ hint: String) -> [ShieldRecord] {
-        reconcileLimitShieldsFromDisk()
-        let needle = hint.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !needle.isEmpty else { return [] }
-        let toRemove = shieldRecords.values.filter {
-            $0.tier == .category
-                && $0.displayName.caseInsensitiveCompare(needle) == .orderedSame
-        }
-        guard !toRemove.isEmpty else { return [] }
-        for record in toRemove {
-            shieldRecords.removeValue(forKey: record.recordKey)
-        }
-        persist()
-        recomputeAndApply()
-        return toRemove
+        ActiveLockPersistenceLock.shared.withLock {
+            reconcileLimitShieldsFromDisk()
+            let needle = hint.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !needle.isEmpty else { return [] }
+            let toRemove = shieldRecords.values.filter {
+                $0.tier == .category
+                    && $0.displayName.caseInsensitiveCompare(needle) == .orderedSame
+            }
+            guard !toRemove.isEmpty else { return [] }
+            for record in toRemove {
+                shieldRecords.removeValue(forKey: record.recordKey)
+            }
+            persist()
+            recomputeAndApply()
+            return toRemove
+        } ?? []
     }
 
     /// Surgically remove a single APP token from every live `.savedList`
@@ -200,12 +186,14 @@ actor ActiveLockStore {
     /// token from the live shield so the app unshields IMMEDIATELY — no
     /// unlock→relock dance. No-ops (no persist/recompute) when nothing matches.
     func dropTokenFromSavedListShields(app token: ApplicationToken) {
-        reconcileLimitShieldsFromDisk()
-        applyDropFromSavedListShields { record in
-            guard record.appTokens.contains(token) else { return nil }
-            var updated = record
-            updated.appTokens.remove(token)
-            return updated
+        _ = ActiveLockPersistenceLock.shared.withLock {
+            reconcileLimitShieldsFromDisk()
+            applyDropFromSavedListShields { record in
+                guard record.appTokens.contains(token) else { return nil }
+                var updated = record
+                updated.appTokens.remove(token)
+                return updated
+            }
         }
     }
 
@@ -213,12 +201,14 @@ actor ActiveLockStore {
     /// drops it from every live `.savedList` shield's baked snapshot so a category
     /// removed from the picker unshields immediately while the Locked set is held.
     func dropTokenFromSavedListShields(category token: ActivityCategoryToken) {
-        reconcileLimitShieldsFromDisk()
-        applyDropFromSavedListShields { record in
-            guard record.categoryTokens.contains(token) else { return nil }
-            var updated = record
-            updated.categoryTokens.remove(token)
-            return updated
+        _ = ActiveLockPersistenceLock.shared.withLock {
+            reconcileLimitShieldsFromDisk()
+            applyDropFromSavedListShields { record in
+                guard record.categoryTokens.contains(token) else { return nil }
+                var updated = record
+                updated.categoryTokens.remove(token)
+                return updated
+            }
         }
     }
 
@@ -253,64 +243,123 @@ actor ActiveLockStore {
     /// they cover the same app — only the limit subsystem's own shields are dropped.
     @discardableResult
     func removeLimitShields(appTokens: Set<ApplicationToken>, bundleID: String?) -> [ShieldRecord] {
-        // Reconcile FIRST so we target the extension's CURRENT `.limit` set (a
-        // threshold may have fired since init). Then compute + remove targets,
-        // then persist (writes disk WITHOUT the targets), then recompute. Because
-        // persist writes the removal to disk before recompute's reconcile re-reads
-        // it, the removed records are NOT resurrected.
-        reconcileLimitShieldsFromDisk()
-        let bidKey = bundleID?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let toRemove = shieldRecords.values.filter { record in
-            guard record.sources.contains(.limit) else { return false }
-            if !appTokens.isEmpty, !record.appTokens.isDisjoint(with: appTokens) { return true }
-            if let bidKey, !bidKey.isEmpty, record.targetKey == bidKey { return true }
-            return false
-        }
-        guard !toRemove.isEmpty else { return [] }
-        for record in toRemove {
-            shieldRecords.removeValue(forKey: record.recordKey)
-        }
-        persist()
-        recomputeAndApply()
-        return toRemove
+        ActiveLockPersistenceLock.shared.withLock {
+            // Reconcile FIRST so we target the extension's CURRENT `.limit` set (a
+            // threshold may have fired since init). Then compute + remove targets,
+            // then persist (writes disk WITHOUT the targets), then recompute. Because
+            // persist writes the removal to disk before recompute's reconcile re-reads
+            // it, the removed records are NOT resurrected.
+            reconcileLimitShieldsFromDisk()
+            let bidKey = bundleID?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let toRemove = shieldRecords.values.filter { record in
+                guard record.sources.contains(.limit) else { return false }
+                if !appTokens.isEmpty, !record.appTokens.isDisjoint(with: appTokens) { return true }
+                if let bidKey, !bidKey.isEmpty, record.targetKey == bidKey { return true }
+                return false
+            }
+            guard !toRemove.isEmpty else { return [] }
+            for record in toRemove {
+                shieldRecords.removeValue(forKey: record.recordKey)
+            }
+            persist()
+            recomputeAndApply()
+            return toRemove
+        } ?? []
     }
 
     // MARK: - Block API
 
     @discardableResult
     func addBlock(_ new: BlockRecord) -> AddBlockResult {
-        reconcileLimitShieldsFromDisk()
-        if blockRecords[new.bundleID] != nil { return .alreadyBlocked }
-        blockRecords[new.bundleID] = new
-        persist()
-        recomputeAndApply()
-        return .added
+        ActiveLockPersistenceLock.shared.withLock {
+            reconcileLimitShieldsFromDisk()
+            if blockRecords[new.bundleID] != nil { return .alreadyBlocked }
+            blockRecords[new.bundleID] = new
+            persist()
+            recomputeAndApply()
+            return .added
+        } ?? .alreadyBlocked
+    }
+
+    func addBlockWithReceipt(
+        _ new: BlockRecord
+    ) -> (result: AddBlockResult, receipt: BlockMutationReceipt)? {
+        ActiveLockPersistenceLock.shared.withLock {
+            guard reloadDurableState() else { return nil }
+            let before = blockRecords[new.bundleID]
+            let result: AddBlockResult
+            if before == nil {
+                blockRecords[new.bundleID] = new
+                result = .added
+            } else {
+                result = .alreadyBlocked
+            }
+            guard persistAndVerify(), reloadDurableState(),
+                  let after = blockRecords[new.bundleID]
+            else {
+                _ = reloadDurableState()
+                recomputeAndApply()
+                return nil
+            }
+            recomputeAndApply()
+            return (
+                result,
+                BlockMutationReceipt(bundleID: new.bundleID, before: before, after: after)
+            )
+        } ?? nil
+    }
+
+    @discardableResult
+    func rollbackBlockMutation(_ receipt: BlockMutationReceipt) -> Bool {
+        ActiveLockPersistenceLock.shared.withLock {
+            guard reloadDurableState() else { return false }
+            guard blockRecords[receipt.bundleID] == receipt.after else {
+                recomputeAndApply()
+                return false
+            }
+            if let before = receipt.before {
+                blockRecords[receipt.bundleID] = before
+            } else {
+                blockRecords.removeValue(forKey: receipt.bundleID)
+            }
+            guard persistAndVerify() else {
+                _ = reloadDurableState()
+                recomputeAndApply()
+                return false
+            }
+            recomputeAndApply()
+            return true
+        } ?? false
     }
 
     @discardableResult
     func removeBlock(bundleID: String, categoryHint: String? = nil) -> RemovedBlock? {
-        reconcileLimitShieldsFromDisk()
-        guard let record = blockRecords.removeValue(forKey: bundleID) else { return nil }
-        persist()
-        recomputeAndApply()
-        // Pass categoryHint so shields on the matching category ARE detected.
-        let query = AppQuery(bundleID: bundleID, categoryHint: categoryHint?.lowercased())
-        let state = effectiveState(for: query)
-        return RemovedBlock(
-            record: record,
-            stillShieldedBy: state.shieldsCovering,
-            possibleSavedListCoverage: state.possibleSavedListCoverage
-        )
+        ActiveLockPersistenceLock.shared.withLock {
+            reconcileLimitShieldsFromDisk()
+            guard let record = blockRecords.removeValue(forKey: bundleID) else { return nil }
+            persist()
+            recomputeAndApply()
+            // Pass categoryHint so shields on the matching category ARE detected.
+            let query = AppQuery(bundleID: bundleID, categoryHint: categoryHint?.lowercased())
+            let state = effectiveState(for: query)
+            return RemovedBlock(
+                record: record,
+                stillShieldedBy: state.shieldsCovering,
+                possibleSavedListCoverage: state.possibleSavedListCoverage
+            )
+        } ?? nil
     }
 
     @discardableResult
     func unblockAll() -> [BlockRecord] {
-        reconcileLimitShieldsFromDisk()
-        let removed = Array(blockRecords.values)
-        blockRecords.removeAll()
-        persist()
-        recomputeAndApply()
-        return removed
+        ActiveLockPersistenceLock.shared.withLock {
+            reconcileLimitShieldsFromDisk()
+            let removed = Array(blockRecords.values)
+            blockRecords.removeAll()
+            persist()
+            recomputeAndApply()
+            return removed
+        } ?? []
     }
 
     // MARK: - Queries
@@ -320,8 +369,10 @@ actor ActiveLockStore {
     }
 
     func reapplyCurrentRestrictions() {
-        reconcileLimitShieldsFromDisk()
-        recomputeAndApply()
+        _ = ActiveLockPersistenceLock.shared.withLock {
+            reconcileLimitShieldsFromDisk()
+            recomputeAndApply()
+        }
     }
 
     func effectiveState(for query: AppQuery) -> EffectiveState {
@@ -357,12 +408,14 @@ actor ActiveLockStore {
 
     @discardableResult
     func sweepExpired(now: Date = Date()) -> [ShieldRecord] {
-        reconcileLimitShieldsFromDisk()
-        let expired = purgeExpiredRecords(now: now)
-        guard !expired.shields.isEmpty || !expired.blocks.isEmpty else { return [] }
-        persist()
-        recomputeAndApply()
-        return expired.shields
+        ActiveLockPersistenceLock.shared.withLock {
+            reconcileLimitShieldsFromDisk()
+            let expired = purgeExpiredRecords(now: now)
+            guard !expired.shields.isEmpty || !expired.blocks.isEmpty else { return [] }
+            persist()
+            recomputeAndApply()
+            return expired.shields
+        } ?? []
     }
 
     // MARK: - Private: merge
@@ -511,10 +564,12 @@ actor ActiveLockStore {
     /// `sources` set becomes empty the record is deleted entirely. No-ops
     /// silently if `recordKey` is not found.
     func removeSource(_ source: ShieldSource, fromRecordKey key: String) {
-        reconcileLimitShieldsFromDisk()
-        shieldRecords = ShieldSourceLogic.removingSource(source, fromRecordKey: key, in: shieldRecords)
-        persist()
-        recomputeAndApply()
+        _ = ActiveLockPersistenceLock.shared.withLock {
+            reconcileLimitShieldsFromDisk()
+            shieldRecords = ShieldSourceLogic.removingSource(source, fromRecordKey: key, in: shieldRecords)
+            persist()
+            recomputeAndApply()
+        }
     }
 
     // MARK: - Private: coverage query

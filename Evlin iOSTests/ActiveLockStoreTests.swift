@@ -11,6 +11,51 @@ final class ActiveLockStoreTests: XCTestCase {
         UserDefaults(suiteName: "group.com.evlin.ios")?.removeObject(forKey: "evlin.blockRecords")
     }
 
+    func test_durable_lock_serializes_extension_write_after_cas_persist() throws {
+        let recordKey = "all:all"
+        let compared = DispatchSemaphore(value: 0)
+        let writerAttempted = DispatchSemaphore(value: 0)
+        let writerEntered = DispatchSemaphore(value: 0)
+        let casFinished = expectation(description: "CAS finished")
+        let writerFinished = expectation(description: "extension writer finished")
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "group.com.evlin.ios"))
+
+        let oldRecord = Self.makeAllRecord(recordKey: recordKey, minutes: 30)
+        let newerRecord = Self.makeAllRecord(recordKey: recordKey, minutes: nil)
+        try Self.persistShields([recordKey: oldRecord], defaults: defaults)
+
+        DispatchQueue.global().async {
+            _ = ActiveLockPersistenceLock.shared.withLock {
+                let comparedRecords = try! Self.loadShields(defaults: defaults)
+                XCTAssertEqual(comparedRecords[recordKey]?.lastCommandID, oldRecord.lastCommandID)
+                compared.signal()
+                XCTAssertEqual(writerAttempted.wait(timeout: .now() + 2), .success)
+                XCTAssertEqual(
+                    writerEntered.wait(timeout: .now() + 0.05),
+                    .timedOut,
+                    "extension writer entered between rollback compare and persist"
+                )
+                try! Self.persistShields([:], defaults: defaults)
+            }
+            casFinished.fulfill()
+        }
+
+        XCTAssertEqual(compared.wait(timeout: .now() + 2), .success)
+        DispatchQueue.global().async {
+            writerAttempted.signal()
+            _ = ActiveLockPersistenceLock.shared.withLock {
+                writerEntered.signal()
+                try! Self.persistShields([recordKey: newerRecord], defaults: defaults)
+            }
+            writerFinished.fulfill()
+        }
+
+        wait(for: [casFinished, writerFinished], timeout: 3)
+        let finalRecord = try Self.loadShields(defaults: defaults)[recordKey]
+        XCTAssertEqual(finalRecord?.lastCommandID, newerRecord.lastCommandID)
+        XCTAssertEqual(finalRecord?.targetChildID, newerRecord.targetChildID)
+    }
+
     // MARK: - Merge rules (spec §3.4)
 
     func test_add_same_target_timed_new_longer_extends() async {
@@ -377,5 +422,22 @@ final class ActiveLockStoreTests: XCTestCase {
             originalRequest: "test",
             targetChildID: UUID()
         )
+    }
+
+    private static func persistShields(
+        _ records: [String: ShieldRecord],
+        defaults: UserDefaults
+    ) throws {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        defaults.set(try encoder.encode(records), forKey: "evlin.shieldRecords")
+        defaults.synchronize()
+    }
+
+    private static func loadShields(defaults: UserDefaults) throws -> [String: ShieldRecord] {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let data = try XCTUnwrap(defaults.data(forKey: "evlin.shieldRecords"))
+        return try decoder.decode([String: ShieldRecord].self, from: data)
     }
 }

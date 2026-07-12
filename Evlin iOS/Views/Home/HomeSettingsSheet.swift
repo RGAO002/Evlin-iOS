@@ -2507,14 +2507,16 @@ struct HomeSettingsSheet: View {
         //    cover the live state, persisted JSON for shield/block records
         //    and diagnostic markers could mislead future debugging if left.
         if let groupDefaults = UserDefaults(suiteName: "group.com.evlin.ios") {
-            for key in [
-                "evlin.shieldRecords",
-                "evlin.blockRecords",
-                "evlin.lastScheduleResult",
-                "evlin.lastIntervalDidEnd",
-                "evlin.lastRecompute",
-            ] {
-                groupDefaults.removeObject(forKey: key)
+            _ = ActiveLockPersistenceLock.shared.withLock {
+                for key in [
+                    "evlin.shieldRecords",
+                    "evlin.blockRecords",
+                    "evlin.lastScheduleResult",
+                    "evlin.lastIntervalDidEnd",
+                    "evlin.lastRecompute",
+                ] {
+                    groupDefaults.removeObject(forKey: key)
+                }
             }
         }
 
