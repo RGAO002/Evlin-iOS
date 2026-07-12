@@ -114,6 +114,27 @@ final class EarnedDisplayTests: XCTestCase {
         )
     }
 
+    func test_deviceRemainingLabel_clampsPositiveDeviceCapToSharedPool() {
+        XCTAssertEqual(
+            EarnedDisplayFormatters.deviceRemainingLabel(
+                remainingToCapMinutes: 120,
+                overallRemainingMinutes: 35,
+                fallbackOverallLabel: "35m left"
+            ),
+            "35 mins left"
+        )
+        XCTAssertEqual(
+            EarnedDisplayFormatters.deviceRemainingFraction(
+                remainingToCapMinutes: 120,
+                capMinutes: 120,
+                overallRemainingMinutes: 35,
+                dailyPoolMinutes: 120
+            ),
+            35.0 / 120.0,
+            accuracy: 0.001
+        )
+    }
+
     func test_deviceRemaining_usesRemainingToCapNotEstimatedUsedMinutes() {
         XCTAssertEqual(
             EarnedDisplayFormatters.deviceRemainingLabel(

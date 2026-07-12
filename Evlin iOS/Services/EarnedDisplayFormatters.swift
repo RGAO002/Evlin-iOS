@@ -81,6 +81,11 @@ enum EarnedDisplayFormatters {
         if let overallRemainingMinutes, overallRemainingMinutes <= 0 {
             return fallbackOverallLabel
         }
+        if let remainingToCapMinutes, let overallRemainingMinutes {
+            return deviceEstimateLabel(
+                estimatedMinutesLeft: min(remainingToCapMinutes, overallRemainingMinutes)
+            )
+        }
         if let remainingToCapMinutes {
             return deviceEstimateLabel(estimatedMinutesLeft: remainingToCapMinutes)
         }
