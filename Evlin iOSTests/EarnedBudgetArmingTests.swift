@@ -296,6 +296,98 @@ final class EarnedBudgetArmingTests: XCTestCase {
         XCTAssertFalse(didMutate)
     }
 
+    func test_generationMutationRollsBackItsWriteWhenAuthorizationChangesAfterOperation() {
+        let suiteName = "EarnedBudgetArmingTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let oldID = UUID()
+        let generation = EarnedActivityGeneration.Generation(
+            activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
+            deviceID: oldID.uuidString,
+            offsetMinutes: 0,
+            armSignature: "old-generation",
+            usageDate: "2026-07-12",
+            timezoneIdentifier: "America/New_York"
+        )
+        let mutationKey = "test.earned.old-generation-write"
+        defaults.set("prior", forKey: mutationKey)
+        defaults.set(oldID.uuidString, forKey: "evlin.childId")
+        XCTAssertTrue(EarnedActivityGeneration.persistLifecycle(
+            .init(active: generation, pending: nil),
+            defaults: defaults
+        ))
+
+        let authorized = EarnedActivityGeneration.performIfAuthorized(
+            generation: generation,
+            defaults: defaults,
+            mutationKeys: [mutationKey],
+            beforeFinalAuthorizationCheck: {
+                defaults.removeObject(forKey: "evlin.childId")
+                XCTAssertTrue(EarnedActivityGeneration.persistLifecycle(
+                    .init(active: nil, pending: nil, isStopped: true),
+                    defaults: defaults
+                ))
+            }
+        ) {
+            defaults.set("old-write", forKey: mutationKey)
+        }
+
+        XCTAssertFalse(authorized)
+        XCTAssertEqual(defaults.string(forKey: mutationKey), "prior")
+    }
+
+    func test_generationRollbackDoesNotOverwriteNewerIdentityWrite() {
+        let suiteName = "EarnedBudgetArmingTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let oldID = UUID()
+        let newID = UUID()
+        let oldGeneration = EarnedActivityGeneration.Generation(
+            activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
+            deviceID: oldID.uuidString,
+            offsetMinutes: 0,
+            armSignature: "old-generation",
+            usageDate: "2026-07-12",
+            timezoneIdentifier: "America/New_York"
+        )
+        let newGeneration = EarnedActivityGeneration.Generation(
+            activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
+            deviceID: newID.uuidString,
+            offsetMinutes: 0,
+            armSignature: "new-generation",
+            usageDate: "2026-07-12",
+            timezoneIdentifier: "America/New_York"
+        )
+        let mutationKey = "test.earned.new-generation-write"
+        defaults.set("prior", forKey: mutationKey)
+        defaults.set(oldID.uuidString, forKey: "evlin.childId")
+        XCTAssertTrue(EarnedActivityGeneration.persistLifecycle(
+            .init(active: oldGeneration, pending: nil),
+            defaults: defaults
+        ))
+
+        let authorized = EarnedActivityGeneration.performIfAuthorized(
+            generation: oldGeneration,
+            defaults: defaults,
+            mutationKeys: [mutationKey],
+            beforeFinalAuthorizationCheck: {
+                defaults.set(newID.uuidString, forKey: "evlin.childId")
+                XCTAssertTrue(EarnedActivityGeneration.persistLifecycle(
+                    .init(active: newGeneration, pending: nil),
+                    defaults: defaults
+                ))
+                defaults.set("new-write", forKey: mutationKey)
+                defaults.synchronize()
+            }
+        ) {
+            defaults.set("old-write", forKey: mutationKey)
+        }
+
+        XCTAssertFalse(authorized)
+        XCTAssertEqual(defaults.string(forKey: mutationKey), "new-write")
+        XCTAssertEqual(EarnedActivityGeneration.loadLifecycle(defaults: defaults)?.active, newGeneration)
+    }
+
     func test_authoritativeReadinessGateRejectsMissingAndMismatchedDeviceMarkers() {
         let suiteName = "EarnedBudgetArmingTests.\(UUID().uuidString)"
         defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }

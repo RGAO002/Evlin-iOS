@@ -13,6 +13,11 @@ import ManagedSettings
 actor ActiveLockStore {
     static let shared = ActiveLockStore()
 
+    struct RekeyMutation: Sendable, Equatable {
+        let original: ShieldRecord
+        let migrated: ShieldRecord
+    }
+
     private var shieldRecords: [String: ShieldRecord] = [:]
     private var blockRecords: [String: BlockRecord] = [:]
     private let store = ManagedSettingsStore()
@@ -342,17 +347,21 @@ actor ActiveLockStore {
     ///
     /// Called once the backend `ChildCatalogList.id` is first learned
     /// (via `EarnedTimeStore.saveLockedSetID`). Safe to call multiple times.
-    func reKeyShieldRecord(fromLocalID localID: String, toBackendID backendID: String) {
-        guard localID != backendID else { return }
+    @discardableResult
+    func reKeyShieldRecord(
+        fromLocalID localID: String,
+        toBackendID backendID: String
+    ) -> RekeyMutation? {
+        guard localID != backendID else { return nil }
 
         let oldKey = ShieldRecord.makeRecordKey(tier: .savedList, targetKey: localID)
         let newKey = ShieldRecord.makeRecordKey(tier: .savedList, targetKey: backendID)
 
         // Idempotent: if the new key already exists, the migration already ran.
-        if shieldRecords[newKey] != nil { return }
+        if shieldRecords[newKey] != nil { return nil }
 
         // Find the old record.
-        guard let old = shieldRecords[oldKey] else { return }
+        guard let old = shieldRecords[oldKey] else { return nil }
 
         // Build the migrated record — same content, new key + targetKey.
         let migrated = ShieldRecord(
@@ -374,6 +383,17 @@ actor ActiveLockStore {
 
         shieldRecords.removeValue(forKey: oldKey)
         shieldRecords[newKey] = migrated
+        persist()
+        recomputeAndApply()
+        return RekeyMutation(original: old, migrated: migrated)
+    }
+
+    func rollbackRekey(_ mutation: RekeyMutation) {
+        guard shieldRecords[mutation.migrated.recordKey] == mutation.migrated,
+              shieldRecords[mutation.original.recordKey] == nil
+        else { return }
+        shieldRecords.removeValue(forKey: mutation.migrated.recordKey)
+        shieldRecords[mutation.original.recordKey] = mutation.original
         persist()
         recomputeAndApply()
     }

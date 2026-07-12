@@ -21,14 +21,14 @@ final class CommandPollerTests: XCTestCase {
     private var savedPollOverride: ((UUID, APIClient) async -> Void)?
     private var savedPollCommandsOverride: ((UUID, APIClient) async throws -> [PollCommandDTO])?
     private var savedLockedSetIDOverride: ((String, Data?) -> Void)?
-    private var savedRekeyOverride: ((String, String) async -> Void)?
+    private var savedAfterRekey: ((String, String) async -> Void)?
 
     override func setUp() async throws {
         savedDeviceIDProvider = poller.childDeviceIDProvider
         savedPollOverride = poller.oneShotPollOverride
         savedPollCommandsOverride = poller.pollCommandsOverride
         savedLockedSetIDOverride = poller.saveLockedSetIDOverride
-        savedRekeyOverride = poller.rekeyShieldRecordOverride
+        savedAfterRekey = poller.afterRekeyShieldRecord
     }
 
     override func tearDown() async throws {
@@ -36,7 +36,7 @@ final class CommandPollerTests: XCTestCase {
         poller.oneShotPollOverride = savedPollOverride
         poller.pollCommandsOverride = savedPollCommandsOverride
         poller.saveLockedSetIDOverride = savedLockedSetIDOverride
-        poller.rekeyShieldRecordOverride = savedRekeyOverride
+        poller.afterRekeyShieldRecord = savedAfterRekey
     }
 
     private func earnedConfigCommand() throws -> PollCommandDTO {
@@ -144,7 +144,7 @@ final class CommandPollerTests: XCTestCase {
         XCTAssertEqual(fetchCount, 2)
     }
 
-    func testEarnedConfigDoesNotPersistNewListWhenIdentityChangesDuringRekey() async throws {
+    func testEarnedConfigRollsBackPersistedRekeyWhenIdentityChangesAfterMutation() async throws {
         let oldID = UUID()
         let newID = UUID()
         var currentID = oldID
@@ -154,9 +154,27 @@ final class CommandPollerTests: XCTestCase {
         store.removeAll()
         defer { store.removeAll() }
         let priorListID = UUID().uuidString
+        let backendListID = "AAAAAAAA-0000-0000-0000-000000000001"
         store.saveLockedSetID(priorListID, tokenData: nil)
         store.poolMinutes = 75
         store.capMinutes = 50
+        let priorRecord = ShieldRecord(
+            recordKey: ShieldRecord.makeRecordKey(tier: .savedList, targetKey: priorListID),
+            tier: .savedList,
+            targetKey: priorListID,
+            displayName: "Locked Set",
+            lastCommandID: UUID(),
+            appTokens: [],
+            categoryTokens: [],
+            webDomainTokens: [],
+            appliesToAll: false,
+            issuedAt: Date(),
+            expiresAt: nil,
+            originalRequest: "old family lock",
+            targetChildID: oldID,
+            sources: [.manual]
+        )
+        _ = await ActiveLockStore.shared.addShield(priorRecord)
 
         poller.childDeviceIDProvider = { currentID }
         poller.oneShotPollOverride = nil
@@ -165,13 +183,19 @@ final class CommandPollerTests: XCTestCase {
             fetchCount += 1
             return fetchCount == 1 ? [try self.earnedConfigCommand()] : []
         }
-        poller.rekeyShieldRecordOverride = { existing, _ in
+        poller.afterRekeyShieldRecord = { existing, replacement in
             XCTAssertEqual(existing, priorListID)
+            XCTAssertEqual(replacement, backendListID)
             await withCheckedContinuation { resumeRekey = $0 }
         }
 
         let poll = Task { await poller.pollOnceForCurrentDevice() }
         while resumeRekey == nil { await Task.yield() }
+        let mutated = await ActiveLockStore.shared.allCurrent().shields
+        XCTAssertNil(mutated.first { $0.recordKey == priorRecord.recordKey })
+        XCTAssertNotNil(mutated.first {
+            $0.recordKey == ShieldRecord.makeRecordKey(tier: .savedList, targetKey: backendListID)
+        })
         XCTAssertEqual(store.lockedSetID, priorListID)
         currentID = newID
         resumeRekey?.resume()
@@ -180,6 +204,12 @@ final class CommandPollerTests: XCTestCase {
         XCTAssertEqual(store.lockedSetID, priorListID)
         XCTAssertEqual(store.poolMinutes, 75)
         XCTAssertEqual(store.capMinutes, 50)
+        let restored = await ActiveLockStore.shared.allCurrent().shields
+        XCTAssertEqual(restored.first { $0.recordKey == priorRecord.recordKey }, priorRecord)
+        XCTAssertNil(restored.first {
+            $0.recordKey == ShieldRecord.makeRecordKey(tier: .savedList, targetKey: backendListID)
+        })
+        _ = await ActiveLockStore.shared.unshieldAll()
     }
 
     /// No paired child device id → safe no-op. A backgrounded push on a device

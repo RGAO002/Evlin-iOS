@@ -262,6 +262,92 @@ final class EarnedSampleReporterTests: XCTestCase {
         XCTAssertEqual(decision.thresholdMinutes, 300)
     }
 
+    func test_newSampleIsDurablyQueuedBeforeAuthorizationCheckAndKeepsDevicePartition() async {
+        let isolatedSuite = "EarnedSampleReporterTests.\(UUID().uuidString)"
+        defer { UserDefaults.standard.removePersistentDomain(forName: isolatedSuite) }
+        let currentDevice = UUID()
+        let deferredDevice = UUID()
+        EarnedSampleReporter.enqueueRetry(
+            .init(
+                deviceID: deferredDevice,
+                usageDate: "2026-07-12",
+                timezone: "America/New_York",
+                thresholdMinutes: 10,
+                estimatedMinutes: 10,
+                observedAt: "2026-07-12T12:00:00Z"
+            ),
+            suiteName: isolatedSuite
+        )
+        var requestCount = 0
+
+        await EarnedSampleReporter.report(
+            baseURL: URL(string: "https://earned-sample-reporter.test")!,
+            deviceID: currentDevice,
+            usageDate: "2026-07-12",
+            timezone: "America/New_York",
+            thresholdMinutes: 15,
+            estimatedMinutes: 15,
+            suiteName: isolatedSuite,
+            authorizationIsCurrent: { false },
+            requestData: { _ in
+                requestCount += 1
+                throw URLError(.badServerResponse)
+            }
+        )
+
+        XCTAssertEqual(requestCount, 0)
+        let queue = EarnedSampleReporter.loadRetryQueue(suiteName: isolatedSuite)
+        XCTAssertEqual(queue.count, 2)
+        XCTAssertEqual(queue.map(\.deviceID), [deferredDevice, currentDevice])
+        XCTAssertEqual(queue.last?.thresholdMinutes, 15)
+    }
+
+    func test_newSampleRemainsQueuedWhenAuthorizationChangesDuringPost() async throws {
+        let isolatedSuite = "EarnedSampleReporterTests.\(UUID().uuidString)"
+        defer { UserDefaults.standard.removePersistentDomain(forName: isolatedSuite) }
+        let deviceID = UUID()
+        var isAuthorized = true
+        var resumeRequest: CheckedContinuation<Void, Never>?
+
+        let reporting = Task {
+            await EarnedSampleReporter.report(
+                baseURL: URL(string: "https://earned-sample-reporter.test")!,
+                deviceID: deviceID,
+                usageDate: "2026-07-12",
+                timezone: "America/New_York",
+                thresholdMinutes: 20,
+                estimatedMinutes: 20,
+                suiteName: isolatedSuite,
+                authorizationIsCurrent: { isAuthorized },
+                requestData: { request in
+                    await withCheckedContinuation { resumeRequest = $0 }
+                    let response = HTTPURLResponse(
+                        url: try XCTUnwrap(request.url),
+                        statusCode: 200,
+                        httpVersion: nil,
+                        headerFields: nil
+                    )!
+                    return (
+                        Data(#"{"usage_date":"2026-07-12","estimated_minutes":20,"counted":true}"#.utf8),
+                        response
+                    )
+                }
+            )
+        }
+        while resumeRequest == nil { await Task.yield() }
+        let queuedDuringPost = EarnedSampleReporter.loadRetryQueue(suiteName: isolatedSuite)
+        XCTAssertEqual(queuedDuringPost.count, 1)
+        XCTAssertEqual(queuedDuringPost.first?.deviceID, deviceID)
+
+        isAuthorized = false
+        resumeRequest?.resume()
+        await reporting.value
+
+        let retained = EarnedSampleReporter.loadRetryQueue(suiteName: isolatedSuite)
+        XCTAssertEqual(retained.count, 1)
+        XCTAssertEqual(retained.first?.thresholdMinutes, 20)
+    }
+
     func test_clearRetryQueue_emptiesQueue() {
         let deviceID = UUID()
         EarnedSampleReporter.enqueueRetry(

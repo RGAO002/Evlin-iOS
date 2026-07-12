@@ -43,11 +43,15 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
     @discardableResult
     private func performIfEarnedGenerationActive(
         _ generation: EarnedActivityGeneration.Generation,
+        mutationKeys: [String] = [],
+        rollbackExternalState: () -> Void = {},
         _ operation: () -> Void
     ) -> Bool {
         EarnedActivityGeneration.performIfAuthorized(
             generation: generation,
             defaults: defaults,
+            mutationKeys: mutationKeys,
+            rollbackExternalState: rollbackExternalState,
             operation
         )
     }
@@ -94,7 +98,13 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         // This mirrors the limit daily-reset path above but is source-specific.
         if EarnedActivityGeneration.isEarnedActivityName(raw) {
             guard let generation = authorizedEarnedGeneration(activityName: raw) else { return }
-            _ = performIfEarnedGenerationActive(generation) {
+            _ = performIfEarnedGenerationActive(
+                generation,
+                mutationKeys: [shieldsKey],
+                rollbackExternalState: {
+                    recomputeAndApplyShields(loadShields())
+                }
+            ) {
                 resetEarnedTimeShields(activity: raw)
             }
             return
@@ -239,7 +249,11 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
                 self.emitEvent(kind: .drop, source: nil, app: eventName, reason: "usage_counting_disabled")
             }
             if let earnedGeneration {
-                _ = performIfEarnedGenerationActive(earnedGeneration, recordSkip)
+                _ = performIfEarnedGenerationActive(
+                    earnedGeneration,
+                    mutationKeys: ["evlin.usageCounting.lastSkipped"],
+                    recordSkip
+                )
             } else {
                 recordSkip()
             }
@@ -432,7 +446,8 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         guard earnedGenerationIsActive(generation) else { return }
         let localReconciliation = earnedStore.recordLocalThresholdEstimate(
             adjustedN,
-            expectedDeviceID: generationDeviceID
+            expectedDeviceID: generationDeviceID,
+            expectedGeneration: generation
         )
         let decision = EarnedSampleReporter.thresholdHandlingDecision(
             thresholdMinutes: adjustedN,
@@ -440,17 +455,29 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         )
 
         let ts = ISO8601DateFormatter().string(from: Date())
-        _ = performIfEarnedGenerationActive(generation) {
+        _ = performIfEarnedGenerationActive(
+            generation,
+            mutationKeys: ["evlin.earned.lastThreshold"]
+        ) {
             defaults?.set(
                 "\(ts) event=\(eventName) activity=\(activity.rawValue) raw=\(n) adjusted=\(adjustedN) offset=\(offset)",
                 forKey: "evlin.earned.lastThreshold"
             )
         }
 
-        // Drain any queued retries + fire the new sample.
-        if let baseURL = ExtensionConfig.baseURL {
-            let usageDate = generation.usageDate
-            let tz = generation.timezoneIdentifier
+        // Persist the newly fired sample before starting any async drain/network
+        // work. Authorization aborts leave this exact device-scoped entry queued.
+        let usageDate = generation.usageDate
+        let tz = generation.timezoneIdentifier
+        let newSample = EarnedSampleReporter.makeRetryEntry(
+            deviceID: generationDeviceID,
+            usageDate: usageDate,
+            timezone: tz,
+            thresholdMinutes: adjustedN,
+            estimatedMinutes: adjustedN
+        )
+        let sampleQueued = EarnedSampleReporter.enqueueRetry(newSample)
+        if let baseURL = ExtensionConfig.baseURL, sampleQueued {
             Task {
                 let authorizationIsCurrent = {
                     EarnedActivityGeneration.isAuthorized(
@@ -464,21 +491,14 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
                     onlyDeviceID: generationDeviceID,
                     authorizationIsCurrent: authorizationIsCurrent
                 )
-                guard authorizationIsCurrent() else { return }
-                await EarnedSampleReporter.report(
-                    baseURL: baseURL,
-                    deviceID: generationDeviceID,
-                    usageDate: usageDate,
-                    timezone: tz,
-                    thresholdMinutes: adjustedN,
-                    estimatedMinutes: adjustedN,
-                    authorizationIsCurrent: authorizationIsCurrent
-                )
             }
         } else {
-            _ = performIfEarnedGenerationActive(generation) {
+            _ = performIfEarnedGenerationActive(
+                generation,
+                mutationKeys: [EarnedSampleReporter.lastSamplePostDebugKey]
+            ) {
                 defaults?.set(
-                    "\(ts) missing baseURL for event=\(eventName) baseURL=\(String(describing: ExtensionConfig.baseURL)) generationDeviceID=\(generation.deviceID)",
+                    "\(ts) sample queue/base unavailable event=\(eventName) baseURL=\(String(describing: ExtensionConfig.baseURL)) queued=\(sampleQueued) generationDeviceID=\(generation.deviceID)",
                     forKey: EarnedSampleReporter.lastSamplePostDebugKey
                 )
             }
@@ -613,7 +633,13 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             current[recordKey] = record
         }
 
-        _ = performIfEarnedGenerationActive(generation) {
+        _ = performIfEarnedGenerationActive(
+            generation,
+            mutationKeys: [shieldsKey, "evlin.lastEarnedShield"],
+            rollbackExternalState: {
+                recomputeAndApplyShields(loadShields())
+            }
+        ) {
             if let data = encodeShields(current) {
                 defaults?.set(data, forKey: shieldsKey)
             }

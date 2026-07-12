@@ -138,13 +138,70 @@ nonisolated enum EarnedActivityGeneration {
     static func performIfAuthorized(
         generation: Generation,
         defaults: UserDefaults?,
+        mutationKeys: [String] = [],
+        beforeFinalAuthorizationCheck: () -> Void = {},
+        rollbackExternalState: () -> Void = {},
         _ operation: () -> Void
     ) -> Bool {
         guard isAuthorized(generation: generation, defaults: defaults) else {
             return false
         }
+        let before = snapshot(defaults: defaults, keys: mutationKeys)
         operation()
-        return true
+        let written = snapshot(defaults: defaults, keys: mutationKeys)
+        beforeFinalAuthorizationCheck()
+        defaults?.synchronize()
+        guard !isAuthorized(generation: generation, defaults: defaults) else {
+            return true
+        }
+        restore(
+            defaults: defaults,
+            prior: before,
+            whereCurrentMatches: written
+        )
+        defaults?.synchronize()
+        rollbackExternalState()
+        return false
+    }
+
+    private struct DefaultsValue {
+        let key: String
+        let value: Any?
+    }
+
+    private static func snapshot(
+        defaults: UserDefaults?,
+        keys: [String]
+    ) -> [DefaultsValue] {
+        keys.map { DefaultsValue(key: $0, value: defaults?.object(forKey: $0)) }
+    }
+
+    private static func restore(
+        defaults: UserDefaults?,
+        prior: [DefaultsValue],
+        whereCurrentMatches written: [DefaultsValue]
+    ) {
+        guard let defaults else { return }
+        for priorValue in prior {
+            let writtenValue = written.first { $0.key == priorValue.key }?.value
+            guard defaultsValuesEqual(
+                defaults.object(forKey: priorValue.key),
+                writtenValue
+            ) else { continue }
+            if let value = priorValue.value {
+                defaults.set(value, forKey: priorValue.key)
+            } else {
+                defaults.removeObject(forKey: priorValue.key)
+            }
+        }
+    }
+
+    private static func defaultsValuesEqual(_ lhs: Any?, _ rhs: Any?) -> Bool {
+        switch (lhs, rhs) {
+        case (nil, nil): return true
+        case (nil, _), (_, nil): return false
+        case (let left?, let right?): return (left as AnyObject).isEqual(right)
+        }
     }
 
     static func loadLifecycle(defaults: UserDefaults?) -> Lifecycle? {
@@ -914,25 +971,25 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
     func recordLocalThresholdEstimate(
         _ estimatedMinutes: Int,
         expectedDeviceID: UUID? = nil,
+        expectedGeneration: EarnedActivityGeneration.Generation? = nil,
         beforeCommit: () -> Void = {}
     ) -> LocalThresholdReconciliation {
         let committed: LocalThresholdReconciliation? = withReconciliationTransaction(
-            rollbackKeys: [estimateKey]
+            rollbackKeys: [estimateKey],
+            expectedDeviceID: expectedDeviceID,
+            identityMismatchValue: { .identityMismatch },
+            authorizationIsCurrent: {
+                guard let expectedGeneration else { return true }
+                return EarnedActivityGeneration.isAuthorized(
+                    generation: expectedGeneration,
+                    defaults: self.defaults
+                )
+            },
+            beforeCommit: beforeCommit
         ) {
-            guard mirrorMatches(expectedDeviceID) else { return .identityMismatch }
-            let previousEstimate = defaults?.object(forKey: estimateKey)
             let estimate = min(1_440, max(0, estimatedMinutes))
             let current = defaults?.integer(forKey: estimateKey) ?? 0
             defaults?.set(max(current, estimate), forKey: estimateKey)
-            beforeCommit()
-            guard mirrorMatches(expectedDeviceID) else {
-                if let previousEstimate {
-                    defaults?.set(previousEstimate, forKey: estimateKey)
-                } else {
-                    defaults?.removeObject(forKey: estimateKey)
-                }
-                return .identityMismatch
-            }
             return .reconciled
         }
         return committed ?? .lockUnavailable
@@ -1095,6 +1152,7 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
         rollbackKeys: [String] = [],
         expectedDeviceID: UUID? = nil,
         identityMismatchValue: (() -> T)? = nil,
+        authorizationIsCurrent: (() -> Bool)? = nil,
         beforeCommit: () -> Void = {},
         _ body: () -> T
     ) -> T? {
@@ -1111,14 +1169,18 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
                     code: 0
                 )
             }
-            if !mirrorMatches(expectedDeviceID), let identityMismatchValue {
+            let isAuthorized = {
+                self.mirrorMatches(expectedDeviceID)
+                    && (authorizationIsCurrent?() ?? true)
+            }
+            if !isAuthorized(), let identityMismatchValue {
                 return EarnedTransactionOutcome<T>.committed(identityMismatchValue())
             }
             let before = snapshotDefaults(defaults, keys: rollbackKeys)
             let value = body()
             let written = snapshotDefaults(defaults, keys: rollbackKeys)
             beforeCommit()
-            if !mirrorMatches(expectedDeviceID), let identityMismatchValue {
+            if !isAuthorized(), let identityMismatchValue {
                 restoreDefaults(
                     defaults,
                     from: before,
@@ -1139,7 +1201,7 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
                     code: 0
                 )
             }
-            if !mirrorMatches(expectedDeviceID), let identityMismatchValue {
+            if !isAuthorized(), let identityMismatchValue {
                 restoreDefaults(
                     defaults,
                     from: before,

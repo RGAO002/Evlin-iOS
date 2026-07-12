@@ -126,7 +126,7 @@ final class CommandPoller {
     var saveLockedSetIDOverride: ((String, Data?) -> Void)?
 
     /// Test seams around the suspension and ack points in earned config handling.
-    var rekeyShieldRecordOverride: ((String, String) async -> Void)?
+    var afterRekeyShieldRecord: ((String, String) async -> Void)?
     var ackEarnedTimeConfigOverride: ((UUID, APIClient) async -> Void)?
 
     /// Test-only capture of the remaining policy an earned config would arm.
@@ -710,15 +710,15 @@ final class CommandPoller {
             // if this payload later gains `all_selected`, wire it the same way.
             // Re-key any shield record stored under an old/provisional id.
             if existing != listID {
-                if let rekeyShieldRecordOverride {
-                    await rekeyShieldRecordOverride(existing, listID)
-                } else {
-                    await ActiveLockStore.shared.reKeyShieldRecord(
-                        fromLocalID: existing,
-                        toBackendID: listID
-                    )
-                }
+                let mutation = await ActiveLockStore.shared.reKeyShieldRecord(
+                    fromLocalID: existing,
+                    toBackendID: listID
+                )
+                await afterRekeyShieldRecord?(existing, listID)
                 guard isExpectedDeviceCurrent(expectedDeviceID) else {
+                    if let mutation {
+                        await ActiveLockStore.shared.rollbackRekey(mutation)
+                    }
                     coalescePollForCurrentIdentity(expectedDeviceID: expectedDeviceID)
                     return
                 }

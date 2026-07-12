@@ -535,6 +535,70 @@ final class ActionExecutorLimitTests: XCTestCase {
                       "the parent's manual shield must be preserved")
     }
 
+    func testClearLimitIdentityChangeAfterRearmRestoresRuleShieldAndMonitoringPlan() async {
+        let spy = LimitSchedulerSpy()
+        let ruleID = UUID()
+        let childID = UUID()
+        let rule = AppLimitRule(
+            id: ruleID,
+            appTokens: [],
+            bundleID: "com.example.old-limit",
+            displayName: "Old Limit",
+            budgetMinutes: 45,
+            window: AppLimitWindow(startMinute: 0, endMinute: 1439, repeats: true, timezone: nil),
+            effectiveFrom: Date(timeIntervalSince1970: 0),
+            expiresAt: nil
+        )
+        let shield = ShieldRecord(
+            recordKey: LimitShieldLogic.recordKey(for: rule),
+            tier: .exactApp,
+            targetKey: rule.bundleID,
+            displayName: rule.displayName,
+            lastCommandID: UUID(),
+            appTokens: [],
+            categoryTokens: [],
+            webDomainTokens: [],
+            appliesToAll: false,
+            issuedAt: Date(),
+            expiresAt: nil,
+            originalRequest: "limit reached",
+            targetChildID: childID,
+            sources: [.limit]
+        )
+        AppLimitRuleStore.shared.upsert(rule)
+        _ = await ActiveLockStore.shared.addShield(shield)
+        _ = AppLimitPlanner(scheduler: spy).arm(rules: [rule])
+        let priorMonitoringPlan = spy.activeActivities
+        var currentID = childID
+        var reachedCheckpoint = false
+        let executor = ActionExecutor(
+            activityScheduler: spy,
+            authorizationStatusProvider: { .approved },
+            afterMutationCheckpoint: { checkpoint in
+                guard checkpoint == .clearLimitRearmed else { return }
+                reachedCheckpoint = true
+                currentID = UUID()
+            }
+        )
+
+        let result = await executor.execute(
+            makeClearCommand(bundleID: rule.bundleID, ruleID: ruleID),
+            expectedChildID: childID,
+            identityIsCurrent: { $0 == currentID }
+        )
+
+        XCTAssertTrue(reachedCheckpoint)
+        XCTAssertEqual(result, .failed(.execution("stale_identity")))
+        XCTAssertEqual(AppLimitRuleStore.shared.rule(forID: ruleID), rule)
+        let restoredShields = await ActiveLockStore.shared.allCurrent().shields
+        let restoredShield = restoredShields.first { $0.recordKey == shield.recordKey }
+        XCTAssertEqual(restoredShield?.recordKey, shield.recordKey)
+        XCTAssertEqual(restoredShield?.targetChildID, shield.targetChildID)
+        XCTAssertEqual(restoredShield?.sources, shield.sources)
+        XCTAssertEqual(restoredShield?.lastCommandID, shield.lastCommandID)
+        XCTAssertEqual(spy.activeActivities, priorMonitoringPlan)
+    }
+
     func testApplyLimitRuleFromCommandImmediatelyShieldsWhenUsedTodayAlreadyReachedBudget() async {
         let spy = LimitSchedulerSpy()
         let executor = makeExecutor(spy: spy)

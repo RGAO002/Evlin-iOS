@@ -45,8 +45,7 @@ nonisolated private final class EarnedSampleRetryQueueLock: @unchecked Sendable 
 ///   - Build the idempotent POST body for `{base}/child/earned-time/sample`
 ///     (A2 backend schema). Body is a `[String: Any]` map for cheap JSON serialization
 ///     inside the extension's tight memory budget.
-///   - POST to backend; on failure enqueue to App Group retry queue (drained
-///     on next threshold fire).
+///   - Durably enqueue before POST; remove only after an accepted response.
 ///   - Expose pure helpers for tripwire math and shield-apply gate so they are
 ///     unit-testable without any DeviceActivity / ManagedSettings types.
 ///
@@ -221,9 +220,8 @@ enum EarnedSampleReporter {
     // MARK: - Network POST + retry enqueue
 
     /// POST the sample to `{base}/child/earned-time/sample`.
-    /// On any network failure or non-2xx/409 response, enqueues the entry to the
-    /// App Group retry queue (key `evlin.earnedSampleRetryQueue`) so the next
-    /// threshold fire can drain it.
+    /// Durably enqueues before request construction or authorization/network
+    /// work, then removes that exact entry only after an accepted response.
     static func report(
         baseURL: URL,
         deviceID: UUID,
@@ -232,9 +230,24 @@ enum EarnedSampleReporter {
         thresholdMinutes: Int,
         estimatedMinutes: Int,
         suiteName: String = "group.com.evlin.ios",
-        authorizationIsCurrent: @escaping () -> Bool = { true }
+        authorizationIsCurrent: @escaping () -> Bool = { true },
+        requestData: @escaping (URLRequest) async throws -> (Data, URLResponse) = {
+            try await URLSession.shared.data(for: $0)
+        }
     ) async {
         let observedAt = ISO8601DateFormatter().string(from: Date())
+        let entry = RetryEntry(
+            deviceID: deviceID,
+            usageDate: usageDate,
+            timezone: timezone,
+            thresholdMinutes: thresholdMinutes,
+            estimatedMinutes: estimatedMinutes,
+            observedAt: observedAt
+        )
+        guard enqueueRetry(entry, suiteName: suiteName) else {
+            recordDebug("enqueue durability_failed t\(thresholdMinutes)", suiteName: suiteName)
+            return
+        }
         let body = makeSampleBody(
             deviceID: deviceID,
             usageDate: usageDate,
@@ -249,61 +262,38 @@ enum EarnedSampleReporter {
             childDeviceID: deviceID,
             body: body
         ) else {
-            guard authorizationIsCurrent() else { return }
-            enqueueRetry(RetryEntry(
-                deviceID: deviceID,
-                usageDate: usageDate,
-                timezone: timezone,
-                thresholdMinutes: thresholdMinutes,
-                estimatedMinutes: estimatedMinutes,
-                observedAt: observedAt
-            ), suiteName: suiteName)
             recordDebug("enqueue request_build_failed t\(thresholdMinutes)", suiteName: suiteName)
             return
         }
 
         guard authorizationIsCurrent() else { return }
         do {
-            let (data, response) = try await URLSession.shared.data(for: req)
+            let (data, response) = try await requestData(req)
             guard authorizationIsCurrent() else { return }
             let status = (response as? HTTPURLResponse)?.statusCode ?? -1
             // 2xx or 409 (already exists — idempotent) are both successes.
             let success = (status >= 200 && status < 300) || status == 409
             recordDebug("post t\(thresholdMinutes) status=\(status) success=\(success)", suiteName: suiteName)
             if success {
-                processSuccessfulResponse(
+                let disposition = processSuccessfulResponse(
                     data,
                     expectedDeviceID: deviceID,
                     store: EarnedTimeStore(suiteName: suiteName),
                     suiteName: suiteName
                 )
-            } else {
-                enqueueRetry(RetryEntry(
-                    deviceID: deviceID,
-                    usageDate: usageDate,
-                    timezone: timezone,
-                    thresholdMinutes: thresholdMinutes,
-                    estimatedMinutes: estimatedMinutes,
-                    observedAt: observedAt
-                ), suiteName: suiteName)
+                if disposition != .identityMismatch {
+                    removeAcceptedRetry(entry, suiteName: suiteName)
+                }
             }
         } catch {
             guard authorizationIsCurrent() else { return }
             recordDebug("enqueue network_error t\(thresholdMinutes) error=\(error.localizedDescription)", suiteName: suiteName)
-            enqueueRetry(RetryEntry(
-                deviceID: deviceID,
-                usageDate: usageDate,
-                timezone: timezone,
-                thresholdMinutes: thresholdMinutes,
-                estimatedMinutes: estimatedMinutes,
-                observedAt: observedAt
-            ), suiteName: suiteName)
         }
     }
 
-    /// Drain the retry queue: attempt to POST each pending entry.
-    /// Clears the queue first, then re-enqueues failures. This prevents
-    /// an infinite-grow loop if the queue is partially drained.
+    /// Drain the retry queue while leaving each entry durable across its await.
+    /// Accepted entries are removed individually; failures and authorization
+    /// aborts remain queued for a later current-device drain.
     static func drainRetryQueue(
         baseURL: URL,
         suiteName: String = sharedSuiteName,
@@ -400,12 +390,34 @@ enum EarnedSampleReporter {
         let observedAt: String
     }
 
-    static func enqueueRetry(_ entry: RetryEntry, suiteName: String = "group.com.evlin.ios") {
-        _ = withRetryQueueLock(suiteName: suiteName) { defaults in
+    static func makeRetryEntry(
+        deviceID: UUID,
+        usageDate: String,
+        timezone: String,
+        thresholdMinutes: Int,
+        estimatedMinutes: Int,
+        observedAt: String = ISO8601DateFormatter().string(from: Date())
+    ) -> RetryEntry {
+        RetryEntry(
+            deviceID: deviceID,
+            usageDate: usageDate,
+            timezone: timezone,
+            thresholdMinutes: thresholdMinutes,
+            estimatedMinutes: estimatedMinutes,
+            observedAt: observedAt
+        )
+    }
+
+    @discardableResult
+    static func enqueueRetry(
+        _ entry: RetryEntry,
+        suiteName: String = "group.com.evlin.ios"
+    ) -> Bool {
+        withRetryQueueLock(suiteName: suiteName) { defaults in
             var queue = loadRetryQueueUnlocked(defaults: defaults)
             queue.append(entry)
             return saveRetryQueueUnlocked(queue, defaults: defaults)
-        }
+        } ?? false
     }
 
     static func loadRetryQueue(suiteName: String = "group.com.evlin.ios") -> [RetryEntry] {

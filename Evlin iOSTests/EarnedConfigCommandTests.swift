@@ -515,14 +515,14 @@ final class EarnedConfigCommandTests: XCTestCase {
         let poller = CommandPoller.shared
         let savedCommands = poller.pollCommandsOverride
         let savedSave = poller.saveLockedSetIDOverride
-        let savedRekey = poller.rekeyShieldRecordOverride
+        let savedRekey = poller.afterRekeyShieldRecord
         let savedAck = poller.ackEarnedTimeConfigOverride
         let savedDevice = poller.childDeviceIDProvider
         let savedOneShot = poller.oneShotPollOverride
         defer {
             poller.pollCommandsOverride = savedCommands
             poller.saveLockedSetIDOverride = savedSave
-            poller.rekeyShieldRecordOverride = savedRekey
+            poller.afterRekeyShieldRecord = savedRekey
             poller.ackEarnedTimeConfigOverride = savedAck
             poller.childDeviceIDProvider = savedDevice
             poller.oneShotPollOverride = savedOneShot
@@ -538,7 +538,7 @@ final class EarnedConfigCommandTests: XCTestCase {
         poller.childDeviceIDProvider = { currentID }
         poller.oneShotPollOverride = nil
         poller.saveLockedSetIDOverride = { _, _ in }
-        poller.rekeyShieldRecordOverride = { _, _ in
+        poller.afterRekeyShieldRecord = { _, _ in
             await withCheckedContinuation { resumeRekey = $0 }
         }
         poller.ackEarnedTimeConfigOverride = { _, _ in ackCount += 1 }

@@ -592,6 +592,29 @@ final class EarnedTimeStoreTests: XCTestCase {
         XCTAssertEqual(defaults.string(forKey: "evlin.childId"), newID.uuidString)
     }
 
+    func test_localThresholdTeardownAfterWriteDoesNotResurrectOldEstimate() throws {
+        let suiteName = "EarnedTimeStoreTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = EarnedTimeStore(suiteName: suiteName)
+        let oldID = UUID()
+        defaults.set(oldID.uuidString, forKey: "evlin.childId")
+        store.latestDeviceEstimate = 25
+
+        let result = store.recordLocalThresholdEstimate(
+            60,
+            expectedDeviceID: oldID,
+            beforeCommit: {
+                defaults.removeObject(forKey: "evlin.childId")
+                store.clearUsageStateForIdentityChange()
+            }
+        )
+
+        XCTAssertEqual(result, .identityMismatch)
+        XCTAssertNil(store.latestDeviceEstimate)
+        XCTAssertNil(defaults.string(forKey: "evlin.childId"))
+    }
+
     func test_isEarnedTimeReady_falseWhenOnlyLockedSetIdPresent() {
         let store = freshStore()
         let id = UUID()

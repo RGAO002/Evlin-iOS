@@ -71,6 +71,111 @@ final class ActionExecutorTests: XCTestCase {
         XCTAssertTrue(spy.started.isEmpty)
     }
 
+    func testExpectedIdentityWithoutCheckerFailsClosed() async {
+        let spy = DeviceActivitySchedulerSpy()
+        let executor = ActionExecutor(
+            activityScheduler: spy,
+            authorizationStatusProvider: { .approved }
+        )
+
+        let result = await executor.execute(
+            makeBlockCommand(bundleID: "com.example.missing-checker", minutes: 15),
+            expectedChildID: UUID()
+        )
+
+        XCTAssertEqual(result, .failed(.execution("stale_identity")))
+        let blocks = await ActiveLockStore.shared.allCurrent().blocks
+        XCTAssertFalse(blocks.contains { $0.bundleID == "com.example.missing-checker" })
+        XCTAssertTrue(spy.started.isEmpty)
+    }
+
+    func testIdentityChangeAfterBlockEffectiveStateReadRollsBackBlockAndSchedule() async {
+        let oldID = UUID()
+        var currentID = oldID
+        var reachedCheckpoint = false
+        let spy = DeviceActivitySchedulerSpy()
+        let executor = ActionExecutor(
+            activityScheduler: spy,
+            authorizationStatusProvider: { .approved },
+            afterMutationCheckpoint: { checkpoint in
+                guard checkpoint == .blockEffectiveStateResolved else { return }
+                reachedCheckpoint = true
+                currentID = UUID()
+            }
+        )
+
+        let result = await executor.execute(
+            makeBlockCommand(bundleID: "com.example.old-block", minutes: 15),
+            expectedChildID: oldID,
+            identityIsCurrent: { $0 == currentID }
+        )
+
+        XCTAssertTrue(reachedCheckpoint)
+        XCTAssertEqual(result, .failed(.execution("stale_identity")))
+        let blocks = await ActiveLockStore.shared.allCurrent().blocks
+        XCTAssertFalse(blocks.contains { $0.bundleID == "com.example.old-block" })
+        XCTAssertTrue(spy.started.isEmpty)
+    }
+
+    func testIdentityChangeAfterShieldEffectiveStateReadRollsBackShieldAndSchedule() async {
+        let oldID = UUID()
+        var currentID = oldID
+        var reachedCheckpoint = false
+        let spy = DeviceActivitySchedulerSpy()
+        let executor = ActionExecutor(
+            activityScheduler: spy,
+            authorizationStatusProvider: { .approved },
+            afterMutationCheckpoint: { checkpoint in
+                guard checkpoint == .shieldEffectiveStateResolved else { return }
+                reachedCheckpoint = true
+                currentID = UUID()
+            }
+        )
+        let command = makeAllShieldCommand(childID: oldID, minutes: 15)
+
+        let result = await executor.execute(
+            command,
+            expectedChildID: oldID,
+            identityIsCurrent: { $0 == currentID }
+        )
+
+        XCTAssertTrue(reachedCheckpoint)
+        XCTAssertEqual(result, .failed(.execution("stale_identity")))
+        let shieldsAfterRollback = await ActiveLockStore.shared.allCurrent().shields
+        XCTAssertTrue(shieldsAfterRollback.isEmpty)
+        XCTAssertTrue(spy.started.isEmpty)
+    }
+
+    func testIdentityChangeAfterUnshieldEffectiveStateReadRestoresRemovedShield() async {
+        let oldID = UUID()
+        let record = makeCategoryShield(childID: oldID)
+        _ = await ActiveLockStore.shared.addShield(record)
+        var currentID = oldID
+        var reachedCheckpoint = false
+        let executor = ActionExecutor(
+            authorizationStatusProvider: { .approved },
+            afterMutationCheckpoint: { checkpoint in
+                guard checkpoint == .unshieldEffectiveStateResolved else { return }
+                reachedCheckpoint = true
+                currentID = UUID()
+            }
+        )
+
+        let result = await executor.execute(
+            makeCategoryUnshieldCommand(childID: oldID),
+            expectedChildID: oldID,
+            identityIsCurrent: { $0 == currentID }
+        )
+
+        XCTAssertTrue(reachedCheckpoint)
+        XCTAssertEqual(result, .failed(.execution("stale_identity")))
+        let restoredShields = await ActiveLockStore.shared.allCurrent().shields
+        XCTAssertEqual(
+            restoredShields.first { $0.recordKey == record.recordKey },
+            record
+        )
+    }
+
     @MainActor
     func testIdentityChangeBeforeSavedListMutationCannotPersistOldConfig() async {
         let store = EarnedTimeStore.shared
@@ -155,6 +260,56 @@ final class ActionExecutorTests: XCTestCase {
                 targetChildID: UUID()
             ),
             durationMinutes: minutes,
+            issuedAt: Date()
+        )
+    }
+
+    private func makeAllShieldCommand(childID: UUID, minutes: Int) -> LockCommand {
+        LockCommand(
+            id: UUID(),
+            action: .shield,
+            tier: .all,
+            target: CommandTarget(
+                originalRequest: "lock everything",
+                targetDisplay: "Everything",
+                targetChildID: childID
+            ),
+            durationMinutes: minutes,
+            issuedAt: Date()
+        )
+    }
+
+    private func makeCategoryShield(childID: UUID) -> ShieldRecord {
+        ShieldRecord(
+            recordKey: ShieldRecord.makeRecordKey(tier: .category, targetKey: "social"),
+            tier: .category,
+            targetKey: "social",
+            displayName: "Social",
+            lastCommandID: UUID(),
+            appTokens: [],
+            categoryTokens: [],
+            webDomainTokens: [],
+            appliesToAll: false,
+            issuedAt: Date(),
+            expiresAt: nil,
+            originalRequest: "lock Social",
+            targetChildID: childID,
+            sources: [.manual]
+        )
+    }
+
+    private func makeCategoryUnshieldCommand(childID: UUID) -> LockCommand {
+        LockCommand(
+            id: UUID(),
+            action: .unshield,
+            tier: .category,
+            target: CommandTarget(
+                categoryHint: "social",
+                originalRequest: "unlock Social",
+                targetDisplay: "Social",
+                targetChildID: childID
+            ),
+            durationMinutes: nil,
             issuedAt: Date()
         )
     }
