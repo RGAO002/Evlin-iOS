@@ -92,6 +92,8 @@ enum EarnedBudgetArming {
 
     private static func currentArmSignature(
         deviceID: String,
+        usageDate: String,
+        timezoneIdentifier: String,
         poolMinutes: Int,
         capMinutes: Int,
         offsetMinutes: Int,
@@ -99,8 +101,8 @@ enum EarnedBudgetArming {
     ) -> String {
         makeArmSignature(
             deviceID: deviceID,
-            usageDate: currentUsageDate(),
-            timezoneIdentifier: TimeZone.current.identifier,
+            usageDate: usageDate,
+            timezoneIdentifier: timezoneIdentifier,
             poolMinutes: poolMinutes,
             capMinutes: capMinutes,
             offsetMinutes: offsetMinutes,
@@ -108,22 +110,39 @@ enum EarnedBudgetArming {
         )
     }
 
-    static func rememberCurrentArmSignature(
-        deviceID: String,
-        poolMinutes: Int,
-        capMinutes: Int,
-        offsetMinutes: Int,
-        selection: FamilyActivitySelection
+    nonisolated static func replacementOffset(
+        acceptedEstimateMinutes: Int?,
+        runningOffsetMinutes: Int
+    ) -> Int {
+        max(0, acceptedEstimateMinutes ?? runningOffsetMinutes)
+    }
+
+    @discardableResult
+    static func installReplacement(
+        replacementOffset: Int,
+        replacementSignature: String,
+        store: EarnedTimeStore,
+        defaults: UserDefaults?,
+        startMonitoring: () -> Bool
+    ) -> Bool {
+        guard startMonitoring() else { return false }
+        store.earnedUsageOffsetMinutes = replacementOffset
+        defaults?.set(replacementSignature, forKey: armSignatureKey)
+        defaults?.synchronize()
+        return true
+    }
+
+    static func stopAndInvalidateSignature(
+        defaults: UserDefaults? = UserDefaults(suiteName: "group.com.evlin.ios"),
+        stopMonitoring: (() -> Void)? = nil
     ) {
-        guard !deviceID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        let signature = currentArmSignature(
-            deviceID: deviceID,
-            poolMinutes: poolMinutes,
-            capMinutes: capMinutes,
-            offsetMinutes: offsetMinutes,
-            selection: selection
-        )
-        UserDefaults(suiteName: "group.com.evlin.ios")?.set(signature, forKey: armSignatureKey)
+        if let stopMonitoring {
+            stopMonitoring()
+        } else {
+            EarnedBudgetScheduler.shared.stop()
+        }
+        defaults?.removeObject(forKey: armSignatureKey)
+        defaults?.synchronize()
     }
 
     /// Detect a child-device identity change and tear down earned-time state
@@ -157,8 +176,7 @@ enum EarnedBudgetArming {
         guard let ownerRaw, !ownerRaw.isEmpty else { return false }
         let owner = canonicalDeviceIdentity(ownerRaw) ?? ownerRaw
 
-        EarnedBudgetScheduler.shared.stop()
-        suite?.removeObject(forKey: armSignatureKey)
+        stopAndInvalidateSignature(defaults: suite)
         EarnedTimeStore.shared.clearUsageStateForIdentityChange()
         CommandDeliveryDiagnostics.record(
             CommandDeliveryDiagnostics.keyEarnedIdentityTransition,
@@ -232,7 +250,7 @@ enum EarnedBudgetArming {
             return
         }
         guard store.usageCountingAllowed else {
-            EarnedBudgetScheduler.shared.stop()
+            stopAndInvalidateSignature()
             CommandDeliveryDiagnostics.record(
                 CommandDeliveryDiagnostics.keyEarnedArmAttempt,
                 "skipped usage-counting-paused \(EarnedBudgetScheduler.selectionSummary(selection))"
@@ -240,47 +258,70 @@ enum EarnedBudgetArming {
             return
         }
 
-        let inputs = BigKidStatePoller.earnedRearmInputs(store: store)
-        store.earnedUsageOffsetMinutes = inputs.offset
-        guard let remainingPolicy = EarnedBudgetScheduler.remainingPolicy(
-            poolMinutes: inputs.poolMinutes,
-            capMinutes: inputs.capMinutes,
-            offsetMinutes: inputs.offset
-        ) else {
-            CommandDeliveryDiagnostics.record(
-                CommandDeliveryDiagnostics.keyEarnedArmAttempt,
-                "skipped no-remaining pool=\(inputs.poolMinutes) cap=\(inputs.capMinutes) offset=\(inputs.offset) \(EarnedBudgetScheduler.selectionSummary(selection))"
-            )
-            return
-        }
-
-        let signature = currentArmSignature(
+        let poolMinutes = store.poolMinutes ?? 60
+        let capMinutes = store.capMinutes ?? poolMinutes
+        let runningOffset = store.earnedUsageOffsetMinutes
+        let usageDate = store.acceptedUsageDate ?? currentUsageDate()
+        let timezoneIdentifier = TimeZone.current.identifier
+        let stableSignature = currentArmSignature(
             deviceID: current,
-            poolMinutes: inputs.poolMinutes,
-            capMinutes: inputs.capMinutes,
-            offsetMinutes: inputs.offset,
+            usageDate: usageDate,
+            timezoneIdentifier: timezoneIdentifier,
+            poolMinutes: poolMinutes,
+            capMinutes: capMinutes,
+            offsetMinutes: runningOffset,
             selection: selection
         )
         let defaults = UserDefaults(suiteName: "group.com.evlin.ios")
         guard shouldStartMonitoring(
             previousSignature: defaults?.string(forKey: armSignatureKey),
-            nextSignature: signature,
+            nextSignature: stableSignature,
             force: force
         ) else {
             CommandDeliveryDiagnostics.record(
                 CommandDeliveryDiagnostics.keyEarnedArmAttempt,
-                "skipped already-armed pool=\(inputs.poolMinutes) cap=\(inputs.capMinutes) offset=\(inputs.offset) \(EarnedBudgetScheduler.selectionSummary(selection))"
+                "skipped already-armed pool=\(poolMinutes) cap=\(capMinutes) offset=\(runningOffset) \(EarnedBudgetScheduler.selectionSummary(selection))"
             )
             return
         }
 
-        let armed = EarnedBudgetScheduler.shared.armFromNow(
-            poolMinutes: remainingPolicy.poolMinutes,
-            capMinutes: remainingPolicy.capMinutes,
+        let replacementOffset = Self.replacementOffset(
+            acceptedEstimateMinutes: store.acceptedEstimateMinutes,
+            runningOffsetMinutes: runningOffset
+        )
+        guard let remainingPolicy = EarnedBudgetScheduler.remainingPolicy(
+            poolMinutes: poolMinutes,
+            capMinutes: capMinutes,
+            offsetMinutes: replacementOffset
+        ) else {
+            stopAndInvalidateSignature(defaults: defaults)
+            CommandDeliveryDiagnostics.record(
+                CommandDeliveryDiagnostics.keyEarnedArmAttempt,
+                "skipped no-remaining pool=\(poolMinutes) cap=\(capMinutes) offset=\(replacementOffset) \(EarnedBudgetScheduler.selectionSummary(selection))"
+            )
+            return
+        }
+        let replacementSignature = currentArmSignature(
+            deviceID: current,
+            usageDate: usageDate,
+            timezoneIdentifier: timezoneIdentifier,
+            poolMinutes: poolMinutes,
+            capMinutes: capMinutes,
+            offsetMinutes: replacementOffset,
             selection: selection
         )
-        if armed {
-            defaults?.set(signature, forKey: armSignatureKey)
-        }
+        _ = installReplacement(
+            replacementOffset: replacementOffset,
+            replacementSignature: replacementSignature,
+            store: store,
+            defaults: defaults,
+            startMonitoring: {
+                EarnedBudgetScheduler.shared.armFromNow(
+                    poolMinutes: remainingPolicy.poolMinutes,
+                    capMinutes: remainingPolicy.capMinutes,
+                    selection: selection
+                )
+            }
+        )
     }
 }

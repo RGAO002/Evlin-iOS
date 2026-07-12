@@ -39,6 +39,7 @@ final class BigKidStatePoller: ObservableObject {
     private var task: Task<Void, Never>?
     private var invalidationObserver: NSObjectProtocol?
     private var isFetchInFlight = false
+    private var pendingRefreshAfterCurrent = false
 
     /// Reflection Lockdown glue. Runs after each state apply: reconciles the
     /// dedicated reflection ShieldRecord against the snapshot, schedules its
@@ -156,10 +157,23 @@ final class BigKidStatePoller: ObservableObject {
     }
 
     private func fetchOnce() async {
-        guard !isFetchInFlight else { return }
+        guard !isFetchInFlight else {
+            pendingRefreshAfterCurrent = true
+            return
+        }
         isFetchInFlight = true
-        defer { isFetchInFlight = false }
+        defer {
+            isFetchInFlight = false
+            pendingRefreshAfterCurrent = false
+        }
 
+        repeat {
+            pendingRefreshAfterCurrent = false
+            await performFetchOnce()
+        } while pendingRefreshAfterCurrent && !familyRemoved && !Task.isCancelled
+    }
+
+    private func performFetchOnce() async {
         // Re-pairing under a new family can happen while the app stays
         // foregrounded (no scene-activation arm pass runs). Catch the identity
         // change here — within one poll tick — so the previous family's ladder
@@ -248,7 +262,7 @@ final class BigKidStatePoller: ObservableObject {
 
     private static func stopUsageCountersForTaskPause() {
         stopUsageCounters(
-            stopEarned: { EarnedBudgetScheduler.shared.stop() },
+            stopEarned: { EarnedBudgetArming.stopAndInvalidateSignature() },
             stopDeviceTotal: { BigKidActivityScheduler.shared.stop() },
             stopPerApp: { _ = AppLimitPlanner().arm(rules: []) }
         )
@@ -266,7 +280,10 @@ final class BigKidStatePoller: ObservableObject {
 
     // Pure seam (Fix 4 test 6): the real pool/cap/offset the re-arm uses.
     nonisolated static func earnedRearmInputs(store: EarnedTimeStore) -> (poolMinutes: Int, capMinutes: Int, offset: Int) {
-        let offset = max(store.acceptedEstimateMinutes ?? 0, store.earnedUsageOffsetMinutes)
+        let offset = EarnedBudgetArming.replacementOffset(
+            acceptedEstimateMinutes: store.acceptedEstimateMinutes,
+            runningOffsetMinutes: store.earnedUsageOffsetMinutes
+        )
         let pool = store.poolMinutes ?? 60
         let cap  = store.capMinutes ?? pool
         return (pool, cap, offset)

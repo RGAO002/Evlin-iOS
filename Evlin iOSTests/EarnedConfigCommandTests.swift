@@ -368,7 +368,8 @@ final class EarnedConfigCommandTests: XCTestCase {
 
         await poller.pollOnceForCurrentDevice()
 
-        XCTAssertEqual(store.earnedUsageOffsetMinutes, 7)
+        XCTAssertEqual(store.earnedUsageOffsetMinutes, 3,
+                       "policy capture is not a successful monitor installation")
         XCTAssertEqual(armedPolicy?.pool, 113)
         XCTAssertEqual(armedPolicy?.cap, 113)
     }

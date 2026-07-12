@@ -232,7 +232,7 @@ final class BigKidStatePollerTests: XCTestCase {
         XCTAssertEqual(events, ["identity", "fetch", "apply", "runtime", "gate", "arm"])
     }
 
-    func test_refresh_suppressesOverlappingFetch() async {
+    func test_refresh_coalescesMultipleOverlapsIntoOneFollowUpFetch() async {
         let response = snapshot(usageCountingAllowed: true)
         let state = BigKidState(snapshot: response)
         var fetchCount = 0
@@ -241,9 +241,12 @@ final class BigKidStatePollerTests: XCTestCase {
             state: state,
             fetchState: {
                 fetchCount += 1
-                return await withCheckedContinuation { continuation in
-                    resumeFetch = continuation
+                if fetchCount == 1 {
+                    return await withCheckedContinuation { continuation in
+                        resumeFetch = continuation
+                    }
                 }
+                return response
             },
             reconcileReflectionLock: { _ in }
         )
@@ -254,10 +257,13 @@ final class BigKidStatePollerTests: XCTestCase {
         }
 
         await poller.refreshNow()
+        await poller.refreshNow()
+        await poller.refreshNow()
 
         XCTAssertEqual(fetchCount, 1)
         resumeFetch?.resume(returning: response)
         await firstRefresh.value
+        XCTAssertEqual(fetchCount, 2)
     }
 
     func test_refresh_persistsValidRuntimeAndMonotonicAcceptedEstimate() async {

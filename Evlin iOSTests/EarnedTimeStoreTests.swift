@@ -212,6 +212,7 @@ final class EarnedTimeStoreTests: XCTestCase {
 
     func test_reconcileAcceptedUsage_isMonotoneWithinUsageDate() {
         withIsolatedStore { store in
+            store.earnedUsageOffsetMinutes = 3
             XCTAssertEqual(store.reconcileAcceptedUsage(
                 usageDate: "2026-07-10", serverEstimatedMinutes: 15,
                 allowSameDayDecrease: false
@@ -221,12 +222,13 @@ final class EarnedTimeStoreTests: XCTestCase {
                 allowSameDayDecrease: false
             ), 15)
             XCTAssertEqual(store.acceptedEstimateMinutes, 15)
-            XCTAssertEqual(store.earnedUsageOffsetMinutes, 15)
+            XCTAssertEqual(store.earnedUsageOffsetMinutes, 3)
         }
     }
 
     func test_reconcileAcceptedUsage_newDateResetsToServer() {
         withIsolatedStore { store in
+            store.earnedUsageOffsetMinutes = 12
             _ = store.reconcileAcceptedUsage(
                 usageDate: "2026-07-10", serverEstimatedMinutes: 40,
                 allowSameDayDecrease: false
@@ -236,12 +238,13 @@ final class EarnedTimeStoreTests: XCTestCase {
                 allowSameDayDecrease: false
             ), 0)
             XCTAssertEqual(store.latestDeviceEstimate, 0)
-            XCTAssertEqual(store.earnedUsageOffsetMinutes, 0)
+            XCTAssertEqual(store.earnedUsageOffsetMinutes, 12)
         }
     }
 
     func test_reconcileAcceptedUsage_pausedResponseMayLowerSameDate() {
         withIsolatedStore { store in
+            store.earnedUsageOffsetMinutes = 4
             _ = store.reconcileAcceptedUsage(
                 usageDate: "2026-07-10", serverEstimatedMinutes: 10,
                 allowSameDayDecrease: false
@@ -251,12 +254,35 @@ final class EarnedTimeStoreTests: XCTestCase {
                 allowSameDayDecrease: true
             ), 0)
             XCTAssertEqual(store.latestDeviceEstimate, 0)
+            XCTAssertEqual(store.earnedUsageOffsetMinutes, 4)
+        }
+    }
+
+    func test_countedT5LeavesRunningOffsetZeroSoRawT10AdjustsToTen() {
+        withIsolatedStore { store in
+            store.earnedUsageOffsetMinutes = 0
+
+            _ = store.reconcileAcceptedUsage(
+                usageDate: "2026-07-10",
+                serverEstimatedMinutes: 5,
+                allowSameDayDecrease: false
+            )
+
+            XCTAssertEqual(store.acceptedEstimateMinutes, 5)
             XCTAssertEqual(store.earnedUsageOffsetMinutes, 0)
+            XCTAssertEqual(
+                EarnedTimeStore.adjustedEarnedThreshold(
+                    rawThresholdMinutes: 10,
+                    runningOffsetMinutes: store.earnedUsageOffsetMinutes
+                ),
+                10
+            )
         }
     }
 
     func test_reconcileAcceptedUsageIfNotStale_rejectsOlderDateWithoutMutation() {
         withIsolatedStore { store in
+            store.earnedUsageOffsetMinutes = 3
             _ = store.reconcileAcceptedUsage(
                 usageDate: "2026-07-11",
                 serverEstimatedMinutes: 8,
@@ -273,7 +299,7 @@ final class EarnedTimeStoreTests: XCTestCase {
             XCTAssertEqual(store.acceptedUsageDate, "2026-07-11")
             XCTAssertEqual(store.acceptedEstimateMinutes, 8)
             XCTAssertEqual(store.latestDeviceEstimate, 8)
-            XCTAssertEqual(store.earnedUsageOffsetMinutes, 8)
+            XCTAssertEqual(store.earnedUsageOffsetMinutes, 3)
         }
     }
 
@@ -305,6 +331,7 @@ final class EarnedTimeStoreTests: XCTestCase {
 
     func test_reconcileRuntimePolicy_validSnapshotWritesPolicyAndMonotonicAcceptedUsage() {
         withIsolatedStore { store in
+            store.earnedUsageOffsetMinutes = 5
             _ = store.reconcileAcceptedUsage(
                 usageDate: "2026-07-11",
                 serverEstimatedMinutes: 20,
@@ -329,7 +356,7 @@ final class EarnedTimeStoreTests: XCTestCase {
             XCTAssertEqual(store.lastBackendSyncAt, syncedAt)
             XCTAssertEqual(store.acceptedUsageDate, "2026-07-11")
             XCTAssertEqual(store.acceptedEstimateMinutes, 20)
-            XCTAssertEqual(store.earnedUsageOffsetMinutes, 20)
+            XCTAssertEqual(store.earnedUsageOffsetMinutes, 5)
         }
     }
 

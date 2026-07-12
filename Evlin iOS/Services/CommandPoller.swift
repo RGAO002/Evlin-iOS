@@ -125,9 +125,8 @@ final class CommandPoller {
     /// touching real App Group UserDefaults. Nil in production.
     var saveLockedSetIDOverride: ((String, Data?) -> Void)?
 
-    /// A4: Called by the inline `earned_time_config` handler instead of
-    /// `EarnedBudgetScheduler.shared.arm` so tests can observe without needing
-    /// DeviceActivity entitlements. Nil in production.
+    /// Test-only capture of the remaining policy an earned config would arm.
+    /// Production always routes through `EarnedBudgetArming.armIfReady()`.
     var armBudgetOverride: ((Int, Int, FamilyActivitySelection) -> Void)?
 
     /// Allows config tests to exercise the arm path with an empty synthetic
@@ -620,8 +619,8 @@ final class CommandPoller {
     ///
     /// 1. Persists `selected_set.list_id` via EarnedTimeStore (+ re-keys any
     ///    existing savedList shield record via ActiveLockStore.reKeyShieldRecord).
-    /// 2. Preserves the latest counted minutes as a re-arm offset, then resumes
-    ///    the `evlin.earned.budget` DeviceActivity ladder from now.
+    /// 2. Persists policy, then asks the sole earned arming entry point to
+    ///    install a generation-safe DeviceActivity ladder when ready.
     /// 3. Acks the command as "confirmed" regardless of missing optional fields.
     ///
     /// Guard: if the device has no measurement selection (earned-time capture
@@ -664,9 +663,9 @@ final class CommandPoller {
         if poolMinutes > 0, capMinutes > 0 {
             EarnedTimeStore.shared.poolMinutes = poolMinutes
             EarnedTimeStore.shared.capMinutes = capMinutes
-            let acceptedOffset = max(
-                EarnedTimeStore.shared.acceptedEstimateMinutes ?? 0,
-                EarnedTimeStore.shared.earnedUsageOffsetMinutes
+            let replacementOffset = EarnedBudgetArming.replacementOffset(
+                acceptedEstimateMinutes: EarnedTimeStore.shared.acceptedEstimateMinutes,
+                runningOffsetMinutes: EarnedTimeStore.shared.earnedUsageOffsetMinutes
             )
             // Wave-2 Task 1 veto-staleness fix: prefer the server-authoritative
             // `remaining_minutes` carried on the wire (pool − used, computed
@@ -680,66 +679,33 @@ final class CommandPoller {
             } else {
                 EarnedTimeStore.shared.backendRemainingAtLastSync = max(
                     0,
-                    min(poolMinutes, capMinutes) - acceptedOffset
+                    min(poolMinutes, capMinutes) - replacementOffset
                 )
             }
             EarnedTimeStore.shared.lastBackendSyncAt = Date()
-            EarnedTimeStore.shared.earnedUsageOffsetMinutes = acceptedOffset
-            let offset = EarnedTimeStore.shared.earnedUsageOffsetMinutes
             guard EarnedTimeStore.shared.usageCountingAllowed else {
-                EarnedBudgetScheduler.shared.stop()
+                EarnedBudgetArming.stopAndInvalidateSignature()
                 return await ackEarnedTimeConfig(commandID: commandID, api: api)
             }
-            guard let remainingPolicy = EarnedBudgetScheduler.remainingPolicy(
-                poolMinutes: poolMinutes,
-                capMinutes: capMinutes,
-                offsetMinutes: offset
-            ) else {
-                CommandDeliveryDiagnostics.record(
-                    CommandDeliveryDiagnostics.keyEarnedArmAttempt,
-                    "skipped config-no-remaining pool=\(poolMinutes) cap=\(capMinutes) offset=\(offset)"
-                )
-                return await ackEarnedTimeConfig(commandID: commandID, api: api)
-            }
-            let hasMeasurableSelection = hasMeasurableSelectionOverride?()
-                ?? EarnedTimeStore.shared.hasMeasurableSelection
-            if let armOverride = armBudgetOverride, hasMeasurableSelection {
-                // Test seam: provide the real selection (or empty) to the override
-                // so tests can verify pool/cap values without DeviceActivity.
-                let selection = EarnedTimeStore.shared.measurementSelection!
-                CommandDeliveryDiagnostics.record(
-                    CommandDeliveryDiagnostics.keyEarnedArmAttempt,
-                    "test-arm-override pool=\(remainingPolicy.poolMinutes) cap=\(remainingPolicy.capMinutes) offset=\(offset) \(EarnedBudgetScheduler.selectionSummary(selection))"
-                )
-                armOverride(remainingPolicy.poolMinutes, remainingPolicy.capMinutes, selection)
-            } else if hasMeasurableSelection,
-                      let selection = EarnedTimeStore.shared.measurementSelection {
-                let armed = EarnedBudgetScheduler.shared.armFromNow(
-                    poolMinutes: remainingPolicy.poolMinutes,
-                    capMinutes: remainingPolicy.capMinutes,
-                    selection: selection
-                )
-                if armed {
-                    let currentDeviceID = UserDefaults.standard.string(
-                        forKey: CommandPoller.childDeviceIDDefaultsKey
-                    ) ?? ""
-                    EarnedBudgetArming.rememberCurrentArmSignature(
-                        deviceID: currentDeviceID,
-                        poolMinutes: poolMinutes,
-                        capMinutes: capMinutes,
-                        offsetMinutes: offset,
-                        selection: selection
+            if let armOverride = armBudgetOverride {
+                let hasMeasurableSelection = hasMeasurableSelectionOverride?()
+                    ?? EarnedTimeStore.shared.hasMeasurableSelection
+                if hasMeasurableSelection,
+                   let selection = EarnedTimeStore.shared.measurementSelection,
+                   let remainingPolicy = EarnedBudgetScheduler.remainingPolicy(
+                       poolMinutes: poolMinutes,
+                       capMinutes: capMinutes,
+                       offsetMinutes: replacementOffset
+                   ) {
+                    CommandDeliveryDiagnostics.record(
+                        CommandDeliveryDiagnostics.keyEarnedArmAttempt,
+                        "test-policy-capture pool=\(remainingPolicy.poolMinutes) cap=\(remainingPolicy.capMinutes) offset=\(replacementOffset) \(EarnedBudgetScheduler.selectionSummary(selection))"
                     )
+                    armOverride(remainingPolicy.poolMinutes, remainingPolicy.capMinutes, selection)
                 }
             } else {
-                let selection = EarnedTimeStore.shared.measurementSelection
-                let summary = selection.map(EarnedBudgetScheduler.selectionSummary) ?? "(missing)"
-                CommandDeliveryDiagnostics.record(
-                    CommandDeliveryDiagnostics.keyEarnedArmAttempt,
-                    "skipped config-not-measurable pool=\(poolMinutes) cap=\(capMinutes) lockedSetID=\(EarnedTimeStore.shared.lockedSetID ?? "(missing)") \(summary)"
-                )
+                EarnedBudgetArming.armIfReady()
             }
-            // If measurementSelection is missing or empty, skip arm() gracefully.
         }
 
         // Step 3: Ack as confirmed.

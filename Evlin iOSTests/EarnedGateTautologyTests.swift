@@ -68,6 +68,7 @@ final class EarnedGateTautologyTests: XCTestCase {
         store.poolMinutes = 60
         store.capMinutes = 30
         store.latestDeviceEstimate = 10
+        store.acceptedEstimateMinutes = 10
         let inputs = BigKidStatePoller.earnedRearmInputs(store: store)   // new pure seam
         XCTAssertEqual(inputs.poolMinutes, 60)
         XCTAssertEqual(inputs.capMinutes, 30)

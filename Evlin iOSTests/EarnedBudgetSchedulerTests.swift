@@ -8,6 +8,112 @@ import DeviceActivity
 /// only. No DeviceActivity framework, no live system calls, no entitlements required.
 final class EarnedBudgetSchedulerTests: XCTestCase {
 
+    func test_generatedActivityNamesAreDistinctAndRecognized() {
+        let first = EarnedActivityGeneration.generatedActivityName(
+            id: UUID(uuidString: "11111111-1111-1111-1111-111111111111")!
+        )
+        let second = EarnedActivityGeneration.generatedActivityName(
+            id: UUID(uuidString: "22222222-2222-2222-2222-222222222222")!
+        )
+
+        XCTAssertNotEqual(first, second)
+        XCTAssertTrue(EarnedActivityGeneration.isEarnedActivityName(first))
+        XCTAssertTrue(EarnedActivityGeneration.isEarnedActivityName(second))
+        XCTAssertTrue(EarnedActivityGeneration.isEarnedActivityName(
+            EarnedActivityGeneration.legacyActivityName
+        ))
+        XCTAssertFalse(EarnedActivityGeneration.isEarnedActivityName("evlin.earned.other"))
+    }
+
+    func test_stopTargetsIncludePersistedGenerationAndLegacy() {
+        let active = EarnedActivityGeneration.generatedActivityName(id: UUID())
+
+        XCTAssertEqual(
+            EarnedActivityGeneration.stopTargets(activeActivityName: active),
+            [active, EarnedActivityGeneration.legacyActivityName]
+        )
+        XCTAssertEqual(
+            EarnedActivityGeneration.stopTargets(activeActivityName: nil),
+            [EarnedActivityGeneration.legacyActivityName]
+        )
+    }
+
+    func test_failedGenerationInstallPreservesPriorGenerationAndStopsNothing() {
+        enum StartFailure: Error { case failed }
+        let suiteName = "EarnedBudgetSchedulerTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let prior = EarnedActivityGeneration.generatedActivityName(id: UUID())
+        defaults.set(prior, forKey: EarnedActivityGeneration.activeActivityNameKey)
+        var stopped: [String] = []
+
+        let installed = EarnedActivityGeneration.installReplacement(
+            id: UUID(),
+            defaults: defaults,
+            startMonitoring: { _ in throw StartFailure.failed },
+            stopMonitoring: { stopped = $0 }
+        )
+
+        XCTAssertNil(installed)
+        XCTAssertEqual(
+            defaults.string(forKey: EarnedActivityGeneration.activeActivityNameKey),
+            prior
+        )
+        XCTAssertTrue(stopped.isEmpty)
+    }
+
+    func test_successiveGenerationInstallsStopPriorAndLegacyThenPersistFreshName() {
+        let suiteName = "EarnedBudgetSchedulerTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let firstID = UUID(uuidString: "11111111-1111-1111-1111-111111111111")!
+        let secondID = UUID(uuidString: "22222222-2222-2222-2222-222222222222")!
+        var started: [String] = []
+        var stopped: [[String]] = []
+
+        let first = EarnedActivityGeneration.installReplacement(
+            id: firstID,
+            defaults: defaults,
+            startMonitoring: { started.append($0) },
+            stopMonitoring: { stopped.append($0) }
+        )
+        let second = EarnedActivityGeneration.installReplacement(
+            id: secondID,
+            defaults: defaults,
+            startMonitoring: { started.append($0) },
+            stopMonitoring: { stopped.append($0) }
+        )
+
+        XCTAssertNotEqual(first, second)
+        XCTAssertEqual(started, [first, second].compactMap { $0 })
+        XCTAssertEqual(stopped.first, [EarnedActivityGeneration.legacyActivityName])
+        XCTAssertEqual(
+            stopped.last,
+            [first!, EarnedActivityGeneration.legacyActivityName]
+        )
+        XCTAssertEqual(
+            defaults.string(forKey: EarnedActivityGeneration.activeActivityNameKey),
+            second
+        )
+    }
+
+    func test_stopPersistedGenerationStopsActiveAndLegacyThenRemovesPersistence() {
+        let suiteName = "EarnedBudgetSchedulerTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let active = EarnedActivityGeneration.generatedActivityName(id: UUID())
+        defaults.set(active, forKey: EarnedActivityGeneration.activeActivityNameKey)
+        var stopped: [String] = []
+
+        EarnedActivityGeneration.stopPersisted(
+            defaults: defaults,
+            stopMonitoring: { stopped = $0 }
+        )
+
+        XCTAssertEqual(stopped, [active, EarnedActivityGeneration.legacyActivityName])
+        XCTAssertNil(defaults.string(forKey: EarnedActivityGeneration.activeActivityNameKey))
+    }
+
     // MARK: - Bucket constant
 
     func test_bucketMinutes_isFive() {

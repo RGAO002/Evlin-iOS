@@ -56,12 +56,12 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             return
         }
 
-        // B5 — Earned-time daily reset. The `evlin.earned.budget` interval starts at
+        // B5 — Earned-time daily reset. The earned activity interval starts at
         // midnight each day (see `EarnedBudgetScheduler.arm`). Strip ONLY the
         // `.earnedTime` source from all selected-set records — do NOT delete whole
         // records (a record with {.manual, .earnedTime} must survive with {.manual}).
         // This mirrors the limit daily-reset path above but is source-specific.
-        if raw == "evlin.earned.budget" {
+        if EarnedActivityGeneration.isEarnedActivityName(raw) {
             resetEarnedTimeShields(activity: raw)
             return
         }
@@ -175,7 +175,8 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         //   1. POST an idempotent cumulative sample to the A2 backend (with retry queue).
         //   2. If N ≥ effective cap/tripwire AND no override flag → apply `.earnedTime`
         //      shield over the Locked-set tokens (pure App Group path, no actor).
-        if event.rawValue.hasPrefix("evlin.earned.t") {
+        if event.rawValue.hasPrefix("evlin.earned.t"),
+           EarnedActivityGeneration.isEarnedActivityName(activity.rawValue) {
             guard usageCountingAllowed(eventName: event.rawValue) else { return }
             handleEarnedThreshold(eventName: event.rawValue, activity: activity)
         }
@@ -361,7 +362,10 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         }
 
         let offset = earnedStore.earnedUsageOffsetMinutes
-        let adjustedN = min(1440, offset + n)
+        let adjustedN = EarnedTimeStore.adjustedEarnedThreshold(
+            rawThresholdMinutes: n,
+            runningOffsetMinutes: offset
+        )
         earnedStore.latestDeviceEstimate = adjustedN
 
         let ts = ISO8601DateFormatter().string(from: Date())

@@ -1,6 +1,67 @@
 import Foundation
 import FamilyControls
 
+/// Shared activity naming and App Group persistence used by both the app and
+/// DeviceActivity extension targets.
+nonisolated enum EarnedActivityGeneration {
+    static let legacyActivityName = "evlin.earned.budget"
+    static let generatedActivityPrefix = "evlin.earned.budget."
+    static let activeActivityNameKey = "evlin.earned.activeActivityName"
+
+    static func generatedActivityName(id: UUID) -> String {
+        generatedActivityPrefix + id.uuidString.lowercased()
+    }
+
+    static func isEarnedActivityName(_ raw: String) -> Bool {
+        raw == legacyActivityName || raw.hasPrefix(generatedActivityPrefix)
+    }
+
+    static func stopTargets(activeActivityName: String?) -> [String] {
+        var targets: [String] = []
+        if let activeActivityName, !activeActivityName.isEmpty {
+            targets.append(activeActivityName)
+        }
+        if !targets.contains(legacyActivityName) {
+            targets.append(legacyActivityName)
+        }
+        return targets
+    }
+
+    @discardableResult
+    static func installReplacement(
+        id: UUID = UUID(),
+        defaults: UserDefaults?,
+        startMonitoring: (String) throws -> Void,
+        stopMonitoring: ([String]) -> Void
+    ) -> String? {
+        let previous = defaults?.string(forKey: activeActivityNameKey)
+        let next = generatedActivityName(id: id)
+        do {
+            try startMonitoring(next)
+        } catch {
+            return nil
+        }
+
+        let targets = stopTargets(activeActivityName: previous).filter { $0 != next }
+        if !targets.isEmpty {
+            stopMonitoring(targets)
+        }
+        defaults?.set(next, forKey: activeActivityNameKey)
+        defaults?.synchronize()
+        return next
+    }
+
+    static func stopPersisted(
+        defaults: UserDefaults?,
+        stopMonitoring: ([String]) -> Void
+    ) {
+        let active = defaults?.string(forKey: activeActivityNameKey)
+        stopMonitoring(stopTargets(activeActivityName: active))
+        defaults?.removeObject(forKey: activeActivityNameKey)
+        defaults?.synchronize()
+    }
+}
+
 /// App Group persistence for the earned screen-time subsystem (Task B3).
 ///
 /// Persists to `group.com.evlin.ios` using plain JSON so both the main app
@@ -27,6 +88,7 @@ import FamilyControls
 ///   - `earned.capMinutes`                 — Int hard parent-set cap (from backend)
 ///   - `evlin.usageCountingAllowed`        — Bool gate written from /child/state
 ///   - `earned.usageCountingOffset`        — Int counted minutes before a task pause
+///   - `evlin.earned.activeActivityName`    — Current generated DeviceActivity name
 nonisolated final class EarnedTimeStore: @unchecked Sendable {
     static let shared = EarnedTimeStore()
     private static let acceptedUsageReconciliationLock = NSLock()
@@ -320,6 +382,13 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
         }
     }
 
+    static func adjustedEarnedThreshold(
+        rawThresholdMinutes: Int,
+        runningOffsetMinutes: Int
+    ) -> Int {
+        min(1440, max(0, runningOffsetMinutes) + max(0, rawThresholdMinutes))
+    }
+
     @discardableResult
     func reconcileAcceptedUsage(
         usageDate: String,
@@ -421,7 +490,6 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
         } else {
             latestDeviceEstimate = max(latestDeviceEstimate ?? 0, accepted)
         }
-        earnedUsageOffsetMinutes = accepted
         defaults?.synchronize()
         return accepted
     }

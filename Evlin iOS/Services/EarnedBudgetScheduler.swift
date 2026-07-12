@@ -4,7 +4,7 @@ import FamilyControls
 
 /// B4 — Whole-device earned-time ladder scheduler.
 ///
-/// Arms ONE `DeviceActivity` activity (`evlin.earned.budget`) over the
+/// Arms one generated `DeviceActivity` activity over the
 /// all-category measurement selection captured in `EarnedTimeStore`.
 /// Events are named `evlin.earned.t5`, `evlin.earned.t10`, … up to
 /// `min(poolMinutes, capMinutes)`, with the exact cap threshold always
@@ -26,12 +26,11 @@ final class EarnedBudgetScheduler {
     /// in one activity (240 min / 5 min per bucket = 48 max meaningful slots).
     nonisolated static let guardEventCount: Int = 48
 
-    private static let activityName = DeviceActivityName("evlin.earned.budget")
-
     // MARK: - Singleton
 
     static let shared = EarnedBudgetScheduler()
     private let center = DeviceActivityCenter()
+    private let defaults = UserDefaults(suiteName: "group.com.evlin.ios")
 
     // MARK: - Pure threshold planner
 
@@ -117,16 +116,16 @@ final class EarnedBudgetScheduler {
     /// Arm the earned-budget activity over `selection` using the pre-computed
     /// pool/cap policy.
     ///
-    /// Safe to call repeatedly — `DeviceActivityCenter.startMonitoring` is
-    /// idempotent for the same activity name (stops any prior run first).
-    /// The call is a no-op when `poolMinutes` or `capMinutes` is ≤ 0, or when
-    /// `thresholds` would produce no events.
+    /// Every call starts a fresh generated activity before retiring the prior
+    /// generated and legacy activities. The call is a no-op when the policy or
+    /// selection cannot produce events.
     @discardableResult
     func arm(
         poolMinutes: Int,
         capMinutes: Int,
         selection: FamilyActivitySelection,
-        schedule: DeviceActivitySchedule? = nil
+        schedule: DeviceActivitySchedule? = nil,
+        generationID: UUID = UUID()
     ) -> Bool {
         let tokenSummary = Self.selectionSummary(selection)
         guard selection.applicationTokens.count > 0
@@ -165,17 +164,30 @@ final class EarnedBudgetScheduler {
             events[name] = event
         }
 
-        do {
-            try center.startMonitoring(Self.activityName, during: schedule, events: events)
+        let installedName = EarnedActivityGeneration.installReplacement(
+            id: generationID,
+            defaults: defaults,
+            startMonitoring: { rawName in
+                try center.startMonitoring(
+                    DeviceActivityName(rawName),
+                    during: schedule,
+                    events: events
+                )
+            },
+            stopMonitoring: { rawNames in
+                center.stopMonitoring(rawNames.map { DeviceActivityName($0) })
+            }
+        )
+        if let installedName {
             CommandDeliveryDiagnostics.record(
                 CommandDeliveryDiagnostics.keyEarnedArmAttempt,
-                "armed events=\(events.count) first=\(steps.first ?? 0) last=\(steps.last ?? 0) pool=\(poolMinutes) cap=\(capMinutes) \(tokenSummary)"
+                "armed activity=\(installedName) events=\(events.count) first=\(steps.first ?? 0) last=\(steps.last ?? 0) pool=\(poolMinutes) cap=\(capMinutes) \(tokenSummary)"
             )
             return true
-        } catch {
+        } else {
             CommandDeliveryDiagnostics.record(
                 CommandDeliveryDiagnostics.keyEarnedArmAttempt,
-                "failed startMonitoring error=\(error.localizedDescription) pool=\(poolMinutes) cap=\(capMinutes) \(tokenSummary)"
+                "failed startMonitoring pool=\(poolMinutes) cap=\(capMinutes) \(tokenSummary)"
             )
             return false
         }
@@ -187,19 +199,26 @@ final class EarnedBudgetScheduler {
         capMinutes: Int,
         selection: FamilyActivitySelection,
         now: Date = Date(),
-        calendar: Calendar = .current
+        calendar: Calendar = .current,
+        generationID: UUID = UUID()
     ) -> Bool {
         arm(
             poolMinutes: poolMinutes,
             capMinutes: capMinutes,
             selection: selection,
-            schedule: Self.resumeSchedule(startingAt: now, calendar: calendar)
+            schedule: Self.resumeSchedule(startingAt: now, calendar: calendar),
+            generationID: generationID
         )
     }
 
     /// Stop monitoring the earned-budget activity (e.g. at end of day / reset).
     func stop() {
-        center.stopMonitoring([Self.activityName])
+        EarnedActivityGeneration.stopPersisted(
+            defaults: defaults,
+            stopMonitoring: { rawNames in
+                center.stopMonitoring(rawNames.map { DeviceActivityName($0) })
+            }
+        )
     }
 
     nonisolated static func selectionSummary(_ selection: FamilyActivitySelection) -> String {

@@ -520,7 +520,7 @@ final class EarnedSampleReporterResponseTests: XCTestCase {
         XCTAssertEqual(result, .counted)
         XCTAssertEqual(store.acceptedEstimateMinutes, 15)
         XCTAssertEqual(store.latestDeviceEstimate, 15)
-        XCTAssertEqual(store.earnedUsageOffsetMinutes, 15)
+        XCTAssertEqual(store.earnedUsageOffsetMinutes, 0)
     }
 
     func test_successWithOmittedCounted_preservesSameDayMonotonicAcceptedUsage() {
@@ -545,13 +545,14 @@ final class EarnedSampleReporterResponseTests: XCTestCase {
         XCTAssertEqual(result, .counted)
         XCTAssertEqual(store.acceptedEstimateMinutes, 15)
         XCTAssertEqual(store.latestDeviceEstimate, 15)
-        XCTAssertEqual(store.earnedUsageOffsetMinutes, 15)
+        XCTAssertEqual(store.earnedUsageOffsetMinutes, 0)
     }
 
     func test_uncountedSuccess_reconcilesPhantomWithoutRetry() {
         let isolatedSuite = makeIsolatedSuiteName()
         defer { removeIsolatedSuite(isolatedSuite) }
         let store = EarnedTimeStore(suiteName: isolatedSuite)
+        store.earnedUsageOffsetMinutes = 4
         _ = store.reconcileAcceptedUsage(
             usageDate: "2026-07-10",
             serverEstimatedMinutes: 10,
@@ -570,7 +571,7 @@ final class EarnedSampleReporterResponseTests: XCTestCase {
         XCTAssertEqual(result, .paused)
         XCTAssertEqual(store.acceptedEstimateMinutes, 0)
         XCTAssertEqual(store.latestDeviceEstimate, 0)
-        XCTAssertEqual(store.earnedUsageOffsetMinutes, 0)
+        XCTAssertEqual(store.earnedUsageOffsetMinutes, 4)
         XCTAssertTrue(EarnedSampleReporter.loadRetryQueue(suiteName: isolatedSuite).isEmpty)
         let lastDebugValue = UserDefaults(suiteName: isolatedSuite)?
             .string(forKey: EarnedSampleReporter.lastSamplePostDebugKey) ?? ""
@@ -596,7 +597,7 @@ final class EarnedSampleReporterResponseTests: XCTestCase {
         XCTAssertEqual(result, .acceptedWithoutReconciliation)
         XCTAssertEqual(store.acceptedEstimateMinutes, 12)
         XCTAssertEqual(store.latestDeviceEstimate, 12)
-        XCTAssertEqual(store.earnedUsageOffsetMinutes, 12)
+        XCTAssertEqual(store.earnedUsageOffsetMinutes, 0)
         XCTAssertTrue(EarnedSampleReporter.loadRetryQueue(suiteName: isolatedSuite).isEmpty)
     }
 
@@ -831,7 +832,7 @@ final class EarnedSampleReporterResponseTests: XCTestCase {
         XCTAssertEqual(store.acceptedUsageDate, date, file: file, line: line)
         XCTAssertEqual(store.acceptedEstimateMinutes, minutes, file: file, line: line)
         XCTAssertEqual(store.latestDeviceEstimate, minutes, file: file, line: line)
-        XCTAssertEqual(store.earnedUsageOffsetMinutes, minutes, file: file, line: line)
+        XCTAssertEqual(store.earnedUsageOffsetMinutes, 0, file: file, line: line)
     }
 
     private func lastDebugValue(in suiteName: String) -> String {
