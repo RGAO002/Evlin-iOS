@@ -135,6 +135,69 @@ final class EarnedDisplayTests: XCTestCase {
         )
     }
 
+    func test_deviceRemaining_usesEffectiveMinutesWithAsymmetricDenominators() {
+        XCTAssertEqual(
+            EarnedDisplayFormatters.deviceRemainingLabel(
+                remainingToCapMinutes: 35,
+                overallRemainingMinutes: 50,
+                fallbackOverallLabel: "50m left"
+            ),
+            "35 mins left"
+        )
+        XCTAssertEqual(
+            EarnedDisplayFormatters.deviceRemainingFraction(
+                remainingToCapMinutes: 35,
+                capMinutes: 60,
+                overallRemainingMinutes: 50,
+                dailyPoolMinutes: 120
+            ),
+            35.0 / 60.0,
+            accuracy: 0.001
+        )
+    }
+
+    func test_deviceRemaining_missingDeviceUsesOverallFallback() {
+        XCTAssertEqual(
+            EarnedDisplayFormatters.deviceRemainingLabel(
+                remainingToCapMinutes: nil,
+                overallRemainingMinutes: 50,
+                fallbackOverallLabel: "50m left"
+            ),
+            "50m left"
+        )
+        XCTAssertEqual(
+            EarnedDisplayFormatters.deviceRemainingFraction(
+                remainingToCapMinutes: nil,
+                capMinutes: 60,
+                overallRemainingMinutes: 50,
+                dailyPoolMinutes: 120
+            ),
+            50.0 / 120.0,
+            accuracy: 0.001
+        )
+    }
+
+    func test_deviceRemaining_negativeOverallIsExhausted() {
+        XCTAssertEqual(
+            EarnedDisplayFormatters.deviceRemainingLabel(
+                remainingToCapMinutes: 35,
+                overallRemainingMinutes: -5,
+                fallbackOverallLabel: "Time's up for today"
+            ),
+            "Time's up for today"
+        )
+        XCTAssertEqual(
+            EarnedDisplayFormatters.deviceRemainingFraction(
+                remainingToCapMinutes: 35,
+                capMinutes: 60,
+                overallRemainingMinutes: -5,
+                dailyPoolMinutes: 120
+            ),
+            0,
+            accuracy: 0.001
+        )
+    }
+
     func test_deviceRemaining_usesRemainingToCapNotEstimatedUsedMinutes() {
         XCTAssertEqual(
             EarnedDisplayFormatters.deviceRemainingLabel(

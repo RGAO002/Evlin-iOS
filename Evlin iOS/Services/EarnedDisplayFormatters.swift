@@ -70,6 +70,14 @@ enum EarnedDisplayFormatters {
         return "\(estimatedMinutesLeft) mins left"
     }
 
+    private static func effectiveDeviceRemainingMinutes(
+        remainingToCapMinutes: Int,
+        overallRemainingMinutes: Int?
+    ) -> Int {
+        guard let overallRemainingMinutes else { return remainingToCapMinutes }
+        return min(remainingToCapMinutes, overallRemainingMinutes)
+    }
+
     /// Device row copy must never claim device time remains after the shared
     /// pool is empty. Per-device estimates can lag the aggregate summary, so
     /// overall remaining time wins when it is exhausted.
@@ -81,20 +89,20 @@ enum EarnedDisplayFormatters {
         if let overallRemainingMinutes, overallRemainingMinutes <= 0 {
             return fallbackOverallLabel
         }
-        if let remainingToCapMinutes, let overallRemainingMinutes {
-            return deviceEstimateLabel(
-                estimatedMinutesLeft: min(remainingToCapMinutes, overallRemainingMinutes)
-            )
-        }
         if let remainingToCapMinutes {
-            return deviceEstimateLabel(estimatedMinutesLeft: remainingToCapMinutes)
+            return deviceEstimateLabel(
+                estimatedMinutesLeft: effectiveDeviceRemainingMinutes(
+                    remainingToCapMinutes: remainingToCapMinutes,
+                    overallRemainingMinutes: overallRemainingMinutes
+                )
+            )
         }
         return fallbackOverallLabel
     }
 
     /// Device row progress uses the same remaining-time direction as the shared
-    /// pool. If both per-device and overall values exist, clamp to the smaller
-    /// fraction so a stale device estimate cannot look fuller than the pool.
+    /// pool. If both per-device and overall values exist, use the smaller
+    /// remaining-minute value with the device-row denominator.
     static func deviceRemainingFraction(
         remainingToCapMinutes: Int?,
         capMinutes: Int?,
@@ -105,32 +113,22 @@ enum EarnedDisplayFormatters {
             return 0
         }
 
-        let hasOverall = overallRemainingMinutes != nil
-        let overallFraction = remainingFraction(
-            remainingMinutes: overallRemainingMinutes,
-            dailyPoolMinutes: dailyPoolMinutes
-        )
-
         guard let remainingToCapMinutes else {
-            return overallFraction
-        }
-
-        let deviceDenominator = capMinutes ?? dailyPoolMinutes
-        let deviceFraction: Double
-        if remainingToCapMinutes <= 0 {
-            deviceFraction = 0
-        } else {
-            deviceFraction = remainingFraction(
-                remainingMinutes: remainingToCapMinutes,
-                dailyPoolMinutes: deviceDenominator
+            return remainingFraction(
+                remainingMinutes: overallRemainingMinutes,
+                dailyPoolMinutes: dailyPoolMinutes
             )
         }
 
-        guard hasOverall else {
-            return deviceFraction
-        }
-
-        return min(overallFraction, deviceFraction)
+        let deviceDenominator = capMinutes ?? dailyPoolMinutes
+        let effectiveRemainingMinutes = effectiveDeviceRemainingMinutes(
+            remainingToCapMinutes: remainingToCapMinutes,
+            overallRemainingMinutes: overallRemainingMinutes
+        )
+        return remainingFraction(
+            remainingMinutes: effectiveRemainingMinutes,
+            dailyPoolMinutes: deviceDenominator
+        )
     }
 
     // MARK: - Freshness label
