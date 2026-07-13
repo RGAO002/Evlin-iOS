@@ -1,5 +1,6 @@
 import XCTest
 import DeviceActivity
+import FamilyControls
 @testable import Evlin_iOS
 
 /// B4 — Pure threshold-planning logic tests.
@@ -14,7 +15,8 @@ final class EarnedBudgetSchedulerTests: XCTestCase {
         offset: Int = 5,
         signature: String = "signature",
         usageDate: String = "2026-07-11",
-        timezone: String = "America/New_York"
+        timezone: String = "America/New_York",
+        armedAt: Date? = nil
     ) -> EarnedActivityGeneration.Generation {
         EarnedActivityGeneration.Generation(
             activityName: EarnedActivityGeneration.generatedActivityName(
@@ -24,8 +26,72 @@ final class EarnedBudgetSchedulerTests: XCTestCase {
             offsetMinutes: offset,
             armSignature: signature,
             usageDate: usageDate,
-            timezoneIdentifier: timezone
+            timezoneIdentifier: timezone,
+            armedAt: armedAt
         )
+    }
+
+    func test_plausibilityAcceptsThresholdAtExactCeiling() {
+        let armedAt = Date(timeIntervalSince1970: 1_784_003_200)
+        let generation = generation(
+            id: "00000000-0000-0000-0000-000000000001",
+            offset: 10,
+            armedAt: armedAt
+        )
+
+        let result = EarnedThresholdPlausibility.evaluate(
+            generation: generation,
+            adjustedEstimateMinutes: 20,
+            callbackAt: armedAt.addingTimeInterval(5 * 60)
+        )
+
+        XCTAssertTrue(result.isPlausible)
+        XCTAssertEqual(result.maximumTrusted, 20)
+    }
+
+    func test_plausibilityRejectsThresholdAboveCeiling() {
+        let armedAt = Date(timeIntervalSince1970: 1_784_003_200)
+        let generation = generation(
+            id: "00000000-0000-0000-0000-000000000002",
+            offset: 10,
+            armedAt: armedAt
+        )
+
+        let result = EarnedThresholdPlausibility.evaluate(
+            generation: generation,
+            adjustedEstimateMinutes: 21,
+            callbackAt: armedAt.addingTimeInterval(5 * 60)
+        )
+
+        XCTAssertFalse(result.isPlausible)
+        XCTAssertEqual(result.maximumTrusted, 20)
+    }
+
+    func test_plausibilityRejectsCallbackBeforeArm() {
+        let armedAt = Date(timeIntervalSince1970: 1_784_003_200)
+        let generation = generation(
+            id: "00000000-0000-0000-0000-000000000003",
+            offset: 10,
+            armedAt: armedAt
+        )
+
+        let result = EarnedThresholdPlausibility.evaluate(
+            generation: generation,
+            adjustedEstimateMinutes: 10,
+            callbackAt: armedAt.addingTimeInterval(-1)
+        )
+
+        XCTAssertFalse(result.isPlausible)
+        XCTAssertNil(result.maximumTrusted)
+    }
+
+    func test_makeEventExcludesPastActivity() {
+        let event = EarnedBudgetScheduler.makeEvent(
+            selection: FamilyActivitySelection(),
+            thresholdMinutes: 5
+        )
+
+        XCTAssertFalse(event.includesPastActivity)
     }
 
     func test_callbackFirewallAcceptsOnlyActiveGeneration() {

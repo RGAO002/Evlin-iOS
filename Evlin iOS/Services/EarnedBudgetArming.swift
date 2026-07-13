@@ -73,6 +73,12 @@ enum EarnedBudgetArming {
         force || previousSignature != nextSignature
     }
 
+    nonisolated static func requiresGenerationReplacement(
+        _ activeGeneration: EarnedActivityGeneration.Generation?
+    ) -> Bool {
+        activeGeneration?.armedAt == nil
+    }
+
     nonisolated static func previousArmSignature(
         lifecycle: EarnedActivityGeneration.Lifecycle?,
         scalarSignature: String?
@@ -412,7 +418,7 @@ enum EarnedBudgetArming {
                 scalarSignature: defaults?.string(forKey: armSignatureKey)
             ),
             nextSignature: stableSignature,
-            force: force
+            force: force || requiresGenerationReplacement(activeGeneration)
         ) else {
             CommandDeliveryDiagnostics.record(
                 CommandDeliveryDiagnostics.keyEarnedArmAttempt,
@@ -452,7 +458,8 @@ enum EarnedBudgetArming {
             offsetMinutes: replacementOffset,
             armSignature: replacementSignature,
             usageDate: usageDate,
-            timezoneIdentifier: timezoneIdentifier
+            timezoneIdentifier: timezoneIdentifier,
+            armedAt: Date()
         )
         _ = installReplacement(
             replacementOffset: replacementOffset,

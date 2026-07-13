@@ -379,6 +379,42 @@ final class EarnedTimeStoreTests: XCTestCase {
         XCTAssertEqual(competing.latestDeviceEstimate, 400)
     }
 
+    func test_generationDecodesLegacyJSONWithoutArmedAt() throws {
+        let activityName = EarnedActivityGeneration.generatedActivityName(id: UUID())
+        let json = """
+        {"activityName":"\(activityName)","deviceID":"b21411cb-63a5-4489-bc68-bf8ac26ee15b","offsetMinutes":5,"armSignature":"legacy-signature","usageDate":"2026-07-13","timezoneIdentifier":"America/New_York"}
+        """
+
+        let generation = try JSONDecoder().decode(
+            EarnedActivityGeneration.Generation.self,
+            from: Data(json.utf8)
+        )
+
+        XCTAssertNil(generation.armedAt)
+        XCTAssertTrue(generation.isValid)
+    }
+
+    func test_generationRoundTripsArmedAtTimestamp() throws {
+        let armedAt = Date(timeIntervalSince1970: 1_784_003_200)
+        let generation = EarnedActivityGeneration.Generation(
+            activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
+            deviceID: UUID().uuidString,
+            offsetMinutes: 5,
+            armSignature: "timestamped-signature",
+            usageDate: "2026-07-13",
+            timezoneIdentifier: "America/New_York",
+            armedAt: armedAt
+        )
+
+        let decoded = try JSONDecoder().decode(
+            EarnedActivityGeneration.Generation.self,
+            from: JSONEncoder().encode(generation)
+        )
+
+        XCTAssertEqual(decoded, generation)
+        XCTAssertEqual(decoded.armedAt, armedAt)
+    }
+
     func test_futureLifecycleVersionIsCorruptAndCannotAuthorizeCallback() throws {
         let suiteName = "EarnedTimeStoreTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))

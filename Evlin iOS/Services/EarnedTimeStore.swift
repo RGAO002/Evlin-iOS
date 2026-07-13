@@ -19,6 +19,25 @@ nonisolated enum EarnedActivityGeneration {
         let armSignature: String
         let usageDate: String
         let timezoneIdentifier: String
+        let armedAt: Date?
+
+        init(
+            activityName: String,
+            deviceID: String,
+            offsetMinutes: Int,
+            armSignature: String,
+            usageDate: String,
+            timezoneIdentifier: String,
+            armedAt: Date? = nil
+        ) {
+            self.activityName = activityName
+            self.deviceID = deviceID
+            self.offsetMinutes = offsetMinutes
+            self.armSignature = armSignature
+            self.usageDate = usageDate
+            self.timezoneIdentifier = timezoneIdentifier
+            self.armedAt = armedAt
+        }
 
         var isValid: Bool {
             isEarnedActivityName(activityName)

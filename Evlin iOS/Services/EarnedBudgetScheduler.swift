@@ -2,6 +2,34 @@ import Foundation
 import DeviceActivity
 import FamilyControls
 
+nonisolated enum EarnedThresholdPlausibility {
+    struct Result: Equatable, Sendable {
+        let isPlausible: Bool
+        let maximumTrusted: Int?
+    }
+
+    static func evaluate(
+        generation: EarnedActivityGeneration.Generation,
+        adjustedEstimateMinutes: Int,
+        callbackAt: Date
+    ) -> Result {
+        guard let armedAt = generation.armedAt, callbackAt >= armedAt else {
+            return Result(isPlausible: false, maximumTrusted: nil)
+        }
+
+        let elapsedMinutes = Int(
+            floor(callbackAt.timeIntervalSince(armedAt) / 60)
+        )
+        let maximumTrusted = generation.offsetMinutes
+            + max(0, elapsedMinutes)
+            + EarnedBudgetScheduler.earnedBucketMinutes
+        return Result(
+            isPlausible: adjustedEstimateMinutes <= maximumTrusted,
+            maximumTrusted: maximumTrusted
+        )
+    }
+}
+
 /// B4 — Whole-device earned-time ladder scheduler.
 ///
 /// Arms one generated `DeviceActivity` activity over the
@@ -82,6 +110,19 @@ final class EarnedBudgetScheduler {
         let remainingCeiling = min(poolMinutes, capMinutes) - max(0, offsetMinutes)
         guard remainingCeiling > 0 else { return nil }
         return (remainingCeiling, remainingCeiling)
+    }
+
+    nonisolated static func makeEvent(
+        selection: FamilyActivitySelection,
+        thresholdMinutes: Int
+    ) -> DeviceActivityEvent {
+        DeviceActivityEvent(
+            applications: selection.applicationTokens,
+            categories: selection.categoryTokens,
+            webDomains: selection.webDomainTokens,
+            threshold: DateComponents(minute: thresholdMinutes),
+            includesPastActivity: false
+        )
     }
 
     // MARK: - Arming
@@ -178,13 +219,10 @@ final class EarnedBudgetScheduler {
         var events: [DeviceActivityEvent.Name: DeviceActivityEvent] = [:]
         for minutes in steps {
             let name = DeviceActivityEvent.Name("evlin.earned.t\(minutes)")
-            let event = DeviceActivityEvent(
-                applications: selection.applicationTokens,
-                categories: selection.categoryTokens,
-                webDomains: selection.webDomainTokens,
-                threshold: DateComponents(minute: minutes)
+            events[name] = Self.makeEvent(
+                selection: selection,
+                thresholdMinutes: minutes
             )
-            events[name] = event
         }
 
         let installed = EarnedActivityGeneration.installReplacement(

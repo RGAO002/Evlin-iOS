@@ -3,6 +3,29 @@ import XCTest
 
 @MainActor
 final class EarnedBudgetArmingTests: XCTestCase {
+    func test_legacyActiveGenerationRequiresReplacement() {
+        let legacy = EarnedActivityGeneration.Generation(
+            activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
+            deviceID: UUID().uuidString,
+            offsetMinutes: 5,
+            armSignature: "legacy-signature",
+            usageDate: "2026-07-13",
+            timezoneIdentifier: "America/New_York"
+        )
+        let timestamped = EarnedActivityGeneration.Generation(
+            activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
+            deviceID: UUID().uuidString,
+            offsetMinutes: 5,
+            armSignature: "timestamped-signature",
+            usageDate: "2026-07-13",
+            timezoneIdentifier: "America/New_York",
+            armedAt: Date()
+        )
+
+        XCTAssertTrue(EarnedBudgetArming.requiresGenerationReplacement(legacy))
+        XCTAssertFalse(EarnedBudgetArming.requiresGenerationReplacement(timestamped))
+    }
+
     func test_acceptedAdvanceDoesNotChangeSignatureForRunningOffset() {
         let base = EarnedBudgetArming.makeArmSignature(
             deviceID: "b21411cb-63a5-4489-bc68-bf8ac26ee15b",
