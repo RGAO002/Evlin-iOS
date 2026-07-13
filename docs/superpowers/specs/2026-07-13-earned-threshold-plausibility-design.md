@@ -2,6 +2,8 @@
 
 **Date:** 2026-07-13
 
+**Authority:** `LOCK_BEHAVIOR_BOUNDARIES.md` G-20 / R-15. This is the stage 1.1 safety patch discovered during the stage 1 physical acceptance run. It executes before stage 2 and does not replace G-14.
+
 ## Problem
 
 On Ruoping's iPad running iPadOS 26.4.2, the earned-time ladder behaved normally through 50 minutes, then delivered thresholds 55 through 120 in two bursts over six seconds. The backend correctly treated those callbacks as authoritative and exhausted Giannis's 120-minute pool even though that amount of foreground use was physically impossible.
@@ -46,6 +48,8 @@ This prevents local false locks, but an old or compromised client can still pois
 Explicitly disable past activity, attach generation timing metadata to every sample, reject impossible callbacks before any local mutation, and repeat the same validation on the backend.
 
 This provides the smallest complete boundary. Device enforcement fails open on bad OS callbacks, while the backend remains authoritative for accepted usage.
+
+R-15 validation runs before R-3. R-3's lock-first reconciliation applies only after a callback is physically plausible; an implausible callback is input corruption and never becomes a lock decision.
 
 ## Device Design
 
