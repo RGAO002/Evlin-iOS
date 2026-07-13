@@ -242,25 +242,20 @@ enum NSELockApplier {
             displayName = "All Apps"
         }
 
-        let recordKey = ShieldRecord.makeRecordKey(tier: tier, targetKey: targetKey)
         var expiresAt = cmd.expiresAt
         if let exp = expiresAt, exp.timeIntervalSinceNow < TimeInterval(minScheduleMinutes * 60) {
             expiresAt = Date().addingTimeInterval(TimeInterval(minScheduleMinutes * 60))
         }
-        return ShieldRecord(
-            recordKey: recordKey,
+        return NSEShieldRecordFactory.make(
+            command: cmd,
             tier: tier,
             targetKey: targetKey,
             displayName: displayName,
-            lastCommandID: cmd.id,
             appTokens: appTokens,
             categoryTokens: categoryTokens,
             webDomainTokens: webDomainTokens,
             appliesToAll: appliesToAll,
-            issuedAt: cmd.issuedAt,
             expiresAt: expiresAt,
-            originalRequest: cmd.target.originalRequest,
-            targetChildID: cmd.target.targetChildID ?? UUID()
         )
     }
 
@@ -376,6 +371,7 @@ private struct NSEWireCommand: Decodable {
     let target: NSEWireTarget
     let duration_minutes: Int?
     let issued_at: String
+    let lock_source: String?
     let unlock_sources: [String]?
 
     static func lockCommand(from poll: NSEWireCommand) -> LockCommand {
@@ -399,6 +395,10 @@ private struct NSEWireCommand: Decodable {
             catalogCategoryTokenDataBase64: poll.target.catalog_category_token_data_base64,
             catalogApplicationTokenDataBase64s: poll.target.applications ?? [],
             catalogCategoryTokenDataBase64s: poll.target.applicationCategories ?? [],
+            lockSource: NSECommandSourceResolver.lockSource(
+                topLevel: poll.lock_source,
+                target: poll.target.lock_source
+            ),
             unlockSources: NSECommandSourceResolver.unlockSources(
                 topLevel: poll.unlock_sources,
                 target: poll.target.unlock_sources
@@ -434,6 +434,7 @@ private struct NSEWireTarget: Decodable {
     let catalog_category_token_data_base64: String?
     let applications: [String]?
     let applicationCategories: [String]?
+    let lock_source: String?
     let unlock_sources: [String]?
 
     private enum CodingKeys: String, CodingKey {
@@ -453,6 +454,7 @@ private struct NSEWireTarget: Decodable {
         case applications
         case applicationCategories
         case application_categories
+        case lock_source
         case unlock_sources
         case canonicalCatalogTokenDataBase64 = "catalog_token_data_base64"
         case canonicalCatalogCategoryTokenDataBase64 = "catalog_category_token_data_base64"
@@ -486,6 +488,7 @@ private struct NSEWireTarget: Decodable {
         applications = try c.decodeIfPresent([String].self, forKey: .applications)
         applicationCategories = try c.decodeIfPresent([String].self, forKey: .applicationCategories)
             ?? c.decodeIfPresent([String].self, forKey: .application_categories)
+        lock_source = try c.decodeIfPresent(String.self, forKey: .lock_source)
         unlock_sources = try c.decodeIfPresent([String].self, forKey: .unlock_sources)
     }
 }

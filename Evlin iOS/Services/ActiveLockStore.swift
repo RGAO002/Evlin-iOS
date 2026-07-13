@@ -892,16 +892,58 @@ actor ActiveLockStore {
 /// Shared by the notification-service wire mapper and its executable app tests.
 /// Top-level command provenance has the same precedence as `CommandPoller`.
 enum NSECommandSourceResolver {
+    static func lockSource(topLevel: String?, target: String?) -> String? {
+        topLevel ?? target
+    }
+
     static func unlockSources(topLevel: [String]?, target: [String]?) -> [String]? {
         topLevel ?? target
     }
 
-    static func shieldSource(from wireValue: String) -> ShieldSource {
+    static func shieldSources(from wireValue: String?) -> Set<ShieldSource> {
         switch wireValue {
-        case "earned_time": return .earnedTime
-        case "task_pause": return .taskPause
-        default: return .manual
+        case "earned_time": return [.earnedTime]
+        case "task_pause": return [.taskPause]
+        default: return [.manual]
         }
+    }
+
+    static func shieldSource(from wireValue: String) -> ShieldSource {
+        shieldSources(from: wireValue).first ?? .manual
+    }
+}
+
+/// Testable final construction shared with the notification-service extension.
+/// Keeping provenance here prevents the NSE from silently taking ShieldRecord's
+/// legacy `.manual` default when a command carries an automatic source.
+enum NSEShieldRecordFactory {
+    static func make(
+        command: LockCommand,
+        tier: ShieldTier,
+        targetKey: String,
+        displayName: String,
+        appTokens: Set<ApplicationToken>,
+        categoryTokens: Set<ActivityCategoryToken>,
+        webDomainTokens: Set<WebDomainToken>,
+        appliesToAll: Bool,
+        expiresAt: Date?
+    ) -> ShieldRecord {
+        ShieldRecord(
+            recordKey: ShieldRecord.makeRecordKey(tier: tier, targetKey: targetKey),
+            tier: tier,
+            targetKey: targetKey,
+            displayName: displayName,
+            lastCommandID: command.id,
+            appTokens: appTokens,
+            categoryTokens: categoryTokens,
+            webDomainTokens: webDomainTokens,
+            appliesToAll: appliesToAll,
+            issuedAt: command.issuedAt,
+            expiresAt: expiresAt,
+            originalRequest: command.target.originalRequest,
+            targetChildID: command.target.targetChildID ?? UUID(),
+            sources: NSECommandSourceResolver.shieldSources(from: command.lockSource)
+        )
     }
 }
 

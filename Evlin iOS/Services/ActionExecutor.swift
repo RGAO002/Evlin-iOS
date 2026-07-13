@@ -936,11 +936,7 @@ final class ActionExecutor: @unchecked Sendable {
     /// B2: map a wire snake `lock_source` value to the `ShieldSource` set for a
     /// new `ShieldRecord`. Internal so tests can verify the mapping directly.
     static func shieldSources(fromWireLockSource wireSource: String?) -> Set<ShieldSource> {
-        switch wireSource {
-        case "earned_time": return [.earnedTime]
-        case "task_pause":  return [.taskPause]
-        default:            return [.manual]
-        }
+        NSECommandSourceResolver.shieldSources(from: wireSource)
     }
 
     // MARK: - Block
