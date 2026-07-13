@@ -213,7 +213,14 @@ nonisolated enum EarnedActivityGeneration {
     }
 
     @discardableResult
-    static func persistLifecycle(_ lifecycle: Lifecycle, defaults: UserDefaults?) -> Bool {
+    static func persistLifecycle(
+        _ lifecycle: Lifecycle,
+        defaults: UserDefaults?,
+        synchronizeDefaults: (UserDefaults) -> Bool = { $0.synchronize() },
+        readBackObject: (UserDefaults, String) -> Any? = {
+            defaults, key in defaults.object(forKey: key)
+        }
+    ) -> Bool {
         guard lifecycle.isValid, let defaults else { return false }
         guard lifecycle.active != nil
                 || lifecycle.pending != nil
@@ -222,19 +229,38 @@ nonisolated enum EarnedActivityGeneration {
         else {
             defaults.removeObject(forKey: lifecycleKey)
             defaults.removeObject(forKey: lifecycleBreadcrumbsKey)
-            return defaults.synchronize()
+            if !synchronizeDefaults(defaults) {
+                recordLifecycleSynchronizeDiagnostic(stage: "clear")
+            }
+            return readBackObject(defaults, lifecycleKey) == nil
+                && readBackObject(defaults, lifecycleBreadcrumbsKey) == nil
         }
         let breadcrumbs = stopTargets(lifecycle: lifecycle)
         defaults.set(breadcrumbs, forKey: lifecycleBreadcrumbsKey)
-        guard defaults.synchronize(),
-              defaults.stringArray(forKey: lifecycleBreadcrumbsKey) == breadcrumbs,
+        if !synchronizeDefaults(defaults) {
+            recordLifecycleSynchronizeDiagnostic(stage: "breadcrumbs")
+        }
+        guard defaultsValuesEqual(
+                  readBackObject(defaults, lifecycleBreadcrumbsKey),
+                  breadcrumbs
+              ),
               let data = try? JSONEncoder().encode(lifecycle)
         else { return false }
         defaults.set(data, forKey: lifecycleKey)
-        guard defaults.synchronize(), defaults.data(forKey: lifecycleKey) == data else {
+        if !synchronizeDefaults(defaults) {
+            recordLifecycleSynchronizeDiagnostic(stage: "lifecycle")
+        }
+        guard defaultsValuesEqual(
+            readBackObject(defaults, lifecycleKey),
+            data
+        ) else {
             return false
         }
         return true
+    }
+
+    private static func recordLifecycleSynchronizeDiagnostic(stage: String) {
+        NSLog("[Evlin/Earned] lifecycle synchronize diagnostic stage=%@", stage)
     }
 
     @discardableResult
@@ -539,6 +565,8 @@ nonisolated private final class EarnedReconciliationLock: @unchecked Sendable {
 nonisolated final class EarnedTimeStore: @unchecked Sendable {
     static let appGroupSuiteName = "group.com.evlin.ios"
     static let reconciliationLockFailureKey = "earned.reconciliationLockFailure"
+    static let reconciliationSynchronizeDiagnosticKey =
+        "earned.reconciliationSynchronizeDiagnostic"
     static let shared = EarnedTimeStore()
 
     enum ReconciliationLockSelection: Equatable, Sendable {
@@ -573,7 +601,9 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
         case lockUnavailable
     }
 
+    private let suiteName: String
     private let defaults: UserDefaults?
+    private let verificationDefaultsFactory: (String) -> UserDefaults?
     private let reconciliationLock: EarnedReconciliationLock
     private let synchronizeDefaults: (UserDefaults) -> Bool
 
@@ -582,9 +612,14 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
         lockSelection: ReconciliationLockSelection? = nil,
         useInProcessLock: Bool = true,
         defaultsFactory: (String) -> UserDefaults? = { UserDefaults(suiteName: $0) },
+        verificationDefaultsFactory: @escaping (String) -> UserDefaults? = {
+            UserDefaults(suiteName: $0)
+        },
         synchronizeDefaults: @escaping (UserDefaults) -> Bool = { $0.synchronize() }
     ) {
+        self.suiteName = suiteName
         defaults = defaultsFactory(suiteName)
+        self.verificationDefaultsFactory = verificationDefaultsFactory
         self.synchronizeDefaults = synchronizeDefaults
         let containerURL = suiteName == Self.appGroupSuiteName
             ? FileManager.default.containerURL(
@@ -1163,11 +1198,8 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
                     code: 0
                 )
             }
-            guard synchronizeDefaults(defaults) else {
-                return EarnedTransactionOutcome<T>.unavailable(
-                    stage: "pre_synchronize",
-                    code: 0
-                )
+            if !synchronizeDefaults(defaults) {
+                recordReconciliationDiagnostic(stage: "pre_synchronize_nonfatal")
             }
             let isAuthorized = {
                 self.mirrorMatches(expectedDeviceID)
@@ -1189,7 +1221,10 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
                 defaults.synchronize()
                 return EarnedTransactionOutcome<T>.committed(identityMismatchValue())
             }
-            guard synchronizeDefaults(defaults) else {
+            if !synchronizeDefaults(defaults) {
+                recordReconciliationDiagnostic(stage: "post_synchronize_nonfatal")
+            }
+            guard verificationMatches(written) else {
                 restoreDefaults(
                     defaults,
                     from: before,
@@ -1197,7 +1232,7 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
                 )
                 defaults.synchronize()
                 return EarnedTransactionOutcome<T>.unavailable(
-                    stage: "post_synchronize",
+                    stage: "post_write_readback",
                     code: 0
                 )
             }
@@ -1234,6 +1269,19 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
         keys.map { DefaultsSnapshotValue(key: $0, value: defaults.object(forKey: $0)) }
     }
 
+    private func verificationMatches(_ written: [DefaultsSnapshotValue]) -> Bool {
+        guard !written.isEmpty else { return true }
+        guard let verificationDefaults = verificationDefaultsFactory(suiteName) else {
+            return false
+        }
+        return written.allSatisfy { entry in
+            defaultsValuesEqual(
+                verificationDefaults.object(forKey: entry.key),
+                entry.value
+            )
+        }
+    }
+
     private func restoreDefaults(
         _ defaults: UserDefaults,
         from before: [DefaultsSnapshotValue],
@@ -1267,6 +1315,12 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
         defaults?.set(diagnostic, forKey: Self.reconciliationLockFailureKey)
         defaults?.synchronize()
         NSLog("[Evlin/Earned] reconciliation lock unavailable %@", diagnostic)
+    }
+
+    private func recordReconciliationDiagnostic(stage: String) {
+        let diagnostic = "\(ISO8601DateFormatter().string(from: Date())) stage=\(stage) errno=0"
+        defaults?.set(diagnostic, forKey: Self.reconciliationSynchronizeDiagnosticKey)
+        NSLog("[Evlin/Earned] reconciliation synchronize diagnostic %@", diagnostic)
     }
 
     func reconciliationLockIsAvailable() -> Bool {

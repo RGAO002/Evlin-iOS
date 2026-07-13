@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Allow authoritative earned-time reconciliation to proceed when `UserDefaults.synchronize()` returns `false`, while retaining file-lock, identity, and write-readback safety.
+**Goal:** Allow authoritative earned-time reconciliation and activity lifecycle persistence to proceed when `UserDefaults.synchronize()` returns `false`, while retaining file-lock, identity, and write-readback safety.
 
 **Architecture:** `synchronize()` becomes diagnostic-only because its Boolean is not a reliable App Group durability signal on physical devices. Each transaction snapshots the intended writes and verifies them through a fresh `UserDefaults` view for the same suite; a verification mismatch restores only fields that still equal this transaction's writes and returns `lockUnavailable`.
 
@@ -29,7 +29,7 @@
 - Consumes: existing `withReconciliationTransaction`, rollback snapshots, file lock, and identity checks.
 - Produces: `verificationDefaultsFactory: (String) -> UserDefaults?` initializer seam and transaction behavior where synchronize failure is nonfatal only when written values read back exactly.
 
-- [ ] **Step 1: Replace obsolete synchronize-failure expectations with failing durability tests**
+- [x] **Step 1: Replace obsolete synchronize-failure expectations with failing durability tests**
 
 Update the tests so an always-false synchronize closure still executes and commits the transaction:
 
@@ -113,7 +113,7 @@ func test_readBackMismatchRollsBackRuntimeFields() {
 
 Delete or rewrite the old tests whose names assert that pre/post synchronize failure itself causes rollback. Keep the explicit lock-unavailable, nil-defaults, competing-writer, and identity rollback tests.
 
-- [ ] **Step 2: Run the focused tests and verify the new contract fails**
+- [x] **Step 2: Run the focused tests and verify the new contract fails**
 
 Run:
 
@@ -126,7 +126,7 @@ xcodebuild test -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' \
 
 Expected: FAIL because the current transaction returns `lockUnavailable` when `synchronizeDefaults` returns false and the initializer has no `verificationDefaultsFactory` seam.
 
-- [ ] **Step 3: Add a fresh-view verification seam**
+- [x] **Step 3: Add a fresh-view verification seam**
 
 Store the suite name and verification factory:
 
@@ -174,7 +174,7 @@ private func verificationMatches(
 }
 ```
 
-- [ ] **Step 4: Make synchronize diagnostic-only and read-back mismatch transactional**
+- [x] **Step 4: Make synchronize diagnostic-only and read-back mismatch transactional**
 
 In `withReconciliationTransaction`, call `synchronizeDefaults(defaults)` before the body without guarding the result. Record `pre_synchronize_nonfatal` when it returns false, then continue under the existing lock and identity checks.
 
@@ -182,7 +182,7 @@ After `body()` and the existing `beforeCommit`/identity check, call synchronize 
 
 Do not remove either post-await/post-body identity check, and do not change the compare-and-restore logic used to avoid overwriting a competing newer value.
 
-- [ ] **Step 5: Run focused earned-time and per-app regression tests**
+- [x] **Step 5: Run focused earned-time and per-app regression tests**
 
 Run:
 
@@ -201,11 +201,11 @@ xcodebuild test -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' \
 
 Expected: all selected suites PASS; Per-App Limit tests show no behavioral regression.
 
-- [ ] **Step 6: Build for the connected iPad**
+- [x] **Step 6: Build for the connected iPad**
 
 Run the existing signed `Evlin iOS` device build for destination ID `00008101-001675CE3C11A01E`. Expected: build succeeds with the app and extensions signed.
 
-- [ ] **Step 7: Verify diff scope and commit**
+- [x] **Step 7: Verify diff scope and commit**
 
 ```bash
 git diff --check
@@ -218,6 +218,22 @@ git diff --cached --check
 git commit -m "fix: tolerate false app-group synchronize results"
 ```
 
-- [ ] **Step 8: Perform physical acceptance**
+- [x] **Step 8: Perform physical acceptance**
 
 Install and launch the build on Ruoping's iPad. Confirm the diagnostics no longer remain at `authoritative-state-not-ready`, the runtime policy is restored, and an earned activity generation is armed. With tasks complete and reflection inactive, keep a measured app open for one full five-minute threshold and verify `counted=true`, Total Pool movement, Device Limit movement, and unchanged Per-App Limit behavior.
+
+---
+
+### Task 2: Remove the same false-synchronize gate from activity lifecycle persistence
+
+**Physical-device evidence:** After Task 1, the iPad persisted authoritative runtime state (`pool=120`, `cap=120`, `remaining=120`, `estimate=0`) but recorded `failed startMonitoring`. The generated lifecycle breadcrumbs existed while the lifecycle record did not. `EarnedActivityGeneration.persistLifecycle` returned before `DeviceActivityCenter.startMonitoring` because it still guarded both writes on `defaults.synchronize() == true`.
+
+**Files:**
+- Modify: `Evlin iOS/Services/EarnedTimeStore.swift:203-230`
+- Test: `Evlin iOSTests/EarnedTimeStoreTests.swift`
+
+- [x] Add a failing test proving a valid lifecycle persists and reads back when an injected synchronize operation always returns `false`.
+- [x] Add a defaulted synchronize seam to `persistLifecycle`.
+- [x] Treat false synchronize results as diagnostics, then require exact read-back of breadcrumbs and encoded lifecycle data. Missing or mismatched read-back remains a hard failure.
+- [x] Re-run the full focused regression set from Task 1.
+- [x] Rebuild and reinstall on Ruoping's iPad. Confirm `evlin.earned.armAttempt` says `armed activity=...` and the lifecycle has an active generation before beginning the five-minute measured-app acceptance.

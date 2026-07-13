@@ -191,9 +191,10 @@ final class EarnedTimeStoreTests: XCTestCase {
         XCTAssertFalse(bodyRan)
     }
 
-    func test_failedPreReadSynchronizeDoesNotRunTransactionBody() {
+    func test_falseSynchronizeStillRunsAndCommitsTransactionBody() {
         let suiteName = "EarnedTimeStoreTests.\(UUID().uuidString)"
         defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let defaults = UserDefaults(suiteName: suiteName)
         var bodyRan = false
         let store = EarnedTimeStore(
             suiteName: suiteName,
@@ -202,11 +203,71 @@ final class EarnedTimeStoreTests: XCTestCase {
 
         let acquired = store.withReconciliationLockForTesting { bodyRan = true }
 
-        XCTAssertFalse(acquired)
-        XCTAssertFalse(bodyRan)
+        XCTAssertTrue(acquired)
+        XCTAssertTrue(bodyRan)
+        XCTAssertNil(defaults?.string(forKey: EarnedTimeStore.reconciliationLockFailureKey))
+        XCTAssertTrue(
+            defaults?.string(
+                forKey: EarnedTimeStore.reconciliationSynchronizeDiagnosticKey
+            )?.contains("synchronize_nonfatal") == true
+        )
     }
 
-    func test_failedPostWriteSynchronizeReturnsLockUnavailableAfterBody() {
+    func test_readBackMismatchRollsBackRuntimeFields() {
+        let suiteName = "EarnedTimeStoreTests.\(UUID().uuidString)"
+        let staleSuite = "EarnedTimeStoreTests.stale.\(UUID().uuidString)"
+        defer {
+            UserDefaults.standard.removePersistentDomain(forName: suiteName)
+            UserDefaults.standard.removePersistentDomain(forName: staleSuite)
+        }
+        let deviceID = UUID()
+        let oldSync = Date(timeIntervalSince1970: 100)
+        let defaults = UserDefaults(suiteName: suiteName)
+        defaults?.set(deviceID.uuidString.lowercased(), forKey: "evlin.childId")
+        let seeded = EarnedTimeStore(suiteName: suiteName)
+        XCTAssertEqual(seeded.reconcileRuntimePolicy(
+            usageDate: "2026-07-13",
+            timezoneIdentifier: "America/New_York",
+            poolMinutes: 90,
+            capMinutes: 60,
+            remainingMinutes: 40,
+            estimatedMinutes: 20,
+            syncedAt: oldSync
+        ), .reconciled(20))
+        seeded.markPendingUncountedReconciliation(
+            deviceID: deviceID,
+            usageDate: "2026-07-13"
+        )
+        let failing = EarnedTimeStore(
+            suiteName: suiteName,
+            verificationDefaultsFactory: { _ in UserDefaults(suiteName: staleSuite) },
+            synchronizeDefaults: { _ in false }
+        )
+
+        XCTAssertEqual(failing.reconcileRuntimePolicy(
+            usageDate: "2026-07-13",
+            timezoneIdentifier: "America/Los_Angeles",
+            poolMinutes: 30,
+            capMinutes: 25,
+            remainingMinutes: 5,
+            estimatedMinutes: 25,
+            syncedAt: Date(timeIntervalSince1970: 200)
+        ), .lockUnavailable)
+        XCTAssertEqual(seeded.poolMinutes, 90)
+        XCTAssertEqual(seeded.capMinutes, 60)
+        XCTAssertEqual(seeded.runtimeTimezoneIdentifier, "America/New_York")
+        XCTAssertEqual(seeded.backendRemainingAtLastSync, 40)
+        XCTAssertEqual(seeded.lastBackendSyncAt, oldSync)
+        XCTAssertEqual(seeded.acceptedUsageDate, "2026-07-13")
+        XCTAssertEqual(seeded.acceptedEstimateMinutes, 20)
+        XCTAssertEqual(seeded.latestDeviceEstimate, 20)
+        XCTAssertTrue(seeded.hasPendingUncountedReconciliation(
+            deviceID: deviceID,
+            usageDate: "2026-07-13"
+        ))
+    }
+
+    func test_falsePostWriteSynchronizeCommitsAcceptedUsageAfterReadBack() {
         let suiteName = "EarnedTimeStoreTests.\(UUID().uuidString)"
         defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
         var outcomes = [true, false]
@@ -221,13 +282,13 @@ final class EarnedTimeStoreTests: XCTestCase {
             allowSameDayDecrease: false
         )
 
-        XCTAssertEqual(result, .lockUnavailable)
-        XCTAssertNil(store.acceptedEstimateMinutes)
-        XCTAssertNil(store.acceptedUsageDate)
-        XCTAssertNil(store.latestDeviceEstimate)
+        XCTAssertEqual(result, .reconciled(10))
+        XCTAssertEqual(store.acceptedEstimateMinutes, 10)
+        XCTAssertEqual(store.acceptedUsageDate, "2026-07-12")
+        XCTAssertEqual(store.latestDeviceEstimate, 10)
     }
 
-    func test_runtimePostSynchronizeFailureRollsBackEveryRuntimeField() {
+    func test_falseSynchronizeCommitsEveryRuntimeFieldAfterReadBack() {
         let suiteName = "EarnedTimeStoreTests.\(UUID().uuidString)"
         defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
         let seeded = EarnedTimeStore(suiteName: suiteName)
@@ -241,10 +302,9 @@ final class EarnedTimeStoreTests: XCTestCase {
             estimatedMinutes: 20,
             syncedAt: oldSync
         ), .reconciled(20))
-        var outcomes = [true, false]
         let failing = EarnedTimeStore(
             suiteName: suiteName,
-            synchronizeDefaults: { _ in outcomes.removeFirst() }
+            synchronizeDefaults: { _ in false }
         )
 
         let result = failing.reconcileRuntimePolicy(
@@ -257,15 +317,15 @@ final class EarnedTimeStoreTests: XCTestCase {
             syncedAt: Date(timeIntervalSince1970: 200)
         )
 
-        XCTAssertEqual(result, .lockUnavailable)
-        XCTAssertEqual(seeded.poolMinutes, 90)
-        XCTAssertEqual(seeded.capMinutes, 60)
-        XCTAssertEqual(seeded.runtimeTimezoneIdentifier, "America/New_York")
-        XCTAssertEqual(seeded.backendRemainingAtLastSync, 40)
-        XCTAssertEqual(seeded.lastBackendSyncAt, oldSync)
+        XCTAssertEqual(result, .reconciled(25))
+        XCTAssertEqual(seeded.poolMinutes, 30)
+        XCTAssertEqual(seeded.capMinutes, 25)
+        XCTAssertEqual(seeded.runtimeTimezoneIdentifier, "America/Los_Angeles")
+        XCTAssertEqual(seeded.backendRemainingAtLastSync, 5)
+        XCTAssertEqual(seeded.lastBackendSyncAt, Date(timeIntervalSince1970: 200))
         XCTAssertEqual(seeded.acceptedUsageDate, "2026-07-12")
-        XCTAssertEqual(seeded.acceptedEstimateMinutes, 20)
-        XCTAssertEqual(seeded.latestDeviceEstimate, 20)
+        XCTAssertEqual(seeded.acceptedEstimateMinutes, 25)
+        XCTAssertEqual(seeded.latestDeviceEstimate, 25)
     }
 
     func test_localThresholdLockFailureDoesNotMutateEstimate() {
@@ -282,7 +342,7 @@ final class EarnedTimeStoreTests: XCTestCase {
         XCTAssertEqual(seeded.latestDeviceEstimate, 25)
     }
 
-    func test_localThresholdPostSynchronizeFailureRestoresPriorEstimate() {
+    func test_falsePostWriteSynchronizeCommitsLocalThresholdAfterReadBack() {
         let suiteName = "EarnedTimeStoreTests.\(UUID().uuidString)"
         defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
         let seeded = EarnedTimeStore(suiteName: suiteName)
@@ -293,8 +353,8 @@ final class EarnedTimeStoreTests: XCTestCase {
             synchronizeDefaults: { _ in outcomes.removeFirst() }
         )
 
-        XCTAssertEqual(failing.recordLocalThresholdEstimate(300), .lockUnavailable)
-        XCTAssertEqual(seeded.latestDeviceEstimate, 25)
+        XCTAssertEqual(failing.recordLocalThresholdEstimate(300), .reconciled)
+        XCTAssertEqual(seeded.latestDeviceEstimate, 300)
     }
 
     func test_localThresholdRollbackDoesNotOverwriteCompetingNewerEstimate() {
@@ -414,6 +474,85 @@ final class EarnedTimeStoreTests: XCTestCase {
             defaults.string(forKey: EarnedActivityGeneration.activeActivityNameKey),
             prior.activityName
         )
+    }
+
+    func test_falseSynchronizePersistsLifecycleWhenExactReadBackMatches() throws {
+        let suiteName = "EarnedTimeStoreTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let generation = EarnedActivityGeneration.Generation(
+            activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
+            deviceID: UUID().uuidString,
+            offsetMinutes: 0,
+            armSignature: "false-sync-signature",
+            usageDate: "2026-07-13",
+            timezoneIdentifier: "America/New_York"
+        )
+        let lifecycle = EarnedActivityGeneration.Lifecycle(
+            active: generation,
+            pending: nil
+        )
+
+        XCTAssertTrue(EarnedActivityGeneration.persistLifecycle(
+            lifecycle,
+            defaults: defaults,
+            synchronizeDefaults: { _ in false }
+        ))
+        XCTAssertEqual(
+            EarnedActivityGeneration.loadLifecycle(defaults: defaults),
+            lifecycle
+        )
+        XCTAssertEqual(
+            defaults.stringArray(forKey: EarnedActivityGeneration.lifecycleBreadcrumbsKey),
+            EarnedActivityGeneration.stopTargets(lifecycle: lifecycle)
+        )
+    }
+
+    func test_lifecycleReadBackMismatchRemainsHardFailure() throws {
+        let suiteName = "EarnedTimeStoreTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let generation = EarnedActivityGeneration.Generation(
+            activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
+            deviceID: UUID().uuidString,
+            offsetMinutes: 0,
+            armSignature: "mismatch-signature",
+            usageDate: "2026-07-13",
+            timezoneIdentifier: "America/New_York"
+        )
+        let lifecycle = EarnedActivityGeneration.Lifecycle(
+            active: generation,
+            pending: nil
+        )
+
+        XCTAssertFalse(EarnedActivityGeneration.persistLifecycle(
+            lifecycle,
+            defaults: defaults,
+            synchronizeDefaults: { _ in false },
+            readBackObject: { defaults, key in
+                if key == EarnedActivityGeneration.lifecycleKey { return Data() }
+                return defaults.object(forKey: key)
+            }
+        ))
+    }
+
+    func test_falseSynchronizeClearsLifecycleWhenReadBackIsEmpty() throws {
+        let suiteName = "EarnedTimeStoreTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(Data([0x01]), forKey: EarnedActivityGeneration.lifecycleKey)
+        defaults.set(
+            [EarnedActivityGeneration.legacyActivityName],
+            forKey: EarnedActivityGeneration.lifecycleBreadcrumbsKey
+        )
+
+        XCTAssertTrue(EarnedActivityGeneration.persistLifecycle(
+            .init(active: nil, pending: nil),
+            defaults: defaults,
+            synchronizeDefaults: { _ in false }
+        ))
+        XCTAssertNil(defaults.object(forKey: EarnedActivityGeneration.lifecycleKey))
+        XCTAssertNil(defaults.object(forKey: EarnedActivityGeneration.lifecycleBreadcrumbsKey))
     }
 
     func test_runtimeTimezonePersistsAndDrivesUsageDateWhenDeviceTimezoneDiffers() {
