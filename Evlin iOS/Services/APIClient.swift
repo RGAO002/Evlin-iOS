@@ -2615,9 +2615,10 @@ extension APIClient {
         return try await authedJSON(path: "/parent/device/unlock-selected", method: "POST", jsonBody: payload)
     }
 
-    private struct ChildSelectedSetBody: Encodable {
+    struct ChildSelectedSetBody: Encodable {
         let family_id: UUID
         let child_profile_id: UUID
+        let operation_id: UUID
     }
 
     struct ChildSelectedSetDeviceReceipt: Decodable, Sendable {
@@ -2634,17 +2635,33 @@ extension APIClient {
 
     /// Adds the manual selected-set shield source to every device linked to the child.
     @discardableResult
-    func lockSelectedForChild(familyID: UUID, childProfileID: UUID) async throws -> ChildSelectedSetResponse {
+    func lockSelectedForChild(
+        familyID: UUID,
+        childProfileID: UUID,
+        operationID: UUID
+    ) async throws -> ChildSelectedSetResponse {
         let payload = try JSONEncoder().encode(
-            ChildSelectedSetBody(family_id: familyID, child_profile_id: childProfileID))
+            ChildSelectedSetBody(
+                family_id: familyID,
+                child_profile_id: childProfileID,
+                operation_id: operationID
+            ))
         return try await authedJSON(path: "/parent/child/lock-selected", method: "POST", jsonBody: payload)
     }
 
     /// Removes only the manual selected-set shield source from every linked device.
     @discardableResult
-    func unlockSelectedForChild(familyID: UUID, childProfileID: UUID) async throws -> ChildSelectedSetResponse {
+    func unlockSelectedForChild(
+        familyID: UUID,
+        childProfileID: UUID,
+        operationID: UUID
+    ) async throws -> ChildSelectedSetResponse {
         let payload = try JSONEncoder().encode(
-            ChildSelectedSetBody(family_id: familyID, child_profile_id: childProfileID))
+            ChildSelectedSetBody(
+                family_id: familyID,
+                child_profile_id: childProfileID,
+                operation_id: operationID
+            ))
         return try await authedJSON(path: "/parent/child/unlock-selected", method: "POST", jsonBody: payload)
     }
 

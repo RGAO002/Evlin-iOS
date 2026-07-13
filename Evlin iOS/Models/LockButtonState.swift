@@ -123,12 +123,11 @@ nonisolated enum ManualLockButtonIntent: String, Codable, Equatable, Sendable {
         state: ManualLockAggregateState,
         retryIntent: ManualLockButtonIntent?
     ) -> ManualLockButtonIntent? {
-        if let retryIntent { return retryIntent }
+        guard retryIntent == nil else { return nil }
         switch state {
         case .unlocked: return .lockSelectedForChild
         case .locked: return .unlockSelectedForChild
-        case .mixed: return .unlockSelectedForChild
-        case .pending: return nil
+        case .mixed, .pending: return nil
         }
     }
 }
@@ -216,18 +215,20 @@ nonisolated struct ManualLockOperationStatus: Equatable, Sendable {
 
 nonisolated struct ManualLockOperationReceipt: Codable, Equatable, Sendable {
     let deviceID: UUID
-    let commandID: UUID
+    let commandID: UUID?
 }
 
 /// Durable intent and command identity for one child-wide manual lock operation.
 nonisolated struct ManualLockOperation: Codable, Equatable, Sendable {
     let childProfileID: UUID
+    let operationID: UUID
     let intent: ManualLockButtonIntent
     let expectedDeviceIDs: [UUID]
     let receipts: [ManualLockOperationReceipt]
 
     init(
         childProfileID: UUID,
+        operationID: UUID,
         intent: ManualLockButtonIntent,
         expectedDeviceIDs: [UUID],
         receipts: [ManualLockOperationReceipt]
@@ -235,12 +236,115 @@ nonisolated struct ManualLockOperation: Codable, Equatable, Sendable {
         var seenReceipts = Set<UUID>()
         let uniqueReceipts = receipts.filter { seenReceipts.insert($0.deviceID).inserted }
         self.childProfileID = childProfileID
+        self.operationID = operationID
         self.intent = intent
         self.expectedDeviceIDs = ManualLockOperationStatus.expectedDeviceIDs(
             displayed: expectedDeviceIDs,
             receipts: uniqueReceipts.map(\.deviceID)
         )
         self.receipts = uniqueReceipts
+    }
+
+    static func provisional(
+        childProfileID: UUID,
+        operationID: UUID,
+        intent: ManualLockButtonIntent,
+        expectedDeviceIDs: [UUID]
+    ) -> ManualLockOperation {
+        let expected = ManualLockOperationStatus.expectedDeviceIDs(
+            displayed: expectedDeviceIDs,
+            receipts: []
+        )
+        return ManualLockOperation(
+            childProfileID: childProfileID,
+            operationID: operationID,
+            intent: intent,
+            expectedDeviceIDs: expected,
+            receipts: expected.map {
+                ManualLockOperationReceipt(deviceID: $0, commandID: nil)
+            }
+        )
+    }
+
+    var hasMissingReceipts: Bool {
+        let receiptByDevice = Dictionary(
+            uniqueKeysWithValues: receipts.map { ($0.deviceID, $0) }
+        )
+        return expectedDeviceIDs.contains { receiptByDevice[$0]?.commandID == nil }
+    }
+
+    func merging(receipts newReceipts: [ManualLockOperationReceipt]) -> ManualLockOperation {
+        var orderedDeviceIDs = ManualLockOperationStatus.expectedDeviceIDs(
+            displayed: expectedDeviceIDs,
+            receipts: receipts.map(\.deviceID)
+        )
+        var receiptByDevice = Dictionary(
+            uniqueKeysWithValues: receipts.map { ($0.deviceID, $0) }
+        )
+        for receipt in newReceipts {
+            if !orderedDeviceIDs.contains(receipt.deviceID) {
+                orderedDeviceIDs.append(receipt.deviceID)
+            }
+            if receipt.commandID != nil || receiptByDevice[receipt.deviceID] == nil {
+                receiptByDevice[receipt.deviceID] = receipt
+            }
+        }
+        return ManualLockOperation(
+            childProfileID: childProfileID,
+            operationID: operationID,
+            intent: intent,
+            expectedDeviceIDs: orderedDeviceIDs,
+            receipts: orderedDeviceIDs.map {
+                receiptByDevice[$0] ?? ManualLockOperationReceipt(deviceID: $0, commandID: nil)
+            }
+        )
+    }
+}
+
+nonisolated enum ManualLockRequestFailureDisposition: Equatable, Sendable {
+    case ambiguous
+    case definitive
+}
+
+nonisolated enum ManualLockOperationAction: Equatable, Sendable {
+    case persist(ManualLockOperation)
+    case post(ManualLockOperation)
+}
+
+/// Pure request ordering and retry gate consumed by ProfileView.
+nonisolated enum ManualLockOperationOrchestrator {
+    static func begin(
+        childProfileID: UUID,
+        operationID: UUID,
+        intent: ManualLockButtonIntent,
+        expectedDeviceIDs: [UUID]
+    ) -> [ManualLockOperationAction] {
+        let operation = ManualLockOperation.provisional(
+            childProfileID: childProfileID,
+            operationID: operationID,
+            intent: intent,
+            expectedDeviceIDs: expectedDeviceIDs
+        )
+        return [.persist(operation), .post(operation)]
+    }
+
+    static func resumeAction(
+        for operation: ManualLockOperation,
+        requestInFlight: Bool,
+        attemptedOperationIDs: Set<UUID>
+    ) -> ManualLockOperationAction? {
+        guard operation.hasMissingReceipts,
+              !requestInFlight,
+              !attemptedOperationIDs.contains(operation.operationID)
+        else { return nil }
+        return .post(operation)
+    }
+
+    static func operationAfterFailure(
+        _ operation: ManualLockOperation,
+        disposition: ManualLockRequestFailureDisposition
+    ) -> ManualLockOperation? {
+        disposition == .ambiguous ? operation : nil
     }
 }
 
@@ -328,17 +432,8 @@ nonisolated struct ManualLockButtonPresentation: Equatable {
         requestActive: Bool = false,
         retryIntent: ManualLockButtonIntent? = nil
     ) -> ManualLockButtonPresentation {
-        if let retryIntent {
-            if requestActive {
-                return updating(childName: childName)
-            }
-            let verb = retryIntent.wantsLocked ? "locking" : "unlocking"
-            return ManualLockButtonPresentation(
-                title: "Retry \(verb) \(childName)'s devices",
-                systemImage: "arrow.clockwise",
-                tone: .updating,
-                allowsTap: true
-            )
+        if requestActive || retryIntent != nil {
+            return updating(childName: childName)
         }
 
         switch state {
@@ -356,14 +451,7 @@ nonisolated struct ManualLockButtonPresentation: Equatable {
                 tone: .unlock,
                 allowsTap: true
             )
-        case .mixed:
-            return ManualLockButtonPresentation(
-                title: "Clear manual locks on \(childName)'s devices",
-                systemImage: "lock.open",
-                tone: .unlock,
-                allowsTap: true
-            )
-        case .pending:
+        case .mixed, .pending:
             return updating(childName: childName)
         }
     }
