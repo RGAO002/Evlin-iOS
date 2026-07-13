@@ -500,6 +500,39 @@ nonisolated enum EarnedActivityGeneration {
     }
 }
 
+/// Shared R-15 policy. DeviceActivity thresholds and its trusted-use tolerance
+/// are both fixed at five minutes.
+nonisolated enum EarnedThresholdPlausibility {
+    static let toleranceMinutes = 5
+
+    struct Result: Equatable, Sendable {
+        let isPlausible: Bool
+        let maximumTrusted: Int?
+    }
+
+    static func evaluate(
+        generation: EarnedActivityGeneration.Generation,
+        adjustedEstimateMinutes: Int,
+        callbackAt: Date
+    ) -> Result {
+        guard let armedAt = generation.armedAt else {
+            return Result(isPlausible: false, maximumTrusted: nil)
+        }
+
+        let elapsedMinutes = Int(
+            floor(max(0, callbackAt.timeIntervalSince(armedAt)) / 60)
+        )
+        let maximumTrusted = generation.offsetMinutes
+            + elapsedMinutes
+            + toleranceMinutes
+        return Result(
+            isPlausible: callbackAt >= armedAt
+                && adjustedEstimateMinutes <= maximumTrusted,
+            maximumTrusted: maximumTrusted
+        )
+    }
+}
+
 nonisolated private enum EarnedLockOutcome<Value> {
     case acquired(Value)
     case unavailable(stage: String, code: Int32)

@@ -2,35 +2,6 @@ import Foundation
 import DeviceActivity
 import FamilyControls
 
-nonisolated enum EarnedThresholdPlausibility {
-    struct Result: Equatable, Sendable {
-        let isPlausible: Bool
-        let maximumTrusted: Int?
-    }
-
-    static func evaluate(
-        generation: EarnedActivityGeneration.Generation,
-        adjustedEstimateMinutes: Int,
-        callbackAt: Date
-    ) -> Result {
-        guard let armedAt = generation.armedAt else {
-            return Result(isPlausible: false, maximumTrusted: nil)
-        }
-
-        let elapsedMinutes = Int(
-            floor(max(0, callbackAt.timeIntervalSince(armedAt)) / 60)
-        )
-        let maximumTrusted = generation.offsetMinutes
-            + elapsedMinutes
-            + EarnedBudgetScheduler.earnedBucketMinutes
-        return Result(
-            isPlausible: callbackAt >= armedAt
-                && adjustedEstimateMinutes <= maximumTrusted,
-            maximumTrusted: maximumTrusted
-        )
-    }
-}
-
 /// B4 — Whole-device earned-time ladder scheduler.
 ///
 /// Arms one generated `DeviceActivity` activity over the

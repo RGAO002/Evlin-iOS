@@ -61,6 +61,38 @@ final class EarnedSampleReporterTests: XCTestCase {
         XCTAssertNotNil(body["client_sample_id"])
     }
 
+    func test_sampleBody_includesGenerationMetadataOnlyWhenBothValuesExist() {
+        let deviceID = UUID()
+        let armedAt = Date(timeIntervalSince1970: 1_784_003_200)
+        let complete = EarnedSampleReporter.makeSampleBody(
+            deviceID: deviceID,
+            usageDate: "2026-07-13",
+            timezone: "America/New_York",
+            thresholdMinutes: 20,
+            estimatedMinutes: 20,
+            observedAt: "2026-07-13T12:05:00Z",
+            generationArmedAt: armedAt,
+            generationOffsetMinutes: 15
+        )
+        let missingOffset = EarnedSampleReporter.makeSampleBody(
+            deviceID: deviceID,
+            usageDate: "2026-07-13",
+            timezone: "America/New_York",
+            thresholdMinutes: 20,
+            estimatedMinutes: 20,
+            observedAt: "2026-07-13T12:05:00Z",
+            generationArmedAt: armedAt
+        )
+
+        XCTAssertEqual(
+            complete["generation_armed_at"] as? String,
+            ISO8601DateFormatter().string(from: armedAt)
+        )
+        XCTAssertEqual(complete["generation_offset_minutes"] as? Int, 15)
+        XCTAssertNil(missingOffset["generation_armed_at"])
+        XCTAssertNil(missingOffset["generation_offset_minutes"])
+    }
+
     func test_sampleBody_clientSampleId_isStable() {
         // Same inputs → same id (idempotency key).
         let deviceID = UUID()
@@ -176,6 +208,38 @@ final class EarnedSampleReporterTests: XCTestCase {
         XCTAssertEqual(queue.count, 1)
         XCTAssertEqual(queue.first?.thresholdMinutes, 30)
         XCTAssertEqual(queue.first?.deviceID, deviceID)
+    }
+
+    func test_retryEntryRoundTripsMetadataAndDecodesLegacyQueueJSON() throws {
+        let armedAt = Date(timeIntervalSince1970: 1_784_003_200)
+        let entry = EarnedSampleReporter.RetryEntry(
+            deviceID: UUID(uuidString: "B21411CB-63A5-4489-BC68-BF8AC26EE15B")!,
+            usageDate: "2026-07-13",
+            timezone: "America/New_York",
+            thresholdMinutes: 20,
+            estimatedMinutes: 20,
+            observedAt: "2026-07-13T12:05:00Z",
+            generationArmedAt: armedAt,
+            generationOffsetMinutes: 15
+        )
+
+        let roundTripped = try JSONDecoder().decode(
+            EarnedSampleReporter.RetryEntry.self,
+            from: JSONEncoder().encode(entry)
+        )
+        let legacyQueue = try JSONDecoder().decode(
+            [EarnedSampleReporter.RetryEntry].self,
+            from: Data("""
+            [{"deviceID":"b21411cb-63a5-4489-bc68-bf8ac26ee15b","usageDate":"2026-07-13","timezone":"America/New_York","thresholdMinutes":20,"estimatedMinutes":20,"observedAt":"2026-07-13T12:05:00Z"}]
+            """.utf8)
+        )
+
+        XCTAssertEqual(roundTripped, entry)
+        XCTAssertEqual(roundTripped.generationArmedAt, armedAt)
+        XCTAssertEqual(roundTripped.generationOffsetMinutes, 15)
+        XCTAssertEqual(legacyQueue.count, 1)
+        XCTAssertNil(legacyQueue[0].generationArmedAt)
+        XCTAssertNil(legacyQueue[0].generationOffsetMinutes)
     }
 
     func test_enqueueRetry_multipleEntries_accumulatesOrdered() {
@@ -348,6 +412,30 @@ final class EarnedSampleReporterTests: XCTestCase {
         XCTAssertFalse(decision.shouldMutateLocalEstimate)
         XCTAssertFalse(decision.shouldApplyLocalShield)
         XCTAssertEqual(decision.thresholdMinutes, 300)
+    }
+
+    func test_plausibleThresholdReportsAndPermitsLocalSideEffects() {
+        let decision = EarnedSampleReporter.thresholdHandlingDecision(
+            thresholdMinutes: 20,
+            isPlausible: true,
+            localReconciliationAvailable: true
+        )
+
+        XCTAssertTrue(decision.shouldReport)
+        XCTAssertTrue(decision.shouldMutateLocalEstimate)
+        XCTAssertTrue(decision.shouldApplyLocalShield)
+    }
+
+    func test_implausibleThresholdDisablesAllSideEffects() {
+        let decision = EarnedSampleReporter.thresholdHandlingDecision(
+            thresholdMinutes: 120,
+            isPlausible: false,
+            localReconciliationAvailable: true
+        )
+
+        XCTAssertFalse(decision.shouldReport)
+        XCTAssertFalse(decision.shouldMutateLocalEstimate)
+        XCTAssertFalse(decision.shouldApplyLocalShield)
     }
 
     func test_newSampleIsDurablyQueuedBeforeAuthorizationCheckAndKeepsDevicePartition() async {

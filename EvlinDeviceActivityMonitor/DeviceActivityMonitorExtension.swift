@@ -447,6 +447,26 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             rawThresholdMinutes: n,
             runningOffsetMinutes: offset
         )
+        let callbackAt = Date()
+        let plausibility = EarnedThresholdPlausibility.evaluate(
+            generation: generation,
+            adjustedEstimateMinutes: adjustedN,
+            callbackAt: callbackAt
+        )
+        guard plausibility.isPlausible else {
+            let ts = ISO8601DateFormatter().string(from: callbackAt)
+            _ = performIfEarnedGenerationActive(
+                generation,
+                mutationKeys: ["evlin.earned.implausibleThreshold"]
+            ) {
+                defaults?.set(
+                    "\(ts) event=\(eventName) activity=\(activity.rawValue) raw=\(n) adjusted=\(adjustedN) offset=\(offset) maximum=\(String(describing: plausibility.maximumTrusted))",
+                    forKey: "evlin.earned.implausibleThreshold"
+                )
+            }
+            return
+        }
+        guard let generationArmedAt = generation.armedAt else { return }
         guard earnedGenerationIsActive(generation) else { return }
         let localReconciliation = earnedStore.recordLocalThresholdEstimate(
             adjustedN,
@@ -455,10 +475,11 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         )
         let decision = EarnedSampleReporter.thresholdHandlingDecision(
             thresholdMinutes: adjustedN,
+            isPlausible: plausibility.isPlausible,
             localReconciliationAvailable: localReconciliation == .reconciled
         )
 
-        let ts = ISO8601DateFormatter().string(from: Date())
+        let ts = ISO8601DateFormatter().string(from: callbackAt)
         _ = performIfEarnedGenerationActive(
             generation,
             mutationKeys: ["evlin.earned.lastThreshold"]
@@ -478,7 +499,10 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             usageDate: usageDate,
             timezone: tz,
             thresholdMinutes: adjustedN,
-            estimatedMinutes: adjustedN
+            estimatedMinutes: adjustedN,
+            observedAt: ts,
+            generationArmedAt: generationArmedAt,
+            generationOffsetMinutes: offset
         )
         let sampleQueued = EarnedSampleReporter.enqueueRetry(newSample)
         if let baseURL = ExtensionConfig.baseURL, sampleQueued {
@@ -545,7 +569,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         if EarnedSampleReporter.backendVetoesSelfLock(
             lastBackendRemaining: earnedStore.backendRemainingAtLastSync,
             lastBackendSyncAt: earnedStore.lastBackendSyncAt,
-            now: Date()
+            now: callbackAt
         ) {
             _ = performIfEarnedGenerationActive(generation) {
                 emitEvent(kind: .drop, source: .earnedPool, app: "device-wide",

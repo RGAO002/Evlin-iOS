@@ -191,10 +191,12 @@ enum EarnedSampleReporter {
         timezone: String,
         thresholdMinutes: Int,
         estimatedMinutes: Int,
-        observedAt: String
+        observedAt: String,
+        generationArmedAt: Date? = nil,
+        generationOffsetMinutes: Int? = nil
     ) -> [String: Any] {
         let clientSampleID = "earned:\(deviceID.uuidString.lowercased()):\(usageDate):t\(thresholdMinutes)"
-        return [
+        var body: [String: Any] = [
             "device_id":         deviceID.uuidString,
             "usage_date":        usageDate,
             "timezone":          timezone,
@@ -205,6 +207,11 @@ enum EarnedSampleReporter {
             "observed_at":       observedAt,
             "client_sample_id":  clientSampleID,
         ]
+        if let generationArmedAt, let generationOffsetMinutes {
+            body["generation_armed_at"] = ISO8601DateFormatter().string(from: generationArmedAt)
+            body["generation_offset_minutes"] = generationOffsetMinutes
+        }
+        return body
     }
 
     /// Build the backend request for POST /child/earned-time/sample.
@@ -235,6 +242,8 @@ enum EarnedSampleReporter {
         timezone: String,
         thresholdMinutes: Int,
         estimatedMinutes: Int,
+        generationArmedAt: Date? = nil,
+        generationOffsetMinutes: Int? = nil,
         suiteName: String = "group.com.evlin.ios",
         authorizationIsCurrent: @escaping () -> Bool = { true },
         requestData: @escaping (URLRequest) async throws -> (Data, URLResponse) = {
@@ -248,7 +257,9 @@ enum EarnedSampleReporter {
             timezone: timezone,
             thresholdMinutes: thresholdMinutes,
             estimatedMinutes: estimatedMinutes,
-            observedAt: observedAt
+            observedAt: observedAt,
+            generationArmedAt: generationArmedAt,
+            generationOffsetMinutes: generationOffsetMinutes
         )
         guard enqueueRetry(entry, suiteName: suiteName) else {
             recordDebug("enqueue durability_failed t\(thresholdMinutes)", suiteName: suiteName)
@@ -260,7 +271,9 @@ enum EarnedSampleReporter {
             timezone: timezone,
             thresholdMinutes: thresholdMinutes,
             estimatedMinutes: estimatedMinutes,
-            observedAt: observedAt
+            observedAt: observedAt,
+            generationArmedAt: entry.generationArmedAt,
+            generationOffsetMinutes: entry.generationOffsetMinutes
         )
 
         guard let req = try? makeSampleRequest(
@@ -321,7 +334,9 @@ enum EarnedSampleReporter {
                 timezone: entry.timezone,
                 thresholdMinutes: entry.thresholdMinutes,
                 estimatedMinutes: entry.estimatedMinutes,
-                observedAt: entry.observedAt
+                observedAt: entry.observedAt,
+                generationArmedAt: entry.generationArmedAt,
+                generationOffsetMinutes: entry.generationOffsetMinutes
             )
             guard let req = try? makeSampleRequest(
                 baseURL: baseURL,
@@ -394,6 +409,53 @@ enum EarnedSampleReporter {
         let thresholdMinutes: Int
         let estimatedMinutes: Int
         let observedAt: String
+        let generationArmedAt: Date?
+        let generationOffsetMinutes: Int?
+
+        init(
+            deviceID: UUID,
+            usageDate: String,
+            timezone: String,
+            thresholdMinutes: Int,
+            estimatedMinutes: Int,
+            observedAt: String,
+            generationArmedAt: Date? = nil,
+            generationOffsetMinutes: Int? = nil
+        ) {
+            self.deviceID = deviceID
+            self.usageDate = usageDate
+            self.timezone = timezone
+            self.thresholdMinutes = thresholdMinutes
+            self.estimatedMinutes = estimatedMinutes
+            self.observedAt = observedAt
+            self.generationArmedAt = generationArmedAt
+            self.generationOffsetMinutes = generationOffsetMinutes
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case deviceID
+            case usageDate
+            case timezone
+            case thresholdMinutes
+            case estimatedMinutes
+            case observedAt
+            case generationArmedAt
+            case generationOffsetMinutes
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            self.init(
+                deviceID: try container.decode(UUID.self, forKey: .deviceID),
+                usageDate: try container.decode(String.self, forKey: .usageDate),
+                timezone: try container.decode(String.self, forKey: .timezone),
+                thresholdMinutes: try container.decode(Int.self, forKey: .thresholdMinutes),
+                estimatedMinutes: try container.decode(Int.self, forKey: .estimatedMinutes),
+                observedAt: try container.decode(String.self, forKey: .observedAt),
+                generationArmedAt: try container.decodeIfPresent(Date.self, forKey: .generationArmedAt),
+                generationOffsetMinutes: try container.decodeIfPresent(Int.self, forKey: .generationOffsetMinutes)
+            )
+        }
     }
 
     static func makeRetryEntry(
@@ -402,7 +464,9 @@ enum EarnedSampleReporter {
         timezone: String,
         thresholdMinutes: Int,
         estimatedMinutes: Int,
-        observedAt: String = ISO8601DateFormatter().string(from: Date())
+        observedAt: String = ISO8601DateFormatter().string(from: Date()),
+        generationArmedAt: Date? = nil,
+        generationOffsetMinutes: Int? = nil
     ) -> RetryEntry {
         RetryEntry(
             deviceID: deviceID,
@@ -410,7 +474,9 @@ enum EarnedSampleReporter {
             timezone: timezone,
             thresholdMinutes: thresholdMinutes,
             estimatedMinutes: estimatedMinutes,
-            observedAt: observedAt
+            observedAt: observedAt,
+            generationArmedAt: generationArmedAt,
+            generationOffsetMinutes: generationOffsetMinutes
         )
     }
 
@@ -614,13 +680,14 @@ enum EarnedSampleReporter {
 
     static func thresholdHandlingDecision(
         thresholdMinutes: Int,
+        isPlausible: Bool = true,
         localReconciliationAvailable: Bool
     ) -> ThresholdHandlingDecision {
         ThresholdHandlingDecision(
             thresholdMinutes: thresholdMinutes,
-            shouldReport: true,
-            shouldMutateLocalEstimate: localReconciliationAvailable,
-            shouldApplyLocalShield: localReconciliationAvailable
+            shouldReport: isPlausible,
+            shouldMutateLocalEstimate: isPlausible && localReconciliationAvailable,
+            shouldApplyLocalShield: isPlausible && localReconciliationAvailable
         )
     }
 
