@@ -113,7 +113,7 @@ nonisolated enum AutomaticLockAggregateState: Equatable {
 }
 
 /// The only side effects the Profile lock button is allowed to request.
-nonisolated enum ManualLockButtonIntent: Equatable, Sendable {
+nonisolated enum ManualLockButtonIntent: String, Codable, Equatable, Sendable {
     case lockSelectedForChild
     case unlockSelectedForChild
 
@@ -127,7 +127,8 @@ nonisolated enum ManualLockButtonIntent: Equatable, Sendable {
         switch state {
         case .unlocked: return .lockSelectedForChild
         case .locked: return .unlockSelectedForChild
-        case .mixed, .pending: return nil
+        case .mixed: return .unlockSelectedForChild
+        case .pending: return nil
         }
     }
 }
@@ -162,12 +163,14 @@ nonisolated struct ManualLockOperationStatus: Equatable, Sendable {
     }
 
     var noteMessage: String? {
-        guard remainingDeviceCount > 0 else { return nil }
-        let noun = remainingDeviceCount == 1 ? "device" : "devices"
-        let pronoun = remainingDeviceCount == 1 ? "it" : "they"
-        let verb = remainingDeviceCount == 1 ? "checks" : "check"
-        return "Queued - \(remainingDeviceCount) \(noun) will update when \(pronoun) next \(verb) in."
+        guard needsUpdateDeviceCount > 0 else { return nil }
+        let noun = needsUpdateDeviceCount == 1 ? "device" : "devices"
+        let verb = needsUpdateDeviceCount == 1 ? "needs" : "need"
+        return "\(needsUpdateDeviceCount) \(noun) still \(verb) update."
     }
+
+    var needsUpdateDeviceCount: Int { failedDeviceCount + remainingDeviceCount }
+    var isComplete: Bool { failedDeviceCount == 0 && remainingDeviceCount == 0 }
 
     static func from(
         expectedDeviceIDs: [UUID],
@@ -208,6 +211,102 @@ nonisolated struct ManualLockOperationStatus: Equatable, Sendable {
     ) -> [UUID] {
         var seen = Set<UUID>()
         return (displayed + receipts).filter { seen.insert($0).inserted }
+    }
+}
+
+nonisolated struct ManualLockOperationReceipt: Codable, Equatable, Sendable {
+    let deviceID: UUID
+    let commandID: UUID
+}
+
+/// Durable intent and command identity for one child-wide manual lock operation.
+nonisolated struct ManualLockOperation: Codable, Equatable, Sendable {
+    let childProfileID: UUID
+    let intent: ManualLockButtonIntent
+    let expectedDeviceIDs: [UUID]
+    let receipts: [ManualLockOperationReceipt]
+
+    init(
+        childProfileID: UUID,
+        intent: ManualLockButtonIntent,
+        expectedDeviceIDs: [UUID],
+        receipts: [ManualLockOperationReceipt]
+    ) {
+        var seenReceipts = Set<UUID>()
+        let uniqueReceipts = receipts.filter { seenReceipts.insert($0.deviceID).inserted }
+        self.childProfileID = childProfileID
+        self.intent = intent
+        self.expectedDeviceIDs = ManualLockOperationStatus.expectedDeviceIDs(
+            displayed: expectedDeviceIDs,
+            receipts: uniqueReceipts.map(\.deviceID)
+        )
+        self.receipts = uniqueReceipts
+    }
+}
+
+nonisolated enum ManualLockOperationStore {
+    private static let keyPrefix = "evlin.pendingManualLockOperation."
+
+    static func load(
+        childProfileID: UUID,
+        defaults: UserDefaults = .standard
+    ) -> ManualLockOperation? {
+        guard let data = defaults.data(forKey: key(childProfileID)) else { return nil }
+        return try? JSONDecoder().decode(ManualLockOperation.self, from: data)
+    }
+
+    static func save(
+        _ operation: ManualLockOperation,
+        defaults: UserDefaults = .standard
+    ) {
+        guard let data = try? JSONEncoder().encode(operation) else { return }
+        defaults.set(data, forKey: key(operation.childProfileID))
+    }
+
+    static func clear(
+        childProfileID: UUID,
+        defaults: UserDefaults = .standard
+    ) {
+        defaults.removeObject(forKey: key(childProfileID))
+    }
+
+    private static func key(_ childProfileID: UUID) -> String {
+        keyPrefix + childProfileID.uuidString.lowercased()
+    }
+}
+
+/// Pure projection used after the initial request and on every later refresh.
+nonisolated struct ManualLockOperationReconciliation: Equatable, Sendable {
+    let status: ManualLockOperationStatus
+    let displayState: ManualLockAggregateState
+    let retryIntent: ManualLockButtonIntent?
+    let shouldClearPersistence: Bool
+
+    static func evaluate(
+        operation: ManualLockOperation,
+        ackByDevice: [UUID: ManualLockAckOutcome],
+        manualLockedByDevice: [UUID: Bool],
+        aggregateState: ManualLockAggregateState
+    ) -> ManualLockOperationReconciliation {
+        let status = ManualLockOperationStatus.reconciled(
+            expectedDeviceIDs: operation.expectedDeviceIDs,
+            ackByDevice: ackByDevice,
+            manualLockedByDevice: manualLockedByDevice,
+            wantsLocked: operation.intent.wantsLocked
+        )
+        let complete = status.isComplete
+        let displayState: ManualLockAggregateState
+        if complete {
+            displayState = aggregateState
+        } else {
+            displayState = aggregateState == .mixed ? .mixed : .pending
+        }
+        return ManualLockOperationReconciliation(
+            status: status,
+            displayState: displayState,
+            retryIntent: complete ? nil : operation.intent,
+            shouldClearPersistence: complete
+        )
     }
 }
 
@@ -257,7 +356,14 @@ nonisolated struct ManualLockButtonPresentation: Equatable {
                 tone: .unlock,
                 allowsTap: true
             )
-        case .mixed, .pending:
+        case .mixed:
+            return ManualLockButtonPresentation(
+                title: "Clear manual locks on \(childName)'s devices",
+                systemImage: "lock.open",
+                tone: .unlock,
+                allowsTap: true
+            )
+        case .pending:
             return updating(childName: childName)
         }
     }

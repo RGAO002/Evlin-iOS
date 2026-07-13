@@ -164,6 +164,11 @@ final class SelectedSetClientTests: XCTestCase {
             ManualLockButtonIntent.from(state: .locked, retryIntent: nil),
             .unlockSelectedForChild
         )
+        XCTAssertEqual(
+            ManualLockButtonIntent.from(state: .mixed, retryIntent: nil),
+            .unlockSelectedForChild,
+            "Mixed state without persisted intent must expose safe manual-source clearing"
+        )
     }
 
     func test_manualButtonIntent_pendingUsesRetryIntent_withoutAnyOtherOperation() {
@@ -251,7 +256,7 @@ final class SelectedSetClientTests: XCTestCase {
         XCTAssertEqual(status.errorMessage, "1 device couldn't apply the update.")
         XCTAssertEqual(
             status.noteMessage,
-            "Queued - 1 device will update when it next checks in."
+            "2 devices still need update."
         )
     }
 
@@ -278,6 +283,103 @@ final class SelectedSetClientTests: XCTestCase {
         XCTAssertNil(complete.noteMessage)
     }
 
+    func test_manualOperation_persistsIntentExpectedDevicesAndCommandReceiptsByChild() throws {
+        let suiteName = "ManualLockOperationTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let childID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+        let otherChildID = UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
+        let phoneID = UUID(uuidString: "00000000-0000-0000-0000-000000000101")!
+        let tabletID = UUID(uuidString: "00000000-0000-0000-0000-000000000102")!
+        let operation = ManualLockOperation(
+            childProfileID: childID,
+            intent: .unlockSelectedForChild,
+            expectedDeviceIDs: [phoneID, tabletID],
+            receipts: [
+                ManualLockOperationReceipt(deviceID: phoneID, commandID: UUID()),
+                ManualLockOperationReceipt(deviceID: tabletID, commandID: UUID()),
+            ]
+        )
+
+        ManualLockOperationStore.save(operation, defaults: defaults)
+
+        XCTAssertEqual(
+            ManualLockOperationStore.load(childProfileID: childID, defaults: defaults),
+            operation
+        )
+        XCTAssertNil(
+            ManualLockOperationStore.load(childProfileID: otherChildID, defaults: defaults)
+        )
+    }
+
+    func test_manualOperationReconciliation_clearsOnlyAfterAckAndDesiredSnapshotForAllDevices() {
+        let childID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+        let phoneID = UUID(uuidString: "00000000-0000-0000-0000-000000000101")!
+        let tabletID = UUID(uuidString: "00000000-0000-0000-0000-000000000102")!
+        let operation = ManualLockOperation(
+            childProfileID: childID,
+            intent: .lockSelectedForChild,
+            expectedDeviceIDs: [phoneID, tabletID],
+            receipts: []
+        )
+        let confirmed = [phoneID: ManualLockAckOutcome.confirmed, tabletID: .confirmed]
+
+        let missingSnapshot = ManualLockOperationReconciliation.evaluate(
+            operation: operation,
+            ackByDevice: confirmed,
+            manualLockedByDevice: [phoneID: true],
+            aggregateState: .pending
+        )
+        XCTAssertFalse(missingSnapshot.shouldClearPersistence)
+        XCTAssertEqual(missingSnapshot.status.remainingDeviceCount, 1)
+        XCTAssertEqual(missingSnapshot.retryIntent, .lockSelectedForChild)
+
+        let missingAck = ManualLockOperationReconciliation.evaluate(
+            operation: operation,
+            ackByDevice: [phoneID: .confirmed, tabletID: .pending],
+            manualLockedByDevice: [phoneID: true, tabletID: true],
+            aggregateState: .locked
+        )
+        XCTAssertFalse(missingAck.shouldClearPersistence)
+        XCTAssertEqual(missingAck.status.remainingDeviceCount, 1)
+
+        let converged = ManualLockOperationReconciliation.evaluate(
+            operation: operation,
+            ackByDevice: confirmed,
+            manualLockedByDevice: [phoneID: true, tabletID: true],
+            aggregateState: .locked
+        )
+        XCTAssertTrue(converged.shouldClearPersistence)
+        XCTAssertNil(converged.retryIntent)
+        XCTAssertEqual(converged.displayState, .locked)
+    }
+
+    func test_manualOperationReconciliation_failedDeviceRemainsPersistedAndRetryableAfterRelaunch() {
+        let childID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+        let phoneID = UUID(uuidString: "00000000-0000-0000-0000-000000000101")!
+        let operation = ManualLockOperation(
+            childProfileID: childID,
+            intent: .unlockSelectedForChild,
+            expectedDeviceIDs: [phoneID],
+            receipts: [
+                ManualLockOperationReceipt(deviceID: phoneID, commandID: UUID())
+            ]
+        )
+
+        let result = ManualLockOperationReconciliation.evaluate(
+            operation: operation,
+            ackByDevice: [phoneID: .failed],
+            manualLockedByDevice: [phoneID: false],
+            aggregateState: .unlocked
+        )
+
+        XCTAssertFalse(result.shouldClearPersistence)
+        XCTAssertEqual(result.status.failedDeviceCount, 1)
+        XCTAssertEqual(result.status.noteMessage, "1 device still needs update.")
+        XCTAssertEqual(result.retryIntent, .unlockSelectedForChild)
+        XCTAssertEqual(result.displayState, .pending)
+    }
+
     // MARK: - Child-wide button presentation
 
     func test_manualButtonPresentation_unlocked_rendersGreenLockAction() {
@@ -298,15 +400,22 @@ final class SelectedSetClientTests: XCTestCase {
         XCTAssertTrue(presentation.allowsTap)
     }
 
-    func test_manualButtonPresentation_mixedAndPending_renderDisabledUpdatingState() {
-        for state in [ManualLockAggregateState.mixed, .pending] {
-            let presentation = ManualLockButtonPresentation.from(state: state, childName: "Sam")
+    func test_manualButtonPresentation_pending_rendersDisabledUpdatingState() {
+        let presentation = ManualLockButtonPresentation.from(state: .pending, childName: "Sam")
 
-            XCTAssertEqual(presentation.title, "Updating Sam's devices")
-            XCTAssertEqual(presentation.systemImage, "arrow.triangle.2.circlepath")
-            XCTAssertEqual(presentation.tone, .updating)
-            XCTAssertFalse(presentation.allowsTap)
-        }
+        XCTAssertEqual(presentation.title, "Updating Sam's devices")
+        XCTAssertEqual(presentation.systemImage, "arrow.triangle.2.circlepath")
+        XCTAssertEqual(presentation.tone, .updating)
+        XCTAssertFalse(presentation.allowsTap)
+    }
+
+    func test_manualButtonPresentation_mixedWithoutIntent_allowsSafeClearAction() {
+        let presentation = ManualLockButtonPresentation.from(state: .mixed, childName: "Sam")
+
+        XCTAssertEqual(presentation.title, "Clear manual locks on Sam's devices")
+        XCTAssertEqual(presentation.systemImage, "lock.open")
+        XCTAssertEqual(presentation.tone, .unlock)
+        XCTAssertTrue(presentation.allowsTap)
     }
 
     func test_manualButtonPresentation_requestActive_disablesRetry() {

@@ -888,3 +888,47 @@ actor ActiveLockStore {
         return (expiredShields, expiredBlocks)
     }
 }
+
+/// Shared by the notification-service wire mapper and its executable app tests.
+/// Top-level command provenance has the same precedence as `CommandPoller`.
+enum NSECommandSourceResolver {
+    static func unlockSources(topLevel: [String]?, target: [String]?) -> [String]? {
+        topLevel ?? target
+    }
+
+    static func shieldSource(from wireValue: String) -> ShieldSource {
+        switch wireValue {
+        case "earned_time": return .earnedTime
+        case "task_pause": return .taskPause
+        default: return .manual
+        }
+    }
+}
+
+/// Source-aware unshield mutation used by the NSE. A non-nil source list is a
+/// scoped command; legacy commands without provenance retain whole-record semantics.
+enum NSEUnshieldCommandApplier {
+    enum Outcome: Equatable {
+        case confirmed
+    }
+
+    static func apply(
+        _ command: LockCommand,
+        recordKey: String,
+        store: ActiveLockStore = .shared
+    ) async -> Outcome? {
+        guard command.action == .unshield else { return nil }
+
+        if let wireSources = command.unlockSources {
+            for wireSource in wireSources {
+                await store.removeSource(
+                    NSECommandSourceResolver.shieldSource(from: wireSource),
+                    fromRecordKey: recordKey
+                )
+            }
+        } else {
+            _ = await store.removeShield(recordKey: recordKey)
+        }
+        return .confirmed
+    }
+}

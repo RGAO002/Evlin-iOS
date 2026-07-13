@@ -128,7 +128,10 @@ enum NSELockApplier {
         case .unshield:
             // Idempotent: removing an absent record is still "unlocked" from the
             // parent's intent, so we always report success.
-            _ = await ActiveLockStore.shared.removeShield(recordKey: unshieldRecordKey(from: cmd))
+            guard await NSEUnshieldCommandApplier.apply(
+                cmd,
+                recordKey: unshieldRecordKey(from: cmd)
+            ) == .confirmed else { return nil }
             return Outcome(verb: "unshield", displayName: cmd.target.targetDisplay ?? "App")
         case .unblock:
             guard let bundleID = cmd.target.bundleID?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -373,6 +376,7 @@ private struct NSEWireCommand: Decodable {
     let target: NSEWireTarget
     let duration_minutes: Int?
     let issued_at: String
+    let unlock_sources: [String]?
 
     static func lockCommand(from poll: NSEWireCommand) -> LockCommand {
         let tier = poll.tier.flatMap(ShieldTier.init(rawValue:))
@@ -394,7 +398,11 @@ private struct NSEWireCommand: Decodable {
             catalogTokenDataBase64: poll.target.catalog_token_data_base64,
             catalogCategoryTokenDataBase64: poll.target.catalog_category_token_data_base64,
             catalogApplicationTokenDataBase64s: poll.target.applications ?? [],
-            catalogCategoryTokenDataBase64s: poll.target.applicationCategories ?? []
+            catalogCategoryTokenDataBase64s: poll.target.applicationCategories ?? [],
+            unlockSources: NSECommandSourceResolver.unlockSources(
+                topLevel: poll.unlock_sources,
+                target: poll.target.unlock_sources
+            )
         )
         let action = CommandAction(rawValue: poll.action) ?? .shield
         let issued = ISO8601DateFormatter().date(from: poll.issued_at) ?? Date()
@@ -426,6 +434,7 @@ private struct NSEWireTarget: Decodable {
     let catalog_category_token_data_base64: String?
     let applications: [String]?
     let applicationCategories: [String]?
+    let unlock_sources: [String]?
 
     private enum CodingKeys: String, CodingKey {
         case bundle_id
@@ -444,6 +453,7 @@ private struct NSEWireTarget: Decodable {
         case applications
         case applicationCategories
         case application_categories
+        case unlock_sources
         case canonicalCatalogTokenDataBase64 = "catalog_token_data_base64"
         case canonicalCatalogCategoryTokenDataBase64 = "catalog_category_token_data_base64"
         case legacyTokenDataBase64 = "token_data_base64"
@@ -476,6 +486,7 @@ private struct NSEWireTarget: Decodable {
         applications = try c.decodeIfPresent([String].self, forKey: .applications)
         applicationCategories = try c.decodeIfPresent([String].self, forKey: .applicationCategories)
             ?? c.decodeIfPresent([String].self, forKey: .application_categories)
+        unlock_sources = try c.decodeIfPresent([String].self, forKey: .unlock_sources)
     }
 }
 
