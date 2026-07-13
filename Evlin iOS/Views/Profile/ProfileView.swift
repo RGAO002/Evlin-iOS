@@ -40,15 +40,9 @@ struct ProfileRefreshScope: Equatable {
     )
 }
 
-private enum ProfileLockAckOutcome: Equatable, Sendable {
-    case confirmed
-    case failed
-    case pending
-}
-
 private struct ProfileLockCommandAck: Sendable {
     let deviceID: UUID
-    let outcome: ProfileLockAckOutcome
+    let outcome: ManualLockAckOutcome
 }
 
 private struct ProfileDeviceLockSnapshot: Sendable {
@@ -183,7 +177,17 @@ struct ProfileView: View {
     }
 
     private var manualLockPresentation: ManualLockButtonPresentation {
-        ManualLockButtonPresentation.from(state: manualLockState, childName: displayChild.name)
+        ManualLockButtonPresentation.from(
+            state: manualLockState,
+            childName: displayChild.name,
+            requestActive: lockBusy,
+            retryIntent: pendingManualLockIntent
+        )
+    }
+
+    private var pendingManualLockIntent: ManualLockButtonIntent? {
+        guard let pendingManualLockWant else { return nil }
+        return pendingManualLockWant ? .lockSelectedForChild : .unlockSelectedForChild
     }
 
     private var manualLockButtonBackground: AnyShapeStyle {
@@ -876,14 +880,14 @@ struct ProfileView: View {
             return
         }
 
-        let wantLocked: Bool
-        switch manualLockState {
-        case .unlocked: wantLocked = true
-        case .locked: wantLocked = false
-        case .mixed, .pending: return
-        }
+        guard let intent = ManualLockButtonIntent.from(
+            state: manualLockState,
+            retryIntent: pendingManualLockIntent
+        ) else { return }
+        let wantLocked = intent.wantsLocked
 
         let previousState = manualLockState
+        let previousPendingManualLockWant = pendingManualLockWant
         lockBusy = true
         lockError = nil
         lockNote = nil
@@ -892,12 +896,13 @@ struct ProfileView: View {
 
         let response: APIClient.ChildSelectedSetResponse
         do {
-            if wantLocked {
+            switch intent {
+            case .lockSelectedForChild:
                 response = try await apiClient.lockSelectedForChild(
                     familyID: famID,
                     childProfileID: pid
                 )
-            } else {
+            case .unlockSelectedForChild:
                 response = try await apiClient.unlockSelectedForChild(
                     familyID: famID,
                     childProfileID: pid
@@ -909,7 +914,7 @@ struct ProfileView: View {
             } else {
                 lockError = "Couldn't \(wantLocked ? "lock" : "unlock"): \(String(describing: error))"
             }
-            pendingManualLockWant = nil
+            pendingManualLockWant = previousPendingManualLockWant
             manualLockState = previousState
             lockBusy = false
             return
@@ -920,19 +925,20 @@ struct ProfileView: View {
             applyListIDIfNeeded(localReceipt.list_id.uuidString)
         }
 
-        let targetDeviceIDs = uniqueDeviceIDs(
-            displayedDeviceIDs + response.devices.map(\.child_device_id)
+        let targetDeviceIDs = ManualLockOperationStatus.expectedDeviceIDs(
+            displayed: displayedDeviceIDs,
+            receipts: response.devices.map(\.child_device_id)
         )
-        let acknowledgements = await waitForCommandAcknowledgements(response.devices)
+        let ackByDevice = await waitForCommandAcknowledgements(
+            response.devices,
+            expectedDeviceIDs: targetDeviceIDs
+        )
         let snapshots = await fetchDeviceLockStates(
             familyID: famID,
             deviceIDs: targetDeviceIDs
         )
         let reducedState = applyLockSnapshots(snapshots, deviceIDs: targetDeviceIDs)
 
-        let ackByDevice = Dictionary(uniqueKeysWithValues: acknowledgements.map {
-            ($0.deviceID, $0.outcome)
-        })
         let manualPairs: [(UUID, Bool)] = snapshots.compactMap { snapshot in
             guard let isManualLocked = ManualLockAggregateState.isManualLocked(
                 coveringSources: snapshot.state?.covering_sources
@@ -940,23 +946,19 @@ struct ProfileView: View {
             return (snapshot.deviceID, isManualLocked)
         }
         let manualByDevice = Dictionary(uniqueKeysWithValues: manualPairs)
-        let failedCount = targetDeviceIDs.filter { ackByDevice[$0] == .failed }.count
-        let remainingCount = targetDeviceIDs.filter { deviceID in
-            guard ackByDevice[deviceID] != .failed else { return false }
-            return ackByDevice[deviceID] != .confirmed || manualByDevice[deviceID] != wantLocked
-        }.count
+        let status = ManualLockOperationStatus.reconciled(
+            expectedDeviceIDs: targetDeviceIDs,
+            ackByDevice: ackByDevice,
+            manualLockedByDevice: manualByDevice,
+            wantsLocked: wantLocked
+        )
+        applyLockOperationStatus(status)
 
-        if failedCount > 0 {
-            let noun = failedCount == 1 ? "device" : "devices"
-            lockError = "\(failedCount) \(noun) couldn't apply the update."
-        }
-        if remainingCount > 0 {
+        if status.failedDeviceCount > 0 || status.remainingDeviceCount > 0 {
             pendingManualLockWant = wantLocked
             manualLockState = reducedState == .mixed ? .mixed : .pending
-            lockNote = queuedLockNote(remainingDeviceCount: remainingCount)
         } else {
             pendingManualLockWant = nil
-            lockNote = nil
             manualLockState = reducedState
         }
 
@@ -977,10 +979,25 @@ struct ProfileView: View {
         let snapshots = await fetchDeviceLockStates(familyID: famID, deviceIDs: deviceIDs)
         let reducedState = applyLockSnapshots(snapshots, deviceIDs: deviceIDs)
         if let wantLocked = pendingManualLockWant {
-            let desiredState: ManualLockAggregateState = wantLocked ? .locked : .unlocked
-            if reducedState == desiredState {
+            let manualPairs: [(UUID, Bool)] = snapshots.compactMap { snapshot in
+                guard let isManualLocked = ManualLockAggregateState.isManualLocked(
+                    coveringSources: snapshot.state?.covering_sources
+                ) else { return nil }
+                return (snapshot.deviceID, isManualLocked)
+            }
+            let manualByDevice = Dictionary(uniqueKeysWithValues: manualPairs)
+            let remainingCount = deviceIDs.filter {
+                manualByDevice[$0] != wantLocked
+            }.count
+            applyLockOperationStatus(
+                ManualLockOperationStatus(
+                    failedDeviceCount: 0,
+                    remainingDeviceCount: remainingCount
+                )
+            )
+
+            if remainingCount == 0 {
                 pendingManualLockWant = nil
-                lockNote = nil
             } else {
                 manualLockState = reducedState == .mixed ? .mixed : .pending
             }
@@ -1011,46 +1028,56 @@ struct ProfileView: View {
     }
 
     private func waitForCommandAcknowledgements(
-        _ receipts: [APIClient.ChildSelectedSetDeviceReceipt]
-    ) async -> [ProfileLockCommandAck] {
-        await withTaskGroup(of: ProfileLockCommandAck.self) { group in
-            for receipt in receipts {
-                group.addTask { @MainActor in
-                    let outcome = await waitForCommandAcknowledgement(
-                        commandID: receipt.command_id
-                    )
-                    return ProfileLockCommandAck(
-                        deviceID: receipt.child_device_id,
-                        outcome: outcome
-                    )
-                }
-            }
-
-            var acknowledgements: [ProfileLockCommandAck] = []
-            for await acknowledgement in group {
-                acknowledgements.append(acknowledgement)
-            }
-            return acknowledgements
+        _ receipts: [APIClient.ChildSelectedSetDeviceReceipt],
+        expectedDeviceIDs: [UUID]
+    ) async -> [UUID: ManualLockAckOutcome] {
+        var commandByDevice: [UUID: UUID] = [:]
+        for receipt in receipts where commandByDevice[receipt.child_device_id] == nil {
+            commandByDevice[receipt.child_device_id] = receipt.command_id
         }
-    }
+        var ackByDevice = Dictionary(
+            uniqueKeysWithValues: expectedDeviceIDs.map { ($0, ManualLockAckOutcome.pending) }
+        )
 
-    private func waitForCommandAcknowledgement(commandID: UUID) async -> ProfileLockAckOutcome {
         for attempt in 0..<6 {
-            if let ack = try? await apiClient.fetchRichAckStatus(commandID: commandID) {
-                switch ack.status {
-                case "confirmed", "confirmed_exact", "confirmed_fallback":
-                    return .confirmed
-                case "failed", "timeout", "pending_confirmation":
-                    return .failed
-                default:
-                    break
-                }
+            let waitingCommands: [(UUID, UUID)] = expectedDeviceIDs.compactMap { deviceID in
+                guard ackByDevice[deviceID] == .pending,
+                      let commandID = commandByDevice[deviceID]
+                else { return nil }
+                return (deviceID, commandID)
             }
+            let round = await withTaskGroup(of: ProfileLockCommandAck.self) { group in
+                for (deviceID, commandID) in waitingCommands {
+                    group.addTask { @MainActor in
+                        let status = try? await apiClient.fetchRichAckStatus(commandID: commandID)
+                        return ProfileLockCommandAck(
+                            deviceID: deviceID,
+                            outcome: status.map { ManualLockAckOutcome.from(status: $0.status) } ?? .pending
+                        )
+                    }
+                }
+
+                var acknowledgements: [ProfileLockCommandAck] = []
+                for await acknowledgement in group {
+                    acknowledgements.append(acknowledgement)
+                }
+                return acknowledgements
+            }
+            for acknowledgement in round {
+                ackByDevice[acknowledgement.deviceID] = acknowledgement.outcome
+            }
+
+            let status = ManualLockOperationStatus.from(
+                expectedDeviceIDs: expectedDeviceIDs,
+                ackByDevice: ackByDevice
+            )
+            applyLockOperationStatus(status)
+            if status.remainingDeviceCount == 0 { break }
             if attempt < 5 {
                 try? await Task.sleep(nanoseconds: 2_500_000_000)
             }
         }
-        return .pending
+        return ackByDevice
     }
 
     @discardableResult
@@ -1069,7 +1096,11 @@ struct ProfileView: View {
             expectedDeviceCount: deviceIDs.count,
             coveringSources: sources
         )
-        let fetchedStates = Array(snapshotByDevice.values)
+        let lockedByDevice = snapshotByDevice.mapValues(\.locked)
+        let automaticState = AutomaticLockAggregateState.reduce(
+            expectedDeviceIDs: deviceIDs,
+            lockedByDevice: lockedByDevice
+        )
 
         if let localDeviceID = UUID(uuidString: pairedChildID),
            let localState = snapshotByDevice[localDeviceID] {
@@ -1078,23 +1109,17 @@ struct ProfileView: View {
 
         withAnimation(.easeOut(duration: 0.18)) {
             manualLockState = reducedState
-            if !fetchedStates.isEmpty {
-                localStatus = fetchedStates.contains(where: \.locked) ? .locked : .unlocked
+            if let automaticState {
+                localStatus = automaticState == .locked ? .locked : .unlocked
             }
         }
         return reducedState
     }
 
-    private func uniqueDeviceIDs(_ ids: [UUID]) -> [UUID] {
-        var seen = Set<UUID>()
-        return ids.filter { seen.insert($0).inserted }
-    }
-
-    private func queuedLockNote(remainingDeviceCount: Int) -> String {
-        let noun = remainingDeviceCount == 1 ? "device" : "devices"
-        let pronoun = remainingDeviceCount == 1 ? "it" : "they"
-        let verb = remainingDeviceCount == 1 ? "checks" : "check"
-        return "Queued - \(remainingDeviceCount) \(noun) will update when \(pronoun) next \(verb) in."
+    @MainActor
+    private func applyLockOperationStatus(_ status: ManualLockOperationStatus) {
+        lockError = status.errorMessage
+        lockNote = status.noteMessage
     }
 
     /// B6 carry: when a lock-state or policy fetch surfaces the backend
@@ -1594,13 +1619,15 @@ struct ProfileView: View {
                         .font(.custom("Inter", size: 11).weight(.medium))
                         .foregroundStyle(Color.evError)
                         .frame(maxWidth: .infinity)
-                } else if let lockNote {
+                }
+                if let lockNote {
                     Text(lockNote)
                         .font(.custom("Inter", size: 11).weight(.medium))
                         .foregroundStyle(Color.evOnSurfaceVariant)
                         .frame(maxWidth: .infinity)
                         .multilineTextAlignment(.center)
-                } else if displayedChildDeviceIDs.isEmpty {
+                }
+                if lockError == nil, lockNote == nil, displayedChildDeviceIDs.isEmpty {
                     Text("Pair \(displayChild.name)'s device to lock")
                         .font(.custom("Inter", size: 11).weight(.medium))
                         .foregroundStyle(Color.evOnSurfaceVariant)

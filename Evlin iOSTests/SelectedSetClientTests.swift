@@ -112,6 +112,172 @@ final class SelectedSetClientTests: XCTestCase {
         )
     }
 
+    // MARK: - Complete child snapshot reduction
+
+    func test_automaticAggregate_completeUnlockedSnapshot_isUnlocked() {
+        let phoneID = UUID(uuidString: "00000000-0000-0000-0000-000000000101")!
+        let tabletID = UUID(uuidString: "00000000-0000-0000-0000-000000000102")!
+
+        XCTAssertEqual(
+            AutomaticLockAggregateState.reduce(
+                expectedDeviceIDs: [phoneID, tabletID],
+                lockedByDevice: [phoneID: false, tabletID: false]
+            ),
+            .unlocked
+        )
+    }
+
+    func test_automaticAggregate_completeSnapshotWithLockedDevice_isLocked() {
+        let phoneID = UUID(uuidString: "00000000-0000-0000-0000-000000000101")!
+        let tabletID = UUID(uuidString: "00000000-0000-0000-0000-000000000102")!
+
+        XCTAssertEqual(
+            AutomaticLockAggregateState.reduce(
+                expectedDeviceIDs: [phoneID, tabletID],
+                lockedByDevice: [phoneID: false, tabletID: true]
+            ),
+            .locked
+        )
+    }
+
+    func test_automaticAggregate_partialSnapshot_hasNoReplacementState() {
+        let phoneID = UUID(uuidString: "00000000-0000-0000-0000-000000000101")!
+        let tabletID = UUID(uuidString: "00000000-0000-0000-0000-000000000102")!
+
+        XCTAssertNil(
+            AutomaticLockAggregateState.reduce(
+                expectedDeviceIDs: [phoneID, tabletID],
+                lockedByDevice: [phoneID: true]
+            ),
+            "A partial refresh must preserve the previously displayed automatic status"
+        )
+    }
+
+    // MARK: - Child-wide operation planning
+
+    func test_manualButtonIntent_unlockedAndLocked_useOnlyChildSelectedSetRequests() {
+        XCTAssertEqual(
+            ManualLockButtonIntent.from(state: .unlocked, retryIntent: nil),
+            .lockSelectedForChild
+        )
+        XCTAssertEqual(
+            ManualLockButtonIntent.from(state: .locked, retryIntent: nil),
+            .unlockSelectedForChild
+        )
+    }
+
+    func test_manualButtonIntent_pendingUsesRetryIntent_withoutAnyOtherOperation() {
+        XCTAssertNil(ManualLockButtonIntent.from(state: .pending, retryIntent: nil))
+        XCTAssertEqual(
+            ManualLockButtonIntent.from(
+                state: .pending,
+                retryIntent: .lockSelectedForChild
+            ),
+            .lockSelectedForChild
+        )
+        XCTAssertEqual(
+            ManualLockButtonIntent.from(
+                state: .mixed,
+                retryIntent: .unlockSelectedForChild
+            ),
+            .unlockSelectedForChild
+        )
+    }
+
+    func test_manualOperationExpectedIDs_includeAllDisplayedAndReceiptDevices() {
+        let phoneID = UUID(uuidString: "00000000-0000-0000-0000-000000000101")!
+        let tabletID = UUID(uuidString: "00000000-0000-0000-0000-000000000102")!
+        let watchID = UUID(uuidString: "00000000-0000-0000-0000-000000000103")!
+
+        XCTAssertEqual(
+            ManualLockOperationStatus.expectedDeviceIDs(
+                displayed: [phoneID, tabletID, phoneID],
+                receipts: [tabletID, watchID]
+            ),
+            [phoneID, tabletID, watchID]
+        )
+    }
+
+    // MARK: - Child-wide acknowledgement progress
+
+    func test_ackOutcome_pendingConfirmation_staysPending() {
+        XCTAssertEqual(ManualLockAckOutcome.from(status: "pending_confirmation"), .pending)
+        XCTAssertEqual(ManualLockAckOutcome.from(status: "pending"), .pending)
+    }
+
+    func test_ackOutcome_onlyPermanentFailures_areFailed() {
+        XCTAssertEqual(ManualLockAckOutcome.from(status: "failed"), .failed)
+        XCTAssertEqual(ManualLockAckOutcome.from(status: "timeout"), .failed)
+        XCTAssertEqual(ManualLockAckOutcome.from(status: "confirmed_exact"), .confirmed)
+    }
+
+    func test_ackProgress_recomputesRemainingCountAfterEveryRound() {
+        let phoneID = UUID(uuidString: "00000000-0000-0000-0000-000000000101")!
+        let tabletID = UUID(uuidString: "00000000-0000-0000-0000-000000000102")!
+        let watchID = UUID(uuidString: "00000000-0000-0000-0000-000000000103")!
+        let expected = [phoneID, tabletID, watchID]
+
+        XCTAssertEqual(
+            ManualLockOperationStatus.from(expectedDeviceIDs: expected, ackByDevice: [:])
+                .remainingDeviceCount,
+            3
+        )
+        XCTAssertEqual(
+            ManualLockOperationStatus.from(
+                expectedDeviceIDs: expected,
+                ackByDevice: [phoneID: .confirmed]
+            ).remainingDeviceCount,
+            2
+        )
+        XCTAssertEqual(
+            ManualLockOperationStatus.from(
+                expectedDeviceIDs: expected,
+                ackByDevice: [phoneID: .confirmed, tabletID: .confirmed]
+            ).remainingDeviceCount,
+            1
+        )
+    }
+
+    func test_ackProgress_failureDoesNotHideNeutralRemainingCount() {
+        let phoneID = UUID(uuidString: "00000000-0000-0000-0000-000000000101")!
+        let tabletID = UUID(uuidString: "00000000-0000-0000-0000-000000000102")!
+        let status = ManualLockOperationStatus.from(
+            expectedDeviceIDs: [phoneID, tabletID],
+            ackByDevice: [phoneID: .failed, tabletID: .pending]
+        )
+
+        XCTAssertEqual(status.failedDeviceCount, 1)
+        XCTAssertEqual(status.remainingDeviceCount, 1)
+        XCTAssertEqual(status.errorMessage, "1 device couldn't apply the update.")
+        XCTAssertEqual(
+            status.noteMessage,
+            "Queued - 1 device will update when it next checks in."
+        )
+    }
+
+    func test_reconciledProgress_requiresAckAndDesiredSnapshotForEveryExpectedDevice() {
+        let phoneID = UUID(uuidString: "00000000-0000-0000-0000-000000000101")!
+        let tabletID = UUID(uuidString: "00000000-0000-0000-0000-000000000102")!
+        let expected = [phoneID, tabletID]
+
+        let partial = ManualLockOperationStatus.reconciled(
+            expectedDeviceIDs: expected,
+            ackByDevice: [phoneID: .confirmed, tabletID: .confirmed],
+            manualLockedByDevice: [phoneID: true],
+            wantsLocked: true
+        )
+        XCTAssertEqual(partial.remainingDeviceCount, 1)
+
+        let complete = ManualLockOperationStatus.reconciled(
+            expectedDeviceIDs: expected,
+            ackByDevice: [phoneID: .confirmed, tabletID: .confirmed],
+            manualLockedByDevice: [phoneID: true, tabletID: true],
+            wantsLocked: true
+        )
+        XCTAssertEqual(complete.remainingDeviceCount, 0)
+        XCTAssertNil(complete.noteMessage)
+    }
+
     // MARK: - Child-wide button presentation
 
     func test_manualButtonPresentation_unlocked_rendersGreenLockAction() {
@@ -141,6 +307,31 @@ final class SelectedSetClientTests: XCTestCase {
             XCTAssertEqual(presentation.tone, .updating)
             XCTAssertFalse(presentation.allowsTap)
         }
+    }
+
+    func test_manualButtonPresentation_requestActive_disablesRetry() {
+        let presentation = ManualLockButtonPresentation.from(
+            state: .pending,
+            childName: "Sam",
+            requestActive: true,
+            retryIntent: .lockSelectedForChild
+        )
+
+        XCTAssertEqual(presentation.title, "Updating Sam's devices")
+        XCTAssertFalse(presentation.allowsTap)
+    }
+
+    func test_manualButtonPresentation_afterTimeout_allowsReconciliationRetry() {
+        let presentation = ManualLockButtonPresentation.from(
+            state: .mixed,
+            childName: "Sam",
+            requestActive: false,
+            retryIntent: .unlockSelectedForChild
+        )
+
+        XCTAssertEqual(presentation.title, "Retry unlocking Sam's devices")
+        XCTAssertEqual(presentation.systemImage, "arrow.clockwise")
+        XCTAssertTrue(presentation.allowsTap)
     }
 
     // MARK: - 1. DeviceLockStateResponse decode

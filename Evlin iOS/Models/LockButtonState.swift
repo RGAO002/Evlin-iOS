@@ -90,6 +90,127 @@ nonisolated enum ManualLockAggregateState: Equatable {
     }
 }
 
+/// Automatic lock display across a complete child-device snapshot.
+/// A nil reduction means the caller must preserve its previous display state.
+nonisolated enum AutomaticLockAggregateState: Equatable {
+    case unlocked
+    case locked
+
+    static func reduce(
+        expectedDeviceIDs: [UUID],
+        lockedByDevice: [UUID: Bool]
+    ) -> AutomaticLockAggregateState? {
+        let expected = ManualLockOperationStatus.expectedDeviceIDs(
+            displayed: expectedDeviceIDs,
+            receipts: []
+        )
+        guard !expected.isEmpty,
+              expected.allSatisfy({ lockedByDevice[$0] != nil })
+        else { return nil }
+
+        return expected.contains(where: { lockedByDevice[$0] == true }) ? .locked : .unlocked
+    }
+}
+
+/// The only side effects the Profile lock button is allowed to request.
+nonisolated enum ManualLockButtonIntent: Equatable, Sendable {
+    case lockSelectedForChild
+    case unlockSelectedForChild
+
+    var wantsLocked: Bool { self == .lockSelectedForChild }
+
+    static func from(
+        state: ManualLockAggregateState,
+        retryIntent: ManualLockButtonIntent?
+    ) -> ManualLockButtonIntent? {
+        if let retryIntent { return retryIntent }
+        switch state {
+        case .unlocked: return .lockSelectedForChild
+        case .locked: return .unlockSelectedForChild
+        case .mixed, .pending: return nil
+        }
+    }
+}
+
+nonisolated enum ManualLockAckOutcome: Equatable, Sendable {
+    case confirmed
+    case failed
+    case pending
+
+    static func from(status: String) -> ManualLockAckOutcome {
+        switch status.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "confirmed", "confirmed_exact", "confirmed_fallback":
+            return .confirmed
+        case "failed", "timeout":
+            return .failed
+        default:
+            return .pending
+        }
+    }
+}
+
+/// Coherent status for one child-wide operation. Error and neutral progress
+/// are separate so a failed device cannot hide devices that are still queued.
+nonisolated struct ManualLockOperationStatus: Equatable, Sendable {
+    let failedDeviceCount: Int
+    let remainingDeviceCount: Int
+
+    var errorMessage: String? {
+        guard failedDeviceCount > 0 else { return nil }
+        let noun = failedDeviceCount == 1 ? "device" : "devices"
+        return "\(failedDeviceCount) \(noun) couldn't apply the update."
+    }
+
+    var noteMessage: String? {
+        guard remainingDeviceCount > 0 else { return nil }
+        let noun = remainingDeviceCount == 1 ? "device" : "devices"
+        let pronoun = remainingDeviceCount == 1 ? "it" : "they"
+        let verb = remainingDeviceCount == 1 ? "checks" : "check"
+        return "Queued - \(remainingDeviceCount) \(noun) will update when \(pronoun) next \(verb) in."
+    }
+
+    static func from(
+        expectedDeviceIDs: [UUID],
+        ackByDevice: [UUID: ManualLockAckOutcome]
+    ) -> ManualLockOperationStatus {
+        let expected = Self.expectedDeviceIDs(displayed: expectedDeviceIDs, receipts: [])
+        return ManualLockOperationStatus(
+            failedDeviceCount: expected.filter { ackByDevice[$0] == .failed }.count,
+            remainingDeviceCount: expected.filter {
+                let outcome = ackByDevice[$0] ?? .pending
+                return outcome == .pending
+            }.count
+        )
+    }
+
+    static func reconciled(
+        expectedDeviceIDs: [UUID],
+        ackByDevice: [UUID: ManualLockAckOutcome],
+        manualLockedByDevice: [UUID: Bool],
+        wantsLocked: Bool
+    ) -> ManualLockOperationStatus {
+        let expected = Self.expectedDeviceIDs(displayed: expectedDeviceIDs, receipts: [])
+        let failedCount = expected.filter { ackByDevice[$0] == .failed }.count
+        let remainingCount = expected.filter { deviceID in
+            guard ackByDevice[deviceID] != .failed else { return false }
+            return ackByDevice[deviceID] != .confirmed
+                || manualLockedByDevice[deviceID] != wantsLocked
+        }.count
+        return ManualLockOperationStatus(
+            failedDeviceCount: failedCount,
+            remainingDeviceCount: remainingCount
+        )
+    }
+
+    static func expectedDeviceIDs(
+        displayed: [UUID],
+        receipts: [UUID]
+    ) -> [UUID] {
+        var seen = Set<UUID>()
+        return (displayed + receipts).filter { seen.insert($0).inserted }
+    }
+}
+
 nonisolated struct ManualLockButtonPresentation: Equatable {
     enum Tone: Equatable {
         case lock
@@ -104,8 +225,23 @@ nonisolated struct ManualLockButtonPresentation: Equatable {
 
     static func from(
         state: ManualLockAggregateState,
-        childName: String
+        childName: String,
+        requestActive: Bool = false,
+        retryIntent: ManualLockButtonIntent? = nil
     ) -> ManualLockButtonPresentation {
+        if let retryIntent {
+            if requestActive {
+                return updating(childName: childName)
+            }
+            let verb = retryIntent.wantsLocked ? "locking" : "unlocking"
+            return ManualLockButtonPresentation(
+                title: "Retry \(verb) \(childName)'s devices",
+                systemImage: "arrow.clockwise",
+                tone: .updating,
+                allowsTap: true
+            )
+        }
+
         switch state {
         case .unlocked:
             return ManualLockButtonPresentation(
@@ -122,12 +258,16 @@ nonisolated struct ManualLockButtonPresentation: Equatable {
                 allowsTap: true
             )
         case .mixed, .pending:
-            return ManualLockButtonPresentation(
-                title: "Updating \(childName)'s devices",
-                systemImage: "arrow.triangle.2.circlepath",
-                tone: .updating,
-                allowsTap: false
-            )
+            return updating(childName: childName)
         }
+    }
+
+    private static func updating(childName: String) -> ManualLockButtonPresentation {
+        ManualLockButtonPresentation(
+            title: "Updating \(childName)'s devices",
+            systemImage: "arrow.triangle.2.circlepath",
+            tone: .updating,
+            allowsTap: false
+        )
     }
 }
