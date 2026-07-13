@@ -513,7 +513,8 @@ nonisolated enum EarnedThresholdPlausibility {
     static func evaluate(
         generation: EarnedActivityGeneration.Generation,
         adjustedEstimateMinutes: Int,
-        callbackAt: Date
+        callbackAt: Date,
+        currentUsageDate: String
     ) -> Result {
         guard let armedAt = generation.armedAt else {
             return Result(isPlausible: false, maximumTrusted: nil)
@@ -527,6 +528,7 @@ nonisolated enum EarnedThresholdPlausibility {
             + toleranceMinutes
         return Result(
             isPlausible: callbackAt >= armedAt
+                && generation.usageDate == currentUsageDate
                 && adjustedEstimateMinutes <= maximumTrusted,
             maximumTrusted: maximumTrusted
         )

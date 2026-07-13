@@ -448,10 +448,12 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             runningOffsetMinutes: offset
         )
         let callbackAt = Date()
+        let currentUsageDate = earnedStore.currentPolicyDateContext(now: callbackAt).usageDate
         let plausibility = EarnedThresholdPlausibility.evaluate(
             generation: generation,
             adjustedEstimateMinutes: adjustedN,
-            callbackAt: callbackAt
+            callbackAt: callbackAt,
+            currentUsageDate: currentUsageDate
         )
         guard plausibility.isPlausible else {
             let ts = ISO8601DateFormatter().string(from: callbackAt)

@@ -428,8 +428,13 @@ enum EarnedSampleReporter {
             self.thresholdMinutes = thresholdMinutes
             self.estimatedMinutes = estimatedMinutes
             self.observedAt = observedAt
-            self.generationArmedAt = generationArmedAt
-            self.generationOffsetMinutes = generationOffsetMinutes
+            if let generationArmedAt, let generationOffsetMinutes {
+                self.generationArmedAt = generationArmedAt
+                self.generationOffsetMinutes = generationOffsetMinutes
+            } else {
+                self.generationArmedAt = nil
+                self.generationOffsetMinutes = nil
+            }
         }
 
         private enum CodingKeys: String, CodingKey {

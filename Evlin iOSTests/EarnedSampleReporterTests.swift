@@ -242,6 +242,68 @@ final class EarnedSampleReporterTests: XCTestCase {
         XCTAssertNil(legacyQueue[0].generationOffsetMinutes)
     }
 
+    func test_makeRetryEntryNormalizesPartialGenerationMetadata() throws {
+        let commonDeviceID = UUID()
+        let armedAt = Date(timeIntervalSince1970: 1_784_003_200)
+        let armedOnly = EarnedSampleReporter.makeRetryEntry(
+            deviceID: commonDeviceID,
+            usageDate: "2026-07-13",
+            timezone: "America/New_York",
+            thresholdMinutes: 20,
+            estimatedMinutes: 20,
+            generationArmedAt: armedAt
+        )
+        let offsetOnly = EarnedSampleReporter.makeRetryEntry(
+            deviceID: commonDeviceID,
+            usageDate: "2026-07-13",
+            timezone: "America/New_York",
+            thresholdMinutes: 20,
+            estimatedMinutes: 20,
+            generationOffsetMinutes: 15
+        )
+
+        for entry in [armedOnly, offsetOnly] {
+            XCTAssertNil(entry.generationArmedAt)
+            XCTAssertNil(entry.generationOffsetMinutes)
+            let encoded = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: JSONEncoder().encode(entry))
+                    as? [String: Any]
+            )
+            XCTAssertNil(encoded["generationArmedAt"])
+            XCTAssertNil(encoded["generationOffsetMinutes"])
+        }
+    }
+
+    func test_retryEntryDecodingNormalizesPartialGenerationMetadata() throws {
+        let complete = EarnedSampleReporter.RetryEntry(
+            deviceID: UUID(),
+            usageDate: "2026-07-13",
+            timezone: "America/New_York",
+            thresholdMinutes: 20,
+            estimatedMinutes: 20,
+            observedAt: "2026-07-13T12:05:00Z",
+            generationArmedAt: Date(timeIntervalSince1970: 1_784_003_200),
+            generationOffsetMinutes: 15
+        )
+        let completeJSON = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(complete))
+                as? [String: Any]
+        )
+        var armedOnlyJSON = completeJSON
+        armedOnlyJSON.removeValue(forKey: "generationOffsetMinutes")
+        var offsetOnlyJSON = completeJSON
+        offsetOnlyJSON.removeValue(forKey: "generationArmedAt")
+
+        for partialJSON in [armedOnlyJSON, offsetOnlyJSON] {
+            let decoded = try JSONDecoder().decode(
+                EarnedSampleReporter.RetryEntry.self,
+                from: JSONSerialization.data(withJSONObject: partialJSON)
+            )
+            XCTAssertNil(decoded.generationArmedAt)
+            XCTAssertNil(decoded.generationOffsetMinutes)
+        }
+    }
+
     func test_enqueueRetry_multipleEntries_accumulatesOrdered() {
         let deviceID = UUID()
         for n in [10, 20, 30] {

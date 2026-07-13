@@ -42,7 +42,8 @@ final class EarnedBudgetSchedulerTests: XCTestCase {
         let result = EarnedThresholdPlausibility.evaluate(
             generation: generation,
             adjustedEstimateMinutes: 20,
-            callbackAt: armedAt.addingTimeInterval(5 * 60)
+            callbackAt: armedAt.addingTimeInterval(5 * 60),
+            currentUsageDate: generation.usageDate
         )
 
         XCTAssertTrue(result.isPlausible)
@@ -60,7 +61,8 @@ final class EarnedBudgetSchedulerTests: XCTestCase {
         let result = EarnedThresholdPlausibility.evaluate(
             generation: generation,
             adjustedEstimateMinutes: 21,
-            callbackAt: armedAt.addingTimeInterval(5 * 60)
+            callbackAt: armedAt.addingTimeInterval(5 * 60),
+            currentUsageDate: generation.usageDate
         )
 
         XCTAssertFalse(result.isPlausible)
@@ -78,7 +80,28 @@ final class EarnedBudgetSchedulerTests: XCTestCase {
         let result = EarnedThresholdPlausibility.evaluate(
             generation: generation,
             adjustedEstimateMinutes: 10,
-            callbackAt: armedAt.addingTimeInterval(-1)
+            callbackAt: armedAt.addingTimeInterval(-1),
+            currentUsageDate: generation.usageDate
+        )
+
+        XCTAssertFalse(result.isPlausible)
+        XCTAssertEqual(result.maximumTrusted, 15)
+    }
+
+    func test_plausibilityRejectsPriorDayGeneration() {
+        let armedAt = Date(timeIntervalSince1970: 1_784_003_200)
+        let generation = generation(
+            id: "00000000-0000-0000-0000-000000000004",
+            offset: 10,
+            usageDate: "2026-07-11",
+            armedAt: armedAt
+        )
+
+        let result = EarnedThresholdPlausibility.evaluate(
+            generation: generation,
+            adjustedEstimateMinutes: 15,
+            callbackAt: armedAt,
+            currentUsageDate: "2026-07-12"
         )
 
         XCTAssertFalse(result.isPlausible)
