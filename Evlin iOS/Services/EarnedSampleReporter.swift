@@ -1,5 +1,50 @@
 import Foundation
 
+/// Shared production seam that owns R-15 before the extension can enter any
+/// accepted-threshold side effects.
+nonisolated enum EarnedThresholdProductionCoordinator {
+    enum Outcome: Equatable, Sendable {
+        case accepted
+        case rejected
+    }
+
+    @discardableResult
+    static func process(
+        generation: EarnedActivityGeneration.Generation,
+        eventName: String,
+        rawThresholdMinutes: Int,
+        adjustedEstimateMinutes: Int,
+        callbackAt: Date,
+        currentUsageDate: String,
+        recordDiagnostic: (String) -> Void,
+        runAcceptedProductionPath: () -> Void
+    ) -> Outcome {
+        let plausibility = EarnedThresholdPlausibility.evaluate(
+            generation: generation,
+            adjustedEstimateMinutes: adjustedEstimateMinutes,
+            callbackAt: callbackAt,
+            currentUsageDate: currentUsageDate
+        )
+        guard plausibility.isPlausible else {
+            let formatter = ISO8601DateFormatter()
+            formatter.timeZone = TimeZone(secondsFromGMT: 0)
+            let timestamp = formatter.string(from: callbackAt)
+            let armedAt = generation.armedAt.map(formatter.string(from:)) ?? "(missing)"
+            let maximum = plausibility.maximumTrusted.map(String.init) ?? "(missing)"
+            recordDiagnostic(
+                "\(timestamp) event=\(eventName) activity=\(generation.activityName) "
+                    + "raw=\(rawThresholdMinutes) adjusted=\(adjustedEstimateMinutes) "
+                    + "offset=\(generation.offsetMinutes) generation.armedAt=\(armedAt) "
+                    + "maximum=\(maximum)"
+            )
+            return .rejected
+        }
+
+        runAcceptedProductionPath()
+        return .accepted
+    }
+}
+
 nonisolated private final class EarnedSampleRetryQueueLock: @unchecked Sendable {
     static let shared = EarnedSampleRetryQueueLock()
     private let processLock = NSLock()

@@ -476,28 +476,99 @@ final class EarnedSampleReporterTests: XCTestCase {
         XCTAssertEqual(decision.thresholdMinutes, 300)
     }
 
-    func test_plausibleThresholdReportsAndPermitsLocalSideEffects() {
-        let decision = EarnedSampleReporter.thresholdHandlingDecision(
-            thresholdMinutes: 20,
-            isPlausible: true,
-            localReconciliationAvailable: true
+    func test_implausibleThresholdCoordinatorRecordsOnlyDiagnostic() {
+        let spy = EarnedThresholdProductionPathSpy()
+        let armedAt = Date(timeIntervalSince1970: 1_784_003_200)
+        let generation = EarnedActivityGeneration.Generation(
+            activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
+            deviceID: UUID().uuidString,
+            offsetMinutes: 50,
+            armSignature: "signature",
+            usageDate: "2026-07-13",
+            timezoneIdentifier: "America/New_York",
+            armedAt: armedAt
         )
 
-        XCTAssertTrue(decision.shouldReport)
-        XCTAssertTrue(decision.shouldMutateLocalEstimate)
-        XCTAssertTrue(decision.shouldApplyLocalShield)
+        let outcome = EarnedThresholdProductionCoordinator.process(
+            generation: generation,
+            eventName: "evlin.earned.t70",
+            rawThresholdMinutes: 70,
+            adjustedEstimateMinutes: 120,
+            callbackAt: armedAt.addingTimeInterval(3 * 60),
+            currentUsageDate: "2026-07-13",
+            recordDiagnostic: spy.recordDiagnostic,
+            runAcceptedProductionPath: spy.runAcceptedProductionPath
+        )
+
+        XCTAssertEqual(outcome, .rejected)
+        XCTAssertEqual(spy.diagnostics.count, 1)
+        XCTAssertEqual(spy.estimateMutationCount, 0)
+        XCTAssertEqual(spy.retryEnqueueCount, 0)
+        XCTAssertEqual(spy.networkDispatchCount, 0)
+        XCTAssertEqual(spy.shieldWorkCount, 0)
+        XCTAssertEqual(spy.acceptedPathCount, 0)
     }
 
-    func test_implausibleThresholdDisablesAllSideEffects() {
-        let decision = EarnedSampleReporter.thresholdHandlingDecision(
-            thresholdMinutes: 120,
-            isPlausible: false,
-            localReconciliationAvailable: true
+    func test_plausibleThresholdCoordinatorReachesAcceptedProductionPath() {
+        let spy = EarnedThresholdProductionPathSpy()
+        let armedAt = Date(timeIntervalSince1970: 1_784_003_200)
+        let generation = EarnedActivityGeneration.Generation(
+            activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
+            deviceID: UUID().uuidString,
+            offsetMinutes: 50,
+            armSignature: "signature",
+            usageDate: "2026-07-13",
+            timezoneIdentifier: "America/New_York",
+            armedAt: armedAt
         )
 
-        XCTAssertFalse(decision.shouldReport)
-        XCTAssertFalse(decision.shouldMutateLocalEstimate)
-        XCTAssertFalse(decision.shouldApplyLocalShield)
+        let outcome = EarnedThresholdProductionCoordinator.process(
+            generation: generation,
+            eventName: "evlin.earned.t5",
+            rawThresholdMinutes: 5,
+            adjustedEstimateMinutes: 55,
+            callbackAt: armedAt,
+            currentUsageDate: "2026-07-13",
+            recordDiagnostic: spy.recordDiagnostic,
+            runAcceptedProductionPath: spy.runAcceptedProductionPath
+        )
+
+        XCTAssertEqual(outcome, .accepted)
+        XCTAssertTrue(spy.diagnostics.isEmpty)
+        XCTAssertEqual(spy.acceptedPathCount, 1)
+    }
+
+    func test_implausibleThresholdDiagnosticIncludesStableGenerationArmedAt() throws {
+        let spy = EarnedThresholdProductionPathSpy()
+        let armedAt = try XCTUnwrap(
+            ISO8601DateFormatter().date(from: "2026-07-13T16:00:00Z")
+        )
+        let generation = EarnedActivityGeneration.Generation(
+            activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
+            deviceID: UUID().uuidString,
+            offsetMinutes: 50,
+            armSignature: "signature",
+            usageDate: "2026-07-13",
+            timezoneIdentifier: "America/New_York",
+            armedAt: armedAt
+        )
+
+        EarnedThresholdProductionCoordinator.process(
+            generation: generation,
+            eventName: "evlin.earned.t70",
+            rawThresholdMinutes: 70,
+            adjustedEstimateMinutes: 120,
+            callbackAt: armedAt.addingTimeInterval(3 * 60),
+            currentUsageDate: "2026-07-13",
+            recordDiagnostic: spy.recordDiagnostic,
+            runAcceptedProductionPath: spy.runAcceptedProductionPath
+        )
+
+        let diagnostic = try XCTUnwrap(spy.diagnostics.first)
+        XCTAssertTrue(
+            diagnostic.contains("generation.armedAt=2026-07-13T16:00:00Z"),
+            diagnostic
+        )
     }
 
     func test_newSampleIsDurablyQueuedBeforeAuthorizationCheckAndKeepsDevicePartition() async {
@@ -1516,6 +1587,27 @@ final class EarnedSampleReporterResponseTests: XCTestCase {
 
     private func removeIsolatedSuite(_ suiteName: String) {
         UserDefaults.standard.removePersistentDomain(forName: suiteName)
+    }
+}
+
+private final class EarnedThresholdProductionPathSpy {
+    private(set) var diagnostics: [String] = []
+    private(set) var acceptedPathCount = 0
+    private(set) var estimateMutationCount = 0
+    private(set) var retryEnqueueCount = 0
+    private(set) var networkDispatchCount = 0
+    private(set) var shieldWorkCount = 0
+
+    func recordDiagnostic(_ diagnostic: String) {
+        diagnostics.append(diagnostic)
+    }
+
+    func runAcceptedProductionPath() {
+        acceptedPathCount += 1
+        estimateMutationCount += 1
+        retryEnqueueCount += 1
+        networkDispatchCount += 1
+        shieldWorkCount += 1
     }
 }
 

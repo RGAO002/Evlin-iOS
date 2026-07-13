@@ -449,25 +449,51 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         )
         let callbackAt = Date()
         let currentUsageDate = earnedStore.currentPolicyDateContext(now: callbackAt).usageDate
-        let plausibility = EarnedThresholdPlausibility.evaluate(
+        EarnedThresholdProductionCoordinator.process(
             generation: generation,
+            eventName: eventName,
+            rawThresholdMinutes: n,
             adjustedEstimateMinutes: adjustedN,
             callbackAt: callbackAt,
-            currentUsageDate: currentUsageDate
-        )
-        guard plausibility.isPlausible else {
-            let ts = ISO8601DateFormatter().string(from: callbackAt)
-            _ = performIfEarnedGenerationActive(
-                generation,
-                mutationKeys: ["evlin.earned.implausibleThreshold"]
-            ) {
-                defaults?.set(
-                    "\(ts) event=\(eventName) activity=\(activity.rawValue) raw=\(n) adjusted=\(adjustedN) offset=\(offset) maximum=\(String(describing: plausibility.maximumTrusted))",
-                    forKey: "evlin.earned.implausibleThreshold"
+            currentUsageDate: currentUsageDate,
+            recordDiagnostic: { diagnostic in
+                _ = performIfEarnedGenerationActive(
+                    generation,
+                    mutationKeys: ["evlin.earned.implausibleThreshold"]
+                ) {
+                    defaults?.set(
+                        diagnostic,
+                        forKey: "evlin.earned.implausibleThreshold"
+                    )
+                }
+            },
+            runAcceptedProductionPath: {
+                handleAcceptedEarnedThreshold(
+                    eventName: eventName,
+                    activity: activity,
+                    generation: generation,
+                    generationDeviceID: generationDeviceID,
+                    rawThresholdMinutes: n,
+                    adjustedEstimateMinutes: adjustedN,
+                    callbackAt: callbackAt,
+                    earnedStore: earnedStore
                 )
             }
-            return
-        }
+        )
+    }
+
+    private func handleAcceptedEarnedThreshold(
+        eventName: String,
+        activity: DeviceActivityName,
+        generation: EarnedActivityGeneration.Generation,
+        generationDeviceID: UUID,
+        rawThresholdMinutes: Int,
+        adjustedEstimateMinutes adjustedN: Int,
+        callbackAt: Date,
+        earnedStore: EarnedTimeStore
+    ) {
+        let offset = generation.offsetMinutes
+        let n = rawThresholdMinutes
         guard let generationArmedAt = generation.armedAt else { return }
         guard earnedGenerationIsActive(generation) else { return }
         let localReconciliation = earnedStore.recordLocalThresholdEstimate(
@@ -477,7 +503,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         )
         let decision = EarnedSampleReporter.thresholdHandlingDecision(
             thresholdMinutes: adjustedN,
-            isPlausible: plausibility.isPlausible,
+            isPlausible: true,
             localReconciliationAvailable: localReconciliation == .reconciled
         )
 
