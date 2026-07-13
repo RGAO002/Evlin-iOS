@@ -15,6 +15,134 @@ import XCTest
 ///    exactly once and calls `ActiveLockStore.reKeyShieldRecord`.
 final class SelectedSetClientTests: XCTestCase {
 
+    // MARK: - Child-wide selected-set response
+
+    func test_childSelectedSetResponse_decodesAllDeviceReceipts() throws {
+        let json = """
+        {
+          "action": "shield",
+          "devices": [
+            {
+              "child_device_id": "00000000-0000-0000-0000-000000000101",
+              "command_id": "00000000-0000-0000-0000-000000000201",
+              "list_id": "00000000-0000-0000-0000-000000000301",
+              "warning": null
+            },
+            {
+              "child_device_id": "00000000-0000-0000-0000-000000000102",
+              "command_id": "00000000-0000-0000-0000-000000000202",
+              "list_id": "00000000-0000-0000-0000-000000000302",
+              "warning": "Device offline; command queued"
+            }
+          ]
+        }
+        """.data(using: .utf8)!
+
+        let response = try JSONDecoder().decode(APIClient.ChildSelectedSetResponse.self, from: json)
+
+        XCTAssertEqual(response.action, "shield")
+        XCTAssertEqual(response.devices.count, 2)
+        XCTAssertEqual(response.devices[0].child_device_id,
+                       UUID(uuidString: "00000000-0000-0000-0000-000000000101"))
+        XCTAssertEqual(response.devices[0].command_id,
+                       UUID(uuidString: "00000000-0000-0000-0000-000000000201"))
+        XCTAssertEqual(response.devices[0].list_id,
+                       UUID(uuidString: "00000000-0000-0000-0000-000000000301"))
+        XCTAssertNil(response.devices[0].warning)
+        XCTAssertEqual(response.devices[1].warning, "Device offline; command queued")
+    }
+
+    // MARK: - Child-wide manual source reducer
+
+    func test_manualAggregate_noManualSource_isUnlocked() {
+        let state = ManualLockAggregateState.reduce(
+            expectedDeviceCount: 2,
+            coveringSources: [[], ["earnedTime", "task_pause"]]
+        )
+
+        XCTAssertEqual(state, .unlocked)
+    }
+
+    func test_manualAggregate_everyDeviceManual_isLocked() {
+        let state = ManualLockAggregateState.reduce(
+            expectedDeviceCount: 2,
+            coveringSources: [["manual"], [" MANUAL ", "earned_time"]]
+        )
+
+        XCTAssertEqual(state, .locked)
+    }
+
+    func test_manualAggregate_someDevicesManual_isMixed() {
+        let state = ManualLockAggregateState.reduce(
+            expectedDeviceCount: 2,
+            coveringSources: [["manual"], ["taskPause"]]
+        )
+
+        XCTAssertEqual(state, .mixed)
+    }
+
+    func test_manualAggregate_missingOrUnknownResponse_isPending() {
+        XCTAssertEqual(
+            ManualLockAggregateState.reduce(
+                expectedDeviceCount: 2,
+                coveringSources: [["manual"]]
+            ),
+            .pending
+        )
+        XCTAssertEqual(
+            ManualLockAggregateState.reduce(
+                expectedDeviceCount: 2,
+                coveringSources: [["manual"], nil]
+            ),
+            .pending
+        )
+    }
+
+    func test_manualAggregate_automaticOnlySources_doNotBecomeManualLocked() {
+        let automaticSources = [
+            "earnedTime", "earned_time", "taskPause", "task_pause", "limit", "reflection"
+        ]
+
+        XCTAssertEqual(
+            ManualLockAggregateState.reduce(
+                expectedDeviceCount: 1,
+                coveringSources: [automaticSources]
+            ),
+            .unlocked
+        )
+    }
+
+    // MARK: - Child-wide button presentation
+
+    func test_manualButtonPresentation_unlocked_rendersGreenLockAction() {
+        let presentation = ManualLockButtonPresentation.from(state: .unlocked, childName: "Sam")
+
+        XCTAssertEqual(presentation.title, "Lock Sam's devices")
+        XCTAssertEqual(presentation.systemImage, "lock")
+        XCTAssertEqual(presentation.tone, .lock)
+        XCTAssertTrue(presentation.allowsTap)
+    }
+
+    func test_manualButtonPresentation_locked_rendersRedUnlockAction() {
+        let presentation = ManualLockButtonPresentation.from(state: .locked, childName: "Sam")
+
+        XCTAssertEqual(presentation.title, "Unlock Sam's devices")
+        XCTAssertEqual(presentation.systemImage, "lock.open")
+        XCTAssertEqual(presentation.tone, .unlock)
+        XCTAssertTrue(presentation.allowsTap)
+    }
+
+    func test_manualButtonPresentation_mixedAndPending_renderDisabledUpdatingState() {
+        for state in [ManualLockAggregateState.mixed, .pending] {
+            let presentation = ManualLockButtonPresentation.from(state: state, childName: "Sam")
+
+            XCTAssertEqual(presentation.title, "Updating Sam's devices")
+            XCTAssertEqual(presentation.systemImage, "arrow.triangle.2.circlepath")
+            XCTAssertEqual(presentation.tone, .updating)
+            XCTAssertFalse(presentation.allowsTap)
+        }
+    }
+
     // MARK: - 1. DeviceLockStateResponse decode
 
     func test_fullLockStateResponse_decodesAllFields() throws {

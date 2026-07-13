@@ -57,3 +57,77 @@ enum LockButtonState: Equatable {
     /// True when the selected set is clear (button should be green).
     var isClear: Bool { self == .clear }
 }
+
+/// Manual selected-set state across every device linked to one child profile.
+nonisolated enum ManualLockAggregateState: Equatable {
+    case unlocked
+    case locked
+    case mixed
+    case pending
+
+    static func reduce(
+        expectedDeviceCount: Int,
+        coveringSources: [[String]?]
+    ) -> ManualLockAggregateState {
+        guard expectedDeviceCount > 0,
+              coveringSources.count == expectedDeviceCount,
+              coveringSources.allSatisfy({ $0 != nil })
+        else { return .pending }
+
+        let manualByDevice = coveringSources.map { isManualLocked(coveringSources: $0) == true }
+        if manualByDevice.allSatisfy({ $0 }) { return .locked }
+        if manualByDevice.allSatisfy({ !$0 }) { return .unlocked }
+        return .mixed
+    }
+
+    static func isManualLocked(coveringSources: [String]?) -> Bool? {
+        guard let coveringSources else { return nil }
+        return coveringSources.contains(where: isManualSource)
+    }
+
+    private static func isManualSource(_ source: String) -> Bool {
+        source.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "manual"
+    }
+}
+
+nonisolated struct ManualLockButtonPresentation: Equatable {
+    enum Tone: Equatable {
+        case lock
+        case unlock
+        case updating
+    }
+
+    let title: String
+    let systemImage: String
+    let tone: Tone
+    let allowsTap: Bool
+
+    static func from(
+        state: ManualLockAggregateState,
+        childName: String
+    ) -> ManualLockButtonPresentation {
+        switch state {
+        case .unlocked:
+            return ManualLockButtonPresentation(
+                title: "Lock \(childName)'s devices",
+                systemImage: "lock",
+                tone: .lock,
+                allowsTap: true
+            )
+        case .locked:
+            return ManualLockButtonPresentation(
+                title: "Unlock \(childName)'s devices",
+                systemImage: "lock.open",
+                tone: .unlock,
+                allowsTap: true
+            )
+        case .mixed, .pending:
+            return ManualLockButtonPresentation(
+                title: "Updating \(childName)'s devices",
+                systemImage: "arrow.triangle.2.circlepath",
+                tone: .updating,
+                allowsTap: false
+            )
+        }
+    }
+}

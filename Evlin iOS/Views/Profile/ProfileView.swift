@@ -40,6 +40,22 @@ struct ProfileRefreshScope: Equatable {
     )
 }
 
+private enum ProfileLockAckOutcome: Equatable, Sendable {
+    case confirmed
+    case failed
+    case pending
+}
+
+private struct ProfileLockCommandAck: Sendable {
+    let deviceID: UUID
+    let outcome: ProfileLockAckOutcome
+}
+
+private struct ProfileDeviceLockSnapshot: Sendable {
+    let deviceID: UUID
+    let state: APIClient.DeviceLockStateResponse?
+}
+
 struct ProfileView: View {
     let child: ChildProfile
     var initialTaskId: Int? = nil
@@ -121,12 +137,9 @@ struct ProfileView: View {
     // Local mutable status so the Lock/Unlock button can flip the avatar
     // and pills without requiring a global mutation. See HTML 1029-1034.
     @State private var localStatus: ChildProfile.Status = .unlocked
-    // B8: acked lock-button state derived from covering_sources/exhausted
-    // (NOT optimistic). Drives red/green coloring of the green button.
-    @State private var ackedLockButtonState: LockButtonState = .pending
-    // B10: whether the last fetched lock-state had exhausted==true (earned-time ran out).
-    // Used in toggleDeviceLock to route the unlock via unlockOverride (not unlockSelected).
-    @State private var lastFetchedExhausted: Bool = false
+    // Manual provenance across every displayed child device. Automatic sources
+    // still drive localStatus but never turn this button into an Unlock action.
+    @State private var manualLockState: ManualLockAggregateState = .pending
     // B11: earned-time summary from A3 backend endpoint.
     // Nil until the first fetch completes; progress bar / countdown uses static
     // config values until then (graceful degradation).
@@ -138,10 +151,8 @@ struct ProfileView: View {
     // Neutral (non-error) status note, e.g. "queued — will apply when the
     // phone next checks in". Shown in muted text, distinct from lockError.
     @State private var lockNote: String? = nil
-    /// Set when the "Queued …" note is showing: the lock state we're waiting
-    /// for. Once any lock-state refresh observes it, the note clears — the
-    /// receipt must never keep claiming "queued" after the device acked.
-    @State private var pendingLockWant: Bool? = nil
+    /// Desired manual state while one or more devices are still queued.
+    @State private var pendingManualLockWant: Bool? = nil
     // B6 carry: once the backend list_id is first learned, remember it so
     // we only call saveLockedSetID + reKeyShieldRecord once per session.
     @State private var knownBackendListID: String? = nil
@@ -164,6 +175,26 @@ struct ProfileView: View {
             timePct: child.timePct,
             subtitle: localSubtitle.isEmpty ? child.subtitle : localSubtitle
         )
+    }
+
+    private var displayedChildDeviceIDs: [UUID] {
+        var seen = Set<UUID>()
+        return devices.compactMap(\.deviceUUID).filter { seen.insert($0).inserted }
+    }
+
+    private var manualLockPresentation: ManualLockButtonPresentation {
+        ManualLockButtonPresentation.from(state: manualLockState, childName: displayChild.name)
+    }
+
+    private var manualLockButtonBackground: AnyShapeStyle {
+        switch manualLockPresentation.tone {
+        case .lock:
+            return AnyShapeStyle(Color.evSecondaryGradient)
+        case .unlock:
+            return AnyShapeStyle(Color.evError)
+        case .updating:
+            return AnyShapeStyle(Color.evOnSurfaceVariant)
+        }
     }
 
     /// Format minutes into a human-readable limit string (same logic as ProfileMockData).
@@ -833,144 +864,237 @@ struct ProfileView: View {
     /// refresh the family aggregate, then pop. On failure (409 = child still
     /// has a linked device, mapped through `ChildCRUDMapper` like the
     /// HomeSettingsSheet flow) show the error and do NOT pop.
-    /// B8: Selected-set lock CTA. Locks/unlocks the CONFIGURED LOCKED SET (not
-    /// all apps). Red/green is driven by the ACKED `covering_sources` field from
-    /// the backend response — never optimistic.
-    ///
-    /// Keeps the "locking…/pending" queued-copy pattern: queue the command, then
-    /// poll until the kid acks or we time out, then show the real result.
+    /// Adds or removes only the manual selected-set source for every child device.
     @MainActor
     private func toggleDeviceLock() async {
-        guard let cid = backendChildID,
-              let pid = UUID(uuidString: child.id),
+        let displayedDeviceIDs = displayedChildDeviceIDs
+        guard let pid = UUID(uuidString: child.id),
               let famRaw = UserDefaults.standard.string(forKey: "evlin.familyID"),
-              let famID = UUID(uuidString: famRaw) else {
+              let famID = UUID(uuidString: famRaw),
+              !displayedDeviceIDs.isEmpty else {
             lockError = "Pair \(displayChild.name)'s device first."
             return
         }
-        let wantLocked = !ackedLockButtonState.isShielded
-        // B10: detect exhausted-unlock path — when the parent unlocks an exhausted day,
-        // we must call unlockOverride (not unlockSelected) AND write the local App Group
-        // flag so the Monitor extension suppresses immediately, offline, without waiting
-        // for the backend command to round-trip to the kid's device.
-        let isExhaustedUnlock = !wantLocked && lastFetchedExhausted
+
+        let wantLocked: Bool
+        switch manualLockState {
+        case .unlocked: wantLocked = true
+        case .locked: wantLocked = false
+        case .mixed, .pending: return
+        }
+
+        let previousState = manualLockState
         lockBusy = true
         lockError = nil
         lockNote = nil
-        if isExhaustedUnlock {
-            // B10: exhausted-day override — write the local App Group flag first so the
-            // Monitor extension suppresses the earned-time shield immediately, offline,
-            // without waiting for the backend command to reach the kid's device.
-            // Then call unlockOverride (A8/B8 backend endpoint) to persist server-side.
-            let overrideUsageDate = todayUsageDate()
-            EarnedTimeStore.shared.setOverride(true, forUsageDate: overrideUsageDate)
-            do {
-                // child.id is a UUID string (backend child profile ID). Send the
-                // SAME usage_date we wrote to the App Group so server + device agree.
-                if let childProfileUUID = UUID(uuidString: child.id) {
-                    _ = try await apiClient.unlockOverride(
-                        childProfileID: childProfileUUID, usageDate: overrideUsageDate)
-                }
-            } catch {
-                lockError = "Couldn't unlock — try again."
-                lockBusy = false
-                return
-            }
-            lockBusy = false
-            await refreshLockState()
-            lockNote = nil
-            await familyStore.refresh()
-            return
-        }
+        pendingManualLockWant = wantLocked
+        manualLockState = .pending
+
+        let response: APIClient.ChildSelectedSetResponse
         do {
-            let resp: APIClient.LockSelectedResponse
             if wantLocked {
-                resp = try await apiClient.lockSelected(familyID: famID, childProfileID: pid, childDeviceID: cid)
+                response = try await apiClient.lockSelectedForChild(
+                    familyID: famID,
+                    childProfileID: pid
+                )
             } else {
-                resp = try await apiClient.unlockSelected(familyID: famID, childProfileID: pid, childDeviceID: cid)
+                response = try await apiClient.unlockSelectedForChild(
+                    familyID: famID,
+                    childProfileID: pid
+                )
             }
-            // Apply B6 carry from command response if it surfaced a list_id.
-            applyListIDIfNeeded(resp.list_id.uuidString)
         } catch {
-            // Detect "no Locked set configured" specifically (backend returns a 4xx
-            // with a code in 400-422 when the selected set is missing or empty —
-            // e.g. `selected_set_missing_or_empty`). Show a friendly, actionable
-            // message that guides the parent to the app-controls / lock-list UI
-            // (which uploads the Locked set via POST /child/catalog-list).
-            // All other failures (404 route not found, 500, network) get the raw
-            // error so they remain diagnosable.
             if ProfileView.isNoLockedSetError(error) {
                 lockError = "Select which apps to lock first — tap \"App Controls\" (the lock list) to set up the Locked set, then try again."
             } else {
                 lockError = "Couldn't \(wantLocked ? "lock" : "unlock"): \(String(describing: error))"
             }
+            pendingManualLockWant = nil
+            manualLockState = previousState
             lockBusy = false
             return
         }
+
+        if let localDeviceID = UUID(uuidString: pairedChildID),
+           let localReceipt = response.devices.first(where: { $0.child_device_id == localDeviceID }) {
+            applyListIDIfNeeded(localReceipt.list_id.uuidString)
+        }
+
+        let targetDeviceIDs = uniqueDeviceIDs(
+            displayedDeviceIDs + response.devices.map(\.child_device_id)
+        )
+        let acknowledgements = await waitForCommandAcknowledgements(response.devices)
+        let snapshots = await fetchDeviceLockStates(
+            familyID: famID,
+            deviceIDs: targetDeviceIDs
+        )
+        let reducedState = applyLockSnapshots(snapshots, deviceIDs: targetDeviceIDs)
+
+        let ackByDevice = Dictionary(uniqueKeysWithValues: acknowledgements.map {
+            ($0.deviceID, $0.outcome)
+        })
+        let manualPairs: [(UUID, Bool)] = snapshots.compactMap { snapshot in
+            guard let isManualLocked = ManualLockAggregateState.isManualLocked(
+                coveringSources: snapshot.state?.covering_sources
+            ) else { return nil }
+            return (snapshot.deviceID, isManualLocked)
+        }
+        let manualByDevice = Dictionary(uniqueKeysWithValues: manualPairs)
+        let failedCount = targetDeviceIDs.filter { ackByDevice[$0] == .failed }.count
+        let remainingCount = targetDeviceIDs.filter { deviceID in
+            guard ackByDevice[deviceID] != .failed else { return false }
+            return ackByDevice[deviceID] != .confirmed || manualByDevice[deviceID] != wantLocked
+        }.count
+
+        if failedCount > 0 {
+            let noun = failedCount == 1 ? "device" : "devices"
+            lockError = "\(failedCount) \(noun) couldn't apply the update."
+        }
+        if remainingCount > 0 {
+            pendingManualLockWant = wantLocked
+            manualLockState = reducedState == .mixed ? .mixed : .pending
+            lockNote = queuedLockNote(remainingDeviceCount: remainingCount)
+        } else {
+            pendingManualLockWant = nil
+            lockNote = nil
+            manualLockState = reducedState
+        }
+
         lockBusy = false
-        // Queue accepted → poll until the kid acks the REAL state change.
-        let applied = await waitForLockStateAcked(wantLocked: wantLocked, cid: cid, famID: famID)
-        lockNote = applied ? nil : (wantLocked
-            ? "Queued — \(displayChild.name)'s phone will lock when it next checks in."
-            : "Queued — \(displayChild.name)'s phone will unlock when it next checks in.")
-        pendingLockWant = applied ? nil : wantLocked
-        // Push the now-real state to Home.
         await familyStore.refresh()
     }
 
-    /// Refresh `ackedLockButtonState` from the device's REAL lock-state ack.
-    /// Derives from `covering_sources` (not `locked` bool). `exhausted`
-    /// is tracked separately for override routing only.
-    /// Also applies the B6 carry: persists list_id once when first learned.
     @MainActor
     private func refreshLockState() async {
-        guard let cid = backendChildID,
-              let famRaw = UserDefaults.standard.string(forKey: "evlin.familyID"),
+        let deviceIDs = displayedChildDeviceIDs
+        guard let famRaw = UserDefaults.standard.string(forKey: "evlin.familyID"),
               let famID = UUID(uuidString: famRaw),
-              let state = try? await apiClient.fetchDeviceLockState(familyID: famID, childDeviceID: cid)
-        else { return }
-        // B6 carry: persist list_id and re-key any local-id record.
-        applyListIDIfNeeded(state.list_id)
-        let buttonState = LockButtonState.from(
-            coveringSources: state.covering_sources,
-            exhausted: state.exhausted)
-        withAnimation(.easeOut(duration: 0.18)) {
-            ackedLockButtonState = buttonState
-            localStatus = buttonState.isShielded ? .locked : .unlocked
-            // B10: track exhausted separately so toggleDeviceLock can route correctly.
-            lastFetchedExhausted = state.exhausted == true
+              !deviceIDs.isEmpty else {
+            manualLockState = .pending
+            return
         }
-        // The awaited state arrived — retire the stale "Queued …" note.
-        if let want = pendingLockWant, buttonState.isShielded == want {
-            lockNote = nil
-            pendingLockWant = nil
+
+        let snapshots = await fetchDeviceLockStates(familyID: famID, deviceIDs: deviceIDs)
+        let reducedState = applyLockSnapshots(snapshots, deviceIDs: deviceIDs)
+        if let wantLocked = pendingManualLockWant {
+            let desiredState: ManualLockAggregateState = wantLocked ? .locked : .unlocked
+            if reducedState == desiredState {
+                pendingManualLockWant = nil
+                lockNote = nil
+            } else {
+                manualLockState = reducedState == .mixed ? .mixed : .pending
+            }
         }
     }
 
-    /// Poll `lock-state` until the acked button state matches `wantLocked`
-    /// (covering_sources non-empty ↔ locked) or ~15s elapses.
-    private func waitForLockStateAcked(wantLocked: Bool, cid: UUID, famID: UUID) async -> Bool {
-        for _ in 0..<6 {
-            try? await Task.sleep(nanoseconds: 2_500_000_000)
-            guard let state = try? await apiClient.fetchDeviceLockState(familyID: famID, childDeviceID: cid) else {
-                continue
-            }
-            applyListIDIfNeeded(state.list_id)
-            let buttonState = LockButtonState.from(
-                coveringSources: state.covering_sources,
-                exhausted: state.exhausted)
-            let isExhausted = state.exhausted == true
-            await MainActor.run {
-                withAnimation(.easeOut(duration: 0.18)) {
-                    ackedLockButtonState = buttonState
-                    localStatus = buttonState.isShielded ? .locked : .unlocked
-                    // B10: track exhausted separately so toggleDeviceLock can route correctly.
-                    lastFetchedExhausted = isExhausted
+    private func fetchDeviceLockStates(
+        familyID: UUID,
+        deviceIDs: [UUID]
+    ) async -> [ProfileDeviceLockSnapshot] {
+        await withTaskGroup(of: ProfileDeviceLockSnapshot.self) { group in
+            for deviceID in deviceIDs {
+                group.addTask { @MainActor in
+                    let state = try? await apiClient.fetchDeviceLockState(
+                        familyID: familyID,
+                        childDeviceID: deviceID
+                    )
+                    return ProfileDeviceLockSnapshot(deviceID: deviceID, state: state)
                 }
             }
-            if buttonState.isShielded == wantLocked { return true }
+
+            var snapshots: [ProfileDeviceLockSnapshot] = []
+            for await snapshot in group {
+                snapshots.append(snapshot)
+            }
+            return snapshots
         }
-        return false
+    }
+
+    private func waitForCommandAcknowledgements(
+        _ receipts: [APIClient.ChildSelectedSetDeviceReceipt]
+    ) async -> [ProfileLockCommandAck] {
+        await withTaskGroup(of: ProfileLockCommandAck.self) { group in
+            for receipt in receipts {
+                group.addTask { @MainActor in
+                    let outcome = await waitForCommandAcknowledgement(
+                        commandID: receipt.command_id
+                    )
+                    return ProfileLockCommandAck(
+                        deviceID: receipt.child_device_id,
+                        outcome: outcome
+                    )
+                }
+            }
+
+            var acknowledgements: [ProfileLockCommandAck] = []
+            for await acknowledgement in group {
+                acknowledgements.append(acknowledgement)
+            }
+            return acknowledgements
+        }
+    }
+
+    private func waitForCommandAcknowledgement(commandID: UUID) async -> ProfileLockAckOutcome {
+        for attempt in 0..<6 {
+            if let ack = try? await apiClient.fetchRichAckStatus(commandID: commandID) {
+                switch ack.status {
+                case "confirmed", "confirmed_exact", "confirmed_fallback":
+                    return .confirmed
+                case "failed", "timeout", "pending_confirmation":
+                    return .failed
+                default:
+                    break
+                }
+            }
+            if attempt < 5 {
+                try? await Task.sleep(nanoseconds: 2_500_000_000)
+            }
+        }
+        return .pending
+    }
+
+    @discardableResult
+    @MainActor
+    private func applyLockSnapshots(
+        _ snapshots: [ProfileDeviceLockSnapshot],
+        deviceIDs: [UUID]
+    ) -> ManualLockAggregateState {
+        let statePairs: [(UUID, APIClient.DeviceLockStateResponse)] = snapshots.compactMap { snapshot in
+            guard let state = snapshot.state else { return nil }
+            return (snapshot.deviceID, state)
+        }
+        let snapshotByDevice = Dictionary(uniqueKeysWithValues: statePairs)
+        let sources = deviceIDs.map { snapshotByDevice[$0]?.covering_sources }
+        let reducedState = ManualLockAggregateState.reduce(
+            expectedDeviceCount: deviceIDs.count,
+            coveringSources: sources
+        )
+        let fetchedStates = Array(snapshotByDevice.values)
+
+        if let localDeviceID = UUID(uuidString: pairedChildID),
+           let localState = snapshotByDevice[localDeviceID] {
+            applyListIDIfNeeded(localState.list_id)
+        }
+
+        withAnimation(.easeOut(duration: 0.18)) {
+            manualLockState = reducedState
+            if !fetchedStates.isEmpty {
+                localStatus = fetchedStates.contains(where: \.locked) ? .locked : .unlocked
+            }
+        }
+        return reducedState
+    }
+
+    private func uniqueDeviceIDs(_ ids: [UUID]) -> [UUID] {
+        var seen = Set<UUID>()
+        return ids.filter { seen.insert($0).inserted }
+    }
+
+    private func queuedLockNote(remainingDeviceCount: Int) -> String {
+        let noun = remainingDeviceCount == 1 ? "device" : "devices"
+        let pronoun = remainingDeviceCount == 1 ? "it" : "they"
+        let verb = remainingDeviceCount == 1 ? "checks" : "check"
+        return "Queued - \(remainingDeviceCount) \(noun) will update when \(pronoun) next \(verb) in."
     }
 
     /// B6 carry: when a lock-state or policy fetch surfaces the backend
@@ -1024,17 +1148,6 @@ struct ProfileView: View {
             }
         }
         return false
-    }
-
-    /// B10: ISO-8601 date string for today in the device's local timezone.
-    /// Matches the `usage_date` key format that `EarnedTimeStore` and the
-    /// Monitor extension both use for the override flag.
-    private func todayUsageDate() -> String {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd"
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = TimeZone.current
-        return f.string(from: Date())
     }
 
     private func performDelete() async {
@@ -1449,19 +1562,14 @@ struct ProfileView: View {
                 }
             }
 
-            // B8: Selected-set lock CTA.
-            // Red/green derives from ACKED state (ackedLockButtonState), NOT
-            // optimistic local flip. Green = selected set is clear (sources=[]).
-            // Red = covering_sources non-empty.
-            // Pending (sources=nil) = neutral/disabled until first ack.
+            // Child-wide manual selected-set CTA. Automatic sources can keep the
+            // child status locked while this button remains a green Lock action.
             VStack(spacing: 6) {
                 Button { Task { await toggleDeviceLock() } } label: {
                     HStack(spacing: 10) {
-                        Image(systemName: ackedLockButtonState.isShielded ? "lock.open" : "lock")
+                        Image(systemName: manualLockPresentation.systemImage)
                             .font(.system(size: 18, weight: .semibold))
-                        Text(ackedLockButtonState.isShielded
-                             ? "Unlock \(displayChild.name)'s devices"
-                             : "Lock \(displayChild.name)'s devices")
+                        Text(manualLockPresentation.title)
                             .font(.custom("Manrope", size: 14).weight(.heavy))
                             .tracking(0.2)
                     }
@@ -1470,14 +1578,14 @@ struct ProfileView: View {
                     .padding(.vertical, 14)
                     .background(
                         RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .fill(ackedLockButtonState.isShielded
-                                  ? AnyShapeStyle(Color.evError)
-                                  : AnyShapeStyle(Color.evSecondaryGradient))
+                            .fill(manualLockButtonBackground)
                     )
                 }
                 .buttonStyle(.plain)
-                .disabled(lockBusy || backendChildID == nil || ackedLockButtonState.isPending)
-                .opacity(backendChildID == nil ? 0.45 : (lockBusy || ackedLockButtonState.isPending ? 0.7 : 1))
+                .disabled(lockBusy || displayedChildDeviceIDs.isEmpty || !manualLockPresentation.allowsTap)
+                .opacity(displayedChildDeviceIDs.isEmpty
+                         ? 0.45
+                         : (lockBusy || !manualLockPresentation.allowsTap ? 0.7 : 1))
 
                 // Caption only when something needs saying: a failure (red), a
                 // neutral "queued" receipt, or why the button is disabled.
@@ -1492,7 +1600,7 @@ struct ProfileView: View {
                         .foregroundStyle(Color.evOnSurfaceVariant)
                         .frame(maxWidth: .infinity)
                         .multilineTextAlignment(.center)
-                } else if backendChildID == nil {
+                } else if displayedChildDeviceIDs.isEmpty {
                     Text("Pair \(displayChild.name)'s device to lock")
                         .font(.custom("Inter", size: 11).weight(.medium))
                         .foregroundStyle(Color.evOnSurfaceVariant)

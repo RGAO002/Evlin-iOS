@@ -2526,7 +2526,7 @@ extension APIClient {
     /// Mixed-casing rule (NO convertFromSnakeCase):
     ///   • `recordKey` / `targetKey` → camelCase (explicit CodingKeys below)
     ///   • everything else             → snake_case
-    struct DeviceLockStateResponse: Decodable {
+    struct DeviceLockStateResponse: Decodable, Sendable {
         // Always present
         let locked: Bool
 
@@ -2613,6 +2613,39 @@ extension APIClient {
         let payload = try JSONEncoder().encode(
             LockSelectedBody(family_id: familyID, child_profile_id: childProfileID, child_device_id: childDeviceID))
         return try await authedJSON(path: "/parent/device/unlock-selected", method: "POST", jsonBody: payload)
+    }
+
+    private struct ChildSelectedSetBody: Encodable {
+        let family_id: UUID
+        let child_profile_id: UUID
+    }
+
+    struct ChildSelectedSetDeviceReceipt: Decodable, Sendable {
+        let child_device_id: UUID
+        let command_id: UUID
+        let list_id: UUID
+        let warning: String?
+    }
+
+    struct ChildSelectedSetResponse: Decodable, Sendable {
+        let action: String
+        let devices: [ChildSelectedSetDeviceReceipt]
+    }
+
+    /// Adds the manual selected-set shield source to every device linked to the child.
+    @discardableResult
+    func lockSelectedForChild(familyID: UUID, childProfileID: UUID) async throws -> ChildSelectedSetResponse {
+        let payload = try JSONEncoder().encode(
+            ChildSelectedSetBody(family_id: familyID, child_profile_id: childProfileID))
+        return try await authedJSON(path: "/parent/child/lock-selected", method: "POST", jsonBody: payload)
+    }
+
+    /// Removes only the manual selected-set shield source from every linked device.
+    @discardableResult
+    func unlockSelectedForChild(familyID: UUID, childProfileID: UUID) async throws -> ChildSelectedSetResponse {
+        let payload = try JSONEncoder().encode(
+            ChildSelectedSetBody(family_id: familyID, child_profile_id: childProfileID))
+        return try await authedJSON(path: "/parent/child/unlock-selected", method: "POST", jsonBody: payload)
     }
 
     // MARK: B8 — Earned-time summary + policy + config
