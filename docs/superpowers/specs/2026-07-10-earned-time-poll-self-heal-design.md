@@ -183,6 +183,15 @@ it persists that offset only after installation succeeds. While the app is
 backgrounded, the old ladder therefore continues reporting correct cumulative
 raw thresholds instead of adding a newly advanced accepted value a second time.
 
+Reconciliation durability does not depend on the Boolean returned by
+`UserDefaults.synchronize()`. On physical devices that API can return `false`
+even though the App Group suite remains readable and writable. A false return is
+recorded as a diagnostic, but it does not by itself reject authoritative runtime
+state. The transaction remains protected by the interprocess file lock, identity
+validation before and after mutation, and write-then-read verification of every
+committed field. A lock failure, identity change, or read-back mismatch still
+rolls the mutation back and prevents arming.
+
 Stopping earned monitoring also invalidates its arm signature. A later
 false-to-true gate transition must install a ladder even when policy and
 selection are unchanged. Config handling and child-state polling share
@@ -226,6 +235,8 @@ behavior.
   that occurred while the clock was intentionally stopped.
 - A network failure remains retryable and does not alter the accepted local
   estimate.
+- A false `UserDefaults.synchronize()` return is diagnostic only. Read-back
+  mismatch remains a hard failure and must preserve the prior committed state.
 - The server remains the authority for usage date and timezone.
 
 ## Tests
@@ -274,6 +285,12 @@ iOS tests must prove:
 13. A device row label and bar both use
     `min(remaining_to_cap_minutes, overall_remaining_minutes)` when both values
     exist.
+14. Reconciliation succeeds when the App Group file lock is held, identity is
+    stable, writes read back correctly, and `UserDefaults.synchronize()` returns
+    false. It still fails and rolls back when read-back verification differs.
+15. Per-app counters and rules remain unchanged by this durability fix; the
+    shared backend gate still stops and resumes earned, device-total, and
+    per-app counters together.
 
 ## Deployment And One-Time Recovery
 
