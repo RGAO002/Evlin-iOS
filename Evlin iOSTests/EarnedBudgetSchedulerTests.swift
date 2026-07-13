@@ -82,7 +82,7 @@ final class EarnedBudgetSchedulerTests: XCTestCase {
         )
 
         XCTAssertFalse(result.isPlausible)
-        XCTAssertNil(result.maximumTrusted)
+        XCTAssertEqual(result.maximumTrusted, 15)
     }
 
     func test_makeEventExcludesPastActivity() {

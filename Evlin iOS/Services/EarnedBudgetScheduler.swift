@@ -13,18 +13,19 @@ nonisolated enum EarnedThresholdPlausibility {
         adjustedEstimateMinutes: Int,
         callbackAt: Date
     ) -> Result {
-        guard let armedAt = generation.armedAt, callbackAt >= armedAt else {
+        guard let armedAt = generation.armedAt else {
             return Result(isPlausible: false, maximumTrusted: nil)
         }
 
         let elapsedMinutes = Int(
-            floor(callbackAt.timeIntervalSince(armedAt) / 60)
+            floor(max(0, callbackAt.timeIntervalSince(armedAt)) / 60)
         )
         let maximumTrusted = generation.offsetMinutes
-            + max(0, elapsedMinutes)
+            + elapsedMinutes
             + EarnedBudgetScheduler.earnedBucketMinutes
         return Result(
-            isPlausible: adjustedEstimateMinutes <= maximumTrusted,
+            isPlausible: callbackAt >= armedAt
+                && adjustedEstimateMinutes <= maximumTrusted,
             maximumTrusted: maximumTrusted
         )
     }
