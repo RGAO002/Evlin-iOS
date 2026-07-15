@@ -21,6 +21,7 @@ git -C /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend stash create
 
 - `Evlin iOS/Services/APIClient.swift` already contains an unrelated agreement hunk. Stage only the new `usage_date` hunk with `git add -p`; never stage the whole file.
 - The Profile CTA calls only `/parent/child/lock-selected` and `/parent/child/unlock-selected`. It never calls the legacy single-device unlock endpoint.
+- The historical `/parent/device/unlock-selected` contract is **SUPERSEDED** by the canonical manual-only behavior in `2026-07-15-metering-epoch-design.md` Section 3.6. It currently has no iOS production caller. Keep its existing test only as legacy compatibility coverage during Phase 0; do not reuse, extend, or treat its "remove every source and infer an exhaustion override" behavior as normative. Retirement of that endpoint is a separate migration/removal task.
 - Manual Lock/Unlock must not mutate task suppression, exhaustion override, pool/day/device ledgers, accepted estimates, offsets, epochs, arm state, or automatic sources.
 - `POST /parent/earned-time/unlock-override` is the only Phase 0 automatic action. It sets the day override and queues `unlock_sources=["earned_time"]` plus `target.earned_override_usage_date=<canonical usage_date>` for every enrolled device. A known Locked-set ID is carried; without one the command is marker-only and never guesses an ID. It must never remove `manual` or `task_pause`.
 - The override endpoint accepts only the child's current canonical usage date. A stale parent snapshot receives `409 stale_usage_date` before any row or command mutation.
@@ -487,21 +488,34 @@ Before any mutation, the service resolves the child's current date through
 
 - [ ] **Step 1: Write failing multi-device and source-isolation tests**
 
-Freeze this test module at a deterministic instant whose canonical New York day
-is `2026-06-23`, then add the release tests:
+Add a non-autouse clock fixture whose deterministic instant projects to
+`2026-06-23` in canonical New York time. Request it only from tests that call
+the current-day-guarded dedicated override endpoint with that fixed date. Do
+not freeze the whole module: the legacy
+`test_unlock_selected_on_exhausted_day_sets_override` intentionally seeds
+`date.today()` and must remain on the real test date.
 
 ```python
-@pytest.fixture(autouse=True)
-def _freeze_override_clock(monkeypatch):
+@pytest.fixture
+def frozen_override_clock(monkeypatch):
     frozen = datetime(2026, 6, 23, 16, 0, tzinfo=timezone.utc)
     monkeypatch.setattr(
         "app.services.screen_time_clock.now_utc",
         lambda: frozen,
     )
+    return frozen
+
+
+async def test_override_on_exhausted_day(
+    session, client, frozen_override_clock
+):
+    # Keep the existing body; only opt this fixed-date endpoint test into the
+    # deterministic authority clock.
+    ...
 
 
 async def test_unlock_override_queues_earned_only_release_for_every_device(
-    session, client, monkeypatch
+    session, client, monkeypatch, frozen_override_clock
 ):
     family, profile, first = await _seed_family(session)
     first.apns_token = "token-first"
@@ -583,7 +597,7 @@ async def test_unlock_override_queues_earned_only_release_for_every_device(
 
 
 async def test_unlock_override_missing_selected_set_still_sets_override(
-    session, client, monkeypatch
+    session, client, monkeypatch, frozen_override_clock
 ):
     family, profile, device = await _seed_family(session)
     device.apns_token = "token-marker-only"
@@ -644,7 +658,7 @@ async def test_unlock_override_missing_selected_set_still_sets_override(
 
 
 async def test_unlock_override_rejects_stale_canonical_day_before_mutation(
-    session, client
+    session, client, frozen_override_clock
 ):
     family, profile, device = await _seed_family(session)
     stale_date = date(2026, 6, 22)
@@ -862,8 +876,9 @@ return result
 ```
 
 Authorization remains before the scheduler/service call. Do not reuse the
-legacy `/parent/device/unlock-selected` route: that route removes multiple
-sources and would violate the new manual-only CTA contract.
+legacy `/parent/device/unlock-selected` route: its old remove-all-sources plus
+implicit-override contract is SUPERSEDED, retained only for compatibility, and
+would violate the new manual-only CTA contract.
 
 - [ ] **Step 5: Run the complete override suite**
 
@@ -873,9 +888,11 @@ EVLIN_TEST_DATABASE_URL='postgresql+asyncpg://ale_user:ale_pass@localhost:5433/a
 ```
 
 Expected: all override tests pass, including existing ownership/day-scope
-coverage and the two new release tests. Repeating the endpoint may enqueue an
-additional idempotent earned-only unshield command; it must never broaden the
-source list or rewrite metering data.
+coverage and the three new release/date-safety tests. The scoped fixture must
+leave `test_unlock_selected_on_exhausted_day_sets_override` on its real
+`date.today()` path. Repeating the endpoint may enqueue an additional
+idempotent earned-only unshield command; it must never broaden the source list
+or rewrite metering data.
 
 - [ ] **Step 6: Commit the backend change only**
 

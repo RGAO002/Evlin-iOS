@@ -19,9 +19,11 @@
 - Vector evaluators dispatch by `kind`, never by vector ID. A switch such as `case "V14": return expected` is a test fake and fails review.
 - Production/reference evaluators accept only typed `input` values. Fixture IDs, descriptions, and `expected` observations stay in the test target and are unavailable to the evaluator module.
 - Stable generation identity contains only protocol version, child-device ID, canonical timezone, policy revision, exact persisted selection-byte digest, and enforcement-set ID. It excludes usage date, offset, estimates, remaining minutes, timestamps, callback counts, gate state, and retry state.
+- Epoch replacement reasons are a closed seven-case enum: `initial`, `day_rollover`, `policy_change`, `selection_change`, `enforcement_set_change`, `identity_recovery`, and `gate_resume_exact_rebase`. `poll_refresh` is not representable. The canonical vectors must execute all seven classifications without enabling the exact-rebase production branch.
 - SHA-256 is computed over the exact persisted selection bytes. Neither implementation may decode and re-encode those bytes before hashing.
 - Callback plausibility is an upper bound only. There is no lower-bound freshness check and no `+5 minutes` allowance.
 - Every rejected callback has a zero `MeteringEffects` value: no local mutation, retry, network dispatch, backend row/ledger mutation, notification, shield mutation, arm, or stop.
+- V14-V17 must assert attributed observations, not aggregate effect counts alone. Every ledger, shield, and receipt observation identifies the child device, lock/source provenance, credential kind, and credential ID (epoch, enforcement set, or exact per-app rule as applicable). "Some device changed" is not acceptance evidence.
 - The DEBUG capability probe must use a dedicated `evlin.metering.probe.*` namespace and App Group keys. It must not touch earned/app-limit activity names, offsets, rules, shields, ledgers, or command acknowledgements.
 - The probe is compiled out of Release with `#if DEBUG`; the backend sender remains a local diagnostic script, not a production route.
 - `--monitor-probe` is fail-closed: it requires exactly one explicit, nonempty APNs token and must never fall back to the script's normal all-child-device broadcast behavior.
@@ -57,11 +59,26 @@
 
 - Every case has `id`, `description`, `input`, and `expected`.
 - All timestamps are integer Unix seconds. Dates are canonical `yyyy-MM-dd` strings. Selection bytes are base64 strings. Ordering tokens are integers in the reference fixture; Phase 2 decides the production database representation.
+- Ledger cases expose full attributed observations in addition to scalar effect counters:
+
+```json
+{
+  "kind": "ledger|shield|receipt",
+  "child_device_id": "UUID",
+  "source": "earned_time|limit",
+  "credential_kind": "epoch|enforcement_set|app_limit_rule",
+  "credential_id": "UUID"
+}
+```
+
+The evaluator computes these arrays from typed input. Tests compare exact
+identity after a documented deterministic sort; they never infer success from
+`ledger_mutations == 1` or `shield_mutations == 2` alone.
 - Exact ownership by group:
 
 | Group | Vector IDs | Contract exercised |
 |---|---|---|
-| `generation_cases` | V01, V02, V03, V07 | unchanged-poll churn, mutable offset exclusion, raw-byte digest, first-launch readiness |
+| `generation_cases` | V01, V02, V03, V07 | unchanged-poll churn, mutable offset exclusion, raw-byte digest, first-launch readiness, closed replacement-reason catalog |
 | `callback_cases` | V04, V05, V06, V08, V13 | early reject, delayed accept, accepted progress plus polls, stale day, identity firewall |
 | `gate_cases` | V09, V10, V11, V12, V21, V22 | canonical rollover, pause/resume, task bypass, reflection precedence, device/canonical timezone split, canonical timezone replacement |
 | `ledger_cases` | V14, V15, V16, V17 | two-device attribution, own cap, shared exhaustion fanout, exact per-app lock |
@@ -151,17 +168,17 @@ Use these non-negotiable numeric anchors:
 - V04: epoch starts at `t=1000`; adjusted estimate `5` at `t=1001` is rejected with all effects zero. Repeat the same rule for a 60-minute per-app callback at `t=1001`.
 - V05: epoch starts at `t=1000`; adjusted estimate `5` at `t=1300` is accepted with default jitter 30.
 - V06: accept estimates 5 and 10 at physically possible times, then run 120 ordinary polls; accepted value remains 10 and monitor starts remain one.
-- V07: configured/authorized/selection-present/identity-present starts once and exposes first threshold; each missing prerequisite separately stays unarmed and reports not ready.
+- V07: configured/authorized/selection-present/identity-present starts once and exposes first threshold; each missing prerequisite separately stays unarmed and reports not ready. Its typed replacement-classification subtable changes one axis at a time and returns, exactly once each, `initial`, `day_rollover`, `policy_change`, `selection_change`, `enforcement_set_change`, `identity_recovery`, and `gate_resume_exact_rebase`. The last entry classifies an explicitly supplied recovery trigger only; it does not enable that branch in a production adapter. Assert that no input can produce `poll_refresh`.
 - V08: active date `2026-07-16`; callback date `2026-07-15`; reject before every effect.
 - V09: canonical midnight retires yesterday's epoch and creates exactly one new epoch without replacing the repeating monitor.
 - V10: pause, a bucket crossing the boundary, and resume with no app-process event; discard only the crossing bucket, then accept the first fully post-resume bucket.
 - V11: task bypass enables counting for `2026-07-15`, but not `2026-07-16`.
 - V12: reflection active keeps counting paused even when task bypass is active.
 - V13: callback/retry owner A presented under owner B; reject and remove old-owner queued work without any new-owner mutation.
-- V14: A accepts 5 under pool 120; shared remaining is 115, A own remaining falls by 5, B own remaining is unchanged.
-- V15: A reaches cap; add only A's device-cap/earned source.
-- V16: shared pool reaches zero; add separate earned receipts/sources for A and B.
-- V17: one rule reaches its limit; mutate only that rule/app/device shield source.
+- V14: A accepts 5 under pool 120; shared remaining is 115, A own remaining falls by 5, B own remaining is unchanged. The sole ledger observation names A, source `earned_time`, and A's fixture epoch ID; there is no B mutation.
+- V15: A reaches cap; add only A's device-cap/earned source. The shield and receipt observations name A, source `earned_time`, and A's enforcement-set ID; B's device/set IDs must not appear.
+- V16: shared pool reaches zero; add separate earned shield and receipt observations for A and B. Each observation names its target device, source `earned_time`, and that device's own enforcement-set ID; aggregate count two is insufficient.
+- V17: one rule reaches its limit; mutate only that rule/app/device shield source. The shield and receipt observations name the rule device, source `limit`, credential kind `app_limit_rule`, and the exact rule ID; unrelated rules, apps, and the sibling device must not appear.
 - V18: apply manual lock then manual unlock; only `manual` changes. Serialize metering state before/after and require identical bytes.
 - V19: v1 request before ratchet is accepted through the compatibility branch.
 - V20: after device ratchets to v2, v1 is `counted=false`, terminal, and not retried.
@@ -233,6 +250,21 @@ nonisolated struct MeteringEpochKey: Codable, Equatable, Sendable {
     let enforcementSetID: UUID
 }
 
+nonisolated enum MeteringEpochReplacementReason: String, Codable, CaseIterable, Equatable, Hashable, Sendable {
+    case initial
+    case dayRollover = "day_rollover"
+    case policyChange = "policy_change"
+    case selectionChange = "selection_change"
+    case enforcementSetChange = "enforcement_set_change"
+    case identityRecovery = "identity_recovery"
+    case gateResumeExactRebase = "gate_resume_exact_rebase"
+}
+
+nonisolated enum MeteringExplicitRecovery: String, Codable, Equatable, Sendable {
+    case identityRecovery = "identity_recovery"
+    case gateResumeExactRebase = "gate_resume_exact_rebase"
+}
+
 nonisolated enum MeteringGenerationDecision: Equatable, Sendable {
     case keep
     case install(MeteringGenerationKey)
@@ -288,6 +320,11 @@ MeteringEpochContract.defaultJitterSeconds == 30
 MeteringEpochContract.maximumJitterSeconds == 60
 MeteringEpochContract.selectionDigest(persistedBytes: Data) -> String
 MeteringEpochContract.generationDecision(active:next:) -> MeteringGenerationDecision
+MeteringEpochContract.replacementReason(
+    active: MeteringEpochKey?,
+    next: MeteringEpochKey,
+    explicitRecovery: MeteringExplicitRecovery?
+) -> MeteringEpochReplacementReason?
 MeteringEpochContract.callbackVerdict(_ input: MeteringCallbackInput) -> MeteringCallbackVerdict
 MeteringEpochContract.effects(for:) -> MeteringEffects
 MeteringEpochContract.canonicalUsageDate(at:timezoneIdentifier:) -> String?
@@ -326,6 +363,9 @@ Pin these before implementation:
 10. the default jitter constant is 30 and an injected value above 60 is clamped to the 60-second hard maximum;
 11. a callback timestamp before `startedAt` rejects as `.rejectTooEarly` even when delta is zero;
 12. canonical usage-date projection ignores the process/device timezone.
+13. the seven one-axis replacement cases return all and only
+    `MeteringEpochReplacementReason.allCases`; an unchanged poll returns `nil`,
+    and `poll_refresh` cannot be decoded as an enum value.
 
 Use a mutable `FakeMonitorInstaller` and `TestMeteringClock`; never sleep or instantiate `DeviceActivityCenter` in unit tests.
 
@@ -346,6 +386,15 @@ Rules:
 
 - `selectionDigest` hashes `Data` directly with `SHA256.hash(data:)`.
 - `generationDecision` is `.keep` only on exact six-field equality; it has no offset/date overload.
+- `replacementReason` is a closed classifier, not a free-form diagnostic
+  string. `active == nil` is `.initial`; an owner change or explicit identity
+  recovery is `.identityRecovery`; an explicit exact-rebase trigger is
+  `.gateResumeExactRebase`; usage-date change is `.dayRollover`; protocol,
+  canonical-timezone, or policy-revision change is `.policyChange`; exact-byte
+  digest change is `.selectionChange`; and enforcement-set change is
+  `.enforcementSetChange`. An unchanged ordinary poll returns `nil`. If more
+  than one axis differs, precedence is identity recovery, explicit gate rebase,
+  day rollover, policy, selection, then enforcement set.
 - `callbackVerdict` checks owner, epoch ID, canonical usage date, policy
   revision, namespace, then computes
   `deltaMinutes = adjustedEstimateMinutes - baseAcceptedMinutes`. A negative
@@ -415,6 +464,35 @@ git commit -m 'feat: add pure metering epoch contract'
 - `MeteringReferenceRules.evaluateManual(_ input: ManualInput) -> ManualObservation`
 - `MeteringReferenceRules.evaluateProtocol(_ input: ProtocolInput) -> ProtocolObservation`
 - `MeteringReferenceRules.evaluatePerAppOrdering(_ input: PerAppOrderingInput) -> PerAppOrderingObservation`
+
+Ledger observations use typed attribution rather than anonymous counters:
+
+```swift
+nonisolated enum MeteringAttributedMutationKind: String, Codable, Sendable {
+    case ledger
+    case shield
+    case receipt
+}
+
+nonisolated enum MeteringCredentialKind: String, Codable, Sendable {
+    case epoch
+    case enforcementSet = "enforcement_set"
+    case appLimitRule = "app_limit_rule"
+}
+
+nonisolated struct MeteringAttributedMutation: Codable, Equatable, Sendable {
+    let kind: MeteringAttributedMutationKind
+    let childDeviceID: UUID
+    let source: String
+    let credentialKind: MeteringCredentialKind
+    let credentialID: UUID
+}
+```
+
+`LedgerObservation` carries the exact sorted
+`[MeteringAttributedMutation]` alongside its projections and
+`MeteringEffects`. V14-V17 fail if the right count is attributed to the wrong
+device, source, epoch, enforcement set, or rule.
 
 Each function accepts only the typed `input` and returns an independently
 computed observation. The fixture wrapper containing `id`, `description`, and
@@ -511,6 +589,13 @@ the "after" state outside the algorithm and compare two fixture values to each
 other. For V23, retain the latest token independently of the active rule so
 clear version 3 leaves a tombstone.
 
+For V07, run the typed replacement-classification subtable through
+`replacementReason`, compare the exact seven enum raw values, and assert the
+result set equals `Set(MeteringEpochReplacementReason.allCases)`. This is enum
+coverage only; the vector runner must not turn on exact-rebase production
+behavior. For V14-V17, compare the complete attributed mutation arrays, not
+only `MeteringEffects` counters.
+
 - [ ] **Step 2: Run and verify the new tests fail on unimplemented rule functions**
 
 ```bash
@@ -528,6 +613,9 @@ Hard rules:
 - day rollover is computed in `canonicalTimezone`, never `TimeZone.current`;
 - device-local midnight alone is no event;
 - canonical timezone change is a named replacement and old callbacks fail before effects;
+- every epoch creation/replacement carries a
+  `MeteringEpochReplacementReason`; ordinary poll reconciliation carries none,
+  and there is no string fallback for unknown reasons;
 - day-scoped task-bypass/override markers are re-evaluated under the newly projected canonical date; old-date markers never migrate to the new date;
 - gate is `((tasksDone || taskBypassDate == usageDate) && !reflectionActive)`;
 - a pause/resume boundary bucket is conservatively discarded;
@@ -568,12 +656,17 @@ git commit -m 'test: execute metering rules in Swift'
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend/tests/test_metering_epoch_vector_contract.py`
 
 **Interfaces:**
-- Python dataclasses/enums mirror the Swift stable keys, verdicts, effects, transitions, projections, ratchet, and per-app tombstone state.
+- Python dataclasses/enums mirror the Swift stable keys, the closed seven-case `EpochReplacementReason`, verdicts, effects, attributed mutation identities, transitions, projections, ratchet, and per-app tombstone state.
 - Public functions use the same names in snake_case:
 
 ```python
 selection_digest(persisted_bytes: bytes) -> str
 generation_decision(active: GenerationKey | None, next_key: GenerationKey) -> GenerationDecision
+replacement_reason(
+    active: EpochKey | None,
+    next_key: EpochKey,
+    explicit_recovery: ExplicitRecovery | None,
+) -> EpochReplacementReason | None
 callback_verdict(value: CallbackInput) -> CallbackVerdict
 effects_for(verdict: CallbackVerdict) -> MeteringEffects
 canonical_usage_date(at_utc: datetime, timezone_identifier: str) -> str
@@ -592,7 +685,9 @@ compares `case["expected"]`. No contract function accepts a case wrapper or an
 expected value. Add direct tests for raw bytes and the upper-bound inequality
 so a fixture-parser mistake cannot hide an algorithm error. For V18, pass the
 metering snapshot into `apply_manual` and compare the returned snapshot bytes,
-not two values both read from the fixture.
+not two values both read from the fixture. Require V07 to cover the same seven
+replacement-reason enum values as Swift and reject `poll_refresh`; compare the
+complete device/source/credential attribution arrays for V14-V17.
 
 - [ ] **Step 2: Run and verify import failure**
 
@@ -735,7 +830,29 @@ cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend
   -q
 ```
 
-- [ ] **Step 3: Add shared DEBUG-only probe persistence, target membership, and the real minimum deployment target**
+- [ ] **Step 3: Audit iOS 17.6 API availability, then add shared DEBUG-only probe persistence and the real target**
+
+Before editing `IPHONEOS_DEPLOYMENT_TARGET`, enumerate every Swift source in
+the `EvlinPushApplier` Compile Sources phase and inspect
+`NotificationService.swift` plus all target-linked shared files for APIs newer
+than iOS 17.6. Then run both configurations with a command-line-only 17.6
+override, so the audit happens before the project setting is persisted:
+
+```bash
+xcodebuild build -project 'Evlin iOS.xcodeproj' \
+  -target EvlinPushApplier -configuration Debug -sdk iphoneos \
+  IPHONEOS_DEPLOYMENT_TARGET=17.6 CODE_SIGNING_ALLOWED=NO
+xcodebuild build -project 'Evlin iOS.xcodeproj' \
+  -target EvlinPushApplier -configuration Release -sdk iphoneos \
+  IPHONEOS_DEPLOYMENT_TARGET=17.6 CODE_SIGNING_ALLOWED=NO
+```
+
+Record the audited source list and both results in the task log. Any symbol
+introduced after 17.6 must be replaced or protected by a correct
+`if #available` fallback and covered before proceeding. Do not persist 17.6
+merely because probe code is under `#if DEBUG`, and do not silently retain or
+raise 26.2 to avoid an availability error; a nontrivial incompatibility stops
+the task for plan review.
 
 Add `Services/MeteringMonitorCapabilityProbe.swift` to both DAM and PushApplier exception arrays. All declarations and every call site are inside `#if DEBUG` so Release contains no probe namespace or App Group mutation.
 
@@ -810,7 +927,9 @@ cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend
 
 Expected: Debug builds all four relevant targets; Release also builds with
 probe code absent; both PushApplier configurations report deployment target
-17.6; probe sender tests prove zero sends for missing/blank/multiple tokens.
+17.6; the pre-edit 17.6 API audit names every PushApplier compile source and
+contains no unguarded post-17.6 symbol; probe sender tests prove zero sends for
+missing/blank/multiple tokens.
 
 - [ ] **Step 9: Commit in each repository**
 
@@ -995,14 +1114,18 @@ Do not start Phase 2 until review confirms:
 
 1. all 23 vectors execute in both languages from byte-identical input;
 2. V01 proves one install over 20 virtual minutes and V02 proves offset is not identity;
-3. every rejected callback has exactly zero effects;
-4. V21/V22 use canonical timezone, not process timezone;
-5. V18 leaves meter state byte-identical;
-6. V23 preserves a clear tombstone and newest-wins ordering;
-7. physical DAM/NSE capability results are explicit and reproducible, use only
+3. V07 executes all seven closed replacement reasons in both languages,
+   ordinary polls produce no reason, and `poll_refresh` is unrepresentable;
+4. every rejected callback has exactly zero effects;
+5. V14-V17 compare exact device/source/credential attribution, not only counts;
+6. V21/V22 use canonical timezone, not process timezone;
+7. V18 leaves meter state byte-identical;
+8. V23 preserves a clear tombstone and newest-wins ordering;
+9. physical DAM/NSE capability results are explicit and reproducible, use only
    `process-capable`/`not proven` labels, and leave Phase 3 on the conservative
    continuous-monitor branch regardless of the short-probe result;
-8. PushApplier Debug and Release both advertise deployment target 17.6;
-9. `--monitor-probe` cannot broadcast and sends only with exactly one explicit token.
+10. PushApplier's full compile-source list was audited before target lowering,
+    and Debug/Release both build and advertise deployment target 17.6;
+11. `--monitor-probe` cannot broadcast and sends only with exactly one explicit token.
 
 Phase 1 completion does **not** mean the three time products are fixed. It means their rules are executable and the Apple process-owner decision is known. Production migration begins in Phase 2 and is not complete until Phases 2-5 plus the physical gates pass.
