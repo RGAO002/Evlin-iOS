@@ -128,6 +128,8 @@ final class CommandPoller {
     /// Test seams around the suspension and ack points in earned config handling.
     var afterRekeyShieldRecord: ((String, String) async -> Void)?
     var ackEarnedTimeConfigOverride: ((UUID, APIClient) async -> Void)?
+    var stopEarnedBudgetOverride: (() -> Void)?
+    var ackMalformedPollOverride: ((UUID, String, [String: Any]?, APIClient) async -> Void)?
 
     /// Test-only capture of the remaining policy an earned config would arm.
     /// Production always routes through `EarnedBudgetArming.armIfReady()`.
@@ -482,6 +484,15 @@ final class CommandPoller {
             coalescePollForCurrentIdentity(expectedDeviceID: expectedDeviceID)
             return
         }
+        if poll.action == CommandAction.earnedTimeConfig.rawValue,
+           poll.target.earned_override_usage_date != nil {
+            await ackMalformedPoll(
+                commandID: poll.command_id,
+                expectedDeviceID: expectedDeviceID,
+                api: api
+            )
+            return
+        }
         // A4: Intercept earned_time_config BEFORE lockCommand() so the command
         // never reaches ActionExecutor. Handle inline and ack confirmed.
         if poll.action == CommandAction.earnedTimeConfig.rawValue {
@@ -764,7 +775,11 @@ final class CommandPoller {
             }
             EarnedTimeStore.shared.lastBackendSyncAt = Date()
             guard EarnedTimeStore.shared.usageCountingAllowed else {
-                EarnedBudgetArming.stopAndInvalidateSignature()
+                if let stopEarnedBudgetOverride {
+                    stopEarnedBudgetOverride()
+                } else {
+                    EarnedBudgetArming.stopAndInvalidateSignature()
+                }
                 return await ackEarnedTimeConfig(
                     commandID: commandID,
                     expectedDeviceID: expectedDeviceID,
@@ -811,6 +826,34 @@ final class CommandPoller {
             expectedDeviceID: expectedDeviceID,
             api: api
         )
+    }
+
+    private func ackMalformedPoll(
+        commandID: UUID,
+        expectedDeviceID: UUID,
+        api: APIClient
+    ) async {
+        guard isExpectedDeviceCurrent(expectedDeviceID) else { return }
+        let status = "failed"
+        let detail: [String: Any] = ["reason": "malformed"]
+        if let ackMalformedPollOverride {
+            await ackMalformedPollOverride(commandID, status, detail, api)
+            return
+        }
+        do {
+            try await api.ack(commandID: commandID, status: status, detail: detail)
+            CommandDeliveryDiagnostics.record(
+                CommandDeliveryDiagnostics.keyCommandAck,
+                "ok command=\(commandID.uuidString) status=\(status)"
+            )
+        } catch {
+            CommandDeliveryDiagnostics.record(
+                CommandDeliveryDiagnostics.keyCommandAck,
+                "failed command=\(commandID.uuidString) status=\(status) " +
+                "error=\(error.localizedDescription)"
+            )
+            print("[CommandPoller] ack failed for \(commandID): \(error)")
+        }
     }
 
     private func ackEarnedTimeConfig(

@@ -1,4 +1,5 @@
 import XCTest
+import FamilyControls
 @testable import Evlin_iOS
 
 /// Task B2 — lock_source / unlock_sources provenance end-to-end.
@@ -63,14 +64,52 @@ final class CommandProvenanceTests: XCTestCase {
         try JSONDecoder().decode(PollCommandDTO.self, from: data)
     }
 
+    private func earnedConfigJSON(
+        deviceID: UUID,
+        newListID: UUID,
+        earnedOverrideUsageDate: String
+    ) -> Data {
+        Data("""
+        {
+          "command_id": "CCCCCCCC-CCCC-CCCC-CCCC-CCCCCCCCCCCC",
+          "action": "earned_time_config",
+          "tier": "earnedTime",
+          "issued_at": "2026-07-15T12:00:00Z",
+          "target": {
+            "target_type": "earnedTime",
+            "target_child_id": "\(deviceID.uuidString)",
+            "original_request": "sync earned policy",
+            "earned_override_usage_date": "\(earnedOverrideUsageDate)"
+          },
+          "earned_time_config": {
+            "child_device_id": "\(deviceID.uuidString)",
+            "effective_date": "2026-07-15",
+            "usage_date": "2026-07-15",
+            "timezone": "America/New_York",
+            "daily_pool_minutes": 90,
+            "device_cap_minutes": 60,
+            "earned_bucket_minutes": 10,
+            "remaining_minutes": 41,
+            "selected_set": {
+              "list_id": "\(newListID.uuidString)",
+              "recordKey": "savedList:\(newListID.uuidString)",
+              "targetKey": "\(newListID.uuidString)",
+              "has_tokens": true
+            }
+          }
+        }
+        """.utf8)
+    }
+
     private func makeRecord(
         recordKey: String = "savedList:BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB",
+        targetKey: String = "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB",
         sources: Set<ShieldSource>
     ) -> ShieldRecord {
         ShieldRecord(
             recordKey: recordKey,
             tier: .savedList,
-            targetKey: "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB",
+            targetKey: targetKey,
             displayName: "Games",
             lastCommandID: UUID(),
             appTokens: [],
@@ -163,6 +202,121 @@ final class CommandProvenanceTests: XCTestCase {
     func test_absentOverrideUsageDate_staysNilForPolicyRaiseCompatibility() throws {
         let dto = try decode(pollJSON(unlockSources: ["earned_time"]))
         XCTAssertNil(CommandPoller.lockCommand(from: dto).target.earnedOverrideUsageDate)
+    }
+
+    func test_poller_metadataBearingEarnedConfig_failsMalformedWithoutMutation() async throws {
+        let deviceID = UUID(uuidString: "DDDDDDDD-DDDD-DDDD-DDDD-DDDDDDDDDDDD")!
+        let oldListID = UUID(uuidString: "EEEEEEEE-EEEE-EEEE-EEEE-EEEEEEEEEEEE")!
+        let newListID = UUID(uuidString: "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF")!
+        let command = try decode(earnedConfigJSON(
+            deviceID: deviceID,
+            newListID: newListID,
+            earnedOverrideUsageDate: "2026-07-15"
+        ))
+        let store = EarnedTimeStore.shared
+        let poller = CommandPoller.shared
+
+        let savedCommands = poller.pollCommandsOverride
+        let savedSaveList = poller.saveLockedSetIDOverride
+        let savedRekey = poller.afterRekeyShieldRecord
+        let savedArm = poller.armBudgetOverride
+        let savedStop = poller.stopEarnedBudgetOverride
+        let savedConfirmedAck = poller.ackEarnedTimeConfigOverride
+        let savedMalformedAck = poller.ackMalformedPollOverride
+        let savedMeasurable = poller.hasMeasurableSelectionOverride
+        let savedDeviceProvider = poller.childDeviceIDProvider
+        let savedOneShot = poller.oneShotPollOverride
+        defer {
+            poller.pollCommandsOverride = savedCommands
+            poller.saveLockedSetIDOverride = savedSaveList
+            poller.afterRekeyShieldRecord = savedRekey
+            poller.armBudgetOverride = savedArm
+            poller.stopEarnedBudgetOverride = savedStop
+            poller.ackEarnedTimeConfigOverride = savedConfirmedAck
+            poller.ackMalformedPollOverride = savedMalformedAck
+            poller.hasMeasurableSelectionOverride = savedMeasurable
+            poller.childDeviceIDProvider = savedDeviceProvider
+            poller.oneShotPollOverride = savedOneShot
+            store.removeAll()
+        }
+
+        store.removeAll()
+        store.saveLockedSetID(oldListID.uuidString, tokenData: nil)
+        store.poolMinutes = 31
+        store.capMinutes = 29
+        store.backendRemainingAtLastSync = 23
+        let seededSyncAt = Date(timeIntervalSince1970: 1_752_580_800)
+        store.lastBackendSyncAt = seededSyncAt
+        store.latestDeviceEstimate = 19
+        store.acceptedUsageDate = "2026-07-15"
+        store.acceptedEstimateMinutes = 17
+        store.earnedUsageOffsetMinutes = 13
+        store.usageCountingAllowed = false
+        store.saveMeasurementSelection(FamilyActivitySelection())
+
+        _ = await ActiveLockStore.shared.unshieldAll()
+        let record = makeRecord(
+            recordKey: ShieldRecord.makeRecordKey(
+                tier: .savedList,
+                targetKey: oldListID.uuidString
+            ),
+            targetKey: oldListID.uuidString,
+            sources: [.manual, .earnedTime]
+        )
+        _ = await ActiveLockStore.shared.addShield(record)
+
+        var rekeyCount = 0
+        var armCount = 0
+        var stopCount = 0
+        var confirmedAckCount = 0
+        var malformedAckCount = 0
+        var malformedAckStatus: String?
+        var malformedAckReason: String?
+        var malformedAckCommandID: UUID?
+        poller.childDeviceIDProvider = { deviceID }
+        poller.oneShotPollOverride = nil
+        poller.pollCommandsOverride = { _, _ in [command] }
+        poller.saveLockedSetIDOverride = nil
+        poller.afterRekeyShieldRecord = { _, _ in rekeyCount += 1 }
+        poller.armBudgetOverride = { _, _, _ in armCount += 1 }
+        poller.stopEarnedBudgetOverride = { stopCount += 1 }
+        poller.hasMeasurableSelectionOverride = { true }
+        poller.ackEarnedTimeConfigOverride = { _, _ in confirmedAckCount += 1 }
+        poller.ackMalformedPollOverride = { commandID, status, detail, _ in
+            malformedAckCount += 1
+            malformedAckCommandID = commandID
+            malformedAckStatus = status
+            malformedAckReason = detail?["reason"] as? String
+        }
+
+        await poller.pollOnceForCurrentDevice()
+
+        XCTAssertEqual(rekeyCount, 0)
+        XCTAssertEqual(store.lockedSetID, oldListID.uuidString)
+        XCTAssertEqual(store.poolMinutes, 31)
+        XCTAssertEqual(store.capMinutes, 29)
+        XCTAssertEqual(store.backendRemainingAtLastSync, 23)
+        XCTAssertEqual(store.lastBackendSyncAt, seededSyncAt)
+        XCTAssertEqual(store.latestDeviceEstimate, 19)
+        XCTAssertEqual(store.acceptedUsageDate, "2026-07-15")
+        XCTAssertEqual(store.acceptedEstimateMinutes, 17)
+        XCTAssertEqual(store.earnedUsageOffsetMinutes, 13)
+        XCTAssertFalse(store.usageCountingAllowed)
+        XCTAssertFalse(store.isOverridden(forUsageDate: "2026-07-15"))
+        XCTAssertEqual(armCount, 0)
+        XCTAssertEqual(stopCount, 0)
+        XCTAssertEqual(confirmedAckCount, 0)
+        XCTAssertEqual(malformedAckCount, 1)
+        XCTAssertEqual(malformedAckCommandID, command.command_id)
+        XCTAssertEqual(malformedAckStatus, "failed")
+        XCTAssertEqual(malformedAckReason, "malformed")
+
+        let snapshot = await ActiveLockStore.shared.allCurrent()
+        XCTAssertEqual(snapshot.shields.count, 1)
+        XCTAssertEqual(snapshot.shields.first?.recordKey, record.recordKey)
+        XCTAssertEqual(snapshot.shields.first?.sources, [.manual, .earnedTime])
+        XCTAssertTrue(snapshot.blocks.isEmpty)
+        _ = await ActiveLockStore.shared.unshieldAll()
     }
 
     // MARK: - ActionExecutor.shieldSources mapping
