@@ -100,19 +100,14 @@ enum EarnedDisplayFormatters {
         return fallbackOverallLabel
     }
 
-    /// Device row progress uses the same remaining-time direction as the shared
-    /// pool. If both per-device and overall values exist, use the smaller
-    /// remaining-minute value with the device-row denominator.
+    /// Device-row progress is own-cap-only. Shared remaining may clamp the row's
+    /// label, but a sibling's usage must never shrink this device's bar.
     static func deviceRemainingFraction(
         remainingToCapMinutes: Int?,
         capMinutes: Int?,
         overallRemainingMinutes: Int?,
         dailyPoolMinutes: Int?
     ) -> Double {
-        if let overallRemainingMinutes, overallRemainingMinutes <= 0 {
-            return 0
-        }
-
         guard let remainingToCapMinutes else {
             return remainingFraction(
                 remainingMinutes: overallRemainingMinutes,
@@ -120,14 +115,9 @@ enum EarnedDisplayFormatters {
             )
         }
 
-        let deviceDenominator = capMinutes ?? dailyPoolMinutes
-        let effectiveRemainingMinutes = effectiveDeviceRemainingMinutes(
-            remainingToCapMinutes: remainingToCapMinutes,
-            overallRemainingMinutes: overallRemainingMinutes
-        )
         return remainingFraction(
-            remainingMinutes: effectiveRemainingMinutes,
-            dailyPoolMinutes: deviceDenominator
+            remainingMinutes: remainingToCapMinutes,
+            dailyPoolMinutes: capMinutes ?? dailyPoolMinutes
         )
     }
 

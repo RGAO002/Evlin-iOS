@@ -93,7 +93,7 @@ final class EarnedDisplayTests: XCTestCase {
         XCTAssertEqual(EarnedDisplayFormatters.deviceEstimateLabel(estimatedMinutesLeft: -1), "time's up on this device")
     }
 
-    func test_deviceRemaining_overallPoolEmptyOverridesStaleDeviceEstimate() {
+    func test_deviceRemaining_sharedPoolEmptyChangesLabelButNotOwnCapBar() {
         XCTAssertEqual(
             EarnedDisplayFormatters.deviceRemainingLabel(
                 remainingToCapMinutes: 60,
@@ -107,14 +107,14 @@ final class EarnedDisplayTests: XCTestCase {
                 remainingToCapMinutes: 60,
                 capMinutes: 65,
                 overallRemainingMinutes: 0,
-                dailyPoolMinutes: 65
+                dailyPoolMinutes: 120
             ),
-            0,
+            60.0 / 65.0,
             accuracy: 0.001
         )
     }
 
-    func test_deviceRemainingLabel_clampsPositiveDeviceCapToSharedPool() {
+    func test_deviceRemaining_sharedPoolClampsLabelButUnusedDeviceBarStaysFull() {
         XCTAssertEqual(
             EarnedDisplayFormatters.deviceRemainingLabel(
                 remainingToCapMinutes: 120,
@@ -130,12 +130,12 @@ final class EarnedDisplayTests: XCTestCase {
                 overallRemainingMinutes: 35,
                 dailyPoolMinutes: 120
             ),
-            35.0 / 120.0,
+            1.0,
             accuracy: 0.001
         )
     }
 
-    func test_deviceRemaining_usesEffectiveMinutesWithAsymmetricDenominators() {
+    func test_deviceRemaining_ownUsageStillShrinksOwnCapBar() {
         XCTAssertEqual(
             EarnedDisplayFormatters.deviceRemainingLabel(
                 remainingToCapMinutes: 35,
@@ -193,7 +193,7 @@ final class EarnedDisplayTests: XCTestCase {
                 overallRemainingMinutes: -5,
                 dailyPoolMinutes: 120
             ),
-            0,
+            35.0 / 60.0,
             accuracy: 0.001
         )
     }
