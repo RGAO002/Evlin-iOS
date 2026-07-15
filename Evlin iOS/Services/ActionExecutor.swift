@@ -163,6 +163,8 @@ final class ActionExecutor: @unchecked Sendable {
 
     private let activityScheduler: DeviceActivityScheduling
     private let authorizationStatusProvider: () -> AuthorizationStatus
+    private let earnedTimeStore: EarnedTimeStore
+    private let overrideUsageDateProvider: () -> String?
     private let beforeMutation: () async -> Void
     private let afterMutationCheckpoint: (MutationCheckpoint) -> Void
 
@@ -188,6 +190,8 @@ final class ActionExecutor: @unchecked Sendable {
         authorizationStatusProvider: @escaping () -> AuthorizationStatus = {
             AuthorizationCenter.shared.authorizationStatus
         },
+        earnedTimeStore: EarnedTimeStore = .shared,
+        overrideUsageDateProvider: (() -> String?)? = nil,
         ruleStore: AppLimitRuleStore = .shared,
         makeLimitPlanner: (@Sendable () -> AppLimitPlanner)? = nil,
         beforeMutation: @escaping () async -> Void = {},
@@ -195,6 +199,10 @@ final class ActionExecutor: @unchecked Sendable {
     ) {
         self.activityScheduler = activityScheduler
         self.authorizationStatusProvider = authorizationStatusProvider
+        self.earnedTimeStore = earnedTimeStore
+        self.overrideUsageDateProvider = overrideUsageDateProvider ?? {
+            earnedTimeStore.currentCanonicalPolicyUsageDate()
+        }
         self.ruleStore = ruleStore
         self.beforeMutation = beforeMutation
         self.afterMutationCheckpoint = afterMutationCheckpoint
@@ -1054,7 +1062,31 @@ final class ActionExecutor: @unchecked Sendable {
 
         switch tier {
         case .savedList:
-            guard let id = cmd.target.listID else { return .failed(.nothingToUnlock) }
+            var overrideMarkerApplied = false
+            if cmd.target.earnedOverrideUsageDate != nil {
+                guard let expectedChildID = identity.expectedChildID,
+                      cmd.target.targetChildID == expectedChildID,
+                      identity.isCurrent
+                else { return Self.staleIdentityResult }
+                guard await prepareForMutation(identity) else {
+                    return Self.staleIdentityResult
+                }
+                guard case .applied = EarnedOverrideCommandApplier.applyIfPresent(
+                    cmd,
+                    currentUsageDate: overrideUsageDateProvider(),
+                    store: earnedTimeStore
+                ) else { return .failed(.malformed) }
+                overrideMarkerApplied = true
+            }
+
+            guard let id = cmd.target.listID else {
+                guard overrideMarkerApplied else { return .failed(.nothingToUnlock) }
+                return .confirmedExact(
+                    verb: .unshield,
+                    displayName: "Screen time override",
+                    effectiveState: nil
+                )
+            }
             // B2: if unlock_sources specified, remove only those sources; legacy
             // commands with no unlock_sources fall through to whole-record removal.
             if let wireSources = cmd.unlockSources {

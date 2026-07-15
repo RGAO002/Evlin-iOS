@@ -112,6 +112,7 @@
 			membershipExceptions = (
 				Models/BlockRecord.swift,
 				Models/CommandModels.swift,
+				Models/NSECommandWireModels.swift,
 				Models/ShieldRecord.swift,
 				Models/ShieldTier.swift,
 				Services/ActiveLockPersistenceLock.swift,

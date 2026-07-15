@@ -20,7 +20,8 @@ final class CommandProvenanceTests: XCTestCase {
     private func pollJSON(
         topLevelLockSource: String? = nil,
         targetLockSource: String? = nil,
-        unlockSources: [String]? = nil
+        unlockSources: [String]? = nil,
+        earnedOverrideUsageDate: String? = nil
     ) -> Data {
         var topLevel = ""
         if let s = topLevelLockSource {
@@ -33,19 +34,25 @@ final class CommandProvenanceTests: XCTestCase {
 
         var targetExtra = ""
         if let s = targetLockSource {
-            targetExtra = #","lock_source":"\#(s)""#
+            targetExtra += #","lock_source":"\#(s)""#
         }
+        if let earnedOverrideUsageDate {
+            targetExtra += #","earned_override_usage_date":"\#(earnedOverrideUsageDate)""#
+        }
+
+        let action = unlockSources == nil ? "shield" : "unshield"
+        let request = unlockSources == nil ? "lock games" : "unlock games"
 
         let json = """
         {
           "command_id": "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA",
-          "action": "shield",
+          "action": "\(action)",
           "tier": "savedList",
           "issued_at": "2026-01-01T00:00:00Z",
           "target": {
             "list_id": "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB",
             "list_name": "Games",
-            "original_request": "lock games"\(targetExtra)
+            "original_request": "\(request)"\(targetExtra)
           }\(topLevel)
         }
         """
@@ -142,6 +149,20 @@ final class CommandProvenanceTests: XCTestCase {
         let dto = try decode(pollJSON())
         let cmd = CommandPoller.lockCommand(from: dto)
         XCTAssertNil(cmd.target.unlockSources, "Absent unlock_sources must be nil")
+    }
+
+    func test_overrideUsageDate_survivesPollDTOAndLockCommandMapping() throws {
+        let dto = try decode(pollJSON(
+            unlockSources: ["earned_time"],
+            earnedOverrideUsageDate: "2026-07-15"
+        ))
+        let command = CommandPoller.lockCommand(from: dto)
+        XCTAssertEqual(command.target.earnedOverrideUsageDate, "2026-07-15")
+    }
+
+    func test_absentOverrideUsageDate_staysNilForPolicyRaiseCompatibility() throws {
+        let dto = try decode(pollJSON(unlockSources: ["earned_time"]))
+        XCTAssertNil(CommandPoller.lockCommand(from: dto).target.earnedOverrideUsageDate)
     }
 
     // MARK: - ActionExecutor.shieldSources mapping

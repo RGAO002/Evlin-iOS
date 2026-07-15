@@ -394,7 +394,8 @@ final class CommandPoller {
             catalogApplicationTokenDataBase64s: poll.target.applications ?? [],
             catalogCategoryTokenDataBase64s: poll.target.applicationCategories ?? [],
             lockSource: resolvedLockSource,
-            unlockSources: resolvedUnlockSources
+            unlockSources: resolvedUnlockSources,
+            earnedOverrideUsageDate: poll.target.earned_override_usage_date
         )
         let action: CommandAction = CommandAction(rawValue: poll.action) ?? .shield
 

@@ -1,20 +1,21 @@
 import XCTest
+import FamilyControls
 @testable import Evlin_iOS
 
-/// B10 — Override end-to-end: flag write + extension suppression.
+/// Override end-to-end: child command persistence + extension suppression.
 ///
-/// Three test classes covering the three acceptance criteria:
+/// Covers the three acceptance criteria:
 ///   1. Extension suppression: `shouldApplyEarnedShield` returns false when the
 ///      override flag is set for today's usage_date.
 ///   2. Enforcement resumes: `shouldApplyEarnedShield` returns true when the flag
 ///      is absent or set for a DIFFERENT date.
-///   3. Exhausted-unlock flag write: `ExhaustedUnlockSpy` verifies the ProfileView
-///      exhausted-unlock path writes the override flag + would call unlockOverride.
+///   3. Child command execution validates backend metadata and persists the marker
+///      before removing the earned-time source.
 ///
-/// Key constraint verified by these tests: the writer (main app via EarnedTimeStore)
+/// Key constraint verified by these tests: the writer (child command executor/NSE)
 /// and the reader (extension via EarnedSampleReporter.shouldApplyEarnedShield, which
 /// calls EarnedTimeStore.isOverridden(forUsageDate:)) use the IDENTICAL App Group key
-/// `earned.overridden.<usageDate>` and the same date format ("yyyy-MM-dd" local tz).
+/// `earned.overridden.<usageDate>` and the backend canonical date format ("yyyy-MM-dd").
 /// Both read/write through EarnedTimeStore — so the key format is automatically
 /// identical by construction. These tests confirm the round-trip in a single process.
 final class OverrideSuppressionTests: XCTestCase {
@@ -145,43 +146,226 @@ final class OverrideSuppressionTests: XCTestCase {
         XCTAssertFalse(result, "No shielding when usage is below the effective cap.")
     }
 
-    // MARK: - 3. Exhausted-unlock flag write (spy pattern)
+    // MARK: - 3. Child command validation and mutation ordering
 
-    /// When the exhausted-unlock path fires, the App Group override flag for today
-    /// must be written immediately (synchronously, before the backend call).
-    ///
-    /// This test uses the pure EarnedTimeStore API to simulate exactly what
-    /// ProfileView.toggleDeviceLock does on the exhausted branch (B10):
-    ///   1. Compute today's usage_date
-    ///   2. Call EarnedTimeStore.shared.setOverride(true, forUsageDate: usageDate)
-    ///   3. (Would call) apiClient.unlockOverride(childProfileID:)
-    ///
-    /// We verify step 2 using EarnedTimeStore directly — no UIKit/SwiftUI required.
-    func test_exhaustedUnlockPath_writesOverrideFlagForToday() {
-        let store = EarnedTimeStore.shared
-        let today = isoDateToday()
-
-        // Pre-condition: flag is absent.
-        XCTAssertFalse(store.isOverridden(forUsageDate: today),
-            "Override flag must be absent before the exhausted-unlock fires.")
-
-        // Simulate exactly what ProfileView.todayUsageDate() + setOverride does.
-        let usageDate = isoDateToday() // same date format: yyyy-MM-dd local tz
-        store.setOverride(true, forUsageDate: usageDate)
-
-        // Verify: flag is now set.
-        XCTAssertTrue(store.isOverridden(forUsageDate: today),
-            "Override flag must be set for today after the exhausted-unlock path fires.")
-
-        // Cross-check: extension suppression check returns false (no re-shield).
-        let extensionWouldShield = EarnedSampleReporter.shouldApplyEarnedShield(
-            thresholdN: 90,
-            effectiveCap: 60,
-            usageDate: today,
-            store: store
+    func test_currentCanonicalPolicyUsageDate_requiresRuntimeTimezone() {
+        let store = EarnedTimeStore(
+            suiteName: "test.override.no-runtime-tz.\(UUID().uuidString)",
+            useInProcessLock: true
         )
-        XCTAssertFalse(extensionWouldShield,
-            "After exhausted-unlock flag write, the extension must NOT re-apply .earnedTime shield.")
+
+        XCTAssertNil(store.currentCanonicalPolicyUsageDate(
+            now: Date(timeIntervalSince1970: 1_768_436_400)
+        ))
+        store.removeAll()
+    }
+
+    func test_currentCanonicalPolicyUsageDate_ignoresDeviceTimezone() {
+        let store = EarnedTimeStore(
+            suiteName: "test.override.canonical-tz.\(UUID().uuidString)",
+            useInProcessLock: true
+        )
+        let instant = ISO8601DateFormatter().date(
+            from: "2026-07-16T02:00:00Z"
+        )!
+        XCTAssertEqual(
+            store.reconcileRuntimePolicy(
+                usageDate: "2026-07-15",
+                timezoneIdentifier: "America/New_York",
+                poolMinutes: 120,
+                capMinutes: 120,
+                remainingMinutes: 120,
+                estimatedMinutes: 0,
+                syncedAt: instant
+            ),
+            .reconciled(0)
+        )
+
+        XCTAssertEqual(
+            store.currentCanonicalPolicyUsageDate(now: instant),
+            "2026-07-15"
+        )
+        XCTAssertEqual(
+            EarnedTimeStore.appLimitUsageDate(
+                now: instant,
+                timeZone: TimeZone(identifier: "Asia/Tokyo")!
+            ),
+            "2026-07-16"
+        )
+        store.removeAll()
+    }
+
+    @MainActor
+    func test_foregroundOverrideCommand_persistsFlagBeforeEarnedSourceRemoval() async throws {
+        let suite = "test.override.foreground.\(UUID().uuidString)"
+        let earnedStore = EarnedTimeStore(
+            suiteName: suite,
+            useInProcessLock: true
+        )
+        earnedStore.removeAll()
+        _ = await ActiveLockStore.shared.unshieldAll()
+
+        let listID = UUID(uuidString: "00000000-0000-0000-0000-000000000401")!
+        let record = makeEarnedRecord(listID: listID)
+        _ = await ActiveLockStore.shared.addShield(record)
+        var overrideWasSetAtRemoval = false
+        let executor = ActionExecutor(
+            authorizationStatusProvider: { .approved },
+            earnedTimeStore: earnedStore,
+            overrideUsageDateProvider: { "2026-07-15" },
+            afterMutationCheckpoint: { checkpoint in
+                if checkpoint == .unshieldRemoved {
+                    overrideWasSetAtRemoval = earnedStore.isOverridden(
+                        forUsageDate: "2026-07-15"
+                    )
+                }
+            }
+        )
+        let result = await executor.execute(
+            makeEarnedOverrideCommand(
+                listID: listID,
+                usageDate: "2026-07-15"
+            ),
+            expectedChildID: overrideDeviceID,
+            identityIsCurrent: { $0 == overrideDeviceID }
+        )
+
+        guard case .confirmedExact(let verb, _, _) = result else {
+            return XCTFail("Expected an exact unshield confirmation, got \(result)")
+        }
+        XCTAssertEqual(verb, .unshield)
+        XCTAssertTrue(overrideWasSetAtRemoval)
+        XCTAssertTrue(earnedStore.isOverridden(forUsageDate: "2026-07-15"))
+        XCTAssertFalse(EarnedSampleReporter.shouldApplyEarnedShield(
+            thresholdN: 120,
+            effectiveCap: 60,
+            usageDate: "2026-07-15",
+            store: earnedStore
+        ))
+        _ = await ActiveLockStore.shared.unshieldAll()
+        earnedStore.removeAll()
+    }
+
+    @MainActor
+    func test_foregroundMarkerOnlyOverride_persistsAndConfirmsWithoutListID() async {
+        let earnedStore = EarnedTimeStore(
+            suiteName: "test.override.marker.\(UUID().uuidString)",
+            useInProcessLock: true
+        )
+        let executor = ActionExecutor(
+            authorizationStatusProvider: { .approved },
+            earnedTimeStore: earnedStore,
+            overrideUsageDateProvider: { "2026-07-15" }
+        )
+        let command = LockCommand(
+            id: UUID(),
+            action: .unshield,
+            tier: .savedList,
+            target: CommandTarget(
+                listName: "Locked set",
+                listID: nil,
+                originalRequest: "override today's screen time",
+                targetDisplay: "Screen time override",
+                targetChildID: overrideDeviceID,
+                unlockSources: ["earned_time"],
+                earnedOverrideUsageDate: "2026-07-15"
+            ),
+            durationMinutes: nil,
+            issuedAt: Date()
+        )
+
+        let result = await executor.execute(
+            command,
+            expectedChildID: overrideDeviceID,
+            identityIsCurrent: { $0 == overrideDeviceID }
+        )
+
+        guard case .confirmedExact(let verb, _, _) = result else {
+            return XCTFail("Expected marker-only override confirmation, got \(result)")
+        }
+        XCTAssertEqual(verb, .unshield)
+        XCTAssertTrue(earnedStore.isOverridden(forUsageDate: "2026-07-15"))
+        earnedStore.removeAll()
+    }
+
+    @MainActor
+    func test_foregroundPriorDayOverride_failsBeforeMarkerOrUnshield() async {
+        let earnedStore = EarnedTimeStore(
+            suiteName: "test.override.stale-day.\(UUID().uuidString)",
+            useInProcessLock: true
+        )
+        let executor = ActionExecutor(
+            authorizationStatusProvider: { .approved },
+            earnedTimeStore: earnedStore,
+            overrideUsageDateProvider: { "2026-07-15" }
+        )
+
+        let result = await executor.execute(
+            makeEarnedOverrideCommand(
+                listID: UUID(uuidString: "00000000-0000-0000-0000-000000000401")!,
+                usageDate: "2026-07-14"
+            ),
+            expectedChildID: overrideDeviceID,
+            identityIsCurrent: { $0 == overrideDeviceID }
+        )
+
+        guard case .failed(.malformed) = result else {
+            return XCTFail("Expected stale override metadata to fail closed")
+        }
+        XCTAssertFalse(earnedStore.isOverridden(forUsageDate: "2026-07-14"))
+        earnedStore.removeAll()
+    }
+
+    @MainActor
+    func test_foregroundMissingCanonicalTimezone_failsBeforeOverrideMarker() async {
+        let earnedStore = EarnedTimeStore(
+            suiteName: "test.override.missing-tz.\(UUID().uuidString)",
+            useInProcessLock: true
+        )
+        let executor = ActionExecutor(
+            authorizationStatusProvider: { .approved },
+            earnedTimeStore: earnedStore
+        )
+
+        let result = await executor.execute(
+            makeEarnedOverrideCommand(
+                listID: UUID(uuidString: "00000000-0000-0000-0000-000000000401")!,
+                usageDate: "2026-07-15"
+            ),
+            expectedChildID: overrideDeviceID,
+            identityIsCurrent: { $0 == overrideDeviceID }
+        )
+
+        guard case .failed(.malformed) = result else {
+            return XCTFail("Expected missing canonical timezone to fail closed")
+        }
+        XCTAssertFalse(earnedStore.isOverridden(forUsageDate: "2026-07-15"))
+        earnedStore.removeAll()
+    }
+
+    @MainActor
+    func test_foregroundIdentitySwitch_failsBeforeOverrideMarker() async {
+        let earnedStore = EarnedTimeStore(
+            suiteName: "test.override.stale-identity.\(UUID().uuidString)",
+            useInProcessLock: true
+        )
+        let executor = ActionExecutor(
+            authorizationStatusProvider: { .approved },
+            earnedTimeStore: earnedStore,
+            overrideUsageDateProvider: { "2026-07-15" }
+        )
+
+        _ = await executor.execute(
+            makeEarnedOverrideCommand(
+                listID: UUID(uuidString: "00000000-0000-0000-0000-000000000401")!,
+                usageDate: "2026-07-15"
+            ),
+            expectedChildID: overrideDeviceID,
+            identityIsCurrent: { _ in false }
+        )
+
+        XCTAssertFalse(earnedStore.isOverridden(forUsageDate: "2026-07-15"))
+        earnedStore.removeAll()
     }
 
     /// Confirms that the flag uses the same key format that shouldApplyEarnedShield reads:
@@ -230,6 +414,50 @@ final class OverrideSuppressionTests: XCTestCase {
             "After clearing the override flag, the extension must apply .earnedTime shield again.")
     }
 
+    private func makeEarnedRecord(listID: UUID) -> ShieldRecord {
+        ShieldRecord(
+            recordKey: ShieldRecord.makeRecordKey(
+                tier: .savedList,
+                targetKey: listID.uuidString
+            ),
+            tier: .savedList,
+            targetKey: listID.uuidString,
+            displayName: "Locked set",
+            lastCommandID: UUID(),
+            appTokens: [],
+            categoryTokens: [],
+            webDomainTokens: [],
+            appliesToAll: true,
+            issuedAt: Date(),
+            expiresAt: nil,
+            originalRequest: "automatic earned lock",
+            targetChildID: overrideDeviceID,
+            sources: [.earnedTime]
+        )
+    }
+
+    private func makeEarnedOverrideCommand(
+        listID: UUID,
+        usageDate: String
+    ) -> LockCommand {
+        LockCommand(
+            id: UUID(),
+            action: .unshield,
+            tier: .savedList,
+            target: CommandTarget(
+                listName: "Locked set",
+                listID: listID,
+                originalRequest: "override today's screen time",
+                targetDisplay: "Locked set",
+                targetChildID: overrideDeviceID,
+                unlockSources: ["earned_time"],
+                earnedOverrideUsageDate: usageDate
+            ),
+            durationMinutes: nil,
+            issuedAt: Date()
+        )
+    }
+
     // MARK: - Helpers
 
     /// ISO-8601 date string for today in the device's local timezone.
@@ -259,3 +487,6 @@ final class OverrideSuppressionTests: XCTestCase {
         return f.string(from: Date().addingTimeInterval(86400))
     }
 }
+
+private let overrideDeviceID =
+    UUID(uuidString: "00000000-0000-0000-0000-000000000400")!

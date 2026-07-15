@@ -891,7 +891,7 @@ actor ActiveLockStore {
 
 /// Shared by the notification-service wire mapper and its executable app tests.
 /// Top-level command provenance has the same precedence as `CommandPoller`.
-enum NSECommandSourceResolver {
+nonisolated enum NSECommandSourceResolver {
     static func lockSource(topLevel: String?, target: String?) -> String? {
         topLevel ?? target
     }
@@ -957,9 +957,33 @@ enum NSEUnshieldCommandApplier {
     static func apply(
         _ command: LockCommand,
         recordKey: String,
-        store: ActiveLockStore = .shared
+        store: ActiveLockStore = .shared,
+        earnedTimeStore: EarnedTimeStore = .shared,
+        fetchedDeviceID: UUID? = nil,
+        currentDeviceID: UUID? = nil,
+        currentUsageDate: String? = nil
     ) async -> Outcome? {
         guard command.action == .unshield else { return nil }
+
+        if command.target.earnedOverrideUsageDate != nil {
+            guard let fetchedDeviceID,
+                  currentDeviceID == fetchedDeviceID,
+                  command.target.targetChildID == fetchedDeviceID
+            else { return nil }
+        }
+
+        switch EarnedOverrideCommandApplier.applyIfPresent(
+            command,
+            currentUsageDate: currentUsageDate,
+            store: earnedTimeStore
+        ) {
+        case .invalid:
+            return nil
+        case .applied where command.target.listID == nil:
+            return .confirmed
+        case .absent, .applied:
+            break
+        }
 
         if let wireSources = command.unlockSources {
             for wireSource in wireSources {

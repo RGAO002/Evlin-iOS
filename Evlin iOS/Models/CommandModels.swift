@@ -106,6 +106,8 @@ struct CommandTarget: Codable, Sendable {
     var lockSource: String? = nil
     // B2: for unshield commands — which sources to remove. Wire snake values.
     var unlockSources: [String]? = nil
+    // Backend-canonical day for an explicit earned-time override.
+    var earnedOverrideUsageDate: String? = nil
 }
 
 struct LockCommand: Codable, Sendable, Identifiable {

@@ -500,6 +500,33 @@ nonisolated enum EarnedActivityGeneration {
     }
 }
 
+nonisolated enum EarnedOverrideCommandApplier {
+    enum Outcome: Equatable, Sendable {
+        case absent
+        case applied(String)
+        case invalid
+    }
+
+    static func applyIfPresent(
+        _ command: LockCommand,
+        currentUsageDate: String?,
+        store: EarnedTimeStore
+    ) -> Outcome {
+        guard let usageDate = command.target.earnedOverrideUsageDate else {
+            return .absent
+        }
+        guard command.action == .unshield,
+              command.tier == .savedList,
+              command.target.unlockSources == ["earned_time"],
+              EarnedTimeStore.isCanonicalUsageDate(usageDate),
+              currentUsageDate == usageDate
+        else { return .invalid }
+
+        store.setOverride(true, forUsageDate: usageDate)
+        return .applied(usageDate)
+    }
+}
+
 /// Shared R-15 policy. DeviceActivity thresholds and its trusted-use tolerance
 /// are both fixed at five minutes.
 nonisolated enum EarnedThresholdPlausibility {
@@ -862,10 +889,13 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
 
     /// Set or clear the earned-time override flag for a given date.
     func setOverride(_ value: Bool, forUsageDate usageDate: String) {
-        if value {
-            defaults?.set(true, forKey: overrideKey(for: usageDate))
-        } else {
-            defaults?.removeObject(forKey: overrideKey(for: usageDate))
+        if let defaults {
+            if value {
+                defaults.set(true, forKey: overrideKey(for: usageDate))
+            } else {
+                defaults.removeObject(forKey: overrideKey(for: usageDate))
+            }
+            _ = synchronizeDefaults(defaults)
         }
     }
 
@@ -950,6 +980,13 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
               TimeZone(identifier: identifier) != nil
         else { return nil }
         return identifier
+    }
+
+    func currentCanonicalPolicyUsageDate(now: Date = Date()) -> String? {
+        guard let timezoneIdentifier = runtimeTimezoneIdentifier,
+              let timeZone = TimeZone(identifier: timezoneIdentifier)
+        else { return nil }
+        return Self.appLimitUsageDate(now: now, timeZone: timeZone)
     }
 
     func usageContext(

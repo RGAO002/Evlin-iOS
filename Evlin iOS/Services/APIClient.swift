@@ -433,6 +433,7 @@ struct PollTargetDTO: Decodable {
     // B2: per-target provenance. Backend emits "earned_time"|"manual".
     let lock_source: String?
     let unlock_sources: [String]?
+    let earned_override_usage_date: String?
 
     private enum CodingKeys: String, CodingKey {
         case bundle_id
@@ -460,6 +461,7 @@ struct PollTargetDTO: Decodable {
         case camelCatalogCategoryTokenDataBase64 = "catalogCategoryTokenDataBase64"
         case lock_source
         case unlock_sources
+        case earned_override_usage_date
     }
 
     init(from decoder: Decoder) throws {
@@ -492,6 +494,8 @@ struct PollTargetDTO: Decodable {
                 ?? c.decodeIfPresent([String].self, forKey: .application_categories)
         lock_source = try c.decodeIfPresent(String.self, forKey: .lock_source)
         unlock_sources = try c.decodeIfPresent([String].self, forKey: .unlock_sources)
+        earned_override_usage_date =
+            try c.decodeIfPresent(String.self, forKey: .earned_override_usage_date)
     }
 }
 
