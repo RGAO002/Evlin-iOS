@@ -134,6 +134,9 @@ struct ProfileView: View {
     // Manual provenance across every displayed child device. Automatic sources
     // still drive localStatus but never turn this button into an Unlock action.
     @State private var manualLockState: ManualLockAggregateState = .pending
+    @State private var automaticCoveringSources: [String] = []
+    @State private var automaticActionBusy = false
+    @State private var automaticActionError: String?
     // B11: earned-time summary from A3 backend endpoint.
     // Nil until the first fetch completes; progress bar / countdown uses static
     // config values until then (graceful degradation).
@@ -190,6 +193,15 @@ struct ProfileView: View {
 
     private var pendingManualLockIntent: ManualLockButtonIntent? {
         pendingManualLockOperation?.intent
+    }
+
+    private var automaticLockNotice: AutomaticLockNotice? {
+        AutomaticLockNotice.make(
+            coveringSources: automaticCoveringSources,
+            exhausted: earnedSummary?.state == "exhausted",
+            overrideActive: earnedSummary?.override_active == true,
+            usageDate: earnedSummary?.usage_date
+        )
     }
 
     private var manualLockButtonBackground: AnyShapeStyle {
@@ -1276,6 +1288,12 @@ struct ProfileView: View {
             expectedDeviceCount: deviceIDs.count,
             coveringSources: sources
         )
+        if let completeSources = AutomaticLockNotice.completeCoveringSources(
+            expectedDeviceCount: deviceIDs.count,
+            coveringSources: sources
+        ) {
+            automaticCoveringSources = completeSources
+        }
         let lockedByDevice = snapshotByDevice.mapValues(\.locked)
         let automaticState = AutomaticLockAggregateState.reduce(
             expectedDeviceIDs: deviceIDs,
@@ -1294,6 +1312,33 @@ struct ProfileView: View {
             }
         }
         return reducedState
+    }
+
+    @MainActor
+    private func performAutomaticLockAction(_ action: AutomaticLockNoticeAction) async {
+        guard !automaticActionBusy,
+              let childProfileID = childProfileUUID
+        else { return }
+
+        automaticActionBusy = true
+        automaticActionError = nil
+        defer { automaticActionBusy = false }
+
+        do {
+            try await AutomaticLockActionRunner.run(
+                action: action,
+                childProfileID: childProfileID
+            ) { id, usageDate in
+                _ = try await apiClient.unlockOverride(
+                    childProfileID: id,
+                    usageDate: usageDate
+                )
+            }
+            await refreshEarnedSummary()
+            await refreshLockState()
+        } catch {
+            automaticActionError = error.localizedDescription
+        }
     }
 
     @MainActor
@@ -1808,6 +1853,44 @@ struct ProfileView: View {
                 .opacity(displayedChildDeviceIDs.isEmpty
                          ? 0.45
                          : (lockBusy || !manualLockPresentation.allowsTap ? 0.7 : 1))
+
+                if let notice = automaticLockNotice {
+                    HStack(alignment: .center, spacing: 8) {
+                        Image(systemName: notice.systemImage)
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(Color.evOnSurfaceVariant)
+
+                        Text(notice.message)
+                            .font(.custom("Inter", size: 11).weight(.medium))
+                            .foregroundStyle(Color.evOnSurfaceVariant)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        if let title = notice.actionTitle,
+                           let action = notice.action {
+                            Button {
+                                Task { await performAutomaticLockAction(action) }
+                            } label: {
+                                if automaticActionBusy {
+                                    ProgressView().controlSize(.small)
+                                } else {
+                                    Text(title)
+                                        .font(.custom("Inter", size: 11).weight(.semibold))
+                                }
+                            }
+                            .buttonStyle(.borderless)
+                            .disabled(automaticActionBusy)
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+
+                if let automaticActionError {
+                    Text(automaticActionError)
+                        .font(.custom("Inter", size: 11).weight(.medium))
+                        .foregroundStyle(Color.evError)
+                        .frame(maxWidth: .infinity)
+                }
 
                 // Caption only when something needs saying: a failure (red), a
                 // neutral "queued" receipt, or why the button is disabled.

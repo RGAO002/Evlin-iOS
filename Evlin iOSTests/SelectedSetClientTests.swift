@@ -81,6 +81,21 @@ final class SelectedSetClientTests: XCTestCase {
         XCTAssertEqual(state, .unlocked)
     }
 
+    func test_manualPresentation_staysGreenWhenOnlyAutomaticSourcesExist() {
+        let manualState = ManualLockAggregateState.reduce(
+            expectedDeviceCount: 2,
+            coveringSources: [["earnedTime"], ["task_pause"]]
+        )
+        let presentation = ManualLockButtonPresentation.from(
+            state: manualState,
+            childName: "Sam"
+        )
+
+        XCTAssertEqual(manualState, .unlocked)
+        XCTAssertEqual(presentation.title, "Lock Sam's devices")
+        XCTAssertEqual(presentation.tone, .lock)
+    }
+
     func test_manualAggregate_everyDeviceManual_isLocked() {
         let state = ManualLockAggregateState.reduce(
             expectedDeviceCount: 2,

@@ -2674,6 +2674,7 @@ extension APIClient {
     /// Earned-time summary for one child device. State values: "ok" | "exhausted".
     struct EarnedSummaryDTO: Decodable {
         let child_profile_id: UUID?
+        var usage_date: String? = nil
         let state: String?          // "ok" | "exhausted"
         let earned_minutes: Int?
         let used_minutes: Int?
@@ -2693,6 +2694,7 @@ extension APIClient {
 
         enum CodingKeys: String, CodingKey {
             case child_profile_id
+            case usage_date
             case state
             case earned_minutes
             case used_minutes

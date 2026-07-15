@@ -300,4 +300,12 @@ final class EarnedDisplayTests: XCTestCase {
         XCTAssertEqual(entry.child_device_id?.uuidString.uppercased(), deviceID.uppercased())
         XCTAssertEqual(entry.estimated_minutes, 30)
     }
+
+    func test_earnedSummaryDTO_decodesCanonicalUsageDate() throws {
+        let data = #"{"usage_date":"2026-07-15","state":"exhausted","remaining_minutes":0}"#
+            .data(using: .utf8)!
+        let summary = try JSONDecoder().decode(APIClient.EarnedSummaryDTO.self, from: data)
+
+        XCTAssertEqual(summary.usage_date, "2026-07-15")
+    }
 }
