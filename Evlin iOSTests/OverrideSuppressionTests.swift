@@ -208,17 +208,17 @@ final class OverrideSuppressionTests: XCTestCase {
         let listID = UUID(uuidString: "00000000-0000-0000-0000-000000000401")!
         let record = makeEarnedRecord(listID: listID)
         _ = await ActiveLockStore.shared.addShield(record)
-        var overrideWasSetAtRemoval = false
+        var sourceMutationCheckpoints = 0
+        var overrideWasSetBeforeRemoval = false
         let executor = ActionExecutor(
             authorizationStatusProvider: { .approved },
             earnedTimeStore: earnedStore,
             overrideUsageDateProvider: { "2026-07-15" },
-            afterMutationCheckpoint: { checkpoint in
-                if checkpoint == .unshieldRemoved {
-                    overrideWasSetAtRemoval = earnedStore.isOverridden(
-                        forUsageDate: "2026-07-15"
-                    )
-                }
+            beforeUnshieldSourceMutation: {
+                sourceMutationCheckpoints += 1
+                overrideWasSetBeforeRemoval = earnedStore.isOverridden(
+                    forUsageDate: "2026-07-15"
+                )
             }
         )
         let result = await executor.execute(
@@ -234,7 +234,8 @@ final class OverrideSuppressionTests: XCTestCase {
             return XCTFail("Expected an exact unshield confirmation, got \(result)")
         }
         XCTAssertEqual(verb, .unshield)
-        XCTAssertTrue(overrideWasSetAtRemoval)
+        XCTAssertEqual(sourceMutationCheckpoints, 1)
+        XCTAssertTrue(overrideWasSetBeforeRemoval)
         XCTAssertTrue(earnedStore.isOverridden(forUsageDate: "2026-07-15"))
         XCTAssertFalse(EarnedSampleReporter.shouldApplyEarnedShield(
             thresholdN: 120,
@@ -368,6 +369,65 @@ final class OverrideSuppressionTests: XCTestCase {
         earnedStore.removeAll()
     }
 
+    @MainActor
+    func test_foregroundMetadataUnshieldAll_preservesSeededState() async {
+        await assertForegroundFirewallPreservesSeededState(
+            command: makeEarnedOverrideCommand(
+                listID: overrideListID,
+                usageDate: "2026-07-15",
+                action: .unshieldAll
+            ),
+            record: makeSeededRecord(
+                tier: .savedList,
+                targetKey: overrideListID.uuidString
+            )
+        )
+    }
+
+    @MainActor
+    func test_foregroundMetadataWrongTier_preservesSeededState() async {
+        await assertForegroundFirewallPreservesSeededState(
+            command: makeEarnedOverrideCommand(
+                listID: overrideListID,
+                usageDate: "2026-07-15",
+                tier: .category,
+                categoryHint: "social"
+            ),
+            record: makeSeededRecord(tier: .category, targetKey: "social")
+        )
+    }
+
+    @MainActor
+    func test_foregroundMetadataWrongAction_preservesSeededState() async {
+        await assertForegroundFirewallPreservesSeededState(
+            command: makeEarnedOverrideCommand(
+                listID: overrideListID,
+                usageDate: "2026-07-15",
+                action: .block,
+                bundleID: "com.example.blocked"
+            ),
+            record: makeSeededRecord(
+                tier: .savedList,
+                targetKey: overrideListID.uuidString
+            )
+        )
+    }
+
+    @MainActor
+    func test_foregroundMetadataWrongSource_preservesSeededState() async {
+        await assertForegroundFirewallPreservesSeededState(
+            command: makeEarnedOverrideCommand(
+                listID: overrideListID,
+                usageDate: "2026-07-15",
+                unlockSources: ["manual"]
+            ),
+            record: makeSeededRecord(
+                tier: .savedList,
+                targetKey: overrideListID.uuidString
+            )
+        )
+    }
+
     /// Confirms that the flag uses the same key format that shouldApplyEarnedShield reads:
     /// "earned.overridden.<yyyy-MM-dd>" in the "group.com.evlin.ios" suite.
     /// The key format is tested by reading UserDefaults directly, matching what the
@@ -438,23 +498,88 @@ final class OverrideSuppressionTests: XCTestCase {
 
     private func makeEarnedOverrideCommand(
         listID: UUID,
-        usageDate: String
+        usageDate: String,
+        action: CommandAction = .unshield,
+        tier: ShieldTier = .savedList,
+        unlockSources: [String] = ["earned_time"],
+        bundleID: String? = nil,
+        categoryHint: String? = nil
     ) -> LockCommand {
         LockCommand(
             id: UUID(),
-            action: .unshield,
-            tier: .savedList,
+            action: action,
+            tier: tier,
             target: CommandTarget(
+                bundleID: bundleID,
                 listName: "Locked set",
                 listID: listID,
+                categoryHint: categoryHint,
                 originalRequest: "override today's screen time",
                 targetDisplay: "Locked set",
                 targetChildID: overrideDeviceID,
-                unlockSources: ["earned_time"],
+                unlockSources: unlockSources,
                 earnedOverrideUsageDate: usageDate
             ),
             durationMinutes: nil,
             issuedAt: Date()
+        )
+    }
+
+    @MainActor
+    private func assertForegroundFirewallPreservesSeededState(
+        command: LockCommand,
+        record: ShieldRecord
+    ) async {
+        let earnedStore = EarnedTimeStore(
+            suiteName: "test.override.foreground-firewall.\(UUID().uuidString)",
+            useInProcessLock: true
+        )
+        earnedStore.removeAll()
+        _ = await ActiveLockStore.shared.unshieldAll()
+        _ = await ActiveLockStore.shared.unblockAll()
+        _ = await ActiveLockStore.shared.addShield(record)
+        let executor = ActionExecutor(
+            authorizationStatusProvider: { .approved },
+            earnedTimeStore: earnedStore,
+            overrideUsageDateProvider: { "2026-07-15" }
+        )
+
+        _ = await executor.execute(
+            command,
+            expectedChildID: overrideDeviceID,
+            identityIsCurrent: { $0 == overrideDeviceID }
+        )
+
+        XCTAssertFalse(earnedStore.isOverridden(forUsageDate: "2026-07-15"))
+        let snapshot = await ActiveLockStore.shared.allCurrent()
+        XCTAssertEqual(snapshot.shields.count, 1)
+        XCTAssertEqual(snapshot.shields.first?.recordKey, record.recordKey)
+        XCTAssertEqual(snapshot.shields.first?.sources, [.manual, .earnedTime])
+        XCTAssertTrue(snapshot.blocks.isEmpty)
+        _ = await ActiveLockStore.shared.unshieldAll()
+        _ = await ActiveLockStore.shared.unblockAll()
+        earnedStore.removeAll()
+    }
+
+    private func makeSeededRecord(
+        tier: ShieldTier,
+        targetKey: String
+    ) -> ShieldRecord {
+        ShieldRecord(
+            recordKey: ShieldRecord.makeRecordKey(tier: tier, targetKey: targetKey),
+            tier: tier,
+            targetKey: targetKey,
+            displayName: "Seeded lock",
+            lastCommandID: UUID(),
+            appTokens: [],
+            categoryTokens: [],
+            webDomainTokens: [],
+            appliesToAll: true,
+            issuedAt: Date(),
+            expiresAt: nil,
+            originalRequest: "seeded lock",
+            targetChildID: overrideDeviceID,
+            sources: [.manual, .earnedTime]
         )
     }
 
@@ -490,3 +615,5 @@ final class OverrideSuppressionTests: XCTestCase {
 
 private let overrideDeviceID =
     UUID(uuidString: "00000000-0000-0000-0000-000000000400")!
+private let overrideListID =
+    UUID(uuidString: "00000000-0000-0000-0000-000000000401")!

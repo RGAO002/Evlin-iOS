@@ -947,6 +947,64 @@ enum NSEShieldRecordFactory {
     }
 }
 
+/// Runs before the NSE's action switch. It owns all shield-removal dispatch so
+/// override metadata cannot bypass validation through another destructive action.
+enum NSELockMutationDispatcher {
+    enum Outcome: Equatable {
+        case notHandled
+        case rejected
+        case unshield
+        case unshieldAll
+    }
+
+    static func apply(
+        _ command: LockCommand,
+        recordKey: String,
+        store: ActiveLockStore = .shared,
+        earnedTimeStore: EarnedTimeStore = .shared,
+        fetchedDeviceID: UUID? = nil,
+        currentDeviceID: UUID? = nil,
+        currentUsageDate: String? = nil,
+        beforeSourceMutation: @escaping () -> Void = {}
+    ) async -> Outcome {
+        var overrideMarkerApplied = false
+        if command.target.earnedOverrideUsageDate != nil {
+            guard command.action == .unshield,
+                  let fetchedDeviceID,
+                  currentDeviceID == fetchedDeviceID,
+                  command.target.targetChildID == fetchedDeviceID,
+                  case .applied = EarnedOverrideCommandApplier.applyIfPresent(
+                      command,
+                      currentUsageDate: currentUsageDate,
+                      store: earnedTimeStore
+                  )
+            else { return .rejected }
+            overrideMarkerApplied = true
+        }
+
+        switch command.action {
+        case .unshield:
+            guard await NSEUnshieldCommandApplier.apply(
+                command,
+                recordKey: recordKey,
+                store: store,
+                earnedTimeStore: earnedTimeStore,
+                fetchedDeviceID: fetchedDeviceID,
+                currentDeviceID: currentDeviceID,
+                currentUsageDate: currentUsageDate,
+                overrideMarkerApplied: overrideMarkerApplied,
+                beforeSourceMutation: beforeSourceMutation
+            ) == .confirmed else { return .rejected }
+            return .unshield
+        case .unshieldAll:
+            _ = await store.unshieldAll()
+            return .unshieldAll
+        default:
+            return .notHandled
+        }
+    }
+}
+
 /// Source-aware unshield mutation used by the NSE. A non-nil source list is a
 /// scoped command; legacy commands without provenance retain whole-record semantics.
 enum NSEUnshieldCommandApplier {
@@ -961,32 +1019,39 @@ enum NSEUnshieldCommandApplier {
         earnedTimeStore: EarnedTimeStore = .shared,
         fetchedDeviceID: UUID? = nil,
         currentDeviceID: UUID? = nil,
-        currentUsageDate: String? = nil
+        currentUsageDate: String? = nil,
+        overrideMarkerApplied: Bool = false,
+        beforeSourceMutation: @escaping () -> Void = {}
     ) async -> Outcome? {
         guard command.action == .unshield else { return nil }
 
-        if command.target.earnedOverrideUsageDate != nil {
-            guard let fetchedDeviceID,
-                  currentDeviceID == fetchedDeviceID,
-                  command.target.targetChildID == fetchedDeviceID
-            else { return nil }
-        }
+        if !overrideMarkerApplied {
+            if command.target.earnedOverrideUsageDate != nil {
+                guard let fetchedDeviceID,
+                      currentDeviceID == fetchedDeviceID,
+                      command.target.targetChildID == fetchedDeviceID
+                else { return nil }
+            }
 
-        switch EarnedOverrideCommandApplier.applyIfPresent(
-            command,
-            currentUsageDate: currentUsageDate,
-            store: earnedTimeStore
-        ) {
-        case .invalid:
-            return nil
-        case .applied where command.target.listID == nil:
+            switch EarnedOverrideCommandApplier.applyIfPresent(
+                command,
+                currentUsageDate: currentUsageDate,
+                store: earnedTimeStore
+            ) {
+            case .invalid:
+                return nil
+            case .applied where command.target.listID == nil:
+                return .confirmed
+            case .absent, .applied:
+                break
+            }
+        } else if command.target.listID == nil {
             return .confirmed
-        case .absent, .applied:
-            break
         }
 
         if let wireSources = command.unlockSources {
             for wireSource in wireSources {
+                beforeSourceMutation()
                 await store.removeSource(
                     NSECommandSourceResolver.shieldSource(from: wireSource),
                     fromRecordKey: recordKey

@@ -165,6 +165,7 @@ final class ActionExecutor: @unchecked Sendable {
     private let authorizationStatusProvider: () -> AuthorizationStatus
     private let earnedTimeStore: EarnedTimeStore
     private let overrideUsageDateProvider: () -> String?
+    private let beforeUnshieldSourceMutation: () -> Void
     private let beforeMutation: () async -> Void
     private let afterMutationCheckpoint: (MutationCheckpoint) -> Void
 
@@ -194,6 +195,7 @@ final class ActionExecutor: @unchecked Sendable {
         overrideUsageDateProvider: (() -> String?)? = nil,
         ruleStore: AppLimitRuleStore = .shared,
         makeLimitPlanner: (@Sendable () -> AppLimitPlanner)? = nil,
+        beforeUnshieldSourceMutation: @escaping () -> Void = {},
         beforeMutation: @escaping () async -> Void = {},
         afterMutationCheckpoint: @escaping (MutationCheckpoint) -> Void = { _ in }
     ) {
@@ -204,6 +206,7 @@ final class ActionExecutor: @unchecked Sendable {
             earnedTimeStore.currentCanonicalPolicyUsageDate()
         }
         self.ruleStore = ruleStore
+        self.beforeUnshieldSourceMutation = beforeUnshieldSourceMutation
         self.beforeMutation = beforeMutation
         self.afterMutationCheckpoint = afterMutationCheckpoint
         // Default factory builds a planner sharing this executor's scheduler so
@@ -226,13 +229,35 @@ final class ActionExecutor: @unchecked Sendable {
             return .failed(.notAuthorized)
         }
 
+        var overrideMarkerApplied = false
+        if cmd.target.earnedOverrideUsageDate != nil {
+            guard cmd.action == .unshield else { return .failed(.malformed) }
+            guard let expectedChildID = identity.expectedChildID,
+                  cmd.target.targetChildID == expectedChildID,
+                  identity.isCurrent
+            else { return Self.staleIdentityResult }
+            guard await prepareForMutation(identity) else {
+                return Self.staleIdentityResult
+            }
+            guard case .applied = EarnedOverrideCommandApplier.applyIfPresent(
+                cmd,
+                currentUsageDate: overrideUsageDateProvider(),
+                store: earnedTimeStore
+            ) else { return .failed(.malformed) }
+            overrideMarkerApplied = true
+        }
+
         switch cmd.action {
         case .shield:
             return await executeShield(cmd: cmd, blob: blob, identity: identity)
         case .block:
             return await executeBlock(cmd: cmd, identity: identity)
         case .unshield:
-            return await executeUnshield(cmd: cmd, identity: identity)
+            return await executeUnshield(
+                cmd: cmd,
+                identity: identity,
+                overrideMarkerApplied: overrideMarkerApplied
+            )
         case .unblock:
             return await executeUnblock(cmd: cmd, identity: identity)
         case .unshieldAll:
@@ -1056,29 +1081,13 @@ final class ActionExecutor: @unchecked Sendable {
 
     private func executeUnshield(
         cmd: LockCommand,
-        identity: CommandIdentityContext
+        identity: CommandIdentityContext,
+        overrideMarkerApplied: Bool
     ) async -> AckResult {
         guard let tier = cmd.tier else { return .failed(.malformed) }
 
         switch tier {
         case .savedList:
-            var overrideMarkerApplied = false
-            if cmd.target.earnedOverrideUsageDate != nil {
-                guard let expectedChildID = identity.expectedChildID,
-                      cmd.target.targetChildID == expectedChildID,
-                      identity.isCurrent
-                else { return Self.staleIdentityResult }
-                guard await prepareForMutation(identity) else {
-                    return Self.staleIdentityResult
-                }
-                guard case .applied = EarnedOverrideCommandApplier.applyIfPresent(
-                    cmd,
-                    currentUsageDate: overrideUsageDateProvider(),
-                    store: earnedTimeStore
-                ) else { return .failed(.malformed) }
-                overrideMarkerApplied = true
-            }
-
             guard let id = cmd.target.listID else {
                 guard overrideMarkerApplied else { return .failed(.nothingToUnlock) }
                 return .confirmedExact(
@@ -1103,6 +1112,7 @@ final class ActionExecutor: @unchecked Sendable {
                     }
                     guard identity.isCurrent else { return Self.staleIdentityResult }
                     guard await prepareForMutation(identity) else { return Self.staleIdentityResult }
+                    beforeUnshieldSourceMutation()
                     await ActiveLockStore.shared.removeSource(src, fromRecordKey: recordKey)
                     afterMutationCheckpoint(.unshieldRemoved)
                     guard identity.isCurrent else {

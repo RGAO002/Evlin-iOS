@@ -114,6 +114,31 @@ enum NSELockApplier {
         _ cmd: LockCommand,
         fetchedDeviceID: UUID? = nil
     ) async -> Outcome? {
+        let earnedTimeStore = EarnedTimeStore.shared
+        switch await NSELockMutationDispatcher.apply(
+            cmd,
+            recordKey: unshieldRecordKey(from: cmd),
+            earnedTimeStore: earnedTimeStore,
+            fetchedDeviceID: fetchedDeviceID,
+            currentDeviceID: NSEConfig.deviceID,
+            currentUsageDate: earnedTimeStore.currentCanonicalPolicyUsageDate()
+        ) {
+        case .rejected:
+            return nil
+        case .unshield:
+            return Outcome(
+                verb: "unshield",
+                displayName: cmd.target.targetDisplay ?? "App"
+            )
+        case .unshieldAll:
+            return Outcome(
+                verb: "unshield_all",
+                displayName: cmd.target.targetDisplay ?? "All apps"
+            )
+        case .notHandled:
+            break
+        }
+
         switch cmd.action {
         case .shield:
             guard let record = buildShieldRecord(from: cmd) else { return nil }
@@ -126,24 +151,12 @@ enum NSELockApplier {
             _ = await ActiveLockStore.shared.addBlock(record)
             return Outcome(verb: "block", displayName: record.displayName)
         case .unshieldAll:
-            _ = await ActiveLockStore.shared.unshieldAll()
-            return Outcome(verb: "unshield_all", displayName: cmd.target.targetDisplay ?? "All apps")
+            return nil
         case .unblockAll:
             _ = await ActiveLockStore.shared.unblockAll()
             return Outcome(verb: "unblock_all", displayName: cmd.target.targetDisplay ?? "All apps")
         case .unshield:
-            // Idempotent: removing an absent record is still "unlocked" from the
-            // parent's intent, so we always report success.
-            let earnedTimeStore = EarnedTimeStore.shared
-            guard await NSEUnshieldCommandApplier.apply(
-                cmd,
-                recordKey: unshieldRecordKey(from: cmd),
-                earnedTimeStore: earnedTimeStore,
-                fetchedDeviceID: fetchedDeviceID,
-                currentDeviceID: NSEConfig.deviceID,
-                currentUsageDate: earnedTimeStore.currentCanonicalPolicyUsageDate()
-            ) == .confirmed else { return nil }
-            return Outcome(verb: "unshield", displayName: cmd.target.targetDisplay ?? "App")
+            return nil
         case .unblock:
             guard let bundleID = cmd.target.bundleID?.trimmingCharacters(in: .whitespacesAndNewlines),
                   !bundleID.isEmpty else { return nil }

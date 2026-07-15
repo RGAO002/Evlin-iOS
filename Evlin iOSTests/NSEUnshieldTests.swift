@@ -173,6 +173,8 @@ final class NSEUnshieldTests: XCTestCase {
         let earnedStore = makeEarnedStore()
         let record = makeMixedRecord()
         _ = await activeStore.addShield(record)
+        var sourceMutationCheckpoints = 0
+        var overrideWasSetBeforeRemoval = false
         let outcome = await NSEUnshieldCommandApplier.apply(
             command,
             recordKey: record.recordKey,
@@ -180,10 +182,18 @@ final class NSEUnshieldTests: XCTestCase {
             earnedTimeStore: earnedStore,
             fetchedDeviceID: overrideDeviceID,
             currentDeviceID: overrideDeviceID,
-            currentUsageDate: "2026-07-15"
+            currentUsageDate: "2026-07-15",
+            beforeSourceMutation: {
+                sourceMutationCheckpoints += 1
+                overrideWasSetBeforeRemoval = earnedStore.isOverridden(
+                    forUsageDate: "2026-07-15"
+                )
+            }
         )
 
         XCTAssertEqual(outcome, .confirmed)
+        XCTAssertEqual(sourceMutationCheckpoints, 1)
+        XCTAssertTrue(overrideWasSetBeforeRemoval)
         XCTAssertTrue(earnedStore.isOverridden(forUsageDate: "2026-07-15"))
         let snapshot = await activeStore.allCurrent()
         let remaining = try XCTUnwrap(snapshot.shields.first {
@@ -378,6 +388,49 @@ final class NSEUnshieldTests: XCTestCase {
         earnedStore.removeAll()
     }
 
+    func test_nseMetadataUnshieldAll_preservesSeededState() async {
+        await assertNSEFirewallPreservesSeededState(
+            command: makeOverrideCommand(action: .unshieldAll),
+            record: makeSeededRecord(
+                tier: .savedList,
+                targetKey: overrideListID.uuidString
+            )
+        )
+    }
+
+    func test_nseMetadataWrongTier_preservesSeededState() async {
+        await assertNSEFirewallPreservesSeededState(
+            command: makeOverrideCommand(
+                tier: .category,
+                categoryHint: "social"
+            ),
+            record: makeSeededRecord(tier: .category, targetKey: "social")
+        )
+    }
+
+    func test_nseMetadataWrongAction_preservesSeededState() async {
+        await assertNSEFirewallPreservesSeededState(
+            command: makeOverrideCommand(
+                action: .block,
+                bundleID: "com.example.blocked"
+            ),
+            record: makeSeededRecord(
+                tier: .savedList,
+                targetKey: overrideListID.uuidString
+            )
+        )
+    }
+
+    func test_nseMetadataWrongSource_preservesSeededState() async {
+        await assertNSEFirewallPreservesSeededState(
+            command: makeOverrideCommand(unlockSources: ["manual"]),
+            record: makeSeededRecord(
+                tier: .savedList,
+                targetKey: overrideListID.uuidString
+            )
+        )
+    }
+
     private func assertAutomaticNSEShieldSurvivesManualUnshield(
         wireSource: String,
         expectedSource: ShieldSource
@@ -463,6 +516,82 @@ final class NSEUnshieldTests: XCTestCase {
             issuedAt: Date(),
             expiresAt: nil,
             originalRequest: "mixed lock",
+            targetChildID: overrideDeviceID,
+            sources: [.manual, .earnedTime]
+        )
+    }
+
+    private func assertNSEFirewallPreservesSeededState(
+        command: LockCommand,
+        record: ShieldRecord
+    ) async {
+        let activeStore = ActiveLockStore()
+        let earnedStore = makeEarnedStore()
+        _ = await activeStore.addShield(record)
+
+        _ = await NSELockMutationDispatcher.apply(
+            command,
+            recordKey: record.recordKey,
+            store: activeStore,
+            earnedTimeStore: earnedStore,
+            fetchedDeviceID: overrideDeviceID,
+            currentDeviceID: overrideDeviceID,
+            currentUsageDate: "2026-07-15"
+        )
+
+        XCTAssertFalse(earnedStore.isOverridden(forUsageDate: "2026-07-15"))
+        let snapshot = await activeStore.allCurrent()
+        XCTAssertEqual(snapshot.shields.count, 1)
+        XCTAssertEqual(snapshot.shields.first?.recordKey, record.recordKey)
+        XCTAssertEqual(snapshot.shields.first?.sources, [.manual, .earnedTime])
+        XCTAssertTrue(snapshot.blocks.isEmpty)
+        earnedStore.removeAll()
+    }
+
+    private func makeOverrideCommand(
+        action: CommandAction = .unshield,
+        tier: ShieldTier = .savedList,
+        unlockSources: [String] = ["earned_time"],
+        bundleID: String? = nil,
+        categoryHint: String? = nil
+    ) -> LockCommand {
+        LockCommand(
+            id: UUID(),
+            action: action,
+            tier: tier,
+            target: CommandTarget(
+                bundleID: bundleID,
+                listName: "Locked set",
+                listID: overrideListID,
+                categoryHint: categoryHint,
+                originalRequest: "override today's screen time",
+                targetDisplay: "Locked set",
+                targetChildID: overrideDeviceID,
+                unlockSources: unlockSources,
+                earnedOverrideUsageDate: "2026-07-15"
+            ),
+            durationMinutes: nil,
+            issuedAt: Date()
+        )
+    }
+
+    private func makeSeededRecord(
+        tier: ShieldTier,
+        targetKey: String
+    ) -> ShieldRecord {
+        ShieldRecord(
+            recordKey: ShieldRecord.makeRecordKey(tier: tier, targetKey: targetKey),
+            tier: tier,
+            targetKey: targetKey,
+            displayName: "Seeded lock",
+            lastCommandID: UUID(),
+            appTokens: [],
+            categoryTokens: [],
+            webDomainTokens: [],
+            appliesToAll: true,
+            issuedAt: Date(),
+            expiresAt: nil,
+            originalRequest: "seeded lock",
             targetChildID: overrideDeviceID,
             sources: [.manual, .earnedTime]
         )
