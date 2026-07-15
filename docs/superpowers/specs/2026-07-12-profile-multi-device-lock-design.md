@@ -1,5 +1,12 @@
 # Profile Multi-Device Lock Design
 
+> **SUPERSEDED (2026-07-15):** This document is historical and must not be used
+> to define the Profile CTA. Its "any source means Unlock" and "Unlock removes
+> automatic sources" behavior conflicts with the approved
+> [Metering Epoch Reliability Design](2026-07-15-metering-epoch-design.md),
+> especially Section 3.6 and Phase 0. The CTA now adds/removes `manual` only;
+> automatic reasons use separate policy-specific actions.
+
 ## Problem
 
 The Profile CTA says `Lock/Unlock <child>'s devices`, but it resolves one

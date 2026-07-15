@@ -1,5 +1,13 @@
 # Profile Multi-Device Lock Implementation Plan
 
+> **SUPERSEDED (2026-07-15) - DO NOT EXECUTE:** The aggregate "any lock source
+> means Unlock" behavior and automatic-source removal in this plan conflict
+> with the approved
+> [Metering Epoch Reliability Design](../specs/2026-07-15-metering-epoch-design.md),
+> Section 3.6 and Phase 0. This file is retained only as implementation history.
+> The Profile CTA now adds/removes `manual` only; automatic locks and their
+> bypass/override actions remain separate.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make the child Profile lock/unlock CTA target every enrolled device for that child, including devices paired before the most recent one.

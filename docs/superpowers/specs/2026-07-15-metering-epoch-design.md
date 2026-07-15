@@ -176,6 +176,33 @@ The large green/red Profile button is a manual-lock control only:
 "Parent explicitly bypasses today's task requirement" is a separate action and
 must never be inferred from this button.
 
+When an automatic source remains while the manual button is green, the parent
+surface must make the active automatic reason visible and provide a separate,
+policy-specific action where one exists (for example, today's task bypass or an
+earned-time exhaustion override). Those actions must remain distinct from the
+manual CTA in presentation, API call, provenance, and side effects.
+
+The dedicated exhaustion override is atomic at the backend boundary: it writes
+the canonical-day override and queues one saved-list `unshield` command for
+every enrolled device, with exactly `unlock_sources=["earned_time"]`. When a
+stable selected-set identity exists, the command carries it and removes that
+source; otherwise the list ID stays absent and the command is marker-only - it
+must never guess a target. It never removes `manual` or `task_pause`. Each
+command carries the canonical `usage_date`; both the foreground command
+executor and the NSE must validate and persist
+`earned.overridden.<usage_date>` before removing the earned source. Invalid
+override metadata fails closed without unlocking, and ordinary earned-source
+release commands that do not carry override metadata retain their existing
+behavior. "Valid" includes day and identity, not only string shape: the
+requested/command date must equal the child's current canonical usage date,
+and the device applying the command must still be the device for which it was
+fetched. A stale prior-day delivery or an identity switch between fetch and
+mutation leaves both the marker and shield sources unchanged. The parent
+endpoint returns `409 stale_usage_date` rather than writing a historical-day
+override. Device-side validation requires the persisted authoritative runtime
+timezone; it must not fall back to `TimeZone.current`. If that timezone is not
+ready, execution fails closed without either mutation.
+
 ## 4. Existing Decisions That Remain Binding
 
 All approved decisions D-1 through D-12 in `LOCK_BEHAVIOR_BOUNDARIES.md`
@@ -721,7 +748,18 @@ pytest. They must cover at least:
 18. manual Lock/Unlock changes only `manual` sources and leaves all meter state
     byte-identical;
 19. old-client requests decode and run before the v2 ratchet;
-20. v1 samples after a v2 ratchet are terminal non-counted drops.
+20. v1 samples after a v2 ratchet are terminal non-counted drops;
+21. with device timezone `Asia/Tokyo` and canonical timezone
+    `America/New_York`, device-local midnight does not roll the usage date or
+    epoch, while canonical midnight does exactly once;
+22. changing the canonical timezone while the device timezone stays fixed
+    retires the old epoch, creates exactly one replacement epoch, rejects old
+    callbacks before mutation, and evaluates task bypass/override state against
+    the new canonical date without migrating prior-date markers;
+23. rapid per-app updates converge by authoritative command version even when
+    delivered out of order: newer `set` beats older `set`, newer `clear` leaves
+    a tombstone that prevents an older `set` from resurrecting the rule, and
+    duplicate versions are idempotent.
 
 Every callback vector asserts all side effects, not only the return value:
 
@@ -795,6 +833,9 @@ and all applicable physical gates pass. A unit-test-only result is insufficient.
 - Pin the existing manual-only child-wide endpoints and button presentation.
 - Add no-side-effect assertions proving the button cannot change metering,
   automatic sources, overrides, or task suppression.
+- When an automatic source remains, expose its reason and the separate
+  policy-specific action, if one is permitted, without changing the manual
+  button's color, verb, endpoint, or semantics.
 
 This phase is independently releasable and does not wait for epoch migration.
 
@@ -804,12 +845,21 @@ This phase is independently releasable and does not wait for epoch migration.
   fake monitor interfaces.
 - Run the DAM/NSE `startMonitoring` capability spike and record results for the
   minimum supported iPhone and iPad targets.
+- Label a successful short spike only as process capability. It cannot enable
+  exact canonical-midnight rebase or NSE-primary production ownership; Phase 3
+  retains the conservative continuous-monitor branch until a later physical
+  day-boundary gate passes.
 
 ### Phase 2: Backend Epoch Protocol
 
 - Add epoch storage/migration, optional wire fields, registration, v2 sample
   validation, protocol ratchet, periodic canonical-day/task reconciliation,
   shared-pool fanout, and backend tests.
+- Establish an authoritative per-rule ordering token for `set_limit` and
+  `clear_limit`. Existing `updated_at` may be used only if concurrency tests
+  prove it is strictly increasing for serialized writes to one rule; otherwise
+  add an explicit monotonic `policy_revision`. Every emitted command carries
+  the token, including clear commands.
 - Deploy backend first with v2 advertised only after migrations and tests pass.
 
 ### Phase 3: Earned-Time Device Epoch
@@ -822,11 +872,30 @@ This phase is independently releasable and does not wait for epoch migration.
 
 - Add explicit `includesPastActivity=false`, stable per-rule arm identity,
   physical-time validation, pause/resume behavior, and false-callback tests.
+- Persist the latest applied ordering token per rule independently of the
+  active rule, including a clear tombstone. Drop older `set_limit` or
+  `clear_limit` commands before mutating the rule store, shields, usage state,
+  or monitor schedule; acknowledge an equal-version duplicate idempotently
+  without repeating those mutations. Two rapid edits and set-then-clear must
+  converge to the backend's final value even when wake, NSE, and poll delivery
+  reorder them.
 
 ### Phase 5: Multi-Device and Delivery Closure
 
 - Verify shared-pool fanout on every enrolled device, source/receipt readback,
   partial failure recovery, and NSE-primary state delivery.
+- Close G-17 explicitly: all five reflection transition paths (chat
+  interception, REST trigger, and agent propose/cancel/approve) use one
+  canonical state-change-and-delivery helper. No path may update reflection
+  state without queuing the matching lock/release delivery and wake.
+- Close G-18 explicitly: `set_limit` and `clear_limit` use the same versioned,
+  force-kill-capable delivery path and readback contract. If the Phase 1 spike
+  proves NSE cannot safely start or replace DeviceActivity monitoring, NSE must
+  durably persist the newest rule/tombstone and wake state; the UI may not claim
+  enforcement until the monitor owner applies and acknowledges that version.
+- G-19 is absorbed by Phases 2/3 plus this delivery closure: an
+  `earned_time_config` update must durably update the App Group policy while
+  monitor replacement remains owned by the proven DAM/main-app path.
 - Run the two-device and overnight gates.
 
 ### Phase 6: Legacy Counter Deprecation
@@ -857,6 +926,13 @@ The work is complete only when all of these are true:
 - Multi-device labels and bars follow D-12 and never imply B used A's minutes.
 - The Profile button adds/removes only `manual`, and every meter/automatic state
   remains unchanged by the button.
+- Parents can see the remaining automatic reason and reach any permitted
+  bypass/override without overloading the manual button.
+- Rapid per-app edits and clears converge to the newest backend version under
+  duplicate and out-of-order delivery; a stale set cannot resurrect a cleared
+  rule.
+- Every G-17 reflection path and G-18 app-limit command has a force-kill-capable
+  delivery/readback result rather than relying only on foreground polling.
 - Identity switches cannot carry usage, retry entries, epochs, or automatic
   locks into the new account.
 - Backend v1/v2 rollout remains wire compatible and ratchets safely per device.
@@ -872,3 +948,26 @@ The work is complete only when all of these are true:
 - Physically deleting the legacy counter before its one-release deprecation
   gate.
 - Claiming reliability solely from simulator or unit-test results.
+
+## 18. Review Addendum (2026-07-15)
+
+This addendum records the scope decisions added during final architecture
+review; the normative phase and test sections above already incorporate them.
+
+1. G-17 and G-18 remain owned work in Phase 5; replacing the older roadmap does
+   not remove either delivery gap. G-19 is split across the epoch protocol,
+   device application, and Phase 5 delivery verification.
+2. Canonical-timezone behavior is covered by shared vectors 21 and 22, including
+   a device whose local timezone differs from policy timezone.
+3. `2026-07-12-profile-multi-device-lock-design.md` and its implementation plan
+   are superseded for CTA semantics. Section 3.6 and Phase 0 here are
+   authoritative: the CTA controls `manual` only.
+4. Rapid per-app edits are a convergence requirement, not merely a UI debounce
+   concern. Phase 2 establishes the ordering token; Phase 4 persists and
+   enforces newest-wins semantics on every delivery path.
+5. The separate exhaustion override is not complete until the override row and
+   earned-only per-device releases are committed together; ledger-only success
+   must not be presented as an unlocked device.
+6. The short DAM/NSE spike establishes process capability only. Exact
+   canonical-day-boundary behavior remains physically gated and the
+   conservative branch remains mandatory beforehand.
