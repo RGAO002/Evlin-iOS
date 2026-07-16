@@ -120,6 +120,11 @@ struct ProfileView: View {
     @State private var addError: String? = nil
     @State private var pollTask: Task<Void, Never>? = nil
     @State private var earnedSummaryPollTask: Task<Void, Never>? = nil
+#if DEBUG
+    /// Instance-only dependency for deterministic visual fixtures. Release does
+    /// not compile this path; production never reads a mode flag.
+    private var runtimeEffectsAllowed: () -> Bool = { true }
+#endif
     private var backendChildID: UUID? {
         familyStore.childDeviceID(forChildId: child.id, preferredDeviceID: pairedChildID)
     }
@@ -550,6 +555,9 @@ struct ProfileView: View {
             )
         }
         .onAppear {
+#if DEBUG
+            guard runtimeEffectsAllowed() else { return }
+#endif
             // Enrolled Devices: live FamilyStore data is authoritative. The
             // mock fixtures render ONLY when the child isn't in the store at
             // all (pure #Preview). A live child with zero devices shows an
@@ -1983,6 +1991,57 @@ struct ProfileView: View {
         }
     }
 }
+
+#if DEBUG
+extension ProfileView {
+    init(
+        child: ChildProfile,
+        initialTaskId: Int? = nil,
+        initialReflectionSubTab: Bool = false,
+        onBack: @escaping () -> Void = {},
+        onOpenCalendar: @escaping () -> Void = {},
+        onOpenTaskDetail: @escaping (TaskItem) -> Void = { _ in },
+        onOpenDevice: @escaping (DeviceItem) -> Void = { _ in },
+        onOpenReflection: @escaping (AppRoute) -> Void = { _ in }
+    ) {
+        self.child = child
+        self.initialTaskId = initialTaskId
+        self.initialReflectionSubTab = initialReflectionSubTab
+        self.onBack = onBack
+        self.onOpenCalendar = onOpenCalendar
+        self.onOpenTaskDetail = onOpenTaskDetail
+        self.onOpenDevice = onOpenDevice
+        self.onOpenReflection = onOpenReflection
+    }
+
+    struct ProfileSnapshotFixture_v1 {
+        let child: ChildProfile
+        let tasks: [TaskItem]
+        let devices: [DeviceItem]
+        let rules: [RuleItem]
+        let dailyLimitMinutes: Int
+        let localStatus: ChildProfile.Status
+        let manualLockState: ManualLockAggregateState
+        let automaticCoveringSources: [String]
+        let earnedSummary: APIClient.EarnedSummaryDTO?
+        let profileTab: ProfileSubTab
+    }
+
+    init(snapshotFixture fixture: ProfileSnapshotFixture_v1) {
+        self.init(child: fixture.child)
+        runtimeEffectsAllowed = { false }
+        _tasks = State(initialValue: fixture.tasks)
+        _devices = State(initialValue: fixture.devices)
+        _rules = State(initialValue: fixture.rules)
+        _dailyLimitMinutes = State(initialValue: fixture.dailyLimitMinutes)
+        _localStatus = State(initialValue: fixture.localStatus)
+        _manualLockState = State(initialValue: fixture.manualLockState)
+        _automaticCoveringSources = State(initialValue: fixture.automaticCoveringSources)
+        _earnedSummary = State(initialValue: fixture.earnedSummary)
+        _profileTab = State(initialValue: fixture.profileTab)
+    }
+}
+#endif
 
 // MARK: - Paired-child resolution (shared by ProfileView + TaskDetailView)
 
