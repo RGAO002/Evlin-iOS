@@ -421,6 +421,10 @@ final class ProfileSnapshotTests: XCTestCase {
         let apiClient = APIClient(baseURL: "https://snapshot.invalid")
         let familyStore = FamilyStore(api: apiClient)
         let reflectionStore = suppliedReflectionStore ?? ParentReflectionFixtureStore()
+        let previousKeyWindow = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap { $0.windows }
+            .first(where: \.isKeyWindow)
         let rootView = NavigationStack {
             view
         }
@@ -437,7 +441,10 @@ final class ProfileSnapshotTests: XCTestCase {
         UIView.setAnimationsEnabled(false)
         defer {
             window.isHidden = true
+            RunLoop.main.run(until: Date().addingTimeInterval(0.01))
             window.rootViewController = nil
+            RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+            previousKeyWindow?.makeKey()
             UIView.setAnimationsEnabled(animationsWereEnabled)
         }
 
@@ -494,7 +501,10 @@ final class ProfileSnapshotTests: XCTestCase {
             }
 
             let clampedOffset = min(max(verticalScrollOffset, minimumOffset), maximumOffset)
-            XCTAssertEqual(clampedOffset, verticalScrollOffset, accuracy: 0.001)
+            guard abs(clampedOffset - verticalScrollOffset) <= 0.001 else {
+                XCTFail("Hosted scroll offset was clamped before snapshot capture.")
+                throw SnapshotFailure.unpinnedEnvironment
+            }
             scrollView.setContentOffset(
                 CGPoint(x: scrollView.contentOffset.x, y: clampedOffset),
                 animated: false
@@ -502,7 +512,10 @@ final class ProfileSnapshotTests: XCTestCase {
             scrollView.layoutIfNeeded()
             window.layoutIfNeeded()
             hostingController.view.layoutIfNeeded()
-            XCTAssertEqual(scrollView.contentOffset.y, clampedOffset, accuracy: 0.001)
+            guard abs(scrollView.contentOffset.y - clampedOffset) <= 0.001 else {
+                XCTFail("Hosted scroll view did not retain the requested snapshot offset.")
+                throw SnapshotFailure.unpinnedEnvironment
+            }
         }
 
         let format = UIGraphicsImageRendererFormat()
@@ -629,8 +642,8 @@ final class ProfileSnapshotTests: XCTestCase {
         let bitmapInfo = CGBitmapInfo.byteOrder32Big.union(
             CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
         )
-        let context = bytes.withUnsafeMutableBytes { buffer in
-            CGContext(
+        let didNormalize = bytes.withUnsafeMutableBytes { buffer in
+            guard let context = CGContext(
                 data: buffer.baseAddress,
                 width: width,
                 height: height,
@@ -638,13 +651,16 @@ final class ProfileSnapshotTests: XCTestCase {
                 bytesPerRow: width * 4,
                 space: colorSpace,
                 bitmapInfo: bitmapInfo.rawValue
-            )
+            ) else {
+                return false
+            }
+            context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
         }
-        guard let context else {
+        guard didNormalize else {
             XCTFail("Could not normalize snapshot pixels.")
             throw SnapshotFailure.imageNormalizationFailed
         }
-        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
         return RGBAImage(width: width, height: height, bytes: bytes)
     }
 
