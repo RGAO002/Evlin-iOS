@@ -74,6 +74,26 @@ struct ProfileView: View {
     /// parent reflection flow.
     var onOpenReflection: (AppRoute) -> Void = { _ in }
 
+    init(
+        child: ChildProfile,
+        initialTaskId: Int? = nil,
+        initialReflectionSubTab: Bool = false,
+        onBack: @escaping () -> Void = {},
+        onOpenCalendar: @escaping () -> Void = {},
+        onOpenTaskDetail: @escaping (TaskItem) -> Void = { _ in },
+        onOpenDevice: @escaping (DeviceItem) -> Void = { _ in },
+        onOpenReflection: @escaping (AppRoute) -> Void = { _ in }
+    ) {
+        self.child = child
+        self.initialTaskId = initialTaskId
+        self.initialReflectionSubTab = initialReflectionSubTab
+        self.onBack = onBack
+        self.onOpenCalendar = onOpenCalendar
+        self.onOpenTaskDetail = onOpenTaskDetail
+        self.onOpenDevice = onOpenDevice
+        self.onOpenReflection = onOpenReflection
+    }
+
     @State private var tasks: [TaskItem] = []
     @State private var devices: [DeviceItem] = []
     @State private var rules: [RuleItem] = []
@@ -1994,26 +2014,6 @@ struct ProfileView: View {
 
 #if DEBUG
 extension ProfileView {
-    init(
-        child: ChildProfile,
-        initialTaskId: Int? = nil,
-        initialReflectionSubTab: Bool = false,
-        onBack: @escaping () -> Void = {},
-        onOpenCalendar: @escaping () -> Void = {},
-        onOpenTaskDetail: @escaping (TaskItem) -> Void = { _ in },
-        onOpenDevice: @escaping (DeviceItem) -> Void = { _ in },
-        onOpenReflection: @escaping (AppRoute) -> Void = { _ in }
-    ) {
-        self.child = child
-        self.initialTaskId = initialTaskId
-        self.initialReflectionSubTab = initialReflectionSubTab
-        self.onBack = onBack
-        self.onOpenCalendar = onOpenCalendar
-        self.onOpenTaskDetail = onOpenTaskDetail
-        self.onOpenDevice = onOpenDevice
-        self.onOpenReflection = onOpenReflection
-    }
-
     struct ProfileSnapshotFixture_v1 {
         let child: ChildProfile
         let tasks: [TaskItem]
