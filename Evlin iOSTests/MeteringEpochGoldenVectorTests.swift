@@ -47,6 +47,12 @@ final class MeteringEpochGoldenVectorTests: XCTestCase {
     private static let manualGenerationID = UUID(uuidString: "99999999-0000-0000-0000-000000000018")!
     private static let manualEpochID = UUID(uuidString: "eeeeeeee-0000-0000-0000-000000000018")!
     private static let manualRetryID = UUID(uuidString: "abababab-0000-0000-0000-000000000018")!
+    private static let ledgerDeviceA = UUID(uuidString: "aaaaaaaa-0000-0000-0000-000000000001")!
+    private static let ledgerDeviceB = UUID(uuidString: "bbbbbbbb-0000-0000-0000-000000000002")!
+    private static let ledgerEpochID = UUID(uuidString: "eeeeeeee-0000-0000-0000-000000000099")!
+    private static let ledgerSetID = UUID(uuidString: "cccccccc-0000-0000-0000-000000000099")!
+    private static let ledgerSiblingSetID = UUID(uuidString: "cccccccc-0000-0000-0000-000000000199")!
+    private static let ledgerRuleID = UUID(uuidString: "dddddddd-0000-0000-0000-000000000099")!
 
     private func loadSuite() throws -> MeteringGoldenVectorSuite {
         let fixtureURL = URL(fileURLWithPath: #filePath)
@@ -125,6 +131,248 @@ final class MeteringEpochGoldenVectorTests: XCTestCase {
             "expected:", "\"V01\"", "\"V23\"", "metering_epoch_vectors.json"
         ] {
             XCTAssertFalse(source.contains(forbidden), "production source contains test-only token \(forbidden)")
+        }
+    }
+
+    func testPauseResumeCountsOnlyBucketsWhollyOutsidePauseWindow() throws {
+        let input: GateInput = try decodeFixtureJSON(
+            #"""
+            {
+              "kind": "gate_pause_resume",
+              "pause_at": 100,
+              "resume_at": 200,
+              "app_process_event": false,
+              "buckets": [
+                { "start_at": 0, "end_at": 90 },
+                { "start_at": 90, "end_at": 100 },
+                { "start_at": 100, "end_at": 150 },
+                { "start_at": 90, "end_at": 110 },
+                { "start_at": 150, "end_at": 210 },
+                { "start_at": 200, "end_at": 260 },
+                { "start_at": 210, "end_at": 220 },
+                { "start_at": 100, "end_at": 200 }
+              ]
+            }
+            """#
+        )
+
+        let actual = MeteringReferenceRules.evaluateGate(input)
+
+        XCTAssertEqual(
+            actual.countedBuckets,
+            [true, true, false, false, false, true, true, false]
+        )
+        XCTAssertEqual(
+            actual.effects,
+            MeteringEffects(
+                localEstimateMutations: 4,
+                networkDispatches: 4,
+                backendSampleRows: 4
+            )
+        )
+    }
+
+    func testDeviceCapFansOutOnlyForPositiveBeforeToZeroAfterTransition() {
+        let leavesPositive = MeteringReferenceRules.evaluateLedger(
+            deviceCapInput(ownRemainingBefore: 5, earnedMinutes: 4)
+        )
+        let startsAtZero = MeteringReferenceRules.evaluateLedger(
+            deviceCapInput(ownRemainingBefore: 0, earnedMinutes: 1)
+        )
+
+        for observation in [leavesPositive, startsAtZero] {
+            XCTAssertEqual(observation.attributedObservations.map(\.kind), [.ledger])
+            XCTAssertEqual(observation.effects.ledgerMutations, 1)
+            XCTAssertEqual(observation.effects.notifications, 0)
+            XCTAssertEqual(observation.effects.shieldMutations, 0)
+        }
+
+        let reachesZero = MeteringReferenceRules.evaluateLedger(
+            deviceCapInput(ownRemainingBefore: 5, earnedMinutes: 5)
+        )
+        XCTAssertEqual(
+            reachesZero.attributedObservations.map(\.kind),
+            [.ledger, .receipt, .shield]
+        )
+        XCTAssertEqual(reachesZero.effects.notifications, 1)
+        XCTAssertEqual(reachesZero.effects.shieldMutations, 1)
+
+        let negativeUsage = MeteringReferenceRules.evaluateLedger(
+            deviceCapInput(ownRemainingBefore: 5, earnedMinutes: -1)
+        )
+        XCTAssertTrue(negativeUsage.attributedObservations.isEmpty)
+        XCTAssertEqual(negativeUsage.effects, MeteringEffects())
+    }
+
+    func testCanonicalTimezoneReplacementRejectsSameDateOldEpochCallback() throws {
+        let input: GateInput = try decodeFixtureJSON(
+            #"""
+            {
+              "kind": "gate_canonical_timezone_replacement",
+              "device_timezone": "Asia/Tokyo",
+              "old_canonical_timezone": "UTC",
+              "new_canonical_timezone": "America/New_York",
+              "at": 1784217600,
+              "old_date_bypass_markers": ["2026-07-16"],
+              "old_date_override_markers": ["2026-07-16"],
+              "old_callback_date": "2026-07-16"
+            }
+            """#
+        )
+
+        let actual = MeteringReferenceRules.evaluateGate(input)
+
+        XCTAssertEqual(actual.projectedCanonicalDate, "2026-07-16")
+        XCTAssertEqual(actual.retiredEpochCount, 1)
+        XCTAssertEqual(actual.createdEpochCount, 1)
+        XCTAssertEqual(actual.oldCallbackAccepted, false)
+        XCTAssertEqual(actual.effects.epochReplacements, 1)
+        XCTAssertEqual(actual.effects.backendSampleRows, 0)
+        XCTAssertEqual(actual.effects.ledgerMutations, 0)
+    }
+
+    func testLedgerProjectionClampsNegativeUsageAndSaturatesTotals() {
+        let isolated = MeteringEpochContract.projectLedger(
+            pool: 10,
+            acceptedByDevice: [Self.ledgerDeviceA: -7, Self.ledgerDeviceB: 6],
+            caps: [Self.ledgerDeviceA: 10, Self.ledgerDeviceB: 10]
+        )
+        XCTAssertEqual(isolated.sharedRemainingMinutes, 4)
+        XCTAssertEqual(
+            isolated.ownRemainingMinutes,
+            [Self.ledgerDeviceA: 10, Self.ledgerDeviceB: 4]
+        )
+
+        let saturated = MeteringEpochContract.projectLedger(
+            pool: .max,
+            acceptedByDevice: [Self.ledgerDeviceA: .max, Self.ledgerDeviceB: .max],
+            caps: [Self.ledgerDeviceA: .max, Self.ledgerDeviceB: .max]
+        )
+        XCTAssertEqual(saturated.sharedRemainingMinutes, 0)
+        XCTAssertEqual(
+            saturated.ownRemainingMinutes,
+            [Self.ledgerDeviceA: 0, Self.ledgerDeviceB: 0]
+        )
+    }
+
+    func testLedgerEvaluatorsRejectNegativeMinutesWithoutOverflowOrFanout() {
+        let attribution = MeteringReferenceRules.evaluateLedger(
+            LedgerInput(
+                kind: .ledgerDeviceAttribution,
+                poolMinutes: .max,
+                accepted: acceptedUsage(earnedMinutes: -1),
+                siblingChildDeviceID: Self.ledgerDeviceB,
+                enforcementSets: nil,
+                sharedRemainingBeforeMinutes: nil,
+                devices: nil,
+                reachedRule: nil,
+                unrelatedRules: nil
+            )
+        )
+        XCTAssertEqual(attribution.sharedRemainingMinutes, .max)
+        XCTAssertEqual(
+            attribution.ownRemainingMinutes,
+            [Self.ledgerDeviceA: .max, Self.ledgerDeviceB: .max]
+        )
+        XCTAssertTrue(attribution.attributedObservations.isEmpty)
+        XCTAssertEqual(attribution.effects, MeteringEffects())
+
+        let exhaustion = MeteringReferenceRules.evaluateLedger(
+            LedgerInput(
+                kind: .ledgerSharedExhaustion,
+                poolMinutes: nil,
+                accepted: acceptedUsage(earnedMinutes: -1),
+                siblingChildDeviceID: nil,
+                enforcementSets: nil,
+                sharedRemainingBeforeMinutes: .max,
+                devices: [enforcementTarget()],
+                reachedRule: nil,
+                unrelatedRules: nil
+            )
+        )
+        XCTAssertEqual(exhaustion.sharedRemainingMinutes, .max)
+        XCTAssertTrue(exhaustion.attributedObservations.isEmpty)
+        XCTAssertEqual(exhaustion.effects, MeteringEffects())
+
+        let extremeFanout = MeteringReferenceRules.evaluateLedger(
+            LedgerInput(
+                kind: .ledgerSharedExhaustion,
+                poolMinutes: nil,
+                accepted: acceptedUsage(earnedMinutes: .max),
+                siblingChildDeviceID: nil,
+                enforcementSets: nil,
+                sharedRemainingBeforeMinutes: .max,
+                devices: [
+                    enforcementTarget(),
+                    enforcementTarget(
+                        childDeviceID: Self.ledgerDeviceB,
+                        credentialID: Self.ledgerSiblingSetID
+                    )
+                ],
+                reachedRule: nil,
+                unrelatedRules: nil
+            )
+        )
+        XCTAssertEqual(extremeFanout.sharedRemainingMinutes, 0)
+        XCTAssertEqual(extremeFanout.attributedObservations.count, 5)
+        XCTAssertEqual(extremeFanout.effects.ledgerMutations, 1)
+        XCTAssertEqual(extremeFanout.effects.notifications, 2)
+        XCTAssertEqual(extremeFanout.effects.shieldMutations, 2)
+
+        let negativePerApp = MeteringReferenceRules.evaluateLedger(
+            LedgerInput(
+                kind: .ledgerPerAppLimit,
+                poolMinutes: nil,
+                accepted: nil,
+                siblingChildDeviceID: nil,
+                enforcementSets: nil,
+                sharedRemainingBeforeMinutes: nil,
+                devices: nil,
+                reachedRule: MeteringAppLimitRuleInput(
+                    childDeviceID: Self.ledgerDeviceA,
+                    source: "limit",
+                    credential: MeteringCredentialReference(
+                        kind: .appLimitRule,
+                        id: Self.ledgerRuleID
+                    ),
+                    bundleID: "com.example.focus",
+                    remainingMinutesBefore: .max,
+                    consumedMinutes: -1
+                ),
+                unrelatedRules: []
+            )
+        )
+        XCTAssertTrue(negativePerApp.attributedObservations.isEmpty)
+        XCTAssertEqual(negativePerApp.effects, MeteringEffects())
+    }
+
+    func testLedgerObservationRejectsUUIDKeyCaseCollisions() {
+        let lower = Self.ledgerDeviceA.uuidString.lowercased()
+        let upper = Self.ledgerDeviceA.uuidString.uppercased()
+        let json = #"""
+        {
+          "own_remaining_minutes": { "\#(lower)": 1, "\#(upper)": 2 },
+          "attributed_observations_sort": [],
+          "attributed_observations": [],
+          "effects": {
+            "local_estimate_mutations": 0,
+            "retry_enqueues": 0,
+            "network_dispatches": 0,
+            "backend_sample_rows": 0,
+            "ledger_mutations": 0,
+            "notifications": 0,
+            "shield_mutations": 0,
+            "monitor_starts": 0,
+            "monitor_stops": 0,
+            "epoch_replacements": 0
+          }
+        }
+        """#
+
+        XCTAssertThrowsError(try decodeFixtureJSON(json) as LedgerObservation) { error in
+            guard case DecodingError.dataCorrupted = error else {
+                return XCTFail("expected dataCorrupted, got \(error)")
+            }
         }
     }
 
@@ -266,5 +514,60 @@ final class MeteringEpochGoldenVectorTests: XCTestCase {
             XCTAssertEqual(actual.tombstoneOrderingToken, 3, testCase.id)
         }
         return suite.perAppOrderingCases.map(\.id)
+    }
+
+    private func decodeFixtureJSON<Value: Decodable>(_ json: String) throws -> Value {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try decoder.decode(Value.self, from: Data(json.utf8))
+    }
+
+    private func acceptedUsage(earnedMinutes: Int) -> MeteringAcceptedUsageInput {
+        MeteringAcceptedUsageInput(
+            childDeviceID: Self.ledgerDeviceA,
+            source: "earned_time",
+            credential: MeteringCredentialReference(kind: .epoch, id: Self.ledgerEpochID),
+            earnedMinutes: earnedMinutes,
+            ownRemainingBeforeMinutes: nil
+        )
+    }
+
+    private func enforcementTarget(
+        childDeviceID: UUID = MeteringEpochGoldenVectorTests.ledgerDeviceA,
+        credentialID: UUID = MeteringEpochGoldenVectorTests.ledgerSetID
+    ) -> MeteringEnforcementTargetInput {
+        MeteringEnforcementTargetInput(
+            childDeviceID: childDeviceID,
+            credential: MeteringCredentialReference(
+                kind: .enforcementSet,
+                id: credentialID
+            )
+        )
+    }
+
+    private func deviceCapInput(
+        ownRemainingBefore: Int,
+        earnedMinutes: Int
+    ) -> LedgerInput {
+        LedgerInput(
+            kind: .ledgerDeviceCap,
+            poolMinutes: nil,
+            accepted: MeteringAcceptedUsageInput(
+                childDeviceID: Self.ledgerDeviceA,
+                source: "earned_time",
+                credential: MeteringCredentialReference(
+                    kind: .epoch,
+                    id: Self.ledgerEpochID
+                ),
+                earnedMinutes: earnedMinutes,
+                ownRemainingBeforeMinutes: ownRemainingBefore
+            ),
+            siblingChildDeviceID: nil,
+            enforcementSets: [enforcementTarget()],
+            sharedRemainingBeforeMinutes: nil,
+            devices: nil,
+            reachedRule: nil,
+            unrelatedRules: nil
+        )
     }
 }

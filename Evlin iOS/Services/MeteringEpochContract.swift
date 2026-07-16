@@ -591,7 +591,9 @@ nonisolated struct LedgerObservation: Codable, Equatable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         sharedRemainingMinutes = try container.decodeIfPresent(Int.self, forKey: .sharedRemainingMinutes)
         if let encoded = try container.decodeIfPresent([String: Int].self, forKey: .ownRemainingMinutes) {
-            ownRemainingMinutes = try Dictionary(uniqueKeysWithValues: encoded.map { key, value in
+            var decoded: [UUID: Int] = [:]
+            var sourceKeys: [UUID: String] = [:]
+            for (key, value) in encoded {
                 guard let id = UUID(uuidString: key) else {
                     throw DecodingError.dataCorruptedError(
                         forKey: .ownRemainingMinutes,
@@ -599,8 +601,17 @@ nonisolated struct LedgerObservation: Codable, Equatable, Sendable {
                         debugDescription: "invalid child device UUID \(key)"
                     )
                 }
-                return (id, value)
-            })
+                if let sourceKey = sourceKeys[id] {
+                    throw DecodingError.dataCorruptedError(
+                        forKey: .ownRemainingMinutes,
+                        in: container,
+                        debugDescription: "child device UUID keys \(sourceKey) and \(key) normalize to the same UUID"
+                    )
+                }
+                sourceKeys[id] = key
+                decoded[id] = value
+            }
+            ownRemainingMinutes = decoded
         } else {
             ownRemainingMinutes = nil
         }
@@ -925,16 +936,52 @@ nonisolated enum MeteringEpochContract {
         acceptedByDevice: [UUID: Int],
         caps: [UUID: Int]
     ) -> MeteringLedgerProjection {
-        let acceptedTotal = acceptedByDevice.values.reduce(0, +)
-        let ownRemaining = caps.mapValues { cap in cap }
-            .mapValues { max(0, $0) }
-        let projectedOwn = Dictionary(uniqueKeysWithValues: ownRemaining.map { deviceID, cap in
-            (deviceID, max(0, cap - max(0, acceptedByDevice[deviceID, default: 0])))
-        })
+        var acceptedTotal = 0
+        for accepted in acceptedByDevice.values {
+            acceptedTotal = saturatingAdd(
+                acceptedTotal,
+                nonnegativeMinutes(accepted)
+            )
+        }
+
+        var projectedOwn: [UUID: Int] = [:]
+        for (deviceID, cap) in caps {
+            projectedOwn[deviceID] = remainingMinutes(
+                before: cap,
+                consumed: acceptedByDevice[deviceID, default: 0]
+            )
+        }
         return MeteringLedgerProjection(
-            sharedRemainingMinutes: max(0, pool - max(0, acceptedTotal)),
+            sharedRemainingMinutes: remainingMinutes(
+                before: pool,
+                consumed: acceptedTotal
+            ),
             ownRemainingMinutes: projectedOwn
         )
+    }
+
+    static func nonnegativeMinutes(_ minutes: Int) -> Int {
+        max(0, minutes)
+    }
+
+    static func remainingMinutes(before: Int, consumed: Int) -> Int {
+        let normalizedBefore = nonnegativeMinutes(before)
+        let normalizedConsumed = nonnegativeMinutes(consumed)
+        guard normalizedBefore > normalizedConsumed else { return 0 }
+        return normalizedBefore - normalizedConsumed
+    }
+
+    static func isPositiveExhaustionTransition(before: Int, consumed: Int) -> Bool {
+        let normalizedBefore = nonnegativeMinutes(before)
+        let normalizedConsumed = nonnegativeMinutes(consumed)
+        return normalizedBefore > 0
+            && normalizedConsumed > 0
+            && normalizedConsumed >= normalizedBefore
+    }
+
+    private static func saturatingAdd(_ lhs: Int, _ rhs: Int) -> Int {
+        let (sum, overflow) = lhs.addingReportingOverflow(rhs)
+        return overflow ? .max : sum
     }
 
     static func applyManual(_ input: ManualInput) -> ManualObservation {
@@ -1253,9 +1300,13 @@ nonisolated enum MeteringReferenceRules {
             )
 
         case .gatePauseResume:
+            let pauseAt = input.pauseAt ?? .min
             let resumeAt = input.resumeAt ?? .max
             let counted = (input.buckets ?? []).map { bucket in
-                bucket.startAt >= resumeAt && bucket.endAt > bucket.startAt
+                let hasPositiveDuration = bucket.endAt > bucket.startAt
+                let whollyBeforePause = bucket.endAt <= pauseAt
+                let whollyAfterResume = bucket.startAt >= resumeAt
+                return hasPositiveDuration && (whollyBeforePause || whollyAfterResume)
             }
             return GateObservation(
                 countedBuckets: counted,
@@ -1327,10 +1378,12 @@ nonisolated enum MeteringReferenceRules {
                 explicitRecovery: nil
             )
             let replaced = reason != nil
+            let oldCallbackAccepted = !replaced
+                && input.oldCallbackDate == projectedDate
             return GateObservation(
                 retiredEpochCount: replaced ? 1 : 0,
                 createdEpochCount: replaced ? 1 : 0,
-                oldCallbackAccepted: input.oldCallbackDate == projectedDate,
+                oldCallbackAccepted: oldCallbackAccepted,
                 projectedCanonicalDate: projectedDate,
                 oldDateBypassActive: Set(input.oldDateBypassMarkers ?? []).contains(projectedDate),
                 oldDateOverrideActive: Set(input.oldDateOverrideMarkers ?? []).contains(projectedDate),
@@ -1347,44 +1400,56 @@ nonisolated enum MeteringReferenceRules {
                   let pool = input.poolMinutes else {
                 return LedgerObservation(attributedObservations: [], effects: MeteringEffects())
             }
+            let earnedMinutes = MeteringEpochContract.nonnegativeMinutes(
+                accepted.earnedMinutes
+            )
             let projection = MeteringEpochContract.projectLedger(
                 pool: pool,
-                acceptedByDevice: [accepted.childDeviceID: accepted.earnedMinutes],
+                acceptedByDevice: [accepted.childDeviceID: earnedMinutes],
                 caps: [accepted.childDeviceID: pool, sibling: pool]
             )
+            let mutations = earnedMinutes > 0
+                ? [mutation(.ledger, accepted.childDeviceID, accepted.source, accepted.credential)]
+                : []
             return LedgerObservation(
                 sharedRemainingMinutes: projection.sharedRemainingMinutes,
                 ownRemainingMinutes: projection.ownRemainingMinutes,
-                attributedObservations: sortedMutations([
-                    mutation(.ledger, accepted.childDeviceID, accepted.source, accepted.credential)
-                ]),
-                effects: effects(ledgerMutations: 1)
+                attributedObservations: sortedMutations(mutations),
+                effects: effects(ledgerMutations: earnedMinutes > 0 ? 1 : 0)
             )
 
         case .ledgerDeviceCap:
             guard let accepted = input.accepted else {
                 return LedgerObservation(attributedObservations: [], effects: MeteringEffects())
             }
-            let matching = (input.enforcementSets ?? []).filter {
+            let earnedMinutes = MeteringEpochContract.nonnegativeMinutes(
+                accepted.earnedMinutes
+            )
+            let capReached = MeteringEpochContract.isPositiveExhaustionTransition(
+                before: accepted.ownRemainingBeforeMinutes ?? 0,
+                consumed: earnedMinutes
+            )
+            let matching = (capReached ? input.enforcementSets ?? [] : []).filter {
                 $0.childDeviceID == accepted.childDeviceID
             }
-            let mutations = [
-                mutation(.ledger, accepted.childDeviceID, accepted.source, accepted.credential)
-            ] + matching.flatMap { target in
+            let ledgerMutations = earnedMinutes > 0
+                ? [mutation(.ledger, accepted.childDeviceID, accepted.source, accepted.credential)]
+                : []
+            let mutations = ledgerMutations + matching.flatMap { target in
                 [
                     mutation(.receipt, target.childDeviceID, accepted.source, target.credential),
                     mutation(.shield, target.childDeviceID, accepted.source, target.credential)
                 ]
             }
             let excluded = (input.enforcementSets ?? []).filter {
-                $0.childDeviceID != accepted.childDeviceID
+                !capReached || $0.childDeviceID != accepted.childDeviceID
             }
             return LedgerObservation(
                 attributedObservations: sortedMutations(mutations),
                 excludedChildDeviceIDs: excluded.map(\.childDeviceID),
                 excludedCredentialIDs: excluded.map(\.credential.id),
                 effects: effects(
-                    ledgerMutations: 1,
+                    ledgerMutations: earnedMinutes > 0 ? 1 : 0,
                     notifications: matching.count,
                     shieldMutations: matching.count
                 )
@@ -1395,21 +1460,32 @@ nonisolated enum MeteringReferenceRules {
                   let before = input.sharedRemainingBeforeMinutes else {
                 return LedgerObservation(attributedObservations: [], effects: MeteringEffects())
             }
-            let exhausted = max(0, before - accepted.earnedMinutes) == 0
+            let earnedMinutes = MeteringEpochContract.nonnegativeMinutes(
+                accepted.earnedMinutes
+            )
+            let remaining = MeteringEpochContract.remainingMinutes(
+                before: before,
+                consumed: earnedMinutes
+            )
+            let exhausted = MeteringEpochContract.isPositiveExhaustionTransition(
+                before: before,
+                consumed: earnedMinutes
+            )
             let targets = exhausted ? input.devices ?? [] : []
-            let mutations = [
-                mutation(.ledger, accepted.childDeviceID, accepted.source, accepted.credential)
-            ] + targets.flatMap { target in
+            let ledgerMutations = earnedMinutes > 0
+                ? [mutation(.ledger, accepted.childDeviceID, accepted.source, accepted.credential)]
+                : []
+            let mutations = ledgerMutations + targets.flatMap { target in
                 [
                     mutation(.receipt, target.childDeviceID, accepted.source, target.credential),
                     mutation(.shield, target.childDeviceID, accepted.source, target.credential)
                 ]
             }
             return LedgerObservation(
-                sharedRemainingMinutes: max(0, before - accepted.earnedMinutes),
+                sharedRemainingMinutes: remaining,
                 attributedObservations: sortedMutations(mutations),
                 effects: effects(
-                    ledgerMutations: 1,
+                    ledgerMutations: earnedMinutes > 0 ? 1 : 0,
                     notifications: targets.count,
                     shieldMutations: targets.count
                 )
@@ -1420,13 +1496,21 @@ nonisolated enum MeteringReferenceRules {
                   let source = rule.source else {
                 return LedgerObservation(attributedObservations: [], effects: MeteringEffects())
             }
-            let reached = max(
-                0,
-                (rule.remainingMinutesBefore ?? 0) - (rule.consumedMinutes ?? 0)
-            ) == 0
-            let mutationKinds: [MeteringAttributedMutationKind] = reached
-                ? [.ledger, .receipt, .shield]
-                : [.ledger]
+            let consumedMinutes = MeteringEpochContract.nonnegativeMinutes(
+                rule.consumedMinutes ?? 0
+            )
+            let reached = MeteringEpochContract.isPositiveExhaustionTransition(
+                before: rule.remainingMinutesBefore ?? 0,
+                consumed: consumedMinutes
+            )
+            let mutationKinds: [MeteringAttributedMutationKind]
+            if consumedMinutes == 0 {
+                mutationKinds = []
+            } else if reached {
+                mutationKinds = [.ledger, .receipt, .shield]
+            } else {
+                mutationKinds = [.ledger]
+            }
             return LedgerObservation(
                 attributedObservations: sortedMutations(
                     mutationKinds.map {
@@ -1435,7 +1519,7 @@ nonisolated enum MeteringReferenceRules {
                 ),
                 excludedRuleIDs: (input.unrelatedRules ?? []).map(\.credential.id),
                 effects: effects(
-                    ledgerMutations: 1,
+                    ledgerMutations: consumedMinutes > 0 ? 1 : 0,
                     notifications: reached ? 1 : 0,
                     shieldMutations: reached ? 1 : 0
                 )
