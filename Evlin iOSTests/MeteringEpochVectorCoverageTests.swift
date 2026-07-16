@@ -4,6 +4,14 @@ import XCTest
 final class MeteringEpochVectorCoverageTests: XCTestCase {
     private typealias JSONObject = [String: Any]
 
+    private struct AttributedObservation: Hashable, Equatable {
+        let kind: String
+        let childDeviceID: String
+        let source: String
+        let credentialKind: String
+        let credentialID: String
+    }
+
     private enum FixtureLoadError: LocalizedError {
         case missing(String)
 
@@ -81,6 +89,19 @@ final class MeteringEpochVectorCoverageTests: XCTestCase {
         "kind", "child_device_id", "source", "credential_kind", "credential_id"
     ]
 
+    private static let rootKeys: Set<String> = [
+        "schema_version", "generation_cases", "callback_cases", "gate_cases",
+        "ledger_cases", "manual_cases", "protocol_cases", "per_app_ordering_cases"
+    ]
+
+    private static let caseKeys: Set<String> = ["id", "description", "input", "expected"]
+
+    // Canonical order: kind, child device, source, credential kind, credential ID.
+    private static let allowedObservationKinds: Set<String> = ["ledger", "receipt", "shield"]
+    private static let observationSortFields = [
+        "kind", "child_device_id", "source", "credential_kind", "credential_id"
+    ]
+
     private static func sourceFixtureURL() -> URL {
         URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -115,14 +136,12 @@ final class MeteringEpochVectorCoverageTests: XCTestCase {
         XCTAssertEqual(Set(allIDs).count, 23)
 
         let root = try XCTUnwrap(JSONSerialization.jsonObject(with: sourceData) as? JSONObject)
+        XCTAssertEqual(Set(root.keys), Self.rootKeys, "fixture root keys")
         for (group, expectedIDs) in Self.expectedGroupIDs {
             let cases = try XCTUnwrap(root[group] as? [JSONObject], "missing \(group)")
             XCTAssertEqual(cases.map { $0["id"] as? String }, expectedIDs, "\(group) IDs")
             for vector in cases {
-                XCTAssertTrue(
-                    Set(["id", "description", "input", "expected"]).isSubset(of: Set(vector.keys)),
-                    "\(group) case missing required keys"
-                )
+                XCTAssertEqual(Set(vector.keys), Self.caseKeys, "\(group) case keys")
                 let id = try XCTUnwrap(vector["id"] as? String)
                 let input = try XCTUnwrap(vector["input"] as? JSONObject, "\(id) input")
                 XCTAssertEqual(input["kind"] as? String, Self.expectedInputKinds[id], "\(id) input.kind")
@@ -138,46 +157,140 @@ final class MeteringEpochVectorCoverageTests: XCTestCase {
             let expected = try XCTUnwrap(vector["expected"] as? JSONObject)
             let observations = try XCTUnwrap(expected["attributed_observations"] as? [JSONObject], "\(id) observations")
             XCTAssertFalse(observations.isEmpty, "\(id) observations")
-            for observation in observations {
-                XCTAssertEqual(Set(observation.keys), Self.observationKeys, "\(id) observation keys")
-                try assertObservationIdentityIsDerivedFromInput(vector, observation: observation)
-            }
+            XCTAssertEqual(expected["attributed_observations_sort"] as? [String], Self.observationSortFields, "\(id) attributed_observations_sort fields")
+            let actual = try observations.map { try observation(from: $0, vectorID: id) }
+            XCTAssertTrue(actual.allSatisfy { Self.allowedObservationKinds.contains($0.kind) }, "\(id) allowed observation kinds")
+            XCTAssertEqual(Set(actual).count, actual.count, "\(id) duplicate observations")
+            XCTAssertEqual(actual, sortObservations(actual), "\(id) attributed_observations_sort")
+
+            let derived = try observationsDerivedSolelyFromTypedInput(vector, vectorID: id)
+            XCTAssertEqual(actual.count, derived.count, "\(id) attributed observation count")
+            XCTAssertEqual(actual, derived, "\(id) attributed observation membership")
         }
     }
 
-    private func assertObservationIdentityIsDerivedFromInput(_ vector: JSONObject, observation: JSONObject) throws {
+    private func observation(from value: JSONObject, vectorID: String) throws -> AttributedObservation {
+        XCTAssertEqual(Set(value.keys), Self.observationKeys, "\(vectorID) observation keys")
+        return AttributedObservation(
+            kind: try XCTUnwrap(value["kind"] as? String, "\(vectorID) observation.kind"),
+            childDeviceID: try XCTUnwrap(value["child_device_id"] as? String, "\(vectorID) observation.child_device_id"),
+            source: try XCTUnwrap(value["source"] as? String, "\(vectorID) observation.source"),
+            credentialKind: try XCTUnwrap(value["credential_kind"] as? String, "\(vectorID) observation.credential_kind"),
+            credentialID: try XCTUnwrap(value["credential_id"] as? String, "\(vectorID) observation.credential_id")
+        )
+    }
+
+    private func observationsDerivedSolelyFromTypedInput(_ vector: JSONObject, vectorID: String) throws -> [AttributedObservation] {
         let input = try XCTUnwrap(vector["input"] as? JSONObject)
         let kind = try XCTUnwrap(input["kind"] as? String)
 
-        if ["ledger_device_attribution", "ledger_device_cap", "ledger_shared_exhaustion"].contains(kind) {
+        switch kind {
+        case "ledger_device_attribution":
             let accepted = try XCTUnwrap(input["accepted"] as? JSONObject)
-            let credential = try XCTUnwrap(accepted["credential"] as? JSONObject)
-            if observation["credential_kind"] as? String == "epoch" {
-                XCTAssertEqual(observation["child_device_id"] as? String, accepted["child_device_id"] as? String)
-                XCTAssertEqual(observation["source"] as? String, accepted["source"] as? String)
-                XCTAssertEqual(observation["credential_id"] as? String, credential["id"] as? String)
-                return
+            _ = try XCTUnwrap(input["sibling_child_device_id"] as? String, "\(vectorID) sibling_child_device_id")
+            return sortObservations([try ledgerObservation(from: accepted, vectorID: vectorID)])
+
+        case "ledger_device_cap":
+            let accepted = try XCTUnwrap(input["accepted"] as? JSONObject)
+            let enforcementSets = try XCTUnwrap(input["enforcement_sets"] as? [JSONObject], "\(vectorID) enforcement_sets")
+            let acceptedChildDeviceID = try XCTUnwrap(accepted["child_device_id"] as? String, "\(vectorID) accepted.child_device_id")
+            let matchingSets = enforcementSets.filter { $0["child_device_id"] as? String == acceptedChildDeviceID }
+            XCTAssertEqual(matchingSets.count, 1, "\(vectorID) accepted enforcement set")
+            let enforcementSet = try XCTUnwrap(matchingSets.first, "\(vectorID) accepted enforcement set")
+            let setObservation = try enforcementSetObservation(from: enforcementSet, source: accepted["source"] as? String, vectorID: vectorID)
+            return sortObservations([
+                try ledgerObservation(from: accepted, vectorID: vectorID),
+                observation(kind: "receipt", from: setObservation),
+                observation(kind: "shield", from: setObservation)
+            ])
+
+        case "ledger_shared_exhaustion":
+            let accepted = try XCTUnwrap(input["accepted"] as? JSONObject)
+            let devices = try XCTUnwrap(input["devices"] as? [JSONObject], "\(vectorID) devices")
+            XCTAssertEqual(devices.count, 2, "\(vectorID) exhaustion devices")
+            let source = try XCTUnwrap(accepted["source"] as? String, "\(vectorID) accepted.source")
+            let setObservations = try devices.map { try enforcementSetObservation(from: $0, source: source, vectorID: vectorID) }
+            var derived = [try ledgerObservation(from: accepted, vectorID: vectorID)]
+            for setObservation in setObservations {
+                derived.append(observation(kind: "receipt", from: setObservation))
+                derived.append(observation(kind: "shield", from: setObservation))
             }
+            return sortObservations(derived)
 
-            let sets = (input["enforcement_sets"] ?? input["devices"])
-            let enforcementSets = try XCTUnwrap(sets as? [JSONObject])
-            XCTAssertEqual(observation["source"] as? String, accepted["source"] as? String)
-            XCTAssertTrue(enforcementSets.contains { set in
-                guard let setCredential = set["credential"] as? JSONObject else { return false }
-                return observation["child_device_id"] as? String == set["child_device_id"] as? String
-                    && observation["credential_kind"] as? String == setCredential["kind"] as? String
-                    && observation["credential_id"] as? String == setCredential["id"] as? String
-            })
-            return
+        case "ledger_per_app_limit":
+            let rule = try XCTUnwrap(input["reached_rule"] as? JSONObject, "\(vectorID) reached_rule")
+            _ = try XCTUnwrap(input["unrelated_rules"] as? [JSONObject], "\(vectorID) unrelated_rules")
+            let ruleObservation = try appLimitRuleObservation(from: rule, vectorID: vectorID)
+            return sortObservations([
+                observation(kind: "ledger", from: ruleObservation),
+                observation(kind: "receipt", from: ruleObservation),
+                observation(kind: "shield", from: ruleObservation)
+            ])
+
+        default:
+            XCTFail("\(vectorID) unsupported ledger input.kind \(kind)")
+            return []
         }
+    }
 
-        XCTAssertEqual(kind, "ledger_per_app_limit")
-        let rule = try XCTUnwrap(input["reached_rule"] as? JSONObject)
-        let credential = try XCTUnwrap(rule["credential"] as? JSONObject)
-        XCTAssertEqual(observation["child_device_id"] as? String, rule["child_device_id"] as? String)
-        XCTAssertEqual(observation["source"] as? String, rule["source"] as? String)
-        XCTAssertEqual(observation["credential_kind"] as? String, credential["kind"] as? String)
-        XCTAssertEqual(observation["credential_id"] as? String, credential["id"] as? String)
+    private func ledgerObservation(from accepted: JSONObject, vectorID: String) throws -> AttributedObservation {
+        let credential = try XCTUnwrap(accepted["credential"] as? JSONObject, "\(vectorID) accepted.credential")
+        let credentialKind = try XCTUnwrap(credential["kind"] as? String, "\(vectorID) accepted.credential.kind")
+        XCTAssertEqual(credentialKind, "epoch", "\(vectorID) accepted credential kind")
+        let source = try XCTUnwrap(accepted["source"] as? String, "\(vectorID) accepted.source")
+        XCTAssertEqual(source, "earned_time", "\(vectorID) accepted source")
+        return AttributedObservation(
+            kind: "ledger",
+            childDeviceID: try XCTUnwrap(accepted["child_device_id"] as? String, "\(vectorID) accepted.child_device_id"),
+            source: source,
+            credentialKind: credentialKind,
+            credentialID: try XCTUnwrap(credential["id"] as? String, "\(vectorID) accepted.credential.id")
+        )
+    }
+
+    private func enforcementSetObservation(from set: JSONObject, source: String?, vectorID: String) throws -> AttributedObservation {
+        let credential = try XCTUnwrap(set["credential"] as? JSONObject, "\(vectorID) enforcement set credential")
+        let credentialKind = try XCTUnwrap(credential["kind"] as? String, "\(vectorID) enforcement set credential.kind")
+        XCTAssertEqual(credentialKind, "enforcement_set", "\(vectorID) enforcement set credential kind")
+        return AttributedObservation(
+            kind: "enforcement_set",
+            childDeviceID: try XCTUnwrap(set["child_device_id"] as? String, "\(vectorID) enforcement set child_device_id"),
+            source: try XCTUnwrap(source, "\(vectorID) accepted.source"),
+            credentialKind: credentialKind,
+            credentialID: try XCTUnwrap(credential["id"] as? String, "\(vectorID) enforcement set credential.id")
+        )
+    }
+
+    private func appLimitRuleObservation(from rule: JSONObject, vectorID: String) throws -> AttributedObservation {
+        let credential = try XCTUnwrap(rule["credential"] as? JSONObject, "\(vectorID) rule credential")
+        let credentialKind = try XCTUnwrap(credential["kind"] as? String, "\(vectorID) rule credential.kind")
+        XCTAssertEqual(credentialKind, "app_limit_rule", "\(vectorID) rule credential kind")
+        let source = try XCTUnwrap(rule["source"] as? String, "\(vectorID) rule source")
+        XCTAssertEqual(source, "limit", "\(vectorID) rule source")
+        return AttributedObservation(
+            kind: "app_limit_rule",
+            childDeviceID: try XCTUnwrap(rule["child_device_id"] as? String, "\(vectorID) rule child_device_id"),
+            source: source,
+            credentialKind: credentialKind,
+            credentialID: try XCTUnwrap(credential["id"] as? String, "\(vectorID) rule credential.id")
+        )
+    }
+
+    private func observation(kind: String, from identity: AttributedObservation) -> AttributedObservation {
+        AttributedObservation(
+            kind: kind,
+            childDeviceID: identity.childDeviceID,
+            source: identity.source,
+            credentialKind: identity.credentialKind,
+            credentialID: identity.credentialID
+        )
+    }
+
+    private func sortObservations(_ observations: [AttributedObservation]) -> [AttributedObservation] {
+        observations.sorted {
+            [$0.kind, $0.childDeviceID, $0.source, $0.credentialKind, $0.credentialID]
+                .lexicographicallyPrecedes([$1.kind, $1.childDeviceID, $1.source, $1.credentialKind, $1.credentialID])
+        }
     }
 
     func testCanonicalVectorBackendByteParity() throws {
