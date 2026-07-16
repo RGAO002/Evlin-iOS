@@ -74,26 +74,6 @@ struct ProfileView: View {
     /// parent reflection flow.
     var onOpenReflection: (AppRoute) -> Void = { _ in }
 
-    init(
-        child: ChildProfile,
-        initialTaskId: Int? = nil,
-        initialReflectionSubTab: Bool = false,
-        onBack: @escaping () -> Void = {},
-        onOpenCalendar: @escaping () -> Void = {},
-        onOpenTaskDetail: @escaping (TaskItem) -> Void = { _ in },
-        onOpenDevice: @escaping (DeviceItem) -> Void = { _ in },
-        onOpenReflection: @escaping (AppRoute) -> Void = { _ in }
-    ) {
-        self.child = child
-        self.initialTaskId = initialTaskId
-        self.initialReflectionSubTab = initialReflectionSubTab
-        self.onBack = onBack
-        self.onOpenCalendar = onOpenCalendar
-        self.onOpenTaskDetail = onOpenTaskDetail
-        self.onOpenDevice = onOpenDevice
-        self.onOpenReflection = onOpenReflection
-    }
-
     @State private var tasks: [TaskItem] = []
     @State private var devices: [DeviceItem] = []
     @State private var rules: [RuleItem] = []
@@ -143,7 +123,7 @@ struct ProfileView: View {
 #if DEBUG
     /// Instance-only dependency for deterministic visual fixtures. Release does
     /// not compile this path; production never reads a mode flag.
-    private var runtimeEffectsAllowed: () -> Bool = { true }
+    @State private var runtimeEffectsAllowed: () -> Bool = { true }
 #endif
     private var backendChildID: UUID? {
         familyStore.childDeviceID(forChildId: child.id, preferredDeviceID: pairedChildID)
@@ -2029,7 +2009,7 @@ extension ProfileView {
 
     init(snapshotFixture fixture: ProfileSnapshotFixture_v1) {
         self.init(child: fixture.child)
-        runtimeEffectsAllowed = { false }
+        _runtimeEffectsAllowed = State(initialValue: { false })
         _tasks = State(initialValue: fixture.tasks)
         _devices = State(initialValue: fixture.devices)
         _rules = State(initialValue: fixture.rules)
