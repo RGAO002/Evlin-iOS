@@ -301,6 +301,37 @@ final class MeteringEpochContractTests: XCTestCase {
         XCTAssertEqual(MeteringEpochContract.effects(for: verdict), MeteringEffects())
     }
 
+    func testExtremeNegativeDeltaRejectsWithoutOverflowAndHasZeroEffects() {
+        let verdict = MeteringEpochContract.callbackVerdict(
+            callbackInput(
+                adjustedEstimateMinutes: .min,
+                baseAcceptedMinutes: 1
+            )
+        )
+
+        XCTAssertEqual(verdict, .rejectNegativeDelta)
+        XCTAssertEqual(MeteringEpochContract.effects(for: verdict), MeteringEffects())
+    }
+
+    func testExtremePositiveDeltaRejectsTooEarlyWithoutOverflowAndHasZeroEffects() {
+        let extremes = [
+            (adjusted: Int.max / 60 + 1, base: 0),
+            (adjusted: Int.max, base: -1)
+        ]
+
+        for extreme in extremes {
+            let verdict = MeteringEpochContract.callbackVerdict(
+                callbackInput(
+                    adjustedEstimateMinutes: extreme.adjusted,
+                    baseAcceptedMinutes: extreme.base
+                )
+            )
+
+            XCTAssertEqual(verdict, .rejectTooEarly)
+            XCTAssertEqual(MeteringEpochContract.effects(for: verdict), MeteringEffects())
+        }
+    }
+
     func testJitterConstantsAndHardMaximumClamp() {
         XCTAssertEqual(MeteringEpochContract.defaultJitterSeconds, 30)
         XCTAssertEqual(MeteringEpochContract.maximumJitterSeconds, 60)

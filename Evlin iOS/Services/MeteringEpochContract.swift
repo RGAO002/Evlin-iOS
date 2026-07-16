@@ -151,9 +151,13 @@ nonisolated enum MeteringEpochContract {
         guard input.expectedEventNamespace == input.callbackEventNamespace else {
             return .rejectNamespace
         }
-        let deltaMinutes = input.adjustedEstimateMinutes - input.baseAcceptedMinutes
-        guard deltaMinutes >= 0 else {
+        guard input.adjustedEstimateMinutes >= input.baseAcceptedMinutes else {
             return .rejectNegativeDelta
+        }
+        let (deltaMinutes, deltaOverflow) = input.adjustedEstimateMinutes
+            .subtractingReportingOverflow(input.baseAcceptedMinutes)
+        guard !deltaOverflow else {
+            return .rejectTooEarly
         }
         guard input.callbackAt >= input.startedAt else {
             return .rejectTooEarly
@@ -161,7 +165,11 @@ nonisolated enum MeteringEpochContract {
 
         let elapsedSeconds = input.callbackAt.timeIntervalSince(input.startedAt)
         let clampedJitter = min(max(input.jitterSeconds, 0), maximumJitterSeconds)
-        return TimeInterval(deltaMinutes * 60) <= elapsedSeconds + TimeInterval(clampedJitter)
+        let (requiredSeconds, secondsOverflow) = deltaMinutes.multipliedReportingOverflow(by: 60)
+        guard !secondsOverflow else {
+            return .rejectTooEarly
+        }
+        return TimeInterval(requiredSeconds) <= elapsedSeconds + TimeInterval(clampedJitter)
             ? .accept
             : .rejectTooEarly
     }
