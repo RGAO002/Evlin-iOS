@@ -345,25 +345,41 @@ For each Profile case, inject `ProfileView(snapshotFixture:)`. For E, inject the
 
 First run compare mode on iPhone. Expected: FAIL with a missing-baseline message and no implicit write.
 
-Then record:
+The XCTest process runs inside the simulator, so a shell-prefixed environment
+variable does not reach it. Resolve and boot the two exact simulator UDIDs,
+then set the recording variable in each simulator's launchd environment:
 
 ```bash
-EVLIN_RECORD_PROFILE_SNAPSHOTS=1 xcodebuild test \
-  -project 'Evlin iOS.xcodeproj' \
-  -scheme 'Evlin iOS' \
-  -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3.1' \
-  -testLanguage en -testRegion US \
-  -only-testing:'Evlin iOSTests/ProfileSnapshotTests'
+xcrun simctl list devices available 'iOS 26.3.1'
+PHONE_UDID='<iPhone 17 Pro UUID from the command above>'
+IPAD_UDID='<iPad (A16) UUID from the command above>'
 
-EVLIN_RECORD_PROFILE_SNAPSHOTS=1 xcodebuild test \
+xcrun simctl boot "$PHONE_UDID" || true
+xcrun simctl spawn "$PHONE_UDID" launchctl setenv EVLIN_RECORD_PROFILE_SNAPSHOTS 1
+xcodebuild test \
   -project 'Evlin iOS.xcodeproj' \
   -scheme 'Evlin iOS' \
-  -destination 'platform=iOS Simulator,name=iPad (A16),OS=26.3.1' \
+  -destination "platform=iOS Simulator,id=$PHONE_UDID" \
+  -parallel-testing-enabled NO \
   -testLanguage en -testRegion US \
   -only-testing:'Evlin iOSTests/ProfileSnapshotTests'
+xcrun simctl spawn "$PHONE_UDID" launchctl unsetenv EVLIN_RECORD_PROFILE_SNAPSHOTS
+
+xcrun simctl boot "$IPAD_UDID" || true
+xcrun simctl spawn "$IPAD_UDID" launchctl setenv EVLIN_RECORD_PROFILE_SNAPSHOTS 1
+xcodebuild test \
+  -project 'Evlin iOS.xcodeproj' \
+  -scheme 'Evlin iOS' \
+  -destination "platform=iOS Simulator,id=$IPAD_UDID" \
+  -parallel-testing-enabled NO \
+  -testLanguage en -testRegion US \
+  -only-testing:'Evlin iOSTests/ProfileSnapshotTests'
+xcrun simctl spawn "$IPAD_UDID" launchctl unsetenv EVLIN_RECORD_PROFILE_SNAPSHOTS
 ```
 
-Expected: seven PNGs in each exact environment folder.
+Expected: seven PNGs in each exact environment folder. The `unsetenv` commands
+are mandatory cleanup. `-parallel-testing-enabled NO` prevents Xcode clone
+destinations from changing the exact device name seen by the fixture guard.
 
 - [ ] **Step 6: Prove the diff path, then restore the clean test**
 
@@ -371,7 +387,8 @@ Temporarily mutate one rendered pixel in test memory before comparison for `A-in
 
 - [ ] **Step 7: Run both compare gates twice**
 
-Run both Step 5 commands without `EVLIN_RECORD_PROFILE_SNAPSHOTS`, twice each.
+Run both Step 5 `xcodebuild` commands after the simulator environment variable
+has been unset, twice each. Keep `-parallel-testing-enabled NO`.
 
 Expected: all 14 comparisons PASS on both consecutive runs, proving the baseline is not timing-dependent and compare mode does not modify baseline mtimes.
 

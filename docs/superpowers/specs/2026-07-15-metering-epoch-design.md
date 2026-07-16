@@ -867,6 +867,16 @@ This phase is independently releasable and does not wait for epoch migration.
 - Add stable raw-byte digest, generation/day epoch persistence, registration and
   retry ordering, strict trust validation, pause accounting, midnight
   self-heal, identity teardown, and local self-lock CAS provenance.
+- **§11/R-16 completion gate:** the Phase 3 completion report must include a
+  "本阶段拆除清单 + 向量证据" table for T1, T2, T3, the Phase 3 portion of T4,
+  T7, and T8. Each row names the replacement, the commit that removes or
+  narrows the old mechanism, and the golden vector that remains green after
+  removal. Any deferred row requires a written owner, reason, and later phase;
+  silence is a failed gate.
+- Phase 3 may not add an unregistered guard, flag, or veto. Before implementation,
+  every such mechanism must be entered under rule-book §11/R-16 with the old
+  mechanism it replaces (or a concrete justification for net-new state), its
+  deletion criterion, and its vector evidence.
 
 ### Phase 4: Per-App Epoch Provenance
 
@@ -902,6 +912,19 @@ This phase is independently releasable and does not wait for epoch migration.
 
 - Observe the flagged legacy path for one release, verify no remaining
   production consumer, then remove it in a separate reviewed change.
+- **§11/R-16 final gate:** the Phase 6 completion report must reconcile every
+  T1-T10 row as removed, intentionally retained with Fred-approved written
+  waiver, or assigned to a named follow-up with evidence that Phase 6 does not
+  depend on it. It must attach the corresponding golden-vector result and the
+  independently revertible removal commit for each removed mechanism.
+- Recount the earned metering guards at the end of Phase 6. The target is two
+  cores (identity match and physical trust) plus gate state. A higher count, an
+  unregistered guard, or a missing replacement/deletion criterion fails the
+  phase even when functional tests pass.
+- C-3 single-writer closure in
+  `docs/superpowers/plans/2026-07-15-lock-single-writer-c3.md` is a Phase 6
+  prerequisite: reflection web allowance and Home settings locks must route
+  through `ActiveLockStore`, then the two dead direct-write methods are removed.
 
 Each phase requires a separate TDD implementation plan and review checkpoint.
 No phase may silently broaden the behavior of the Profile manual button.
