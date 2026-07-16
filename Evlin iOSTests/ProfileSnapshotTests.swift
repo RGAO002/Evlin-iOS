@@ -89,6 +89,23 @@ private struct ProfileSnapshotCase {
     let name: String
     let view: AnyView
     let reflectionStore: ParentReflectionFixtureStore
+    let iPhoneVerticalScrollOffset: CGFloat?
+
+    init(
+        name: String,
+        view: AnyView,
+        reflectionStore: ParentReflectionFixtureStore,
+        iPhoneVerticalScrollOffset: CGFloat? = nil
+    ) {
+        self.name = name
+        self.view = view
+        self.reflectionStore = reflectionStore
+        self.iPhoneVerticalScrollOffset = iPhoneVerticalScrollOffset
+    }
+
+    func verticalScrollOffset(for environment: SnapshotEnvironment) -> CGFloat? {
+        environment.modelIdentifier == "iPhone18,1" ? iPhoneVerticalScrollOffset : nil
+    }
 }
 
 @MainActor
@@ -121,7 +138,8 @@ final class ProfileSnapshotTests: XCTestCase {
             let image = try render(
                 snapshotCase.view,
                 size: environment.logicalSize,
-                reflectionStore: snapshotCase.reflectionStore
+                reflectionStore: snapshotCase.reflectionStore,
+                verticalScrollOffset: snapshotCase.verticalScrollOffset(for: environment)
             )
             try assertSnapshot(
                 named: snapshotCase.name,
@@ -276,7 +294,12 @@ final class ProfileSnapshotTests: XCTestCase {
         )
 
         return [
-            .init(name: "A-independent-bars", view: AnyView(ProfileView(snapshotFixture: aFixture)), reflectionStore: aStore),
+            .init(
+                name: "A-independent-bars",
+                view: AnyView(ProfileView(snapshotFixture: aFixture)),
+                reflectionStore: aStore,
+                iPhoneVerticalScrollOffset: 420
+            ),
             .init(name: "B-task-pause", view: AnyView(ProfileView(snapshotFixture: bFixture)), reflectionStore: bStore),
             .init(name: "C-earned-exhausted", view: AnyView(ProfileView(snapshotFixture: cFixture)), reflectionStore: cStore),
             .init(name: "D-mixed-manual", view: AnyView(ProfileView(snapshotFixture: dFixture)), reflectionStore: dStore),
@@ -387,7 +410,8 @@ final class ProfileSnapshotTests: XCTestCase {
     private func render<V: View>(
         _ view: V,
         size: CGSize,
-        reflectionStore suppliedReflectionStore: ParentReflectionFixtureStore? = nil
+        reflectionStore suppliedReflectionStore: ParentReflectionFixtureStore? = nil,
+        verticalScrollOffset: CGFloat? = nil
     ) throws -> UIImage {
         assertPinnedScreenSize(size)
         guard UIScreen.main.bounds.size == size else {
@@ -436,12 +460,62 @@ final class ProfileSnapshotTests: XCTestCase {
         window.layoutIfNeeded()
         hostingController.view.layoutIfNeeded()
 
+        if let verticalScrollOffset {
+            let scrollViews = hostedScrollViews(in: hostingController.view)
+            let candidates = scrollViews.filter {
+                !$0.isHidden
+                    && $0.alpha > 0
+                    && $0.bounds.height > 0
+                    && $0.contentSize.height > $0.bounds.height
+            }
+            XCTAssertEqual(
+                candidates.count,
+                1,
+                "Expected one visible hosted SwiftUI vertical scroll view; found \(candidates.count)."
+            )
+            guard let scrollView = candidates.first, candidates.count == 1 else {
+                throw SnapshotFailure.unpinnedEnvironment
+            }
+
+            let minimumOffset = -scrollView.adjustedContentInset.top
+            let maximumOffset = max(
+                minimumOffset,
+                scrollView.contentSize.height
+                    - scrollView.bounds.height
+                    + scrollView.adjustedContentInset.bottom
+            )
+            XCTAssertGreaterThanOrEqual(
+                maximumOffset,
+                verticalScrollOffset,
+                "Hosted scroll content does not cover the requested snapshot offset."
+            )
+            guard maximumOffset >= verticalScrollOffset else {
+                throw SnapshotFailure.unpinnedEnvironment
+            }
+
+            let clampedOffset = min(max(verticalScrollOffset, minimumOffset), maximumOffset)
+            XCTAssertEqual(clampedOffset, verticalScrollOffset, accuracy: 0.001)
+            scrollView.setContentOffset(
+                CGPoint(x: scrollView.contentOffset.x, y: clampedOffset),
+                animated: false
+            )
+            scrollView.layoutIfNeeded()
+            window.layoutIfNeeded()
+            hostingController.view.layoutIfNeeded()
+            XCTAssertEqual(scrollView.contentOffset.y, clampedOffset, accuracy: 0.001)
+        }
+
         let format = UIGraphicsImageRendererFormat()
         format.scale = UIScreen.main.scale
         format.opaque = true
         return UIGraphicsImageRenderer(size: size, format: format).image { context in
             window.layer.render(in: context.cgContext)
         }
+    }
+
+    private func hostedScrollViews(in view: UIView) -> [UIScrollView] {
+        let current = view as? UIScrollView
+        return current.map { [$0] } ?? view.subviews.flatMap(hostedScrollViews(in:))
     }
 
     private func assertSnapshot(
