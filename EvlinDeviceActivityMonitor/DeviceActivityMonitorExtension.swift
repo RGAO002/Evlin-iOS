@@ -77,6 +77,17 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
 
         let raw = activity.rawValue
 
+#if DEBUG
+        if MeteringMonitorCapabilityProbe.isProbeActivity(raw) {
+            let ts = ISO8601DateFormatter().string(from: Date())
+            let line = "dam callback timestamp=\(ts) activity=\(raw)"
+            MeteringMonitorCapabilityProbe.append(line, defaults: defaults)
+            defaults?.set(line, forKey: MeteringMonitorCapabilityProbe.callbackKey)
+            NSLog("[Evlin/Ext] %@", line)
+            return
+        }
+#endif
+
         // Per-app limit daily reset (P7). The window's interval start (midnight for
         // a daily window) means a fresh day's budget. DeviceActivity auto-resets
         // each event's threshold counter at the interval boundary, so the budget
@@ -131,6 +142,13 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             forKey: "evlin.delivery.damHeartbeat"
         )
         NSLog("[Evlin/Ext] command heartbeat intervalDidStart %@ #%d %@", raw, count, rearm)
+#if DEBUG
+        runMeteringMonitorCapabilityProbe(
+            sequence: count,
+            canonicalTimezone: EarnedTimeStore.shared.currentPolicyDateContext()
+                .timezoneIdentifier
+        )
+#endif
         Task { await BigKidExtensionReporter.shared.reportCommandHeartbeat() }
     }
 
@@ -996,6 +1014,128 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         defaults?.set(count, forKey: countKey)
         return count
     }
+
+#if DEBUG
+    private func runMeteringMonitorCapabilityProbe(
+        sequence: Int,
+        canonicalTimezone: String
+    ) {
+        let now = Date()
+        guard let plan = MeteringMonitorCapabilityProbe.schedulePlan(
+            origin: "dam",
+            sequence: sequence,
+            now: now,
+            canonicalTimezone: canonicalTimezone
+        ),
+        let stoppedStart = plan.dateComponents(for: plan.stoppedStart),
+        let supersededActiveStart = plan.dateComponents(
+            for: plan.supersededActiveStart
+        ),
+        let replacementActiveStart = plan.dateComponents(
+            for: plan.replacementActiveStart
+        ),
+        let end = plan.dateComponents(for: plan.end) else {
+            MeteringMonitorCapabilityProbe.append(
+                "origin=dam sequence=\(sequence) operation=validate result=error invalid_timezone=\(canonicalTimezone)",
+                defaults: defaults
+            )
+            return
+        }
+
+        let formatter = ISO8601DateFormatter()
+        let center = DeviceActivityCenter()
+        let stoppedName = DeviceActivityName(plan.stoppedActivityName)
+        let activeName = DeviceActivityName(plan.activeActivityName)
+
+        func append(
+            role: String,
+            operation: String,
+            result: String,
+            expectedCallback: String
+        ) {
+            MeteringMonitorCapabilityProbe.append(
+                "origin=dam sequence=\(sequence) role=\(role) operation=\(operation) result=\(result) expected_callback=\(expectedCallback)",
+                defaults: defaults
+            )
+        }
+
+        let stoppedSchedule = DeviceActivitySchedule(
+            intervalStart: stoppedStart,
+            intervalEnd: end,
+            repeats: false
+        )
+        let stoppedExpected = formatter.string(from: plan.stoppedStart)
+        do {
+            try center.startMonitoring(stoppedName, during: stoppedSchedule)
+            append(
+                role: "stopped",
+                operation: "start",
+                result: "ok",
+                expectedCallback: stoppedExpected
+            )
+        } catch {
+            append(
+                role: "stopped",
+                operation: "start",
+                result: "error=\(error.localizedDescription)",
+                expectedCallback: stoppedExpected
+            )
+        }
+        center.stopMonitoring([stoppedName])
+        append(
+            role: "stopped",
+            operation: "stop",
+            result: "called",
+            expectedCallback: "suppressed@\(stoppedExpected)"
+        )
+
+        let supersededSchedule = DeviceActivitySchedule(
+            intervalStart: supersededActiveStart,
+            intervalEnd: end,
+            repeats: false
+        )
+        let supersededExpected = formatter.string(from: plan.supersededActiveStart)
+        do {
+            try center.startMonitoring(activeName, during: supersededSchedule)
+            append(
+                role: "active",
+                operation: "start",
+                result: "ok",
+                expectedCallback: supersededExpected
+            )
+        } catch {
+            append(
+                role: "active",
+                operation: "start",
+                result: "error=\(error.localizedDescription)",
+                expectedCallback: supersededExpected
+            )
+        }
+
+        let replacementSchedule = DeviceActivitySchedule(
+            intervalStart: replacementActiveStart,
+            intervalEnd: end,
+            repeats: false
+        )
+        let replacementExpected = formatter.string(from: plan.replacementActiveStart)
+        do {
+            try center.startMonitoring(activeName, during: replacementSchedule)
+            append(
+                role: "active",
+                operation: "replace_same_name",
+                result: "ok",
+                expectedCallback: replacementExpected
+            )
+        } catch {
+            append(
+                role: "active",
+                operation: "replace_same_name",
+                result: "error=\(error.localizedDescription)",
+                expectedCallback: replacementExpected
+            )
+        }
+    }
+#endif
 }
 
 // CRITICAL: date strategy MUST match `ActiveLockStore.persist()` / `restore()`,

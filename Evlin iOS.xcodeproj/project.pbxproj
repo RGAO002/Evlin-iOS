@@ -122,6 +122,7 @@
 				Services/DefaultLockGroupStore.swift,
 				Services/EarnedTimeStore.swift,
 				Services/MeteringEpochContract.swift,
+				Services/MeteringMonitorCapabilityProbe.swift,
 				Services/ShieldSourceLogic.swift,
 			);
 			target = B600D6332FDB4C5F000E60E6 /* EvlinPushApplier */;
@@ -158,6 +159,7 @@
 				Services/EarnedTimeStore.swift,
 				Services/LimitShieldLogic.swift,
 				Services/MeteringEpochContract.swift,
+				Services/MeteringMonitorCapabilityProbe.swift,
 				Services/ScreenTimeEventLog.swift,
 				Services/ShieldSourceLogic.swift,
 			);
@@ -722,6 +724,7 @@
 				INFOPLIST_FILE = EvlinPushApplier/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = EvlinPushApplier;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -753,6 +756,7 @@
 				INFOPLIST_FILE = EvlinPushApplier/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = EvlinPushApplier;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",

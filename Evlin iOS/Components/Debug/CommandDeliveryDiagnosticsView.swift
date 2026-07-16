@@ -41,6 +41,9 @@ struct CommandDeliveryDiagnosticsView: View {
             earnedTimeDiagnosticsSection
             heartbeatHistorySection
             nseSpikeSection
+#if DEBUG
+            meteringMonitorProbeSection
+#endif
             pickerSeparationSection
         }
         .navigationTitle("Command Delivery")
@@ -257,6 +260,84 @@ struct CommandDeliveryDiagnosticsView: View {
     private var nseTotal: Int {
         CommandDeliveryDiagnostics.readInt(CommandDeliveryDiagnostics.keyNSECount)
     }
+
+#if DEBUG
+    @ViewBuilder
+    private var meteringMonitorProbeSection: some View {
+        Section {
+            earnedRow("latest result", meteringMonitorProbeLatestResult)
+
+            if meteringMonitorProbeLog.isEmpty {
+                Text("No metering monitor probe results yet.")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(
+                    Array(meteringMonitorProbeLog.reversed().enumerated()),
+                    id: \.offset
+                ) { _, line in
+                    Text(line)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+            }
+
+            Button {
+                clearMeteringMonitorProbe()
+                do {
+                    try BigKidActivityScheduler.shared.startCommandHeartbeatSpike(
+                        delaySeconds: 30
+                    )
+                } catch {
+                    MeteringMonitorCapabilityProbe.append(
+                        "control operation=arm_dam_heartbeat result=error=\(error.localizedDescription)",
+                        defaults: meteringMonitorProbeDefaults
+                    )
+                }
+                refreshTick += 1
+            } label: {
+                Label("Run DAM monitor probe", systemImage: "play.fill")
+            }
+
+            Button(role: .destructive) {
+                clearMeteringMonitorProbe()
+                refreshTick += 1
+            } label: {
+                Label("Clear monitor probe results", systemImage: "trash")
+            }
+        } header: {
+            Text("Metering Monitor Capability")
+        }
+        .id("metering-monitor-probe-\(refreshTick)")
+    }
+
+    private var meteringMonitorProbeDefaults: UserDefaults? {
+        UserDefaults(suiteName: "group.com.evlin.ios")
+    }
+
+    private var meteringMonitorProbeLog: [String] {
+        meteringMonitorProbeDefaults?.stringArray(
+            forKey: MeteringMonitorCapabilityProbe.logKey
+        ) ?? []
+    }
+
+    private var meteringMonitorProbeLatestResult: String {
+        meteringMonitorProbeDefaults?.string(
+            forKey: MeteringMonitorCapabilityProbe.callbackKey
+        ) ?? meteringMonitorProbeLog.last
+        ?? "(none)"
+    }
+
+    private func clearMeteringMonitorProbe() {
+        meteringMonitorProbeDefaults?.removeObject(
+            forKey: MeteringMonitorCapabilityProbe.logKey
+        )
+        meteringMonitorProbeDefaults?.removeObject(
+            forKey: MeteringMonitorCapabilityProbe.callbackKey
+        )
+    }
+#endif
 
     @ViewBuilder
     private func deliveryDiagnosticRow(_ title: String, _ key: String) -> some View {
