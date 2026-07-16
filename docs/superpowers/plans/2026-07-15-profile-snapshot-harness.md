@@ -72,7 +72,7 @@ final class ProfileSnapshotTests: XCTestCase {
 xcodebuild test \
   -project 'Evlin iOS.xcodeproj' \
   -scheme 'Evlin iOS' \
-  -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3' \
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3.1' \
   -testLanguage en -testRegion US \
   -only-testing:'Evlin iOSTests/ProfileSnapshotTests/test_debugFixtureCanSeedProfileWithoutLiveRuntimeEffects'
 ```
@@ -351,14 +351,14 @@ Then record:
 EVLIN_RECORD_PROFILE_SNAPSHOTS=1 xcodebuild test \
   -project 'Evlin iOS.xcodeproj' \
   -scheme 'Evlin iOS' \
-  -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3' \
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3.1' \
   -testLanguage en -testRegion US \
   -only-testing:'Evlin iOSTests/ProfileSnapshotTests'
 
 EVLIN_RECORD_PROFILE_SNAPSHOTS=1 xcodebuild test \
   -project 'Evlin iOS.xcodeproj' \
   -scheme 'Evlin iOS' \
-  -destination 'platform=iOS Simulator,name=iPad (A16),OS=26.3' \
+  -destination 'platform=iOS Simulator,name=iPad (A16),OS=26.3.1' \
   -testLanguage en -testRegion US \
   -only-testing:'Evlin iOSTests/ProfileSnapshotTests'
 ```
