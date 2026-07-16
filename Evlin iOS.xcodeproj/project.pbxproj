@@ -121,6 +121,7 @@
 				Services/DefaultLockGroup.swift,
 				Services/DefaultLockGroupStore.swift,
 				Services/EarnedTimeStore.swift,
+				Services/MeteringEpochContract.swift,
 				Services/ShieldSourceLogic.swift,
 			);
 			target = B600D6332FDB4C5F000E60E6 /* EvlinPushApplier */;
@@ -156,6 +157,7 @@
 				Services/EarnedSampleReporter.swift,
 				Services/EarnedTimeStore.swift,
 				Services/LimitShieldLogic.swift,
+				Services/MeteringEpochContract.swift,
 				Services/ScreenTimeEventLog.swift,
 				Services/ShieldSourceLogic.swift,
 			);
