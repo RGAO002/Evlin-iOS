@@ -1,6 +1,6 @@
 # Metering Epoch Phase 2 Completion Report
 
-Status: DONE_WITH_CONCERNS. This report is the iOS task artifact. The
+Status: DONE. This report is the iOS task artifact. The
 cross-repository final report, including both immutable commit SHAs, is at
 `/Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend/.superpowers/sdd/task-8-report.md`.
 
@@ -93,5 +93,46 @@ Later rollout order, not executed:
 6. set advertised version 2
 7. monitor registration conflicts, terminal v1 drops, fanout receipts, and command acknowledgements
 
-Pre-existing iOS dirty files were neither staged nor intentionally modified;
-only this completion report is staged for the iOS task commit.
+Pre-existing iOS dirty files were neither staged nor intentionally modified.
+The original completion report was committed alone at
+`67f22be1afd74f3aac7dc1d3233d5f81948e6e78`; this review-fix follow-up also
+commits only this report.
+
+## Review-Fix Evidence (2026-07-17)
+
+This section supersedes the earlier initial-gate concerns. The backend
+review-fix uses test/report changes only; no iOS production source changed.
+
+```sh
+cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend
+.venv/bin/python scripts/run_limits_db_regression.py
+```
+
+Result: `202 passed in 162.13s (0:02:42)`.
+
+```sh
+METERING_EPOCH_ADVERTISED_VERSION=1 \
+  .venv/bin/python scripts/run_limits_db_regression.py \
+  tests/test_metering_epoch_readiness.py \
+  tests/test_bigkid_endpoints.py
+```
+
+Result: `27 passed, 1 xfailed, 3 warnings in 23.82s`.
+
+```sh
+METERING_EPOCH_ADVERTISED_VERSION=2 \
+  .venv/bin/python scripts/run_limits_db_regression.py \
+  tests/test_metering_epoch_readiness.py \
+  tests/test_metering_epoch_registration.py
+```
+
+Result: `45 passed in 35.17s`.
+
+The Task 8 integration scenario now passes with strengthened rejected-sample,
+valid-replay, real manual/task source, independently-derived receipt, and
+strict D+1 idempotency evidence: `1 passed in 2.80s`.
+
+The historical four task-lock failures remain out of scope. Backend
+`task-6-report.md` identifies base `2ae0d026e05cbc72a811488eefdf28995dee7c76`,
+and `task-6-review.md` records that the same four failures occur at that base.
+No task-lock code or tests were changed by this follow-up.
