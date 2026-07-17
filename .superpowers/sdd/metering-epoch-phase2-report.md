@@ -1,6 +1,6 @@
 # Metering Epoch Phase 2 Completion Report
 
-Status: DONE
+Status: PENDING FINAL RE-REVIEW
 
 This is the final iOS-side Task 8 evidence record. No iOS production code was
 changed for Task 8 or its review-fix waves.
@@ -29,8 +29,12 @@ changed for Task 8 or its review-fix waves.
   `bcb8afcbd527b0353b73ff1b0f139c686984eb82`
 - Backend request-engine app-control delivery:
   `92628ef17fe29298b3a2dafe7b43a89bafe153f5`
+- Backend one-context timezone promotion fix:
+  `081955d3732239dfc80f35d06d3614d8bccd253b`
 - Backend final-review completion report:
   `23922a5b081fb31a735fe9b4104306dfd273893f`
+- Backend final re-review evidence report:
+  `57beda038c6547978b89d1b7e3c119c2b2bb8f40`
 - Original iOS Task 8 report:
   `67f22be1afd74f3aac7dc1d3233d5f81948e6e78`
 - Prior committed iOS review evidence:
@@ -61,7 +65,7 @@ Result: `1 passed in 2.47s`.
 .venv/bin/python scripts/run_limits_db_regression.py
 ```
 
-Result: `207 passed in 117.68s (0:01:57)` with no warning output.
+Result: `209 passed in 113.39s (0:01:53)` with no warning output.
 
 ```sh
 .venv/bin/python scripts/run_limits_db_regression.py \
@@ -77,15 +81,50 @@ Result: `207 passed in 117.68s (0:01:57)` with no warning output.
   tests/test_effective_state_sources.py
 ```
 
-Result: `140 passed in 76.90s (0:01:16)`.
+Result: `140 passed in 75.65s (0:01:15)`.
 
 Mandatory same-disposable-database receipts/registration/sample/reconciler
-suite: `91 passed in 52.56s`.
+suite: `91 passed in 52.81s`.
 
 The exact targeted bundle is the approval gate for task-lock prerequisite
 `2944580dfd4d32d818f94c7b5d3492343ca11243`. Its own focused evidence was
 `4 passed in 3.07s`, and its full task-lock module evidence was
 `39 passed in 28.24s`.
+
+## Final Re-Review Evidence
+
+At server `2026-07-17T03:30:00Z`, the old sample route derived New York date 16
+before a first authenticated Tokyo sample promoted the profile's migration
+timezone. It therefore rejected legitimate Tokyo date 17 and could accept a
+mixed date-16/Tokyo sample.
+
+Backend commit `081955d3732239dfc80f35d06d3614d8bccd253b` resolves one scoped
+canonical context under the profile lock and carries its single captured UTC
+instant, resolved timezone, and date through validation, v2 runtime, and
+persistence. Rejected authenticated samples may persist valid timezone
+observation/promotion metadata, but the regression proves no sample, epoch,
+ledger, command, receipt, APNs, shield, or task effect.
+
+Focused route TDD command:
+
+```sh
+.venv/bin/python scripts/run_limits_db_regression.py -- \
+  tests/test_metering_epoch_sample_adapter.py -k first_timezone_promotion
+```
+
+RED: `2 failed, 21 deselected in 2.33s`. GREEN:
+`2 passed, 21 deselected in 2.23s`. Canonical service plus full adapter modules
+passed `29 passed in 16.96s`, including delayed-prior-day coverage and stable
+parent/device-confirmed timezones.
+
+A positive first-promotion v2 fixture was not fabricated: epoch registration
+rejects timezone/date mismatches against the still-New-York runtime before it
+can insert a Tokyo/date-17 epoch. Existing v2 paths consume the resolved request
+context and cannot persist mixed provenance.
+
+The delivery/override suite passed `91 passed in 45.11s`; the two-test increase
+is exactly the new adapter regressions, and dedicated earned override and task
+bypass coverage remains intact.
 
 ## Rollout Gates
 
@@ -100,7 +139,7 @@ PYTHONWARNINGS='error::RuntimeWarning' \
   -W "ignore:The 'verify' parameter is deprecated.*:DeprecationWarning:postgrest._sync.client"
 ```
 
-Result: `27 passed, 1 xfailed in 117.82s (0:01:57)`. RuntimeWarning and
+Result: `27 passed, 1 xfailed in 114.30s (0:01:54)`. RuntimeWarning and
 unraisable warnings were errors; only the two named third-party PostgREST
 deprecations were filtered.
 
@@ -111,16 +150,17 @@ METERING_EPOCH_ADVERTISED_VERSION=2 \
   tests/test_metering_epoch_registration.py
 ```
 
-Result: `46 passed in 22.81s`. Configured protocol remains version 1 outside
+Result: `46 passed in 22.78s`. Configured protocol remains version 1 outside
 the disposable v2 command environment.
 
-The pure contract/readiness/policy gate passed `79 passed in 0.41s`.
+The pure contract/readiness/policy gate passed `79 passed in 0.40s`.
 `alembic heads` reported the single head
 `2026_07_16_meter_epoch_v2 (head)`.
 
 ## iOS Compatibility
 
-Run from `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS`:
+Preserved from the prior Task 8 run in
+`/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS`:
 
 ```sh
 cmp \
@@ -145,12 +185,18 @@ and has SHA-256
 The app-limit wire fixture has SHA-256
 `4d651a535dc2c698fdf5f76cca77d86806ae543b6e2efea33f049c50a91ea8b4`.
 XCTest completed with `** TEST SUCCEEDED **`: 6 tests passed in 41.303 seconds.
+These fixture comparisons and selected XCTest were not rerun for final
+re-review because no fixture, cross-platform contract assertion, or iOS source
+changed.
 
 ## Operational Constraints
 
 Pre-existing iOS WIP remained unstaged and unmodified by this task. No push,
 deployment, Render environment change, TestFlight upload, production database
 access, or production data mutation occurred.
+
+Phase 2 remains `PENDING FINAL RE-REVIEW`. Exact remaining blocker: independent
+final re-review only.
 
 Later rollout order remains:
 
