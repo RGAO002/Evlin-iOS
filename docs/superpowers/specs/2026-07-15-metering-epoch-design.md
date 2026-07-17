@@ -1,7 +1,7 @@
 # Metering Epoch Reliability Design
 
 **Date:** 2026-07-15
-**Status:** Proposed for joint review before implementation
+**Status:** Revised 2026-07-17 after architecture verification; approved basis for Phase 3 planning
 
 **Platform floor:** iOS 17.6 and iPadOS 17.6 for the app and all Screen Time
 extensions. Capability spikes and release builds must exercise this floor even
@@ -13,6 +13,43 @@ arm/gate clauses in `2026-07-10-earned-time-poll-self-heal-design.md`, the
 the any-source/override Profile CTA behavior in
 `2026-07-12-profile-multi-device-lock-design.md`. Their unrelated requirements
 remain in force.
+
+## 0. Architecture Correction (2026-07-17)
+
+This correction is normative and supersedes every conflicting sentence in the
+original 2026-07-15 text. Local Xcode 26.3 / iPhoneOS 26.2 SDK interfaces and
+the implemented Phase 2 backend contract prove two earlier premises impossible:
+
+1. Apple's monitor callback supplies only `DeviceActivityName` and
+   `DeviceActivityEvent.Name`; it does not supply an independently trustworthy
+   usage date, epoch, policy, owner, or raw counter snapshot.
+2. A repeating activity name cannot identify which canonical day produced a
+   delayed callback. The app and DAM also have no synchronous exact raw-usage
+   read API from which to perform an exact resume rebase.
+
+Phase 3 therefore uses immutable, dated, non-repeating callback routes. An
+opaque route UUID appears in both Apple names, and one durable route record
+independently binds that UUID to owner, canonical date, epoch, generation,
+policy, namespace, schedule, events, and lifecycle. The Apple-shaped callback
+DTO contains only `{activityName, eventName, observedAt}`. No callback field is
+trusted until the route is resolved and all durable owner/date/epoch/policy
+checks pass.
+
+For each active policy generation, the app maintains a bounded installation
+horizon of canonical today plus the next seven canonical dates: exactly eight
+dated routes when fully ready. Running the app fills the horizon without
+replacing unchanged routes. If the horizon expires while Evlin remains
+force-quit, the device enters explicit `coverageExhausted` monitoring state.
+Unknown or uncovered callbacks then have zero usage, ledger, retry, network,
+notification, or earned auto-shield effects. Evlin neither manufactures usage
+nor applies an earned-time fail-closed lock. Manual, task-pause, reflection,
+admin, block, per-app, and other non-metering sources remain independent.
+
+Pause/resume is always conservative in Phase 3: keep the dated monitor active,
+discard the first post-resume threshold bucket, and continue from the new raw
+high-water mark. The backend's existing `gate_resume_exact_rebase` enum value
+remains accepted for protocol compatibility, but Phase 3 iOS never emits it.
+No NSE-primary monitor ownership is authorized by this correction.
 
 ## 1. Purpose
 
@@ -79,7 +116,7 @@ must be reversed.
 |---|---|
 | Progress moves and then freezes | Unchanged polls cannot replace a monitor; delayed active-epoch callbacks remain valid. |
 | Midnight resets but today's task lock is missing | Database-driven canonical-day task reconciliation plus NSE-primary delivery and device self-heal. |
-| Progress never moves from first launch | Explicit readiness state, one stable initial arm, and first-threshold acceptance only after real elapsed use. |
+| Progress never moves from first launch | Explicit readiness state, one stable eight-date route horizon, and first-threshold acceptance only after real elapsed use. |
 | The next day's progress never moves | Daily epoch rollover is independent of the main app and rejects stale-day state before mutation. |
 | Usage jumps or reaches zero far too early | No `+5` allowance, immutable epoch start/base, strict early-callback rejection, and no churn. |
 | One device appears to consume another device's cap | Per-device ledger isolation and own-cap-only device progress bars; only the child pool is shared. |
@@ -258,10 +295,11 @@ rejected.
 
 ## 6. Architecture
 
-### 6.1 Stable Monitor Generation
+### 6.1 Stable Policy Generation
 
-A monitor generation represents one installed Apple `DeviceActivity`
-schedule. Its replacement key contains only stable policy identity:
+A policy generation is not an Apple schedule. It is the durable identity shared
+by a bounded set of dated route installations. Its replacement key contains
+exactly these six fields:
 
 ```text
 protocolVersion
@@ -272,34 +310,62 @@ measurementSelectionDigest
 enforcementSetID
 ```
 
-It explicitly excludes:
+The key excludes `usageDate`, offset, accepted estimate, remaining minutes,
+counters, timestamps, raw high-water marks, gate state, install state, and
+retry state. Date belongs to the daily epoch and route. One immutable
+`generationID` identifies the concrete generation but is not a key field.
 
-```text
-usage offset
-accepted estimate
-remaining minutes
-last sync time
-armedAt
-callback count
-retry count
-accounting gate state
+`measurementSelectionDigest` is SHA-256 of the exact bytes persisted at
+`earned.measurementSelection`. The generation also retains those exact bytes
+for recovery. Normal reconciliation never decodes and re-encodes the selection
+before hashing. `policyRevision` remains the backend's string value formed from
+the immutable config/cap identity.
+
+### 6.2 Dated Callback Routes And Coverage
+
+Each canonical date has one non-repeating `DeviceActivitySchedule` built by the
+exact Swift interface:
+
+```swift
+nonisolated static func datedSchedule(
+    usageDate: String,
+    timeZone: TimeZone,
+    calendar: Calendar = Calendar(identifier: .gregorian)
+) throws -> DeviceActivitySchedule
 ```
 
-`usageDate` belongs to the daily epoch, not the long-lived repeating monitor.
-This lets Apple's repeating schedule cross midnight without requiring the main
-app to be alive.
+The schedule contains absolute year/month/day components in the canonical
+timezone and `repeats == false`. A route uses these names:
 
-`measurementSelectionDigest` is SHA-256 of the exact persisted
-`earned.measurementSelection` bytes. A normal poll must not decode and re-encode
-the selection. An explicit user save may produce new persisted bytes and one
-intentional replacement, even when the selected set is semantically unchanged.
+```text
+activity = evlin.earned.v2.<route-uuid>
+event    = evlin.earned.v2.<route-uuid>.t<threshold-minutes>
+```
 
-`policyRevision` is backend-generated from the immutable active config ID and
-active device-cap ID (`pool` when the cap falls back to the pool). Pool, cap,
-and timezone changes create new immutable policy rows and therefore a new
-revision.
+The durable route is immutable after creation and contains `routeID`, both name
+forms/namespace, `generationID`, the six-field generation key,
+`ownerChildDeviceID`, `usageDate`, `epochID`, planned/installed schedule,
+planned events, and lifecycle. Parsing the same route UUID from both names is
+necessary but never sufficient; the store record supplies independent
+provenance.
 
-### 6.2 Daily Metering Epoch
+The app fills exactly eight canonical dates, today through today + 7, whenever
+it runs. Reconciliation of an unchanged, already full horizon performs no
+start, stop, replacement, route-ID, generation-ID, or epoch-ID mutation. When
+the canonical date advances while the app runs, it appends only the newly
+needed future route and retires expired work through the normal tombstone
+protocol. A route tombstone remains until Apple stop is acknowledged, all work
+that references the route is terminal, and the retention horizon has elapsed.
+
+Coverage state records the required range, verified `readyThroughUsageDate`,
+status (`ready`, `installLimited`, or `coverageExhausted`), refresh time, and
+bounded error code. `DeviceActivityCenter.MonitoringError.excessiveActivities`
+does not authorize destructive replacement: preserve every verified existing
+route, stop filling, record the actual ready-through date, and expose
+`installLimited`. If today is not covered, transition to `coverageExhausted`
+and apply the zero-metering-effects rule from section 0.
+
+### 6.3 Daily Metering Epoch
 
 A daily epoch is one device's cumulative accounting session for one canonical
 usage date. It contains:
@@ -316,43 +382,32 @@ enforcementSetID
 startedAt
 registeredAt
 baseAcceptedMinutes
+baseSource = childState200 | registration200 | registrationConflict409
 lastRawThresholdMinutes
 excludedWhilePausedMinutes
 status = active | paused | exhausted | retired
+resumeBoundaryPending
 retiredAt
 retireReason
+exhaustedAt
 ```
 
-The daily epoch stable key is exactly
-`(protocolVersion, childDeviceID, usageDate, canonicalTimezone,
-policyRevision, measurementSelectionDigest, enforcementSetID)`. `epochID`
-identifies one concrete instance but is not part of that stable key. A new
-epoch is created only when the stable key changes or for an explicit recovery
-transition such as `gate_resume_exact_rebase` or `identity_recovery`; ordinary
-polling is never such a transition.
+The stable key is exactly the six-field generation key plus `usageDate`.
+`epochID`, dates, bases, progress, and status are not key fields. The backend
+`earned_time_runtime.estimated_minutes` (or the authoritative snapshot in a
+registration 409) is the only input to `baseAcceptedMinutes`; remaining, cap,
+local offsets, and local estimates cannot be substituted.
 
-After successful registration, `epochID`, the stable key, `startedAt`,
-`registeredAt`, and `baseAcceptedMinutes` are immutable provenance. Raw
-threshold high-water, pause exclusions, status, and retirement metadata are
-mutable runtime state. Timestamps, base values, and mutable progress are never
-replacement triggers.
+At most one epoch is active for `(childDeviceID, usageDate)`. Phase 3 iOS emits
+`initial`, `day_rollover`, `policy_change`, `selection_change`,
+`enforcement_set_change`, or `identity_recovery` as appropriate. The Phase 2
+backend continues decoding `gate_resume_exact_rebase`, but iOS does not create
+that transition because no exact raw counter is available. Exhaustion is an
+epoch status with `exhaustedAt`, not a free-standing Boolean guard. Retired
+epochs always have `retiredAt` and `retireReason`, never return to active, and
+cannot authorize effects.
 
-At most one epoch is active for `(childDeviceID, usageDate)`. Replacement
-requires a named reason:
-
-```text
-initial
-day_rollover
-policy_change
-selection_change
-enforcement_set_change
-identity_recovery
-gate_resume_exact_rebase
-```
-
-There is no `poll_refresh` replacement reason.
-
-### 6.3 Backend Epoch Registry
+### 6.4 Backend Epoch Registry
 
 Add `evlin_earned_time_metering_epochs` as an audit table. It stores the daily
 epoch fields above, family/profile ownership, last accepted sample time, and
@@ -370,26 +425,105 @@ Registration is idempotent by `epochID`. The backend validates:
   family/profile/device scope.
 
 A base mismatch returns the authoritative snapshot and does not activate the
-epoch. The client reconciles, chooses the returned accepted value as mutable
-base state, and registers one corrected epoch. It does not edit an already
-registered epoch in place.
+epoch. The client retires the rejected local epoch, creates one corrected epoch
+from `authoritative_snapshot.estimated_minutes`, and retries registration with
+the same durable ordering rules. It never edits registered provenance in place.
 
-### 6.4 Device Epoch Store
+### 6.5 One Versioned Device Epoch Store
 
-The App Group stores the active monitor generation and daily epoch as one
-versioned transaction protected by the existing interprocess persistence lock.
-Every read and write rechecks the mirrored child-device owner before and after
-the mutation.
+One App Group root is the sole Phase 3 payload authority. Every transaction is
+protected by `ActiveLockPersistenceLock`, uses atomic replacement plus readback,
+and rechecks the mirrored owner before and after mutation. The root contains:
 
-Identity change retires the generation, removes all queued registrations and
-samples owned by the old device, clears day-scoped metering state, stops known
-old activity names, and prevents a delayed callback from entering local
-mutation. This preserves the t185 cross-account firewall.
+```text
+schemaVersion and ownerChildDeviceID
+generations and activeGenerationID
+daily epochs and activeEpochID
+immutable routes and route tombstones
+registration queue and sample queue
+activity install/start/verify/activate/stop acknowledgements
+coverage state
+shield-effect operation references
+identity-cleanup envelope
+rollover-effects envelope
+per-owner protocol ratchet
+```
 
-### 6.5 One Callback Trust Function
+Registration, sample, fallback, install, shield-reference, cleanup, rollover,
+and ratchet work is never split across uncoordinated `UserDefaults` flags. A
+reopen recovery driver examines every nonterminal envelope before creating new
+work. It adopts or retries the same UUIDs and makes each external operation
+idempotent.
 
-Swift and Python implement the same pure decision from shared JSON vectors.
-For an active epoch:
+The sample queue and protocol-1 backfill are active before any production path
+may select protocol 2. A device remains advertised/selected as protocol 1 until
+registration returns HTTP 200 (`registered` or `already_registered`); only that
+success durably ratchets the owner to 2. Future routes cannot be registered
+because Phase 2 validates registration against canonical today, so they carry
+explicit `futurePlanned` authorization. Today's route registers before install;
+if offline, it may carry durable `offlinePending`, but callbacks remain queued
+with zero business effects until registration resolves.
+
+### 6.6 Crash-Safe Install And Retirement
+
+Generation or day replacement follows this exact order:
+
+1. Atomically create the generation/epoch/route, registration work, and durable
+   `pendingStart` install work.
+2. Register today's epoch, except for explicit `futurePlanned` or
+   `offlinePending` authorization.
+3. Start the new dated route, then verify it through
+   `activities`, `schedule(for:)`, and `events(for:)`.
+4. Atomically activate the verified route and epoch. Only now retire the old
+   route/epoch and append durable `pendingStop` work.
+5. Stop old canonical activity names and acknowledge their absence before
+   terminalizing the stop work or tombstone.
+
+Horizon fill for a future date is the explicit exception to step 1: it persists
+an immutable route with a reserved epoch UUID plus `futurePlanned/pendingStart`,
+but no registered daily epoch or registration request. On that canonical date,
+backend child state or a registration 200/authoritative 409 supplies
+`estimated_minutes` before the full epoch can authorize usage or shield effects.
+The app or DAM obtains that state through authenticated `GET /child/state` with
+`X-Child-Id`; registration and sample POSTs continue using
+`X-Evlin-Child-Device-ID`. A failed/missing runtime fetch leaves the dated route
+non-authorizing and cannot be replaced with a local estimate.
+
+The old active route is never stopped before the new route is verified active.
+A crash at every numbered boundary reopens into the same IDs and resumes the
+same phase. Identity cleanup is owner-independent work persisted before owner
+replacement; it captures every old route, epoch, registration, sample,
+fallback, and shield operation ID, blocks old callbacks immediately, and
+acknowledges each purge/stop/release before completing. Canonical rollover uses
+a separate durable effects envelope that captures old/new dates and
+acknowledges earned, per-app, task, bypass, registration, and install effects.
+No new-day callback may mutate usage or shielding until that envelope is
+reconciled.
+
+### 6.7 One Callback Trust Function
+
+The production callback ingress is exactly:
+
+```swift
+nonisolated struct MeteringAppleCallback: Codable, Equatable, Sendable {
+    let activityName: String
+    let eventName: String
+    let observedAt: Date
+}
+```
+
+Swift resolves the opaque route ID from both names, loads the immutable route,
+then runs the shared pure trust decision. Before every side effect it rechecks
+owner, route lifecycle, tombstone, epoch status, canonical date, generation,
+policy, event namespace/threshold plan, gate, registration authorization, and
+the owner mirrored outside the store. Unknown, malformed, mismatched,
+future-prepared, retired, stopped, tombstoned, uncovered, or unregistered
+callbacks without explicit current-day `offlinePending` authorization have
+exactly zero effects. A fully trusted current-day `offlinePending` callback may
+append one durable sample blocked on registration; it has no local estimate,
+network, backend, notification, or shield effect until registration succeeds.
+
+For an active registered epoch:
 
 ```text
 deltaMinutes = adjustedEstimateMinutes - baseAcceptedMinutes
@@ -406,11 +540,22 @@ network delay, or extension scheduling and remains valid. An early callback is
 invalid. There is no lower-bound freshness requirement and no whole-threshold
 free allowance.
 
-A callback must also match active epoch ID, device owner, canonical usage date,
-policy revision, and event namespace. Failure happens before local estimate
-mutation, retry enqueue, network dispatch, notification, or shield application.
+A delayed callback has no lower-bound age rejection. The production default is
+30 seconds and the hard maximum is 60. Failure happens before local estimate
+mutation, queue mutation, network dispatch, backend row/ledger mutation,
+notification, or shield application.
 
-### 6.6 Sample Semantics
+### 6.8 Shield Effects And Sample Semantics
+
+Earned shield mutation is coupled to a durable effect envelope under the same
+`ActiveLockPersistenceLock` used for shield persistence. The envelope records
+operation ID, owner, epoch, generation, route, exact record key, before/intended
+after snapshots, and phase (`prepared`, `applied`, `releasePending`,
+`released`). Persist `prepared` before mutating the shield, persist `applied`
+afterward, and recover by exact compare-and-swap. The Device Epoch Store keeps
+only the operation reference. Release removes only the matching `earnedTime`
+source and preserves manual, `taskPause`, reflection, block, limit/per-app,
+admin, and newer record state byte-for-byte.
 
 For an accepted protocol-v2 sample:
 
@@ -475,8 +620,23 @@ snapshot. A conflict response is actionable reconciliation, not a blind retry.
 
 ### 7.3 Sample Ingest
 
-The existing sample request adds optional `protocol_version` and `epoch_id`.
-Existing generation telemetry remains accepted during rollout.
+`POST /api/v1/child/earned-time/sample` keeps the exact common fields
+`device_id`, `usage_date`, `timezone`, `activity_name`, `event_name`,
+`threshold_minutes`, `estimated_minutes`, `observed_at`, and
+`client_sample_id`. Protocol 2 adds the pair `protocol_version`/`epoch_id`.
+Protocol 1 instead sends the pair `generation_armed_at`/
+`generation_offset_minutes`. Phase 3 does not invent
+`device_to_backend_offset_seconds` or any other field. The v2 activity/event
+values are explicit Phase 2 compatibility aliases derived from the verified
+route: `evlin.earned.budget.<routeID>` and
+`evlin.earned.t<thresholdMinutes>`. The raw Apple callback and durable route
+retain the canonical both-name forms from section 6.2; alias projection is a
+wire adapter and never callback provenance. The backend's `estimated_minutes` is
+the pause-adjusted authoritative cumulative estimate while
+`threshold_minutes` is the event threshold parsed from the verified route.
+New route-backed work uses deterministic `client_sample_id` value
+`earned:<v1|v2>:<lowercase-route-uuid>:t<threshold>` and retains that exact value
+across retries.
 
 Protocol-v2 outcomes are explicit:
 
@@ -496,8 +656,11 @@ stale, and implausible samples are terminal drops.
 - Wire compatibility does not preserve the unsafe trust allowance. Legacy
   requests that already supply generation metadata use the same strict
   upper-bound check with no `+5` minutes before the v2 rollout begins.
-- A device remains on the legacy lane until it successfully registers its first
-  v2 epoch.
+- The durable v1 queue/backfill and recovery driver are installed and exercised
+  before any production branch can choose v2.
+- A device remains on the legacy lane until it receives HTTP 200 for its first
+  v2 registration. Advertising version 2, enqueuing a request, an install, a
+  callback, or a 409 conflict cannot ratchet it.
 - After that registration, the backend records that device as v2-capable and
   never counts a later metadata-free v1 sample for that device. It returns HTTP
   200 with `counted=false`, `warning=legacy_after_v2` so downgrade cannot create
@@ -512,27 +675,32 @@ stale, and implausible samples are terminal drops.
 ### 8.1 Poll
 
 Every 10-second poll may reconcile policy, gate, backend accepted usage, and
-lock state. It performs zero monitor replacement when the stable replacement
-key is unchanged. Advancing accepted usage or offset cannot change that key.
+lock state. It first recovers nonterminal work, then fills missing dated routes.
+It performs zero replacement when the six-field generation key is unchanged.
+Advancing accepted usage, changing offset, or changing date cannot replace the
+generation.
 
 The churn invariant is:
 
 ```text
-20 minutes of unchanged 10-second polls -> exactly one successful arm
+121 unchanged polls -> one generation + the same eight route IDs/installations
+                     + zero replacement starts/stops
 ```
 
 ### 8.2 Policy or Selection Change
 
-Pool, cap, timezone, measurement selection, or enforcement-set changes retire
-the current generation/epoch once, register a replacement using the committed
-backend device estimate as mutable base, and install the new monitor only after
-registration succeeds or while explicitly operating offline from a durable
-pending registration.
+Pool/cap revision, timezone, exact persisted selection bytes, or enforcement-set
+changes create one new six-field generation and its eight-date plan. The store
+persists `pendingStart` before external work, registers today's epoch first,
+starts and verifies new routes before activation, then retires/stops old routes.
+Future routes use `futurePlanned`; a current route may use `offlinePending`.
+Reopen recovery resumes the same route/work IDs. An install error never erases
+the last verified active route.
 
 ### 8.3 Accounting Pause and Resume
 
 Closing the accounting gate changes epoch status to `paused` but does not tear
-down the only repeating monitor. Thresholds observed while paused update only a
+down its dated monitor. Thresholds observed while paused update only a
 local ignored-raw high-water mark and diagnostics.
 
 The continuous-monitor accounting is explicit. Let `R` be the current raw
@@ -543,31 +711,12 @@ paused callback: E = E + max(0, R - L); L = R; emit no sample
 active callback: adjusted = baseAcceptedMinutes + R - E; L = R
 ```
 
-When a resume cannot perform an exact rebase, a `resumeBoundaryPending` flag
-causes the first post-resume callback to execute the paused-callback rule. That
-discards the one bucket whose usage cannot be split safely across the boundary;
-later callbacks use the active rule.
-
-On resume:
-
-1. If an exact rebase can be installed by the active app or a proven extension
-   execution path, retire the paused epoch once and create
-   `gate_resume_exact_rebase` from backend accepted usage.
-2. If the main app is force-killed and no extension context can legally replace
-   monitoring, continue the repeating monitor. The first threshold bucket that
-   straddles the pause boundary is discarded, and later raw progress subtracts
-   the ignored paused high-water mark. This may under-count at most one
-   five-minute bucket but can never overcharge or false-lock.
-
-Implementation begins with a physical-device capability spike that tests
-`DeviceActivityCenter.startMonitoring` from both the DeviceActivity monitor
-extension and the Notification Service extension on the minimum supported
-iPadOS/iOS. The spike also verifies whether `DeviceActivitySchedule` honors a
-canonical timezone carried by `DateComponents` when the device timezone is
-different. The exact-rebase or canonical-schedule branch is enabled only for
-contexts that pass the same start, callback, stop, replacement, and day-boundary
-assertions. The conservative continuous-monitor branch is mandatory regardless,
-so force-kill recovery never depends on an unproven extension capability.
+Every resume sets `resumeBoundaryPending`. The first post-resume callback runs
+the paused rule once, clears the marker, and emits no sample or shield effect.
+Later callbacks use the active rule. This conservatively discards the one bucket
+that may straddle the boundary. There is no Phase 3 exact-rebase branch and no
+raw usage invention. Gate close/open alone does not start, stop, or replace a
+route.
 
 ### 8.4 Midnight and Canonical Day Change
 
@@ -584,28 +733,49 @@ The backend reconciler is database-driven and idempotent under multiple
 workers. It uses durable day/device rows plus the command outbox as its guards;
 process-local `BigKidStore` state is hydrated input, never the once-only marker.
 
-The first trigger that observes the new day:
+The first trigger atomically writes `RolloverEffectsWork` with old/new dates,
+old/new epoch/route IDs, and pending acknowledgements for earned source reset,
+per-app reset, task state, bypass expiry, registration, and dated install.
+Today's preinstalled route is not activated for effects until those items and
+current-day registration are reconciled. A delayed old route resolves through
+its tombstone and has zero effects even when current state otherwise looks
+valid. Manual, reflection, admin, block, and unrelated sources remain intact.
 
-- retires yesterday's daily epoch;
-- creates today's epoch with backend base zero or the authoritative already
-  accepted value;
-- resets only prior-day earned/per-app automatic sources;
-- leaves `manual` sources untouched;
-- re-applies `task_pause` when today's tasks are incomplete;
-- records the canonical runtime timezone and day key;
-- rejects the triggering stale callback before local estimate mutation.
+If Evlin was force-quit, a route already installed for today can receive the
+callback and drive the same durable rollover recovery. This guarantee lasts
+through the bounded eight-date coverage horizon; it is not an indefinite
+foreground-free promise.
 
-The repeating monitor remains available when the main app is force-killed. A
-new day never requires a foreground poll merely to become measurable.
+### 8.5 Identity Change
 
-### 8.5 Exhaustion and Override
+Before changing `ownerChildDeviceID`, atomically persist owner-independent
+`IdentityCleanupWork` and retire the old active epoch/generation/routes. The
+envelope names all canonical old activity names, route tombstones,
+registration/sample/fallback work, day state, and earned shield operation
+references. Old callbacks are unauthorized immediately. Stop, purge, release,
+and acknowledgement proceed idempotently after the owner field changes; a
+crash at any boundary reopens into cleanup rather than admitting old mutation.
+
+### 8.6 Coverage Exhaustion And Install Limits
+
+The planner requests exactly today through today + 7. If
+`excessiveActivities` prevents a full fill, keep verified routes and mark the
+actual `readyThroughUsageDate`. If canonical today is uncovered because the
+horizon expired or installation never succeeded, epoch/coverage state becomes
+`coverageExhausted`. Known stale and unknown callbacks both produce zero usage,
+queue, backend, notification, and earned shield effects. The product shows
+monitoring-not-ready/coverage-exhausted, does not guess usage, and does not add
+or preserve an earned-time lock solely because coverage is absent. Existing
+manual, task-pause, reflection, admin, block, and per-app sources are unchanged.
+
+### 8.7 Exhaustion And Override
 
 - A trustworthy device-cap terminal callback may self-lock that device.
 - A trustworthy shared-pool terminal callback may self-lock the reporting
   device; the backend fans out to siblings after durable aggregation.
-- Local self-lock records include epoch ID, generation, record key, and the
-  post-mutation snapshot. Backend headroom may remove that self-lock only by
-  compare-and-swap when no later writer changed the record.
+- Local self-lock uses the prepared/applied effect envelope and exact CAS from
+  section 6.8. Backend headroom may request release, but cannot veto the trusted
+  callback or remove any newer/non-earned source.
 - An explicit exhaustion override follows D-10: it suppresses earned-time
   relocking for the rest of the canonical day. It is not the Profile manual
   button.
@@ -683,12 +853,15 @@ only from repository grep.
 Diagnostics record bounded, non-sensitive fields:
 
 - monitor generation ID and replacement reason;
-- epoch ID, device ID, usage date, policy revision, and status;
-- arm attempt count and successful arm count;
+- epoch and route IDs, device ID, usage date, policy revision, and lifecycle;
+- coverage range, ready-through date, status, and `excessiveActivities` result;
+- registration/install/verify/activate/stop phases and attempt counts;
 - callback raw threshold, adjusted estimate, elapsed seconds, trust result, and
   rejection reason;
 - gate transitions and ignored paused high-water mark;
 - backend registration conflict and authoritative base;
+- sample queue/ratchet disposition without request secrets;
+- shield, identity-cleanup, and rollover envelope phase/acknowledgements;
 - local self-lock receipt/CAS result;
 - shared fanout target/ack counts.
 
@@ -706,6 +879,8 @@ paused by reflection
 exhausted
 registration pending/offline
 monitor replacement failed
+monitoring not ready: coverage exhausted
+monitoring limited: ready through <canonical date>
 ```
 
 This prevents a full-looking but unarmed bar from masquerading as working
@@ -726,7 +901,8 @@ through every state transition.
 Create versioned JSON vectors consumed byte-for-byte by Swift XCTest and
 pytest. They must cover at least:
 
-1. unchanged poll for 20 virtual minutes arms exactly once;
+1. 121 unchanged polls retain one generation and the same eight dated route
+   IDs/installations, with no replacement start or stop;
 2. accepted offset advances without changing generation/epoch identity;
 3. identical persisted selection bytes produce one stable digest;
 4. immediate `t5` and immediate full per-app budget are rejected with no side
@@ -734,9 +910,10 @@ pytest. They must cover at least:
 5. a delayed but physically possible callback is accepted;
 6. progress followed by repeated polls does not freeze;
 7. first-launch ready state reaches its first threshold;
-8. stale prior-day callbacks are rejected before local mutation;
-9. virtual midnight resets the day and remains measurable without app lifecycle
-   events;
+8. after rollover, an old-date callback resolves through its route tombstone
+   and has zero effects rather than merely failing a current-state comparison;
+9. virtual canonical midnight activates the preinstalled dated route exactly
+   once and remains measurable without app lifecycle events;
 10. pause/resume with the main app absent never overcharges or gets stuck;
 11. task bypass resumes counting today and expires tomorrow;
 12. reflection remains paused despite task bypass;
@@ -760,6 +937,34 @@ pytest. They must cover at least:
     delivered out of order: newer `set` beats older `set`, newer `clear` leaves
     a tombstone that prevents an older `set` from resurrecting the rule, and
     duplicate versions are idempotent.
+24. the planner installs exactly canonical today plus seven dates, app relaunch
+    appends only the missing tail date, and unchanged reconciliation has no
+    replacement churn;
+25. force-quit beyond `readyThroughUsageDate` yields `coverageExhausted`; an
+    unknown/uncovered callback has zero metering and earned auto-shield effects
+    while manual, task-pause, reflection, admin, block, and per-app state is
+    byte-identical;
+26. `excessiveActivities` preserves verified routes, records the actual
+    ready-through date, and never stops the last active route to make room;
+27. activity/event route-ID mismatch, malformed names, prepared routes,
+    tombstoned routes, and registration-pending callbacks without current-day
+    `offlinePending` authorization each have zero effects; an authorized offline
+    callback creates only one registration-blocked queue item;
+28. crashes after durable pending start, Apple start, verification, activation,
+    retirement, Apple stop, and stop acknowledgement recover the same IDs and
+    converge without duplicate activation;
+29. crashes before/after shield mutation, identity-owner replacement, and each
+    rollover acknowledgement converge by exact CAS without losing unrelated
+    sources or admitting stale callbacks;
+30. a real production v1 callback travels through the Apple DTO and durable v1
+    queue, successful registration ratchets the device, the next real callback
+    uses v2, and a delayed v1 retry ends `legacy_after_v2` without ledger or
+    shield effects;
+31. `P3V01` uses production `ShieldRecord` with `.taskPause` and reaches the
+    shared effect store/CAS path; vector outputs assert the persisted records,
+    not a test-only projection;
+32. an authoritative registration conflict uses only
+    `authoritative_snapshot.estimated_minutes` for the corrected epoch base.
 
 Every callback vector asserts all side effects, not only the return value:
 
@@ -772,6 +977,8 @@ device-day and child-day ledger
 notification
 shield records and sources
 arm/stop calls
+route/install/tombstone state
+coverage and recovery envelopes
 ```
 
 ### 13.2 Virtual Time and Fault Injection
@@ -784,16 +991,22 @@ arm/stop calls
   milliseconds.
 - Fault cases include offline registration, duplicate delivery, out-of-order
   samples, concurrent samples, stale poll snapshots, delayed retired epochs,
-  partial sibling fanout, app-process absence, and identity changes during an
-  asynchronous write.
+  partial sibling fanout, app-process absence, `excessiveActivities`, horizon
+  expiry, and identity/rollover/shield changes at every durable/external
+  operation boundary.
 
 ### 13.3 Required Build and Regression Gates
 
 - Focused Swift unit/state-machine suites pass.
 - Full iOS test target passes except documented unrelated pre-existing failures.
 - All touched backend suites pass under PostgreSQL.
-- App, DeviceActivity extension, NSE, and push-applier targets compile for the
-  minimum supported iOS/iPadOS version.
+- All six targets compile with `SWIFT_VERSION = 5.0`, deployment target 17.6,
+  and iPhone/iPad family `1,2`. Runtime tests use the installed iOS 26.3
+  simulator when no 17.6 runtime exists; that proves deployment compatibility,
+  not the minimum-floor runtime behavior.
+- Release products are built before scans. The scan fails if the expected
+  product count is zero and proves DEBUG clock symbols/keys are absent and the
+  Push NSE has no earned monitor-owner call.
 - The existing identity-switch, source-provenance, app-limit reset, task-lock,
   and child-wide manual-lock suites remain green.
 
@@ -813,7 +1026,16 @@ real elapsed time:
 4. **TestFlight overnight soak:** leave both child apps force-killed across one
    canonical midnight. Expected: new-day pool/caps reset, yesterday's automatic
    sources clear, today's task lock reconciles, and the first trustworthy usage
-   bucket advances without opening Evlin.
+   bucket advances through the preinstalled dated route without opening Evlin.
+5. **iOS/iPadOS 17.6 minimum-floor smoke:** when no local 17.6 simulator runtime
+   is installed, run install/start/callback/stop and horizon-fill behavior on a
+   physical 17.6 iPhone or iPad. An iOS 26.3 simulator run cannot substitute for
+   this gate.
+
+The overnight evidence also records the number of accepted dated activities.
+If Apple reports `excessiveActivities`, retain the verified routes and record
+the ready-through date. The eight-date product horizon remains definitive
+unless that physical evidence requires a later reviewed reduction.
 
 Codex drives builds, installs, launches, App Group capture, backend queries,
 and result comparison. The human tester only unlocks/authorizes devices, opens
@@ -821,8 +1043,10 @@ the named monitored app, force-kills Evlin when requested, and confirms the
 visible shield. Two connected devices are required only for gate 3 and the
 overnight soak.
 
-No release may claim the three products are fixed until the automated matrix
-and all applicable physical gates pass. A unit-test-only result is insufficient.
+No Phase 3 completion or release claim is allowed until the automated matrix
+and all five applicable physical gates pass. Planning and automated reports
+must label every unrun physical row `PENDING`; a unit-test-only result is
+insufficient.
 
 ## 15. Implementation Phases
 
@@ -846,9 +1070,9 @@ This phase is independently releasable and does not wait for epoch migration.
 - Run the DAM/NSE `startMonitoring` capability spike and record results for the
   minimum supported iPhone and iPad targets.
 - Label a successful short spike only as process capability. It cannot enable
-  exact canonical-midnight rebase or NSE-primary production ownership; Phase 3
-  retains the conservative continuous-monitor branch until a later physical
-  day-boundary gate passes.
+  exact canonical-midnight rebase or NSE-primary production ownership. Phase 3
+  uses dated app/DAM routes and conservative pause/resume regardless of the
+  short spike; only later reviewed physical evidence may change ownership.
 
 ### Phase 2: Backend Epoch Protocol
 
@@ -864,19 +1088,42 @@ This phase is independently releasable and does not wait for epoch migration.
 
 ### Phase 3: Earned-Time Device Epoch
 
-- Add stable raw-byte digest, generation/day epoch persistence, registration and
-  retry ordering, strict trust validation, pause accounting, midnight
-  self-heal, identity teardown, and local self-lock CAS provenance.
+- Add shared clock and value-adapted `DeviceActivityCenter` injection for app
+  and DAM first. The DEBUG App Group override is compile-time absent from
+  Release, and the Push NSE remains unable to own earned monitoring.
+- Add the one versioned, owner-fenced Device Epoch Store root with exact
+  selection bytes, six-field policy generations, full daily epochs, immutable
+  routes/tombstones, registration/sample queues, install acknowledgements,
+  eight-date coverage, ratchet, shield references, identity cleanup, and
+  rollover effects.
+- Install non-repeating canonical dated schedules for today plus seven days.
+  Register today before install except durable `offlinePending`; mark future
+  routes `futurePlanned`; start and verify replacements before activation;
+  retire/stop old routes only after the new route is active; recover every
+  nonterminal phase using the same IDs.
+- Route the real Apple callback DTO through independent durable provenance,
+  strict physical trust, registration/sample delivery, local effects, and the
+  Phase 2 v1-to-v2 ratchet. Rejected, stale, unregistered, uncovered, or
+  malformed callbacks have zero effects.
+- Use only conservative continuous-monitor pause accounting, one discarded
+  post-resume boundary bucket, durable identity/rollover recovery, and shared
+  shield-effect CAS provenance. Do not create an exact-rebase branch.
+- Make coverage exhaustion explicit and non-locking for earned metering while
+  preserving all unrelated lock sources. Exercise `excessiveActivities`
+  without destructive replacement.
 - **§11/R-16 completion gate:** the Phase 3 completion report must include a
   "本阶段拆除清单 + 向量证据" table for T1, T2, T3, the Phase 3 portion of T4,
-  T7, and T8. Each row names the replacement, the commit that removes or
+  overdue device-side T5 `+5` attribution, T7, and T8. Each row names the
+  replacement, the commit that removes or
   narrows the old mechanism, and the golden vector that remains green after
   removal. Any deferred row requires a written owner, reason, and later phase;
   silence is a failed gate.
 - Phase 3 may not add an unregistered guard, flag, or veto. Before implementation,
-  every such mechanism must be entered under rule-book §11/R-16 with the old
-  mechanism it replaces (or a concrete justification for net-new state), its
-  deletion criterion, and its vector evidence.
+  route/tombstone lifecycle, install authorization/phase, coverage state,
+  registration/ratchet state, process-role ownership, pause state, sample
+  queue, shield envelope, identity cleanup, and rollover envelope must each be
+  entered under rule-book §11/R-16 with replacement, deletion criterion, and
+  vector evidence. No ad hoc Boolean may duplicate these registered states.
 
 ### Phase 4: Per-App Epoch Provenance
 
@@ -939,13 +1186,20 @@ The work is complete only when all of these are true:
   cap unless the shared pool is also exhausted.
 - Per-App Limit advances only for the rule app/device and applies only the
   `.limit` source at the rule budget.
-- Unchanged polling never re-arms, including after accepted usage advances.
+- A full unchanged horizon remains one six-field generation and the same eight
+  dated installations across 121 polls, including after usage advances.
 - Immediate/history callbacks cannot mutate usage or lock anything.
 - Delayed physically possible callbacks remain accepted.
 - Task/reflection pauses do not charge time; task bypass resumes the same day;
   a new day expires the bypass.
-- Force-killing the main app does not prevent threshold measurement, new-day
-  recovery, task-lock reconciliation, or automatic enforcement.
+- Force-killing the main app does not prevent threshold measurement or
+  canonical rollover while the preinstalled eight-date horizon covers the
+  current day.
+- Expired or installation-limited coverage is explicit, never manufactures
+  usage, never applies an earned fail-closed lock, and leaves all non-metering
+  sources unchanged.
+- Route tombstones, not a comparison only to current state, make cross-date and
+  replaced-route callbacks zero-effect.
 - Multi-device labels and bars follow D-12 and never imply B used A's minutes.
 - The Profile button adds/removes only `manual`, and every meter/automatic state
   remains unchanged by the button.
@@ -959,7 +1213,11 @@ The work is complete only when all of these are true:
 - Identity switches cannot carry usage, retry entries, epochs, or automatic
   locks into the new account.
 - Backend v1/v2 rollout remains wire compatible and ratchets safely per device.
-- Automated and physical-device release gates have recorded evidence.
+- Queue/backfill recovery is active before the first production v2 switch.
+- Every R-16 demolition follows a committed replacement/vector and the final
+  report contains the exact `本阶段拆除清单 + 向量证据` table.
+- Automated gates have recorded evidence and all unrun physical gates are
+  explicitly `PENDING`; Phase 3 is not complete or releasable until they pass.
 
 ## 17. Non-Goals
 
@@ -991,6 +1249,6 @@ review; the normative phase and test sections above already incorporate them.
 5. The separate exhaustion override is not complete until the override row and
    earned-only per-device releases are committed together; ledger-only success
    must not be presented as an unlocked device.
-6. The short DAM/NSE spike establishes process capability only. Exact
-   canonical-day-boundary behavior remains physically gated and the
-   conservative branch remains mandatory beforehand.
+6. The short DAM/NSE spike establishes process capability only. The 2026-07-17
+   correction removes exact resume rebase and NSE-primary ownership from Phase
+   3; dated app/DAM routes plus conservative pause/resume are mandatory.
