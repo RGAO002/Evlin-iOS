@@ -33,6 +33,7 @@ Do not edit production code, the Phase 3 plan, the design, `/Users/fred/Desktop/
 - Do not push, deploy, invoke Render, upload to TestFlight, alter a production database, use production APNs credentials, or run a migration against any shared database.
 - Automated gates run before the DEBUG physical probe is prepared. Simulator success is not physical evidence. Keep physical rows `PENDING` until artifacts from the named device run exist.
 - Phase 4 does not close Phase 5 G18. Persisting an NSE command and waking the owner is not force-kill enforcement, and UI/readback must not say that it is.
+- Phase 4 owns the complete set/clear transport handoff: backend alert classification, scoped NSE fetch, `AppLimitCommandCoordinator` ingress, `persisted_waiting_for_owner`, durable `AppLimitApplyReceipt`, and the injected `AppLimitOwnerReadbackPort`. Phase 5 may provide the concrete network adapter and physical evidence, but it may not recreate any of those interfaces.
 
 ## Immutable Baseline
 
@@ -80,7 +81,7 @@ Run every probe below and paste its output/exit status into Task 1's preflight r
 (cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS && test -f 'Evlin iOS/Services/MeteringProductionComposition.swift')
 (cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS && test -f 'Evlin iOS/Services/MeteringProcessEntries.swift')
 (cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS && test -f 'Evlin iOSTests/MeteringProductionIntegrationTests.swift')
-(cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS && test -f 'Evlin iOSTests/MeteringPhase3CompletionVerifierTests.swift')
+(cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS && test -f 'scripts/test_verify_metering_phase3_completion.py')
 (cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS && rg -U -q 'func transaction<Value>\([[:space:]]*expectedOwner:[[:space:]]*UUID\?' 'Evlin iOS/Services/DeviceEpochStore.swift')
 (cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS && rg -q 'protocol MeteringDeviceActivityCenter' 'Evlin iOS/Services/MeteringDeviceActivityCenter.swift')
 (cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS && rg -q 'enum MeteringRuntimeClock' 'Evlin iOS/Services/MeteringRuntimeInfrastructure.swift')
@@ -95,7 +96,8 @@ Run every probe below and paste its output/exit status into Task 1's preflight r
 
 ```bash
 (cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS && rg -q 'NSE may persist the newest policy, rule, or tombstone and wake state' docs/superpowers/research/2026-07-15-metering-monitor-capability-results.md)
-(cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS && xcodebuild test -project '/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3.1' IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' -only-testing:'Evlin iOSTests/MeteringEpochGoldenVectorTests' -only-testing:'Evlin iOSTests/MeteringProductionIntegrationTests' -only-testing:'Evlin iOSTests/MeteringPhase3CompletionVerifierTests')
+(cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS && xcodebuild test -project '/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3.1' IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' -only-testing:'Evlin iOSTests/MeteringEpochGoldenVectorTests' -only-testing:'Evlin iOSTests/MeteringProductionIntegrationTests')
+(cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS && /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend/.venv/bin/python -m pytest -q scripts/test_verify_metering_phase3_completion.py)
 (cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend && /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend/.venv/bin/python scripts/run_limits_db_regression.py tests/test_metering_epoch_registration.py tests/test_metering_epoch_phase2_integration.py)
 ```
 
@@ -129,7 +131,7 @@ This manifest is mechanically cross-checked against the current Phase 3 plan. Ta
 | Task 12 | `EarnedMeteringCallback.swift`: 30-second default/60-second maximum physical trust | Task 13 extracts a shared pure predicate while preserving all earned vectors. If no helper symbol exists, extraction is the adjustment; constants and semantics do not change. |
 | Task 18 | `MeteringProductionComposition.swift`; `MeteringProductionIntegrationTests.swift` | Tasks 10-11 add app-limit adapters without replacing earned production factories. Use this exact production integration test; do not invent an alias. |
 | Task 21 | `MeteringProcessEntries.swift`: `AppMeteringEntry`, `DAMMeteringEntry`; Push persist-only hook | Task 11 hooks app-limit recovery into the final entries. If method names differ, adapt calls only; ownership remains app/DAM. |
-| Task 29 | `scripts/verify_metering_phase3_completion.sh`; `MeteringPhase3CompletionVerifierTests.swift`; final attestation path `.superpowers/evidence/metering-phase3/report-commit-attestation.json` | Hard prerequisite verifies the attested Task 30 report commit/blob. It never tests the Phase 3 plan review status. |
+| Task 29 | `scripts/verify_metering_phase3_completion.sh`; `scripts/test_verify_metering_phase3_completion.py`; final attestation path `.superpowers/evidence/metering-phase3/report-commit-attestation.json` | Hard prerequisite executes the real host-side verifier test and verifies the attested Task 30 report commit/blob. It never tests the Phase 3 plan review status. |
 | Task 30 | `docs/superpowers/reports/2026-07-17-metering-epoch-phase-3-completion.md` | Hard prerequisite requires `AUTOMATED PASSED; PHYSICAL PENDING; NOT RELEASABLE` and `releasable: false`. Physical pending is a valid dependency state, not a failure. |
 
 ## Pinned Phase 4 Contracts
@@ -176,7 +178,13 @@ nonisolated struct AppLimitApplyReceipt: Codable, Equatable, Sendable {
     let appliedAt: Date
     let storeRevision: UInt64
 }
+
+protocol AppLimitOwnerReadbackPort: Sendable {
+    func confirm(commandID: UUID, receipt: AppLimitApplyReceipt) async throws
+}
 ```
+
+`AppLimitOwnerReadbackPort` is the only owner-network seam. Phase 4 recovery injects it and calls it only after the exact current receipt is durably read back. The canonical pending detail is exactly `persisted_waiting_for_owner`; `persisted_awaiting_owner` and every other spelling are invalid aliases and must fail fixture verification.
 
 `orderingToken` is required and positive on new set and clear commands. Decode backend JSON integers losslessly into `Int64`; do not pass through `Double`. `payloadDigest` is SHA-256 over canonical command fields and exact token bytes, not display text. An equal token with an unequal digest is corrupt input and fails closed with zero mutation.
 
@@ -237,6 +245,21 @@ Default `jitterSeconds` is 30. There is no minimum-age/freshness rejection: a de
 | `equalTokenConflict` | `failed` | `failed` | None; retain prior state |
 
 Posting a `pending` ack sets `acked_at` and stops alert escalation while the command remains pollable because its `ack_status` remains pending. The later app-owner confirmation must reference the same command ID and persisted receipt.
+
+### Shared Release-iPhoneOS Product Gate
+
+Task 17 creates `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/scripts/build_verify_six_release_iphoneos.sh`. Phases 4, 5, and 6 invoke that one script; later phases must not copy or weaken its manifest. The script accepts `--derived-data <absolute-path>` and `--evidence <absolute-path>`, removes and recreates only the supplied DerivedData directory, builds with `-configuration Release -destination 'generic/platform=iOS' -sdk iphoneos CODE_SIGNING_ALLOWED=NO IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2'`, and verifies exactly these six nonempty `Release-iphoneos` Mach-O executables:
+
+```text
+Evlin iOS.app/Evlin iOS
+Evlin iOS.app/PlugIns/EvlinDeviceActivityMonitor.appex/EvlinDeviceActivityMonitor
+Evlin iOS.app/PlugIns/EvlinDeviceActivityReport.appex/EvlinDeviceActivityReport
+Evlin iOS.app/PlugIns/EvlinShieldConfig.appex/EvlinShieldConfig
+Evlin iOS.app/PlugIns/EvlinPushApplier.appex/EvlinPushApplier
+Evlin iOS.app/PlugIns/Evlin iOSTests.xctest/Evlin iOSTests
+```
+
+The implementation must build the app with `build-for-testing`, then build the exact six targets `Evlin iOS`, `EvlinDeviceActivityMonitor`, `EvlinDeviceActivityReport`, `EvlinShieldConfig`, `EvlinPushApplier`, and `Evlin iOSTests`. It writes sorted expected and observed bundle manifests, requires them byte-identical, requires exactly five PlugIns bundles plus the app executable, runs `test -s` and `file` with a `Mach-O` assertion on every exact executable, rejects a seventh `.appex`/`.xctest` product, and writes SHA-256 plus `file` output for all six to the evidence path. A stale DerivedData product cannot satisfy the gate.
 
 ## Target Membership
 
@@ -301,6 +324,7 @@ Every callback vector asserts the complete side-effect tuple: local accepted est
 16 test: prove app limit reordering convergence
 17 test: add metering phase 4 automated gate
 18 test: prepare phase 4 physical gate
+19 docs: attest metering phase 4 handoff
 ```
 
 ---
@@ -327,7 +351,8 @@ Every callback vector asserts the complete side-effect tuple: local accepted est
 **Verify:**
 
 ```bash
-(cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS && xcodebuild test -project '/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3.1' IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' -only-testing:'Evlin iOSTests/MeteringPhase4SafetyRegistrationTests' -only-testing:'Evlin iOSTests/MeteringProductionIntegrationTests' -only-testing:'Evlin iOSTests/MeteringPhase3CompletionVerifierTests')
+(cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS && xcodebuild test -project '/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3.1' IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' -only-testing:'Evlin iOSTests/MeteringPhase4SafetyRegistrationTests' -only-testing:'Evlin iOSTests/MeteringProductionIntegrationTests')
+(cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS && /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend/.venv/bin/python -m pytest -q scripts/test_verify_metering_phase3_completion.py)
 ```
 
 **Commit:**
@@ -365,7 +390,8 @@ The staged name list must contain exactly the two declared files.
 **Verify:**
 
 ```bash
-(cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend && /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend/.venv/bin/python -m pytest tests/test_metering_epoch_vector_contract.py tests/test_app_limit_wire_contract.py tests/test_app_limit_delivery.py -q)
+(cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend && /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend/.venv/bin/python -m pytest tests/test_metering_epoch_vector_contract.py tests/test_app_limit_delivery.py -q)
+(cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend && /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend/.venv/bin/python scripts/run_limits_db_regression.py tests/test_app_limit_wire_contract.py)
 ```
 
 **Commit:**
@@ -397,7 +423,8 @@ The staged name list must contain exactly the three declared files.
 **RED:** Replace the old assertions that set/clear are excluded. Assert immediate alert plus silent wake, mutable-content command ID, nested token preservation, and that a later `pending` ack prevents escalation resend while leaving the command pollable. Expected failure is action exclusion or missing alert.
 
 ```bash
-(cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend && /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend/.venv/bin/python -m pytest tests/test_app_limit_delivery.py tests/services/test_lock_command_alert_payload.py tests/test_command_delivery_apns.py -q)
+(cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend && /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend/.venv/bin/python -m pytest tests/test_app_limit_delivery.py tests/services/test_lock_command_alert_payload.py -q)
+(cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend && /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend/.venv/bin/python scripts/run_limits_db_regression.py tests/test_command_delivery_apns.py)
 ```
 
 **Minimal GREEN:** Expand delivery filtering/copy only. Do not change command ordering generation, polling projection, or acknowledgement endpoint semantics.
@@ -405,8 +432,8 @@ The staged name list must contain exactly the three declared files.
 **Verify:**
 
 ```bash
-(cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend && /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend/.venv/bin/python -m pytest tests/test_app_limit_delivery.py tests/services/test_lock_command_alert_payload.py tests/test_command_delivery_apns.py tests/test_lock_command_shape.py -q)
-(cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend && /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend/.venv/bin/python scripts/run_limits_db_regression.py tests/api/test_command_scoped_fetch.py tests/api/test_app_limits_endpoint.py)
+(cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend && /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend/.venv/bin/python -m pytest tests/test_app_limit_delivery.py tests/services/test_lock_command_alert_payload.py tests/test_lock_command_shape.py -q)
+(cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend && /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend/.venv/bin/python scripts/run_limits_db_regression.py tests/test_command_delivery_apns.py tests/api/test_command_scoped_fetch.py tests/api/test_app_limits_endpoint.py)
 ```
 
 **Commit:**
@@ -717,15 +744,15 @@ The staged name list must contain exactly the six declared files.
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS/Services/CommandPoller.swift`
 - Create: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/AppLimitWakeRecoveryTests.swift`
 
-**Interfaces:** Every app launch, foreground, silent remote notification, and poll completion invokes one idempotent owner recovery entry. Recovery claims the single current owner work, never recreates work for an equal token, and confirms pending command IDs only after applied receipt readback. Lower-token work is terminalized as superseded.
+**Interfaces:** Every app launch, foreground, silent remote notification, and poll completion invokes one idempotent owner recovery entry. Recovery claims the single current owner work, never recreates work for an equal token, and calls the injected `AppLimitOwnerReadbackPort` only after applied receipt readback. Lower-token work is terminalized as superseded. Tests use a recording port; production composition exposes the same port for Phase 5's network adapter rather than defining a second protocol.
 
-**RED:** Simulate NSE set -> app launch, NSE clear -> silent wake, poll/equal while recovering, crash after claim, and clear while old set effect is in flight. Expected failure is no common wake recovery path.
+**RED:** Simulate NSE set -> app launch, NSE clear -> silent wake, poll/equal while recovering, crash after claim, and clear while old set effect is in flight. Inject a recording `AppLimitOwnerReadbackPort`; require zero calls before exact receipt readback and one call with the current command/receipt after readback. Expected failure is no common wake recovery path or owner-network port.
 
 ```bash
 (cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS && xcodebuild test -project '/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3.1' IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' -only-testing:'Evlin iOSTests/AppLimitWakeRecoveryTests')
 ```
 
-**Minimal GREEN:** Wire the entry points to one recovery driver. At this task, planner/effects may remain spies; prove ownership and ack sequencing first.
+**Minimal GREEN:** Declare `AppLimitOwnerReadbackPort` in `AppLimitProductionComposition.swift`, inject it into the one recovery driver, and wire all entry points there. At this task, planner/effects may remain spies; prove ownership and ack sequencing first. No concrete HTTP client is added until Phase 5, and no second protocol may appear there.
 
 **Verify:**
 
@@ -843,7 +870,7 @@ The staged name list must contain exactly the six declared files.
 - Create: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/AppLimitEffectJournalTests.swift`
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/LimitShieldLogicTests.swift`
 
-**Interfaces:** Accepted callbacks enqueue durable effect work keyed by rule/token/arm/effect kind. A worker transaction claims one lease. For synchronous local monitor/shield mutation, it keeps `ActiveLockPersistenceLock` held from the final current-token/arm/lease check through mutation and receipt write/readback. For async usage transport, it releases the lock, sends `ordering_token`, then re-enters the store and commits the response only if current slot/token/arm and lease still match; the backend independently rejects stale tokens. Shield records use source `.limit` plus rule/token/arm provenance. UI/ack reads `AppLimitApplyReceipt`; queued work alone is never “applied.”
+**Interfaces:** Accepted callbacks enqueue durable effect work keyed by rule/token/arm/effect kind. A worker transaction claims one lease. For synchronous local monitor/shield mutation, it keeps `ActiveLockPersistenceLock` held from the final current-token/arm/lease check through mutation and receipt write/readback. For async usage transport, it releases the lock, sends `ordering_token`, then re-enters the store and commits the response only if current slot/token/arm and lease still match; the backend independently rejects stale tokens. Shield records use source `.limit` plus rule/token/arm provenance. UI and `AppLimitOwnerReadbackPort` consume only a durably reread `AppLimitApplyReceipt`; queued work alone is never “applied.”
 
 **RED:** Test crash before/after each boundary, duplicate callback, clear between claim and shield, old set between claim and usage, source readback, receipt readback, stale backend sample response, and per-app isolation. Assert old work cannot commit after a newer clear. Expected failure is current direct local/network/shield mutation.
 
@@ -961,10 +988,11 @@ The staged name list must contain exactly the five declared files.
 **Files:**
 
 - Create: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/scripts/verify_metering_phase4.sh`
+- Create: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/scripts/build_verify_six_release_iphoneos.sh`
 - Create: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/MeteringPhase4CompletionVerifierTests.swift`
 - Create: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/docs/superpowers/reports/2026-07-17-metering-epoch-phase-4-completion.md`
 
-**Interfaces:** The script has `--automated` and `--release` modes. `--automated` runs exact cross-stack fixture comparison, backend pure tests, isolated local DB regression, iPhone and iPad Phase 4 suites, all six Release device builds, deployment/family scans, Push ownership scan, and dirty-path allowlist checks. It creates the Phase 4/Phase 5 handoff at the exact path `docs/superpowers/reports/2026-07-17-metering-epoch-phase-4-completion.md` with status `AUTOMATED PASSED; PHYSICAL PENDING; NOT RELEASABLE`, `releasable: false`, Task 16's exact stale-path removal commit SHA, and raw-log/product/vector hashes. `--release` additionally requires signed physical artifacts and must exit nonzero while physical rows are PENDING.
+**Interfaces:** The script has `--automated`, `--release`, and `final <report-commit-sha>` modes. `--automated` runs exact cross-stack fixture comparison, backend pure tests, isolated local DB regression, iPhone and iPad Phase 4 suites, the shared exact-six Release-iPhoneOS product gate, deployment/family scans, Push ownership scan, and dirty-path allowlist checks. It creates the Phase 4/Phase 5 handoff at the exact path `docs/superpowers/reports/2026-07-17-metering-epoch-phase-4-completion.md` with display status `AUTOMATED PASSED; PHYSICAL PENDING; NOT RELEASABLE` and structured fields `status_code: AUTOMATED_PASSED_PHYSICAL_PENDING`, `phase_complete: false`, `releasable: false`, Task 16's exact stale-path removal commit SHA, and raw-log/product/vector hashes. `--release` additionally requires signed physical artifacts and must exit nonzero while physical rows are PENDING. `final` is fail-closed and accepts the legal physical-pending state; Task 19 binds its zero exit to the committed report blob.
 
 **RED:** First add the verifier test and invoke the missing script. Expected RED is exit 127/missing script. The test also requires `--release` to fail with `physical_gate_pending`, not to skip it.
 
@@ -975,19 +1003,15 @@ The staged name list must contain exactly the five declared files.
 **Minimal GREEN:** Implement the script with absolute roots and exact test paths. It must contain these real entries, not a generic test discovery command:
 
 ```bash
-(cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend && /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend/.venv/bin/python -m pytest tests/test_metering_epoch_vector_contract.py tests/test_app_limit_delivery.py tests/services/test_lock_command_alert_payload.py tests/test_command_delivery_apns.py tests/test_app_limit_wire_contract.py -q)
+(cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend && /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend/.venv/bin/python -m pytest tests/test_metering_epoch_vector_contract.py tests/test_app_limit_delivery.py tests/services/test_lock_command_alert_payload.py -q)
+(cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend && /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend/.venv/bin/python scripts/run_limits_db_regression.py tests/test_command_delivery_apns.py tests/test_app_limit_wire_contract.py)
 (cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend && /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend/.venv/bin/python scripts/run_limits_db_regression.py)
 (cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS && xcodebuild test -project '/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3.1' IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' -only-testing:'Evlin iOSTests/MeteringEpochGoldenVectorTests' -only-testing:'Evlin iOSTests/AppLimitEpochStoreTests' -only-testing:'Evlin iOSTests/AppLimitCommandCoordinatorTests' -only-testing:'Evlin iOSTests/NSEAppLimitPersistenceTests' -only-testing:'Evlin iOSTests/AppLimitWakeRecoveryTests' -only-testing:'Evlin iOSTests/AppLimitPlannerTests' -only-testing:'Evlin iOSTests/AppLimitCallbackValidatorTests' -only-testing:'Evlin iOSTests/AppLimitCallbackNoEffectsTests' -only-testing:'Evlin iOSTests/AppLimitEffectJournalTests' -only-testing:'Evlin iOSTests/AppLimitPauseResumeTests' -only-testing:'Evlin iOSTests/AppLimitProductionReorderingTests')
 (cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS && xcodebuild test -project '/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5),OS=26.3.1' IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' -only-testing:'Evlin iOSTests/MeteringEpochGoldenVectorTests' -only-testing:'Evlin iOSTests/AppLimitProductionReorderingTests' -only-testing:'Evlin iOSTests/AppLimitPauseResumeTests')
-(cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS && xcodebuild build -project '/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -configuration Release -destination 'generic/platform=iOS' IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2')
-(cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS && xcodebuild build -project '/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS.xcodeproj' -scheme 'EvlinDeviceActivityMonitor' -configuration Release -destination 'generic/platform=iOS' IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2')
-(cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS && xcodebuild build -project '/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS.xcodeproj' -scheme 'EvlinPushApplier' -configuration Release -destination 'generic/platform=iOS' IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2')
-(cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS && xcodebuild build -project '/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS.xcodeproj' -scheme 'EvlinShieldConfig' -configuration Release -destination 'generic/platform=iOS' IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2')
-(cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS && xcodebuild build -project '/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS.xcodeproj' -scheme 'EvlinDeviceActivityReport' -configuration Release -destination 'generic/platform=iOS' IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2')
-(cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS && xcodebuild build -project '/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS.xcodeproj' -target 'Evlin iOSTests' -configuration Release -destination 'generic/platform=iOS' IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2')
+(cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS && /bin/bash scripts/build_verify_six_release_iphoneos.sh --derived-data '/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/.superpowers/evidence/metering-phase4/DerivedData-Release' --evidence '/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/.superpowers/evidence/metering-phase4/release-products.sha256')
 ```
 
-Write command, SHA, runtime, and result into the completion report. The completion verifier requires the exact handoff path and exact three-part status, and rejects any `physical passed`, `releasable: true`, missing Task 16 SHA, or stale pre-transaction mutation path. Do not paste credentials or database URLs.
+Write command, SHA, runtime, and result into the completion report. The completion verifier parses the anchored structured fields and physical-row table; it accepts the literal words `NOT RELEASABLE` only when `releasable: false`, and rejects `phase_complete: true`, `releasable: true`, any physical status other than `PENDING`, missing Task 16 SHA, or stale pre-transaction mutation path. Bare substring bans on `RELEASABLE` are forbidden. Do not paste credentials or database URLs.
 
 **Verify:** Run automated mode; then prove release mode refuses completion.
 
@@ -999,14 +1023,14 @@ Write command, SHA, runtime, and result into the completion report. The completi
 **Commit:**
 
 ```bash
-(cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS && git add -- 'scripts/verify_metering_phase4.sh' 'Evlin iOSTests/MeteringPhase4CompletionVerifierTests.swift' 'docs/superpowers/reports/2026-07-17-metering-epoch-phase-4-completion.md')
+(cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS && git add -- 'scripts/verify_metering_phase4.sh' 'scripts/build_verify_six_release_iphoneos.sh' 'Evlin iOSTests/MeteringPhase4CompletionVerifierTests.swift' 'docs/superpowers/reports/2026-07-17-metering-epoch-phase-4-completion.md')
 (cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS && git diff --cached --check)
 (cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS && git diff --cached --name-only)
 (cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS && git diff --cached)
 (cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS && git commit -m 'test: add metering phase 4 automated gate')
 ```
 
-The staged name list must contain exactly the three declared files. Automated PASS means “ready for physical gate,” not Phase 4 complete or releasable. Phase 5 consumes the completion report at this exact path; Task 18's separate physical report supplements it and never replaces it.
+The staged name list must contain exactly the four declared files. Automated PASS means “ready for physical gate,” not Phase 4 complete or releasable. Phase 5 consumes the completion report only after Task 19's immutable attestation; Task 18's separate physical report supplements it and never replaces it.
 
 ## Task 18: Prepare but Do Not Claim the DEBUG Physical Gate
 
@@ -1051,9 +1075,48 @@ The staged name list must contain exactly the three declared files. Automated PA
 
 The staged name list must contain exactly the four declared files.
 
+## Task 19: Bind the Committed Phase 4 Handoff
+
+**Repository:** iOS.
+
+**Files:**
+
+- Create: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/scripts/test_verify_metering_phase4_completion.py`
+- Create: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/.superpowers/evidence/metering-phase4/report-commit-attestation.json`
+
+**Interfaces:** This is a post-commit attestation step. It finds exactly one Task 17 commit with subject `test: add metering phase 4 automated gate`, resolves the canonical report blob from that commit, records the report commit/blob/SHA-256 plus verifier and shared Release-product-script blob/SHA-256 values, and records the exact zero exit of `verify_metering_phase4.sh final <report-commit-sha>`. The attestation explicitly records `physical_status: PENDING`, `phase_complete: false`, and `releasable: false`; those are legal final-verifier inputs and cannot be promoted here.
+
+**RED:** Add the host-side pytest first. It must fail when the attestation is missing, when the report commit is ambiguous or lacks the canonical report, when a hash is stale, when `final` was not run against that exact commit, when the shared six-product script is omitted, or when the structured status claims physical/complete/releasable success. Expected RED is missing attestation, not a skipped iOS test.
+
+```bash
+(cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS && /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend/.venv/bin/python -m pytest -q scripts/test_verify_metering_phase4_completion.py)
+```
+
+**Minimal GREEN:** Resolve the immutable values from Git objects, run `verify_metering_phase4.sh final` against the exact Task 17 report commit, and write the JSON only after the command exits zero. Do not hash or attest the JSON itself, and do not rewrite the already committed canonical report.
+
+**Verify:** Run the real host verifier and prove release mode still refuses the pending physical gate.
+
+```bash
+(cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS && REPORT_COMMIT="$(git log --format='%H%x09%s' -- 'docs/superpowers/reports/2026-07-17-metering-epoch-phase-4-completion.md' | awk -F '\t' '$2 == "test: add metering phase 4 automated gate" { print $1 }')"; test "$(printf '%s\n' "$REPORT_COMMIT" | rg -c '^[0-9a-f]{40}$')" -eq 1; /bin/bash scripts/verify_metering_phase4.sh final "$REPORT_COMMIT")
+(cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS && /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend/.venv/bin/python -m pytest -q scripts/test_verify_metering_phase4_completion.py)
+(cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS && ! /bin/bash scripts/verify_metering_phase4.sh --release)
+```
+
+**Commit:**
+
+```bash
+(cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS && git add -- 'scripts/test_verify_metering_phase4_completion.py' '.superpowers/evidence/metering-phase4/report-commit-attestation.json')
+(cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS && git diff --cached --check)
+(cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS && git diff --cached --name-only)
+(cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS && git diff --cached)
+(cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS && git commit -m 'docs: attest metering phase 4 handoff')
+```
+
+The staged name list must contain exactly the two declared files. This commit is the immutable Phase 5/6 prerequisite; its zero result never means the physical rows passed.
+
 ### Manual Physical Procedure — Remains PENDING
 
-Only after Tasks 1-18 and `--automated` pass, use an enrolled K-mode physical iPhone/iPad with Screen Time authorization. Build the Debug app from the existing main workspace using Xcode's selected physical-device destination; do not use TestFlight.
+Only after Tasks 1-19 and `--automated` pass, use an enrolled K-mode physical iPhone/iPad with Screen Time authorization. Build the Debug app from the existing main workspace using Xcode's selected physical-device destination; do not use TestFlight.
 
 1. Record device model, OS, build SHA, local timezone, selected app token digest, rule ID, ordering token, arm ID, activity/event names, and start timestamp.
 2. Arm the one-minute rule while the selected app has not been used in the new arm. Verify readback says `includesPastActivity=false` for enforcement and measurement events.
@@ -1067,10 +1130,11 @@ This manual procedure has no completion claim in this plan. Do not change `Statu
 
 ## Final Automated Verification
 
-After Task 18, run the complete local automated gate once more from clean task commits:
+After Task 19, run the complete local automated gate once more from clean task commits:
 
 ```bash
 (cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS && /bin/bash '/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/scripts/verify_metering_phase4.sh' --automated)
+(cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS && /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend/.venv/bin/python -m pytest -q scripts/test_verify_metering_phase4_completion.py)
 (cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS && ! /bin/bash '/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/scripts/verify_metering_phase4.sh' --release)
 (cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS && git status --short --branch)
 (cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend && git status --short --branch)
@@ -1092,7 +1156,7 @@ These remain outside automated completion:
 | P5-G18 | Force-kill NSE delivery/application/readback closure | **PENDING; Phase 5 ownership** |
 | RELEASE | TestFlight overnight and production rollout | **NOT AUTHORIZED by this plan** |
 
-Phase 4 may be described as “automated gates passed; physical gate pending” only after Task 17/18 automated evidence exists. It must not be described as complete, release-ready, deployed, or physically verified while any Phase 4 physical row is PENDING.
+Phase 4 may be described as “automated gates passed; physical gate pending” only after Tasks 17-19 and the post-commit attestation exist. It must not be described as complete, release-ready, deployed, or physically verified while any Phase 4 physical row is PENDING.
 
 ## Requirements Traceability
 
