@@ -1,114 +1,77 @@
 # Metering Epoch Phase 2 Completion Report
 
-Status: DONE. This report is the iOS task artifact. The
-cross-repository final report, including both immutable commit SHAs, is at
+Status: DONE
+
+This is the final iOS-side Task 8 evidence record. No iOS production code was
+changed for Task 8 or its review-fix waves.
+
+## Commit Evidence
+
+- Backend original Task 8:
+  `7c6a87d36a07aae26d45fbfe3585d56c85682900`
+- Backend deterministic test hygiene:
+  `57f9eb8409d7160be7d0b774e8ab1586cd0b1d6b`
+- Backend task-lock prerequisite:
+  `2944580dfd4d32d818f94c7b5d3492343ca11243`
+- Backend first review-proof wave:
+  `32056af3df3f9a005a1afe479e7d8a209e73d227`
+- Backend final integration-test commit:
+  `722978073700d402adf45b24684a737400e0fb11`
+- Original iOS Task 8 report:
+  `67f22be1afd74f3aac7dc1d3233d5f81948e6e78`
+- Prior committed iOS review evidence:
+  `f5af66b8a6acc5faa36b184dd827910767921ea2`
+
+The commit containing this final report cannot identify its own SHA without
+changing that SHA. Its exact report-only commit is recorded after commit in
 `/Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend/.superpowers/sdd/task-8-report.md`.
 
-## Commit and Recovery Evidence
+## Final Backend Proof
 
-- Backend start: `099204036343cac9f1761d29a6af4fd4b7319d20`
-- Backend task commit: `7c6a87d36a07aae26d45fbfe3585d56c85682900`
-- iOS start/recovery pointer: `42a0aa4ef1f040940da399a2c73553927787f4d9`
-- iOS end: this report commit (`docs: report metering epoch phase 2`); its
-  immutable SHA is recorded in the cross-repository final report after commit.
+The final integration scenario proves complete rejected-sample effect
+snapshots, valid A t5 replay idempotency, default-v1 behavior, real manual and
+task-pause source isolation, independently derived receipt command IDs, and
+strict D+1 repeat idempotency. The D+1 snapshot includes complete persisted
+`BigKidTaskRecord` content, task status/phase, bypass status and canonical
+provenance; the replay comparison normalizes only `last_sample_at`.
 
-## Fixture and XCTest Gates
-
-The following commands ran from `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS`:
+Run from `/Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend`:
 
 ```sh
-cmp \
-  'Evlin iOSTests/Fixtures/metering_epoch_vectors.json' \
-  /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend/tests/fixtures/metering_epoch_vectors.json
-
-cmp \
-  'Evlin iOSTests/Fixtures/app_limit_wire.json' \
-  /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend/tests/fixtures/app_limit_wire.json
-
-xcodebuild test \
-  -project 'Evlin iOS.xcodeproj' \
-  -scheme 'Evlin iOS' \
-  -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
-  -only-testing:Evlin\ iOSTests/MeteringEpochVectorCoverageTests \
-  -only-testing:Evlin\ iOSTests/AppLimitWireContractTests
+.venv/bin/python scripts/run_limits_db_regression.py \
+  tests/test_metering_epoch_phase2_integration.py
 ```
 
-Both `cmp` commands exited 0. The metering fixture has 23 cases across its
-seven case groups and is byte-identical to the backend fixture:
-`dae61b95d500d54318e76ec0ce27e2999c6fb0e4325b78f187043542b33e47e2`.
-The app-limit wire fixture is byte-identical:
-`4d651a535dc2c698fdf5f76cca77d86806ae543b6e2efea33f049c50a91ea8b4`.
-
-The standard XCTest command completed with `** TEST SUCCEEDED **`: 6 tests
-passed (2 `MeteringEpochVectorCoverageTests`, 4 `AppLimitWireContractTests`) in
-41.303 seconds. The observed Sentry simulator CodeSign failure did not occur,
-so no `CODE_SIGNING_ALLOWED=NO` rerun was needed.
-
-## Backend Integration and Rollout Evidence
-
-The backend task commit adds the real-PostgreSQL Phase 2 integration scenario
-and appends its six Phase 2 files to the disposable regression runner. The
-scenario passed directly: `1 passed in 2.66s`.
-
-Pure contracts/readiness/policy identity passed: `79 passed in 0.44s`.
-`alembic heads` reported the sole head:
-`2026_07_16_meter_epoch_v2 (head)`.
-
-The advertised-v1 disposable gate passed: `27 passed, 1 xfailed, 3 warnings in
-23.23s`. This verifies schema readiness while unratcheted child state advertises
-version 1. The selected v2 registration suite passed separately: `39 passed in
-25.73s`, verifying a first v2 registration is allowed. The exact combined v2
-command had `44 passed, 1 failed`; the only failure asserted that a `Settings`
-instance must default to 1 while the command explicitly injects
-`METERING_EPOCH_ADVERTISED_VERSION=2`. This is a test-command expectation
-conflict, not a product failure.
-
-Configured protocol remains 1 outside these disposable command environments.
-No Render deployment, TestFlight upload, production environment change, or
-production-data mutation occurred. No production Swift epoch adapter changed.
-
-## Concerns and Later Rollout Order
-
-The complete disposable runner ended `201 passed, 1 failed`; the unrelated
-failure is `tests/api/test_limits_regression_pack.py::test_limits_regression_pack_parent_child_flow`.
-It was reproduced standalone before reporting: the test summarizes
-`date.today()` while its earned sample is fixed at `2026-06-23`, resulting in
-`used_minutes == 0` rather than 30. Neither that file nor production code was
-modified.
-
-The targeted bundle ended `136 passed, 4 failed`. The four failures are exactly
-the already A/B-proven Phase 2 task-lock failures:
-`test_tokenless_selected_set_emits_warning_not_command`,
-`test_task_executor_approve_reconciles_existing_task_pause_lock`,
-`test_task_executor_delete_reconciles_existing_task_pause_lock`, and
-`test_task_executor_cancel_reconciles_existing_task_pause_lock`.
-
-Later rollout order, not executed:
-
-1. merge backend code and migration
-2. deploy backend with advertised version 1
-3. verify /health says schema_ready true
-4. ship Phase 3 iOS with v2 support but no device can ratchet while server advertises 1
-5. ask Fred for explicit approval
-6. set advertised version 2
-7. monitor registration conflicts, terminal v1 drops, fanout receipts, and command acknowledgements
-
-Pre-existing iOS dirty files were neither staged nor intentionally modified.
-The original completion report was committed alone at
-`67f22be1afd74f3aac7dc1d3233d5f81948e6e78`; this review-fix follow-up also
-commits only this report.
-
-## Review-Fix Evidence (2026-07-17)
-
-This section supersedes the earlier initial-gate concerns. The backend
-review-fix uses test/report changes only; no iOS production source changed.
+Result: `1 passed in 3.31s`.
 
 ```sh
-cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend
 .venv/bin/python scripts/run_limits_db_regression.py
 ```
 
-Result: `202 passed in 162.13s (0:02:42)`.
+Result: `202 passed in 131.69s (0:02:11)`.
+
+```sh
+.venv/bin/python scripts/run_limits_db_regression.py \
+  tests/test_earned_time_sample.py \
+  tests/test_earned_time_auto_lock.py \
+  tests/test_earned_time_config.py \
+  tests/test_earned_time_policy_summary.py \
+  tests/test_task_lock_service.py \
+  tests/test_task_gated_lock_routes.py \
+  tests/test_app_limit_delivery.py \
+  tests/test_app_limit_wire_contract.py \
+  tests/api/test_app_limits_endpoint.py \
+  tests/test_effective_state_sources.py
+```
+
+Result: `140 passed in 86.75s (0:01:26)`.
+
+The exact targeted bundle is the approval gate for task-lock prerequisite
+`2944580dfd4d32d818f94c7b5d3492343ca11243`. Its own focused evidence was
+`4 passed in 3.07s`, and its full task-lock module evidence was
+`39 passed in 28.24s`.
+
+## Rollout Gates
 
 ```sh
 METERING_EPOCH_ADVERTISED_VERSION=1 \
@@ -128,11 +91,54 @@ METERING_EPOCH_ADVERTISED_VERSION=2 \
 
 Result: `45 passed in 35.17s`.
 
-The Task 8 integration scenario now passes with strengthened rejected-sample,
-valid-replay, real manual/task source, independently-derived receipt, and
-strict D+1 idempotency evidence: `1 passed in 2.80s`.
+The v1 warnings are non-failing asyncpg cancellation and Supabase deprecation
+warnings. Configured protocol remains version 1 outside the disposable v2
+command environment.
 
-The historical four task-lock failures remain out of scope. Backend
-`task-6-report.md` identifies base `2ae0d026e05cbc72a811488eefdf28995dee7c76`,
-and `task-6-review.md` records that the same four failures occur at that base.
-No task-lock code or tests were changed by this follow-up.
+The pure contract/readiness/policy gate passed `79 passed in 0.44s`.
+`alembic heads` reported the single head
+`2026_07_16_meter_epoch_v2 (head)`.
+
+## iOS Compatibility
+
+Run from `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS`:
+
+```sh
+cmp \
+  'Evlin iOSTests/Fixtures/metering_epoch_vectors.json' \
+  /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend/tests/fixtures/metering_epoch_vectors.json
+
+cmp \
+  'Evlin iOSTests/Fixtures/app_limit_wire.json' \
+  /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend/tests/fixtures/app_limit_wire.json
+
+xcodebuild test \
+  -project 'Evlin iOS.xcodeproj' \
+  -scheme 'Evlin iOS' \
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
+  -only-testing:Evlin\ iOSTests/MeteringEpochVectorCoverageTests \
+  -only-testing:Evlin\ iOSTests/AppLimitWireContractTests
+```
+
+Both fixtures were byte-identical. The metering fixture contains 23 vectors
+and has SHA-256
+`dae61b95d500d54318e76ec0ce27e2999c6fb0e4325b78f187043542b33e47e2`.
+The app-limit wire fixture has SHA-256
+`4d651a535dc2c698fdf5f76cca77d86806ae543b6e2efea33f049c50a91ea8b4`.
+XCTest completed with `** TEST SUCCEEDED **`: 6 tests passed in 41.303 seconds.
+
+## Operational Constraints
+
+Pre-existing iOS WIP remained unstaged and unmodified by this task. No push,
+deployment, Render environment change, TestFlight upload, production database
+access, or production data mutation occurred.
+
+Later rollout order remains:
+
+1. merge backend code and migration
+2. deploy backend with advertised version 1
+3. verify `/health` reports `schema_ready: true`
+4. ship Phase 3 iOS with v2 support while server advertisement remains 1
+5. obtain Fred's explicit approval
+6. set advertised version 2
+7. monitor registration conflicts, terminal v1 drops, fanout receipts, and command acknowledgements
