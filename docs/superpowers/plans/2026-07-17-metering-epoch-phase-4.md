@@ -253,13 +253,13 @@ Task 17 creates `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/scripts/build_v
 ```text
 Evlin iOS.app/Evlin iOS
 Evlin iOS.app/PlugIns/EvlinDeviceActivityMonitor.appex/EvlinDeviceActivityMonitor
-Evlin iOS.app/PlugIns/EvlinDeviceActivityReport.appex/EvlinDeviceActivityReport
+Evlin iOS.app/Extensions/EvlinDeviceActivityReport.appex/EvlinDeviceActivityReport
 Evlin iOS.app/PlugIns/EvlinShieldConfig.appex/EvlinShieldConfig
 Evlin iOS.app/PlugIns/EvlinPushApplier.appex/EvlinPushApplier
 Evlin iOS.app/PlugIns/Evlin iOSTests.xctest/Evlin iOSTests
 ```
 
-The implementation must build the app with `build-for-testing`, then build the exact six targets `Evlin iOS`, `EvlinDeviceActivityMonitor`, `EvlinDeviceActivityReport`, `EvlinShieldConfig`, `EvlinPushApplier`, and `Evlin iOSTests`. It writes sorted expected and observed bundle manifests, requires them byte-identical, requires exactly five PlugIns bundles plus the app executable, runs `test -s` and `file` with a `Mach-O` assertion on every exact executable, rejects a seventh `.appex`/`.xctest` product, and writes SHA-256 plus `file` output for all six to the evidence path. A stale DerivedData product cannot satisfy the gate.
+The implementation must build the app with `build-for-testing`, then require the exact six products emitted by that scheme dependency graph: `Evlin iOS`, `EvlinDeviceActivityMonitor`, `EvlinDeviceActivityReport`, `EvlinShieldConfig`, `EvlinPushApplier`, and `Evlin iOSTests`. It writes sorted expected and observed bundle manifests, requires them byte-identical, requires exactly four `PlugIns` bundles plus one `Extensions` bundle plus the app executable, runs `test -s` and `file` with a `Mach-O` assertion on every exact executable, rejects a seventh `.appex`/`.xctest` product, and writes SHA-256 plus `file` output for all six to the evidence path. A stale DerivedData product cannot satisfy the gate.
 
 ## Target Membership
 
@@ -1200,4 +1200,4 @@ Phase 4 may be described as “automated gates passed; physical gate pending” 
 - Confirm no command pushes, deploys, uploads, stashes, resets, or accesses production data.
 - Confirm no placeholder wording delegates core behavior to the implementer.
 
-**Result:** PASS. The scan resolves every XCTest/backend test entry to an existing file, a Phase 3 producer, or the exact earlier Phase 4 create task; all 18 tasks contain RED/GREEN/verify/commit sections and matching staged-file counts. Implementation remains blocked on Phase 3 completion evidence and physical evidence remains PENDING.
+**Result:** PASS. The scan resolves every XCTest/backend test entry to an existing file, a Phase 3 producer, or the exact earlier Phase 4 create task; all 19 tasks contain RED/GREEN/verify/commit sections and matching staged-file counts. Implementation remains blocked on Phase 3 completion evidence and physical evidence remains PENDING.

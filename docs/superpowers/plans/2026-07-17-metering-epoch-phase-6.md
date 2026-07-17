@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Finish C-3 single-writer closure, reconcile R-16 T1-T10 with independently reversible demolition evidence, and prepare the legacy device-total counter for removal without crossing its one-release observation gate or Fred's T10 approval gate.
+**Goal:** Finish C-3 single-writer closure, reconcile R-16 T1-T11 with independently reversible demolition evidence, and prepare the legacy device-total counter for removal without crossing its one-release observation gate or Fred's T10 approval gate.
 
-**Architecture:** Phase 3's Device Epoch Store, immutable routes, physical trust function, and earned-effect CAS are the replacement authority. Phase 6 does not invent another metering guard. It first proves C-3 is complete, then attests the already independent Phase 3 demolitions for T1-T5/T7/T8, adds a registered and removable T6 observation switch, removes the truly dead T9 blob in its own commit, and produces a machine-readable ledger. T6 remains `PENDING_ONE_RELEASE`; T10 remains `PENDING_FRED_APPROVAL`. Therefore this plan can finish all local automation while truthfully leaving Phase 6 incomplete and not releasable.
+**Architecture:** Phase 3's Device Epoch Store, immutable routes, physical trust function, and earned-effect CAS are the replacement authority. Phase 6 does not invent another metering guard. It first proves C-3 is complete, then attests the already independent Phase 3 demolitions for T1-T4/T7/T8/T11 and the Phase 2 Backend T5 demolition, adds a registered and removable T6 observation switch, removes the truly dead T9 blob in its own commit, and produces a machine-readable ledger. T6 remains `PENDING_ONE_RELEASE`; T10 remains `PENDING_FRED_APPROVAL`. Therefore this plan can finish all local automation while truthfully leaving Phase 6 incomplete and not releasable.
 
 **Tech Stack:** Python 3.11 through the Backend virtual environment, FastAPI, SQLAlchemy 2, PostgreSQL disposable regression runner, Swift 5, XCTest, DeviceActivity, ManagedSettings, Xcode 26.3, JSON evidence ledgers.
 
@@ -13,9 +13,9 @@
 - Work only in `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS` and `/Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend`; do not create a worktree.
 - Before every task, record `git status --short` in both repositories. Never restore, stage, or edit a pre-existing dirty path unless the task explicitly lists it and its baseline diff is captured first.
 - C-3 is Gate 0. All three commits and its completion report must exist before Task 1. Phase 6 may not absorb, squash, rename, or silently reimplement those commits.
-- The canonical Phase 3, Phase 4, and Phase 5 automated handoffs and their immutable attestations must pass before demolition. Their legal status is `AUTOMATED PASSED; PHYSICAL PENDING; NOT RELEASABLE`; physical completion is not required and must not be inferred. A missing predecessor commit or vector returns execution to that phase's plan; Phase 6 does not patch around it.
+- The canonical Phase 3, Phase 4, and Phase 5 automated handoffs and their hash-verified post-commit attestations must pass before demolition. Their legal status is `AUTOMATED PASSED; PHYSICAL PENDING; NOT RELEASABLE`; physical completion is not required and must not be inferred. Each final verifier is rerun against the named report commit before its external attestation hash is consumed. A missing predecessor commit or vector returns execution to that phase's plan; Phase 6 does not patch around it.
 - Every `REMOVED` R-16 row must name its replacement contract, exact vector IDs, raw evidence hashes, repository, independently revertible demolition SHA, and literal `git revert <sha>` command. A commit subject alone is insufficient.
-- Existing Phase 3 removal commits for T1-T5/T7/T8 remain the demolition commits. Their Phase 6 tasks add fail-closed attestation only. Do not make duplicate production edits when source-absence tests are already green.
+- Existing Phase 3 removal commits for T1-T4/T7/T8/T11 and the historical Phase 2 Backend T5 removal remain the demolition commits. Their Phase 6 tasks add fail-closed attestation only. Do not make duplicate production edits when source-absence tests are already green.
 - T6 must remain `PENDING_ONE_RELEASE`. This plan may add the default-off observation switch and telemetry, but contains no step that deletes `BigKidActivityScheduler`, `evlin.bigkid.freeplay`, `evlin.bigkid.chunk`, `BigKidExtensionReporter.reportChunk`, or `/child/time-consumption`.
 - T10 must remain `PENDING_FRED_APPROVAL`. No test result, elapsed time, release evidence, issue comment, or agent inference counts as Fred's approval. This plan contains no step that deletes or changes the compatibility endpoints.
 - Preserve all manual, task-pause, reflection, limit, admin, block, and unknown future lock sources. Profile/Home manual actions never remove automatic sources or create an automatic override.
@@ -39,7 +39,7 @@
 | Phase 4 Task 19 attestation | `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/.superpowers/evidence/metering-phase4/report-commit-attestation.json` plus host-side `scripts/test_verify_metering_phase4_completion.py` | report blob/commit and verifier/product-script blobs bound; final mode zero with physical pending |
 | Phase 5 report | `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/docs/superpowers/reports/2026-07-17-metering-epoch-phase-5-completion.md` | G-17/G-18/G-19 automated pass |
 | Phase 5 Task 12 attestation | `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/.superpowers/evidence/metering-phase5/report-commit-attestation.json` plus host-side `scripts/test_verify_metering_phase5_completion.py` | report blob/commit and Phase 3/4 dependency attestations bound; final mode zero with physical pending |
-| Rule-book hash | `/Users/fred/Desktop/Evlin/LOCK_BEHAVIOR_BOUNDARIES.md` section 11 | T1-T10/R-16 content hash recorded |
+| Rule-book hash | `/Users/fred/Desktop/Evlin/LOCK_BEHAVIOR_BOUNDARIES.md` section 11 | T1-T11/R-16 content hash recorded |
 
 Each Phase 3/4/5 report row above must contain the display status `AUTOMATED PASSED; PHYSICAL PENDING; NOT RELEASABLE` plus structured `phase_complete: false` and `releasable: false`, and must have its separate post-commit attestation. Phase 3 plan `PASS` is not evidence. Phase 4 Task 17 directly creates the canonical completion report; Task 19 attests it. Task 18's separate `2026-07-17-metering-phase4-physical.md` may be hash-attested as pending evidence but never replaces the canonical handoff.
 
@@ -66,7 +66,7 @@ The C-3 plan predates the final Phase 3/4/5 interfaces. Before running its first
 
 ## Demolition Ledger Contract
 
-The fixed ledger path is `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/docs/superpowers/reports/2026-07-17-metering-epoch-phase-6-demolition.json`. It contains exactly T1-T10 once each. Each row has:
+The fixed ledger path is `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/docs/superpowers/reports/2026-07-17-metering-epoch-phase-6-demolition.json`. It contains exactly T1-T11 once each. T5 is the Backend permissive-ingest demolition and T11 is the distinct iOS whole-bucket plus-five demolition. Each row has:
 
 ```json
 {
@@ -130,7 +130,7 @@ Expected RED: the script and ledger are absent.
 
 - [ ] **Step 3: Implement schema validation and seed rows**
 
-Seed T1-T5/T7-T9 as `UNATTESTED`, T6 as `PENDING_ONE_RELEASE`, and T10 as `PENDING_FRED_APPROVAL`. Register the T6 switch as net-new temporary deprecation state that replaces no runtime safety guard and must be deleted with T6 after one observed release. Build forbidden tokens from segments in tests/verifier so source scans do not match themselves.
+Seed T1-T5/T7-T9/T11 as `UNATTESTED`, T6 as `PENDING_ONE_RELEASE`, and T10 as `PENDING_FRED_APPROVAL`. Register the T6 switch as net-new temporary deprecation state that replaces no runtime safety guard and must be deleted with T6 after one observed release. Build forbidden tokens from segments in tests/verifier so source scans do not match themselves.
 
 - [ ] **Step 4: Run structural GREEN, then prove final mode is still RED**
 
@@ -374,7 +374,7 @@ git commit -m 'docs: attest R-16 T4 demolition'
 
 ---
 
-### Task 6: Attest R-16 T5 Plus-Five Demolition Across Both Repositories
+### Task 6: Attest Backend T5 and iOS T11 Plus-Five Demolitions
 
 **Repository:** iOS ledger, consuming iOS and Backend evidence.
 
@@ -382,18 +382,18 @@ git commit -m 'docs: attest R-16 T4 demolition'
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/MeteringPhase6DemolitionLedgerTests.swift`
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/docs/superpowers/reports/2026-07-17-metering-epoch-phase-6-demolition.json`
 
-**Replacement:** One strict physical bound, `delta_minutes * 60 <= elapsed_seconds + jitter`, with 30-second default and 60-second maximum. **Vectors:** V04/V05/V19/V30. **Backend demolition owner:** immutable historical commit `ff1436de90b7afa9c502bbf64924072d84a85c4c` (`feat: validate ratcheted metering samples`), which removed the permissive Backend ingest behavior. Phase 3's iOS commit `refactor: remove earned plus-five heuristic` is separate device-side trust replacement evidence, not a substitute Backend demolition owner.
+**Replacement:** One strict physical bound, `delta_minutes * 60 <= elapsed_seconds + jitter`, with 30-second default and 60-second maximum. **Vectors:** V04/V05/V19/V30. **Backend T5 demolition owner:** immutable historical commit `ff1436de90b7afa9c502bbf64924072d84a85c4c` (`feat: validate ratcheted metering samples`), which removed the permissive Backend ingest behavior. **iOS T11 demolition owner:** the unique Phase 3 commit `refactor: remove earned plus-five heuristic`, which removes the distinct device-side whole-bucket tolerance. The two ledger rows must remain separate even though they share vectors.
 
 - [ ] **Step 1: Add and run RED**
 
-Require T5 `REMOVED`, exact Backend demolition SHA `ff1436de90b7afa9c502bbf64924072d84a85c4c`, the separately resolved Phase 3 iOS replacement SHA, exact vectors, no five-minute allowance in iOS or Backend, immediate t5 rejection, 269/270/271 boundary behavior at 30-second jitter, 60-second maximum, and delayed physically possible acceptance.
+Require T5 and T11 each `REMOVED`; T5 has exact Backend demolition SHA `ff1436de90b7afa9c502bbf64924072d84a85c4c`, while T11 has the separately resolved Phase 3 iOS demolition SHA. Require exact vectors, no five-minute allowance in iOS or Backend, immediate t5 rejection, 269/270/271 boundary behavior at 30-second jitter, 60-second maximum, and delayed physically possible acceptance.
 
 ```bash
 cd '/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS'
-xcodebuild test -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3.1' -parallel-testing-enabled NO IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' -only-testing:'Evlin iOSTests/MeteringPhase6DemolitionLedgerTests/testT5Attestation'
+xcodebuild test -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3.1' -parallel-testing-enabled NO IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' -only-testing:'Evlin iOSTests/MeteringPhase6DemolitionLedgerTests/testT5AndT11Attestation'
 ```
 
-Expected RED: T5 is `UNATTESTED`.
+Expected RED: T5 and T11 are `UNATTESTED`.
 
 - [ ] **Step 2: Verify iOS replacement and Backend contract**
 
@@ -402,8 +402,9 @@ LOG='/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/.superpowers/evidence/meter
 mkdir -p "$(dirname "$LOG")"
 set -o pipefail
 (
+  set -euo pipefail
   cd '/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS'
-  xcodebuild test -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3.1' -parallel-testing-enabled NO IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' -only-testing:'Evlin iOSTests/MeteringT5DemolitionTests' -only-testing:'Evlin iOSTests/EarnedMeteringCallbackTests' -only-testing:'Evlin iOSTests/MeteringProductionIntegrationTests' -only-testing:'Evlin iOSTests/MeteringEpochGoldenVectorTests'
+  xcodebuild test -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3.1' -parallel-testing-enabled NO IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' -only-testing:'Evlin iOSTests/MeteringT11DemolitionTests' -only-testing:'Evlin iOSTests/EarnedMeteringCallbackTests' -only-testing:'Evlin iOSTests/MeteringProductionIntegrationTests' -only-testing:'Evlin iOSTests/MeteringEpochGoldenVectorTests'
   cd '/Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend'
   /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend/.venv/bin/python -m pytest -q tests/test_metering_epoch_vector_contract.py
 ) 2>&1 | tee "$LOG"
@@ -413,21 +414,21 @@ test -s "$LOG"
 shasum -a 256 "$LOG"
 ```
 
-Expected GREEN: both languages implement the same strict inequality. Verify `ff1436de90b7afa9c502bbf64924072d84a85c4c` is an ancestor of the Phase 2 completion SHA and that its diff contains the Backend replacement/removal lineage. The ledger records that Backend SHA as `demolition_commit`; it records the Phase 3 iOS trust/removal SHA under `replacement_commits` and evidence. Do not invent a new Backend removal or hide the Backend history under the iOS SHA.
+Expected GREEN: both languages implement the same strict inequality. Verify `ff1436de90b7afa9c502bbf64924072d84a85c4c` is an ancestor of the Phase 2 completion SHA and that its diff contains the Backend replacement/removal lineage. The ledger records that Backend SHA as T5's `demolition_commit`; T11 records the unique Phase 3 iOS trust/removal SHA as its own `demolition_commit`. Do not invent a new Backend removal or collapse either history into the other row.
 
 - [ ] **Step 3: Record the historical Backend owner plus iOS replacement evidence, run GREEN, and commit**
 
-Set T5 `demolition_commit.repository` to `backend`, its SHA to `ff1436de90b7afa9c502bbf64924072d84a85c4c`, and its literal revert command to `git -C /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend revert ff1436de90b7afa9c502bbf64924072d84a85c4c`. Record the unique Phase 3 iOS strict-trust SHA only in `replacement_commits`. Hash the fixed `T5-focused.log`; do not rewrite either historical commit.
+Set T5 `demolition_commit.repository` to `backend`, its SHA to `ff1436de90b7afa9c502bbf64924072d84a85c4c`, and its literal revert command to `git -C /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend revert ff1436de90b7afa9c502bbf64924072d84a85c4c`. Set T11's demolition repository/SHA/revert command to the unique Phase 3 iOS strict-trust commit and also record the shared Backend contract under its replacement evidence. Hash the fixed `T5-focused.log`; do not rewrite either historical commit.
 
 ```bash
 cd '/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS'
-xcodebuild test -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3.1' -parallel-testing-enabled NO IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' -only-testing:'Evlin iOSTests/MeteringPhase6DemolitionLedgerTests/testT5Attestation'
+xcodebuild test -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3.1' -parallel-testing-enabled NO IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' -only-testing:'Evlin iOSTests/MeteringPhase6DemolitionLedgerTests/testT5AndT11Attestation'
 /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend/.venv/bin/python /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/scripts/verify_metering_phase6_demolition.py --allow-unattested
 git add -- 'Evlin iOSTests/MeteringPhase6DemolitionLedgerTests.swift' docs/superpowers/reports/2026-07-17-metering-epoch-phase-6-demolition.json
 git diff --cached --check
 git diff --cached
 git diff --cached --name-only
-git commit -m 'docs: attest R-16 T5 demolition'
+git commit -m 'docs: attest R-16 T5 and T11 demolition'
 ```
 
 ---
@@ -591,6 +592,24 @@ Run the focused test before editing the ledger and require RED because observati
 - [ ] **Step 6: Verify and commit pending attestation**
 
 ```bash
+EVIDENCE='/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/.superpowers/evidence/metering-phase6'
+mkdir -p "$EVIDENCE"
+set -o pipefail
+(
+  set -euo pipefail
+  cd '/Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend'
+  .venv/bin/python scripts/run_limits_db_regression.py tests/test_metering_legacy_device_total_observation.py tests/test_bigkid_endpoints.py tests/test_metering_gate.py
+) 2>&1 | tee "$EVIDENCE/T6-backend-observation.log"
+test "${PIPESTATUS[0]}" -eq 0
+(
+  set -euo pipefail
+  cd '/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS'
+  xcodebuild test -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3.1' -parallel-testing-enabled NO IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' -only-testing:'Evlin iOSTests/BigKidModelsTests' -only-testing:'Evlin iOSTests/BigKidStatePollerTests' -only-testing:'Evlin iOSTests/LegacyDeviceTotalObservationTests' -only-testing:'Evlin iOSTests/MeteringProductionIntegrationTests' -only-testing:'Evlin iOSTests/MeteringV2ActivationTests'
+) 2>&1 | tee "$EVIDENCE/T6-ios-observation.log"
+test "${PIPESTATUS[0]}" -eq 0
+test -s "$EVIDENCE/T6-backend-observation.log"
+test -s "$EVIDENCE/T6-ios-observation.log"
+shasum -a 256 "$EVIDENCE/T6-backend-observation.log" "$EVIDENCE/T6-ios-observation.log"
 cd '/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS'
 xcodebuild test -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3.1' -parallel-testing-enabled NO IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' -only-testing:'Evlin iOSTests/MeteringPhase6DemolitionLedgerTests/testT6PendingOneRelease'
 /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend/.venv/bin/python /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/scripts/verify_metering_phase6_demolition.py --allow-unattested
@@ -613,7 +632,7 @@ Task 8B ends at the attestation commit and stages exactly its two declared files
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/MeteringPhase6DemolitionLedgerTests.swift`
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/docs/superpowers/reports/2026-07-17-metering-epoch-phase-6-demolition.json`
 
-**Replacement:** Epoch-scoped paused high-water, `excludedWhilePausedMinutes`, one `resumeBoundaryPending`, conservative replacement, and deterministic recovery work. **Vectors:** V06/V10/V11/V12/V33/V34. **Demolition subject:** `refactor: remove earned counter recovery flags`.
+**Replacement:** Epoch-scoped paused high-water, `excludedWhilePausedMinutes`, one `resumeBoundaryPending`, conservative `dualV2`/`cutoverReady` replacement, and deterministic recovery work. **Vectors:** V06/V10/V11/V12/V33/V34/V37. **Demolition subject:** `refactor: remove earned counter recovery flags`.
 
 - [ ] **Step 1: Add and run RED**
 
@@ -735,8 +754,17 @@ Remove the property, key constant, round-trip/reset assertions, DAM fallback/com
 - [ ] **Step 3: Run focused and full affected GREEN**
 
 ```bash
-cd '/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS'
-xcodebuild test -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3.1' -parallel-testing-enabled NO IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' -only-testing:'Evlin iOSTests/MeteringT9DemolitionTests' -only-testing:'Evlin iOSTests/LockedSetFullCoverageTests' -only-testing:'Evlin iOSTests/DefaultLockGroupStoreTests' -only-testing:'Evlin iOSTests/ActiveLockStoreTests' -only-testing:'Evlin iOSTests/ActionExecutorTests' -only-testing:'Evlin iOSTests/MeteringEpochPhase3VectorTests'
+LOG='/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/.superpowers/evidence/metering-phase6/T9-focused.log'
+mkdir -p "$(dirname "$LOG")"
+set -o pipefail
+(
+  set -euo pipefail
+  cd '/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS'
+  xcodebuild test -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3.1' -parallel-testing-enabled NO IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' -only-testing:'Evlin iOSTests/MeteringT9DemolitionTests' -only-testing:'Evlin iOSTests/LockedSetFullCoverageTests' -only-testing:'Evlin iOSTests/DefaultLockGroupStoreTests' -only-testing:'Evlin iOSTests/ActiveLockStoreTests' -only-testing:'Evlin iOSTests/ActionExecutorTests' -only-testing:'Evlin iOSTests/MeteringEpochPhase3VectorTests'
+) 2>&1 | tee "$LOG"
+test "${PIPESTATUS[0]}" -eq 0
+test -s "$LOG"
+shasum -a 256 "$LOG"
 ```
 
 Expected GREEN: forbidden path is absent and all replacement/source-union behavior passes.
@@ -797,7 +825,7 @@ Task 11B ends at this commit and stages exactly its two declared files. A combin
 
 Require:
 
-1. T1-T5/T7-T9 are `REMOVED` with valid replacement-before-demolition ancestry, vectors, hashes, SHA, and revert command.
+1. T1-T5/T7-T9/T11 are `REMOVED` with valid replacement-before-demolition ancestry, vectors, hashes, SHA, and revert command.
 2. T6 is `PENDING_ONE_RELEASE` with exact observation commits but null release evidence and no demolition SHA.
 3. T10 is `PENDING_FRED_APPROVAL`, old compatibility routes still exist, pure manual and separate override replacements pass, and approval is null.
 4. Production earned guards recount to identity match + physical trust + gate state only.
@@ -834,6 +862,7 @@ Set T10's automated replacement vectors/hashes while leaving its approval fields
 | T6 | legacy device-total chain | earned runtime authority | automated observation only | none | PENDING_ONE_RELEASE |
 | T7-T9 | one row each | exact contract | exact IDs + SHA-256 | exact SHA/command | REMOVED |
 | T10 | superseded unlock contract | manual CTA + separate override | automated replacement only | none | PENDING_FRED_APPROVAL |
+| T11 | iOS whole-bucket plus-five heuristic | strict elapsed/jitter trust | V04/V05/V19/V30 + exact log hash | exact SHA/command | REMOVED |
 
 The only allowed overall status is:
 
@@ -864,13 +893,13 @@ Assert exactly these six nonempty products under `/Users/fred/Desktop/Evlin/code
 ```text
 Evlin iOS.app/Evlin iOS
 Evlin iOS.app/PlugIns/EvlinDeviceActivityMonitor.appex/EvlinDeviceActivityMonitor
-Evlin iOS.app/PlugIns/EvlinDeviceActivityReport.appex/EvlinDeviceActivityReport
+Evlin iOS.app/Extensions/EvlinDeviceActivityReport.appex/EvlinDeviceActivityReport
 Evlin iOS.app/PlugIns/EvlinShieldConfig.appex/EvlinShieldConfig
 Evlin iOS.app/PlugIns/EvlinPushApplier.appex/EvlinPushApplier
 Evlin iOS.app/PlugIns/Evlin iOSTests.xctest/Evlin iOSTests
 ```
 
-The Phase 4-owned shared script removes the Phase 6 DerivedData path, builds the fixed six targets for `generic/platform=iOS`/`iphoneos`, compares exact expected and observed bundle manifests, runs `test -s` and `file` on every path, rejects any seventh product, and hashes all six. The Phase 6 verifier validates that evidence file rather than reimplementing the manifest. Expected GREEN: all automated tests, disposable DB suites without skips, both literal simulators, six fresh Release-iphoneos Mach-O products, ledger ancestry/hashes, source absence, and guard recount pass. The verifier exits zero while explicitly preserving the two pending gates; zero means evidence-consistent, not phase complete.
+The Phase 4-owned shared script removes the Phase 6 DerivedData path, runs one valid `Evlin iOS` scheme `build-for-testing` graph for `generic/platform=iOS`/`iphoneos`, requires the fixed six products, compares exact expected and observed bundle manifests, runs `test -s` and `file` on every path, rejects any seventh product, and hashes all six. The Phase 6 verifier validates that evidence file rather than reimplementing the manifest. Expected GREEN: all automated tests, disposable DB suites without skips, both literal simulators, six fresh Release-iphoneos Mach-O products, ledger ancestry/hashes, source absence, and guard recount pass. The verifier exits zero while explicitly preserving the two pending gates; zero means evidence-consistent, not phase complete.
 
 - [ ] **Step 5: Commit the final automated report only**
 
@@ -916,12 +945,12 @@ The one-release T6 observation, real production telemetry review, feature-flag r
 | Requirement | Plan coverage |
 |---|---|
 | C-3 single writer first | Gate 0 and immutable three-commit proof |
-| T1-T5 reversible reconciliation | Tasks 2-6 |
+| T1-T5 and T11 reversible reconciliation | Tasks 2-6 |
 | T6 one-version observation only | Tasks 7-8 plus human gate; no deletion task |
 | T7/T8 reversible reconciliation | Tasks 9-10 |
 | T9 dead path deletion | Task 11A demolition and Task 11B independent attestation |
 | T10 Fred approval required | Task 12 and explicit pending gate; no deletion step |
-| replacement vectors per item | ledger schema and every T1-T10 task |
+| replacement vectors per item | ledger schema and every T1-T11 task |
 | demolition ledger evidence | Tasks 1-12, exact SHAs/hashes/revert commands |
 | guard count target | Task 12 named inventory, two cores plus gate state |
 | real test entry points | absolute venv, disposable DB runner, literal simulators |
@@ -930,7 +959,7 @@ The one-release T6 observation, real production telemetry review, feature-flag r
 ## Self-Review Checklist
 
 - **Dependency pass:** C-3 precedes all Phase 6 tasks; Phase 3/4/5 completion SHAs are fail-closed inputs.
-- **R-16 pass:** T1-T10 appear exactly once; every row has replacement/deletion/vector evidence; T6/T10 cannot be promoted automatically.
+- **R-16 pass:** T1-T11 appear exactly once; every row has replacement/deletion/vector evidence; T6/T10 cannot be promoted automatically.
 - **TDD pass:** every task names RED, minimal implementation or attestation, focused GREEN, affected regression, exact staging, and commit subject.
 - **Reversibility pass:** predecessor demolitions retain their SHAs; T9 deletion is isolated from its SHA attestation; pending rows have no fake revert command.
 - **Command pass:** Backend uses the absolute virtual-environment runner, DB suites use the guarded script, and iOS uses both installed destinations.

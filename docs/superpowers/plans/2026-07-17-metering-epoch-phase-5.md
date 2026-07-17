@@ -181,7 +181,7 @@ FORBIDDEN="Versioned""AppLimit|ingest""Desired|next""Desired|mark""Applied|AppLi
 ! rg -n "$FORBIDDEN" "$PHASE5_PLAN"
 ```
 
-Expected GREEN: fixture tests and exact-symbol cross-checks pass. The real command exits zero when both automated handoffs and immutable attestations are valid while physical rows remain pending and both phases remain not releasable. It must not wait for, infer, or require physical completion.
+Expected GREEN: fixture tests and exact-symbol cross-checks pass. The real command exits zero when both automated handoffs and their hash-verified post-commit attestations are valid while physical rows remain pending and both phases remain not releasable. It must not wait for, infer, or require physical completion.
 
 - [ ] **Step 5: Commit exact files**
 
@@ -565,7 +565,7 @@ Expected RED: the column and nested ordering token do not exist.
 
 - [ ] **Step 3: Implement row-locked token allocation**
 
-Use migration revision `2026_07_17_meter_policy_delivery` with down revision `2026_07_17_meter_epoch_conservative`. Add a nonnegative check constraint. Inside `_insert_earned_time_config_command`, reload the device with `SELECT ... FOR UPDATE`, increment, deep-copy the payload, set `earned_time_config["ordering_token"]`, then insert the command. Reconciler and request paths continue calling only this helper.
+Use migration revision `2026_07_17_meter_policy_delivery` with down revision `2026_07_17_meter_epoch_cons`. Add a nonnegative check constraint. Inside `_insert_earned_time_config_command`, reload the device with `SELECT ... FOR UPDATE`, increment, deep-copy the payload, set `earned_time_config["ordering_token"]`, then insert the command. Reconciler and request paths continue calling only this helper.
 
 - [ ] **Step 4: Run GREEN and the complete touched DB set**
 
@@ -883,7 +883,7 @@ cd '/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS'
 /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend/.venv/bin/python -m pytest -q scripts/test_verify_metering_phase5_completion.py
 ```
 
-Expected RED: the immutable attestation is absent; no test is skipped.
+Expected RED: the post-commit attestation is absent; no test is skipped.
 
 - [ ] **Step 2: Generate immutable values and run final mode**
 
