@@ -82,17 +82,24 @@ xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'plat
 
 ## Full Suite Deviation
 
-The mandated full suite was run with the same project, scheme, simulator, and
-build settings. It exited 65: 1,173 passed, 36 failed, and 4 skipped out of
-1,213 tests. The metering vector and golden-vector tests in that run passed.
+The mandated full suite was run from a clean export of Task 1 head
+`f3111669dcedc4ed2dd500c891f52b9ff8818f50`, with the required project,
+scheme, simulator, and build settings. It remained red: `xcodebuild` exited
+65, the unfiltered log contains 35 failing test lines and 4 skip lines, and
+the result marker is `** TEST FAILED **`. The complete authoritative log has
+SHA-256
+`6f673346d13efa2122738cb0e1608bccf164b375ddca5b3071cbddfeee3ad012`.
 
-The failures span pre-existing/unrelated worktree areas, including snapshots,
-chat, PlanArch cards, calendar DTOs, catalog binding, and onboarding/reflection
-models. The worktree also contained unrelated modified and untracked iOS files
-before Task 1 was resumed. This task touched only this report and
-`scripts/verify_metering_phase3_r16.py`; it neither changed nor staged the
-unrelated WIP. The full-suite baseline remains red and is not represented as
-Task 1 success.
+Clean base `9e19f41` and clean Task 1 head `f311166` have 502 byte-identical
+Xcode-relevant tracked inputs. The base and head manifests are both SHA-256
+`57a2e255bf5e8ef95f6645223b60b0ccb1305c6375b90071124734abb36d41ab`.
+Task 1 adds only this host-side report and `scripts/verify_metering_phase3_r16.py`;
+it changes zero Xcode inputs.
+
+The controller explicitly accepts this known red baseline for Phase 3 Task 1
+closure only, based on that clean-export equivalence evidence. This is not a
+green full-suite result, and this exception cannot be reused for Task 2 or any
+later production change.
 
 No push, deployment, Render, TestFlight, production database, or physical
 device action was performed.
@@ -100,8 +107,9 @@ device action was performed.
 ## Commit Evidence
 
 Only the report and verifier were staged. `git diff --cached --check` passed,
-the staged stat reported 402 insertions across exactly two files, and the full
-staged diff was inspected before committing with:
+the staged stat reported 415 insertions across exactly two files, and the full
+staged diff was inspected before committing. The original Task 1 commit was
+`f3111669dcedc4ed2dd500c891f52b9ff8818f50` (`f311166`):
 
 ```sh
 git commit -m 'test: register phase 3 metering safety states'
