@@ -7,6 +7,7 @@ final class BigKidStatePollerTests: XCTestCase {
         EarnedTimeRuntime(
             usageDate: "2026-07-11",
             timezone: "America/New_York",
+            policyRevision: "policy-r17",
             dailyPoolMinutes: 120,
             deviceCapMinutes: 90,
             remainingMinutes: 75,
@@ -180,6 +181,7 @@ final class BigKidStatePollerTests: XCTestCase {
         let runtime = EarnedTimeRuntime(
             usageDate: "2026-07-11",
             timezone: "America/New_York",
+            policyRevision: "policy-r17",
             dailyPoolMinutes: 120,
             deviceCapMinutes: 90,
             remainingMinutes: 75,
@@ -218,6 +220,7 @@ final class BigKidStatePollerTests: XCTestCase {
         let runtime = EarnedTimeRuntime(
             usageDate: "2026-07-11",
             timezone: "America/New_York",
+            policyRevision: "policy-r17",
             dailyPoolMinutes: 120,
             deviceCapMinutes: 90,
             remainingMinutes: 75,
@@ -258,6 +261,7 @@ final class BigKidStatePollerTests: XCTestCase {
         let runtime = EarnedTimeRuntime(
             usageDate: "2026-07-11",
             timezone: "America/New_York",
+            policyRevision: "policy-r17",
             dailyPoolMinutes: 120,
             deviceCapMinutes: 90,
             remainingMinutes: 75,
@@ -573,6 +577,7 @@ final class BigKidStatePollerTests: XCTestCase {
         let runtime = EarnedTimeRuntime(
             usageDate: "2026-07-11",
             timezone: "America/New_York",
+            policyRevision: "policy-r17",
             dailyPoolMinutes: 100,
             deviceCapMinutes: 80,
             remainingMinutes: 63,
@@ -607,6 +612,7 @@ final class BigKidStatePollerTests: XCTestCase {
         let runtime = EarnedTimeRuntime(
             usageDate: "2026-07-11",
             timezone: "America/New_York",
+            policyRevision: "policy-r17",
             dailyPoolMinutes: 0,
             deviceCapMinutes: 60,
             remainingMinutes: 0,

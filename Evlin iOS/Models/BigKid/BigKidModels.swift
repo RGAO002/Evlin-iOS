@@ -124,10 +124,50 @@ struct ResolvedReflection: Codable, Equatable, Sendable {
 struct EarnedTimeRuntime: Codable, Equatable, Sendable {
     let usageDate: String
     let timezone: String
+    let policyRevision: String
     let dailyPoolMinutes: Int
     let deviceCapMinutes: Int
     let remainingMinutes: Int
     let estimatedMinutes: Int
+
+    init(
+        usageDate: String,
+        timezone: String,
+        policyRevision: String,
+        dailyPoolMinutes: Int,
+        deviceCapMinutes: Int,
+        remainingMinutes: Int,
+        estimatedMinutes: Int
+    ) {
+        self.usageDate = usageDate
+        self.timezone = timezone
+        self.policyRevision = policyRevision
+        self.dailyPoolMinutes = dailyPoolMinutes
+        self.deviceCapMinutes = deviceCapMinutes
+        self.remainingMinutes = remainingMinutes
+        self.estimatedMinutes = estimatedMinutes
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case usageDate
+        case timezone
+        case policyRevision
+        case dailyPoolMinutes
+        case deviceCapMinutes
+        case remainingMinutes
+        case estimatedMinutes
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        usageDate = try values.decode(String.self, forKey: .usageDate)
+        timezone = try values.decode(String.self, forKey: .timezone)
+        policyRevision = try values.decodeIfPresent(String.self, forKey: .policyRevision) ?? ""
+        dailyPoolMinutes = try values.decode(Int.self, forKey: .dailyPoolMinutes)
+        deviceCapMinutes = try values.decode(Int.self, forKey: .deviceCapMinutes)
+        remainingMinutes = try values.decode(Int.self, forKey: .remainingMinutes)
+        estimatedMinutes = try values.decode(Int.self, forKey: .estimatedMinutes)
+    }
 }
 
 struct ReflectionRequest: Codable, Equatable, Sendable, Identifiable {
@@ -173,6 +213,7 @@ struct ReflectionRequest: Codable, Equatable, Sendable, Identifiable {
 }
 
 struct ChildStateResponse: Codable, Equatable, Sendable {
+    let meteringProtocolVersion: Int
     let childName: String
     let minutesLeft: Int
     let minutesMax: Int
@@ -196,8 +237,10 @@ struct ChildStateResponse: Codable, Equatable, Sendable {
         screenTimeFinishedAcknowledged: Bool,
         lastResolvedReflection: ResolvedReflection?,
         usageCountingAllowed: Bool? = nil,
-        earnedTimeRuntime: EarnedTimeRuntime? = nil
+        earnedTimeRuntime: EarnedTimeRuntime? = nil,
+        meteringProtocolVersion: Int = 1
     ) {
+        self.meteringProtocolVersion = meteringProtocolVersion
         self.childName = childName
         self.minutesLeft = minutesLeft
         self.minutesMax = minutesMax
@@ -209,6 +252,29 @@ struct ChildStateResponse: Codable, Equatable, Sendable {
         self.lastResolvedReflection = lastResolvedReflection
         self.usageCountingAllowed = usageCountingAllowed
         self.earnedTimeRuntime = earnedTimeRuntime
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case meteringProtocolVersion, childName, minutesLeft, minutesMax, tasks
+        case reflectionRequest, notifyParentCooldownEndsAt
+        case dailyCompleteAcknowledged, screenTimeFinishedAcknowledged
+        case lastResolvedReflection, usageCountingAllowed, earnedTimeRuntime
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        meteringProtocolVersion = try values.decodeIfPresent(Int.self, forKey: .meteringProtocolVersion) ?? 1
+        childName = try values.decode(String.self, forKey: .childName)
+        minutesLeft = try values.decode(Int.self, forKey: .minutesLeft)
+        minutesMax = try values.decode(Int.self, forKey: .minutesMax)
+        tasks = try values.decode([BigKidTask].self, forKey: .tasks)
+        reflectionRequest = try values.decodeIfPresent(ReflectionRequest.self, forKey: .reflectionRequest)
+        notifyParentCooldownEndsAt = try values.decodeIfPresent(Date.self, forKey: .notifyParentCooldownEndsAt)
+        dailyCompleteAcknowledged = try values.decode(Bool.self, forKey: .dailyCompleteAcknowledged)
+        screenTimeFinishedAcknowledged = try values.decode(Bool.self, forKey: .screenTimeFinishedAcknowledged)
+        lastResolvedReflection = try values.decodeIfPresent(ResolvedReflection.self, forKey: .lastResolvedReflection)
+        usageCountingAllowed = try values.decodeIfPresent(Bool.self, forKey: .usageCountingAllowed)
+        earnedTimeRuntime = try values.decodeIfPresent(EarnedTimeRuntime.self, forKey: .earnedTimeRuntime)
     }
 }
 

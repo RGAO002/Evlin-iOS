@@ -24,6 +24,14 @@ final class MeteringTargetMembershipTests: XCTestCase {
         XCTAssertFalse(isMember("Services/MeteringDeviceActivityCenter.swift", of: .push, in: project))
     }
 
+    func testEpochWireBelongsToAppMonitorAndPushTargets() throws {
+        let project = try projectSource()
+
+        XCTAssertTrue(isMember("Services/MeteringEpochWire.swift", of: .app, in: project))
+        XCTAssertTrue(isMember("Services/MeteringEpochWire.swift", of: .deviceActivityMonitor, in: project))
+        XCTAssertTrue(isMember("Services/MeteringEpochWire.swift", of: .push, in: project))
+    }
+
     private func projectSource() throws -> String {
         let projectURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
