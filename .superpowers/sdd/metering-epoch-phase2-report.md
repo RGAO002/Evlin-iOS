@@ -1,6 +1,6 @@
 # Metering Epoch Phase 2 Completion Report
 
-Status: PENDING FINAL RE-REVIEW
+Status: AUTOMATED COMPLETE — RELEASE/DEPLOYMENT PENDING FRED APPROVAL
 
 This is the final iOS-side Task 8 evidence record. No iOS production code was
 changed for Task 8 or its review-fix waves.
@@ -35,6 +35,8 @@ changed for Task 8 or its review-fix waves.
   `a13f29a16da1aeac1e654753a18c2d4bd84ed98d`
 - Backend opaque instant authority and cross-date promotion:
   `a914397c93c065519ddc3f1db557571f7cfe1a7f`
+- Backend profile-first lock regression correction:
+  `e0b3cd1`
 - Backend final-review completion report:
   `23922a5b081fb31a735fe9b4104306dfd273893f`
 - Backend final re-review evidence report:
@@ -273,8 +275,28 @@ The Backend checkout was clean but already at `cf209ec` rather than the
 requested `0d5c191`; that intervening commit contains only Phase 3 review maps.
 Those Phase 3 files were not modified or staged. No iOS XCTest was rerun because
 no iOS source, shared fixture, or cross-platform contract assertion changed.
-Phase 2 remains `PENDING FINAL RE-REVIEW`; independent final re-review is the
-sole remaining blocker.
+Phase 2 automated implementation and independent final re-review are complete.
+Release, deployment, Render configuration, TestFlight, production database,
+and physical-device gates remain pending Fred's explicit approval.
+
+## Independent Final Re-Review
+
+Independent final re-review at Backend `16f3953` returned `READY`. The only
+commits after `e0b3cd1` are Phase 3 documentation maps; production Phase 2 code
+was unchanged.
+
+The exact profile-first lock bundle passed `9 passed in 5.43s`, including the
+real protocol-ratchet gate, cross-date receipt first-write serialization,
+policy-writer rollover, and reassignment concurrency paths. The mandatory
+same-disposable-database receipts/registration/sample/reconciler bundle passed
+`99 passed in 56.77s`.
+
+The reviewer independently reran the future-authority and promotion filter
+(`10 passed, 29 deselected`), the five route/service/registration/runtime/
+child-state single-capture clock tests (`5 passed`), and the integrated Phase 2
+gate (`1 passed`). It verified issuer-only canonical context, no public
+caller-controlled canonical time/date/timezone inputs, a clean Backend
+worktree, and one Alembic head: `2026_07_16_meter_epoch_v2`.
 
 ## Rollout Gates
 
@@ -346,8 +368,9 @@ Pre-existing iOS WIP remained unstaged and unmodified by this task. No push,
 deployment, Render environment change, TestFlight upload, production database
 access, or production data mutation occurred.
 
-Phase 2 remains `PENDING FINAL RE-REVIEW`. Exact remaining blocker: independent
-final re-review only.
+Phase 2 automated gates and independent final re-review are complete. The
+remaining gates are operational only: Fred-approved release/deployment,
+TestFlight, Render, production database, and physical-device validation.
 
 Later rollout order remains:
 
