@@ -17,6 +17,20 @@ changed for Task 8 or its review-fix waves.
   `32056af3df3f9a005a1afe479e7d8a209e73d227`
 - Backend final integration-test commit:
   `722978073700d402adf45b24684a737400e0fb11`
+- Backend request-time canonical day:
+  `4bdd76e019b9bb683e40e1ad82f35e1facc2203a`
+- Backend manual-only legacy unlock:
+  `79fdc6d46572bd884120ab9b12a49182ba62ffe5`
+- Backend stable predecessor tie-break:
+  `03b562bdbe06c47a9ee38402fbb342ef192f4891`
+- Backend stable 64-bit advisory locks:
+  `1aa5dd783c66a293b078d2cb299118d446cadf73`
+- Backend request-engine notification drains:
+  `bcb8afcbd527b0353b73ff1b0f139c686984eb82`
+- Backend request-engine app-control delivery:
+  `92628ef17fe29298b3a2dafe7b43a89bafe153f5`
+- Backend final-review completion report:
+  `23922a5b081fb31a735fe9b4104306dfd273893f`
 - Original iOS Task 8 report:
   `67f22be1afd74f3aac7dc1d3233d5f81948e6e78`
 - Prior committed iOS review evidence:
@@ -24,16 +38,15 @@ changed for Task 8 or its review-fix waves.
 
 The commit containing this final report cannot identify its own SHA without
 changing that SHA. Its exact report-only commit is recorded after commit in
-`/Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend/.superpowers/sdd/task-8-report.md`.
+`/Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend/.superpowers/sdd/phase2-final-review-fix-report.md`.
 
 ## Final Backend Proof
 
-The final integration scenario proves complete rejected-sample effect
-snapshots, valid A t5 replay idempotency, default-v1 behavior, real manual and
-task-pause source isolation, independently derived receipt command IDs, and
-strict D+1 repeat idempotency. The D+1 snapshot includes complete persisted
-`BigKidTaskRecord` content, task status/phase, bypass status and canonical
-provenance; the replay comparison normalizes only `last_sample_at`.
+The final-review wave additionally proves server-authoritative request day for
+v1/v2, manual-only legacy unlock with automatic policy state unchanged,
+deterministic predecessor ties, stable full-width advisory locks, mandatory
+concurrency rendezvous, and warning-clean async background database cleanup.
+Dedicated earned override and task-bypass coverage remains intact.
 
 Run from `/Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend`:
 
@@ -42,13 +55,13 @@ Run from `/Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend`:
   tests/test_metering_epoch_phase2_integration.py
 ```
 
-Result: `1 passed in 3.31s`.
+Result: `1 passed in 2.47s`.
 
 ```sh
 .venv/bin/python scripts/run_limits_db_regression.py
 ```
 
-Result: `202 passed in 131.69s (0:02:11)`.
+Result: `207 passed in 117.68s (0:01:57)` with no warning output.
 
 ```sh
 .venv/bin/python scripts/run_limits_db_regression.py \
@@ -64,7 +77,10 @@ Result: `202 passed in 131.69s (0:02:11)`.
   tests/test_effective_state_sources.py
 ```
 
-Result: `140 passed in 86.75s (0:01:26)`.
+Result: `140 passed in 76.90s (0:01:16)`.
+
+Mandatory same-disposable-database receipts/registration/sample/reconciler
+suite: `91 passed in 52.56s`.
 
 The exact targeted bundle is the approval gate for task-lock prerequisite
 `2944580dfd4d32d818f94c7b5d3492343ca11243`. Its own focused evidence was
@@ -75,12 +91,18 @@ The exact targeted bundle is the approval gate for task-lock prerequisite
 
 ```sh
 METERING_EPOCH_ADVERTISED_VERSION=1 \
-  .venv/bin/python scripts/run_limits_db_regression.py \
-  tests/test_metering_epoch_readiness.py \
-  tests/test_bigkid_endpoints.py
+PYTHONTRACEMALLOC=25 \
+PYTHONWARNINGS='error::RuntimeWarning' \
+  .venv/bin/python scripts/run_limits_db_regression.py -- \
+  tests/test_metering_epoch_readiness.py tests/test_bigkid_endpoints.py \
+  -W 'error::pytest.PytestUnraisableExceptionWarning' \
+  -W "ignore:The 'timeout' parameter is deprecated.*:DeprecationWarning:postgrest._sync.client" \
+  -W "ignore:The 'verify' parameter is deprecated.*:DeprecationWarning:postgrest._sync.client"
 ```
 
-Result: `27 passed, 1 xfailed, 3 warnings in 23.82s`.
+Result: `27 passed, 1 xfailed in 117.82s (0:01:57)`. RuntimeWarning and
+unraisable warnings were errors; only the two named third-party PostgREST
+deprecations were filtered.
 
 ```sh
 METERING_EPOCH_ADVERTISED_VERSION=2 \
@@ -89,13 +111,10 @@ METERING_EPOCH_ADVERTISED_VERSION=2 \
   tests/test_metering_epoch_registration.py
 ```
 
-Result: `45 passed in 35.17s`.
+Result: `46 passed in 22.81s`. Configured protocol remains version 1 outside
+the disposable v2 command environment.
 
-The v1 warnings are non-failing asyncpg cancellation and Supabase deprecation
-warnings. Configured protocol remains version 1 outside the disposable v2
-command environment.
-
-The pure contract/readiness/policy gate passed `79 passed in 0.44s`.
+The pure contract/readiness/policy gate passed `79 passed in 0.41s`.
 `alembic heads` reported the single head
 `2026_07_16_meter_epoch_v2 (head)`.
 
