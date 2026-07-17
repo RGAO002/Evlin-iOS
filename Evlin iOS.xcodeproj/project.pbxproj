@@ -123,6 +123,7 @@
 				Services/EarnedTimeStore.swift,
 				Services/MeteringEpochContract.swift,
 				Services/MeteringMonitorCapabilityProbe.swift,
+				Services/MeteringRuntimeInfrastructure.swift,
 				Services/ShieldSourceLogic.swift,
 			);
 			target = B600D6332FDB4C5F000E60E6 /* EvlinPushApplier */;
@@ -158,8 +159,10 @@
 				Services/EarnedSampleReporter.swift,
 				Services/EarnedTimeStore.swift,
 				Services/LimitShieldLogic.swift,
+				Services/MeteringDeviceActivityCenter.swift,
 				Services/MeteringEpochContract.swift,
 				Services/MeteringMonitorCapabilityProbe.swift,
+				Services/MeteringRuntimeInfrastructure.swift,
 				Services/ScreenTimeEventLog.swift,
 				Services/ShieldSourceLogic.swift,
 			);
