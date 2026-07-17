@@ -456,7 +456,7 @@ git commit -m 'feat: inject shared metering runtime dependencies'
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend/app/services/metering_epoch_registry.py`
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend/app/api/routes/earned_time.py`
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend/app/db/models/earned_time.py`
-- Create: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend/alembic/versions/2026_07_17_meter_epoch_conservative.py`
+- Create: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend/alembic/versions/2026_07_17_meter_epoch_cons.py`
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend/tests/test_metering_epoch_models.py`
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend/tests/test_metering_epoch_registration.py`
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend/tests/test_metering_epoch_sample_adapter.py`
@@ -489,6 +489,19 @@ git commit -m 'feat: inject shared metering runtime dependencies'
     registration but before activation. Each activation returns a stable 409,
     preserves protocol 1, and has zero sample/ledger/command/receipt/APNs effect.
     A future/naive `verified_at` is also rejected without mutation.
+11. Commit activation, treat the response as lost, then independently close the
+    gate, exhaust the epoch through a valid v2 sample, change current policy, and
+    change the selected enforcement set before retrying the identical route.
+    Every retry returns `already_activated`, protocol 2, the current snapshot and
+    current mutable epoch status, with no second mutation. A different route or
+    a retired/replaced epoch still returns the stable conflict.
+12. Register a conservative/base-correction epoch with
+    `base_accepted_minutes = 17`. Post a route-valid sample whose raw event
+    threshold would fail a base-zero elapsed check but whose adjusted cumulative
+    estimate advances only five physically possible minutes. It must count.
+    Backend physical trust is evaluated exactly once against
+    `epoch.base_accepted_minutes`; route namespace/threshold-name validation is
+    separate and cannot reintroduce a base-zero elapsed test.
 
 ```python
 ROUTE_ID = UUID("70000000-0000-0000-0000-000000000030")
@@ -566,7 +579,7 @@ class EpochActivationResponse(BaseModel):
     snapshot: DeviceDaySnapshot
 ```
 
-Add `GATE_RESUME_CONSERVATIVE` to `EpochReplacementReason` and `ExplicitRecovery`, map it in `_explicit_recovery`, and keep `GATE_RESUME_EXACT_REBASE`. Migration revision is exactly `2026_07_17_meter_epoch_conservative`, down revision `2026_07_16_meter_epoch_v2`; it replaces the replacement-reason check constraint and adds nullable UUID `activation_route_id` plus nullable timezone-aware `activated_at`.
+Add `GATE_RESUME_CONSERVATIVE` to `EpochReplacementReason` and `ExplicitRecovery`, map it in `_explicit_recovery`, and keep `GATE_RESUME_EXACT_REBASE`. Migration revision is exactly `2026_07_17_meter_epoch_cons` (within the repository's 32-character `alembic_version.version_num` limit), down revision `2026_07_16_meter_epoch_v2`; it replaces the replacement-reason check constraint and adds nullable UUID `activation_route_id` plus nullable timezone-aware `activated_at`.
 
 Implement registration and activation with these exact service signatures:
 
@@ -640,6 +653,16 @@ async def activate_metering_epoch(
         raise HTTPException(status_code=409, detail="activation_epoch_not_current")
     if epoch.activation_route_id is not None and epoch.activation_route_id != request.route_id:
         raise HTTPException(status_code=409, detail="activation_route_mismatch")
+    if epoch.activation_route_id == request.route_id and epoch.activated_at is not None:
+        # The activation transaction already ratcheted protocol 2. Mutable gate,
+        # policy, enforcement, date, or exhausted status cannot make its lost
+        # response replay fail; replacement retirement still can.
+        snapshot = await _current_snapshot(
+            session,
+            device=device,
+            usage_date=canonical_context.usage_date,
+        )
+        return EpochActivationResult("already_activated", epoch, snapshot, 2)
     if epoch.usage_date != canonical_context.usage_date:
         raise HTTPException(status_code=409, detail="activation_epoch_not_current")
     runtime = await current_metering_runtime_snapshot(
@@ -682,15 +705,16 @@ async def activate_metering_epoch(
         return EpochActivationResult("paused", epoch, snapshot, device.metering_protocol_version)
     if epoch.status != "active":
         raise HTTPException(status_code=409, detail="activation_epoch_not_current")
-    already = epoch.activated_at is not None
     epoch.activation_route_id = request.route_id
-    epoch.activated_at = epoch.activated_at or captured_now
+    epoch.activated_at = captured_now
     device.metering_protocol_version = 2
     await session.flush()
-    return EpochActivationResult("already_activated" if already else "activated", epoch, snapshot, 2)
+    return EpochActivationResult("activated", epoch, snapshot, 2)
 ```
 
-Registration calls `usage_counting_allowed` immediately before final epoch status/return, sets `result.epoch.status` from that final value, always returns it as `epoch_status`, and removes the current registration-time ratchet assignment. `gate_resume_conservative` requires a paused predecessor but accepts a final closed gate as a paused HTTP 200. The sample route emits `gate_resume_conservative_required` for paused plus open. Activation mirrors production registration's unlocked scope observation, profile advisory lock, device row lock, and family/profile/mode revalidation before loading issuer-only canonical authority. It then revalidates exact epoch scope/protocol/date/timezone, current policy revision, selected active enforcement set, route idempotency, and verification timestamp before reading the gate or ratcheting. Tests force reassignment between observation and row lock, already-stale epoch scope, post-registration policy/enforcement changes, and future verification time. A test-only future instant is supplied only by monkeypatching the production clock seam, never through a service argument.
+Registration calls `usage_counting_allowed` immediately before final epoch status/return, sets `result.epoch.status` from that final value, always returns it as `epoch_status`, and removes the current registration-time ratchet assignment. `gate_resume_conservative` requires a paused predecessor but accepts a final closed gate as a paused HTTP 200. The sample route emits `gate_resume_conservative_required` for paused plus open. Activation mirrors production registration's unlocked scope observation, profile advisory lock, device row lock, and family/profile/mode revalidation before loading issuer-only canonical authority. It then verifies immutable epoch family/profile/device/protocol/not-retired scope and exact route ownership. A same-route row with non-null `activated_at` returns `already_activated` immediately with protocol 2 and current snapshot/status; mutable date, policy, enforcement, gate, or exhausted drift cannot invalidate a transaction whose response was lost. Only a first activation continues through current date/timezone, policy revision, selected active enforcement set, verification timestamp, gate, and active-status checks before ratcheting. Tests force reassignment between observation and row lock, already-stale epoch scope, post-registration policy/enforcement changes before first activation, future verification time, and all four mutable-drift cases after committed activation. A test-only future instant is supplied only by monkeypatching the production clock seam, never through a service argument.
+
+For protocol-2 sample ingest, retain route/activity/event namespace consistency but remove the separate `physical_threshold_is_trustworthy(base_accepted_minutes=0, adjusted_estimate_minutes=body.threshold_minutes, ...)` call. The sole physical check is `physical_threshold_is_trustworthy(base_accepted_minutes=epoch.base_accepted_minutes, adjusted_estimate_minutes=body.estimated_minutes, ...)`. Raw route thresholds may legitimately begin above zero after conservative resume or authoritative-base correction; trusting them as cumulative usage from zero would reject valid work. A negative adjusted delta still fails, and event threshold/name mismatch remains independently terminal.
 
 Add route `POST /child/earned-time/epochs/{epoch_id}/activation`, validate header/body/path ownership, call `activate_metering_epoch`, commit, and return the exact response.
 
@@ -703,7 +727,7 @@ cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend
 .venv/bin/python scripts/run_limits_db_regression.py tests/test_metering_epoch_models.py tests/test_metering_epoch_registration.py tests/test_metering_epoch_sample_adapter.py tests/test_metering_epoch_phase2_integration.py tests/test_metering_epoch_lifespan.py
 ```
 
-Expected GREEN: migration upgrade/downgrade checks pass; registration leaves v1; gate-close races return paused; only active activation ratchets; exact-rebase remains accepted; the new warning is emitted.
+Expected GREEN: migration upgrade/downgrade checks pass; registration leaves v1; gate-close races return paused; only first active activation ratchets; same-route committed replay survives mutable drift; nonzero-base adjusted samples count without a base-zero raw-threshold veto; exact-rebase remains accepted; the new warning is emitted.
 
 **Full GREEN before staging:**
 
@@ -718,7 +742,7 @@ Expected full GREEN: the complete disposable-database regression set passes with
 
 ```bash
 cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend
-git add app/schemas/earned_time.py app/services/metering_epoch_contract.py app/services/metering_epoch_registry.py app/api/routes/earned_time.py app/db/models/earned_time.py alembic/versions/2026_07_17_meter_epoch_conservative.py tests/test_metering_epoch_models.py tests/test_metering_epoch_registration.py tests/test_metering_epoch_sample_adapter.py tests/test_metering_epoch_phase2_integration.py tests/test_metering_epoch_lifespan.py
+git add app/schemas/earned_time.py app/services/metering_epoch_contract.py app/services/metering_epoch_registry.py app/api/routes/earned_time.py app/db/models/earned_time.py alembic/versions/2026_07_17_meter_epoch_cons.py tests/test_metering_epoch_models.py tests/test_metering_epoch_registration.py tests/test_metering_epoch_sample_adapter.py tests/test_metering_epoch_phase2_integration.py tests/test_metering_epoch_lifespan.py
 git diff --cached --check && git diff --cached --stat && git diff --cached && git diff --cached --name-only
 IOS_TASK2_SHA="$(git -C /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS log --format='%H%x09%s' "$(cat /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/.superpowers/evidence/metering-phase3/ios-base-sha.txt)..HEAD" | awk -F '\t' '$2 == "feat: inject shared metering runtime dependencies" { print $1 }')"
 test "$(printf '%s\n' "$IOS_TASK2_SHA" | rg -c '^[0-9a-f]{40}$')" -eq 1
@@ -1934,7 +1958,7 @@ git commit -m 'feat: arbitrate and verify dated route installs'
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/MeteringTargetMembershipTests.swift`
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS.xcodeproj/project.pbxproj`
 
-**TDD RED:** Cover advertised version 1, offline registration, registration retry, registration 200, crash after registration ack, v2 start failure, crash after start, verification failure, crash immediately before and after the durable `dualActive` commit, activation network failure, activation paused due gate close, backend activation commit with a lost response, and app restart at every state. Before `dualActive`, assert real v1 callbacks advance the ledger and no legacy stop occurs. In `dualActive`, route/install provenance accepts exact v2 callbacks while real v1 callbacks remain functional; one overlapping v1/v2 cumulative interval advances the ledger once by monotonic max. After backend activation commit but before local v2-only commit, assert v2 still advances the ledger and delayed v1 is terminal, proving there is no zero-metering window. On local active commit assert `localSelection == .v2` and route active are one transaction; then and only then legacy becomes retiring, is stopped, absence is verified, and becomes stopped. A paused activation never ratchets, exits `dualActive` into paused replacement recovery, and waits for a fresh conservative epoch after gate open.
+**TDD RED:** Cover advertised version 1, offline registration, registration retry, registration 200, crash after registration ack, v2 start failure, crash after start, verification failure, crash immediately before and after the durable `dualActive` commit, activation network failure, activation paused due gate close, backend activation commit with a lost response, and app restart at every state. Before `dualActive`, assert real v1 callbacks advance the ledger and no legacy stop occurs. In `dualActive`, route/install provenance accepts exact v2 callbacks while real v1 callbacks remain functional; one overlapping v1/v2 cumulative interval advances the ledger once by monotonic max. After backend activation commit but before local v2-only commit, assert v2 still advances the ledger and delayed v1 is terminal, proving there is no zero-metering window. Replay the same activation after gate close, epoch exhaustion, policy change, and enforcement-set change; each `already_activated` response acknowledges the immutable committed ratchet even when mutable `epoch_status` is no longer active. The local transaction must select v2 and preserve that current status, then schedule any required pause/policy/rollover replacement; it must not wait for a second backend ratchet. A different route or retired epoch remains terminal. On local active commit assert `localSelection == .v2` and route active are one transaction; then and only then legacy becomes retiring, is stopped, absence is verified, and becomes stopped. A paused response from a first, never-committed activation does not ratchet, exits `dualActive` into paused replacement recovery, and waits for a fresh conservative epoch after gate open.
 
 Repeat every crash boundary for an already-v2 owner replacing route A with B: create B while A stays active; start/verify B; commit exact A→B `dualV2`; queue overlapping A/B callbacks; drain every deliverable/in-flight A work; race one final A callback against the atomic no-pending-work barrier; enter `cutoverReady`; send registration; lose the registration response after the backend atomically retires A; reopen; retry registration; activate B; lose activation response; locally commit B active; then stop A. Before the barrier A advances usage and B queues without business effects. A callback that wins the store lock queues and prevents the barrier; one that loses is discarded while B continues queueing. Registration is forbidden before `cutoverReady`. After backend cutover B advances usage even if the response was lost and no undelivered A sample can be stranded as stale. Across the overlap, device-day and child-day advance by `max(A,B)` exactly once, never by sum. At every injected crash at least one route remains countable, and A is not locally retired/tombstoned or physically stopped before B is active.
 
@@ -1963,7 +1987,7 @@ final class EarnedMeteringRecoveryDriver {
 }
 ```
 
-Recovery order is cleanup, rollover, candidate install, dual-lane/dual-v2 commit, prior-route sample drain/barrier, registration, activation, candidate sample drain, shield, and prior stop. Initial migration registration may precede install; it sets matching install authorization to `.registered` and records `registeredV2At` but never changes the backend ratchet. Initial install `.verified` transitions in one owner/epoch/route/generation transaction to `.dualActive`, records exact v2 callback authorization, preserves legacy v1 delivery, and creates exactly one activation work.
+Recovery order is cleanup, rollover, candidate install, dual-lane/dual-v2 commit, prior-route sample drain/barrier, registration, activation, candidate sample drain, shield, and prior stop. Initial migration registration may precede install; it sets matching install authorization to `.registered` and records `registeredV2At` but never changes the backend ratchet. Initial install `.verified` transitions in one owner/epoch/route/generation transaction to `.dualActive`, records exact v2 callback authorization, preserves legacy v1 delivery, and creates exactly one activation work. Either `activated` or same-route `already_activated` with protocol 2 is a durable activation acknowledgement. For `already_activated`, mutable paused/exhausted/policy/enforcement drift is reconciled only after the local v2-selection commit; it cannot leave the device in `.dualActive` with a terminal v1 lane.
 
 For an already-v2 owner, candidate install and daemon verification happen while the prior route remains active. One transaction creates/advances the exact `V2RouteHandoff` to `.dualV2`; it leaves `activeRouteID` and the prior route lifecycle unchanged and authorizes callbacks from both exact routes. Candidate callbacks remain durable waiting work. Recovery sends and terminally settles all deliverable prior-route work, waits for in-flight delivery to finish, then uses the same root lock as callback enqueue to require zero nonterminal prior work, records `priorRouteInputClosedAt`, advances to `.cutoverReady`, and makes registration due. After that barrier prior callbacks are byte-identical discards and only candidate work queues. Registration 200 or idempotent retry records the handoff acknowledgement; a lost response cannot remove local authorization. Active/already-active activation then atomically makes the candidate route active, marks the handoff `.committed`, retires/tombstones the prior local route, and appends its pending stop. Only absence acknowledgement terminalizes the prior stop and permits handoff collection.
 
@@ -2627,7 +2651,7 @@ trap cleanup EXIT
 cd "$IOS"
 xcodebuild \
   -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' \
-  -destination "platform=iOS Simulator,id=$SIM_UDID" \
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3.1' \
   -parallel-testing-enabled NO \
   IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' \
   -only-testing:'Evlin iOSTests/MeteringV30ProductionEncoderTests/testWritesCrossStackArtifact' test
@@ -3302,7 +3326,7 @@ graph invocation rather than an invalid per-target loop. It rejects a changed co
 fixture expectation, and review map are revised together; prose-only arithmetic
 does not satisfy this gate.
 
-`pre-report` runs after Task 29 commit and proves 01-29; it does not expect Task 30. `final` proves 01-30, requires its argument equal the unique Task 30 commit, requires that commit to contain the report, and records the report blob hash plus commit SHA in uncommitted immutable evidence. This explicitly avoids the impossible claim that a committed report embeds its own commit SHA.
+`pre-report` runs after Task 29 commit and proves 01-29; it does not expect Task 30. `final` proves 01-30, requires its argument equal the unique Task 30 commit, requires that commit to contain the report, and records the report blob hash plus commit SHA in a hash-verified external post-commit attestation. The attestation is deliberately not described as a committed or self-authenticating artifact; downstream phases must rerun final mode against the named report commit and bind the resulting attestation hash in their own committed report. This explicitly avoids the impossible claim that a committed report embeds its own commit SHA.
 
 The verifier writes every command's unfiltered stdout/stderr to a nonempty file below `.superpowers/evidence/metering-phase3/logs`, then writes `raw-log-sha256.txt` only after checking each file is nonempty. It runs:
 
@@ -3427,7 +3451,7 @@ Expected RED: Task 30 commit is absent and supplied report SHA does not exist.
 | T8 | dual activity lifecycle implementation | Device Epoch Store + LegacyCompatibilityMonitorState | V01/V08/V09/V13/V21/V22/V28/V38 + T8 log | AUTOMATED PASS |
 ```
 
-The report must state that neither its own commit SHA nor its own Git blob/SHA-256 can be embedded recursively. It contains no self-hash field. After the report-only commit, Task 29 final mode computes the committed report blob, content SHA-256, and exact commit SHA and writes all three to `.superpowers/evidence/metering-phase3/report-commit-attestation.json`. List all physical gates as `PENDING` and `releasable: false`.
+The report must state that neither its own commit SHA nor its own Git blob/SHA-256 can be embedded recursively. It contains no self-hash field. It does contain the exact anchored structured fields `status_code: AUTOMATED_PASSED_PHYSICAL_PENDING`, `phase_complete: false`, and `releasable: false`, plus display status `AUTOMATED PASSED; PHYSICAL PENDING; NOT RELEASABLE`. After the report-only commit, Task 29 final mode computes the committed report blob, content SHA-256, and exact commit SHA and writes all three to `.superpowers/evidence/metering-phase3/report-commit-attestation.json`. Final mode must be idempotent: rerunning it against the same report commit reproduces or validates the same semantic attestation, and downstream phases rerun it before trusting the external file. List all physical gates as `PENDING`.
 
 **Full GREEN before staging:** Re-run Task 29 pre-report mode against committed Tasks 01-29 and the populated uncommitted report:
 
@@ -3450,7 +3474,7 @@ REPORT_COMMIT="$(git rev-parse HEAD)"
 bash scripts/verify_metering_phase3_completion.sh final "$REPORT_COMMIT"
 ```
 
-Expected GREEN: Tasks 01-30 are exact, unique, ordered, ancestral, and hash-attested; report is the only Task 30 file; status remains physical pending/not releasable.
+Expected GREEN: Tasks 01-30 are exact, unique, ordered, ancestral, and hash-attested; report is the only Task 30 committed file; the external post-commit attestation is nonempty and final mode can validate it again; status remains `phase_complete: false`, physical pending, and not releasable.
 
 ---
 

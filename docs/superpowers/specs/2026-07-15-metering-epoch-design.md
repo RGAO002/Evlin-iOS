@@ -487,13 +487,16 @@ The backend adds idempotent
 `POST /child/earned-time/epochs/{epoch_id}/activation`. Its request carries
 `protocol_version`, `device_id`, `route_id`, and `verified_at`. The endpoint
 observes device scope, takes the profile advisory lock, row-locks and revalidates
-device family/profile/mode, then rechecks exact epoch family/profile/device,
-protocol, canonical date/timezone, current policy revision, currently selected
-active enforcement set, route idempotency, verification timestamp, and the
-accounting gate. It stores `activation_route_id` and `activated_at` and ratchets the
-device to protocol 2 only for `activated` or `already_activated`. If the gate is
-closed it leaves the epoch paused, leaves the per-device ratchet unchanged, and
-returns `status=paused`, `epoch_status=paused`, the current
+device family/profile/mode, then rechecks immutable epoch
+family/profile/device/protocol/not-retired scope and exact route ownership. A
+same-route row with non-null `activated_at` returns idempotent
+`already_activated` before mutable authority checks. Only a first activation
+continues through canonical date/timezone, current policy revision, currently
+selected active enforcement set, verification timestamp, and accounting gate.
+That first successful transaction stores `activation_route_id` and
+`activated_at` and ratchets the device to protocol 2. If its gate is closed it
+leaves the epoch paused, leaves the per-device ratchet unchanged, and returns
+`status=paused`, `epoch_status=paused`, the current
 `metering_protocol_version`, and the authoritative `snapshot`.
 
 No activation service accepts a caller-supplied clock instant, canonical date,
@@ -581,8 +584,10 @@ Initial v1-to-v2 migration follows this exact order:
    `activities`, `schedule(for:)`, and `events(for:)`.
 4. Atomically enter `dualActive` for the verified route. Both exact v1 and v2
    callbacks remain countable, and duplicate cumulative coverage converges by
-   monotonic max. Only then call the activation endpoint and require
-   `activated`/`already_activated` with an active epoch status.
+   monotonic max. Only then call the activation endpoint. A new `activated`
+   result must have active epoch status; a same-route `already_activated` replay
+   acknowledges the committed ratchet even when current mutable status has since
+   become paused or exhausted.
 5. Atomically activate the verified route and epoch and select owner protocol 2;
    only now mark the legacy monitor retiring.
 6. Stop old canonical activity names and acknowledge their absence before
@@ -833,10 +838,20 @@ After daemon verification, iOS calls
 
 Its HTTP 200 response has `status` (`activated`, `already_activated`, or
 `paused`), `epoch_id`, `epoch_status`, `metering_protocol_version`, and
-`snapshot`. A repeated identical route is idempotent. A different route for an
-already activated epoch returns `detail=activation_route_mismatch`; a noncurrent
-or unregistered epoch returns `detail=activation_epoch_not_current`. A paused
-response never ratchets or authorizes local activation.
+`snapshot`. A repeated identical route is immutable and idempotent. After
+family/profile/device/protocol/not-retired scope and exact route ownership are
+verified, non-null `activated_at` returns `already_activated`, protocol 2, and
+the current snapshot/mutable epoch status before any current date, policy,
+enforcement, gate, or active-status check. This ordering is required when the
+activation transaction committed but its response was lost: later gate close,
+epoch exhaustion, policy change, or enforcement-set change cannot resurrect v1
+or make the committed ratchet unacknowledgeable. The client commits local v2
+selection on that acknowledgement, then reconciles the returned mutable state
+through the normal replacement path. A different route returns
+`detail=activation_route_mismatch`; a retired, wrong-scope, or unregistered
+epoch returns `detail=activation_epoch_not_current`. A `paused` response from a
+first activation that never committed does not ratchet or authorize local
+activation.
 
 ### 7.3 Sample Ingest
 
@@ -855,6 +870,13 @@ retain the canonical both-name forms from section 6.2; alias projection is a
 wire adapter and never callback provenance. The backend's `estimated_minutes` is
 the pause-adjusted authoritative cumulative estimate while
 `threshold_minutes` is the event threshold parsed from the verified route.
+Backend physical trust is evaluated exactly once as
+`(estimated_minutes - epoch.base_accepted_minutes) * 60 <=
+elapsed_since_epoch_start + jitter`. Namespace and threshold-name consistency
+remain independent route checks. The backend must not also treat raw
+`threshold_minutes` as cumulative usage from base zero: a conservative-resume
+or authoritative-base-correction route may legitimately begin at a raw event
+threshold above the minutes elapsed since that fresh route started.
 New route-backed work uses deterministic `client_sample_id` value
 `earned:<v1|v2>:<lowercase-route-uuid>:t<threshold>` and retains that exact value
 across retries.
@@ -893,8 +915,11 @@ it.
   double counting. The activation endpoint then atomically records the route
   and ratchets the backend device. A lost response cannot create a gap because
   v2 was already accepted locally; recovery repeats activation idempotently.
-  On its `activated`/`already_activated` result, local state selects v2-only and
-  only then retires/stops legacy.
+  On its `activated` result, or same-route `already_activated` result after a
+  committed-but-lost response, local state selects v2-only and only then
+  retires/stops legacy. Mutable paused/exhausted/policy drift is reconciled after
+  this local acknowledgement rather than being allowed to strand the device in
+  `dualActive` with terminal v1.
 - After activation, the backend never counts a later v1 sample for that device.
   It returns HTTP 200 with `counted=false`, `warning=legacy_after_v2` so downgrade
   cannot create a false lock or retry storm.
