@@ -200,51 +200,35 @@ Tasks use these exact subjects in order:
 
 - Modify: `/Users/fred/Desktop/Evlin/LOCK_BEHAVIOR_BOUNDARIES.md`
 - Create: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/docs/superpowers/reports/2026-07-17-metering-phase3-r16-registration.md`
-- Create: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/MeteringPhase3R16RegistrationTests.swift`
+- Create: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/scripts/verify_metering_phase3_r16.py`
 
-**TDD RED:** Add this test before the rulebook rows:
+**TDD RED:** Add a host-side stdlib parser before the rulebook rows. It locates
+the existing T1-T10 table and the new Phase 3 state table by heading, parses
+every Markdown cell, and compares normalized rows to two exact in-code tuples.
+The T1-T10 tuple pins every pre-existing cell so this task cannot silently edit
+the dismantling ledger. The Phase 3 tuple pins state name, replacement,
+deletion criterion, and exact vector set; a name in prose or a wrong vector
+must fail.
 
-```swift
-import XCTest
+```python
+def parse_table_after_heading(text: str, heading: str) -> tuple[tuple[str, ...], ...]:
+    """Return exact non-header Markdown rows; reject duplicate/malformed tables."""
 
-final class MeteringPhase3R16RegistrationTests: XCTestCase {
-    func testEveryPhase3SafetyStateIsRegistered() throws {
-        let text = try String(
-            contentsOfFile: "/Users/fred/Desktop/Evlin/LOCK_BEHAVIOR_BOUNDARIES.md",
-            encoding: .utf8
-        )
-        let names = [
-            "MeteringCallbackRoute/route tombstone",
-            "LegacyCompatibilityMonitorState",
-            "pendingStart/starting/installed/verified/active/pendingStop/stopped",
-            "ActivityInstallClaim 60-second lease",
-            "futurePlanned/offlinePending",
-            "MonitorCoverageState.readyThrough/coverageExhausted",
-            "registration/activation queue and per-owner protocol ratchet",
-            "BaseCorrectionState.available/used",
-            "process-role monitor owner",
-            "resumeBoundaryPending/paused high-water",
-            "0/5/15/60/300 retry schedule",
-            "EarnedShieldEffectEnvelope",
-            "IdentityCleanupWork",
-            "RolloverEffectsWork",
-            "EpochSampleWork",
-        ]
-        for name in names {
-            XCTAssertTrue(text.contains(name), "missing R-16 row: \(name)")
-        }
-    }
-}
+def main() -> int:
+    rulebook = Path("/Users/fred/Desktop/Evlin/LOCK_BEHAVIOR_BOUNDARIES.md").read_text()
+    assert parse_table_after_heading(rulebook, "§11") == EXPECTED_T1_T10
+    assert parse_table_after_heading(rulebook, "Phase 3 registered safety state") == EXPECTED_PHASE3
+    return 0
 ```
 
 Run:
 
 ```bash
 cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS
-xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3.1' IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' -only-testing:'Evlin iOSTests/MeteringPhase3R16RegistrationTests' test
+/Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend/.venv/bin/python scripts/verify_metering_phase3_r16.py
 ```
 
-Expected RED: the first assertion fails on `MeteringCallbackRoute/route tombstone`.
+Expected RED: the exact Phase 3 table is absent; a prose-only name cannot pass.
 
 **Minimal GREEN:** Append one R-16 table immediately after the existing T1-T10 table with these exact rows:
 
@@ -252,7 +236,7 @@ Expected RED: the first assertion fails on `MeteringCallbackRoute/route tombston
 |---|---|---|---|
 | `MeteringCallbackRoute/route tombstone` | T2/T8 callback provenance | stop acknowledged, all references terminal, retention elapsed | V04,V05,V08,V27,V35 |
 | `LegacyCompatibilityMonitorState` | preserves T8 v1 behavior while replacing its storage authority | owner v2 activated and legacy stop acknowledged | V30,V38 |
-| `pendingStart/starting/installed/verified/active/pendingStop/stopped` | replaces T8 lifecycle choreography | daemon presence/config or absence acknowledged | V28,V33 |
+| `pendingStart/starting/installed/verified/dualActive/active/pendingStop/stopped` | replaces T8 lifecycle choreography; `dualActive` closes the backend/local ratchet crash window | daemon presence/config or absence acknowledged | V28,V30,V33,V38 |
 | `ActivityInstallClaim 60-second lease` | net-new app/DAM single-start arbitration | one proven monitor-owner process exists | V33 |
 | `futurePlanned/offlinePending` | net-new explicit bounded authorization | registered/activated, retired, or stopped | V24,V27 |
 | `MonitorCoverageState.readyThrough/coverageExhausted` | replaces false repeating coverage | horizon refilled or owner/generation retired | V24,V25,V26 |
@@ -261,7 +245,7 @@ Expected RED: the first assertion fails on `MeteringCallbackRoute/route tombston
 | `process-role monitor owner` | net-new capability boundary | physical ownership proof authorizes another role | target/Release/physical evidence |
 | `resumeBoundaryPending/paused high-water` | replaces T7 | first new-route callback discarded or epoch retired | V10,V11,V12,V37 |
 | `0/5/15/60/300 retry schedule` | net-new deterministic recovery policy | all work terminal | V34 |
-| `EarnedShieldEffectEnvelope` | replaces T4 veto | exact release/CAS terminal | V15,V16,P3V01,V36 |
+| `EarnedShieldEffectEnvelope` | replaces T4 veto | exact release/CAS terminal | V15,V16,P3V01,P3V02,V36 |
 | `IdentityCleanupWork` | replaces T8 detached teardown | every captured acknowledgement durable | V13,V29 |
 | `RolloverEffectsWork` | net-new durable canonical rollover | all exact old/new effects acknowledged | V09,V21,V22,V29 |
 | `EpochSampleWork` | replaces legacy retry/fallback after activation | accepted or terminal disposition | V19,V20,V30,V32 |
@@ -273,10 +257,12 @@ The iOS report reproduces the rows and records the post-edit rulebook hash.
 ```bash
 cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS
 shasum -a 256 /Users/fred/Desktop/Evlin/LOCK_BEHAVIOR_BOUNDARIES.md
-xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3.1' IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' -only-testing:'Evlin iOSTests/MeteringPhase3R16RegistrationTests' -only-testing:'Evlin iOSTests/MeteringEpochVectorCoverageTests' test
+/Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend/.venv/bin/python scripts/verify_metering_phase3_r16.py
+xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3.1' IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' -only-testing:'Evlin iOSTests/MeteringEpochVectorCoverageTests' test
 ```
 
-Expected GREEN: all 15 exact state names are present and T1-T10 rows are unchanged.
+Expected GREEN: every exact Phase 3 row and all four cells match, and the exact
+pre-existing T1-T10 rows are unchanged.
 
 **Full GREEN before staging:**
 
@@ -291,7 +277,7 @@ Expected full GREEN: every test present at this commit passes.
 
 ```bash
 cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS
-git add 'docs/superpowers/reports/2026-07-17-metering-phase3-r16-registration.md' 'Evlin iOSTests/MeteringPhase3R16RegistrationTests.swift'
+git add 'docs/superpowers/reports/2026-07-17-metering-phase3-r16-registration.md' 'scripts/verify_metering_phase3_r16.py'
 git diff --cached --check && git diff --cached --stat && git diff --cached && git diff --cached --name-only
 test "$(git diff --cached --name-only | wc -l | tr -d ' ')" -eq 2
 git commit -m 'test: register phase 3 metering safety states'
@@ -413,7 +399,7 @@ git commit -m 'feat: inject shared metering runtime dependencies'
 
 **Repository:** Backend.
 
-**Interfaces:** Consumes current `POST /child/earned-time/epochs`, `EpochRegistrationRequest`, `DeviceDaySnapshot`, `usage_counting_allowed`, and `EarnedTimeMeteringEpoch`. Produces additive `gate_resume_conservative`, `epoch_status`, activation DTOs/route/service, `activation_route_id`, and `activated_at`. Registration no longer ratchets; activation does.
+**Interfaces:** Consumes current `POST /child/earned-time/epochs`, `EpochRegistrationRequest`, `DeviceDaySnapshot`, `usage_counting_allowed`, `EarnedTimeMeteringEpoch`, and Phase 2's opaque server-clock-issued canonical context. Produces additive `gate_resume_conservative`, `epoch_status`, activation DTOs/route/service, `activation_route_id`, and `activated_at`. Registration no longer ratchets; activation does only after the iOS production path has durably entered `dualActive`. No service accepts a caller-selected time/date/timezone authority.
 
 **Files:**
 
@@ -437,6 +423,13 @@ git commit -m 'feat: inject shared metering runtime dependencies'
 4. Activation route currently returns 404.
 5. Paused-then-open sample currently returns `gate_resume_rebase_required`.
 6. A gate-close activation race must return paused and preserve the ratchet at 1.
+7. Direct activation exposes no `now_utc`, canonical-date, or timezone override;
+   tests pin the production `screen_time_clock.now_utc` seam and assert exactly
+   one capture.
+8. Before activation, one v1 and one v2 sample covering the same cumulative
+   minutes converge by monotonic max rather than addition. After the activation
+   commit, v2 remains countable and v1 is terminal `legacy_after_v2` even when
+   the activation response is treated as lost.
 
 ```python
 ROUTE_ID = UUID("70000000-0000-0000-0000-000000000030")
@@ -533,9 +526,15 @@ async def activate_metering_epoch(
     child_device: Device,
     epoch_id: UUID,
     request: EpochActivationRequest,
-    now_utc: datetime | None = None,
 ) -> EpochActivationResult:
-    captured_now = _utc(now_utc or screen_time_clock.now_utc())
+    # Mirror registration's advisory-profile -> profile row -> device row ->
+    # epoch row lock order. The resolver captures the production clock once.
+    canonical_context = await load_sample_canonical_context(
+        session,
+        family_id=child_device.family_id,
+        child_profile_id=child_device.child_profile_id,
+    )
+    captured_now = canonical_context.now_utc
     device = (await session.execute(
         select(Device).where(Device.id == child_device.id).with_for_update().execution_options(populate_existing=True)
     )).scalar_one()
@@ -549,6 +548,8 @@ async def activate_metering_epoch(
         raise HTTPException(status_code=409, detail="activation_epoch_not_current")
     if epoch.activation_route_id is not None and epoch.activation_route_id != request.route_id:
         raise HTTPException(status_code=409, detail="activation_route_mismatch")
+    if epoch.usage_date != canonical_context.usage_date:
+        raise HTTPException(status_code=409, detail="activation_epoch_not_current")
     gate_open = await usage_counting_allowed(session, store, device.id)
     snapshot = await _current_snapshot(session, device=device, usage_date=epoch.usage_date)
     if not gate_open:
@@ -565,7 +566,7 @@ async def activate_metering_epoch(
     return EpochActivationResult("already_activated" if already else "activated", epoch, snapshot, 2)
 ```
 
-Registration calls `usage_counting_allowed` immediately before final epoch status/return, sets `result.epoch.status` from that final value, always returns it as `epoch_status`, and removes the current registration-time ratchet assignment. `gate_resume_conservative` requires a paused predecessor but accepts a final closed gate as a paused HTTP 200. The sample route emits `gate_resume_conservative_required` for paused plus open.
+Registration calls `usage_counting_allowed` immediately before final epoch status/return, sets `result.epoch.status` from that final value, always returns it as `epoch_status`, and removes the current registration-time ratchet assignment. `gate_resume_conservative` requires a paused predecessor but accepts a final closed gate as a paused HTTP 200. The sample route emits `gate_resume_conservative_required` for paused plus open. Activation mirrors Phase 2's canonical-context and profile-lock protocol; a test-only future instant is supplied only by monkeypatching the production clock seam, never through a service argument.
 
 Add route `POST /child/earned-time/epochs/{epoch_id}/activation`, validate header/body/path ownership, call `activate_metering_epoch`, commit, and return the exact response.
 
@@ -573,7 +574,8 @@ Add route `POST /child/earned-time/epochs/{epoch_id}/activation`, validate heade
 
 ```bash
 cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend
-.venv/bin/python -m pytest -q tests/test_metering_epoch_vector_contract.py tests/test_target_gate_resume_helpers.py
+.venv/bin/python -m pytest -q tests/test_metering_epoch_vector_contract.py
+.venv/bin/python scripts/run_limits_db_regression.py tests/test_target_gate_resume_helpers.py
 .venv/bin/python scripts/run_limits_db_regression.py tests/test_metering_epoch_models.py tests/test_metering_epoch_registration.py tests/test_metering_epoch_sample_adapter.py tests/test_metering_epoch_phase2_integration.py tests/test_metering_epoch_lifespan.py
 ```
 
@@ -1024,7 +1026,7 @@ nonisolated enum MeteringInstallAuthorization: String, Codable, Sendable {
 }
 
 nonisolated enum ActivityInstallPhase: String, Codable, Sendable {
-    case pendingStart, starting, installed, verified, activationPrepared
+    case pendingStart, starting, installed, verified, dualActive
     case active, pendingStop, stopped
 }
 
@@ -1180,11 +1182,16 @@ nonisolated struct RolloverEffectsWork: Codable, Equatable, Sendable {
     let createdAt: Date
 }
 
+nonisolated enum MeteringLocalProtocolSelection: String, Codable, Sendable {
+    case v1, dualActive, v2
+}
+
 nonisolated struct MeteringOwnerRatchet: Codable, Equatable, Sendable {
     let ownerChildDeviceID: UUID
     var advertisedVersion: Int
-    var selectedVersion: Int
+    var localSelection: MeteringLocalProtocolSelection
     var registeredV2At: Date?
+    var dualActiveAt: Date?
     var activatedV2At: Date?
 }
 
@@ -1315,7 +1322,7 @@ git commit -m 'feat: add atomic device epoch store'
 
 **Repository:** iOS.
 
-**Interfaces:** Consumes Task 4 wire, Task 5 root, current `EarnedSampleReporter` v1 semantics, and `URLSession`. Produces durable registration, activation, sample, install, cleanup, and rollover scheduling with one ordering rule. The selected protocol remains 1 throughout this task.
+**Interfaces:** Consumes Task 4 wire, Task 5 root, current `EarnedSampleReporter` v1 semantics, and `URLSession`. Produces durable registration, activation, sample, install, cleanup, and rollover scheduling with one ordering rule. The local protocol selection remains `.v1` throughout this task.
 
 **Files:**
 
@@ -1327,7 +1334,7 @@ git commit -m 'feat: add atomic device epoch store'
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/MeteringTargetMembershipTests.swift`
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS.xcodeproj/project.pbxproj`
 
-**TDD RED:** Persist a metadata-free v1 callback, a metadata-bearing v1 callback, and the current legacy retry/fallback payload, destroy the producer, reopen, and require byte-identical requests. Cover network failure, 429/5xx retry, accepted duplicate, `legacy_after_v2`, identity 409, `accounting_paused`, malformed lane, owner change during response, and virtual times `t`, `t+5`, `t+15`, `t+60`, `t+300`, `t+600`. Require due-order keys `(nextAttemptAt, workKindPriority, createdAt, workID.uuidString.lowercased())` where priorities are identity cleanup 0, rollover 1, registration 2, install 3, activation 4, sample 5, shield 6. Require registration work to dispatch before matching install and activation work. Assert `selectedVersion == 1` before and after every response.
+**TDD RED:** Persist a metadata-free v1 callback, a metadata-bearing v1 callback, and the current legacy retry/fallback payload, destroy the producer, reopen, and require byte-identical requests. Cover network failure, 429/5xx retry, accepted duplicate, `legacy_after_v2`, identity 409, `accounting_paused`, malformed lane, owner change during response, and virtual times `t`, `t+5`, `t+15`, `t+60`, `t+300`, `t+600`. Require due-order keys `(nextAttemptAt, workKindPriority, createdAt, workID.uuidString.lowercased())` where priorities are identity cleanup 0, rollover 1, registration 2, install 3, activation 4, sample 5, shield 6. Require registration work to dispatch before matching install and activation work. Assert `localSelection == .v1` before and after every response.
 
 ```bash
 cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS
@@ -1378,7 +1385,7 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
 }
 ```
 
-Import legacy retry/fallback payloads once inside the root transaction and remove each legacy key only after root readback succeeds. Existing callback production enqueues v1 first and then calls `drain`; no callback is lost offline. Registration 200 records `registeredV2At` but does not change `selectedVersion`; only Task 11 activation can do so. Every response transaction rechecks owner and referenced epoch/route. Terminal samples are retained as terminal work until tombstone retention can prove all references terminal.
+Import legacy retry/fallback payloads once inside the root transaction and remove each legacy key only after root readback succeeds. Existing callback production enqueues v1 first and then calls `drain`; no callback is lost offline. Registration 200 records `registeredV2At` but does not change `localSelection`; only Task 11 may move it through `.dualActive` to `.v2`. Every response transaction rechecks owner and referenced epoch/route. Terminal samples are retained as terminal work until tombstone retention can prove all references terminal.
 Add `MeteringEpochDelivery.swift` to DAM membership because DAM drains callback work. Keep it out of Push: Push may persist root work but cannot create the transport/recovery path.
 
 **GREEN:**
@@ -1447,7 +1454,8 @@ Expected RED: V33-V39 are missing and V30 cannot activate through a real endpoin
 
 ```bash
 cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend
-.venv/bin/python -m pytest -q tests/test_metering_epoch_vector_contract.py tests/test_target_gate_resume_helpers.py
+.venv/bin/python -m pytest -q tests/test_metering_epoch_vector_contract.py
+.venv/bin/python scripts/run_limits_db_regression.py tests/test_target_gate_resume_helpers.py
 .venv/bin/python scripts/run_limits_db_regression.py tests/test_metering_epoch_phase3_vectors.py tests/test_metering_epoch_registration.py tests/test_metering_epoch_sample_adapter.py tests/test_metering_epoch_phase2_integration.py tests/test_metering_epoch_lifespan.py tests/test_metering_epoch_models.py
 ```
 
@@ -1488,13 +1496,14 @@ git commit -m 'test: extend backend phase 3 vectors' -m "Phase3-Depends-On: $IOS
 - Create: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/Fixtures/metering_epoch_phase3_vectors.json`
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS/Services/MeteringEpochContract.swift`
 - Create: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS/Services/EarnedShieldEffectStore.swift`
+- Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS/Models/ShieldRecord.swift`
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/MeteringEpochGoldenVectorTests.swift`
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/MeteringEpochVectorCoverageTests.swift`
 - Create: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/MeteringEpochPhase3VectorTests.swift`
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/MeteringTargetMembershipTests.swift`
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS.xcodeproj/project.pbxproj`
 
-**TDD RED:** Copy the backend fixture byte-for-byte and require V01-V39. Add P3V01 using a real `ShieldRecord` with sources `[.manual, .taskPause, .earnedTime]`; a mismatched current record must remain byte-identical, while an exact match removes only `.earnedTime`. Add P3V02 with `.limit` plus an unknown future Codable source fixture and prove the production merge preserves both opaque records. Run:
+**TDD RED:** Copy the backend fixture byte-for-byte and require V01-V39. Add P3V01 using a real `ShieldRecord` with sources `[.manual, .taskPause, .earnedTime]`; a mismatched current record must remain byte-identical, while an exact match removes only `.earnedTime`. Add P3V02 with `.limit` plus an unknown future Codable source fixture and prove decode -> merge -> encode preserves the exact unknown raw source instead of coercing it to `.manual`. Run:
 
 ```bash
 cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS
@@ -1522,6 +1531,12 @@ nonisolated enum EarnedShieldCAS {
 
 P3V01 constructs the production `ShieldRecord` memberwise and calls this exact function. The vector adapter must expose production effect counts for queue mutations, starts/stops, shield writes, notifications, backend sends, earned ledger changes, bank changes, and lock-ledger changes; a pure verdict alone does not pass. Add DAM and Push target membership for the store, including its existing `ShieldRecord.swift`, `ShieldTier.swift`, `ShieldSourceLogic.swift`, and `ActiveLockPersistenceLock.swift` closure.
 
+Replace `ShieldSource`'s lossy unknown decode with one raw-value-preserving
+Codable/Hashable representation. Keep `.manual`, `.limit`, `.earnedTime`, and
+`.taskPause` source-compatible static values and missing legacy fields defaulting
+to `.manual`; any nonempty future raw value round-trips unchanged. This is a
+provenance compatibility type, not a second lock-state owner.
+
 **GREEN:**
 
 ```bash
@@ -1548,7 +1563,7 @@ Expected full GREEN: every test present at this commit passes.
 
 ```bash
 cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS
-git add 'Evlin iOSTests/Fixtures/metering_epoch_vectors.json' 'Evlin iOSTests/Fixtures/metering_epoch_phase3_vectors.json' 'Evlin iOS/Services/MeteringEpochContract.swift' 'Evlin iOS/Services/EarnedShieldEffectStore.swift' 'Evlin iOSTests/MeteringEpochGoldenVectorTests.swift' 'Evlin iOSTests/MeteringEpochVectorCoverageTests.swift' 'Evlin iOSTests/MeteringEpochPhase3VectorTests.swift' 'Evlin iOSTests/MeteringTargetMembershipTests.swift' 'Evlin iOS.xcodeproj/project.pbxproj'
+git add 'Evlin iOSTests/Fixtures/metering_epoch_vectors.json' 'Evlin iOSTests/Fixtures/metering_epoch_phase3_vectors.json' 'Evlin iOS/Services/MeteringEpochContract.swift' 'Evlin iOS/Services/EarnedShieldEffectStore.swift' 'Evlin iOS/Models/ShieldRecord.swift' 'Evlin iOSTests/MeteringEpochGoldenVectorTests.swift' 'Evlin iOSTests/MeteringEpochVectorCoverageTests.swift' 'Evlin iOSTests/MeteringEpochPhase3VectorTests.swift' 'Evlin iOSTests/MeteringTargetMembershipTests.swift' 'Evlin iOS.xcodeproj/project.pbxproj'
 git diff --cached --check && git diff --cached --stat && git diff --cached && git diff --cached --name-only
 BACKEND_TASK7_SHA="$(git -C /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend log --format='%H%x09%s' "$(cat .superpowers/evidence/metering-phase3/backend-base-sha.txt)..HEAD" | awk -F '\t' '$2 == "test: extend backend phase 3 vectors" { print $1 }')"
 test "$(printf '%s\n' "$BACKEND_TASK7_SHA" | rg -c '^[0-9a-f]{40}$')" -eq 1
@@ -1751,7 +1766,7 @@ git commit -m 'feat: arbitrate and verify dated route installs'
 
 **Repository:** iOS.
 
-**Interfaces:** Consumes backend Task 3, durable queue, verified install, and migrated `LegacyCompatibilityMonitorState`. Produces the sole ratchet transition. Functional v1 remains active through registration 200 and v2 start/verification; it stops only after backend activation 200 active and local activation commit.
+**Interfaces:** Consumes backend Task 3, durable queue, verified install, and migrated `LegacyCompatibilityMonitorState`. Produces the sole ratchet transition. Functional v1 remains active through registration 200 and v2 start/verification. One durable `dualActive` commit authorizes the exact v2 route before the backend ratchet while retaining v1; v1 stops only after backend activation is observed and local v2-only activation commits.
 
 **Files:**
 
@@ -1763,7 +1778,7 @@ git commit -m 'feat: arbitrate and verify dated route installs'
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/MeteringTargetMembershipTests.swift`
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS.xcodeproj/project.pbxproj`
 
-**TDD RED:** Cover advertised version 1, offline registration, registration retry, registration 200, crash after registration ack, v2 start failure, crash after start, verification failure, activation network failure, activation paused due gate close, crash after activation backend commit, and app restart at every state. In every case before active activation assert either legacy v1 is daemon-active or verified v2 is daemon-active, selected version is 1, real v1 callbacks remain queued/delivered, and no legacy stop call occurs. On active activation assert selected version 2 and route active are one transaction; then and only then legacy becomes retiring, is stopped, absence is verified, and becomes stopped. A paused activation remains selected v1 and recovery waits for a fresh conservative epoch after gate open.
+**TDD RED:** Cover advertised version 1, offline registration, registration retry, registration 200, crash after registration ack, v2 start failure, crash after start, verification failure, crash immediately before and after the durable `dualActive` commit, activation network failure, activation paused due gate close, backend activation commit with a lost response, and app restart at every state. Before `dualActive`, assert real v1 callbacks advance the ledger and no legacy stop occurs. In `dualActive`, route/install provenance accepts exact v2 callbacks while real v1 callbacks remain functional; one overlapping v1/v2 cumulative interval advances the ledger once by monotonic max. After backend activation commit but before local v2-only commit, assert v2 still advances the ledger and delayed v1 is terminal, proving there is no zero-metering window. On local active commit assert `localSelection == .v2` and route active are one transaction; then and only then legacy becomes retiring, is stopped, absence is verified, and becomes stopped. A paused activation never ratchets, exits `dualActive` into paused replacement recovery, and waits for a fresh conservative epoch after gate open.
 
 ```bash
 cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS
@@ -1790,7 +1805,7 @@ final class EarnedMeteringRecoveryDriver {
 }
 ```
 
-Recovery order is cleanup, rollover, registration, install, activation, sample, shield. Registration active 200 sets matching install authorization to `.registered` and records `registeredV2At`; it never changes selected version. Install `.verified` transitions to `.activationPrepared` and creates exactly one activation work. Active activation 200 atomically checks owner/epoch/route/daemon verification, changes install and route to `.active`, records `activatedV2At`, and changes selected version to 2. Only a later step changes legacy to `.retiringV1` and asks Apple to stop; absence acknowledgement changes it to `.stoppedV1`. Replaced v2 install work moves through `.pendingStop` to `.stopped`. Paused registration/activation never activates locally and schedules fresh conservative replacement only after authoritative child state reports the gate open.
+Recovery order is cleanup, rollover, registration, install, dual-active commit, activation, sample, shield. Registration active 200 sets matching install authorization to `.registered` and records `registeredV2At`; it never changes the backend ratchet. Install `.verified` transitions in one owner/epoch/route/generation transaction to `.dualActive`, records the exact v2 callback authorization, preserves legacy v1 delivery, and creates exactly one activation work. Callback trust accepts the exact current route in `.dualActive` or `.active`; no other pre-active phase is accepted. Active/already-active activation 200, or an idempotent retry after a lost response, atomically checks owner/epoch/route/daemon verification, changes install and route to `.active`, records `activatedV2At`, and changes local selection to v2-only. Only a later step changes legacy to `.retiringV1` and asks Apple to stop; absence acknowledgement changes it to `.stoppedV1`. Replaced v2 install work moves through `.pendingStop` to `.stopped`. Paused registration/activation never becomes v2-only and schedules fresh conservative replacement only after authoritative child state reports the gate open.
 
 **GREEN:**
 
@@ -1799,7 +1814,7 @@ cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS
 xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3.1' IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' -only-testing:'Evlin iOSTests/MeteringV2ActivationTests' -only-testing:'Evlin iOSTests/MeteringEpochDeliveryTests' -only-testing:'Evlin iOSTests/DatedRouteInstallerTests' -only-testing:'Evlin iOSTests/DeviceEpochStoreMigrationTests' test
 ```
 
-Expected GREEN: v1 survives offline, unadvertised, failed-v2, and restart paths; no state has neither v1 nor a verified v2 monitor; only active activation ratchets.
+Expected GREEN: v1 survives offline, unadvertised, failed-v2, and restart paths; every crash boundary has a countable lane; `dualActive` overlap is monotonic rather than additive; only active activation ratchets and only the later local commit retires v1.
 
 **Full GREEN before staging:**
 
@@ -1836,7 +1851,7 @@ git commit -m 'feat: activate v2 without breaking legacy metering'
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/MeteringTargetMembershipTests.swift`
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS.xcodeproj/project.pbxproj`
 
-**TDD RED:** Drive malformed names, route mismatch, unknown route, real old-route tombstone after rollover, planned/retired/tombstoned route, matching install work in pendingStart/starting/installed/verified/activationPrepared/pendingStop/stopped, wrong owner/day/epoch/generation/policy/namespace, selected protocol 1, unregistered route, paused/exhausted/retired epoch, coverage exhausted, 31 seconds early, configured 61-second jitter, and one-day-delayed valid callback. For every rejection compare full root bytes and assert zero queue, usage, ledger, network, notification, shield, center, and auto-lock effects. A valid route requires route `.active` plus install `.active` and queues one v2 sample; an offline registered route queues once without transport. A tombstoned prior-date callback proves zero effects by resolving the tombstone, not by comparing only current state.
+**TDD RED:** Drive malformed names, route mismatch, unknown route, real old-route tombstone after rollover, planned/retired/tombstoned route, matching install work in pendingStart/starting/installed/verified/pendingStop/stopped, wrong owner/day/epoch/generation/policy/namespace, local selection `.v1`, unregistered route, exhausted/retired epoch, coverage exhausted, 31 seconds early, configured 61-second jitter, and one-day-delayed valid callback. For each hard rejection compare full root bytes and assert zero queue, usage, ledger, network, notification, shield, center, and auto-lock effects. Separately test the only bounded metadata-only outcomes: (a) a paused epoch while the gate remains closed may change only `lastRawThresholdMinutes`, `excludedWhilePausedMinutes`, and one diagnostic; (b) a callback on that old paused route after the gate reopens is byte-identical and schedules no work; (c) the first fresh `resumeBoundaryPending` callback changes only its boundary fields. A valid exact route in install `.dualActive` or `.active` queues one v2 sample; `.dualActive` is valid even while the backend ratchet is still 1. An offline registered route queues once without transport. A tombstoned prior-date callback proves zero effects by resolving the tombstone, not by comparing only current state.
 
 ```bash
 cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS
@@ -1870,7 +1885,7 @@ nonisolated final class EarnedMeteringCallback: @unchecked Sendable {
 }
 ```
 
-The initializer rejects jitter outside `0...60`. `handle` parses both names, resolves route or tombstone, validates all independent provenance and active v2 selection before mutation, then repeats owner/route/epoch checks inside one root transaction before advancing high-water and appending a sample. For `resumeBoundaryPending`, that transaction records the callback threshold as both `lastRawThresholdMinutes` and the excluded boundary, clears `resumeBoundaryPending`, and returns `.discarded` without changing accepted usage or creating sample/network/shield work. Unknown/uncovered/tombstoned input cannot create usage. Transport and shield work occur later and repeat authorization.
+The initializer rejects jitter outside `0...60`. `handle` parses both names, resolves route or tombstone, validates all independent provenance and local selection `.dualActive`/`.v2` before mutation, then repeats owner/route/epoch checks inside one root transaction before advancing high-water and appending a sample. A closed-gate paused callback may update only its registered high-water/diagnostic fields. A reopened old paused route has zero mutation. For `resumeBoundaryPending`, the transaction records the callback threshold as both `lastRawThresholdMinutes` and the excluded boundary, clears `resumeBoundaryPending`, and returns `.discarded` without changing accepted usage or creating sample/network/shield work. Unknown/uncovered/tombstoned input cannot create usage. Transport and shield work occur later and repeat authorization.
 
 **GREEN:**
 
@@ -1879,7 +1894,7 @@ cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS
 xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3.1' IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' -only-testing:'Evlin iOSTests/EarnedMeteringCallbackTests' -only-testing:'Evlin iOSTests/MeteringEpochGoldenVectorTests' -only-testing:'Evlin iOSTests/MeteringEpochDeliveryTests' test
 ```
 
-Expected GREEN: all rejected callbacks produce byte-identical state and zero effects; delayed valid callback is accepted; early jitter is bounded.
+Expected GREEN: hard rejections are byte-identical; the two registered boundary/high-water cases mutate only their named metadata; every case has zero unintended effects; delayed valid callback is accepted and early jitter is bounded.
 
 **Full GREEN before staging:**
 
@@ -1965,6 +1980,7 @@ git commit -m 'fix: replace route on authoritative base correction'
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS/Services/EarnedShieldEffectStore.swift`
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS/Services/ActiveLockStore.swift`
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS/Services/DeviceEpochStore.swift`
+- Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS/Models/ShieldRecord.swift`
 - Create: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/EarnedShieldEffectStoreTests.swift`
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/ActiveLockStoreTests.swift`
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/MeteringTargetMembershipTests.swift`
@@ -2016,7 +2032,7 @@ nonisolated final class EarnedShieldEffectStore: @unchecked Sendable {
 }
 ```
 
-**TDD RED:** Inject crashes before/after prepared-envelope write, shield write/readback, applied-envelope write, recompute, release-pending write, CAS release/readback, and released write. Recover from `current == before`, `current == intendedAfter`, and CAS conflict. Include manual, taskPause, limit, earnedTime, block records, per-app records, and a third-party/future source record. Add the required real production race: DAM `EarnedShieldEffectStore.apply` writes earnedTime; an already-live `ActiveLockStore` actor performs an unrelated manual/taskPause/limit mutation; durable readback still contains earnedTime and every other source. Force a CAS conflict and prove no source is removed.
+**TDD RED:** Inject crashes before/after prepared-envelope write, shield write/readback, applied-envelope write, recompute, release-pending write, CAS release/readback, and released write. Recover from `current == before`, `current == intendedAfter`, and CAS conflict. Include manual, taskPause, limit, earnedTime, block records, per-app records, and a third-party/future source record whose unknown raw value must survive every reopen and re-encode. Add the required real production race: DAM `EarnedShieldEffectStore.apply` writes earnedTime; an already-live `ActiveLockStore` actor performs an unrelated manual/taskPause/limit mutation; durable readback still contains earnedTime and every other source. Force a CAS conflict and prove no source is removed.
 
 ```bash
 cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS
@@ -2053,7 +2069,7 @@ Expected full GREEN: every test present at this commit passes.
 
 ```bash
 cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS
-git add 'Evlin iOS/Services/EarnedShieldEffectStore.swift' 'Evlin iOS/Services/ActiveLockStore.swift' 'Evlin iOS/Services/DeviceEpochStore.swift' 'Evlin iOSTests/EarnedShieldEffectStoreTests.swift' 'Evlin iOSTests/ActiveLockStoreTests.swift' 'Evlin iOSTests/MeteringTargetMembershipTests.swift' 'Evlin iOS.xcodeproj/project.pbxproj'
+git add 'Evlin iOS/Services/EarnedShieldEffectStore.swift' 'Evlin iOS/Services/ActiveLockStore.swift' 'Evlin iOS/Services/DeviceEpochStore.swift' 'Evlin iOS/Models/ShieldRecord.swift' 'Evlin iOSTests/EarnedShieldEffectStoreTests.swift' 'Evlin iOSTests/ActiveLockStoreTests.swift' 'Evlin iOSTests/MeteringTargetMembershipTests.swift' 'Evlin iOS.xcodeproj/project.pbxproj'
 git diff --cached --check && git diff --cached --stat && git diff --cached && git diff --cached --name-only
 git commit -m 'feat: persist earned shield effects across processes'
 ```
@@ -2222,10 +2238,11 @@ git commit -m 'feat: recover canonical rollover effects'
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS/Services/EarnedMeteringRecoveryDriver.swift`
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS/Services/EarnedMeteringCallback.swift`
 - Create: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/MeteringConservativeResumeTests.swift`
+- Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/EarnedMeteringCallbackTests.swift`
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/BigKidStatePollerTests.swift`
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/EarnedTimeStoreTests.swift`
 
-**TDD RED:** Close the task/reflection gate while a route is active: callback high-water advances excluded paused minutes but creates no sample/shield/earned effect, and no monitor stop occurs. Reopen with backend `estimated_minutes = 17`: old paused epoch and route retire/tombstone, fresh epoch and fresh route use base 17 and `gate_resume_conservative`, registration/install/activation run, and first callback on the new route clears `resumeBoundaryPending` with zero effects. The second callback reports cumulative estimate from base 17. Race gate close during registration and activation; backend 200 paused leaves local selected v1/prior monitor, no local active new epoch, and recovery waits for another open snapshot. Test gate close does not stop an earned monitor merely because task/reflection closes.
+**TDD RED:** Close the task/reflection gate while a route is active: callback high-water advances excluded paused minutes but the serialized diff is limited to the two registered high-water fields plus diagnostics; no sample/shield/earned effect and no monitor stop occurs. Reopen and prove another callback on that old paused route is byte-identical. With backend `estimated_minutes = 17`, old paused epoch and route retire/tombstone, fresh epoch and fresh route use base 17 and `gate_resume_conservative`, registration/install/dualActive/activation run, and first callback on the new route clears `resumeBoundaryPending` with only its bounded metadata diff and zero effects. The second callback reports cumulative estimate from base 17. Race gate close during registration and activation; backend 200 paused preserves the prior local selection and prior functioning monitor (`.v1` during initial migration, `.v2` during later replacement), creates no locally active new epoch, and recovery waits for another open snapshot. Test gate close does not stop an earned monitor merely because task/reflection closes.
 
 ```bash
 cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS
@@ -2262,7 +2279,7 @@ Expected full GREEN: every test present at this commit passes.
 
 ```bash
 cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS
-git add 'Evlin iOS/Services/BigKidStatePoller.swift' 'Evlin iOS/Services/EarnedTimeStore.swift' 'Evlin iOS/Services/EarnedMeteringRecoveryDriver.swift' 'Evlin iOS/Services/EarnedMeteringCallback.swift' 'Evlin iOSTests/MeteringConservativeResumeTests.swift' 'Evlin iOSTests/BigKidStatePollerTests.swift' 'Evlin iOSTests/EarnedTimeStoreTests.swift'
+git add 'Evlin iOS/Services/BigKidStatePoller.swift' 'Evlin iOS/Services/EarnedTimeStore.swift' 'Evlin iOS/Services/EarnedMeteringRecoveryDriver.swift' 'Evlin iOS/Services/EarnedMeteringCallback.swift' 'Evlin iOSTests/MeteringConservativeResumeTests.swift' 'Evlin iOSTests/EarnedMeteringCallbackTests.swift' 'Evlin iOSTests/BigKidStatePollerTests.swift' 'Evlin iOSTests/EarnedTimeStoreTests.swift'
 git diff --cached --check && git diff --cached --stat && git diff --cached && git diff --cached --name-only
 git commit -m 'feat: resume metering with conservative replacement'
 ```
@@ -2358,7 +2375,7 @@ nonisolated enum MeteringV30ScenarioEncoder {
 }
 ```
 
-It constructs the production Task 4 DTOs from those exact V39 constants and writes sorted-key, ISO-8601 bytes. The scenario is pool 20/device cap 10: metadata-free `01-v1` reports threshold/estimate 5; registration uses authoritative base 5; activation uses the fixed route; `04-v2` reports route threshold 5 and cumulative estimate 10; metadata-free `05-stale-v1` reports threshold/estimate 10. Registration and activation use their exact request DTO bodies, and activation/v2 use the same route UUID. `manifest.json` records each filename, byte count, and SHA-256. The test requires exactly six nonempty regular files and recomputes every hash. Add `MeteringProductionComposition.swift` to DAM, keep `MeteringV30ScenarioEncoder.swift` app-only, and add neither to Push.
+It constructs the production Task 4 DTOs from those exact V39 constants and writes sorted-key, ISO-8601 bytes. The scenario is pool 20/device cap 10: metadata-free `01-v1` reports threshold/estimate 5; registration uses authoritative base 5; activation uses the fixed route; `04-v2` reports route threshold 5 and cumulative estimate 10; metadata-free `05-stale-v1` reports threshold/estimate 10. Registration and activation use their exact request DTO bodies, and activation/v2 use the same route UUID. `manifest.json` records filename, byte count, and SHA-256 for exactly the five request files; it lists itself only as the manifest schema/version and never attempts a self-hash. The test requires exactly six nonempty regular files, recomputes all five request hashes, and verifies the manifest separately. Add `MeteringProductionComposition.swift` to DAM, keep `MeteringV30ScenarioEncoder.swift` app-only, and add neither to Push.
 
 **GREEN:**
 
@@ -2419,12 +2436,22 @@ set -euo pipefail
 IOS=/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS
 BACKEND=/Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend
 ARTIFACT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/evlin-v30.XXXXXX")"
-trap 'rm -rf "$ARTIFACT_DIR"' EXIT
+SIM_UDID="$(xcrun simctl list devices available | awk -F '[()]' '/iPhone 17 Pro \(/ { print $2; exit }')"
+test -n "$SIM_UDID"
+xcrun simctl boot "$SIM_UDID" >/dev/null 2>&1 || true
+xcrun simctl bootstatus "$SIM_UDID" -b
+xcrun simctl spawn "$SIM_UDID" launchctl setenv EVLIN_V30_ARTIFACT_DIR "$ARTIFACT_DIR"
+cleanup() {
+  xcrun simctl spawn "$SIM_UDID" launchctl unsetenv EVLIN_V30_ARTIFACT_DIR >/dev/null 2>&1 || true
+  rm -rf "$ARTIFACT_DIR"
+}
+trap cleanup EXIT
 
 cd "$IOS"
-EVLIN_V30_ARTIFACT_DIR="$ARTIFACT_DIR" xcodebuild \
+xcodebuild \
   -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' \
-  -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3.1' \
+  -destination "platform=iOS Simulator,id=$SIM_UDID" \
+  -parallel-testing-enabled NO \
   IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' \
   -only-testing:'Evlin iOSTests/MeteringV30ProductionEncoderTests/testWritesCrossStackArtifact' test
 
@@ -2550,7 +2577,7 @@ git commit -m 'feat: surface bounded metering coverage' -m "Phase3-Depends-On: $
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/MeteringTargetMembershipTests.swift`
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS.xcodeproj/project.pbxproj`
 
-**TDD RED:** Seed each persisted work phase, launch only the app entry, then only the DAM entry, and require due recovery. Cover app active/onAppear, DAM interval start/threshold, auth sign-out, family gone, root owner change, Push policy persistence, owner change during async response, offline restart, future-day install, expired install claim adoption, shield envelope, identity cleanup, rollover, and tombstone collection. Assert Push never creates a center or invokes start/stop. Compile all three targets and require exact membership.
+**TDD RED:** Seed each persisted work phase, launch only the app entry, then only the DAM entry, and require due recovery. Cover app active/onAppear, DAM interval start/threshold, auth sign-out, family gone, root owner change, Push policy persistence, owner change during async response, offline restart, future-day install, expired install claim adoption, shield envelope, identity cleanup, rollover, and tombstone collection. Assert Push never creates a center or invokes start/stop. Compile all three targets and require exact membership. Pin the current zero-availability-guard baseline for `NotificationService.swift`: source tests reject `#available`/`@available` gates for iOS 18 through 26 and reject every Task 21 symbol whose SDK declaration is introduced after iOS 17.6. An unavailable unguarded symbol must fail the 17.6 build; an availability wrapper must fail the source test.
 
 ```bash
 cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS
@@ -2592,7 +2619,7 @@ final class DAMMeteringEntry {
 }
 ```
 
-Both read exact `evlin.baseURL` and `evlin.childId`; malformed or absent values no-op without deleting work. `AppMeteringEntry` calls Task 18 factory with `.app`; `DAMMeteringEntry` calls it with `.deviceActivityMonitor` and retains one instance ID for process lifetime. `Evlin_iOSApp` calls app recovery on appear/active. DAM calls recovery on both callback kinds and routes earned names through `handle` before effects. Push may write root policy/work under the lock but the source scan must prove it has no `DeviceActivityCenter`, `DatedRouteInstaller`, `startMonitoring`, or `stopMonitoring` token.
+Both read exact `evlin.baseURL` and `evlin.childId`; malformed or absent values no-op without deleting work. `AppMeteringEntry` calls Task 18 factory with `.app`; `DAMMeteringEntry` calls it with `.deviceActivityMonitor` and retains one instance ID for process lifetime. `Evlin_iOSApp` calls app recovery on appear/active. DAM calls recovery on both callback kinds and routes earned names through `handle` before effects. Push may write root policy/work under the lock but the source scan must prove it has no `DeviceActivityCenter`, `DatedRouteInstaller`, `startMonitoring`, or `stopMonitoring` token. It also proves no `#available`/`@available` gate can conceal an iOS-26-only path from the 17.6 build, and records the SDK availability of every newly referenced Push API.
 
 **GREEN:**
 
@@ -2692,7 +2719,7 @@ git commit -m 'refactor: remove earned arm signature churn'
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/EarnedMeteringCallbackTests.swift`
 - Create: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/MeteringT2DemolitionTests.swift`
 
-**TDD RED:** Require `stale_ladder_drop` and its pool/cap raw ceiling branch to be absent. Prove a delayed event planned by its immutable route remains valid after current policy changes, while an actual old-route tombstone remains zero-effect.
+**TDD RED:** Require `stale_ladder_drop` and its pool/cap raw ceiling branch to be absent. Prove a delayed event planned by its immutable route remains valid across mutable usage/remaining changes that do not alter the six-field generation. A real policy revision change must create a new generation, retire/tombstone the old route, and make its delayed event zero-effect; an independently old-date tombstone remains zero-effect as well.
 
 ```bash
 cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS
@@ -3025,13 +3052,21 @@ git commit -m 'refactor: retire duplicate earned activity lifecycle'
 **Files:**
 
 - Create: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/scripts/verify_metering_phase3_completion.sh`
-- Create: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/MeteringPhase3CompletionVerifierTests.swift`
+- Create: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/scripts/test_verify_metering_phase3_completion.py`
 
-**TDD RED:** Run verifier tests before the script exists. Fixtures must cover missing subject, duplicate subject, duplicate SHA, reversed same-repo ancestry, absent/wrong cross-repo dependency trailer, base not ancestor, empty log, zero Release products, missing exact XCTest executable, DEBUG token in Release, wrong fixture hash, and a report that claims a physical pass. Also assert Task 29 pre-report mode expects Tasks 01-29 exactly once and final mode expects Tasks 01-30 exactly once.
+**TDD RED:** Run a real host-side subprocess test before the script exists. The
+test invokes the actual shell verifier against temporary fixture repositories;
+it is not an app-hosted XCTest and does not copy verifier logic. Fixtures must
+cover missing subject, duplicate subject, duplicate SHA, reversed same-repo
+ancestry, absent/wrong cross-repo dependency trailer, base not ancestor, empty
+log, zero Release products, missing exact XCTest executable, DEBUG token in
+Release, wrong fixture hash, and a report that claims a physical pass. Also
+assert Task 29 pre-report mode expects Tasks 01-29 exactly once and final mode
+expects Tasks 01-30 exactly once.
 
 ```bash
 cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS
-xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3.1' IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' -only-testing:'Evlin iOSTests/MeteringPhase3CompletionVerifierTests' test
+/Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend/.venv/bin/python -m pytest -q scripts/test_verify_metering_phase3_completion.py
 ```
 
 Expected RED: script is missing and fixture invocation exits 127.
@@ -3061,14 +3096,20 @@ The verifier writes every command's unfiltered stdout/stderr to a nonempty file 
 
 ```bash
 cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend
-.venv/bin/python -m pytest -q tests/test_metering_epoch_vector_contract.py tests/test_target_gate_resume_helpers.py
+.venv/bin/python -m pytest -q tests/test_metering_epoch_vector_contract.py
+.venv/bin/python scripts/run_limits_db_regression.py tests/test_target_gate_resume_helpers.py
 .venv/bin/python scripts/run_limits_db_regression.py tests/test_metering_epoch_models.py tests/test_metering_epoch_registration.py tests/test_metering_epoch_sample_adapter.py tests/test_metering_epoch_phase2_integration.py tests/test_metering_epoch_lifespan.py tests/test_metering_epoch_phase3_vectors.py
 bash scripts/run_metering_v30_cross_stack.sh
 
 cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS
 xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3.1' IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' test
-xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5),OS=26.3.1' IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' test
+xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5),OS=26.3.1' IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' -skip-testing:'Evlin iOSTests/ProfileSnapshotTests' test
 ```
+
+The iPad run excludes only `ProfileSnapshotTests`, whose checked-in baselines
+are intentionally pinned to iPhone 17 Pro and iPad (A16). The iPhone run still
+executes that suite; this exception is recorded in raw evidence and cannot be
+used to skip a Phase 3 test.
 
 Build Release before any binary scan using a fresh derived directory:
 
@@ -3095,13 +3136,19 @@ Release-iphoneos/Evlin iOS.app/PlugIns/Evlin iOSTests.xctest/Evlin iOSTests
 
 Require product count exactly six, each `test -s`, and each `file` output contains `Mach-O`. Run `strings` on all six and fail if any contains `DebugAppGroupMeteringClock` or `evlin.metering.debugClockNow`. Separately preprocess/compile the Release source and require the DEBUG provider symbol absent, so the binary scan cannot pass vacuously through a missing product. Hash the six products, both vector fixtures, every raw log, commit manifest, target-membership manifest, status-before files, dirty-diff-before hashes, and R-16 before/after hashes.
 
-The final JSON status is `automated: passed`, `physical: pending`, `releasable: false`; any skipped DB test, empty artifact, absent product, dirty-baseline mismatch, report physical-pass claim, or hash mismatch fails.
+The verifier parses the rulebook registration table and Task 30 demolition table
+as structured Markdown and compares every row's exact required vector set to
+the committed R-16 map. A state name in prose, a missing V36/V37/V38, or an
+extra substitute vector fails. The final JSON status is `automated: passed`,
+`physical: pending`, `releasable: false`; any skipped DB test, empty artifact,
+absent product, dirty-baseline mismatch, report physical-pass claim, or hash
+mismatch fails.
 
 **GREEN:**
 
 ```bash
 cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS
-xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3.1' IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' -only-testing:'Evlin iOSTests/MeteringPhase3CompletionVerifierTests' test
+/Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend/.venv/bin/python -m pytest -q scripts/test_verify_metering_phase3_completion.py
 ```
 
 Expected GREEN: verifier fixture tests pass. The real Tasks 01-29 history and automated evidence check runs immediately after the Task 29 commit below.
@@ -3114,7 +3161,7 @@ cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend
 bash scripts/run_metering_v30_cross_stack.sh
 cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS
 xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3.1' IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' test
-xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5),OS=26.3.1' IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' test
+xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5),OS=26.3.1' IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' -skip-testing:'Evlin iOSTests/ProfileSnapshotTests' test
 ```
 
 Expected full GREEN: all backend tests execute without skips, the V30 harness consumes nonempty Swift artifacts, and both simulator schemes pass. Task 29 post-commit `pre-report` still remains mandatory because commit ancestry cannot be proved before this task's commit exists.
@@ -3123,7 +3170,7 @@ Expected full GREEN: all backend tests execute without skips, the V30 harness co
 
 ```bash
 cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS
-git add scripts/verify_metering_phase3_completion.sh 'Evlin iOSTests/MeteringPhase3CompletionVerifierTests.swift'
+git add scripts/verify_metering_phase3_completion.sh scripts/test_verify_metering_phase3_completion.py
 git diff --cached --check && git diff --cached --stat && git diff --cached && git diff --cached --name-only
 git commit -m 'test: add metering phase 3 completion verifier'
 bash scripts/verify_metering_phase3_completion.sh pre-report
@@ -3160,13 +3207,13 @@ Expected RED: Task 30 commit is absent and supplied report SHA does not exist.
 | T1 | scalar arm signature churn | six-field generation + eight dated routes | V01/V02/V03/V06/V07/V24 + real-installer 121 reconciliation log | AUTOMATED PASS |
 | T2 | raw pool/cap stale-ladder ceiling | immutable route provenance + tombstone | V04/V05/V08/V13/V27 + T2 log | AUTOMATED PASS |
 | T3 | fresh-at-fire shield gate | strict callback trust + shield envelope | V04/V05/V10/V12/P3V01 + T3 log | AUTOMATED PASS |
-| Phase 3 T4 | backend headroom veto | local effect envelope + exact CAS release | V15/V16/P3V01/P3V02 + T4 log | AUTOMATED PASS |
+| Phase 3 T4 | backend headroom veto | local effect envelope + exact CAS release | V15/V16/P3V01/P3V02/V36 + T4 log | AUTOMATED PASS |
 | T5 | device plus-five heuristic | 30-second default / 60-second maximum jitter | V04/V05/V19/V30 + T5 log | AUTOMATED PASS |
-| T7 | counter-recovery flags | paused high-water + conservative replacement + one boundary discard | V06/V10/V11/V12/V33/V34 + T7 log | AUTOMATED PASS |
-| T8 | dual activity lifecycle implementation | Device Epoch Store + LegacyCompatibilityMonitorState | V01/V08/V09/V13/V21/V22/V28/V36/V37 + T8 log | AUTOMATED PASS |
+| T7 | counter-recovery flags | paused high-water + conservative replacement + one boundary discard | V06/V10/V11/V12/V37 + T7 log | AUTOMATED PASS |
+| T8 | dual activity lifecycle implementation | Device Epoch Store + LegacyCompatibilityMonitorState | V01/V08/V09/V13/V21/V22/V28/V38 + T8 log | AUTOMATED PASS |
 ```
 
-The report must state that its own commit SHA cannot be embedded recursively. It records the report blob SHA available before commit; the exact commit SHA is written by Task 29 final mode to `.superpowers/evidence/metering-phase3/report-commit-attestation.json` after commit. List all physical gates as `PENDING` and `releasable: false`.
+The report must state that neither its own commit SHA nor its own Git blob/SHA-256 can be embedded recursively. It contains no self-hash field. After the report-only commit, Task 29 final mode computes the committed report blob, content SHA-256, and exact commit SHA and writes all three to `.superpowers/evidence/metering-phase3/report-commit-attestation.json`. List all physical gates as `PENDING` and `releasable: false`.
 
 **Full GREEN before staging:** Re-run Task 29 pre-report mode against committed Tasks 01-29 and the populated uncommitted report:
 
@@ -3198,7 +3245,7 @@ Expected GREEN: Tasks 01-30 are exact, unique, ordered, ancestral, and hash-atte
 The implementation may report **AUTOMATED PASSED** only when Task 29 final mode exits zero and all of the following are recorded with raw-log hashes:
 
 1. Backend pure tests and disposable-DB suites pass without skips; V30 consumes Swift production bytes through real routes and rows.
-2. Full iPhone 17 Pro and iPad Pro simulator schemes pass at deployment target 17.6 on installed runtime 26.3.1.
+2. Full iPhone 17 Pro and iPad Pro simulator schemes pass at deployment target 17.6 on installed runtime 26.3.1; only the unrelated device-pinned `ProfileSnapshotTests` suite is excluded from the M5 iPad run and remains executed on its supported iPhone destination.
 3. App, DAM, Report, Shield Config, Push, and XCTest Release products are built first, exactly six nonempty Mach-O paths are found, and DEBUG clock tokens are absent.
 4. V01-V39 and P3V01/P3V02 reach their required production effects; rejected routes have zero effects; corrected/resumed/rolled epochs always have fresh route IDs.
 5. Every persisted work item has owner, retry schedule, terminal condition, R-16 row, and a tested app/DAM/Push-appropriate recovery trigger.

@@ -76,10 +76,14 @@ legacy active/pending/retiring generation state is migrated into
 `LegacyCompatibilityMonitorState`; its real callbacks and durable v1 queue
 continue while v2 is unadvertised, offline, registration-only, or recovering
 after restart. A new activation acknowledgement endpoint ratchets the backend
-device only after the v2 route is started, verified, and locally prepared to
-accept callbacks. The legacy monitor stops only after that acknowledgement and
-durable local v2 activation. This ordering always leaves either functional v1
-or a verified v2 monitor.
+device only after the v2 route is started, verified, and a durable local
+`dualActive` transaction has authorized that exact route to accept callbacks
+while keeping the legacy lane functional. During `dualActive`, v1 and v2
+cumulative samples may overlap; the backend's monotonic accepted estimate makes
+their overlap idempotent rather than additive. The legacy monitor stops only
+after the acknowledgement is durably reflected as local v2-only state. This
+closes both crash windows: before the backend ratchet v1 remains countable, and
+after the backend ratchet v2 was already locally authorized.
 
 ## 1. Purpose
 
@@ -487,6 +491,11 @@ closed it leaves the epoch paused, leaves the per-device ratchet unchanged, and
 returns `status=paused`, `epoch_status=paused`, the current
 `metering_protocol_version`, and the authoritative `snapshot`.
 
+No activation service accepts a caller-supplied clock instant, canonical date,
+or timezone override. It consumes locked canonical authority issued from one
+production server-clock capture. Tests control that production clock seam;
+wire callers cannot choose the instant used for activation or ratcheting.
+
 ### 6.5 One Versioned Device Epoch Store
 
 One App Group root is the sole Phase 3 payload authority. Every transaction is
@@ -500,7 +509,7 @@ daily epochs and activeEpochID
 immutable routes and route tombstones
 legacy compatibility monitor state
 registration, activation, and sample queues
-activity install/start/verify/activate/stop acknowledgements
+activity install/start/verify/dualActive/activate/stop acknowledgements
 install claim/lease arbitration
 coverage state
 shield-effect operation references
@@ -518,11 +527,15 @@ idempotent.
 The sample queue, exact legacy lifecycle import, and protocol-1 backfill are
 active before any production path may select protocol 2. Advertising v2 or
 receiving registration HTTP 200 does not stop or disable v1. The owner remains
-locally selected as protocol 1 and the backend device remains ratcheted at 1
-until the new v2 route is started, schedule/events are daemon-verified, local
-callback acceptance is durably prepared, and the activation endpoint returns
-`activated` or `already_activated`. Only then does one local transaction select
-v2 and mark the legacy monitor retiring; legacy stop follows that transaction.
+backend-ratcheted at 1 until the new v2 route is started, schedule/events are
+daemon-verified, and one durable local transaction enters `dualActive` for the
+exact owner/epoch/route/generation. `dualActive` accepts trusted v2 callbacks
+and preserves functional v1 callbacks; overlapping cumulative estimates are
+committed by monotonic max, never summed. Only after that transaction may the
+activation request ratchet the backend. Its `activated`/`already_activated`
+response, or an idempotent recovery read after a lost response, lets one local
+transaction select v2-only and mark the legacy monitor retiring; legacy stop
+follows that transaction.
 Future routes cannot be registered because Phase 2 validates registration
 against canonical today, so they carry explicit `futurePlanned` authorization.
 Today's route registers before install; if offline, it may carry durable
@@ -540,9 +553,10 @@ exact order:
    `offlinePending` authorization. Registration 200 is not a protocol ratchet.
 3. Claim the pending start, start the new dated route, then verify it through
    `activities`, `schedule(for:)`, and `events(for:)`.
-4. Durably prepare the verified route to queue trusted callbacks, call the
-   activation endpoint, and require `activated`/`already_activated` with an
-   active epoch status.
+4. Atomically enter `dualActive` for the verified route. Both exact v1 and v2
+   callbacks remain countable, and duplicate cumulative coverage converges by
+   monotonic max. Only then call the activation endpoint and require
+   `activated`/`already_activated` with an active epoch status.
 5. Atomically activate the verified route and epoch and select owner protocol 2.
    A replacement's old route/epoch was already logically retired/tombstoned when
    fresh IDs were created; only now append its physical `pendingStop` work. For
@@ -664,6 +678,11 @@ then recomputes ManagedSettings. This must preserve an earned-time envelope
 written by DAM when an already-live app actor later performs an unrelated
 manual, `taskPause`, `.limit`, block, or third-party-record mutation. Exact CAS
 conflicts leave the newer durable record untouched.
+
+`ShieldSource` persistence is forward-compatible without collapsing an unknown
+raw source to `.manual`. Known sources retain their named conveniences, while
+an unknown future raw value round-trips losslessly through decode, merge, CAS,
+and encode. This is provenance compatibility, not a second lock authority.
 
 For an accepted protocol-v2 sample:
 
@@ -821,10 +840,13 @@ it.
   HTTP 200. The exact legacy monitor and queue continue while offline and across
   restart. Registration, a 409, a start attempt, and verification alone cannot
   ratchet it.
-- The new route is started and daemon-verified before local callback acceptance
-  is durably prepared. The activation endpoint then atomically records the route
-  and ratchets the backend device. On its `activated`/`already_activated`
-  response, local state selects v2 and only then retires/stops legacy.
+- The new route is started and daemon-verified before local state durably enters
+  `dualActive`. In that state both lanes remain countable without additive
+  double counting. The activation endpoint then atomically records the route
+  and ratchets the backend device. A lost response cannot create a gap because
+  v2 was already accepted locally; recovery repeats activation idempotently.
+  On its `activated`/`already_activated` result, local state selects v2-only and
+  only then retires/stops legacy.
 - After activation, the backend never counts a later v1 sample for that device.
   It returns HTTP 200 with `counted=false`, `warning=legacy_after_v2` so downgrade
   cannot create a false lock or retry storm.
@@ -869,6 +891,15 @@ down its dated monitor merely because tasks/reflection closed the gate.
 Thresholds observed while paused update only that paused epoch's ignored raw
 high-water and diagnostics and have no sample, ledger, network, notification,
 or shield effects.
+
+This is an explicitly bounded metadata mutation, not a byte-identical
+rejection. While the gate remains closed, only `lastRawThresholdMinutes`,
+`excludedWhilePausedMinutes`, and the corresponding diagnostic entry may
+change. Every business/effect field remains byte-identical. Once the gate is
+observed open, callbacks on the old paused route do not advance even those
+fields; recovery creates the fresh conservative epoch/route. Likewise, the
+first `resumeBoundaryPending` callback may set the new route's excluded
+boundary and clear that flag, but creates no business effect.
 
 When authoritative child state first reports the gate open, the app or DAM uses
 only `earned_time_runtime.estimated_minutes` to atomically create a new epoch,
@@ -1116,21 +1147,23 @@ pytest. They must cover at least:
     byte-identical;
 26. `excessiveActivities` preserves verified routes, records the actual
     ready-through date, and never stops the last active route to make room;
-27. activity/event route-ID mismatch, malformed names, prepared routes,
+27. activity/event route-ID mismatch, malformed names, pre-`dualActive` routes,
     tombstoned routes, and registration-pending callbacks without current-day
     `offlinePending` authorization each have zero effects; an authorized offline
     callback creates only one registration-blocked queue item;
-28. crashes after durable pending start, Apple start, verification, activation,
-    retirement, Apple stop, and stop acknowledgement recover the same IDs and
-    converge without duplicate activation;
+28. crashes after durable pending start, Apple start, verification,
+    `dualActive`, backend activation commit before its response, local v2-only
+    activation, retirement, Apple stop, and stop acknowledgement recover the
+    same IDs and converge without duplicate activation or a zero-metering gap;
 29. crashes before/after shield mutation, identity-owner replacement, and each
     rollover acknowledgement converge by exact CAS without losing unrelated
     sources or admitting stale callbacks;
 30. a real production v1 callback travels through the Apple DTO and durable v1
     queue; registration alone leaves v1 functional; the v2 route is started,
-    verified, locally prepared, and activation-acknowledged before ratchet; the
-    next real callback uses v2; and a delayed v1 retry ends `legacy_after_v2`
-    without ledger or shield effects;
+    verified, and locally committed `dualActive`; v1 and v2 callbacks on both
+    sides of the backend activation commit advance one monotonic ledger without
+    double counting; after v2-only commit, the next real callback uses v2 and a
+    delayed v1 retry ends `legacy_after_v2` without ledger or shield effects;
 31. `P3V01` uses production `ShieldRecord` with `.taskPause` and reaches the
     shared effect store/CAS path; vector outputs assert the persisted records,
     not a test-only projection;
@@ -1307,8 +1340,9 @@ This phase is independently releasable and does not wait for epoch migration.
 - Install non-repeating canonical dated schedules for today plus seven days.
   Register today before install except durable `offlinePending`; mark future
   routes `futurePlanned`; arbitrate app/DAM starts with the 60-second durable
-  lease; start and verify replacements before activation; preserve functional
-  v1 until backend activation acknowledgement. Replacement transactions
+  lease; start and verify replacements before activation; enter durable
+  `dualActive` before the backend ratchet and preserve functional v1 until the
+  v2-only local commit after activation acknowledgement. Replacement transactions
   logically retire/tombstone old epoch/route IDs immediately, but retain their
   Apple monitors as crash-safe stop targets until the new route is active;
   recover every nonterminal phase using the same IDs.
