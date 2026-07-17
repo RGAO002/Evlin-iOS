@@ -1,8 +1,8 @@
 # Metering Epoch Phase 3 Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` to implement this plan task-by-task in the existing main workspaces. Do not begin execution until two independent reviewers change this document from **NEEDS RE-REVIEW** to PASS.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` to implement this plan task-by-task in the existing main workspaces. Do not begin execution until two independent reviewers change this document from **NEEDS FINAL RE-REVIEW** to PASS.
 
-**Status:** NEEDS RE-REVIEW after review round 2
+**Status:** NEEDS FINAL RE-REVIEW after review round 5
 
 **Goal:** Ship the additive backend protocol and iOS device epoch runtime that preserve functional v1 until verified v2 activation, use immutable dated routes, recover every cross-process/crash boundary, and replace the Phase 3 R-16 mechanisms without inventing raw usage.
 

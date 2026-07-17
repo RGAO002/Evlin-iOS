@@ -1,7 +1,7 @@
 # Metering Epoch Reliability Design
 
 **Date:** 2026-07-15
-**Status:** Revised 2026-07-17 (review round 2); NEEDS RE-REVIEW
+**Status:** Revised 2026-07-17 (review round 5); NEEDS FINAL RE-REVIEW
 
 **Platform floor:** iOS 17.6 and iPadOS 17.6 for the app and all Screen Time
 extensions. Capability spikes and release builds must exercise this floor even
