@@ -465,14 +465,16 @@ Registration is idempotent by `epochID`. The backend validates:
   family/profile/device scope.
 
 A base mismatch returns the authoritative snapshot and does not activate the
-epoch. In one local transaction the client retires the rejected epoch and route,
-tombstones the route, terminalizes every old-route queued sample with
-`superseded_by_authoritative_base`, and creates a corrected epoch, a fresh route,
-fresh install work, and fresh registration work from
-`authoritative_snapshot.estimated_minutes`. The corrected monitor is registered,
-started, verified, and activated before any prior functioning monitor is
-stopped. A second mismatch is terminal; no registered provenance or route is
-edited or reused in place.
+candidate epoch. In one local transaction the client terminalizes only that
+rejected candidate epoch, route, and candidate-route queued samples with
+`superseded_by_authoritative_base`; the prior functioning epoch and route remain
+active. It creates a corrected candidate epoch, a fresh route, fresh install
+work, and fresh registration work from
+`authoritative_snapshot.estimated_minutes`. The corrected monitor completes the
+dual-v2 handoff below before the prior functioning route is retired or stopped.
+A second mismatch is terminal for the candidate and still leaves the prior
+functioning route untouched; no registered provenance or route is edited or
+reused in place.
 
 The corrected backend registration response keeps the existing `status`,
 `epoch_id`, `metering_protocol_version`, and authoritative `snapshot` fields and
@@ -484,8 +486,11 @@ snapshot; no duplicate snapshot field is added.
 The backend adds idempotent
 `POST /child/earned-time/epochs/{epoch_id}/activation`. Its request carries
 `protocol_version`, `device_id`, `route_id`, and `verified_at`. The endpoint
-rechecks epoch ownership/currentness and the accounting gate under the device
-row lock. It stores `activation_route_id` and `activated_at` and ratchets the
+observes device scope, takes the profile advisory lock, row-locks and revalidates
+device family/profile/mode, then rechecks exact epoch family/profile/device,
+protocol, canonical date/timezone, current policy revision, currently selected
+active enforcement set, route idempotency, verification timestamp, and the
+accounting gate. It stores `activation_route_id` and `activated_at` and ratchets the
 device to protocol 2 only for `activated` or `already_activated`. If the gate is
 closed it leaves the epoch paused, leaves the per-device ratchet unchanged, and
 returns `status=paused`, `epoch_status=paused`, the current
@@ -510,6 +515,7 @@ immutable routes and route tombstones
 legacy compatibility monitor state
 registration, activation, and sample queues
 activity install/start/verify/dualActive/activate/stop acknowledgements
+v2 route handoff with exact from/to epoch and route IDs
 install claim/lease arbitration
 coverage state
 shield-effect operation references
@@ -536,16 +542,36 @@ activation request ratchet the backend. Its `activated`/`already_activated`
 response, or an idempotent recovery read after a lost response, lets one local
 transaction select v2-only and mark the legacy monitor retiring; legacy stop
 follows that transaction.
+
+Every v2-to-v2 replacement uses a separate durable `V2RouteHandoff`. The prior
+epoch/route remains locally active while the replacement route is physically
+started and daemon-verified. One transaction then enters `dualV2`, authorizing
+both exact routes and queueing replacement callbacks without retiring the prior
+route. Recovery first settles every deliverable prior-route sample and waits for
+any in-flight prior delivery. Under the same Device Epoch Store lock used by
+callbacks, it then requires no nonterminal prior-route sample work and advances
+the handoff to `cutoverReady`. A prior callback racing this barrier either queues
+before it and prevents the transition, or arrives after it and is discarded
+without mutation; replacement callbacks remain durably queued waiting for
+registration. Only `cutoverReady` may send registration and atomically replace
+the backend epoch. If that response is lost, the replacement route is already
+countable locally and its queued samples retry idempotently; prior-route samples
+become terminal only after the backend cutover. Overlapping cumulative samples
+from the two exact routes converge by monotonic maximum for the same owner/day,
+never by addition. Activation of the replacement and one local active commit
+then retire/tombstone the prior route and schedule its physical stop. Thus every
+crash boundary has at least one countable route and no overlap can double count.
 Future routes cannot be registered because Phase 2 validates registration
 against canonical today, so they carry explicit `futurePlanned` authorization.
-Today's route registers before install; if offline, it may carry durable
-`offlinePending`, but callbacks remain queued with zero business effects until
-registration resolves.
+An initial v1-to-v2 route registers before install. A v2-to-v2 replacement is
+started and verified before its registration cutover, under the explicit
+`dualV2` handoff. If offline, a candidate may carry durable `offlinePending`;
+callbacks are queued without business effects until registration resolves,
+while the prior functioning route remains authoritative.
 
 ### 6.6 Crash-Safe Install And Retirement
 
-Generation, day, pause-resume, and base-correction replacement follows this
-exact order:
+Initial v1-to-v2 migration follows this exact order:
 
 1. Atomically create the generation/epoch/route, registration work, and durable
    `pendingStart` install work.
@@ -557,12 +583,33 @@ exact order:
    callbacks remain countable, and duplicate cumulative coverage converges by
    monotonic max. Only then call the activation endpoint and require
    `activated`/`already_activated` with an active epoch status.
-5. Atomically activate the verified route and epoch and select owner protocol 2.
-   A replacement's old route/epoch was already logically retired/tombstoned when
-   fresh IDs were created; only now append its physical `pendingStop` work. For
-   initial v1 migration, only now mark the legacy monitor retiring.
+5. Atomically activate the verified route and epoch and select owner protocol 2;
+   only now mark the legacy monitor retiring.
 6. Stop old canonical activity names and acknowledge their absence before
    terminalizing the stop work or tombstone.
+
+Every generation, day, pause-resume, or base-correction v2-to-v2 replacement
+instead follows this exact order:
+
+1. Keep the prior epoch, route, and monitor active. Atomically create only the
+   candidate epoch/route plus install and registration work.
+2. Claim, start, and daemon-verify the candidate monitor while the prior route
+   continues to authorize callbacks.
+3. Atomically enter `V2RouteHandoff.dualV2` with exact from/to epoch, route, and
+   generation IDs. Both routes are locally countable; cumulative overlap merges
+   by monotonic maximum.
+4. Deliver every queued/in-flight prior-route sample. In one callback-serialized
+   transaction require no nonterminal prior work and enter `cutoverReady`; after
+   this barrier only the candidate route may enqueue business work.
+5. Register the candidate. That transaction may retire the prior backend epoch.
+   A lost response leaves local `cutoverReady` intact, so candidate callbacks remain
+   durably queued and retry while prior callbacks resolve as accepted-before-
+   cutover or terminal-after-cutover.
+6. Activate or idempotently recover the candidate, then atomically make it the
+   sole local active route. Only this transaction retires/tombstones the prior
+   local route and appends its physical `pendingStop` work.
+7. Stop the prior canonical activity and acknowledge absence before collecting
+   its tombstone and handoff envelope.
 
 Horizon fill for a future date is the explicit exception to step 1: it persists
 an immutable route with a reserved epoch UUID plus `futurePlanned/pendingStart`,
@@ -574,9 +621,10 @@ The app or DAM obtains that state through authenticated `GET /child/state` with
 `X-Evlin-Child-Device-ID`. A failed/missing runtime fetch leaves the dated route
 non-authorizing and cannot be replaced with a local estimate.
 
-The old active route or legacy monitor is never stopped before the new route is
-verified and active. A crash at every numbered boundary reopens into the same
-IDs and resumes the same phase. App and DAM may both recover `pendingStart`, so
+The old active route or legacy monitor is never logically retired locally or
+physically stopped before the new route is verified and active. A crash at every
+numbered boundary reopens into the same IDs and resumes the same phase. App and
+DAM may both recover `pendingStart`, so
 each install work item carries a claim with a unique token, process role,
 process instance ID, `claimedAt`, and `expiresAt`. The claim lease is exactly 60
 seconds. Under the Device Epoch Store lock only one process may transition
@@ -878,8 +926,9 @@ next 120 unchanged real poll reconciliations
 
 Pool/cap revision, timezone, exact persisted selection bytes, or enforcement-set
 changes create one new six-field generation and its eight-date plan. The store
-persists `pendingStart` before external work, registers today's epoch first,
-starts and verifies new routes before activation, then retires/stops old routes.
+persists `pendingStart` before external work, starts and verifies today's
+replacement route while the prior route remains active, commits `dualV2`, then
+registers and activates the replacement before retiring/stopping old routes.
 Future routes use `futurePlanned`; a current route may use `offlinePending`.
 Reopen recovery resumes the same route/work IDs. An install error never erases
 the last verified active route.
@@ -906,7 +955,9 @@ only `earned_time_runtime.estimated_minutes` to atomically create a new epoch,
 fresh route, fresh registration/install/activation work, and
 `resumeBoundaryPending=true` with reason `gate_resume_conservative`. The paused
 epoch/route remains physically installed until the replacement is registered,
-started, verified, and activated. If registration or activation returns paused,
+started, verified, and activated. It also remains the prior local route until
+the candidate completes `dualV2`, the prior-sample drain/`cutoverReady` barrier,
+and local activation. If registration or activation returns paused,
 local activation does not occur; recovery after a later open creates another
 fresh epoch and route rather than reviving either paused row.
 
@@ -936,10 +987,12 @@ The first trigger atomically writes `RolloverEffectsWork` with old/new dates,
 exact `oldEpochID`, `newEpochID`, `oldRouteID`, and `newRouteID`, plus pending
 acknowledgements for earned source reset, per-app reset, task state, bypass
 expiry, registration, dated install, activation, and old-route stop.
-Today's preinstalled route is not activated for effects until those items and
-current-day registration are reconciled. A delayed old route resolves through
-its tombstone and has zero effects even when current state otherwise looks
-valid. Manual, reflection, admin, block, and unrelated sources remain intact.
+Today's preinstalled route enters exact old→new `dualV2`, drains prior-date
+work, and enters `cutoverReady` before current-day registration can cut over
+backend authority. A delayed old route remains
+attributable only to its old date before cutover and resolves through its
+tombstone with zero effects after the new local activation. Manual, reflection,
+admin, block, and unrelated sources remain intact.
 
 If Evlin was force-quit, a route already installed for today can receive the
 callback and drive the same durable rollover recovery. This guarantee lasts
@@ -1131,9 +1184,10 @@ pytest. They must cover at least:
     `America/New_York`, device-local midnight does not roll the usage date or
     epoch, while canonical midnight does exactly once;
 22. changing the canonical timezone while the device timezone stays fixed
-    retires the old epoch, creates exactly one replacement epoch, rejects old
-    callbacks before mutation, and evaluates task bypass/override state against
-    the new canonical date without migrating prior-date markers;
+    creates exactly one replacement epoch/route, keeps the prior route countable
+    through exact `dualV2`, retires it only after replacement activation, rejects
+    post-cutover old callbacks before mutation, and evaluates task bypass/override
+    state against the new canonical date without migrating prior-date markers;
 23. rapid per-app updates converge by authoritative command version even when
     delivered out of order: newer `set` beats older `set`, newer `clear` leaves
     a tombstone that prevents an older `set` from resurrecting the rule, and
@@ -1170,8 +1224,9 @@ pytest. They must cover at least:
 32. an authoritative registration conflict uses only
     `authoritative_snapshot.estimated_minutes`, retires/tombstones the rejected
     route, terminalizes its queued samples, and creates fresh corrected epoch,
-    route, registration, install, and activation work before any old functioning
-    monitor is stopped;
+    route, registration, install, and activation work; corrected install/verify,
+    prior-work drain, and `cutoverReady` precede registration, and no old
+    functioning monitor is stopped before corrected activation;
 33. app and DAM race for one pending start: exactly one 60-second claim wins and
     one start occurs; after winner crashes, the loser no-ops before expiry and
     adopts an exact daemon installation after expiry without another start;
@@ -1215,7 +1270,9 @@ coverage and recovery envelopes
 ### 13.2 Virtual Time and Fault Injection
 
 - Swift uses an injected `MeteringClock` and fake `DeviceActivityCenter`.
-- Python routes/services accept `now_utc` and canonical usage-date injection.
+- Python tests monkeypatch the production `screen_time_clock.now_utc` seam.
+  Public routes/services accept no caller-selected clock instant, canonical
+  date, or timezone override, and canonical context can only be issuer-created.
 - A DEBUG-only App Group clock override drives extension day changes without
   changing the physical device clock. Release builds contain no override.
 - Tests advance seconds, five-minute thresholds, midnight, and multiple days in
@@ -1338,14 +1395,15 @@ This phase is independently releasable and does not wait for epoch migration.
   rollover effects. Every persisted work item has an owner, retry deadline,
   terminal condition, R-16 row, and app/DAM/Push-appropriate recovery trigger.
 - Install non-repeating canonical dated schedules for today plus seven days.
-  Register today before install except durable `offlinePending`; mark future
-  routes `futurePlanned`; arbitrate app/DAM starts with the 60-second durable
-  lease; start and verify replacements before activation; enter durable
-  `dualActive` before the backend ratchet and preserve functional v1 until the
-  v2-only local commit after activation acknowledgement. Replacement transactions
-  logically retire/tombstone old epoch/route IDs immediately, but retain their
-  Apple monitors as crash-safe stop targets until the new route is active;
-  recover every nonterminal phase using the same IDs.
+  Register an initial v1-to-v2 route before install except durable
+  `offlinePending`; mark future routes `futurePlanned`; arbitrate app/DAM starts
+  with the 60-second durable lease. Enter durable `dualActive` before the initial
+  backend ratchet and preserve functional v1 until the v2-only local commit after
+  activation acknowledgement. For every v2-to-v2 replacement, start and verify
+  the candidate while the prior route remains active, enter exact `dualV2`,
+  settle prior work and atomically enter `cutoverReady`, then register/activate
+  and only afterward retire/tombstone/stop the prior route.
+  Recover every nonterminal phase using the same IDs.
 - Extend backend schema, registry, routes, migration, and tests additively for
   `gate_resume_conservative`, response `epoch_status`, and the idempotent route
   activation acknowledgement. Registration validates authoritative base/gate;
@@ -1358,9 +1416,9 @@ This phase is independently releasable and does not wait for epoch migration.
   route from backend `estimated_minutes`; discard the first callback on that new
   route. Do not stop the paused monitor until the replacement is active, and do
   not create an exact-rebase or same-epoch resume branch.
-- On authoritative-base 409, replace both epoch and route, terminalize old-route
-  queued work, and start/verify/activate the corrected monitor before stopping
-  any prior functioning monitor.
+- On authoritative-base 409, terminalize only the rejected candidate epoch,
+  route, and queued work. Keep the prior functioning route active while the
+  corrected candidate completes the explicit dual-v2 handoff.
 - Reload/merge all durable shield and block records before every app-side
   `ActiveLockStore` mutation under `ActiveLockPersistenceLock`; recover earned
   shield effects by exact CAS without dropping unrelated sources.
@@ -1369,14 +1427,16 @@ This phase is independently releasable and does not wait for epoch migration.
   without destructive replacement.
 - **§11/R-16 completion gate:** the Phase 3 completion report must include a
   "本阶段拆除清单 + 向量证据" table for T1, T2, T3, the Phase 3 portion of T4,
-  overdue device-side T5 `+5` attribution, T7, and T8. Each row names the
+  device-side T11 `+5` heuristic, T7, and T8. Backend T5 remains Phase 2
+  evidence and cannot be closed by iOS work. Each row names the
   replacement, the commit that removes or
   narrows the old mechanism, and the golden vector that remains green after
   removal. Any deferred row requires a written owner, reason, and later phase;
   silence is a failed gate.
 - Phase 3 may not add an unregistered guard, flag, or veto. Before implementation,
   route/tombstone lifecycle, legacy compatibility, install authorization/phase,
-  install claim/lease, coverage state, registration/activation/ratchet state,
+  v2 route handoff, install claim/lease, coverage state,
+  registration/activation/ratchet state,
   process-role ownership, pause state, base correction, sample queue, retry
   schedule, shield envelope, identity cleanup, and rollover envelope must each
   be entered under rule-book §11/R-16 with replacement, deletion criterion, and
@@ -1417,7 +1477,7 @@ This phase is independently releasable and does not wait for epoch migration.
 - Observe the flagged legacy path for one release, verify no remaining
   production consumer, then remove it in a separate reviewed change.
 - **§11/R-16 final gate:** the Phase 6 completion report must reconcile every
-  T1-T10 row as removed, intentionally retained with Fred-approved written
+  T1-T11 row as removed, intentionally retained with Fred-approved written
   waiver, or assigned to a named follow-up with evidence that Phase 6 does not
   depend on it. It must attach the corresponding golden-vector result and the
   independently revertible removal commit for each removed mechanism.
