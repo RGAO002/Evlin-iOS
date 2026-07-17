@@ -437,6 +437,11 @@ final class MeteringEpochContractTests: XCTestCase {
             ),
             MeteringEpochContract.replacementReason(
                 active: active,
+                next: active,
+                explicitRecovery: .gateResumeConservative
+            ),
+            MeteringEpochContract.replacementReason(
+                active: active,
                 next: epochKey(usageDate: "2026-07-17"),
                 explicitRecovery: nil
             ),
@@ -457,7 +462,7 @@ final class MeteringEpochContractTests: XCTestCase {
             )
         ].compactMap { $0 }
 
-        XCTAssertEqual(reasons.count, 7)
+        XCTAssertEqual(reasons.count, 8)
         XCTAssertEqual(Set(reasons), Set(MeteringEpochReplacementReason.allCases))
     }
 

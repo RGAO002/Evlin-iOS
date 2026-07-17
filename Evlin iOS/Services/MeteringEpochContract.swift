@@ -33,11 +33,13 @@ nonisolated enum MeteringEpochReplacementReason: String, Codable, CaseIterable,
     case enforcementSetChange = "enforcement_set_change"
     case identityRecovery = "identity_recovery"
     case gateResumeExactRebase = "gate_resume_exact_rebase"
+    case gateResumeConservative = "gate_resume_conservative"
 }
 
 nonisolated enum MeteringExplicitRecovery: String, Codable, Equatable, Sendable {
     case identityRecovery = "identity_recovery"
     case gateResumeExactRebase = "gate_resume_exact_rebase"
+    case gateResumeConservative = "gate_resume_conservative"
 }
 
 nonisolated enum MeteringGenerationDecision: Equatable, Sendable {
@@ -160,6 +162,7 @@ nonisolated enum MeteringReplacementAxis: String, Codable, Equatable, Sendable {
 nonisolated enum MeteringReplacementRecoveryTrigger: String, Codable, Equatable, Sendable {
     case identityRecovered = "identity_recovered"
     case resumeExactRebase = "resume_exact_rebase"
+    case resumeConservative = "resume_conservative"
 }
 
 nonisolated struct MeteringReplacementClassificationInput: Codable, Equatable, Sendable {
@@ -838,6 +841,9 @@ nonisolated enum MeteringEpochContract {
         }
         if explicitRecovery == .gateResumeExactRebase {
             return .gateResumeExactRebase
+        }
+        if explicitRecovery == .gateResumeConservative {
+            return .gateResumeConservative
         }
         if active.usageDate != next.usageDate {
             return .dayRollover
@@ -1645,6 +1651,8 @@ nonisolated enum MeteringReferenceRules {
             explicitRecovery = .identityRecovery
         case .resumeExactRebase:
             explicitRecovery = .gateResumeExactRebase
+        case .resumeConservative:
+            explicitRecovery = .gateResumeConservative
         case nil:
             explicitRecovery = nil
         }

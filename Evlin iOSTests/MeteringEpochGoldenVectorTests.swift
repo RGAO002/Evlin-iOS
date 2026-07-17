@@ -384,7 +384,7 @@ final class MeteringEpochGoldenVectorTests: XCTestCase {
 
             if testCase.input.kind == .generationReadinessReplacement {
                 let reasons = actual.replacementReasons ?? []
-                XCTAssertEqual(reasons.count, 7, testCase.id)
+                XCTAssertEqual(reasons.count, 8, testCase.id)
                 XCTAssertEqual(
                     Set(reasons),
                     Set(MeteringEpochReplacementReason.allCases.map(\.rawValue)),

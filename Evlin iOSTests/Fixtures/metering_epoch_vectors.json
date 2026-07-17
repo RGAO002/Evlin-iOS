@@ -62,13 +62,14 @@
           { "changed_axis": "selection", "recovery_trigger": null },
           { "changed_axis": "enforcement_set", "recovery_trigger": null },
           { "changed_axis": "identity", "recovery_trigger": "identity_recovered" },
-          { "changed_axis": "gate", "recovery_trigger": "resume_exact_rebase" }
+          { "changed_axis": "gate", "recovery_trigger": "resume_exact_rebase" },
+          { "changed_axis": "gate", "recovery_trigger": "resume_conservative" }
         ]
       },
       "expected": {
         "ready": { "armed": true, "first_threshold_exposed": true },
         "not_ready_variants": ["not_ready", "not_ready", "not_ready", "not_ready"],
-        "replacement_reasons": ["initial", "day_rollover", "policy_change", "selection_change", "enforcement_set_change", "identity_recovery", "gate_resume_exact_rebase"],
+        "replacement_reasons": ["initial", "day_rollover", "policy_change", "selection_change", "enforcement_set_change", "identity_recovery", "gate_resume_exact_rebase", "gate_resume_conservative"],
         "forbidden_replacement_reason": "poll_refresh",
         "effects": { "local_estimate_mutations": 0, "retry_enqueues": 0, "network_dispatches": 0, "backend_sample_rows": 0, "ledger_mutations": 0, "notifications": 0, "shield_mutations": 0, "monitor_starts": 1, "monitor_stops": 0, "epoch_replacements": 1 }
       }
