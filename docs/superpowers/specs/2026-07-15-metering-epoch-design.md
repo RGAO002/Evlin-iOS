@@ -1,7 +1,7 @@
 # Metering Epoch Reliability Design
 
 **Date:** 2026-07-15
-**Status:** Revised 2026-07-17 after architecture verification; approved basis for Phase 3 planning
+**Status:** Revised 2026-07-17 (review round 2); NEEDS RE-REVIEW
 
 **Platform floor:** iOS 17.6 and iPadOS 17.6 for the app and all Screen Time
 extensions. Capability spikes and release builds must exercise this floor even
@@ -14,7 +14,9 @@ the any-source/override Profile CTA behavior in
 `2026-07-12-profile-multi-device-lock-design.md`. Their unrelated requirements
 remain in force.
 
-## 0. Architecture Correction (2026-07-17)
+## 0. Architecture Corrections (2026-07-17)
+
+### 0.1 Callback provenance and dated coverage
 
 This correction is normative and supersedes every conflicting sentence in the
 original 2026-07-15 text. Local Xcode 26.3 / iPhoneOS 26.2 SDK interfaces and
@@ -45,11 +47,39 @@ notification, or earned auto-shield effects. Evlin neither manufactures usage
 nor applies an earned-time fail-closed lock. Manual, task-pause, reflection,
 admin, block, per-app, and other non-metering sources remain independent.
 
-Pause/resume is always conservative in Phase 3: keep the dated monitor active,
-discard the first post-resume threshold bucket, and continue from the new raw
-high-water mark. The backend's existing `gate_resume_exact_rebase` enum value
-remains accepted for protocol compatibility, but Phase 3 iOS never emits it.
 No NSE-primary monitor ownership is authorized by this correction.
+
+### 0.2 Review-round-2 protocol and recovery correction
+
+The 2026-07-17 second review verified that the deployed Phase 2 backend marks a
+trusted closed-gate epoch `paused` and refuses to resume that row except through
+`gate_resume_exact_rebase`. Because Apple exposes no exact raw counter to the app
+or DAM, continuing the same epoch after pause is not implementable. Phase 3 is
+therefore required to extend the backend additively with
+`gate_resume_conservative`. The old reason remains decodable for wire and stored
+row compatibility but is never emitted by new iOS code.
+
+Conservative resume retires the paused epoch and creates a fresh immutable epoch
+and fresh route/install/registration work from the backend's authoritative
+`estimated_minutes`. The old monitor is not stopped merely because the gate is
+closed: its epoch and route are logically retired/tombstoned in the replacement
+transaction, while its Apple monitor remains a crash-safe physical stop target.
+Once the new monitor is registered, started, daemon-verified, and activated, the
+old monitor is stopped and absence-acknowledged. The first callback on the new
+route is discarded and becomes its excluded boundary high-water. A registration
+or activation race that observes the gate closed returns `epoch_status=paused`,
+does not activate locally, and is recovered after the gate opens by another
+fresh epoch and route. No paused or base-corrected epoch ever reuses a route.
+
+Registration HTTP 200 alone also cannot remove functional protocol 1. The exact
+legacy active/pending/retiring generation state is migrated into
+`LegacyCompatibilityMonitorState`; its real callbacks and durable v1 queue
+continue while v2 is unadvertised, offline, registration-only, or recovering
+after restart. A new activation acknowledgement endpoint ratchets the backend
+device only after the v2 route is started, verified, and locally prepared to
+accept callbacks. The legacy monitor stops only after that acknowledgement and
+durable local v2 activation. This ordering always leaves either functional v1
+or a verified v2 monitor.
 
 ## 1. Purpose
 
@@ -334,6 +364,10 @@ nonisolated static func datedSchedule(
 ) throws -> DeviceActivitySchedule
 ```
 
+Phase 3 implements this on shared `MeteringDatedSchedule`, compiled by both app
+and DAM. The app-only legacy scheduler may delegate to it, but the dated
+installer never depends on an app-only scheduler type.
+
 The schedule contains absolute year/month/day components in the canonical
 timezone and `repeats == false`. A route uses these names:
 
@@ -390,6 +424,7 @@ resumeBoundaryPending
 retiredAt
 retireReason
 exhaustedAt
+baseCorrectionState = available | used
 ```
 
 The stable key is exactly the six-field generation key plus `usageDate`.
@@ -398,14 +433,15 @@ The stable key is exactly the six-field generation key plus `usageDate`.
 registration 409) is the only input to `baseAcceptedMinutes`; remaining, cap,
 local offsets, and local estimates cannot be substituted.
 
-At most one epoch is active for `(childDeviceID, usageDate)`. Phase 3 iOS emits
-`initial`, `day_rollover`, `policy_change`, `selection_change`,
-`enforcement_set_change`, or `identity_recovery` as appropriate. The Phase 2
-backend continues decoding `gate_resume_exact_rebase`, but iOS does not create
-that transition because no exact raw counter is available. Exhaustion is an
-epoch status with `exhaustedAt`, not a free-standing Boolean guard. Retired
-epochs always have `retiredAt` and `retireReason`, never return to active, and
-cannot authorize effects.
+At most one backend epoch is non-retired for `(childDeviceID, usageDate)`.
+Phase 3 iOS emits `initial`, `day_rollover`, `policy_change`,
+`selection_change`, `enforcement_set_change`, `identity_recovery`, or
+`gate_resume_conservative` as appropriate. The backend continues decoding
+`gate_resume_exact_rebase` for old rows and clients, but new iOS never emits it.
+Exhaustion is an epoch status with `exhaustedAt`, not a free-standing Boolean
+guard. Paused, exhausted, and retired epochs never return to active. Resume,
+authoritative-base correction, and any other immutable epoch replacement always
+create a fresh route as well as a fresh epoch.
 
 ### 6.4 Backend Epoch Registry
 
@@ -425,9 +461,31 @@ Registration is idempotent by `epochID`. The backend validates:
   family/profile/device scope.
 
 A base mismatch returns the authoritative snapshot and does not activate the
-epoch. The client retires the rejected local epoch, creates one corrected epoch
-from `authoritative_snapshot.estimated_minutes`, and retries registration with
-the same durable ordering rules. It never edits registered provenance in place.
+epoch. In one local transaction the client retires the rejected epoch and route,
+tombstones the route, terminalizes every old-route queued sample with
+`superseded_by_authoritative_base`, and creates a corrected epoch, a fresh route,
+fresh install work, and fresh registration work from
+`authoritative_snapshot.estimated_minutes`. The corrected monitor is registered,
+started, verified, and activated before any prior functioning monitor is
+stopped. A second mismatch is terminal; no registered provenance or route is
+edited or reused in place.
+
+The corrected backend registration response keeps the existing `status`,
+`epoch_id`, `metering_protocol_version`, and authoritative `snapshot` fields and
+adds `epoch_status` (`active`, `paused`, `exhausted`, or `retired`). New iOS
+requires that field before local activation; absence is handled conservatively
+by leaving work pending and fetching state again. `snapshot` is the authoritative
+snapshot; no duplicate snapshot field is added.
+
+The backend adds idempotent
+`POST /child/earned-time/epochs/{epoch_id}/activation`. Its request carries
+`protocol_version`, `device_id`, `route_id`, and `verified_at`. The endpoint
+rechecks epoch ownership/currentness and the accounting gate under the device
+row lock. It stores `activation_route_id` and `activated_at` and ratchets the
+device to protocol 2 only for `activated` or `already_activated`. If the gate is
+closed it leaves the epoch paused, leaves the per-device ratchet unchanged, and
+returns `status=paused`, `epoch_status=paused`, the current
+`metering_protocol_version`, and the authoritative `snapshot`.
 
 ### 6.5 One Versioned Device Epoch Store
 
@@ -440,8 +498,10 @@ schemaVersion and ownerChildDeviceID
 generations and activeGenerationID
 daily epochs and activeEpochID
 immutable routes and route tombstones
-registration queue and sample queue
+legacy compatibility monitor state
+registration, activation, and sample queues
 activity install/start/verify/activate/stop acknowledgements
+install claim/lease arbitration
 coverage state
 shield-effect operation references
 identity-cleanup envelope
@@ -449,34 +509,45 @@ rollover-effects envelope
 per-owner protocol ratchet
 ```
 
-Registration, sample, fallback, install, shield-reference, cleanup, rollover,
-and ratchet work is never split across uncoordinated `UserDefaults` flags. A
+Registration, activation, sample, fallback, install, shield-reference, cleanup,
+rollover, and ratchet work is never split across uncoordinated `UserDefaults` flags. A
 reopen recovery driver examines every nonterminal envelope before creating new
 work. It adopts or retries the same UUIDs and makes each external operation
 idempotent.
 
-The sample queue and protocol-1 backfill are active before any production path
-may select protocol 2. A device remains advertised/selected as protocol 1 until
-registration returns HTTP 200 (`registered` or `already_registered`); only that
-success durably ratchets the owner to 2. Future routes cannot be registered
-because Phase 2 validates registration against canonical today, so they carry
-explicit `futurePlanned` authorization. Today's route registers before install;
-if offline, it may carry durable `offlinePending`, but callbacks remain queued
-with zero business effects until registration resolves.
+The sample queue, exact legacy lifecycle import, and protocol-1 backfill are
+active before any production path may select protocol 2. Advertising v2 or
+receiving registration HTTP 200 does not stop or disable v1. The owner remains
+locally selected as protocol 1 and the backend device remains ratcheted at 1
+until the new v2 route is started, schedule/events are daemon-verified, local
+callback acceptance is durably prepared, and the activation endpoint returns
+`activated` or `already_activated`. Only then does one local transaction select
+v2 and mark the legacy monitor retiring; legacy stop follows that transaction.
+Future routes cannot be registered because Phase 2 validates registration
+against canonical today, so they carry explicit `futurePlanned` authorization.
+Today's route registers before install; if offline, it may carry durable
+`offlinePending`, but callbacks remain queued with zero business effects until
+registration resolves.
 
 ### 6.6 Crash-Safe Install And Retirement
 
-Generation or day replacement follows this exact order:
+Generation, day, pause-resume, and base-correction replacement follows this
+exact order:
 
 1. Atomically create the generation/epoch/route, registration work, and durable
    `pendingStart` install work.
 2. Register today's epoch, except for explicit `futurePlanned` or
-   `offlinePending` authorization.
-3. Start the new dated route, then verify it through
+   `offlinePending` authorization. Registration 200 is not a protocol ratchet.
+3. Claim the pending start, start the new dated route, then verify it through
    `activities`, `schedule(for:)`, and `events(for:)`.
-4. Atomically activate the verified route and epoch. Only now retire the old
-   route/epoch and append durable `pendingStop` work.
-5. Stop old canonical activity names and acknowledge their absence before
+4. Durably prepare the verified route to queue trusted callbacks, call the
+   activation endpoint, and require `activated`/`already_activated` with an
+   active epoch status.
+5. Atomically activate the verified route and epoch and select owner protocol 2.
+   A replacement's old route/epoch was already logically retired/tombstoned when
+   fresh IDs were created; only now append its physical `pendingStop` work. For
+   initial v1 migration, only now mark the legacy monitor retiring.
+6. Stop old canonical activity names and acknowledge their absence before
    terminalizing the stop work or tombstone.
 
 Horizon fill for a future date is the explicit exception to step 1: it persists
@@ -489,16 +560,43 @@ The app or DAM obtains that state through authenticated `GET /child/state` with
 `X-Evlin-Child-Device-ID`. A failed/missing runtime fetch leaves the dated route
 non-authorizing and cannot be replaced with a local estimate.
 
-The old active route is never stopped before the new route is verified active.
-A crash at every numbered boundary reopens into the same IDs and resumes the
-same phase. Identity cleanup is owner-independent work persisted before owner
-replacement; it captures every old route, epoch, registration, sample,
-fallback, and shield operation ID, blocks old callbacks immediately, and
-acknowledges each purge/stop/release before completing. Canonical rollover uses
-a separate durable effects envelope that captures old/new dates and
-acknowledges earned, per-app, task, bypass, registration, and install effects.
-No new-day callback may mutate usage or shielding until that envelope is
-reconciled.
+The old active route or legacy monitor is never stopped before the new route is
+verified and active. A crash at every numbered boundary reopens into the same
+IDs and resumes the same phase. App and DAM may both recover `pendingStart`, so
+each install work item carries a claim with a unique token, process role,
+process instance ID, `claimedAt`, and `expiresAt`. The claim lease is exactly 60
+seconds. Under the Device Epoch Store lock only one process may transition
+`pendingStart` to `starting`; a loser performs no Apple call. After expiry an
+adopter first compares daemon `activities`, schedule, and events. It acknowledges
+an exact existing installation without calling `startMonitoring` again. If the
+route is absent it starts once; if the same name exists with mismatched immutable
+configuration it replaces and reverifies that route while a prior functioning
+monitor remains. It never blindly duplicates a start.
+
+All registration, activation, install, sample, shield-effect, identity-cleanup,
+and rollover work uses the retry sequence 0, 5, 15, 60, 300 seconds, with every
+later delay capped at 300. New work is due immediately. After failures 1, 2, 3,
+and 4, its next delay is 5, 15, 60, and 300 seconds. Due work is ordered by
+`(nextAttemptAt, kindPriority, createdAt, lowercaseWorkID)`, with kind priority
+identity cleanup, rollover, registration, install, activation, sample, then
+shield effect. Virtual-clock tests pin every boundary.
+
+Identity cleanup is owner-independent work persisted before owner replacement;
+it captures every old route, epoch, registration, activation, sample, fallback,
+install, and shield operation ID, blocks old callbacks immediately, and
+acknowledges each terminalized work ID, purged fallback key, released shield
+operation ID, stopped activity name, cleared usage date, and owner-mirror
+transition before completing. Canonical rollover uses a separate durable effects
+envelope containing exact old/new epoch IDs and old/new route IDs plus durable
+acknowledgements for earned source reset, per-app reset, task reset, bypass
+expiry, registration, install, activation, and old-route stop. No new-day
+callback may mutate usage or shielding until that envelope is reconciled.
+
+A route tombstone may be deleted only after every referenced queue/effect is
+terminal and Apple stop is acknowledged and the current time is at or after the
+later of (a) canonical day end plus 48 hours and (b) stop acknowledgement plus
+24 hours. Missing stop acknowledgement makes the tombstone ineligible forever;
+polling or restart cannot shorten this retention.
 
 ### 6.7 One Callback Trust Function
 
@@ -556,6 +654,16 @@ afterward, and recover by exact compare-and-swap. The Device Epoch Store keeps
 only the operation reference. Release removes only the matching `earnedTime`
 source and preserves manual, `taskPause`, reflection, block, limit/per-app,
 admin, and newer record state byte-for-byte.
+
+Cross-process correctness applies to every app-side lock mutation, not only
+`.limit` reconciliation and receipt rollback. Before each mutation,
+`ActiveLockStore` acquires `ActiveLockPersistenceLock`, reloads and normalizes
+the complete durable shield and block dictionaries, merges no stale actor
+snapshot over them, performs the requested mutation, persists and verifies, and
+then recomputes ManagedSettings. This must preserve an earned-time envelope
+written by DAM when an already-live app actor later performs an unrelated
+manual, `taskPause`, `.limit`, block, or third-party-record mutation. Exact CAS
+conflicts leave the newer durable record untouched.
 
 For an accepted protocol-v2 sample:
 
@@ -615,8 +723,53 @@ Add `POST /child/earned-time/epochs`:
 }
 ```
 
-The response returns registration status plus the authoritative device-day
-snapshot. A conflict response is actionable reconciliation, not a blind retry.
+HTTP 200 keeps the existing response fields and adds `epoch_status`:
+
+```json
+{
+  "status": "registered",
+  "epoch_id": "uuid",
+  "metering_protocol_version": 2,
+  "epoch_status": "active",
+  "snapshot": {
+    "child_device_id": "uuid",
+    "usage_date": "2026-07-15",
+    "estimated_minutes": 10,
+    "cap_minutes": 60,
+    "child_day_state": "available",
+    "used_minutes": 10,
+    "remaining_minutes": 110,
+    "counted": true,
+    "warning": null
+  }
+}
+```
+
+`epoch_status` is additive in Pydantic and Codable so old payloads still decode,
+but the corrected backend always emits it and new iOS treats absence as
+non-activating. The existing `snapshot` is the authoritative snapshot. A 409
+`authoritative_base_mismatch` response remains
+`{"code", "authoritative_snapshot"}` and creates fresh epoch and route work,
+not a blind retry.
+
+After daemon verification, iOS calls
+`POST /child/earned-time/epochs/{epoch_id}/activation`:
+
+```json
+{
+  "protocol_version": 2,
+  "device_id": "uuid",
+  "route_id": "uuid",
+  "verified_at": "2026-07-15T14:00:02Z"
+}
+```
+
+Its HTTP 200 response has `status` (`activated`, `already_activated`, or
+`paused`), `epoch_id`, `epoch_status`, `metering_protocol_version`, and
+`snapshot`. A repeated identical route is idempotent. A different route for an
+already activated epoch returns `detail=activation_route_mismatch`; a noncurrent
+or unregistered epoch returns `detail=activation_epoch_not_current`. A paused
+response never ratchets or authorizes local activation.
 
 ### 7.3 Sample Ingest
 
@@ -624,8 +777,9 @@ snapshot. A conflict response is actionable reconciliation, not a blind retry.
 `device_id`, `usage_date`, `timezone`, `activity_name`, `event_name`,
 `threshold_minutes`, `estimated_minutes`, `observed_at`, and
 `client_sample_id`. Protocol 2 adds the pair `protocol_version`/`epoch_id`.
-Protocol 1 instead sends the pair `generation_armed_at`/
-`generation_offset_minutes`. Phase 3 does not invent
+Protocol 1 may omit both legacy generation fields, matching current production,
+or send the complete pair `generation_armed_at`/
+`generation_offset_minutes`; a partial pair is invalid. Phase 3 does not invent
 `device_to_backend_offset_seconds` or any other field. The v2 activity/event
 values are explicit Phase 2 compatibility aliases derived from the verified
 route: `evlin.earned.budget.<routeID>` and
@@ -647,8 +801,13 @@ Protocol-v2 outcomes are explicit:
   `warning=implausible_threshold`;
 - identity/policy/date mismatch: `counted=false` with the matching stable reason.
 
-Only a registration/base conflict is retryable after reconciliation. Paused,
-stale, and implausible samples are terminal drops.
+Sample ingest never edits or revives epoch/route provenance. Paused, stale,
+superseded-route, and implausible sample requests are terminal drops. Recovery
+that observes the resume warning first fetches authoritative child state and
+then creates fresh registration/install/activation work. A paused epoch observed after the gate reopens returns
+`warning=gate_resume_conservative_required`; old clients may still decode the
+legacy `gate_resume_rebase_required` warning but new backend code does not emit
+it.
 
 ### 7.4 Rollout Ratchet
 
@@ -658,13 +817,17 @@ stale, and implausible samples are terminal drops.
   upper-bound check with no `+5` minutes before the v2 rollout begins.
 - The durable v1 queue/backfill and recovery driver are installed and exercised
   before any production branch can choose v2.
-- A device remains on the legacy lane until it receives HTTP 200 for its first
-  v2 registration. Advertising version 2, enqueuing a request, an install, a
-  callback, or a 409 conflict cannot ratchet it.
-- After that registration, the backend records that device as v2-capable and
-  never counts a later metadata-free v1 sample for that device. It returns HTTP
-  200 with `counted=false`, `warning=legacy_after_v2` so downgrade cannot create
-  a false lock or retry storm.
+- A device remains on the legacy lane after v2 advertisement and registration
+  HTTP 200. The exact legacy monitor and queue continue while offline and across
+  restart. Registration, a 409, a start attempt, and verification alone cannot
+  ratchet it.
+- The new route is started and daemon-verified before local callback acceptance
+  is durably prepared. The activation endpoint then atomically records the route
+  and ratchets the backend device. On its `activated`/`already_activated`
+  response, local state selects v2 and only then retires/stops legacy.
+- After activation, the backend never counts a later v1 sample for that device.
+  It returns HTTP 200 with `counted=false`, `warning=legacy_after_v2` so downgrade
+  cannot create a false lock or retry storm.
 - An old client remains functional before the ratchet. A downgraded client on a
   ratcheted device fails open by not advancing time rather than corrupting the
   ledger.
@@ -683,8 +846,10 @@ generation.
 The churn invariant is:
 
 ```text
-121 unchanged polls -> one generation + the same eight route IDs/installations
-                     + zero replacement starts/stops
+first real installer reconciliation -> exactly eight startMonitoring calls
+next 120 unchanged real poll reconciliations
+  -> one generation + the same eight route IDs/installations
+  -> zero additional starts and zero stops
 ```
 
 ### 8.2 Policy or Selection Change
@@ -700,23 +865,26 @@ the last verified active route.
 ### 8.3 Accounting Pause and Resume
 
 Closing the accounting gate changes epoch status to `paused` but does not tear
-down its dated monitor. Thresholds observed while paused update only a
-local ignored-raw high-water mark and diagnostics.
+down its dated monitor merely because tasks/reflection closed the gate.
+Thresholds observed while paused update only that paused epoch's ignored raw
+high-water and diagnostics and have no sample, ledger, network, notification,
+or shield effects.
 
-The continuous-monitor accounting is explicit. Let `R` be the current raw
-threshold, `L` the previous raw threshold, and `E` excluded raw minutes:
+When authoritative child state first reports the gate open, the app or DAM uses
+only `earned_time_runtime.estimated_minutes` to atomically create a new epoch,
+fresh route, fresh registration/install/activation work, and
+`resumeBoundaryPending=true` with reason `gate_resume_conservative`. The paused
+epoch/route remains physically installed until the replacement is registered,
+started, verified, and activated. If registration or activation returns paused,
+local activation does not occur; recovery after a later open creates another
+fresh epoch and route rather than reviving either paused row.
 
-```text
-paused callback: E = E + max(0, R - L); L = R; emit no sample
-active callback: adjusted = baseAcceptedMinutes + R - E; L = R
-```
-
-Every resume sets `resumeBoundaryPending`. The first post-resume callback runs
-the paused rule once, clears the marker, and emits no sample or shield effect.
-Later callbacks use the active rule. This conservatively discards the one bucket
-that may straddle the boundary. There is no Phase 3 exact-rebase branch and no
-raw usage invention. Gate close/open alone does not start, stop, or replace a
-route.
+Let `R` be the raw threshold on the new route and `E` its excluded boundary
+minutes. The first callback executes `E = R`, clears
+`resumeBoundaryPending`, and emits nothing. A later callback computes
+`adjusted = baseAcceptedMinutes + max(0, R - E)`. This conservatively discards
+one boundary bucket. There is no exact raw query, exact-rebase branch, same-epoch
+resume, or manufactured usage.
 
 ### 8.4 Midnight and Canonical Day Change
 
@@ -734,8 +902,9 @@ workers. It uses durable day/device rows plus the command outbox as its guards;
 process-local `BigKidStore` state is hydrated input, never the once-only marker.
 
 The first trigger atomically writes `RolloverEffectsWork` with old/new dates,
-old/new epoch/route IDs, and pending acknowledgements for earned source reset,
-per-app reset, task state, bypass expiry, registration, and dated install.
+exact `oldEpochID`, `newEpochID`, `oldRouteID`, and `newRouteID`, plus pending
+acknowledgements for earned source reset, per-app reset, task state, bypass
+expiry, registration, dated install, activation, and old-route stop.
 Today's preinstalled route is not activated for effects until those items and
 current-day registration are reconciled. A delayed old route resolves through
 its tombstone and has zero effects even when current state otherwise looks
@@ -901,8 +1070,9 @@ through every state transition.
 Create versioned JSON vectors consumed byte-for-byte by Swift XCTest and
 pytest. They must cover at least:
 
-1. 121 unchanged polls retain one generation and the same eight dated route
-   IDs/installations, with no replacement start or stop;
+1. the first real installer reconciliation makes exactly eight starts; the next
+   120 unchanged real poll reconciliations retain one generation and the same
+   eight route IDs/installations with no additional start or stop;
 2. accepted offset advances without changing generation/epoch identity;
 3. identical persisted selection bytes produce one stable digest;
 4. immediate `t5` and immediate full per-app budget are rejected with no side
@@ -957,14 +1127,42 @@ pytest. They must cover at least:
     rollover acknowledgement converge by exact CAS without losing unrelated
     sources or admitting stale callbacks;
 30. a real production v1 callback travels through the Apple DTO and durable v1
-    queue, successful registration ratchets the device, the next real callback
-    uses v2, and a delayed v1 retry ends `legacy_after_v2` without ledger or
-    shield effects;
+    queue; registration alone leaves v1 functional; the v2 route is started,
+    verified, locally prepared, and activation-acknowledged before ratchet; the
+    next real callback uses v2; and a delayed v1 retry ends `legacy_after_v2`
+    without ledger or shield effects;
 31. `P3V01` uses production `ShieldRecord` with `.taskPause` and reaches the
     shared effect store/CAS path; vector outputs assert the persisted records,
     not a test-only projection;
 32. an authoritative registration conflict uses only
-    `authoritative_snapshot.estimated_minutes` for the corrected epoch base.
+    `authoritative_snapshot.estimated_minutes`, retires/tombstones the rejected
+    route, terminalizes its queued samples, and creates fresh corrected epoch,
+    route, registration, install, and activation work before any old functioning
+    monitor is stopped;
+33. app and DAM race for one pending start: exactly one 60-second claim wins and
+    one start occurs; after winner crashes, the loser no-ops before expiry and
+    adopts an exact daemon installation after expiry without another start;
+34. virtual-clock retry deadlines are exactly immediate, +5, +15, +60, +300,
+    then +300 seconds, and global due ordering is deterministic;
+35. a tombstone cannot purge before referenced work is terminal, stop is
+    acknowledged, and the later of canonical day end +48h or stop ack +24h;
+36. a DAM earned envelope write followed by an unrelated mutation from an
+    already-live app actor preserves all earned, manual, `taskPause`, `.limit`,
+    block, and unrelated records under both normal and CAS-conflict paths;
+37. a gate close injected during conservative registration returns HTTP 200
+    with `epoch_status=paused`, does not activate locally, and a later open uses
+    another fresh epoch and route;
+38. migration preserves exact active, pending, and retiring legacy monitor
+    provenance; unadvertised, offline, and restart paths continue real v1 until
+    verified v2 activation;
+39. a cross-stack V30 orchestrator compiles the production Swift encoders,
+    writes nonempty hashed v1/registration/activation/v2/stale-v1 request bytes,
+    sends those exact bytes through real guarded disposable-database routes,
+    proves `EarnedTimeMeteringEpoch`, `EarnedTimeSample`,
+    `EarnedTimeDeviceDay`, `EarnedTimeDay`, `EarnedTimeLockCommand`, and
+    `Command` rows, and verifies the separate
+    `BigKidStore.get_state(device.id).minutes_left` bank snapshot rather than
+    claiming a nonexistent bank table or comparing hand-built fixtures.
 
 Every callback vector asserts all side effects, not only the return value:
 
@@ -994,15 +1192,23 @@ coverage and recovery envelopes
   partial sibling fanout, app-process absence, `excessiveActivities`, horizon
   expiry, and identity/rollover/shield changes at every durable/external
   operation boundary.
+- The install claim lease is 60 seconds. Retry deadlines are 0, 5, 15, 60, 300,
+  then 300 seconds. Tombstone retention uses canonical day end +48h and stop
+  acknowledgement +24h exactly. All three are virtual-clock assertions.
 
 ### 13.3 Required Build and Regression Gates
 
 - Focused Swift unit/state-machine suites pass.
 - Full iOS test target passes except documented unrelated pre-existing failures.
-- All touched backend suites pass under PostgreSQL.
+- All touched backend DB suites run through
+  `/Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend/.venv/bin/python scripts/run_limits_db_regression.py`
+  against its guarded disposable local database. Pure tests may use
+  `.venv/bin/python -m pytest`; a skipped DB test is not evidence.
 - All six targets compile with `SWIFT_VERSION = 5.0`, deployment target 17.6,
-  and iPhone/iPad family `1,2`. Runtime tests use the installed iOS 26.3
-  simulator when no 17.6 runtime exists; that proves deployment compatibility,
+  and iPhone/iPad family `1,2`. Runtime tests use literal installed simulator
+  destinations `platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3.1` and
+  `platform=iOS Simulator,name=iPad Pro 13-inch (M5),OS=26.3.1` when no 17.6
+  runtime exists; that proves deployment compatibility,
   not the minimum-floor runtime behavior.
 - Release products are built before scans. The scan fails if the expected
   product count is zero and proves DEBUG clock symbols/keys are absent and the
@@ -1093,21 +1299,37 @@ This phase is independently releasable and does not wait for epoch migration.
   Release, and the Push NSE remains unable to own earned monitoring.
 - Add the one versioned, owner-fenced Device Epoch Store root with exact
   selection bytes, six-field policy generations, full daily epochs, immutable
-  routes/tombstones, registration/sample queues, install acknowledgements,
+  routes/tombstones, exact legacy compatibility monitor state,
+  registration/activation/sample queues, install claims and acknowledgements,
   eight-date coverage, ratchet, shield references, identity cleanup, and
-  rollover effects.
+  rollover effects. Every persisted work item has an owner, retry deadline,
+  terminal condition, R-16 row, and app/DAM/Push-appropriate recovery trigger.
 - Install non-repeating canonical dated schedules for today plus seven days.
   Register today before install except durable `offlinePending`; mark future
-  routes `futurePlanned`; start and verify replacements before activation;
-  retire/stop old routes only after the new route is active; recover every
-  nonterminal phase using the same IDs.
+  routes `futurePlanned`; arbitrate app/DAM starts with the 60-second durable
+  lease; start and verify replacements before activation; preserve functional
+  v1 until backend activation acknowledgement. Replacement transactions
+  logically retire/tombstone old epoch/route IDs immediately, but retain their
+  Apple monitors as crash-safe stop targets until the new route is active;
+  recover every nonterminal phase using the same IDs.
+- Extend backend schema, registry, routes, migration, and tests additively for
+  `gate_resume_conservative`, response `epoch_status`, and the idempotent route
+  activation acknowledgement. Registration validates authoritative base/gate;
+  activation performs the per-device ratchet only for an active epoch.
 - Route the real Apple callback DTO through independent durable provenance,
   strict physical trust, registration/sample delivery, local effects, and the
   Phase 2 v1-to-v2 ratchet. Rejected, stale, unregistered, uncovered, or
   malformed callbacks have zero effects.
-- Use only conservative continuous-monitor pause accounting, one discarded
-  post-resume boundary bucket, durable identity/rollover recovery, and shared
-  shield-effect CAS provenance. Do not create an exact-rebase branch.
+- On conservative resume, retire the paused epoch and create a fresh epoch and
+  route from backend `estimated_minutes`; discard the first callback on that new
+  route. Do not stop the paused monitor until the replacement is active, and do
+  not create an exact-rebase or same-epoch resume branch.
+- On authoritative-base 409, replace both epoch and route, terminalize old-route
+  queued work, and start/verify/activate the corrected monitor before stopping
+  any prior functioning monitor.
+- Reload/merge all durable shield and block records before every app-side
+  `ActiveLockStore` mutation under `ActiveLockPersistenceLock`; recover earned
+  shield effects by exact CAS without dropping unrelated sources.
 - Make coverage exhaustion explicit and non-locking for earned metering while
   preserving all unrelated lock sources. Exercise `excessiveActivities`
   without destructive replacement.
@@ -1119,10 +1341,11 @@ This phase is independently releasable and does not wait for epoch migration.
   removal. Any deferred row requires a written owner, reason, and later phase;
   silence is a failed gate.
 - Phase 3 may not add an unregistered guard, flag, or veto. Before implementation,
-  route/tombstone lifecycle, install authorization/phase, coverage state,
-  registration/ratchet state, process-role ownership, pause state, sample
-  queue, shield envelope, identity cleanup, and rollover envelope must each be
-  entered under rule-book §11/R-16 with replacement, deletion criterion, and
+  route/tombstone lifecycle, legacy compatibility, install authorization/phase,
+  install claim/lease, coverage state, registration/activation/ratchet state,
+  process-role ownership, pause state, base correction, sample queue, retry
+  schedule, shield envelope, identity cleanup, and rollover envelope must each
+  be entered under rule-book §11/R-16 with replacement, deletion criterion, and
   vector evidence. No ad hoc Boolean may duplicate these registered states.
 
 ### Phase 4: Per-App Epoch Provenance
@@ -1186,9 +1409,12 @@ The work is complete only when all of these are true:
   cap unless the shared pool is also exhausted.
 - Per-App Limit advances only for the rule app/device and applies only the
   `.limit` source at the rule budget.
-- A full unchanged horizon remains one six-field generation and the same eight
-  dated installations across 121 polls, including after usage advances.
-- Immediate/history callbacks cannot mutate usage or lock anything.
+- A full unchanged horizon performs exactly eight real starts initially and
+  remains one six-field generation and the same eight dated installations with
+  zero additional starts/stops across the next 120 real poll reconciliations,
+  including after usage advances.
+- Immediate physically impossible callbacks and callbacks without durable route
+  provenance cannot mutate usage or lock anything.
 - Delayed physically possible callbacks remain accepted.
 - Task/reflection pauses do not charge time; task bypass resumes the same day;
   a new day expires the bypass.
@@ -1214,6 +1440,16 @@ The work is complete only when all of these are true:
   locks into the new account.
 - Backend v1/v2 rollout remains wire compatible and ratchets safely per device.
 - Queue/backfill recovery is active before the first production v2 switch.
+- Legacy v1 remains functional through unadvertised, offline, registration-only,
+  and restart states and stops only after a started, verified, activated v2 route
+  receives backend activation acknowledgement.
+- Every paused-epoch resume and authoritative-base correction creates both a
+  fresh immutable epoch and a fresh route; neither route nor epoch is revived.
+- App/DAM install races produce one 60-second lease winner and no blind duplicate
+  start; retries and tombstone retention match the pinned constants.
+- Every app-side lock mutation reloads all cross-process durable sources before
+  mutation, so a DAM-earned write survives unrelated live-app mutations and CAS
+  conflicts.
 - Every R-16 demolition follows a committed replacement/vector and the final
   report contains the exact `本阶段拆除清单 + 向量证据` table.
 - Automated gates have recorded evidence and all unrun physical gates are
