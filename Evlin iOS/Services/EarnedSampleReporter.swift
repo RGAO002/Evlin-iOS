@@ -1,7 +1,7 @@
 import Foundation
 
-/// Shared production seam that owns R-15 before the extension can enter any
-/// accepted-threshold side effects.
+/// Shared production seam that routes legacy callbacks through the same strict
+/// elapsed-time contract as v2 before any accepted-threshold side effects.
 nonisolated enum EarnedThresholdProductionCoordinator {
     enum Outcome: Equatable, Sendable {
         case accepted
@@ -19,29 +19,93 @@ nonisolated enum EarnedThresholdProductionCoordinator {
         recordDiagnostic: (String) -> Void,
         runAcceptedProductionPath: () -> Void
     ) -> Outcome {
-        let plausibility = EarnedThresholdPlausibility.evaluate(
-            generation: generation,
+        guard let ownerDeviceID = UUID(uuidString: generation.deviceID) else {
+            recordRejection(
+                verdict: .rejectOwner,
+                generation: generation,
+                eventName: eventName,
+                rawThresholdMinutes: rawThresholdMinutes,
+                adjustedEstimateMinutes: adjustedEstimateMinutes,
+                callbackAt: callbackAt,
+                recordDiagnostic: recordDiagnostic
+            )
+            return .rejected
+        }
+        guard let armedAt = generation.armedAt else {
+            recordRejection(
+                verdict: .rejectTooEarly,
+                generation: generation,
+                eventName: eventName,
+                rawThresholdMinutes: rawThresholdMinutes,
+                adjustedEstimateMinutes: adjustedEstimateMinutes,
+                callbackAt: callbackAt,
+                recordDiagnostic: recordDiagnostic
+            )
+            return .rejected
+        }
+
+        let epochID = legacyEpochID(for: generation.activityName)
+        let policyRevision = generation.generationKey?.policyRevision ?? "legacy-v1"
+        let verdict = MeteringEpochContract.callbackVerdict(MeteringCallbackInput(
+            activeEpochID: epochID,
+            callbackEpochID: epochID,
+            activeOwnerDeviceID: ownerDeviceID,
+            callbackOwnerDeviceID: ownerDeviceID,
+            activeUsageDate: currentUsageDate,
+            callbackUsageDate: generation.usageDate,
+            activePolicyRevision: policyRevision,
+            callbackPolicyRevision: policyRevision,
+            expectedEventNamespace: generation.activityName,
+            callbackEventNamespace: generation.activityName,
             adjustedEstimateMinutes: adjustedEstimateMinutes,
+            baseAcceptedMinutes: generation.offsetMinutes,
+            startedAt: armedAt,
             callbackAt: callbackAt,
-            currentUsageDate: currentUsageDate
-        )
-        guard plausibility.isPlausible else {
-            let formatter = ISO8601DateFormatter()
-            formatter.timeZone = TimeZone(secondsFromGMT: 0)
-            let timestamp = formatter.string(from: callbackAt)
-            let armedAt = generation.armedAt.map(formatter.string(from:)) ?? "(missing)"
-            let maximum = plausibility.maximumTrusted.map(String.init) ?? "(missing)"
-            recordDiagnostic(
-                "\(timestamp) event=\(eventName) activity=\(generation.activityName) "
-                    + "raw=\(rawThresholdMinutes) adjusted=\(adjustedEstimateMinutes) "
-                    + "offset=\(generation.offsetMinutes) generation.armedAt=\(armedAt) "
-                    + "maximum=\(maximum)"
+            jitterSeconds: MeteringEpochContract.defaultJitterSeconds
+        ))
+        guard verdict == .accept else {
+            recordRejection(
+                verdict: verdict,
+                generation: generation,
+                eventName: eventName,
+                rawThresholdMinutes: rawThresholdMinutes,
+                adjustedEstimateMinutes: adjustedEstimateMinutes,
+                callbackAt: callbackAt,
+                recordDiagnostic: recordDiagnostic
             )
             return .rejected
         }
 
         runAcceptedProductionPath()
         return .accepted
+    }
+
+    private static func legacyEpochID(for activityName: String) -> UUID {
+        let suffix = String(
+            activityName.dropFirst(EarnedActivityGeneration.generatedActivityPrefix.count)
+        )
+        return UUID(uuidString: suffix) ?? UUID(uuidString: "00000000-0000-0000-0000-000000000000")!
+    }
+
+    private static func recordRejection(
+        verdict: MeteringCallbackVerdict,
+        generation: EarnedActivityGeneration.Generation,
+        eventName: String,
+        rawThresholdMinutes: Int,
+        adjustedEstimateMinutes: Int,
+        callbackAt: Date,
+        recordDiagnostic: (String) -> Void
+    ) {
+        let formatter = ISO8601DateFormatter()
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        let timestamp = formatter.string(from: callbackAt)
+        let armedAt = generation.armedAt.map(formatter.string(from:)) ?? "(missing)"
+        recordDiagnostic(
+            "\(timestamp) event=\(eventName) activity=\(generation.activityName) "
+                + "raw=\(rawThresholdMinutes) adjusted=\(adjustedEstimateMinutes) "
+                + "offset=\(generation.offsetMinutes) generation.armedAt=\(armedAt) "
+                + "verdict=\(verdict.rawValue)"
+        )
     }
 }
 

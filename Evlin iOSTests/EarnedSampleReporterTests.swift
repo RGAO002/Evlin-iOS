@@ -542,7 +542,7 @@ final class EarnedSampleReporterTests: XCTestCase {
         XCTAssertEqual(spy.acceptedPathCount, 0)
     }
 
-    func test_plausibleThresholdCoordinatorReachesAcceptedProductionPath() {
+    func test_strictThresholdCoordinatorReachesAcceptedProductionPathAtBoundary() {
         let spy = EarnedThresholdProductionPathSpy()
         let armedAt = Date(timeIntervalSince1970: 1_784_003_200)
         let generation = EarnedActivityGeneration.Generation(
@@ -559,7 +559,7 @@ final class EarnedSampleReporterTests: XCTestCase {
             eventName: "evlin.earned.t5",
             rawThresholdMinutes: 5,
             adjustedEstimateMinutes: 55,
-            callbackAt: armedAt,
+            callbackAt: armedAt.addingTimeInterval(270),
             currentUsageDate: "2026-07-13",
             recordDiagnostic: spy.recordDiagnostic,
             runAcceptedProductionPath: spy.runAcceptedProductionPath
