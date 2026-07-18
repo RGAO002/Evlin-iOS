@@ -63,6 +63,14 @@ final class MeteringTargetMembershipTests: XCTestCase {
         XCTAssertFalse(isMember("Services/MeteringEpochDelivery.swift", of: .push, in: project))
     }
 
+    func testEarnedMeteringCallbackBelongsToAppAndMonitorButNotPushTargets() throws {
+        let project = try projectSource()
+
+        XCTAssertTrue(isMember("Services/EarnedMeteringCallback.swift", of: .app, in: project))
+        XCTAssertTrue(isMember("Services/EarnedMeteringCallback.swift", of: .deviceActivityMonitor, in: project))
+        XCTAssertFalse(isMember("Services/EarnedMeteringCallback.swift", of: .push, in: project))
+    }
+
     func testV2RecoveryBelongsToAppAndMonitorButNotPushTargets() throws {
         let project = try projectSource()
 

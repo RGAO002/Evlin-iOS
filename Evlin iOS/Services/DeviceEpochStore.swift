@@ -200,6 +200,22 @@ nonisolated enum EpochSampleAuthorization: String, Codable, Sendable {
     case legacyDeliverable, waitingForRegistration, v2Deliverable
 }
 
+nonisolated struct MeteringAuthorizedCallbackInput: Equatable, Sendable {
+    let routeID: UUID
+    let activityName: String
+    let eventName: String
+    let namespace: String
+    let thresholdMinutes: Int
+    let observedAt: Date
+    let now: Date
+    let jitterSeconds: Int
+}
+
+nonisolated enum MeteringAuthorizedCallbackResult: Equatable, Sendable {
+    case queued(sampleWorkID: UUID)
+    case discarded(reason: String)
+}
+
 nonisolated struct EpochSampleWork: Codable, Equatable, Sendable {
     let workID: UUID
     let ownerChildDeviceID: UUID
@@ -601,6 +617,230 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         ownerProvider() == owner
     }
 
+    /// The callback boundary is deliberately the sole local producer of v2
+    /// sample work. It performs a non-mutating preflight first so rejected
+    /// callbacks cannot bootstrap an empty root, then repeats every authority
+    /// check under the root lock before any high-water or queue mutation.
+    func enqueueAuthorizedV2Callback(
+        _ input: MeteringAuthorizedCallbackInput,
+        owner: UUID
+    ) throws -> MeteringAuthorizedCallbackResult {
+        guard isCurrentOwner(owner) else {
+            return .discarded(reason: "owner_mismatch")
+        }
+
+        let preflight = try read()
+        guard preflight.ownerChildDeviceID == owner else {
+            return .discarded(reason: preflight.ownerChildDeviceID == nil ? "missing_owner" : "owner_mismatch")
+        }
+        guard preflight.routes[input.routeID] != nil else {
+            return .discarded(reason: preflight.tombstones[input.routeID] == nil ? "unknown_route" : "tombstoned_route")
+        }
+
+        return try transaction(expectedOwner: owner) { state in
+            authorizeV2Callback(&state, input: input, owner: owner)
+        }
+    }
+
+    private func authorizeV2Callback(
+        _ state: inout DeviceEpochStoreState,
+        input: MeteringAuthorizedCallbackInput,
+        owner: UUID
+    ) -> MeteringAuthorizedCallbackResult {
+        if state.tombstones[input.routeID] != nil {
+            return .discarded(reason: "tombstoned_route")
+        }
+        guard state.ownerChildDeviceID == owner,
+              let route = state.routes[input.routeID],
+              let generation = state.generations[route.generationID],
+              var epoch = state.epochs[route.epochID],
+              route.ownerChildDeviceID == owner,
+              route.routeID == input.routeID,
+              route.activityName == input.activityName,
+              route.namespace == input.namespace,
+              route.lifecycle == .active,
+              route.epochID == epoch.epochID,
+              route.generationID == generation.generationID,
+              route.usageDate == epoch.usageDate,
+              epoch.childDeviceID == owner,
+              epoch.protocolVersion == 2,
+              epoch.canonicalTimezone == generation.canonicalTimezone,
+              epoch.policyRevision == generation.policyRevision,
+              epoch.measurementSelectionDigest == generation.measurementSelectionDigest,
+              epoch.enforcementSetID == generation.enforcementSetID,
+              generation.childDeviceID == owner,
+              generation.protocolVersion == 2,
+              generation.retiredAt == nil,
+              route.plannedEvents.contains(where: {
+                  $0.eventName == input.eventName && $0.thresholdMinutes == input.thresholdMinutes
+              }),
+              matchingCallbackInstall(routeID: route.routeID, owner: owner, state: state) != nil
+        else {
+            return .discarded(reason: "route_provenance_mismatch")
+        }
+
+        let earliest = epoch.startedAt.addingTimeInterval(
+            TimeInterval(input.thresholdMinutes * 60 - input.jitterSeconds)
+        )
+        guard input.observedAt >= earliest else {
+            return .discarded(reason: "too_early")
+        }
+
+        if epoch.status == .paused {
+            epoch.lastRawThresholdMinutes = max(epoch.lastRawThresholdMinutes, input.thresholdMinutes)
+            epoch.excludedWhilePausedMinutes = max(epoch.excludedWhilePausedMinutes, input.thresholdMinutes)
+            state.epochs[epoch.epochID] = epoch
+            return .discarded(reason: "paused")
+        }
+
+        guard epoch.status == .active,
+              epoch.retiredAt == nil,
+              epoch.exhaustedAt == nil,
+              epoch.authoritativeBaseConflict == nil,
+              hasCallbackCoverage(route: route, owner: owner, state: state),
+              let ratchet = state.ratchets[owner],
+              ratchet.localSelection != .v1
+        else {
+            return .discarded(reason: "epoch_not_active")
+        }
+
+        if epoch.resumeBoundaryPending {
+            epoch.lastRawThresholdMinutes = max(epoch.lastRawThresholdMinutes, input.thresholdMinutes)
+            epoch.excludedWhilePausedMinutes = max(epoch.excludedWhilePausedMinutes, input.thresholdMinutes)
+            epoch.resumeBoundaryPending = false
+            state.epochs[epoch.epochID] = epoch
+            return .discarded(reason: "resume_boundary")
+        }
+
+        switch callbackRouteAuthorization(route: route, epoch: epoch, owner: owner, ratchet: ratchet, state: state) {
+        case .discarded(let reason):
+            return .discarded(reason: reason)
+        case .accepted:
+            break
+        }
+
+        let rawThreshold = max(epoch.lastRawThresholdMinutes, input.thresholdMinutes)
+        let estimatedMinutes = epoch.baseAcceptedMinutes + max(0, rawThreshold - epoch.excludedWhilePausedMinutes)
+        let clientSampleID = MeteringSampleWireAliases.clientSampleID(
+            lane: .v2,
+            routeID: route.routeID,
+            thresholdMinutes: rawThreshold
+        )
+        if let existing = state.sampleWork.values.first(where: {
+            $0.ownerChildDeviceID == owner && $0.request.clientSampleID == clientSampleID
+        }) {
+            return .queued(sampleWorkID: existing.workID)
+        }
+
+        epoch.lastRawThresholdMinutes = rawThreshold
+        state.epochs[epoch.epochID] = epoch
+        let workID = UUID()
+        state.sampleWork[workID] = EpochSampleWork(
+            workID: workID,
+            ownerChildDeviceID: owner,
+            epochID: epoch.epochID,
+            routeID: route.routeID,
+            request: EpochSampleRequestDTO(
+                deviceID: owner,
+                usageDate: epoch.usageDate,
+                timezone: epoch.canonicalTimezone,
+                activityName: route.activityName,
+                eventName: input.eventName,
+                thresholdMinutes: rawThreshold,
+                estimatedMinutes: estimatedMinutes,
+                observedAt: input.observedAt,
+                clientSampleID: clientSampleID,
+                protocolVersion: 2,
+                epochID: epoch.epochID,
+                generationArmedAt: nil,
+                generationOffsetMinutes: nil
+            ),
+            authorization: epoch.registeredAt == nil ? .waitingForRegistration : .v2Deliverable,
+            claim: nil,
+            retry: MeteringRetryState(
+                attemptCount: 0,
+                nextAttemptAt: input.now,
+                lastErrorCode: nil,
+                terminal: .pending
+            ),
+            createdAt: input.now
+        )
+        return .queued(sampleWorkID: workID)
+    }
+
+    private enum CallbackAuthorization {
+        case accepted
+        case discarded(String)
+    }
+
+    private func callbackRouteAuthorization(
+        route: MeteringCallbackRoute,
+        epoch: DeviceDailyEpoch,
+        owner: UUID,
+        ratchet: MeteringOwnerRatchet,
+        state: DeviceEpochStoreState
+    ) -> CallbackAuthorization {
+        guard state.hasCurrentRegistrationProvenance(owner: owner, epochID: epoch.epochID, routeID: route.routeID) else {
+            return .discarded("route_not_current")
+        }
+
+        if ratchet.localSelection == .dualActive {
+            return state.activeRouteID == nil
+                && state.activeGenerationID == route.generationID
+                && state.activeEpochID == epoch.epochID
+                ? .accepted
+                : .discarded("initial_dual_active_mismatch")
+        }
+
+        guard let handoff = state.v2RouteHandoff else {
+            return state.activeRouteID == route.routeID ? .accepted : .discarded("route_not_active")
+        }
+        guard handoff.ownerChildDeviceID == owner else { return .discarded("handoff_owner_mismatch") }
+
+        switch handoff.phase {
+        case .preparing:
+            return .discarded("handoff_preparing")
+        case .dualV2:
+            guard state.hasExactHandoffPriorProvenance(owner: owner, handoff: handoff),
+                  route.routeID == handoff.fromRouteID || route.routeID == handoff.toRouteID
+            else { return .discarded("handoff_route_mismatch") }
+            return .accepted
+        case .cutoverReady:
+            if route.routeID == handoff.fromRouteID {
+                return .discarded("handoff_prior_input_closed")
+            }
+            guard route.routeID == handoff.toRouteID,
+                  state.hasExactHandoffPriorProvenance(owner: owner, handoff: handoff)
+            else { return .discarded("handoff_route_mismatch") }
+            return .accepted
+        case .committed:
+            return state.activeRouteID == route.routeID ? .accepted : .discarded("handoff_committed")
+        }
+    }
+
+    private func hasCallbackCoverage(
+        route: MeteringCallbackRoute,
+        owner: UUID,
+        state: DeviceEpochStoreState
+    ) -> Bool {
+        guard let coverage = state.coverage else { return true }
+        return coverage.ownerChildDeviceID == owner
+            && coverage.status == .ready
+            && (coverage.readyThroughUsageDate ?? "") >= route.usageDate
+    }
+
+    private func matchingCallbackInstall(
+        routeID: UUID,
+        owner: UUID,
+        state: DeviceEpochStoreState
+    ) -> ActivityInstallWork? {
+        let matches = state.installWork.values.filter {
+            $0.ownerChildDeviceID == owner && $0.routeID == routeID
+                && ($0.phase == .dualActive || $0.phase == .active)
+        }
+        return matches.count == 1 ? matches[0] : nil
+    }
+
     func dueInstallWork(owner: UUID, now: Date) throws -> [ActivityInstallWork] {
         let state = try read()
         guard state.ownerChildDeviceID == owner else { throw DeviceEpochStoreError.ownerMismatch }
@@ -903,6 +1143,10 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
             try checkOwner(expectedOwner: expectedOwner, state: candidate)
             try validateStatic(candidate, expectedOwner: expectedOwner, requireOwnerMatch: true)
             try validateTransactionDelta(candidate: candidate, priorState: state)
+
+            // Re-encoding an unchanged Codable value can produce different bytes on
+            // some SDKs. Rejected callback paths must be byte-identical no-ops.
+            guard candidate != state else { return value }
 
             let encoded = try Self.encoder.encode(candidate)
             guard encoded != priorData else { return value }

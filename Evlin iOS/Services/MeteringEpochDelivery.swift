@@ -531,6 +531,14 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
             work.claim = nil
             state.registrationWork[key] = work
             state.epochs[work.epochID]?.registeredAt = clock.now
+            for (sampleKey, var sampleWork) in state.sampleWork where
+                sampleWork.ownerChildDeviceID == owner
+                    && sampleWork.epochID == work.epochID
+                    && sampleWork.routeID == route.routeID
+                    && sampleWork.authorization == .waitingForRegistration {
+                sampleWork.authorization = .v2Deliverable
+                state.sampleWork[sampleKey] = sampleWork
+            }
             for (installKey, var installWork) in state.installWork where
                 installWork.ownerChildDeviceID == owner
                     && installWork.routeID == route.routeID
