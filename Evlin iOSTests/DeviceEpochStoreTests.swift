@@ -71,11 +71,23 @@ final class DeviceEpochStoreTests: XCTestCase {
         })
         XCTAssertEqual(io.data, priorBytes)
 
-        io.failWrite = true
+        io.failWriteAfterMutationCount = 1
         XCTAssertThrowsError(try store.transaction(expectedOwner: owner) { state in
             state.activeEpochID = nil
         })
         XCTAssertEqual(io.data, priorBytes)
+    }
+
+    func testFailedInitialWriteRestoresAnAbsentRoot() throws {
+        let io = TestFileIO()
+        let store = makeStore(io: io)
+        io.failWriteAfterMutationCount = 1
+
+        XCTAssertThrowsError(try store.transaction(expectedOwner: owner) { state in
+            state.ownerChildDeviceID = owner
+        })
+
+        XCTAssertNil(io.data)
     }
 
     func testInjectedLockAndReadFailuresAreReturnedWithoutMutation() throws {
@@ -105,6 +117,35 @@ final class DeviceEpochStoreTests: XCTestCase {
             state.ratchets[owner]?.advertisedVersion = 2
         }) { error in
             XCTAssertEqual(error as? DeviceEpochStoreError, .readbackMismatch)
+        }
+        XCTAssertEqual(io.data, priorBytes)
+    }
+
+    func testReadbackReadFailureAfterSuccessfulWriteRestoresPriorBytes() throws {
+        let io = TestFileIO()
+        let store = makeStore(io: io)
+        try store.transaction(expectedOwner: owner) { $0 = makeState() }
+        let priorBytes = io.data
+        io.failNextReadback = true
+
+        XCTAssertThrowsError(try store.transaction(expectedOwner: owner) { state in
+            state.ratchets[owner]?.advertisedVersion = 2
+        })
+        XCTAssertEqual(io.data, priorBytes)
+        XCTAssertEqual(io.readbackFailureCount, 1)
+    }
+
+    func testRestorationFailurePropagatesDeterministicStoreError() throws {
+        let io = TestFileIO()
+        let store = makeStore(io: io)
+        try store.transaction(expectedOwner: owner) { $0 = makeState() }
+        let priorBytes = io.data
+        io.failWriteAfterMutationCount = 2
+
+        XCTAssertThrowsError(try store.transaction(expectedOwner: owner) { state in
+            state.ratchets[owner]?.advertisedVersion = 2
+        }) { error in
+            XCTAssertEqual(String(describing: error), "restorationFailed")
         }
         XCTAssertEqual(io.data, priorBytes)
     }
@@ -150,11 +191,11 @@ final class DeviceEpochStoreTests: XCTestCase {
         let stableStore = makeStore(io: io)
         try stableStore.transaction(expectedOwner: owner) { $0 = makeState() }
         let priorBytes = io.data
-        var calls = 0
-        let store = makeStore(io: io, ownerProvider: {
-            calls += 1
-            return calls < 3 ? self.owner : self.otherOwner
-        })
+        var currentOwner = owner
+        let store = makeStore(io: io, ownerProvider: { currentOwner })
+        io.onReadback = {
+            currentOwner = self.otherOwner
+        }
 
         XCTAssertThrowsError(try store.transaction(expectedOwner: owner) { state in
             state.ratchets[owner]?.advertisedVersion = 2
@@ -162,6 +203,114 @@ final class DeviceEpochStoreTests: XCTestCase {
             XCTAssertEqual(error as? DeviceEpochStoreError, .ownerMismatch)
         }
         XCTAssertEqual(io.data, priorBytes)
+    }
+
+    func testProcessRoleUsesThePlannedRawValue() {
+        XCTAssertEqual(MeteringProcessRole.deviceActivityMonitor.rawValue, "deviceActivityMonitor")
+    }
+
+    func testMeasurementSelectionDigestMustMatchExactPersistedBytes() throws {
+        let io = TestFileIO()
+        let store = makeStore(io: io)
+        let generationID = UUID(uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")!
+        let selectionBytes = Data([0x00, 0x01, 0xFE, 0xFF])
+        let generation = MeteringPolicyGeneration(
+            generationID: generationID,
+            protocolVersion: 2,
+            childDeviceID: owner,
+            canonicalTimezone: "America/New_York",
+            policyRevision: "policy-r1",
+            measurementSelectionDigest: "digest-is-not-the-sha256",
+            enforcementSetID: UUID(uuidString: "99999999-9999-9999-9999-999999999999")!,
+            measurementSelectionBytes: selectionBytes,
+            createdAt: Date(timeIntervalSince1970: 100),
+            retiredAt: nil
+        )
+        var invalid = DeviceEpochStoreState(ownerChildDeviceID: owner, generations: [generationID: generation], activeGenerationID: generationID)
+
+        XCTAssertThrowsError(try store.transaction(expectedOwner: owner) { $0 = invalid })
+        XCTAssertEqual(MeteringEpochContract.selectionDigest(persistedBytes: selectionBytes), "c5dbae22661af6db18a1f676db82a7ef7de46d27c3a263a872f00478b0d99fc4")
+    }
+
+    func testRouteGenerationKeyMustMatchReferencedGeneration() throws {
+        let io = TestFileIO()
+        let store = makeStore(io: io)
+        var invalid = makeState()
+        let routeID = invalid.activeRouteID!
+        let route = invalid.routes[routeID]!
+        let mismatchedKey = MeteringGenerationKey(
+            protocolVersion: route.generationKey.protocolVersion,
+            childDeviceID: route.generationKey.childDeviceID,
+            canonicalTimezone: route.generationKey.canonicalTimezone,
+            policyRevision: route.generationKey.policyRevision,
+            measurementSelectionDigest: "another-digest",
+            enforcementSetID: route.generationKey.enforcementSetID
+        )
+        invalid.routes[routeID] = MeteringCallbackRoute(
+            routeID: route.routeID,
+            activityName: route.activityName,
+            namespace: route.namespace,
+            generationID: route.generationID,
+            generationKey: mismatchedKey,
+            ownerChildDeviceID: route.ownerChildDeviceID,
+            usageDate: route.usageDate,
+            epochID: route.epochID,
+            plannedSchedule: route.plannedSchedule,
+            installedSchedule: route.installedSchedule,
+            plannedEvents: route.plannedEvents,
+            installedEvents: route.installedEvents,
+            lifecycle: route.lifecycle,
+            createdAt: route.createdAt
+        )
+
+        XCTAssertThrowsError(try store.transaction(expectedOwner: owner) { $0 = invalid })
+    }
+
+    func testRouteEpochMustReferenceExistingEpochWhenNoHandoffNamesIt() throws {
+        let io = TestFileIO()
+        let store = makeStore(io: io)
+        var invalid = makeState()
+        invalid.v2RouteHandoff = nil
+        invalid.epochs.removeAll()
+        invalid.activeEpochID = nil
+        invalid.tombstones.removeAll()
+        invalid.registrationWork.removeAll()
+        invalid.activationWork.removeAll()
+        invalid.sampleWork.removeAll()
+        invalid.installWork.removeAll()
+        invalid.shieldReferences.removeAll()
+        invalid.identityCleanupWork = nil
+        invalid.rolloverEffectsWork = nil
+        invalid.ratchets.removeAll()
+
+        XCTAssertThrowsError(try store.transaction(expectedOwner: owner) { $0 = invalid })
+    }
+
+    func testReadRejectsInvalidPersistedRoot() throws {
+        let io = TestFileIO()
+        let store = makeStore(io: io)
+        var invalid = makeState()
+        let routeID = invalid.activeRouteID!
+        let route = invalid.routes[routeID]!
+        invalid.routes[routeID] = MeteringCallbackRoute(
+            routeID: route.routeID,
+            activityName: route.activityName,
+            namespace: route.namespace,
+            generationID: UUID(),
+            generationKey: route.generationKey,
+            ownerChildDeviceID: route.ownerChildDeviceID,
+            usageDate: route.usageDate,
+            epochID: route.epochID,
+            plannedSchedule: route.plannedSchedule,
+            installedSchedule: route.installedSchedule,
+            plannedEvents: route.plannedEvents,
+            installedEvents: route.installedEvents,
+            lifecycle: route.lifecycle,
+            createdAt: route.createdAt
+        )
+        io.data = try encode(invalid)
+
+        XCTAssertThrowsError(try store.read())
     }
 
     func testDualV2ReferencesSameOwnerRoutesAndKeepsPriorRouteActiveUntilCommit() throws {
@@ -186,12 +335,74 @@ final class DeviceEpochStoreTests: XCTestCase {
         var committed = state
         committed.v2RouteHandoff?.phase = .committed
         committed.activeRouteID = committed.v2RouteHandoff?.toRouteID
-        XCTAssertThrowsError(try store.transaction(expectedOwner: owner) { $0 = committed })
-
+        committed.activeEpochID = committed.v2RouteHandoff?.toEpochID
+        committed.activeGenerationID = committed.v2RouteHandoff?.toGenerationID
+        committed.epochs[committed.v2RouteHandoff!.fromEpochID]?.status = .retired
+        committed.epochs[committed.v2RouteHandoff!.fromEpochID]?.retiredAt = Date(timeIntervalSince1970: 300)
+        committed.epochs[committed.v2RouteHandoff!.fromEpochID]?.retireReason = .activationSuperseded
+        committed.epochs[committed.v2RouteHandoff!.toEpochID]?.registeredAt = Date(timeIntervalSince1970: 250)
+        committed.routes[committed.v2RouteHandoff!.fromRouteID]?.lifecycle = .tombstoned
+        committed.tombstones[committed.v2RouteHandoff!.fromRouteID] = MeteringRouteTombstone(
+            routeID: committed.v2RouteHandoff!.fromRouteID,
+            activityName: state.routes[committed.v2RouteHandoff!.fromRouteID]!.activityName,
+            eventNames: ["t5"],
+            ownerChildDeviceID: owner,
+            usageDate: "2026-07-17",
+            epochID: committed.v2RouteHandoff!.fromEpochID,
+            generationID: committed.v2RouteHandoff!.fromGenerationID,
+            canonicalDayEnd: Date(timeIntervalSince1970: 86_500),
+            stopAcknowledgedAt: Date(timeIntervalSince1970: 301),
+            referencedWorkIDs: [],
+            retainedUntil: nil
+        )
+        committed.v2RouteHandoff?.registrationAcknowledgedAt = Date(timeIntervalSince1970: 250)
         committed.v2RouteHandoff?.activationAcknowledgedAt = Date(timeIntervalSince1970: 300)
-        XCTAssertThrowsError(try store.transaction(expectedOwner: owner) { $0 = committed })
-
         committed.v2RouteHandoff?.priorStopAcknowledgedAt = Date(timeIntervalSince1970: 301)
+        committed.sampleWork = committed.sampleWork.mapValues { work in
+            var copy = work
+            copy.retry.terminal = .succeeded
+            return copy
+        }
+        committed.registrationWork = committed.registrationWork.mapValues { work in
+            var copy = work
+            copy.retry.terminal = .succeeded
+            return copy
+        }
+        committed.activationWork = committed.activationWork.mapValues { work in
+            var copy = work
+            copy.retry.terminal = .succeeded
+            return copy
+        }
+        let priorInstallID = UUID(uuidString: "12121212-1212-1212-1212-121212121212")!
+        committed.installWork[priorInstallID] = ActivityInstallWork(
+            workID: priorInstallID,
+            ownerChildDeviceID: owner,
+            routeID: committed.v2RouteHandoff!.fromRouteID,
+            authorization: .registered,
+            phase: .stopped,
+            claim: nil,
+            retry: MeteringRetryState(attemptCount: 0, nextAttemptAt: Date(timeIntervalSince1970: 300), lastErrorCode: nil, terminal: .succeeded),
+            createdAt: Date(timeIntervalSince1970: 100)
+        )
+        let candidateInstallID = committed.installWork.first { $0.value.routeID == committed.v2RouteHandoff!.toRouteID }!.key
+        committed.installWork[candidateInstallID]?.phase = .active
+        committed.ratchets[owner] = MeteringOwnerRatchet(
+            ownerChildDeviceID: owner,
+            advertisedVersion: 2,
+            localSelection: .v2,
+            registeredV2At: Date(timeIntervalSince1970: 250),
+            dualActiveAt: Date(timeIntervalSince1970: 200),
+            activatedV2At: Date(timeIntervalSince1970: 300)
+        )
+
+        var notActivated = committed
+        notActivated.installWork[candidateInstallID]?.phase = .verified
+        XCTAssertThrowsError(try store.transaction(expectedOwner: owner) { $0 = notActivated })
+
+        var missingStop = committed
+        missingStop.tombstones[committed.v2RouteHandoff!.fromRouteID]?.stopAcknowledgedAt = nil
+        XCTAssertThrowsError(try store.transaction(expectedOwner: owner) { $0 = missingStop })
+
         try store.transaction(expectedOwner: owner) { $0 = committed }
         XCTAssertEqual(try store.read().activeRouteID, committed.v2RouteHandoff?.toRouteID)
     }
@@ -200,6 +411,7 @@ final class DeviceEpochStoreTests: XCTestCase {
         let io = TestFileIO()
         let store = makeStore(io: io)
         var state = makeState()
+        try store.transaction(expectedOwner: owner) { $0 = state }
         let barrier = Date(timeIntervalSince1970: 150)
         state.v2RouteHandoff?.phase = .cutoverReady
         state.v2RouteHandoff?.priorRouteInputClosedAt = barrier
@@ -234,6 +446,48 @@ final class DeviceEpochStoreTests: XCTestCase {
         XCTAssertThrowsError(try store.transaction(expectedOwner: owner) { $0 = afterBarrier })
     }
 
+    func testCutoverBarrierRejectsBackdatedPriorSampleAddedInTheBarrierTransaction() throws {
+        let io = TestFileIO()
+        let store = makeStore(io: io)
+        var invalid = makeState()
+        invalid.sampleWork.removeAll()
+        invalid.v2RouteHandoff?.phase = .cutoverReady
+        invalid.v2RouteHandoff?.priorRouteInputClosedAt = Date(timeIntervalSince1970: 150)
+        let sampleID = UUID(uuidString: "ffffffff-ffff-ffff-ffff-ffffffffffff")!
+        invalid.sampleWork[sampleID] = makeSampleWork(
+            workID: sampleID,
+            routeID: invalid.v2RouteHandoff!.fromRouteID,
+            epochID: invalid.v2RouteHandoff!.fromEpochID,
+            createdAt: Date(timeIntervalSince1970: 101),
+            terminal: .succeeded,
+            activityName: invalid.routes[invalid.v2RouteHandoff!.fromRouteID]!.activityName
+        )
+
+        XCTAssertThrowsError(try store.transaction(expectedOwner: owner) { $0 = invalid })
+    }
+
+    func testClosedBarrierRejectsBackdatedPriorSampleAddedInLaterTransaction() throws {
+        let io = TestFileIO()
+        let store = makeStore(io: io)
+        var closed = makeState()
+        closed.sampleWork.removeAll()
+        closed.v2RouteHandoff?.phase = .cutoverReady
+        closed.v2RouteHandoff?.priorRouteInputClosedAt = Date(timeIntervalSince1970: 150)
+        try store.transaction(expectedOwner: owner) { $0 = closed }
+
+        let sampleID = UUID(uuidString: "abababab-abab-abab-abab-abababababab")!
+        XCTAssertThrowsError(try store.transaction(expectedOwner: owner) { state in
+            state.sampleWork[sampleID] = self.makeSampleWork(
+                workID: sampleID,
+                routeID: state.v2RouteHandoff!.fromRouteID,
+                epochID: state.v2RouteHandoff!.fromEpochID,
+                createdAt: Date(timeIntervalSince1970: 101),
+                terminal: .succeeded,
+                activityName: state.routes[state.v2RouteHandoff!.fromRouteID]!.activityName
+            )
+        })
+    }
+
     func testRetryPolicyUsesImmediateThenFiveFifteenSixtyAndThreeHundredSeconds() {
         let now = Date(timeIntervalSince1970: 10)
         XCTAssertEqual(MeteringRetryPolicy.nextAttempt(after: 0, now: now), now.addingTimeInterval(5))
@@ -266,6 +520,52 @@ final class DeviceEpochStoreTests: XCTestCase {
         ].forEach { defaults?.removeObject(forKey: $0) }
     }
 
+    private func encode(_ state: DeviceEpochStoreState) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys]
+        return try encoder.encode(state)
+    }
+
+    private func makeSampleWork(
+        workID: UUID,
+        routeID: UUID,
+        epochID: UUID,
+        createdAt: Date,
+        terminal: MeteringWorkTerminal,
+        activityName: String = "evlin.earned.budget.prior"
+    ) -> EpochSampleWork {
+        EpochSampleWork(
+            workID: workID,
+            ownerChildDeviceID: owner,
+            epochID: epochID,
+            routeID: routeID,
+            request: EpochSampleRequestDTO(
+                deviceID: owner,
+                usageDate: "2026-07-17",
+                timezone: "America/New_York",
+                activityName: activityName,
+                eventName: "t5",
+                thresholdMinutes: 5,
+                estimatedMinutes: 5,
+                observedAt: createdAt,
+                clientSampleID: "earned:v2:prior:t5",
+                protocolVersion: 2,
+                epochID: epochID,
+                generationArmedAt: nil,
+                generationOffsetMinutes: nil
+            ),
+            authorization: .v2Deliverable,
+            retry: MeteringRetryState(
+                attemptCount: 0,
+                nextAttemptAt: createdAt,
+                lastErrorCode: nil,
+                terminal: terminal
+            ),
+            createdAt: createdAt
+        )
+    }
+
     private func makeState() -> DeviceEpochStoreState {
         let startedAt = Date(timeIntervalSince1970: 100)
         let candidateStartedAt = Date(timeIntervalSince1970: 200)
@@ -275,12 +575,13 @@ final class DeviceEpochStoreTests: XCTestCase {
         let priorRouteID = UUID(uuidString: "dddddddd-dddd-dddd-dddd-dddddddddddd")!
         let candidateRouteID = UUID(uuidString: "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee")!
         let selectionBytes = Data([0x00, 0x01, 0xFE, 0xFF])
+        let selectionDigest = MeteringEpochContract.selectionDigest(persistedBytes: selectionBytes)
         let generationKey = MeteringGenerationKey(
             protocolVersion: 2,
             childDeviceID: owner,
             canonicalTimezone: "America/New_York",
             policyRevision: "policy-r1",
-            measurementSelectionDigest: "digest-r1",
+            measurementSelectionDigest: selectionDigest,
             enforcementSetID: UUID(uuidString: "99999999-9999-9999-9999-999999999999")!
         )
         let generation = MeteringPolicyGeneration(
@@ -302,7 +603,7 @@ final class DeviceEpochStoreTests: XCTestCase {
             usageDate: "2026-07-17",
             canonicalTimezone: "America/New_York",
             policyRevision: "policy-r1",
-            measurementSelectionDigest: "digest-r1",
+            measurementSelectionDigest: selectionDigest,
             enforcementSetID: generationKey.enforcementSetID,
             startedAt: startedAt,
             registeredAt: startedAt,
@@ -324,7 +625,7 @@ final class DeviceEpochStoreTests: XCTestCase {
             usageDate: "2026-07-17",
             canonicalTimezone: "America/New_York",
             policyRevision: "policy-r1",
-            measurementSelectionDigest: "digest-r1",
+            measurementSelectionDigest: selectionDigest,
             enforcementSetID: generationKey.enforcementSetID,
             startedAt: candidateStartedAt,
             registeredAt: nil,
@@ -381,7 +682,7 @@ final class DeviceEpochStoreTests: XCTestCase {
             usageDate: "2026-07-17",
             timezone: "America/New_York",
             policyRevision: "policy-r1",
-            measurementSelectionDigest: "digest-r1",
+            measurementSelectionDigest: selectionDigest,
             enforcementSetID: generationKey.enforcementSetID,
             startedAt: candidateStartedAt,
             baseAcceptedMinutes: 5,
@@ -417,7 +718,6 @@ final class DeviceEpochStoreTests: XCTestCase {
             stopAcknowledgedAt: nil
         )
         let coverage = MonitorCoverageState(ownerChildDeviceID: owner, requiredFromUsageDate: "2026-07-17", requiredThroughUsageDate: "2026-07-24", readyThroughUsageDate: "2026-07-24", status: .ready, refreshedAt: startedAt, errorCode: nil)
-        let tombstone = MeteringRouteTombstone(routeID: priorRouteID, activityName: priorRoute.activityName, eventNames: ["t5"], ownerChildDeviceID: owner, usageDate: "2026-07-17", epochID: priorEpochID, generationID: generationID, canonicalDayEnd: startedAt.addingTimeInterval(86_400), stopAcknowledgedAt: nil, referencedWorkIDs: [], retainedUntil: nil)
         let handoff = V2RouteHandoff(handoffID: UUID(), ownerChildDeviceID: owner, fromGenerationID: generationID, fromEpochID: priorEpochID, fromRouteID: priorRouteID, toGenerationID: generationID, toEpochID: candidateEpochID, toRouteID: candidateRouteID, phase: .dualV2, priorRouteInputClosedAt: nil, registrationAcknowledgedAt: nil, activationAcknowledgedAt: nil, priorStopAcknowledgedAt: nil, createdAt: candidateStartedAt)
         let ratchet = MeteringOwnerRatchet(ownerChildDeviceID: owner, advertisedVersion: 1, localSelection: .dualActive, registeredV2At: nil, dualActiveAt: nil, activatedV2At: nil)
         return DeviceEpochStoreState(
@@ -429,7 +729,7 @@ final class DeviceEpochStoreTests: XCTestCase {
             activeEpochID: priorEpochID,
             routes: [priorRouteID: priorRoute, candidateRouteID: candidateRoute],
             activeRouteID: priorRouteID,
-            tombstones: [priorRouteID: tombstone],
+            tombstones: [:],
             v2RouteHandoff: handoff,
             legacy: legacy,
             registrationWork: [UUID(): EpochRegistrationWork(workID: UUID(), ownerChildDeviceID: owner, epochID: candidateEpochID, routeID: candidateRouteID, request: registration, retry: retry, createdAt: candidateStartedAt)],
@@ -460,22 +760,44 @@ private final class TestFileIO: DeviceEpochFileIO, @unchecked Sendable {
     var readbackData: Data?
     var readbackPending = false
     var failRead = false
-    var failWrite = false
+    var failWriteAfterMutationCount = 0
+    var failNextReadback = false
+    var readbackFailureCount = 0
+    var onWrite: (() -> Void)?
+    var onReadback: (() -> Void)?
     var writeCount = 0
 
     func read(from url: URL) throws -> Data? {
         if failRead { throw TestError.mutation }
         if readbackPending {
             readbackPending = false
-            return readbackData ?? data
+            if failNextReadback {
+                failNextReadback = false
+                readbackFailureCount += 1
+                throw TestError.mutation
+            }
+            onReadback?()
+            onReadback = nil
+            let result = readbackData ?? data
+            readbackData = nil
+            return result
         }
         return data
     }
 
     func writeAtomically(_ data: Data, to url: URL) throws {
-        if failWrite { throw TestError.mutation }
         writeCount += 1
         self.data = data
         readbackPending = true
+        onWrite?()
+        if failWriteAfterMutationCount > 0 {
+            failWriteAfterMutationCount -= 1
+            throw TestError.mutation
+        }
+    }
+
+    func remove(at url: URL) throws {
+        data = nil
+        readbackPending = false
     }
 }

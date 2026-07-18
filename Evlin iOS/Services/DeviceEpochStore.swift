@@ -131,7 +131,7 @@ nonisolated enum ActivityInstallPhase: String, Codable, Sendable {
 
 nonisolated enum MeteringProcessRole: String, Codable, Sendable {
     case app
-    case deviceActivityMonitor = "device_activity_monitor"
+    case deviceActivityMonitor = "deviceActivityMonitor"
 }
 
 nonisolated struct ActivityInstallClaim: Codable, Equatable, Sendable {
@@ -430,6 +430,14 @@ extension ActiveLockPersistenceLock: DeviceEpochStoreLocking {}
 nonisolated protocol DeviceEpochFileIO: Sendable {
     func read(from url: URL) throws -> Data?
     func writeAtomically(_ data: Data, to url: URL) throws
+    func remove(at url: URL) throws
+}
+
+extension DeviceEpochFileIO {
+    func remove(at url: URL) throws {
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        try FileManager.default.removeItem(at: url)
+    }
 }
 
 nonisolated struct SystemDeviceEpochFileIO: DeviceEpochFileIO {
@@ -441,6 +449,11 @@ nonisolated struct SystemDeviceEpochFileIO: DeviceEpochFileIO {
     func writeAtomically(_ data: Data, to url: URL) throws {
         try data.write(to: url, options: .atomic)
     }
+
+    func remove(at url: URL) throws {
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        try FileManager.default.removeItem(at: url)
+    }
 }
 
 nonisolated enum DeviceEpochStoreError: Error, Equatable {
@@ -449,6 +462,7 @@ nonisolated enum DeviceEpochStoreError: Error, Equatable {
     case ownerMismatch
     case unsupportedSchema(Int)
     case readbackMismatch
+    case restorationFailed
 }
 
 private enum DeviceEpochStoreInvariantError: Error {
@@ -489,6 +503,7 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
             let url = try resolvedFileURL()
             let priorData = try fileIO.read(from: url)
             var state = try decodeState(priorData)
+            try validate(state, expectedOwner: nil, requireOwnerMatch: false, priorState: nil)
             try checkOwner(expectedOwner: expectedOwner, state: state)
 
             if state.ownerChildDeviceID == nil {
@@ -498,13 +513,13 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
             var candidate = state
             let value = try mutate(&candidate)
             try checkOwner(expectedOwner: expectedOwner, state: candidate)
-            try validate(candidate, expectedOwner: expectedOwner)
+            try validate(candidate, expectedOwner: expectedOwner, requireOwnerMatch: true, priorState: state)
 
             let encoded = try Self.encoder.encode(candidate)
-            var didWrite = false
+            var writeAttempted = false
             do {
+                writeAttempted = true
                 try fileIO.writeAtomically(encoded, to: url)
-                didWrite = true
                 guard let readbackData = try fileIO.read(from: url) else {
                     throw DeviceEpochStoreError.readbackMismatch
                 }
@@ -515,8 +530,12 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                 try checkOwner(expectedOwner: expectedOwner, state: readback)
                 return value
             } catch {
-                if didWrite {
-                    restore(priorData, at: url)
+                if writeAttempted {
+                    do {
+                        try restore(priorData, at: url)
+                    } catch {
+                        throw DeviceEpochStoreError.restorationFailed
+                    }
                 }
                 throw error
             }
@@ -561,7 +580,9 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
 
     private func loadState() throws -> DeviceEpochStoreState {
         let url = try resolvedFileURL()
-        return try decodeState(try fileIO.read(from: url))
+        let state = try decodeState(try fileIO.read(from: url))
+        try validate(state, expectedOwner: nil, requireOwnerMatch: false, priorState: nil)
+        return state
     }
 
     private func decodeState(_ data: Data?) throws -> DeviceEpochStoreState {
@@ -638,26 +659,199 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         }
     }
 
-    private func validate(_ state: DeviceEpochStoreState, expectedOwner: UUID?) throws {
+    private func validate(
+        _ state: DeviceEpochStoreState,
+        expectedOwner: UUID?,
+        requireOwnerMatch: Bool,
+        priorState: DeviceEpochStoreState?
+    ) throws {
         guard state.schemaVersion == DeviceEpochStoreState.currentSchemaVersion else {
             throw DeviceEpochStoreError.unsupportedSchema(state.schemaVersion)
         }
-        guard state.ownerChildDeviceID == expectedOwner else {
+        if requireOwnerMatch, state.ownerChildDeviceID != expectedOwner {
             throw DeviceEpochStoreError.ownerMismatch
         }
 
+        let owner = expectedOwner ?? state.ownerChildDeviceID
+        let hasPersistedObjects = !state.generations.isEmpty
+            || !state.epochs.isEmpty
+            || !state.routes.isEmpty
+            || !state.tombstones.isEmpty
+            || state.v2RouteHandoff != nil
+            || state.legacy != nil
+            || !state.registrationWork.isEmpty
+            || !state.activationWork.isEmpty
+            || !state.sampleWork.isEmpty
+            || !state.installWork.isEmpty
+            || !state.shieldReferences.isEmpty
+            || state.identityCleanupWork != nil
+            || state.rolloverEffectsWork != nil
+            || state.coverage != nil
+            || !state.ratchets.isEmpty
+        guard let owner else {
+            if hasPersistedObjects {
+                throw DeviceEpochStoreInvariantError.invalidState("persisted objects have no owner")
+            }
+            return
+        }
+
+        func generationKey(for generation: MeteringPolicyGeneration) -> MeteringGenerationKey {
+            MeteringGenerationKey(
+                protocolVersion: generation.protocolVersion,
+                childDeviceID: generation.childDeviceID,
+                canonicalTimezone: generation.canonicalTimezone,
+                policyRevision: generation.policyRevision,
+                measurementSelectionDigest: generation.measurementSelectionDigest,
+                enforcementSetID: generation.enforcementSetID
+            )
+        }
+
+        func generationMatches(_ generation: MeteringPolicyGeneration, _ epoch: DeviceDailyEpoch) -> Bool {
+            generation.protocolVersion == epoch.protocolVersion
+                && generation.childDeviceID == epoch.childDeviceID
+                && generation.canonicalTimezone == epoch.canonicalTimezone
+                && generation.policyRevision == epoch.policyRevision
+                && generation.measurementSelectionDigest == epoch.measurementSelectionDigest
+                && generation.enforcementSetID == epoch.enforcementSetID
+        }
+
+        for (generationID, generation) in state.generations {
+            guard generationID == generation.generationID,
+                  generation.childDeviceID == owner,
+                  generation.measurementSelectionDigest == MeteringEpochContract.selectionDigest(
+                      persistedBytes: generation.measurementSelectionBytes
+                  )
+            else {
+                throw DeviceEpochStoreInvariantError.invalidState("generation identity or selection digest is invalid")
+            }
+        }
+
+        if let activeGenerationID = state.activeGenerationID {
+            guard let generation = state.generations[activeGenerationID], generation.childDeviceID == owner else {
+                throw DeviceEpochStoreInvariantError.invalidState("active generation is missing")
+            }
+        }
+
+        for (epochID, epoch) in state.epochs {
+            guard epochID == epoch.epochID,
+                  epoch.childDeviceID == owner,
+                  state.generations.values.contains(where: { generationMatches($0, epoch) })
+            else {
+                throw DeviceEpochStoreInvariantError.invalidState("epoch identity or generation coherence is invalid")
+            }
+        }
+
+        if let activeEpochID = state.activeEpochID {
+            guard let epoch = state.epochs[activeEpochID], epoch.childDeviceID == owner else {
+                throw DeviceEpochStoreInvariantError.invalidState("active epoch is missing")
+            }
+        }
+
+        for (routeID, route) in state.routes {
+            guard routeID == route.routeID,
+                  route.ownerChildDeviceID == owner,
+                  let generation = state.generations[route.generationID],
+                  generation.childDeviceID == owner,
+                  route.generationKey == generationKey(for: generation),
+                  let epoch = state.epochs[route.epochID],
+                  epoch.childDeviceID == owner,
+                  generationMatches(generation, epoch),
+                  epoch.usageDate == route.usageDate,
+                  route.plannedSchedule.usageDate == route.usageDate,
+                  route.plannedSchedule.timezoneIdentifier == generation.canonicalTimezone
+            else {
+                throw DeviceEpochStoreInvariantError.invalidState("route generation or epoch coherence is invalid")
+            }
+            if route.lifecycle == .tombstoned, state.tombstones[routeID] == nil {
+                throw DeviceEpochStoreInvariantError.invalidState("tombstoned route has no tombstone")
+            }
+        }
+
+        if let activeRouteID = state.activeRouteID {
+            guard let activeRoute = state.routes[activeRouteID],
+                  activeRoute.lifecycle == .active,
+                  state.activeEpochID == activeRoute.epochID,
+                  state.activeGenerationID == activeRoute.generationID
+            else {
+                throw DeviceEpochStoreInvariantError.invalidState("active route references are incoherent")
+            }
+        }
+
+        for (tombstoneID, tombstone) in state.tombstones {
+            guard tombstoneID == tombstone.routeID,
+                  let route = state.routes[tombstone.routeID],
+                  route.ownerChildDeviceID == tombstone.ownerChildDeviceID,
+                  route.epochID == tombstone.epochID,
+                  route.generationID == tombstone.generationID,
+                  route.activityName == tombstone.activityName,
+                  route.usageDate == tombstone.usageDate
+            else {
+                throw DeviceEpochStoreInvariantError.invalidState("route tombstone is incoherent")
+            }
+        }
+
+        for work in state.registrationWork.values {
+            guard work.ownerChildDeviceID == owner,
+                  let route = state.routes[work.routeID],
+                  route.epochID == work.epochID
+            else {
+                throw DeviceEpochStoreInvariantError.invalidState("registration work references an invalid route")
+            }
+        }
+        for work in state.activationWork.values {
+            guard work.ownerChildDeviceID == owner,
+                  let route = state.routes[work.routeID],
+                  route.epochID == work.epochID
+            else {
+                throw DeviceEpochStoreInvariantError.invalidState("activation work references an invalid route")
+            }
+        }
+        for work in state.sampleWork.values {
+            guard work.ownerChildDeviceID == owner else {
+                throw DeviceEpochStoreInvariantError.invalidState("sample work has the wrong owner")
+            }
+            if let routeID = work.routeID {
+                guard let route = state.routes[routeID],
+                      work.epochID == route.epochID,
+                      work.request.deviceID == owner,
+                      work.request.epochID == route.epochID,
+                      work.request.activityName == route.activityName,
+                      work.request.usageDate == route.usageDate,
+                      work.createdAt >= route.createdAt
+                else {
+                    throw DeviceEpochStoreInvariantError.invalidState("sample work references an invalid route")
+                }
+            }
+        }
+        for work in state.installWork.values {
+            guard work.ownerChildDeviceID == owner, state.routes[work.routeID] != nil else {
+                throw DeviceEpochStoreInvariantError.invalidState("install work references an invalid route")
+            }
+        }
+
+        if let coverage = state.coverage, coverage.ownerChildDeviceID != owner {
+            throw DeviceEpochStoreInvariantError.invalidState("coverage has the wrong owner")
+        }
+        for (ratchetID, ratchet) in state.ratchets {
+            guard ratchetID == ratchet.ownerChildDeviceID, ratchet.ownerChildDeviceID == owner else {
+                throw DeviceEpochStoreInvariantError.invalidState("ratchet has the wrong owner")
+            }
+        }
+
         if let handoff = state.v2RouteHandoff {
-            guard handoff.ownerChildDeviceID == expectedOwner,
-                  state.generations[handoff.fromGenerationID]?.childDeviceID == expectedOwner,
-                  state.generations[handoff.toGenerationID]?.childDeviceID == expectedOwner,
+            guard handoff.ownerChildDeviceID == owner,
+                  state.generations[handoff.fromGenerationID]?.childDeviceID == owner,
+                  state.generations[handoff.toGenerationID]?.childDeviceID == owner,
                   let fromEpoch = state.epochs[handoff.fromEpochID],
                   let toEpoch = state.epochs[handoff.toEpochID],
                   let fromRoute = state.routes[handoff.fromRouteID],
                   let toRoute = state.routes[handoff.toRouteID],
-                  fromEpoch.childDeviceID == expectedOwner,
-                  toEpoch.childDeviceID == expectedOwner,
-                  fromRoute.ownerChildDeviceID == expectedOwner,
-                  toRoute.ownerChildDeviceID == expectedOwner,
+                  fromEpoch.childDeviceID == owner,
+                  toEpoch.childDeviceID == owner,
+                  fromRoute.ownerChildDeviceID == owner,
+                  toRoute.ownerChildDeviceID == owner,
+                  fromRoute.generationID == handoff.fromGenerationID,
+                  toRoute.generationID == handoff.toGenerationID,
                   fromRoute.epochID == handoff.fromEpochID,
                   toRoute.epochID == handoff.toEpochID,
                   fromRoute.routeID != toRoute.routeID,
@@ -677,37 +871,79 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                 guard state.activeRouteID == handoff.fromRouteID else {
                     throw DeviceEpochStoreInvariantError.invalidState("cutoverReady must keep prior route active")
                 }
-                guard handoff.priorRouteInputClosedAt != nil else {
+                guard let closedAt = handoff.priorRouteInputClosedAt else {
                     throw DeviceEpochStoreInvariantError.invalidState("prior route barrier is incomplete")
                 }
-                if let closedAt = handoff.priorRouteInputClosedAt,
-                   state.sampleWork.values.contains(where: {
-                       $0.routeID == handoff.fromRouteID && $0.createdAt > closedAt
-                   }) {
-                    throw DeviceEpochStoreInvariantError.invalidState("prior route callback crossed barrier")
+                let priorSampleIDs = priorState.map { Set($0.sampleWork.keys) } ?? Set<UUID>()
+                let newlyAppendedPriorWork = state.sampleWork.filter {
+                    $0.value.routeID == handoff.fromRouteID && !priorSampleIDs.contains($0.key)
+                }.values
+                if !newlyAppendedPriorWork.isEmpty {
+                    throw DeviceEpochStoreInvariantError.invalidState("prior route work was appended with barrier")
                 }
                 if state.sampleWork.values.contains(where: {
                     $0.routeID == handoff.fromRouteID && $0.retry.terminal == .pending
                 }) {
                     throw DeviceEpochStoreInvariantError.invalidState("prior route sample work is pending")
                 }
+                if state.sampleWork.values.contains(where: {
+                    $0.routeID == handoff.fromRouteID && $0.createdAt > closedAt
+                }) {
+                    throw DeviceEpochStoreInvariantError.invalidState("prior route callback crossed barrier")
+                }
             case .committed:
+                let candidateInstallIsActive = state.installWork.values.contains {
+                    $0.routeID == handoff.toRouteID && $0.phase == .active
+                }
+                let priorInstallIsStopped = state.installWork.values.contains {
+                    $0.routeID == handoff.fromRouteID && $0.phase == .stopped
+                }
+                let priorTombstone = state.tombstones[handoff.fromRouteID]
                 guard state.activeRouteID == handoff.toRouteID,
+                      state.activeEpochID == handoff.toEpochID,
+                      state.activeGenerationID == handoff.toGenerationID,
+                      toEpoch.status == .active,
+                      toEpoch.registeredAt != nil,
+                      toRoute.lifecycle == .active,
+                      toRoute.installedSchedule != nil,
+                      toRoute.installedEvents != nil,
+                      candidateInstallIsActive,
+                      fromEpoch.status == .retired,
+                      fromEpoch.retiredAt != nil,
+                      fromEpoch.retireReason != nil,
+                      fromRoute.lifecycle == .tombstoned,
+                      priorTombstone?.stopAcknowledgedAt != nil,
+                      priorInstallIsStopped,
+                      handoff.registrationAcknowledgedAt != nil,
                       handoff.activationAcknowledgedAt != nil,
                       handoff.priorStopAcknowledgedAt != nil
                 else {
-                    throw DeviceEpochStoreInvariantError.invalidState("handoff collection acknowledgements are incomplete")
+                    throw DeviceEpochStoreInvariantError.invalidState("handoff collection prerequisites are incomplete")
                 }
             }
-
         }
     }
 
-    private func restore(_ priorData: Data?, at url: URL) {
-        if let priorData {
-            try? fileIO.writeAtomically(priorData, to: url)
-        } else {
-            try? FileManager.default.removeItem(at: url)
+    private func restore(_ priorData: Data?, at url: URL) throws {
+        var restoreError: Error?
+        do {
+            if let priorData {
+                try fileIO.writeAtomically(priorData, to: url)
+            } else {
+                try fileIO.remove(at: url)
+            }
+        } catch {
+            restoreError = error
+        }
+
+        let restoredData: Data?
+        do {
+            restoredData = try fileIO.read(from: url)
+        } catch {
+            throw DeviceEpochStoreError.restorationFailed
+        }
+        guard restoreError == nil, restoredData == priorData else {
+            throw DeviceEpochStoreError.restorationFailed
         }
     }
 }
