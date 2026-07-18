@@ -60,19 +60,19 @@ nonisolated enum MeteringDatedSchedule {
         let ceiling = min(poolMinutes, capMinutes)
         guard ceiling > 0 else { return [] }
 
+        let minimumStep = ceiling / guardEventCount
+            + (ceiling % guardEventCount == 0 ? 0 : 1)
+        let step = max(
+            earnedBucketMinutes,
+            ((minimumStep + earnedBucketMinutes - 1) / earnedBucketMinutes) * earnedBucketMinutes
+        )
         var result = stride(
-            from: earnedBucketMinutes,
+            from: step,
             through: ceiling,
-            by: earnedBucketMinutes
+            by: step
         ).map { $0 }
-        if ceiling % earnedBucketMinutes != 0 {
+        if result.last != ceiling {
             result.append(ceiling)
-        }
-        if result.count > guardEventCount {
-            result = Array(result.prefix(guardEventCount - 1))
-            if result.last != ceiling {
-                result.append(ceiling)
-            }
         }
         return result
     }
@@ -146,8 +146,9 @@ extension DeviceEpochStore {
         )
 
         return try transaction(expectedOwner: request.ownerChildDeviceID) { state in
-            let generation = state.generations.values.first(where: {
-                MeteringGenerationKey(
+            let matchesRequest: (MeteringPolicyGeneration) -> Bool = {
+                guard $0.retiredAt == nil else { return false }
+                return MeteringGenerationKey(
                     protocolVersion: $0.protocolVersion,
                     childDeviceID: $0.childDeviceID,
                     canonicalTimezone: $0.canonicalTimezone,
@@ -155,7 +156,19 @@ extension DeviceEpochStore {
                     measurementSelectionDigest: $0.measurementSelectionDigest,
                     enforcementSetID: $0.enforcementSetID
                 ) == request.generationKey
-            }) ?? MeteringPolicyGeneration(
+            }
+            let activeMatch = state.activeGenerationID
+                .flatMap { state.generations[$0] }
+                .flatMap { matchesRequest($0) ? $0 : nil }
+            let deterministicMatch = state.generations.values
+                .filter(matchesRequest)
+                .sorted {
+                    if $0.createdAt != $1.createdAt { return $0.createdAt > $1.createdAt }
+                    return $0.generationID.uuidString.lowercased()
+                        < $1.generationID.uuidString.lowercased()
+                }
+                .first
+            let generation = activeMatch ?? deterministicMatch ?? MeteringPolicyGeneration(
                 generationID: UUID(),
                 protocolVersion: request.generationKey.protocolVersion,
                 childDeviceID: request.generationKey.childDeviceID,

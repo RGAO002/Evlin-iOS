@@ -331,6 +331,79 @@ final class EarnedBudgetSchedulerTests: XCTestCase {
         XCTAssertFalse(Mirror(reflecting: initial).children.compactMap(\.label).contains("offsetMinutes"))
     }
 
+    func testRetiredGenerationIsNotReusedWhenIdentityReturnsFromR1ToR2ToR1() throws {
+        let owner = UUID(uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")!
+        let selectionBytes = Data([0x00, 0x01, 0xFE, 0xFF])
+        let storeURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("metering-horizon-retired-generation-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: storeURL) }
+        let store = DeviceEpochStore(fileURL: storeURL, ownerProvider: { owner })
+        let r1Key = generationKey(owner: owner)
+        let r2Key = MeteringGenerationKey(
+            protocolVersion: r1Key.protocolVersion,
+            childDeviceID: r1Key.childDeviceID,
+            canonicalTimezone: r1Key.canonicalTimezone,
+            policyRevision: "policy-r2",
+            measurementSelectionDigest: r1Key.measurementSelectionDigest,
+            enforcementSetID: r1Key.enforcementSetID
+        )
+        let startedAt = Date(timeIntervalSince1970: 1_784_764_800)
+
+        func request(key: MeteringGenerationKey, now: Date) -> MeteringHorizonRequest {
+            MeteringHorizonRequest(
+                ownerChildDeviceID: owner,
+                today: "2026-07-17",
+                generationKey: key,
+                persistedSelectionBytes: selectionBytes,
+                poolMinutes: 120,
+                deviceCapMinutes: 62,
+                authoritativeBaseAcceptedMinutes: 12,
+                now: now
+            )
+        }
+
+        let firstR1 = try store.reconcileMeteringHorizon(request(key: r1Key, now: startedAt))
+        let r2 = try store.reconcileMeteringHorizon(
+            request(key: r2Key, now: startedAt.addingTimeInterval(60))
+        )
+        XCTAssertNotEqual(r2.generationID, firstR1.generationID)
+
+        let retiredAt = startedAt.addingTimeInterval(120)
+        try store.transaction(expectedOwner: owner) { state in
+            XCTAssertEqual(state.activeGenerationID, r2.generationID)
+            var retiredR1 = try XCTUnwrap(state.generations[firstR1.generationID])
+            retiredR1.retiredAt = retiredAt
+            state.generations[firstR1.generationID] = retiredR1
+        }
+        let retiredState = try store.read()
+        let retiredGeneration = try XCTUnwrap(retiredState.generations[firstR1.generationID])
+        let oldRouteIDs = Set(firstR1.routeIDsByUsageDate.values)
+        let oldEpochIDs = Set(try oldRouteIDs.map { routeID in
+            try XCTUnwrap(retiredState.routes[routeID]?.epochID)
+        })
+
+        let returningR1 = try store.reconcileMeteringHorizon(
+            request(key: r1Key, now: startedAt.addingTimeInterval(180))
+        )
+        let finalState = try store.read()
+        let returningRouteIDs = Set(returningR1.routeIDsByUsageDate.values)
+        let returningEpochIDs = Set(try returningRouteIDs.map { routeID in
+            try XCTUnwrap(finalState.routes[routeID]?.epochID)
+        })
+
+        XCTAssertNotEqual(returningR1.generationID, firstR1.generationID)
+        XCTAssertNotEqual(returningR1.generationID, r2.generationID)
+        XCTAssertTrue(oldRouteIDs.isDisjoint(with: returningRouteIDs))
+        XCTAssertTrue(oldEpochIDs.isDisjoint(with: returningEpochIDs))
+        XCTAssertEqual(finalState.generations[firstR1.generationID], retiredGeneration)
+        for routeID in oldRouteIDs {
+            XCTAssertEqual(finalState.routes[routeID], retiredState.routes[routeID])
+        }
+        for epochID in oldEpochIDs {
+            XCTAssertEqual(finalState.epochs[epochID], retiredState.epochs[epochID])
+        }
+    }
+
     private func generationKey(owner: UUID) -> MeteringGenerationKey {
         MeteringGenerationKey(
             protocolVersion: 2,
@@ -920,13 +993,32 @@ final class EarnedBudgetSchedulerTests: XCTestCase {
         XCTAssertLessThanOrEqual(result.count, EarnedBudgetScheduler.guardEventCount)
     }
 
-    func test_thresholds_300MinutePolicyRetainsExactTerminalWithin48Events() {
+    func test_thresholds_300MinutePolicyUsesExactAdaptiveTenMinuteLadder() {
         let result = EarnedBudgetScheduler.thresholds(poolMinutes: 300, capMinutes: 300)
 
-        XCTAssertLessThanOrEqual(result.count, 48)
-        XCTAssertEqual(result.last, 300)
-        XCTAssertEqual(result, result.sorted())
-        XCTAssertEqual(Set(result).count, result.count)
+        XCTAssertEqual(result, stride(from: 10, through: 300, by: 10).map { $0 })
+        XCTAssertEqual(result.count, 30)
+    }
+
+    func test_thresholds_1440MinutePolicyUsesCompleteThirtyMinuteLadderWithinGuard() {
+        let result = EarnedBudgetScheduler.thresholds(poolMinutes: 1_440, capMinutes: 1_440)
+
+        XCTAssertEqual(result, stride(from: 30, through: 1_440, by: 30).map { $0 })
+        XCTAssertEqual(result.count, EarnedBudgetScheduler.guardEventCount)
+    }
+
+    func test_thresholds_ordinaryPolicyPreservesFiveMinuteLadderAndExactTerminal() {
+        let result = EarnedBudgetScheduler.thresholds(poolMinutes: 237, capMinutes: 237)
+
+        XCTAssertEqual(result, stride(from: 5, through: 235, by: 5).map { $0 } + [237])
+        XCTAssertEqual(result.count, EarnedBudgetScheduler.guardEventCount)
+    }
+
+    func test_thresholds_adaptivePolicyRetainsNonmultipleTerminalWithoutLargeGap() {
+        let result = EarnedBudgetScheduler.thresholds(poolMinutes: 301, capMinutes: 301)
+
+        XCTAssertEqual(result, stride(from: 10, through: 300, by: 10).map { $0 } + [301])
+        XCTAssertLessThanOrEqual(result.count, EarnedBudgetScheduler.guardEventCount)
     }
 
     // MARK: - Threshold list never exceeds min(pool, cap)

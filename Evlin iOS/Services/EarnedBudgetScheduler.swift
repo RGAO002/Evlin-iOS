@@ -22,8 +22,8 @@ final class EarnedBudgetScheduler {
     /// All event thresholds are derived from this value.
     nonisolated static let earnedBucketMinutes = MeteringDatedSchedule.earnedBucketMinutes
 
-    /// Hard ceiling on the number of DeviceActivity events that can be armed
-    /// in one activity (240 min / 5 min per bucket = 48 max meaningful slots).
+    /// Hard ceiling on DeviceActivity events per route. Policies through 240
+    /// minutes use five-minute buckets; larger policies use adaptive spacing.
     nonisolated static let guardEventCount = MeteringDatedSchedule.guardEventCount
 
     // MARK: - Singleton
