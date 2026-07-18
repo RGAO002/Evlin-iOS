@@ -540,11 +540,6 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             expectedDeviceID: generationDeviceID,
             expectedGeneration: generation
         )
-        let decision = EarnedSampleReporter.thresholdHandlingDecision(
-            thresholdMinutes: adjustedN,
-            isPlausible: true,
-            localReconciliationAvailable: localReconciliation == .reconciled
-        )
 
         let ts = ISO8601DateFormatter().string(from: callbackAt)
         _ = performIfEarnedGenerationActive(
@@ -599,157 +594,11 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             }
         }
 
-        guard decision.shouldApplyLocalShield else {
+        if localReconciliation != .reconciled {
             _ = performIfEarnedGenerationActive(generation) {
                 NSLog("[Evlin/Ext] earned threshold reported with local reconciliation deferred")
                 emitEvent(kind: .decision, source: .earnedPool, app: "device-wide",
                           reason: "local_reconciliation_deferred")
-            }
-            return
-        }
-        guard earnedGenerationIsActive(generation) else { return }
-
-        // Fresh-at-fire-time gate (Fix 4). The tripwire is the parent-set budget
-        // read fresh from the store — NOT latestEstimate+backendRemaining (which
-        // was a tautology: no writer for backendRemaining ⇒ effectiveCap ≤ adjustedN
-        // ⇒ always fired). See EarnedGateTautologyTests.
-        let poolMinutes = earnedStore.poolMinutes ?? 240
-        let capMinutes  = earnedStore.capMinutes  ?? 240
-        let usageDateForOverride = generation.usageDate
-
-        guard EarnedSampleReporter.shouldApplyEarnedShieldFresh(
-            adjustedN: adjustedN,
-            poolMinutes: poolMinutes,
-            capMinutes: capMinutes,
-            usageDate: usageDateForOverride,
-            store: earnedStore
-        ) else {
-            _ = performIfEarnedGenerationActive(generation) {
-                emitEvent(kind: .decision, source: .earnedPool, app: "device-wide",
-                          reason: "pool_under_cap")
-            }
-            return
-        }
-
-        // Defense-in-depth: a fresh backend sync with comfortable headroom vetoes
-        // a LOCAL self-lock (the "backend same-second says rem=40" incident).
-        if EarnedSampleReporter.backendVetoesSelfLock(
-            lastBackendRemaining: earnedStore.backendRemainingAtLastSync,
-            lastBackendSyncAt: earnedStore.lastBackendSyncAt,
-            now: callbackAt
-        ) {
-            _ = performIfEarnedGenerationActive(generation) {
-                emitEvent(kind: .drop, source: .earnedPool, app: "device-wide",
-                          reason: "backend_headroom_veto")
-            }
-            return
-        }
-        guard earnedGenerationIsActive(generation) else { return }
-
-        let boundSource: ScreenTimeEvent.Source =
-            (capMinutes < poolMinutes && adjustedN >= capMinutes) ? .deviceCap : .earnedPool
-        applyEarnedTimeShield(
-            earnedStore: earnedStore,
-            thresholdN: adjustedN,
-            source: boundSource,
-            generation: generation
-        )
-    }
-
-    /// Apply the `.earnedTime` shield over the Locked-set tokens.
-    ///
-    /// Reads the Locked-set ID + token data from `EarnedTimeStore`, unions
-    /// `.earnedTime` into the existing record (or creates one) via
-    /// `ShieldSourceLogic.unioning`, persists, and recomputes.
-    ///
-    /// Pure App Group path — no actor, no `ActiveLockStore`.
-    private func applyEarnedTimeShield(
-        earnedStore: EarnedTimeStore,
-        thresholdN: Int,
-        source: ScreenTimeEvent.Source,
-        generation: EarnedActivityGeneration.Generation
-    ) {
-        guard earnedGenerationIsActive(generation) else { return }
-        guard let lockedSetID = earnedStore.lockedSetID else {
-            _ = performIfEarnedGenerationActive(generation) {
-                NSLog("[Evlin/Ext] earned shield: no lockedSetID in store — cannot shield")
-            }
-            return
-        }
-
-        // Route through the canonical helper (not raw interpolation) so this
-        // stays in lockstep with any future normalization in `makeRecordKey`
-        // (Wave-1 Task 5: helper now lowercases the savedList segment).
-        let recordKey = ShieldRecord.makeRecordKey(tier: .savedList, targetKey: lockedSetID)
-        _ = ActiveLockPersistenceLock.shared.withLock {
-            var current = loadShields()
-
-            // Build the record if it doesn't exist yet; union .earnedTime if it does.
-            if let existing = current[recordKey] {
-                current[recordKey] = ShieldSourceLogic.unioning(existing, intoSources: [.earnedTime])
-            } else {
-                // Device-local union (paper-lock fix): earnedStore.lockedSetTokenData
-                // is never actually populated anywhere in the app today (both
-                // saveLockedSetID call sites pass tokenData: nil — ProfileView.swift,
-                // CommandPoller.swift), so this blob decode was dead code. Read the
-                // kid's live FamilyActivitySelection from DefaultLockGroupStore instead —
-                // same ground-truth source ActionExecutor now uses on the parent-lock path.
-                var appTokens: Set<ApplicationToken> = []
-                var catTokens:  Set<ActivityCategoryToken> = []
-                var webTokens:  Set<WebDomainToken> = []
-                let localSelection = DefaultLockGroupStore.load()
-                appTokens = localSelection.applicationTokens
-                catTokens = localSelection.categoryTokens
-                webTokens = localSelection.webDomainTokens
-                // Legacy blob fallback, kept for completeness if a future writer
-                // ever does populate lockedSetTokenData ahead of DefaultLockGroupStore.
-                if appTokens.isEmpty && catTokens.isEmpty,
-                   let blob = earnedStore.lockedSetTokenData,
-                   let sel = try? JSONDecoder().decode(FamilyActivitySelection.self, from: blob) {
-                    appTokens = sel.applicationTokens
-                    catTokens = sel.categoryTokens
-                    webTokens = sel.webDomainTokens
-                }
-                let record = ShieldRecord(
-                    recordKey: recordKey,
-                    tier: .savedList,
-                    targetKey: lockedSetID,
-                    displayName: "Locked Set",
-                    lastCommandID: UUID(),
-                    appTokens: appTokens,
-                    categoryTokens: catTokens,
-                    webDomainTokens: webTokens,
-                    appliesToAll: earnedStore.lockedSetAllSelected,
-                    issuedAt: Date(),
-                    expiresAt: nil,
-                    originalRequest: "earned time cap reached: t\(thresholdN)",
-                    targetChildID: ExtensionConfig.childId ?? UUID(),
-                    sources: [.earnedTime]
-                )
-                current[recordKey] = record
-            }
-
-            _ = performIfEarnedGenerationActive(
-                generation,
-                mutationKeys: [shieldsKey, "evlin.lastEarnedShield"],
-                rollbackExternalState: {
-                    recomputeAndApplyShields(loadShields())
-                }
-            ) {
-                if let data = encodeShields(current) {
-                    defaults?.set(data, forKey: shieldsKey)
-                }
-                recomputeAndApplyShields(current)
-
-                let ts = ISO8601DateFormatter().string(from: Date())
-                defaults?.set(
-                    "earned_shielded_at=\(ts) t=\(thresholdN) key=\(recordKey)",
-                    forKey: "evlin.lastEarnedShield"
-                )
-                NSLog("[Evlin/Ext] earned time cap reached t%d — .earnedTime shield applied", thresholdN)
-                emitEvent(kind: .lock, source: source, app: "device-wide",
-                          reason: source == .deviceCap ? "cap_exhausted" : "pool_exhausted",
-                          transition: .init(before: "shielded:false", after: "shielded:true"))
             }
         }
     }
