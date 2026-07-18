@@ -458,6 +458,122 @@ final class DeviceEpochStoreTests: XCTestCase {
         XCTAssertThrowsError(try store.transaction(expectedOwner: owner) { $0 = ambiguousCandidate })
     }
 
+    func testPersistedHandoffFreezesEntireTupleAndCannotBeRemovedBeforeStopAcknowledgement() throws {
+        let mutations: [(String, (inout DeviceEpochStoreState) -> Void)] = [
+            ("handoffID", { state in
+                state.v2RouteHandoff = self.replacingImmutableHandoff(
+                    state.v2RouteHandoff!,
+                    handoffID: UUID(uuidString: "16161616-1616-1616-1616-161616161616")!
+                )
+            }),
+            ("ownerChildDeviceID", { state in
+                state.v2RouteHandoff = self.replacingImmutableHandoff(
+                    state.v2RouteHandoff!,
+                    ownerChildDeviceID: self.otherOwner
+                )
+            }),
+            ("fromGenerationID", { state in
+                state.v2RouteHandoff = self.replacingImmutableHandoff(
+                    state.v2RouteHandoff!,
+                    fromGenerationID: UUID(uuidString: "17171717-1717-1717-1717-171717171717")!
+                )
+            }),
+            ("fromEpochID", { state in
+                state.v2RouteHandoff = self.replacingImmutableHandoff(
+                    state.v2RouteHandoff!,
+                    fromEpochID: UUID(uuidString: "18181818-1818-1818-1818-181818181818")!
+                )
+            }),
+            ("fromRouteID", { state in
+                state.v2RouteHandoff = self.replacingImmutableHandoff(
+                    state.v2RouteHandoff!,
+                    fromRouteID: UUID(uuidString: "19191919-1919-1919-1919-191919191919")!
+                )
+            }),
+            ("toGenerationID", { state in
+                state.v2RouteHandoff = self.replacingImmutableHandoff(
+                    state.v2RouteHandoff!,
+                    toGenerationID: UUID(uuidString: "20202020-2020-2020-2020-202020202020")!
+                )
+            }),
+            ("toEpochID", { state in
+                state.v2RouteHandoff = self.replacingImmutableHandoff(
+                    state.v2RouteHandoff!,
+                    toEpochID: UUID(uuidString: "21212121-2121-2121-2121-212121212121")!
+                )
+            }),
+            ("toRouteID", { state in
+                state.v2RouteHandoff = self.replacingImmutableHandoff(
+                    state.v2RouteHandoff!,
+                    toRouteID: UUID(uuidString: "23232323-2323-2323-2323-232323232323")!
+                )
+            }),
+            ("coherent from/to lane swap", { state in
+                let handoff = state.v2RouteHandoff!
+                state.v2RouteHandoff = V2RouteHandoff(
+                    handoffID: handoff.handoffID,
+                    ownerChildDeviceID: handoff.ownerChildDeviceID,
+                    fromGenerationID: handoff.toGenerationID,
+                    fromEpochID: handoff.toEpochID,
+                    fromRouteID: handoff.toRouteID,
+                    toGenerationID: handoff.fromGenerationID,
+                    toEpochID: handoff.fromEpochID,
+                    toRouteID: handoff.fromRouteID,
+                    phase: handoff.phase,
+                    priorRouteInputClosedAt: handoff.priorRouteInputClosedAt,
+                    registrationAcknowledgedAt: handoff.registrationAcknowledgedAt,
+                    activationAcknowledgedAt: handoff.activationAcknowledgedAt,
+                    priorStopAcknowledgedAt: handoff.priorStopAcknowledgedAt,
+                    createdAt: handoff.createdAt
+                )
+                state.activeGenerationID = handoff.toGenerationID
+                state.activeEpochID = handoff.toEpochID
+                state.activeRouteID = handoff.toRouteID
+            }),
+            ("createdAt", { state in
+                state.v2RouteHandoff = self.replacingImmutableHandoff(
+                    state.v2RouteHandoff!,
+                    createdAt: Date(timeIntervalSince1970: 999)
+                )
+            }),
+            ("early removal", { state in
+                state.v2RouteHandoff = nil
+            })
+        ]
+
+        for (name, mutate) in mutations {
+            let store = makeStore(io: TestFileIO())
+            let persisted = makeState()
+            try store.transaction(expectedOwner: owner) { $0 = persisted }
+
+            var candidate = persisted
+            mutate(&candidate)
+
+            XCTAssertThrowsError(
+                try store.transaction(expectedOwner: owner) { $0 = candidate },
+                "immutable handoff mutation must fail closed: \(name)"
+            )
+        }
+    }
+
+    func testStoppedAcknowledgedHandoffMayBeCollected() throws {
+        let store = makeStore(io: TestFileIO())
+        let initial = makeState()
+        try store.transaction(expectedOwner: owner) { $0 = initial }
+        let cutoverReady = makeCutoverReadyState(from: initial)
+        try store.transaction(expectedOwner: owner) { $0 = cutoverReady }
+        let committed = makeCommittedPendingStopState(from: cutoverReady)
+        try store.transaction(expectedOwner: owner) { $0 = committed }
+        let stopped = makeStoppedCommittedState(from: committed)
+        try store.transaction(expectedOwner: owner) { $0 = stopped }
+
+        var collected = stopped
+        collected.v2RouteHandoff = nil
+        try store.transaction(expectedOwner: owner) { $0 = collected }
+
+        XCTAssertNil(try store.read().v2RouteHandoff)
+    }
+
     func testStoppedCommittedHandoffCannotReverseToPendingStop() throws {
         let io = TestFileIO()
         let store = makeStore(io: io)
@@ -738,6 +854,36 @@ final class DeviceEpochStoreTests: XCTestCase {
         result.tombstones[handoff.fromRouteID]?.stopAcknowledgedAt = Date(timeIntervalSince1970: 301)
         result.v2RouteHandoff?.priorStopAcknowledgedAt = Date(timeIntervalSince1970: 301)
         return result
+    }
+
+    private func replacingImmutableHandoff(
+        _ handoff: V2RouteHandoff,
+        handoffID: UUID? = nil,
+        ownerChildDeviceID: UUID? = nil,
+        fromGenerationID: UUID? = nil,
+        fromEpochID: UUID? = nil,
+        fromRouteID: UUID? = nil,
+        toGenerationID: UUID? = nil,
+        toEpochID: UUID? = nil,
+        toRouteID: UUID? = nil,
+        createdAt: Date? = nil
+    ) -> V2RouteHandoff {
+        V2RouteHandoff(
+            handoffID: handoffID ?? handoff.handoffID,
+            ownerChildDeviceID: ownerChildDeviceID ?? handoff.ownerChildDeviceID,
+            fromGenerationID: fromGenerationID ?? handoff.fromGenerationID,
+            fromEpochID: fromEpochID ?? handoff.fromEpochID,
+            fromRouteID: fromRouteID ?? handoff.fromRouteID,
+            toGenerationID: toGenerationID ?? handoff.toGenerationID,
+            toEpochID: toEpochID ?? handoff.toEpochID,
+            toRouteID: toRouteID ?? handoff.toRouteID,
+            phase: handoff.phase,
+            priorRouteInputClosedAt: handoff.priorRouteInputClosedAt,
+            registrationAcknowledgedAt: handoff.registrationAcknowledgedAt,
+            activationAcknowledgedAt: handoff.activationAcknowledgedAt,
+            priorStopAcknowledgedAt: handoff.priorStopAcknowledgedAt,
+            createdAt: createdAt ?? handoff.createdAt
+        )
     }
 
     private func makeState() -> DeviceEpochStoreState {

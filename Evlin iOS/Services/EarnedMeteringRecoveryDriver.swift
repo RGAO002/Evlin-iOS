@@ -40,6 +40,7 @@ final class EarnedMeteringRecoveryDriver {
         try advanceReplacementBarrier(owner: owner)
         await delivery.drain(owner: owner)
         try promoteAcknowledgedActivation(owner: owner)
+        try prepareReplacementIfNeeded(owner: owner)
         try stopRetiredLane(owner: owner)
     }
 
@@ -277,6 +278,7 @@ final class EarnedMeteringRecoveryDriver {
             let name = DeviceActivityName(route.activityName)
             center.stopMonitoring([name])
             guard !center.activities.contains(name) else { return }
+            let acknowledgedAt = clock.now
             try store.transaction(expectedOwner: owner) { state in
                 guard var current = state.v2RouteHandoff,
                       current.handoffID == handoff.handoffID,
@@ -287,8 +289,8 @@ final class EarnedMeteringRecoveryDriver {
                       state.installWork[currentInstallKey]?.phase == .pendingStop
                 else { return }
                 state.installWork[currentInstallKey]?.phase = .stopped
-                state.tombstones[handoff.fromRouteID]?.stopAcknowledgedAt = clock.now
-                current.priorStopAcknowledgedAt = clock.now
+                state.tombstones[handoff.fromRouteID]?.stopAcknowledgedAt = acknowledgedAt
+                current.priorStopAcknowledgedAt = acknowledgedAt
                 state.v2RouteHandoff = current
             }
             return

@@ -169,6 +169,37 @@ final class MeteringV2ActivationTests: XCTestCase {
         }
     }
 
+    func testRetiredAlreadyActivatedSchedulesExactPreplannedReplacementAfterV2Commit() async throws {
+        let fixture = try makeInitialFixture()
+        defer { fixture.cleanup() }
+        try fixture.addPreplannedReplacement()
+        fixture.transport.results = [
+            activationResult(
+                epochID: fixture.candidateEpochID,
+                status: .alreadyActivated,
+                epochStatus: .retired
+            )
+        ]
+
+        try await makeDriver(fixture).recover(ownerChildDeviceID: owner)
+
+        let state = try fixture.store.read()
+        let handoff = try XCTUnwrap(state.v2RouteHandoff)
+        XCTAssertEqual(state.epochs[fixture.candidateEpochID]?.status, .retired)
+        XCTAssertEqual(state.ratchets[owner]?.localSelection, .v2)
+        XCTAssertEqual(state.activeRouteID, fixture.candidateRouteID)
+        XCTAssertEqual(state.legacy?.phase, .stoppedV1)
+        XCTAssertEqual(handoff.phase, .preparing)
+        XCTAssertEqual(handoff.fromGenerationID, fixture.candidateGenerationID)
+        XCTAssertEqual(handoff.fromEpochID, fixture.candidateEpochID)
+        XCTAssertEqual(handoff.fromRouteID, fixture.candidateRouteID)
+        XCTAssertEqual(handoff.toGenerationID, fixture.recoveryGenerationID)
+        XCTAssertEqual(handoff.toEpochID, fixture.recoveryEpochID)
+        XCTAssertEqual(handoff.toRouteID, fixture.recoveryRouteID)
+        XCTAssertEqual(state.routes[fixture.recoveryRouteID]?.lifecycle, .planned)
+        XCTAssertEqual(state.installWork[fixture.recoveryInstallID]?.phase, .verified)
+    }
+
     func testLostActivationResponseRetriesExactNonActiveInitialCandidate() async throws {
         for responseStatus in [EpochStatusDTO.paused, .exhausted, .retired] {
             let fixture = try makeInitialFixture()
@@ -226,6 +257,26 @@ final class MeteringV2ActivationTests: XCTestCase {
             XCTAssertEqual(state.ratchets[owner]?.localSelection, .dualActive, name)
             XCTAssertEqual(state.legacy?.phase, .activeV1, name)
         }
+    }
+
+    func testActiveStaleHorizonActivationCannotBypassExactTupleAuthorization() async throws {
+        let fixture = try makeInitialFixture()
+        defer { fixture.cleanup() }
+        fixture.transport.errors = [.noResponse]
+        try await makeDriver(fixture).recover(ownerChildDeviceID: owner)
+        try fixture.replacePendingActivationWithUnrelatedRoute(
+            lifecycle: .active,
+            epochStatus: .active
+        )
+        fixture.transport.results = [activationResult(epochID: fixture.unrelatedEpochID)]
+
+        try await makeDriver(fixture, at: start.addingTimeInterval(5)).recover(ownerChildDeviceID: owner)
+
+        let state = try fixture.store.read()
+        XCTAssertEqual(fixture.transport.requests.count, 1)
+        XCTAssertEqual(state.activationWork.values.first?.retry.terminal, .pending)
+        XCTAssertEqual(state.ratchets[owner]?.localSelection, .dualActive)
+        XCTAssertEqual(state.legacy?.phase, .activeV1)
     }
 
     func testReplacementKeepsPriorRouteUntilCandidateActivationThenStopsPrior() async throws {
@@ -388,8 +439,30 @@ final class MeteringV2ActivationTests: XCTestCase {
         XCTAssertEqual(fixture.center.stopCalls.count, 2)
     }
 
-    private func makeDriver(_ fixture: ActivationFixture, at date: Date? = nil) -> EarnedMeteringRecoveryDriver {
-        let clock = ActivationClock(now: date ?? start)
+    func testReplacementStopPersistsOneExactAcknowledgementTimestamp() async throws {
+        let fixture = try makeReplacementFixture()
+        defer { fixture.cleanup() }
+        fixture.transport.results = [
+            registrationResult(epochID: fixture.candidateEpochID),
+            activationResult(epochID: fixture.candidateEpochID)
+        ]
+        let clock = AdvancingActivationClock(now: start, step: 0.001)
+
+        try await makeDriver(fixture, clock: clock).recover(ownerChildDeviceID: owner)
+
+        let state = try fixture.store.read()
+        let handoff = try XCTUnwrap(state.v2RouteHandoff)
+        let tombstone = try XCTUnwrap(state.tombstones[handoff.fromRouteID])
+        XCTAssertEqual(state.installWork[fixture.priorInstallID]?.phase, .stopped)
+        XCTAssertEqual(tombstone.stopAcknowledgedAt, handoff.priorStopAcknowledgedAt)
+    }
+
+    private func makeDriver(
+        _ fixture: ActivationFixture,
+        at date: Date? = nil,
+        clock injectedClock: (any MeteringClock)? = nil
+    ) -> EarnedMeteringRecoveryDriver {
+        let clock: any MeteringClock = injectedClock ?? ActivationClock(now: date ?? start)
         let delivery = MeteringEpochDelivery(
             baseURL: baseURL,
             store: fixture.store,
@@ -478,6 +551,21 @@ private struct ActivationClock: MeteringClock {
     let now: Date
 }
 
+private final class AdvancingActivationClock: MeteringClock, @unchecked Sendable {
+    private var value: Date
+    private let step: TimeInterval
+
+    init(now: Date, step: TimeInterval) {
+        value = now
+        self.step = step
+    }
+
+    var now: Date {
+        defer { value = value.addingTimeInterval(step) }
+        return value
+    }
+}
+
 private final class ActivationTransport: MeteringHTTPTransport, @unchecked Sendable {
     var requests: [URLRequest] = []
     var results: [(Data, URLResponse)] = []
@@ -539,6 +627,12 @@ private final class ActivationFixture {
     let candidateRouteID = UUID(uuidString: "20000000-0000-4000-8000-000000000003")!
     let candidateInstallID = UUID(uuidString: "20000000-0000-4000-8000-000000000004")!
     let priorInstallID = UUID(uuidString: "10000000-0000-4000-8000-000000000004")!
+    let unrelatedEpochID = UUID(uuidString: "30000000-0000-4000-8000-000000000002")!
+    let unrelatedRouteID = UUID(uuidString: "30000000-0000-4000-8000-000000000003")!
+    let recoveryGenerationID = UUID(uuidString: "50000000-0000-4000-8000-000000000001")!
+    let recoveryEpochID = UUID(uuidString: "50000000-0000-4000-8000-000000000002")!
+    let recoveryRouteID = UUID(uuidString: "50000000-0000-4000-8000-000000000003")!
+    let recoveryInstallID = UUID(uuidString: "50000000-0000-4000-8000-000000000004")!
 
     init(owner: UUID, start: Date) {
         self.owner = owner
@@ -639,6 +733,33 @@ private final class ActivationFixture {
         }
     }
 
+    func addPreplannedReplacement() throws {
+        try store.transaction(expectedOwner: owner) { state in
+            let generation = makeGeneration(id: recoveryGenerationID, policy: "recovery")
+            let epoch = makeEpoch(id: recoveryEpochID, generation: generation, registeredAt: nil)
+            let route = makeRoute(
+                id: recoveryRouteID,
+                epoch: epoch,
+                generation: generation,
+                name: "evlin.earned.recovery",
+                lifecycle: .planned
+            )
+            state.generations[generation.generationID] = generation
+            state.epochs[epoch.epochID] = epoch
+            state.routes[route.routeID] = route
+            state.installWork[recoveryInstallID] = ActivityInstallWork(
+                workID: recoveryInstallID,
+                ownerChildDeviceID: owner,
+                routeID: route.routeID,
+                authorization: .offlinePending,
+                phase: .verified,
+                claim: nil,
+                retry: retry(.succeeded),
+                createdAt: start
+            )
+        }
+    }
+
     func setCandidateEpochStatus(_ status: DeviceDailyEpochStatus) throws {
         try store.transaction(expectedOwner: owner) { state in
             state.epochs[candidateEpochID]?.status = status
@@ -658,16 +779,19 @@ private final class ActivationFixture {
         }
     }
 
-    func replacePendingActivationWithUnrelatedRoute(lifecycle: MeteringRouteLifecycle) throws {
+    func replacePendingActivationWithUnrelatedRoute(
+        lifecycle: MeteringRouteLifecycle,
+        epochStatus: DeviceDailyEpochStatus = .retired
+    ) throws {
         try store.transaction(expectedOwner: owner) { state in
             guard let generation = state.generations[candidateGenerationID],
                   let activationKey = state.activationWork.keys.first,
                   let prior = state.activationWork[activationKey]
             else { return }
-            let epochID = UUID(uuidString: "30000000-0000-4000-8000-000000000002")!
-            let routeID = UUID(uuidString: "30000000-0000-4000-8000-000000000003")!
+            let epochID = unrelatedEpochID
+            let routeID = unrelatedRouteID
             var epoch = makeEpoch(id: epochID, generation: generation, registeredAt: start)
-            epoch.status = .retired
+            epoch.status = epochStatus
             let route = makeRoute(
                 id: routeID,
                 epoch: epoch,

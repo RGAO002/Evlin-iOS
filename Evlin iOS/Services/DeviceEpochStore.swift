@@ -1384,7 +1384,27 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         candidate: DeviceEpochStoreState,
         priorState: DeviceEpochStoreState
     ) throws {
-        guard let handoff = candidate.v2RouteHandoff,
+        let priorHandoff = priorState.v2RouteHandoff
+        let candidateHandoff = candidate.v2RouteHandoff
+
+        if let priorHandoff {
+            guard let candidateHandoff else {
+                guard canCollectHandoff(priorHandoff, from: priorState) else {
+                    throw DeviceEpochStoreInvariantError.invalidState("handoff was removed before exact stop acknowledgement")
+                }
+                return
+            }
+            guard hasSameImmutableTuple(candidateHandoff, as: priorHandoff) else {
+                throw DeviceEpochStoreInvariantError.invalidState("handoff immutable tuple changed")
+            }
+            guard isAllowedHandoffTransition(from: priorHandoff.phase, to: candidateHandoff.phase) else {
+                throw DeviceEpochStoreInvariantError.invalidState("handoff phase moved illegally")
+            }
+        } else if candidateHandoff?.phase == .committed {
+            throw DeviceEpochStoreInvariantError.invalidState("committed handoff has no durable predecessor")
+        }
+
+        guard let handoff = candidateHandoff,
               handoff.phase == .cutoverReady || handoff.phase == .committed else {
             return
         }
@@ -1397,11 +1417,8 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         }
 
         guard handoff.phase == .committed else { return }
-        guard let priorHandoff = priorState.v2RouteHandoff else {
+        guard let priorHandoff else {
             throw DeviceEpochStoreInvariantError.invalidState("committed handoff has no durable predecessor")
-        }
-        guard priorHandoff.handoffID == handoff.handoffID else {
-            throw DeviceEpochStoreInvariantError.invalidState("handoff identity changed during cutover")
         }
 
         let candidatePriorInstalls = candidate.installWork.values.filter {
@@ -1442,6 +1459,54 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         case .preparing, .dualV2:
             throw DeviceEpochStoreInvariantError.invalidState("handoff committed before cutover barrier")
         }
+    }
+
+    private func hasSameImmutableTuple(_ candidate: V2RouteHandoff, as prior: V2RouteHandoff) -> Bool {
+        candidate.handoffID == prior.handoffID
+            && candidate.ownerChildDeviceID == prior.ownerChildDeviceID
+            && candidate.fromGenerationID == prior.fromGenerationID
+            && candidate.fromEpochID == prior.fromEpochID
+            && candidate.fromRouteID == prior.fromRouteID
+            && candidate.toGenerationID == prior.toGenerationID
+            && candidate.toEpochID == prior.toEpochID
+            && candidate.toRouteID == prior.toRouteID
+            && candidate.createdAt == prior.createdAt
+    }
+
+    private func isAllowedHandoffTransition(
+        from prior: V2RouteHandoffPhase,
+        to candidate: V2RouteHandoffPhase
+    ) -> Bool {
+        if prior == candidate { return true }
+        switch (prior, candidate) {
+        case (.preparing, .dualV2), (.dualV2, .cutoverReady), (.cutoverReady, .committed):
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func canCollectHandoff(
+        _ handoff: V2RouteHandoff,
+        from state: DeviceEpochStoreState
+    ) -> Bool {
+        guard handoff.phase == .committed,
+              let handoffStopAcknowledgedAt = handoff.priorStopAcknowledgedAt
+        else { return false }
+        let priorInstalls = state.installWork.values.filter {
+            $0.ownerChildDeviceID == handoff.ownerChildDeviceID
+                && $0.routeID == handoff.fromRouteID
+        }
+        guard priorInstalls.count == 1,
+              priorInstalls[0].phase == .stopped,
+              let tombstone = state.tombstones[handoff.fromRouteID],
+              tombstone.ownerChildDeviceID == handoff.ownerChildDeviceID,
+              tombstone.generationID == handoff.fromGenerationID,
+              tombstone.epochID == handoff.fromEpochID,
+              tombstone.routeID == handoff.fromRouteID,
+              tombstone.stopAcknowledgedAt == handoffStopAcknowledgedAt
+        else { return false }
+        return true
     }
 
     private func restore(_ priorData: Data?, at url: URL) throws {

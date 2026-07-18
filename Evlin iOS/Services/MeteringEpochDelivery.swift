@@ -271,11 +271,7 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
             case .registration:
                 guard let registration = state.registrationWork.values.first(where: { $0.workID == item.workID }),
                       !isSuppressedCandidate(registration.epochID, state: state),
-                      state.hasCurrentRegistrationProvenance(
-                          owner: owner,
-                          epochID: registration.epochID,
-                          routeID: registration.routeID
-                      )
+                      hasNetworkRegistrationAuthorization(registration, owner: owner, state: state)
                 else { return false }
                 return true
             case .sample:
@@ -294,7 +290,7 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
                       let epoch = state.epochs[activation.epochID],
                       epoch.childDeviceID == owner,
                       epoch.authoritativeBaseConflict == nil,
-                      epoch.status == .active || hasExactNonActiveActivationAuthorization(
+                      hasExactActivationAuthorization(
                           activation,
                           owner: owner,
                           state: state
@@ -521,7 +517,7 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
             if settleInvalidRegistrationClaim(&state, key: key, work: &work, owner: owner, claim: claim) {
                 return
             }
-            guard state.hasCurrentRegistrationProvenance(owner: owner, epochID: work.epochID, routeID: work.routeID),
+            guard hasNetworkRegistrationAuthorization(work, owner: owner, state: state),
                   let route = state.routes[work.routeID],
                   let epoch = state.epochs[work.epochID],
                   work.request.usageDate == route.usageDate,
@@ -573,7 +569,7 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
             if settleInvalidRegistrationClaim(&state, key: key, work: &work, owner: owner, claim: claim) {
                 return
             }
-            guard state.hasCurrentRegistrationProvenance(owner: owner, epochID: work.epochID, routeID: work.routeID),
+            guard hasNetworkRegistrationAuthorization(work, owner: owner, state: state),
                   let route = state.routes[work.routeID],
                   var epoch = state.epochs[work.epochID],
                   epoch.authoritativeBaseConflict == nil,
@@ -605,7 +601,7 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
             if settleInvalidRegistrationClaim(&state, key: key, work: &work, owner: owner, claim: claim) {
                 return
             }
-            guard state.hasCurrentRegistrationProvenance(owner: owner, epochID: work.epochID, routeID: work.routeID),
+            guard hasNetworkRegistrationAuthorization(work, owner: owner, state: state),
                   let route = state.routes[work.routeID],
                   let epoch = state.epochs[work.epochID],
                   epoch.authoritativeBaseConflict == nil,
@@ -638,7 +634,7 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
             if settleInvalidRegistrationClaim(&state, key: key, work: &work, owner: owner, claim: claim) {
                 return
             }
-            guard state.hasCurrentRegistrationProvenance(owner: owner, epochID: work.epochID, routeID: work.routeID),
+            guard hasNetworkRegistrationAuthorization(work, owner: owner, state: state),
                   let route = state.routes[work.routeID],
                   let epoch = state.epochs[work.epochID],
                   epoch.authoritativeBaseConflict == nil,
@@ -758,7 +754,7 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
                   var epoch = state.epochs[work.epochID],
                   epoch.childDeviceID == owner,
                   epoch.authoritativeBaseConflict == nil,
-                  epoch.status == .active || hasExactNonActiveActivationAuthorization(
+                  hasExactActivationAuthorization(
                       work,
                       owner: owner,
                       state: state
@@ -901,7 +897,25 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
         return state.epochs[epochID]?.authoritativeBaseConflict != nil
     }
 
-    private func hasExactNonActiveActivationAuthorization(
+    private func hasNetworkRegistrationAuthorization(
+        _ work: EpochRegistrationWork,
+        owner: UUID,
+        state: DeviceEpochStoreState
+    ) -> Bool {
+        guard state.hasCurrentRegistrationProvenance(
+            owner: owner,
+            epochID: work.epochID,
+            routeID: work.routeID
+        ) else { return false }
+        guard let handoff = state.v2RouteHandoff,
+              handoff.ownerChildDeviceID == owner,
+              handoff.toEpochID == work.epochID,
+              handoff.toRouteID == work.routeID
+        else { return true }
+        return handoff.phase == .cutoverReady
+    }
+
+    private func hasExactActivationAuthorization(
         _ work: EpochActivationWork,
         owner: UUID,
         state: DeviceEpochStoreState

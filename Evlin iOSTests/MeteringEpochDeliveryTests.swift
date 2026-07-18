@@ -310,7 +310,7 @@ final class MeteringEpochDeliveryTests: XCTestCase {
         }
     }
 
-    func testRegistrationDispatchesBeforeActivationAndLeavesLocalSelectionV1() async throws {
+    func testRegistrationDispatchesBeforeActivationAndLeavesActivationPendingUntilDualActive() async throws {
         let fileURL = temporaryStoreURL()
         defer { removeTemporaryStore(fileURL) }
         let store = makeStore(fileURL: fileURL)
@@ -335,17 +335,9 @@ final class MeteringEpochDeliveryTests: XCTestCase {
             snapshot: snapshot,
             epochStatus: .active
         )
-        let activationResponse = EpochActivationResponseDTO(
-            status: .activated,
-            epochID: epochID,
-            epochStatus: .active,
-            meteringProtocolVersion: 2,
-            snapshot: snapshot
-        )
         let response = HTTPURLResponse(url: baseURL, statusCode: 200, httpVersion: nil, headerFields: nil)!
         transport.results = [
-            (try encoded(registrationResponse), response),
-            (try encoded(activationResponse), response)
+            (try encoded(registrationResponse), response)
         ]
         let delivery = MeteringEpochDelivery(baseURL: baseURL, store: store, transport: transport, clock: clock)
 
@@ -355,13 +347,10 @@ final class MeteringEpochDeliveryTests: XCTestCase {
 
         await delivery.drain(owner: owner)
 
-        XCTAssertEqual(transport.requests.map { $0.url?.path }, [
-            "/child/earned-time/epochs",
-            "/child/earned-time/epochs/\(epochID.uuidString.lowercased())/activation"
-        ])
+        XCTAssertEqual(transport.requests.map { $0.url?.path }, ["/child/earned-time/epochs"])
         let final = try store.read()
         XCTAssertEqual(final.registrationWork.values.first?.retry.terminal, .succeeded)
-        XCTAssertEqual(final.activationWork.values.first?.retry.terminal, .succeeded)
+        XCTAssertEqual(final.activationWork.values.first?.retry.terminal, .pending)
         XCTAssertNotNil(final.ratchets[owner]?.registeredV2At)
         XCTAssertEqual(final.ratchets[owner]?.localSelection, .v1)
     }
@@ -548,7 +537,7 @@ final class MeteringEpochDeliveryTests: XCTestCase {
         XCTAssertNil(final.ratchets[owner]?.registeredV2At)
     }
 
-    func testRegistration200AcceptsExactPreparingHandoffCandidateWhilePriorRouteIsActive() async throws {
+    func testReplacementRegistrationWaitsForExactCutoverReadyBarrier() async throws {
         let fileURL = temporaryStoreURL()
         defer { removeTemporaryStore(fileURL) }
         let store = makeStore(fileURL: fileURL)
@@ -653,7 +642,27 @@ final class MeteringEpochDeliveryTests: XCTestCase {
         try delivery.enqueueRegistration(request, owner: owner, epochID: candidateEpochID, routeID: candidateRouteID)
         await delivery.drain(owner: owner)
 
+        var waiting = try store.read()
+        XCTAssertTrue(transport.requests.isEmpty)
+        XCTAssertEqual(waiting.registrationWork.values.first?.retry.terminal, .pending)
+
+        try store.transaction(expectedOwner: owner) { state in
+            state.v2RouteHandoff?.phase = .dualV2
+        }
+        await delivery.drain(owner: owner)
+
+        waiting = try store.read()
+        XCTAssertTrue(transport.requests.isEmpty)
+        XCTAssertEqual(waiting.registrationWork.values.first?.retry.terminal, .pending)
+
+        try store.transaction(expectedOwner: owner) { state in
+            state.v2RouteHandoff?.phase = .cutoverReady
+            state.v2RouteHandoff?.priorRouteInputClosedAt = self.start
+        }
+        await delivery.drain(owner: owner)
+
         let final = try store.read()
+        XCTAssertEqual(transport.requests.count, 1)
         XCTAssertEqual(final.registrationWork.values.first?.retry.terminal, .succeeded)
         XCTAssertEqual(final.epochs[candidateEpochID]?.registeredAt, start)
         XCTAssertNotNil(final.ratchets[owner]?.registeredV2At)
@@ -1059,6 +1068,7 @@ final class MeteringEpochDeliveryTests: XCTestCase {
                     retry: MeteringRetryState(attemptCount: 0, nextAttemptAt: start, lastErrorCode: nil, terminal: .pending),
                     createdAt: start
                 )
+                authorizeInitialDualActiveActivation(&state)
             }
             let transport = DeliveryTestTransport()
             let delivery = MeteringEpochDelivery(baseURL: baseURL, store: store, transport: transport, clock: DeliveryTestClock(now: start))
@@ -1080,6 +1090,7 @@ final class MeteringEpochDeliveryTests: XCTestCase {
             registration.retry.terminal = .succeeded
             state.registrationWork[registrationID] = registration
             state.installWork[UUID()] = makeVerifiedInstallWork(createdAt: start)
+            authorizeInitialDualActiveActivation(&state)
         }
         let response = HTTPURLResponse(url: baseURL, statusCode: 200, httpVersion: nil, headerFields: nil)!
         let transport = DeliveryTestTransport()
@@ -1299,6 +1310,7 @@ final class MeteringEpochDeliveryTests: XCTestCase {
             registration.retry.terminal = .succeeded
             state.registrationWork[registrationID] = registration
             state.installWork[UUID()] = makeVerifiedInstallWork(createdAt: start)
+            authorizeInitialDualActiveActivation(&state)
         }
         let response = HTTPURLResponse(url: baseURL, statusCode: 200, httpVersion: nil, headerFields: nil)!
         let transport = DeliveryTestTransport()
@@ -1693,18 +1705,16 @@ final class MeteringEpochDeliveryTests: XCTestCase {
         let store = makeStore(fileURL: fileURL)
         try store.transaction(expectedOwner: owner) { state in
             state = makeBaseState()
+            let registrationID = UUID()
+            var registration = makeRegistrationWork(workID: registrationID, createdAt: start)
+            registration.retry.terminal = .succeeded
+            state.registrationWork[registrationID] = registration
             state.installWork[UUID()] = makeVerifiedInstallWork(createdAt: start)
+            authorizeInitialDualActiveActivation(&state)
         }
         let transport = DeliveryTestTransport()
         let response = HTTPURLResponse(url: baseURL, statusCode: 200, httpVersion: nil, headerFields: nil)!
         transport.results = [
-            (try encoded(EpochRegistrationResponseDTO(
-                status: .registered,
-                epochID: epochID,
-                meteringProtocolVersion: 2,
-                snapshot: makeSnapshot(counted: true, warning: nil),
-                epochStatus: .active
-            )), response),
             (try encoded(EpochActivationResponseDTO(
                 status: .activated,
                 epochID: UUID(uuidString: "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB")!,
@@ -1719,7 +1729,6 @@ final class MeteringEpochDeliveryTests: XCTestCase {
             transport: transport,
             clock: DeliveryTestClock(now: start)
         )
-        try delivery.enqueueRegistration(makeValidRegistrationRequest(), owner: owner, epochID: epochID, routeID: routeID)
         try delivery.enqueueActivation(
             EpochActivationRequestDTO(protocolVersion: 2, deviceID: owner, routeID: routeID, verifiedAt: start),
             owner: owner,
@@ -1730,11 +1739,11 @@ final class MeteringEpochDeliveryTests: XCTestCase {
         await delivery.drain(owner: owner)
 
         let final = try store.read()
-        XCTAssertEqual(transport.requests.count, 2)
+        XCTAssertEqual(transport.requests.count, 1)
         XCTAssertEqual(final.registrationWork.values.first?.retry.terminal, .succeeded)
         XCTAssertEqual(final.activationWork.values.first?.retry.lastErrorCode, "epoch_mismatch")
         XCTAssertEqual(final.activationWork.values.first?.retry.terminal, .rejected)
-        XCTAssertEqual(final.ratchets[owner]?.localSelection, .v1)
+        XCTAssertEqual(final.ratchets[owner]?.localSelection, .dualActive)
     }
 
     func testActivationWaitsForVerifiedInstall() async throws {
@@ -2103,6 +2112,39 @@ final class MeteringEpochDeliveryTests: XCTestCase {
             startedAt: start,
             baseAcceptedMinutes: 0,
             reason: .initial
+        )
+    }
+
+    private func authorizeInitialDualActiveActivation(_ state: inout DeviceEpochStoreState) {
+        state.activeRouteID = nil
+        state.routes[routeID]?.lifecycle = .active
+        state.ratchets[owner] = MeteringOwnerRatchet(
+            ownerChildDeviceID: owner,
+            advertisedVersion: 1,
+            localSelection: .dualActive,
+            registeredV2At: start,
+            dualActiveAt: start,
+            activatedV2At: nil
+        )
+        state.legacy = LegacyCompatibilityMonitorState(
+            ownerChildDeviceID: owner,
+            lifecycleVersion: 1,
+            active: LegacyGenerationProvenance(
+                activityName: "evlin.earned.legacy",
+                deviceID: owner.uuidString,
+                offsetMinutes: 0,
+                armSignature: "legacy",
+                usageDate: "2026-07-16",
+                timezoneIdentifier: "America/New_York",
+                armedAt: start
+            ),
+            pending: nil,
+            retiringActivityNames: [],
+            breadcrumbActivityNames: [],
+            scalarActiveActivityName: "evlin.earned.legacy",
+            isStopped: false,
+            phase: .activeV1,
+            stopAcknowledgedAt: nil
         )
     }
 
