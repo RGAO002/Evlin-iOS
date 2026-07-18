@@ -207,13 +207,18 @@ final class BigKidStatePollerTests: XCTestCase {
                 events.append("gate")
                 return allowed
             },
+            reconcileMeteringRuntime: { allowed, receivedRuntime in
+                XCTAssertTrue(allowed)
+                XCTAssertEqual(receivedRuntime, runtime)
+                events.append("epoch")
+            },
             markAuthoritativeReady: { _ in events.append("ready") },
             ensureEarnedArmed: { events.append("arm") }
         )
 
         await poller.refreshNow()
 
-        XCTAssertEqual(events, ["mirror", "apply", "runtime", "gate", "ready", "arm"])
+        XCTAssertEqual(events, ["mirror", "apply", "runtime", "gate", "epoch", "ready", "arm"])
     }
 
     func test_refresh_identityTransitionDoesNotArmBeforeRuntimeAndGate() async {

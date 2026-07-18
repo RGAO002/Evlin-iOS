@@ -79,6 +79,22 @@ final class MeteringTargetMembershipTests: XCTestCase {
         XCTAssertFalse(isMember("Services/EarnedMeteringRecoveryDriver.swift", of: .push, in: project))
     }
 
+    func testProductionCompositionBelongsToAppAndMonitorButNotPushTargets() throws {
+        let project = try projectSource()
+
+        XCTAssertTrue(isMember("Services/MeteringProductionComposition.swift", of: .app, in: project))
+        XCTAssertTrue(isMember("Services/MeteringProductionComposition.swift", of: .deviceActivityMonitor, in: project))
+        XCTAssertFalse(isMember("Services/MeteringProductionComposition.swift", of: .push, in: project))
+    }
+
+    func testV30EncoderStaysAppOnly() throws {
+        let project = try projectSource()
+
+        XCTAssertTrue(isMember("Services/MeteringV30ScenarioEncoder.swift", of: .app, in: project))
+        XCTAssertFalse(isMember("Services/MeteringV30ScenarioEncoder.swift", of: .deviceActivityMonitor, in: project))
+        XCTAssertFalse(isMember("Services/MeteringV30ScenarioEncoder.swift", of: .push, in: project))
+    }
+
     func testEarnedShieldEffectStoreClosureBelongsToAppMonitorAndPushTargets() throws {
         let project = try projectSource()
         let paths = [

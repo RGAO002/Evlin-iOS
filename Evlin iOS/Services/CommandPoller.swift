@@ -817,6 +817,18 @@ final class CommandPoller {
                 }
             } else {
                 EarnedBudgetArming.armIfReady()
+                Task { @MainActor in
+                    do {
+                        try await MeteringProductionComposition.recoverFromSharedConfiguration(
+                            role: .app
+                        )
+                    } catch {
+                        CommandDeliveryDiagnostics.record(
+                            CommandDeliveryDiagnostics.keyEarnedArmAttempt,
+                            "metering-recovery-failed error=\(error)"
+                        )
+                    }
+                }
             }
         }
 

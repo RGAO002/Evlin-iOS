@@ -90,6 +90,7 @@ struct Evlin_iOSApp: App {
                     refreshParentPushRegistrationIfNeeded()
                     startPollerIfPaired()
                     armEarnedBudgetIfReady()
+                    recoverMeteringEpochIfReady()
                     drainEarnedSampleRetryQueueIfNeeded()
                 }
                 .onChange(of: scenePhase) { _, phase in
@@ -98,6 +99,7 @@ struct Evlin_iOSApp: App {
                         refreshParentPushRegistrationIfNeeded()
                         startPollerIfPaired()
                         armEarnedBudgetIfReady()
+                        recoverMeteringEpochIfReady()
                         drainEarnedSampleRetryQueueIfNeeded()
                         Task { await ScreenTimeEventUploader.uploadPending() }
                     case .background:
@@ -194,6 +196,19 @@ struct Evlin_iOSApp: App {
         guard appMode == "child" else { return }
         Task {
             await EarnedSampleReporter.drainRetryQueueFromStoredConfig()
+        }
+    }
+
+    private func recoverMeteringEpochIfReady() {
+        guard appMode == "child" else { return }
+        Task { @MainActor in
+            do {
+                try await MeteringProductionComposition.recoverFromSharedConfiguration(
+                    role: .app
+                )
+            } catch {
+                print("[Evlin_iOSApp] metering recovery failed: \(error)")
+            }
         }
     }
 

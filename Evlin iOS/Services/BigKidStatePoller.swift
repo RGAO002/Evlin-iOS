@@ -35,6 +35,7 @@ final class BigKidStatePoller: ObservableObject {
     private let mirrorChildIdentity: (UUID) -> Void
     private let syncEarnedRuntime: (EarnedTimeRuntime?) -> EarnedTimeStore.RuntimePolicyReconciliation
     private let setUsageCountingAllowed: (Bool) -> Bool
+    private let reconcileMeteringRuntime: (Bool, EarnedTimeRuntime?) async -> Void
     private let markAuthoritativeReady: (UUID) -> Void
     private let clearAuthoritativeReadiness: () -> Void
     private let ensureEarnedArmed: () -> Void
@@ -95,6 +96,17 @@ final class BigKidStatePoller: ObservableObject {
         }
         self.syncEarnedRuntime = Self.syncEarnedRuntimeFromSnapshot
         self.setUsageCountingAllowed = Self.writeUsageCountingAllowed
+        self.reconcileMeteringRuntime = { allowed, runtime in
+            do {
+                try await MeteringProductionComposition.recoverFromSharedConfiguration(
+                    role: .app,
+                    runtime: runtime,
+                    usageCountingAllowed: allowed
+                )
+            } catch {
+                print("[BigKidStatePoller] metering epoch reconciliation failed: \(error)")
+            }
+        }
         self.markAuthoritativeReady = {
             EarnedTimeStore.shared.markAuthoritativeStateReady(deviceID: $0)
         }
@@ -137,6 +149,7 @@ final class BigKidStatePoller: ObservableObject {
         mirrorChildIdentity: @escaping (UUID) -> Void = { _ in },
         syncEarnedRuntime: @escaping (EarnedTimeRuntime?) -> EarnedTimeStore.RuntimePolicyReconciliation = BigKidStatePoller.syncEarnedRuntimeFromSnapshot,
         setUsageCountingAllowed: @escaping (Bool) -> Bool = BigKidStatePoller.writeUsageCountingAllowed,
+        reconcileMeteringRuntime: @escaping (Bool, EarnedTimeRuntime?) async -> Void = { _, _ in },
         markAuthoritativeReady: @escaping (UUID) -> Void = { _ in },
         clearAuthoritativeReadiness: @escaping () -> Void = {},
         ensureEarnedArmed: @escaping () -> Void = {},
@@ -160,6 +173,7 @@ final class BigKidStatePoller: ObservableObject {
         self.mirrorChildIdentity = mirrorChildIdentity
         self.syncEarnedRuntime = syncEarnedRuntime
         self.setUsageCountingAllowed = setUsageCountingAllowed
+        self.reconcileMeteringRuntime = reconcileMeteringRuntime
         self.markAuthoritativeReady = markAuthoritativeReady
         self.clearAuthoritativeReadiness = clearAuthoritativeReadiness
         self.ensureEarnedArmed = ensureEarnedArmed
@@ -290,6 +304,9 @@ final class BigKidStatePoller: ObservableObject {
 
             let allowed = snapshot.effectiveUsageCountingAllowed
             let wasCountingAllowed = setUsageCountingAllowed(allowed)
+            if runtimeIsAuthoritative {
+                await reconcileMeteringRuntime(allowed, snapshot.earnedTimeRuntime)
+            }
             if runtimeIsAuthoritative, let expectedChildID {
                 markAuthoritativeReady(expectedChildID)
             }

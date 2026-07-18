@@ -88,6 +88,11 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         }
 #endif
 
+        if raw.hasPrefix(MeteringRouteNamespace.prefix) {
+            recoverV2Metering()
+            return
+        }
+
         // Per-app limit daily reset (P7). The window's interval start (midnight for
         // a daily window) means a fresh day's budget. DeviceActivity auto-resets
         // each event's threshold counter at the interval boundary, so the budget
@@ -218,6 +223,10 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             Task { await BigKidExtensionReporter.shared.reportChunk() }
             return
         }
+        if activity.rawValue.hasPrefix(MeteringRouteNamespace.prefix) {
+            handleV2MeteringThreshold(event: event, activity: activity)
+            return
+        }
         // Per-app limit: the kid's usage of `<ruleId>`'s app crossed its daily
         // budget. The event name is `evlin.limit.<ruleId>` (see AppLimitPlanner).
         // Resolve the rule, write a `source == .limit` ShieldRecord, recompute.
@@ -253,6 +262,45 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
                 activity: activity,
                 generation: generation
             )
+        }
+    }
+
+    private func handleV2MeteringThreshold(
+        event: DeviceActivityEvent.Name,
+        activity: DeviceActivityName
+    ) {
+        guard let ownerRaw = defaults?.string(forKey: MeteringProductionComposition.ownerKey),
+              let owner = UUID(uuidString: ownerRaw)
+        else { return }
+
+        do {
+            let outcome = try MeteringProductionComposition.makeCallback().handle(
+                MeteringAppleCallback(
+                    activityName: activity.rawValue,
+                    eventName: event.rawValue,
+                    observedAt: Date()
+                ),
+                expectedOwnerChildDeviceID: owner
+            )
+            NSLog("[Evlin/Ext] v2 metering callback %@", String(describing: outcome))
+            recoverV2Metering()
+        } catch {
+            NSLog("[Evlin/Ext] v2 metering callback failed: %@", String(describing: error))
+        }
+    }
+
+    private func recoverV2Metering() {
+        guard defaults?.string(forKey: MeteringProductionComposition.baseURLKey) != nil,
+              defaults?.string(forKey: MeteringProductionComposition.ownerKey) != nil
+        else { return }
+        Task { @MainActor in
+            do {
+                try await MeteringProductionComposition.recoverFromSharedConfiguration(
+                    role: .deviceActivityMonitor
+                )
+            } catch {
+                NSLog("[Evlin/Ext] v2 metering recovery failed: %@", String(describing: error))
+            }
         }
     }
 

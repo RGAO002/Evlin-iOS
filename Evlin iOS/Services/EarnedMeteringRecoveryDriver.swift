@@ -44,9 +44,13 @@ final class EarnedMeteringRecoveryDriver {
         self.purgeIdentityRetryState = purgeIdentityRetryState ?? { owner, keys in
             EarnedSampleReporter.purgeRetryState(deviceID: owner, capturedKeys: keys)
         }
-        let effectStore = EarnedShieldEffectStore(epochStore: store)
-        self.releaseIdentityShield = releaseIdentityShield ?? { operationID, owner in
-            try effectStore.release(operationID: operationID, expectedOwner: owner)
+        if let releaseIdentityShield {
+            self.releaseIdentityShield = releaseIdentityShield
+        } else {
+            let effectStore = EarnedShieldEffectStore(epochStore: store)
+            self.releaseIdentityShield = { operationID, owner in
+                try effectStore.release(operationID: operationID, expectedOwner: owner)
+            }
         }
         self.resetRolloverEffect = resetRolloverEffect ?? { _, _ in
             throw EarnedMeteringRecoveryError.invalidRollover("reset adapter unavailable")
