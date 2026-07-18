@@ -3020,7 +3020,7 @@ receipt snapshot is the intended-after `ShieldRecord` bytes required by D#6.
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/EvlinDeviceActivityMonitor/DeviceActivityMonitorExtension.swift`
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/EarnedMeteringCallbackTests.swift`
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/EarnedShieldEffectStoreTests.swift`
-- Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/MeteringProcessEntryTests.swift`
+- Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/MeteringColdReopenRecoveryTests.swift`
 - Create: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/MeteringTerminalShieldCompositionTests.swift`
 
 **TDD RED:** Drive the real DAM process entry with injected stores and projection.
@@ -3079,7 +3079,7 @@ or applies an earned shield envelope.
 
 ```bash
 cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS
-SENTRY_SKIP_DSYM_UPLOAD=1 xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3.1' IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' -parallel-testing-enabled NO -only-testing:'Evlin iOSTests/MeteringTerminalShieldCompositionTests' -only-testing:'Evlin iOSTests/EarnedMeteringCallbackTests' -only-testing:'Evlin iOSTests/EarnedShieldEffectStoreTests' -only-testing:'Evlin iOSTests/MeteringProcessEntryTests' test
+SENTRY_SKIP_DSYM_UPLOAD=1 xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3.1' IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' -parallel-testing-enabled NO -only-testing:'Evlin iOSTests/MeteringTerminalShieldCompositionTests' -only-testing:'Evlin iOSTests/EarnedMeteringCallbackTests' -only-testing:'Evlin iOSTests/EarnedShieldEffectStoreTests' -only-testing:'Evlin iOSTests/MeteringColdReopenRecoveryTests' test
 SENTRY_SKIP_DSYM_UPLOAD=1 xcodebuild -quiet -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' build
 ```
 
@@ -3090,7 +3090,7 @@ D#6 provenance and every rejection/suppression is zero-shield-effect.
 
 ```bash
 cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS
-git add 'Evlin iOS/Services/DeviceEpochStore.swift' 'Evlin iOS/Services/EarnedMeteringCallback.swift' 'Evlin iOS/Services/EarnedShieldEffectStore.swift' 'Evlin iOS/Services/MeteringProcessEntries.swift' 'EvlinDeviceActivityMonitor/DeviceActivityMonitorExtension.swift' 'Evlin iOSTests/EarnedMeteringCallbackTests.swift' 'Evlin iOSTests/EarnedShieldEffectStoreTests.swift' 'Evlin iOSTests/MeteringProcessEntryTests.swift' 'Evlin iOSTests/MeteringTerminalShieldCompositionTests.swift'
+git add 'Evlin iOS/Services/DeviceEpochStore.swift' 'Evlin iOS/Services/EarnedMeteringCallback.swift' 'Evlin iOS/Services/EarnedShieldEffectStore.swift' 'Evlin iOS/Services/MeteringProcessEntries.swift' 'EvlinDeviceActivityMonitor/DeviceActivityMonitorExtension.swift' 'Evlin iOSTests/EarnedMeteringCallbackTests.swift' 'Evlin iOSTests/EarnedShieldEffectStoreTests.swift' 'Evlin iOSTests/MeteringColdReopenRecoveryTests.swift' 'Evlin iOSTests/MeteringTerminalShieldCompositionTests.swift'
 git diff --cached --check && git diff --cached --stat && git diff --cached && git diff --cached --name-only
 git commit -m 'feat: persist trusted terminal shield receipts'
 ```
@@ -3498,7 +3498,7 @@ Task 20 iOS depends on Task 19 backend
 
 The same stdlib parser used by the fixture test mechanically pins this plan to
 31 task headings, 31 commit commands/unique subjects, 52 `Create` declarations,
-165 `Modify` declarations, 217 total declarations, 97 unique declared paths,
+165 `Modify` declarations, 217 total declarations, 96 unique declared paths,
 97 literal `xcodebuild` commands. The Release scheme build is one dependency-
 graph invocation rather than an invalid per-target loop. It rejects a changed count unless the plan,
 fixture expectation, and review map are revised together; prose-only arithmetic
