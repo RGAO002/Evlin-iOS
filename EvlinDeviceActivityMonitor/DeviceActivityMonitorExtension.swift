@@ -471,25 +471,6 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         guard let generationDeviceID = UUID(uuidString: generation.deviceID) else { return }
         guard earnedGenerationIsActive(generation) else { return }
 
-        // Stale-ladder firewall. A legitimately armed ladder never carries a
-        // raw threshold above min(pool, cap) (`EarnedBudgetScheduler.thresholds`
-        // tops out there), so a higher N can only come from a ladder armed
-        // under an earlier config or a previous device identity (account /
-        // family switch). Billing it to the current family would instantly
-        // exhaust a smaller pool — drop it before touching the day odometer.
-        if let pool = earnedStore.poolMinutes {
-            let cap = earnedStore.capMinutes ?? pool
-            if n > min(pool, cap) {
-                _ = performIfEarnedGenerationActive(generation) {
-                    NSLog("[Evlin/Ext] earned t%d exceeds min(pool %d, cap %d) — stale ladder, dropped",
-                          n, pool, cap)
-                    emitEvent(kind: .decision, source: .earnedPool, app: "device-wide",
-                              reason: "stale_ladder_drop")
-                }
-                return
-            }
-        }
-
         let offset = generation.offsetMinutes
         let adjustedN = EarnedTimeStore.adjustedEarnedThreshold(
             rawThresholdMinutes: n,

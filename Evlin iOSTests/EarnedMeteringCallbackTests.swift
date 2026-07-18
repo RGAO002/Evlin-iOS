@@ -321,9 +321,13 @@ final class EarnedMeteringCallbackTests: XCTestCase {
         XCTAssertEqual(try fixture.store.read().sampleWork.count, 1)
     }
 
-    func testOneDayDelayedActiveCallbackRemainsValid() throws {
+    func testOneDayDelayedActiveCallbackSurvivesMutableUsageState() throws {
         let fixture = try CallbackFixture.active()
         defer { fixture.cleanup() }
+        try fixture.mutate { state in
+            state.epochs[fixture.epochID]?.lastRawThresholdMinutes = 4
+            state.epochs[fixture.epochID]?.excludedWhilePausedMinutes = 1
+        }
 
         let outcome = try fixture.callbackHandler().handle(
             fixture.callback(threshold: 5, observedAt: fixture.start.addingTimeInterval(86_400 + 300)),
@@ -331,6 +335,7 @@ final class EarnedMeteringCallbackTests: XCTestCase {
         )
 
         guard case .queued = outcome else { return XCTFail("delayed callbacks have no maximum age") }
+        XCTAssertEqual(try fixture.store.read().epochs[fixture.epochID]?.lastRawThresholdMinutes, 5)
     }
 
     func testPausedCallbackOnlyAdvancesRegisteredPausedMetadata() throws {
