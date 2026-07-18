@@ -1,4 +1,5 @@
 import Foundation
+import FamilyControls
 
 nonisolated enum EarnedShieldEffectPhase: String, Codable, Sendable {
     case prepared, applied, releasePending, released, conflicted
@@ -59,6 +60,169 @@ nonisolated final class EarnedShieldEffectStore: @unchecked Sendable {
         self.defaults = defaults
         self.lock = lock
         self.epochStore = epochStore
+    }
+
+    /// Persists only the local lock intent. The callback transaction later
+    /// commits the exact D#6 reference together with its sample; recovery is
+    /// forbidden from applying this envelope until that reference exists.
+    func prepareTerminal(
+        _ candidate: MeteringTerminalShieldCandidate,
+        selection: FamilyActivitySelection,
+        appliesToAll: Bool,
+        isSuppressed: () -> Bool
+    ) throws -> EarnedShieldEffectEnvelope? {
+        try withPersistenceLock {
+            guard !isSuppressed() else { return nil }
+            var envelopes = try loadEnvelopes()
+            let recordKey = ShieldRecord.makeRecordKey(
+                tier: .savedList,
+                targetKey: candidate.enforcementSetID.uuidString
+            )
+            if let existing = envelopes[candidate.operationID] {
+                guard existing.ownerChildDeviceID == candidate.ownerChildDeviceID,
+                      existing.generationID == candidate.generationID,
+                      existing.epochID == candidate.epochID,
+                      existing.routeID == candidate.routeID,
+                      existing.recordKey == recordKey
+                else { throw EarnedShieldEffectError.authorizationChanged }
+                switch existing.phase {
+                case .prepared, .applied:
+                    return existing
+                case .released, .releasePending:
+                    return nil
+                case .conflicted:
+                    throw EarnedShieldEffectError.casConflict(existing.operationID)
+                }
+            }
+
+            let shields = try loadShields()
+            let before = shields[recordKey]
+            let after: ShieldRecord
+            if let before {
+                after = ShieldSourceLogic.unioning(before, intoSources: [.earnedTime])
+            } else {
+                after = ShieldRecord(
+                    recordKey: recordKey,
+                    tier: .savedList,
+                    targetKey: candidate.enforcementSetID.uuidString,
+                    displayName: "Locked Set",
+                    lastCommandID: candidate.operationID,
+                    appTokens: selection.applicationTokens,
+                    categoryTokens: selection.categoryTokens,
+                    webDomainTokens: selection.webDomainTokens,
+                    appliesToAll: appliesToAll,
+                    issuedAt: candidate.observedAt,
+                    expiresAt: nil,
+                    originalRequest: "earned time terminal: t\(candidate.thresholdMinutes)",
+                    targetChildID: candidate.ownerChildDeviceID,
+                    sources: [.earnedTime]
+                )
+            }
+            let envelope = EarnedShieldEffectEnvelope(
+                operationID: candidate.operationID,
+                ownerChildDeviceID: candidate.ownerChildDeviceID,
+                generationID: candidate.generationID,
+                epochID: candidate.epochID,
+                routeID: candidate.routeID,
+                recordKey: recordKey,
+                beforeRecord: before,
+                intendedAfterRecord: after,
+                phase: .prepared,
+                retry: MeteringRetryState(
+                    attemptCount: 0,
+                    nextAttemptAt: candidate.observedAt,
+                    lastErrorCode: nil,
+                    terminal: .pending
+                ),
+                createdAt: candidate.observedAt
+            )
+            try validateEnvelope(envelope)
+            guard try epochStore.canPrepareEarnedShieldReference(try reference(for: envelope)) else {
+                throw EarnedShieldEffectError.authorizationChanged
+            }
+            envelopes[envelope.operationID] = envelope
+            try persistEnvelopes(envelopes)
+            return envelope
+        }
+    }
+
+    /// Applies a previously prepared intent only when the callback transaction
+    /// has committed its byte-exact reference. The suppression closure executes
+    /// while the ActiveLock lock is held, closing the override race.
+    @discardableResult
+    func applyPrepared(
+        operationID: UUID,
+        expectedOwner: UUID,
+        isSuppressed: (EarnedShieldEffectEnvelope) -> Bool
+    ) throws -> Bool {
+        try withPersistenceLock {
+            var envelopes = try loadEnvelopes()
+            guard var envelope = envelopes[operationID] else {
+                throw EarnedShieldEffectError.envelopeMissing(operationID)
+            }
+            guard envelope.ownerChildDeviceID == expectedOwner else {
+                throw EarnedShieldEffectError.authorizationChanged
+            }
+            let expectedReference = try reference(for: envelope)
+            guard try epochStore.hasExactEarnedShieldReference(expectedReference) else {
+                throw EarnedShieldEffectError.authorizationChanged
+            }
+            switch envelope.phase {
+            case .released, .releasePending:
+                return false
+            case .conflicted:
+                throw EarnedShieldEffectError.casConflict(operationID)
+            case .applied:
+                guard try loadShields()[envelope.recordKey] == envelope.intendedAfterRecord else {
+                    envelope.phase = .conflicted
+                    envelopes[operationID] = envelope
+                    try persistEnvelopes(envelopes)
+                    throw EarnedShieldEffectError.casConflict(operationID)
+                }
+                return false
+            case .prepared:
+                break
+            }
+
+            if isSuppressed(envelope) {
+                envelope.phase = .released
+                envelopes[operationID] = envelope
+                try persistEnvelopes(envelopes)
+                return false
+            }
+
+            var shields = try loadShields()
+            let current = shields[envelope.recordKey]
+            if current != envelope.intendedAfterRecord {
+                guard current == envelope.beforeRecord else {
+                    envelope.phase = .conflicted
+                    envelopes[operationID] = envelope
+                    try persistEnvelopes(envelopes)
+                    throw EarnedShieldEffectError.casConflict(operationID)
+                }
+                set(envelope.intendedAfterRecord, at: envelope.recordKey, in: &shields)
+                try persistShields(shields)
+            }
+            envelope.phase = .applied
+            envelopes[operationID] = envelope
+            try persistEnvelopes(envelopes)
+            return true
+        }
+    }
+
+    func discardPrepared(operationID: UUID, expectedOwner: UUID) throws {
+        try withPersistenceLock {
+            var envelopes = try loadEnvelopes()
+            guard let envelope = envelopes[operationID],
+                  envelope.ownerChildDeviceID == expectedOwner,
+                  envelope.phase == .prepared
+            else { return }
+            if try epochStore.hasExactEarnedShieldReference(try reference(for: envelope)) {
+                return
+            }
+            envelopes.removeValue(forKey: operationID)
+            try persistEnvelopes(envelopes)
+        }
     }
 
     func apply(_ envelope: EarnedShieldEffectEnvelope) throws {
@@ -195,7 +359,11 @@ nonisolated final class EarnedShieldEffectStore: @unchecked Sendable {
         }
     }
 
-    func recover(expectedOwner: UUID) throws {
+    @discardableResult
+    func recover(
+        expectedOwner: UUID,
+        isSuppressed: (EarnedShieldEffectEnvelope) -> Bool = { _ in false }
+    ) throws -> Bool {
         let pending = try withPersistenceLock { () -> [EarnedShieldEffectEnvelope] in
             try loadEnvelopes().values
                 .filter { $0.ownerChildDeviceID == expectedOwner }
@@ -205,21 +373,36 @@ nonisolated final class EarnedShieldEffectStore: @unchecked Sendable {
                         < $1.operationID.uuidString.lowercased()
                 }
         }
+        var requiresProjection = false
         for envelope in pending {
             switch envelope.phase {
             case .prepared:
-                try apply(envelope)
+                let reference = try reference(for: envelope)
+                if try epochStore.hasExactEarnedShieldReference(reference) {
+                    requiresProjection = try applyPrepared(
+                        operationID: envelope.operationID,
+                        expectedOwner: expectedOwner,
+                        isSuppressed: isSuppressed
+                    ) || requiresProjection
+                } else {
+                    try discardPrepared(
+                        operationID: envelope.operationID,
+                        expectedOwner: expectedOwner
+                    )
+                }
             case .releasePending:
                 try release(operationID: envelope.operationID, expectedOwner: expectedOwner)
+                requiresProjection = true
             case .applied, .released:
                 continue
             case .conflicted:
                 throw EarnedShieldEffectError.casConflict(envelope.operationID)
             }
         }
+        return requiresProjection
     }
 
-    private func reference(for envelope: EarnedShieldEffectEnvelope) throws -> EarnedShieldReference {
+    func reference(for envelope: EarnedShieldEffectEnvelope) throws -> EarnedShieldReference {
         EarnedShieldReference(
             operationID: envelope.operationID,
             ownerChildDeviceID: envelope.ownerChildDeviceID,
@@ -231,6 +414,10 @@ nonisolated final class EarnedShieldEffectStore: @unchecked Sendable {
             retry: envelope.retry,
             createdAt: envelope.createdAt
         )
+    }
+
+    func loadShieldRecords() throws -> [String: ShieldRecord] {
+        try withPersistenceLock { try loadShields() }
     }
 
     private func validateEnvelope(_ envelope: EarnedShieldEffectEnvelope) throws {

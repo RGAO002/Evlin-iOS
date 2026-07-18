@@ -28,32 +28,53 @@ nonisolated final class EarnedMeteringCallback: @unchecked Sendable {
 
     func handle(
         _ callback: MeteringAppleCallback,
-        expectedOwnerChildDeviceID: UUID
+        expectedOwnerChildDeviceID: UUID,
+        preparedShieldReference: EarnedShieldReference? = nil
     ) throws -> EarnedMeteringCallbackOutcome {
-        guard let jitterSeconds else { return .discarded(reason: "invalid_jitter") }
-        guard let parsed = MeteringRouteNamespace.parse(
-            activityName: callback.activityName,
-            eventName: callback.eventName
-        ) else {
-            return .discarded(reason: "malformed_route")
+        guard let input = callbackInput(callback) else {
+            return .discarded(reason: jitterSeconds == nil ? "invalid_jitter" : "malformed_route")
         }
 
         let result = try store.enqueueAuthorizedV2Callback(
-            MeteringAuthorizedCallbackInput(
-                routeID: parsed.routeID,
-                activityName: callback.activityName,
-                eventName: callback.eventName,
-                namespace: MeteringRouteNamespace.prefix,
-                thresholdMinutes: parsed.thresholdMinutes,
-                observedAt: callback.observedAt,
-                now: clock.now,
-                jitterSeconds: jitterSeconds
-            ),
-            owner: expectedOwnerChildDeviceID
+            input,
+            owner: expectedOwnerChildDeviceID,
+            preparedShieldReference: preparedShieldReference
         )
         switch result {
         case .queued(let sampleWorkID): return .queued(sampleWorkID: sampleWorkID)
         case .discarded(let reason): return .discarded(reason: reason)
         }
+    }
+
+    func terminalCandidate(
+        _ callback: MeteringAppleCallback,
+        expectedOwnerChildDeviceID: UUID
+    ) throws -> MeteringTerminalShieldCandidate? {
+        guard let input = callbackInput(callback) else { return nil }
+        return try store.terminalShieldCandidate(
+            input,
+            owner: expectedOwnerChildDeviceID
+        )
+    }
+
+    private func callbackInput(
+        _ callback: MeteringAppleCallback
+    ) -> MeteringAuthorizedCallbackInput? {
+        guard let jitterSeconds,
+              let parsed = MeteringRouteNamespace.parse(
+                  activityName: callback.activityName,
+                  eventName: callback.eventName
+              )
+        else { return nil }
+        return MeteringAuthorizedCallbackInput(
+            routeID: parsed.routeID,
+            activityName: callback.activityName,
+            eventName: callback.eventName,
+            namespace: MeteringRouteNamespace.prefix,
+            thresholdMinutes: parsed.thresholdMinutes,
+            observedAt: callback.observedAt,
+            now: clock.now,
+            jitterSeconds: jitterSeconds
+        )
     }
 }

@@ -90,7 +90,11 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
 
         if raw.hasPrefix(MeteringRouteNamespace.prefix) {
             Task { @MainActor in
-                await DAMMeteringEntry.shared.recoverIfConfigured()
+                await DAMMeteringEntry.shared.recoverIfConfigured(
+                    projectShields: { [weak self] shields in
+                        self?.recomputeAndApplyShields(shields)
+                    }
+                )
             }
             return
         }
@@ -271,18 +275,24 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         event: DeviceActivityEvent.Name,
         activity: DeviceActivityName
     ) {
+        let project: ([String: ShieldRecord]) -> Void = { [weak self] shields in
+            self?.recomputeAndApplyShields(shields)
+        }
         do {
             let outcome = try DAMMeteringEntry.shared.handle(
                 activityName: activity.rawValue,
                 eventName: event.rawValue,
-                observedAt: Date()
+                observedAt: Date(),
+                projectShields: project
             )
             NSLog("[Evlin/Ext] v2 metering callback %@", String(describing: outcome))
-            Task { @MainActor in
-                await DAMMeteringEntry.shared.recoverIfConfigured()
-            }
         } catch {
             NSLog("[Evlin/Ext] v2 metering callback failed: %@", String(describing: error))
+        }
+        Task { @MainActor in
+            await DAMMeteringEntry.shared.recoverIfConfigured(
+                projectShields: project
+            )
         }
     }
 

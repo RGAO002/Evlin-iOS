@@ -43,6 +43,61 @@ final class EarnedMeteringCallbackTests: XCTestCase {
         XCTAssertEqual(work?.request.lane, .v2)
     }
 
+    func testTerminalCallbackCommitsPreparedShieldReferenceWithSampleButEarlyCallbackCommitsNeither() throws {
+        let fixture = try CallbackFixture.active()
+        defer { fixture.cleanup() }
+        let reference = EarnedShieldReference(
+            operationID: fixture.routeID,
+            ownerChildDeviceID: fixture.owner,
+            generationID: fixture.generationID,
+            epochID: fixture.epochID,
+            routeID: fixture.routeID,
+            recordKey: "savedList:terminal",
+            expectedRecordBytes: Data([0x01]),
+            retry: MeteringRetryState(
+                attemptCount: 0,
+                nextAttemptAt: fixture.start,
+                lastErrorCode: nil,
+                terminal: .pending
+            ),
+            createdAt: fixture.start
+        )
+
+        let accepted = try fixture.callbackHandler().handle(
+            fixture.callback(threshold: 5),
+            expectedOwnerChildDeviceID: fixture.owner,
+            preparedShieldReference: reference
+        )
+
+        guard case .queued = accepted else { return XCTFail("terminal callback must queue") }
+        let acceptedState = try fixture.store.read()
+        XCTAssertEqual(acceptedState.sampleWork.count, 1)
+        XCTAssertEqual(acceptedState.shieldReferences[fixture.routeID], reference)
+
+        let early = try CallbackFixture.active()
+        defer { early.cleanup() }
+        let earlyReference = EarnedShieldReference(
+            operationID: early.routeID,
+            ownerChildDeviceID: early.owner,
+            generationID: early.generationID,
+            epochID: early.epochID,
+            routeID: early.routeID,
+            recordKey: reference.recordKey,
+            expectedRecordBytes: reference.expectedRecordBytes,
+            retry: reference.retry,
+            createdAt: reference.createdAt
+        )
+        let rejected = try early.callbackHandler().handle(
+            early.callback(threshold: 5, observedAt: early.start.addingTimeInterval(269)),
+            expectedOwnerChildDeviceID: early.owner,
+            preparedShieldReference: earlyReference
+        )
+
+        XCTAssertEqual(rejected, .discarded(reason: "too_early"))
+        XCTAssertTrue(try early.store.read().sampleWork.isEmpty)
+        XCTAssertTrue(try early.store.read().shieldReferences.isEmpty)
+    }
+
     func testThirtyOneSecondsEarlyIsByteIdenticalAndQueuesNothing() throws {
         let fixture = try CallbackFixture.active()
         defer { fixture.cleanup() }

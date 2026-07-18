@@ -100,6 +100,14 @@ final class EarnedShieldEffectStoreTests: XCTestCase {
         let envelope = makeEnvelope(fixture: fixture)
         try seedBefore(envelope)
         try persistEnvelopes([operationID: envelope])
+        XCTAssertTrue(
+            try fixture.store.createOrVerifyEarnedShieldReference(
+                try EarnedShieldEffectStore(
+                    defaults: defaults,
+                    epochStore: fixture.store
+                ).reference(for: envelope)
+            )
+        )
 
         let reopened = EarnedShieldEffectStore(defaults: defaults, epochStore: fixture.store)
         try reopened.recover(expectedOwner: owner)

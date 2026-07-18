@@ -91,6 +91,8 @@ final class MeteringColdReopenRecoveryTests: XCTestCase {
         XCTAssertTrue(app.contains("AppMeteringEntry.shared.recoverIfConfigured"))
         XCTAssertTrue(dam.contains("DAMMeteringEntry.shared.recoverIfConfigured"))
         XCTAssertTrue(dam.contains("DAMMeteringEntry.shared.handle"))
+        XCTAssertTrue(dam.contains("projectShields: project"))
+        XCTAssertTrue(dam.contains("self?.recomputeAndApplyShields(shields)"))
         let synchronousHandle = try XCTUnwrap(
             dam.range(of: "let outcome = try DAMMeteringEntry.shared.handle")
         )

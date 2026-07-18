@@ -211,6 +211,18 @@ nonisolated struct MeteringAuthorizedCallbackInput: Equatable, Sendable {
     let jitterSeconds: Int
 }
 
+nonisolated struct MeteringTerminalShieldCandidate: Equatable, Sendable {
+    let operationID: UUID
+    let ownerChildDeviceID: UUID
+    let generationID: UUID
+    let epochID: UUID
+    let routeID: UUID
+    let usageDate: String
+    let enforcementSetID: UUID
+    let thresholdMinutes: Int
+    let observedAt: Date
+}
+
 nonisolated enum MeteringAuthorizedCallbackResult: Equatable, Sendable {
     case queued(sampleWorkID: UUID)
     case discarded(reason: String)
@@ -932,6 +944,22 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         }
     }
 
+    func hasExactEarnedShieldReference(_ expected: EarnedShieldReference) throws -> Bool {
+        guard isCurrentOwner(expected.ownerChildDeviceID) else { return false }
+        guard let reference = try read().shieldReferences[expected.operationID] else {
+            return false
+        }
+        return reference.matches(
+            operationID: expected.operationID,
+            ownerChildDeviceID: expected.ownerChildDeviceID,
+            generationID: expected.generationID,
+            epochID: expected.epochID,
+            routeID: expected.routeID,
+            recordKey: expected.recordKey,
+            expectedRecordBytes: expected.expectedRecordBytes
+        )
+    }
+
     /// Release is never a generic source removal. The operation must still be
     /// referenced by this owner and the originating epoch must have entered one
     /// of the narrow terminal paths that is allowed to unwind earned shielding.
@@ -1021,13 +1049,51 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         return true
     }
 
+    /// Read-only terminal preflight. This only recognizes the immutable final
+    /// event in a route; callback authority is still revalidated under the
+    /// store transaction before any sample or shield receipt is committed.
+    func terminalShieldCandidate(
+        _ input: MeteringAuthorizedCallbackInput,
+        owner: UUID
+    ) throws -> MeteringTerminalShieldCandidate? {
+        guard isCurrentOwner(owner) else { return nil }
+        let state = try read()
+        guard state.ownerChildDeviceID == owner,
+              let route = state.routes[input.routeID],
+              let generation = state.generations[route.generationID],
+              let epoch = state.epochs[route.epochID],
+              route.ownerChildDeviceID == owner,
+              route.activityName == input.activityName,
+              route.namespace == input.namespace,
+              route.epochID == epoch.epochID,
+              route.generationID == generation.generationID,
+              let terminal = route.plannedEvents.max(by: {
+                  $0.thresholdMinutes < $1.thresholdMinutes
+              }),
+              terminal.eventName == input.eventName,
+              terminal.thresholdMinutes == input.thresholdMinutes
+        else { return nil }
+        return MeteringTerminalShieldCandidate(
+            operationID: route.routeID,
+            ownerChildDeviceID: owner,
+            generationID: generation.generationID,
+            epochID: epoch.epochID,
+            routeID: route.routeID,
+            usageDate: epoch.usageDate,
+            enforcementSetID: epoch.enforcementSetID,
+            thresholdMinutes: terminal.thresholdMinutes,
+            observedAt: input.observedAt
+        )
+    }
+
     /// The callback boundary is deliberately the sole local producer of v2
     /// sample work. It performs a non-mutating preflight first so rejected
     /// callbacks cannot bootstrap an empty root, then repeats every authority
     /// check under the root lock before any high-water or queue mutation.
     func enqueueAuthorizedV2Callback(
         _ input: MeteringAuthorizedCallbackInput,
-        owner: UUID
+        owner: UUID,
+        preparedShieldReference: EarnedShieldReference? = nil
     ) throws -> MeteringAuthorizedCallbackResult {
         guard isCurrentOwner(owner) else {
             return .discarded(reason: "owner_mismatch")
@@ -1042,14 +1108,20 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         }
 
         return try transaction(expectedOwner: owner) { state in
-            authorizeV2Callback(&state, input: input, owner: owner)
+            authorizeV2Callback(
+                &state,
+                input: input,
+                owner: owner,
+                preparedShieldReference: preparedShieldReference
+            )
         }
     }
 
     private func authorizeV2Callback(
         _ state: inout DeviceEpochStoreState,
         input: MeteringAuthorizedCallbackInput,
-        owner: UUID
+        owner: UUID,
+        preparedShieldReference: EarnedShieldReference?
     ) -> MeteringAuthorizedCallbackResult {
         if state.tombstones[input.routeID] != nil {
             return .discarded(reason: "tombstoned_route")
@@ -1150,6 +1222,38 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
             epoch.resumeBoundaryPending = false
             state.epochs[epoch.epochID] = epoch
             return .discarded(reason: "resume_boundary")
+        }
+
+        if let reference = preparedShieldReference {
+            guard let terminal = route.plannedEvents.max(by: {
+                $0.thresholdMinutes < $1.thresholdMinutes
+            }),
+                  terminal.eventName == input.eventName,
+                  terminal.thresholdMinutes == input.thresholdMinutes,
+                  reference.operationID == route.routeID,
+                  reference.ownerChildDeviceID == owner,
+                  reference.generationID == route.generationID,
+                  reference.epochID == route.epochID,
+                  reference.routeID == route.routeID,
+                  canApplyEarnedShieldReference(reference, in: state)
+            else {
+                return .discarded(reason: "shield_reference_mismatch")
+            }
+            if let existing = state.shieldReferences[reference.operationID] {
+                guard existing.matches(
+                    operationID: reference.operationID,
+                    ownerChildDeviceID: reference.ownerChildDeviceID,
+                    generationID: reference.generationID,
+                    epochID: reference.epochID,
+                    routeID: reference.routeID,
+                    recordKey: reference.recordKey,
+                    expectedRecordBytes: reference.expectedRecordBytes
+                ) else {
+                    return .discarded(reason: "shield_reference_mismatch")
+                }
+            } else {
+                state.shieldReferences[reference.operationID] = reference
+            }
         }
 
         let rawThreshold = max(epoch.lastRawThresholdMinutes, input.thresholdMinutes)
