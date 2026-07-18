@@ -166,24 +166,33 @@ final class DeviceEpochStoreTests: XCTestCase {
 
     func testOwnerChangeBeforeWriteLeavesPriorBytesUnchanged() throws {
         let io = TestFileIO()
-        var calls = 0
-        var initializing = true
+        var currentOwner = owner
+        var observedOwners: [UUID?] = []
         let store = makeStore(io: io, ownerProvider: {
-            calls += 1
-            return initializing ? (calls <= 3 ? self.owner : self.otherOwner) : (calls == 1 ? self.owner : self.otherOwner)
+            observedOwners.append(currentOwner)
+            return currentOwner
         })
         try store.transaction(expectedOwner: owner) { $0 = makeState() }
         let priorBytes = io.data
-        initializing = false
-        calls = 0
+        let initializationWriteCount = io.writeCount
+        observedOwners.removeAll()
+        var writeMutationObserved = false
+        io.onWrite = {
+            if io.data != priorBytes {
+                writeMutationObserved = true
+            }
+            currentOwner = self.otherOwner
+        }
 
         XCTAssertThrowsError(try store.transaction(expectedOwner: owner) { state in
             state.ratchets[owner]?.advertisedVersion = 2
         }) { error in
             XCTAssertEqual(error as? DeviceEpochStoreError, .ownerMismatch)
         }
+        XCTAssertEqual(observedOwners, [owner, owner, otherOwner])
+        XCTAssertTrue(writeMutationObserved)
         XCTAssertEqual(io.data, priorBytes)
-        XCTAssertEqual(io.writeCount, 1)
+        XCTAssertGreaterThan(io.writeCount, initializationWriteCount)
     }
 
     func testOwnerChangeAfterReadbackRestoresPriorBytes() throws {
@@ -358,6 +367,7 @@ final class DeviceEpochStoreTests: XCTestCase {
         committed.v2RouteHandoff?.registrationAcknowledgedAt = Date(timeIntervalSince1970: 250)
         committed.v2RouteHandoff?.activationAcknowledgedAt = Date(timeIntervalSince1970: 300)
         committed.v2RouteHandoff?.priorStopAcknowledgedAt = Date(timeIntervalSince1970: 301)
+        committed.v2RouteHandoff?.priorRouteInputClosedAt = Date(timeIntervalSince1970: 150)
         committed.sampleWork = committed.sampleWork.mapValues { work in
             var copy = work
             copy.retry.terminal = .succeeded
@@ -403,8 +413,40 @@ final class DeviceEpochStoreTests: XCTestCase {
         missingStop.tombstones[committed.v2RouteHandoff!.fromRouteID]?.stopAcknowledgedAt = nil
         XCTAssertThrowsError(try store.transaction(expectedOwner: owner) { $0 = missingStop })
 
+        var missingClosure = committed
+        missingClosure.v2RouteHandoff?.priorRouteInputClosedAt = nil
+        XCTAssertThrowsError(try store.transaction(expectedOwner: owner) { $0 = missingClosure })
+
+        var pendingPriorWork = committed
+        pendingPriorWork.sampleWork = pendingPriorWork.sampleWork.mapValues { work in
+            var copy = work
+            copy.retry.terminal = .pending
+            return copy
+        }
+        XCTAssertThrowsError(try store.transaction(expectedOwner: owner) { $0 = pendingPriorWork })
+
         try store.transaction(expectedOwner: owner) { $0 = committed }
-        XCTAssertEqual(try store.read().activeRouteID, committed.v2RouteHandoff?.toRouteID)
+        let reopenedStore = makeStore(io: io)
+        XCTAssertEqual(try reopenedStore.read(), committed)
+    }
+
+    func testReadReopensCutoverReadyRootWithSucceededPreBarrierPriorSampleWork() throws {
+        let io = TestFileIO()
+        let store = makeStore(io: io)
+        var state = makeState()
+        try store.transaction(expectedOwner: owner) { $0 = state }
+
+        state.v2RouteHandoff?.phase = .cutoverReady
+        state.v2RouteHandoff?.priorRouteInputClosedAt = Date(timeIntervalSince1970: 150)
+        state.sampleWork = state.sampleWork.mapValues { work in
+            var copy = work
+            copy.retry.terminal = .succeeded
+            return copy
+        }
+        try store.transaction(expectedOwner: owner) { $0 = state }
+
+        let reopenedStore = makeStore(io: io)
+        XCTAssertEqual(try reopenedStore.read(), state)
     }
 
     func testCutoverBarrierRejectsPriorWorkCreatedBeforeOrAfterBarrier() throws {

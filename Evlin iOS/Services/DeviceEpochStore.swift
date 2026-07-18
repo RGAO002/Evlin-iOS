@@ -503,7 +503,7 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
             let url = try resolvedFileURL()
             let priorData = try fileIO.read(from: url)
             var state = try decodeState(priorData)
-            try validate(state, expectedOwner: nil, requireOwnerMatch: false, priorState: nil)
+            try validateStatic(state, expectedOwner: nil, requireOwnerMatch: false)
             try checkOwner(expectedOwner: expectedOwner, state: state)
 
             if state.ownerChildDeviceID == nil {
@@ -513,7 +513,8 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
             var candidate = state
             let value = try mutate(&candidate)
             try checkOwner(expectedOwner: expectedOwner, state: candidate)
-            try validate(candidate, expectedOwner: expectedOwner, requireOwnerMatch: true, priorState: state)
+            try validateStatic(candidate, expectedOwner: expectedOwner, requireOwnerMatch: true)
+            try validateTransactionDelta(candidate: candidate, priorState: state)
 
             let encoded = try Self.encoder.encode(candidate)
             var writeAttempted = false
@@ -581,7 +582,7 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
     private func loadState() throws -> DeviceEpochStoreState {
         let url = try resolvedFileURL()
         let state = try decodeState(try fileIO.read(from: url))
-        try validate(state, expectedOwner: nil, requireOwnerMatch: false, priorState: nil)
+        try validateStatic(state, expectedOwner: nil, requireOwnerMatch: false)
         return state
     }
 
@@ -659,11 +660,10 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         }
     }
 
-    private func validate(
+    private func validateStatic(
         _ state: DeviceEpochStoreState,
         expectedOwner: UUID?,
-        requireOwnerMatch: Bool,
-        priorState: DeviceEpochStoreState?
+        requireOwnerMatch: Bool
     ) throws {
         guard state.schemaVersion == DeviceEpochStoreState.currentSchemaVersion else {
             throw DeviceEpochStoreError.unsupportedSchema(state.schemaVersion)
@@ -874,13 +874,6 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                 guard let closedAt = handoff.priorRouteInputClosedAt else {
                     throw DeviceEpochStoreInvariantError.invalidState("prior route barrier is incomplete")
                 }
-                let priorSampleIDs = priorState.map { Set($0.sampleWork.keys) } ?? Set<UUID>()
-                let newlyAppendedPriorWork = state.sampleWork.filter {
-                    $0.value.routeID == handoff.fromRouteID && !priorSampleIDs.contains($0.key)
-                }.values
-                if !newlyAppendedPriorWork.isEmpty {
-                    throw DeviceEpochStoreInvariantError.invalidState("prior route work was appended with barrier")
-                }
                 if state.sampleWork.values.contains(where: {
                     $0.routeID == handoff.fromRouteID && $0.retry.terminal == .pending
                 }) {
@@ -892,6 +885,22 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                     throw DeviceEpochStoreInvariantError.invalidState("prior route callback crossed barrier")
                 }
             case .committed:
+                guard let closedAt = handoff.priorRouteInputClosedAt else {
+                    throw DeviceEpochStoreInvariantError.invalidState("prior route barrier is incomplete")
+                }
+                let priorRouteSampleWork = state.sampleWork.values.filter {
+                    $0.routeID == handoff.fromRouteID
+                }
+                guard priorRouteSampleWork.allSatisfy({ work in
+                    switch work.retry.terminal {
+                    case .pending:
+                        return false
+                    case .succeeded, .superseded, .rejected, .abandoned:
+                        return true
+                    }
+                }), !priorRouteSampleWork.contains(where: { $0.createdAt > closedAt }) else {
+                    throw DeviceEpochStoreInvariantError.invalidState("prior route sample work is not closed")
+                }
                 let candidateInstallIsActive = state.installWork.values.contains {
                     $0.routeID == handoff.toRouteID && $0.phase == .active
                 }
@@ -921,6 +930,23 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                     throw DeviceEpochStoreInvariantError.invalidState("handoff collection prerequisites are incomplete")
                 }
             }
+        }
+    }
+
+    private func validateTransactionDelta(
+        candidate: DeviceEpochStoreState,
+        priorState: DeviceEpochStoreState
+    ) throws {
+        guard let handoff = candidate.v2RouteHandoff,
+              handoff.phase == .cutoverReady || handoff.phase == .committed else {
+            return
+        }
+        let priorSampleIDs = Set(priorState.sampleWork.keys)
+        let newlyAppendedPriorWork = candidate.sampleWork.contains { workID, work in
+            work.routeID == handoff.fromRouteID && !priorSampleIDs.contains(workID)
+        }
+        guard !newlyAppendedPriorWork else {
+            throw DeviceEpochStoreInvariantError.invalidState("prior route work was appended with barrier")
         }
     }
 
