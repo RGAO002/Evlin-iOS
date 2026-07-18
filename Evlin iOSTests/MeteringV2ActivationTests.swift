@@ -200,6 +200,47 @@ final class MeteringV2ActivationTests: XCTestCase {
         XCTAssertEqual(state.installWork[fixture.recoveryInstallID]?.phase, .verified)
     }
 
+    func testRetiredAlreadyActivatedReplacementRegistersAndCommitsOnNextRecovery() async throws {
+        let fixture = try makeInitialFixture()
+        defer { fixture.cleanup() }
+        try fixture.addPreplannedReplacement()
+        fixture.transport.results = [
+            activationResult(
+                epochID: fixture.candidateEpochID,
+                status: .alreadyActivated,
+                epochStatus: .retired
+            )
+        ]
+
+        try await makeDriver(fixture).recover(ownerChildDeviceID: owner)
+
+        fixture.transport.results = [
+            registrationResult(epochID: fixture.recoveryEpochID),
+            activationResult(epochID: fixture.recoveryEpochID)
+        ]
+        try await makeDriver(fixture, at: start.addingTimeInterval(5)).recover(ownerChildDeviceID: owner)
+
+        let state = try fixture.store.read()
+        let handoff = try XCTUnwrap(state.v2RouteHandoff)
+        XCTAssertEqual(handoff.phase, .committed)
+        XCTAssertEqual(state.activeGenerationID, fixture.recoveryGenerationID)
+        XCTAssertEqual(state.activeEpochID, fixture.recoveryEpochID)
+        XCTAssertEqual(state.activeRouteID, fixture.recoveryRouteID)
+        XCTAssertEqual(state.epochs[fixture.recoveryEpochID]?.status, .active)
+        XCTAssertEqual(state.installWork[fixture.recoveryInstallID]?.phase, .active)
+        XCTAssertEqual(state.installWork[fixture.candidateInstallID]?.phase, .stopped)
+        XCTAssertEqual(
+            fixture.transport.requests.map(\.url?.path),
+            [
+                "/api/v1/child/earned-time/epochs/\(fixture.candidateEpochID.uuidString.lowercased())/activation",
+                "/api/v1/child/earned-time/epochs",
+                "/api/v1/child/earned-time/epochs/\(fixture.recoveryEpochID.uuidString.lowercased())/activation"
+            ]
+        )
+        XCTAssertFalse(state.registrationWork.values.contains { $0.retry.terminal == .pending })
+        XCTAssertFalse(state.activationWork.values.contains { $0.retry.terminal == .pending })
+    }
+
     func testLostActivationResponseRetriesExactNonActiveInitialCandidate() async throws {
         for responseStatus in [EpochStatusDTO.paused, .exhausted, .retired] {
             let fixture = try makeInitialFixture()

@@ -1552,10 +1552,18 @@ extension DeviceEpochStoreState {
               handoff.toGenerationID == route.generationID,
               handoff.toEpochID == epochID,
               handoff.toRouteID == routeID,
+              handoff.phase == .preparing || handoff.phase == .dualV2 || handoff.phase == .cutoverReady
+        else { return false }
+        return hasExactHandoffPriorProvenance(owner: owner, handoff: handoff)
+    }
+
+    func hasExactHandoffPriorProvenance(owner: UUID, handoff: V2RouteHandoff) -> Bool {
+        guard handoff.ownerChildDeviceID == owner,
               handoff.phase == .preparing || handoff.phase == .dualV2 || handoff.phase == .cutoverReady,
               let fromRoute = routes[handoff.fromRouteID],
               let fromEpoch = epochs[handoff.fromEpochID],
               let fromGeneration = generations[handoff.fromGenerationID],
+              let toRoute = routes[handoff.toRouteID],
               fromRoute.ownerChildDeviceID == owner,
               fromRoute.routeID == handoff.fromRouteID,
               fromRoute.epochID == handoff.fromEpochID,
@@ -1563,18 +1571,47 @@ extension DeviceEpochStoreState {
               fromRoute.lifecycle == .active,
               fromEpoch.childDeviceID == owner,
               fromEpoch.epochID == handoff.fromEpochID,
-              fromEpoch.status == .active,
-              fromEpoch.retiredAt == nil,
               fromGeneration.childDeviceID == owner,
               fromGeneration.generationID == handoff.fromGenerationID,
               fromGeneration.retiredAt == nil,
               activeRouteID == handoff.fromRouteID,
               activeEpochID == handoff.fromEpochID,
-              activeGenerationID == handoff.fromGenerationID,
-              hasEligibleRouteEpochGeneration(owner: owner, route: fromRoute, epoch: fromEpoch, generation: fromGeneration),
-              currentHorizonUsageDates(owner: owner, generationID: handoff.fromGenerationID).contains(fromRoute.usageDate)
+              activeGenerationID == handoff.fromGenerationID
         else { return false }
-        return true
+
+        let hasActivePrior = fromEpoch.status == .active
+            && fromEpoch.retiredAt == nil
+            && hasEligibleRouteEpochGeneration(
+                owner: owner,
+                route: fromRoute,
+                epoch: fromEpoch,
+                generation: fromGeneration
+            )
+            && currentHorizonUsageDates(
+                owner: owner,
+                generationID: handoff.fromGenerationID
+            ).contains(fromRoute.usageDate)
+        if hasActivePrior { return true }
+
+        // An already-activated initial epoch can be authoritatively retired
+        // before this device observes the response. It may make exactly one
+        // replacement cutover, but only after the initial v2 ratchet and only
+        // once the prior lane has passed the same closed-input barrier as a
+        // normal active-prior cutover.
+        let hasAcknowledgedRetiredPriorRecovery = handoff.phase == .cutoverReady
+            && fromEpoch.status == .retired
+            && fromEpoch.retiredAt == nil
+            && ratchets[owner]?.localSelection == .v2
+            && ratchets[owner]?.advertisedVersion == 2
+            && ratchets[owner]?.activatedV2At != nil
+            && legacy?.phase == .stoppedV1
+            && legacy?.isStopped == true
+            && fromRoute.usageDate == toRoute.usageDate
+            && isValidUsageDate(
+                fromRoute.usageDate,
+                timeZoneIdentifier: fromGeneration.canonicalTimezone
+            )
+        return hasAcknowledgedRetiredPriorRecovery
     }
 
     func currentHorizonUsageDates(owner: UUID, generationID: UUID) -> [String] {

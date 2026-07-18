@@ -955,15 +955,12 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
               state.activeGenerationID == handoff.fromGenerationID,
               state.activeEpochID == handoff.fromEpochID,
               state.activeRouteID == handoff.fromRouteID,
+              state.hasExactHandoffPriorProvenance(owner: owner, handoff: handoff),
               let priorRoute = state.routes[handoff.fromRouteID],
               priorRoute.ownerChildDeviceID == owner,
               priorRoute.generationID == handoff.fromGenerationID,
               priorRoute.epochID == handoff.fromEpochID,
-              priorRoute.lifecycle == .active,
-              let priorEpoch = state.epochs[handoff.fromEpochID],
-              priorEpoch.childDeviceID == owner,
-              priorEpoch.status == .active,
-              priorEpoch.retiredAt == nil
+              priorRoute.lifecycle == .active
         else { return false }
 
         let priorInstalls = state.installWork.values.filter {
