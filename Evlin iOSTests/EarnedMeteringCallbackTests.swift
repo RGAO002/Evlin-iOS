@@ -269,7 +269,7 @@ final class EarnedMeteringCallbackTests: XCTestCase {
             handoffFixture.candidateCallback(threshold: 5),
             expectedOwnerChildDeviceID: handoffFixture.owner
         )
-        XCTAssertEqual(outcome, .discarded(reason: "handoff_preparing"))
+        XCTAssertEqual(outcome, .discarded(reason: "unregistered_route_not_candidate"))
         XCTAssertEqual(try Data(contentsOf: handoffFixture.storeURL), before)
     }
 
@@ -352,6 +352,112 @@ final class EarnedMeteringCallbackTests: XCTestCase {
         XCTAssertTrue(state.sampleWork.isEmpty)
     }
 
+    func testPausedCallbackRejectsInvalidRatchetRegistrationAndCoverageByteIdentically() throws {
+        enum InvalidPausedState: String, CaseIterable {
+            case v1Ratchet, unregistered, coverageExhausted
+        }
+
+        for invalidState in InvalidPausedState.allCases {
+            let fixture = try CallbackFixture.active()
+            defer { fixture.cleanup() }
+            try fixture.mutate { state in
+                state.epochs[fixture.epochID]?.status = .paused
+                switch invalidState {
+                case .v1Ratchet:
+                    state.ratchets[fixture.owner]?.localSelection = .v1
+                case .unregistered:
+                    state.epochs[fixture.epochID]?.registeredAt = nil
+                case .coverageExhausted:
+                    state.coverage = fixture.exhaustedCoverage()
+                }
+            }
+            let before = try Data(contentsOf: fixture.storeURL)
+
+            let outcome = try fixture.callbackHandler().handle(
+                fixture.callback(threshold: 5),
+                expectedOwnerChildDeviceID: fixture.owner
+            )
+
+            guard case .discarded = outcome else { return XCTFail("\(invalidState) must reject") }
+            XCTAssertEqual(try Data(contentsOf: fixture.storeURL), before, invalidState.rawValue)
+            XCTAssertEqual(try fixture.store.read().epochs[fixture.epochID]?.lastRawThresholdMinutes, 0)
+        }
+    }
+
+    func testPausedCallbackRejectsPreparingClosedAndUnregisteredCandidateRoutesByteIdentically() throws {
+        let cases: [(String, V2RouteHandoffPhase, Bool)] = [
+            ("preparing-prior", .preparing, false),
+            ("dual-v2-prior", .dualV2, false),
+            ("closed-prior", .cutoverReady, false),
+            ("unregistered-candidate", .dualV2, true)
+        ]
+        for (label, phase, useCandidate) in cases {
+            let fixture = try CallbackFixture.dualV2(phase: phase)
+            defer { fixture.cleanup() }
+            let targetEpochID = useCandidate ? fixture.candidateEpochID : fixture.epochID
+            try fixture.mutate { state in state.epochs[targetEpochID]?.status = .paused }
+            let before = try Data(contentsOf: fixture.storeURL)
+            let callback = useCandidate ? fixture.candidateCallback(threshold: 5) : fixture.callback(threshold: 5)
+
+            let outcome = try fixture.callbackHandler().handle(
+                callback,
+                expectedOwnerChildDeviceID: fixture.owner
+            )
+
+            guard case .discarded = outcome else { return XCTFail("\(label) must reject") }
+            XCTAssertEqual(try Data(contentsOf: fixture.storeURL), before, label)
+            XCTAssertEqual(try fixture.store.read().epochs[targetEpochID]?.lastRawThresholdMinutes, 0)
+        }
+    }
+
+    func testResumeBoundaryRejectsUnregisteredPreparingAndClosedRoutesByteIdentically() throws {
+        let cases: [(String, V2RouteHandoffPhase, Bool)] = [
+            ("preparing-prior", .preparing, false),
+            ("closed-prior", .cutoverReady, false),
+            ("unregistered-candidate", .dualV2, true)
+        ]
+        for (label, phase, useCandidate) in cases {
+            let fixture = try CallbackFixture.dualV2(phase: phase)
+            defer { fixture.cleanup() }
+            let targetEpochID = useCandidate ? fixture.candidateEpochID : fixture.epochID
+            try fixture.mutate { state in state.epochs[targetEpochID]?.resumeBoundaryPending = true }
+            let before = try Data(contentsOf: fixture.storeURL)
+            let callback = useCandidate ? fixture.candidateCallback(threshold: 5) : fixture.callback(threshold: 5)
+
+            let outcome = try fixture.callbackHandler().handle(
+                callback,
+                expectedOwnerChildDeviceID: fixture.owner
+            )
+
+            guard case .discarded = outcome else { return XCTFail("\(label) must reject") }
+            XCTAssertEqual(try Data(contentsOf: fixture.storeURL), before, label)
+            XCTAssertTrue(try fixture.store.read().epochs[targetEpochID]?.resumeBoundaryPending ?? false)
+        }
+    }
+
+    func testPausedAndResumeCallbacksOutsideExactHandoffAreByteIdentical() throws {
+        for status in [DeviceDailyEpochStatus.paused, .active] {
+            let fixture = try CallbackFixture.dualV2()
+            defer { fixture.cleanup() }
+            let extra = try fixture.addRouteOutsideHandoff(
+                status: status,
+                resumeBoundaryPending: status == .active
+            )
+            let before = try Data(contentsOf: fixture.storeURL)
+
+            let outcome = try fixture.callbackHandler().handle(
+                extra.callback,
+                expectedOwnerChildDeviceID: fixture.owner
+            )
+
+            guard case .discarded = outcome else { return XCTFail("wrong handoff route must reject") }
+            XCTAssertEqual(try Data(contentsOf: fixture.storeURL), before, status.rawValue)
+            let epoch = try fixture.store.read().epochs[extra.epochID]
+            XCTAssertEqual(epoch?.lastRawThresholdMinutes, 0)
+            XCTAssertEqual(epoch?.resumeBoundaryPending, status == .active)
+        }
+    }
+
     func testResumeBoundaryConsumesFirstCallbackWithoutSampleWork() throws {
         let fixture = try CallbackFixture.active()
         defer { fixture.cleanup() }
@@ -389,6 +495,155 @@ final class EarnedMeteringCallbackTests: XCTestCase {
 
         guard case .queued = outcome else { return XCTFail("expected initial v2 callback to queue") }
         XCTAssertEqual(try fixture.store.read().sampleWork.values.first?.authorization, .v2Deliverable)
+    }
+
+    func testRegisteredEpochRequiresSoleRegisteredInstallAuthorization() throws {
+        let authorizations: [MeteringInstallAuthorization] = [
+            .registrationRequired, .registered, .futurePlanned, .offlinePending
+        ]
+        for authorization in authorizations {
+            let fixture = try CallbackFixture.active()
+            defer { fixture.cleanup() }
+            try fixture.mutate { state in state.installWork[fixture.installID]?.authorization = authorization }
+            let before = try Data(contentsOf: fixture.storeURL)
+
+            let outcome = try fixture.callbackHandler().handle(
+                fixture.callback(threshold: 5),
+                expectedOwnerChildDeviceID: fixture.owner
+            )
+
+            if authorization == .registered {
+                guard case .queued = outcome else { return XCTFail("registered install must queue") }
+            } else {
+                guard case .discarded = outcome else { return XCTFail("\(authorization) must reject") }
+                XCTAssertEqual(try Data(contentsOf: fixture.storeURL), before, authorization.rawValue)
+            }
+        }
+    }
+
+    func testUnregisteredCandidateRequiresOfflinePendingInstallAuthorization() throws {
+        let authorizations: [MeteringInstallAuthorization] = [
+            .registrationRequired, .registered, .futurePlanned, .offlinePending
+        ]
+        for authorization in authorizations {
+            let fixture = try CallbackFixture.dualV2()
+            defer { fixture.cleanup() }
+            try fixture.mutate { state in
+                state.installWork[fixture.candidateInstallID]?.authorization = authorization
+            }
+            let before = try Data(contentsOf: fixture.storeURL)
+
+            let outcome = try fixture.callbackHandler().handle(
+                fixture.candidateCallback(threshold: 5),
+                expectedOwnerChildDeviceID: fixture.owner
+            )
+
+            if authorization == .offlinePending {
+                guard case let .queued(workID) = outcome else { return XCTFail("offline candidate must queue") }
+                XCTAssertEqual(try fixture.store.read().sampleWork[workID]?.authorization, .waitingForRegistration)
+            } else {
+                guard case .discarded = outcome else { return XCTFail("\(authorization) must reject") }
+                XCTAssertEqual(try Data(contentsOf: fixture.storeURL), before, authorization.rawValue)
+            }
+        }
+    }
+
+    func testUnregisteredActiveRouteOutsideExactCandidateHandoffIsByteIdentical() throws {
+        let fixture = try CallbackFixture.active()
+        defer { fixture.cleanup() }
+        try fixture.mutate { state in
+            state.epochs[fixture.epochID]?.registeredAt = nil
+            state.installWork[fixture.installID]?.authorization = .offlinePending
+        }
+        let before = try Data(contentsOf: fixture.storeURL)
+
+        let outcome = try fixture.callbackHandler().handle(
+            fixture.callback(threshold: 5),
+            expectedOwnerChildDeviceID: fixture.owner
+        )
+
+        guard case .discarded = outcome else { return XCTFail("only an exact candidate may queue before registration") }
+        XCTAssertEqual(try Data(contentsOf: fixture.storeURL), before)
+    }
+
+    func testDuplicateMixedPhaseInstallsFailClosedByteIdentically() throws {
+        let duplicatePhases: [ActivityInstallPhase] = [
+            .pendingStart, .starting, .installed, .verified,
+            .dualActive, .active, .pendingStop, .stopped
+        ]
+        for duplicatePhase in duplicatePhases {
+            let fixture = try CallbackFixture.active()
+            defer { fixture.cleanup() }
+            let duplicateID = UUID()
+            try fixture.mutate { state in
+                state.installWork[duplicateID] = ActivityInstallWork(
+                    workID: duplicateID,
+                    ownerChildDeviceID: fixture.owner,
+                    routeID: fixture.routeID,
+                    authorization: .registered,
+                    phase: duplicatePhase,
+                    claim: nil,
+                    retry: MeteringRetryState(
+                        attemptCount: 0,
+                        nextAttemptAt: fixture.start,
+                        lastErrorCode: nil,
+                        terminal: .pending
+                    ),
+                    createdAt: fixture.start
+                )
+            }
+            let before = try Data(contentsOf: fixture.storeURL)
+
+            let outcome = try fixture.callbackHandler().handle(
+                fixture.callback(threshold: 5),
+                expectedOwnerChildDeviceID: fixture.owner
+            )
+
+            guard case .discarded = outcome else {
+                return XCTFail("duplicate \(duplicatePhase) install must fail closed")
+            }
+            XCTAssertEqual(try Data(contentsOf: fixture.storeURL), before, duplicatePhase.rawValue)
+        }
+    }
+
+    func testJitterZeroAcceptsExactBoundaryAndRejectsOneSecondEarly() throws {
+        let accepted = try CallbackFixture.active()
+        defer { accepted.cleanup() }
+        let acceptedOutcome = try accepted.callbackHandler(jitterSeconds: 0).handle(
+            accepted.callback(threshold: 5, observedAt: accepted.start.addingTimeInterval(300)),
+            expectedOwnerChildDeviceID: accepted.owner
+        )
+        guard case .queued = acceptedOutcome else { return XCTFail("exact zero-jitter boundary must queue") }
+
+        let rejected = try CallbackFixture.active()
+        defer { rejected.cleanup() }
+        let before = try Data(contentsOf: rejected.storeURL)
+        let rejectedOutcome = try rejected.callbackHandler(jitterSeconds: 0).handle(
+            rejected.callback(threshold: 5, observedAt: rejected.start.addingTimeInterval(299)),
+            expectedOwnerChildDeviceID: rejected.owner
+        )
+        XCTAssertEqual(rejectedOutcome, .discarded(reason: "too_early"))
+        XCTAssertEqual(try Data(contentsOf: rejected.storeURL), before)
+    }
+
+    func testJitterSixtyAcceptsExactAllowanceAndRejectsSixtyOneSecondsEarly() throws {
+        let accepted = try CallbackFixture.active()
+        defer { accepted.cleanup() }
+        let acceptedOutcome = try accepted.callbackHandler(jitterSeconds: 60).handle(
+            accepted.callback(threshold: 5, observedAt: accepted.start.addingTimeInterval(240)),
+            expectedOwnerChildDeviceID: accepted.owner
+        )
+        guard case .queued = acceptedOutcome else { return XCTFail("exact maximum-jitter boundary must queue") }
+
+        let rejected = try CallbackFixture.active()
+        defer { rejected.cleanup() }
+        let before = try Data(contentsOf: rejected.storeURL)
+        let rejectedOutcome = try rejected.callbackHandler(jitterSeconds: 60).handle(
+            rejected.callback(threshold: 5, observedAt: rejected.start.addingTimeInterval(239)),
+            expectedOwnerChildDeviceID: rejected.owner
+        )
+        XCTAssertEqual(rejectedOutcome, .discarded(reason: "too_early"))
+        XCTAssertEqual(try Data(contentsOf: rejected.storeURL), before)
     }
 
     func testDualV2CandidateQueuesWaitingForRegistrationWithoutSummingRouteUsage() throws {
@@ -541,13 +796,20 @@ final class EarnedMeteringCallbackTests: XCTestCase {
         )
         await delivery.drain(owner: fixture.owner)
 
-        XCTAssertEqual(try fixture.store.read().sampleWork[workID]?.authorization, .v2Deliverable)
+        let state = try fixture.store.read()
+        XCTAssertEqual(state.sampleWork[workID]?.authorization, .v2Deliverable)
+        XCTAssertEqual(state.installWork[fixture.candidateInstallID]?.authorization, .registered)
         XCTAssertEqual(transport.requests.count, 1)
     }
 }
 
 private struct CallbackClock: MeteringClock {
     let now: Date
+}
+
+private struct ExtraCallbackRoute {
+    let epochID: UUID
+    let callback: MeteringAppleCallback
 }
 
 private final class CallbackFixture {
@@ -585,10 +847,118 @@ private final class CallbackFixture {
         try? FileManager.default.removeItem(at: storeURL)
     }
 
-    func callbackHandler() -> EarnedMeteringCallback {
+    func callbackHandler(
+        jitterSeconds: Int = EarnedMeteringCallback.defaultJitterSeconds
+    ) -> EarnedMeteringCallback {
         EarnedMeteringCallback(
             store: store,
-            clock: CallbackClock(now: start.addingTimeInterval(5 * 60))
+            clock: CallbackClock(now: start.addingTimeInterval(5 * 60)),
+            jitterSeconds: jitterSeconds
+        )
+    }
+
+    func exhaustedCoverage() -> MonitorCoverageState {
+        MonitorCoverageState(
+            ownerChildDeviceID: owner,
+            requiredFromUsageDate: "2026-07-18",
+            requiredThroughUsageDate: "2026-07-25",
+            readyThroughUsageDate: nil,
+            status: .coverageExhausted,
+            refreshedAt: start,
+            errorCode: "coverage_exhausted"
+        )
+    }
+
+    func addRouteOutsideHandoff(
+        status: DeviceDailyEpochStatus,
+        resumeBoundaryPending: Bool
+    ) throws -> ExtraCallbackRoute {
+        let extraEpochID = UUID()
+        let extraRouteID = UUID()
+        let extraInstallID = UUID()
+        try mutate { state in
+            guard let generation = state.generations[generationID],
+                  let priorEpoch = state.epochs[epochID]
+            else { return }
+            let extraEpoch = DeviceDailyEpoch(
+                epochID: extraEpochID,
+                protocolVersion: 2,
+                childDeviceID: owner,
+                usageDate: priorEpoch.usageDate,
+                canonicalTimezone: generation.canonicalTimezone,
+                policyRevision: generation.policyRevision,
+                measurementSelectionDigest: generation.measurementSelectionDigest,
+                enforcementSetID: generation.enforcementSetID,
+                startedAt: start,
+                registeredAt: start,
+                baseAcceptedMinutes: priorEpoch.baseAcceptedMinutes,
+                baseSource: .childState200,
+                lastRawThresholdMinutes: 0,
+                excludedWhilePausedMinutes: 0,
+                status: status,
+                resumeBoundaryPending: resumeBoundaryPending,
+                retiredAt: nil,
+                retireReason: nil,
+                exhaustedAt: nil,
+                baseCorrectionState: .available
+            )
+            let activityName = MeteringRouteNamespace.activityName(routeID: extraRouteID)
+            let event = MeteringEventPlan(
+                eventName: MeteringRouteNamespace.eventName(routeID: extraRouteID, thresholdMinutes: 5),
+                thresholdMinutes: 5
+            )
+            let schedule = DatedSchedulePlan(
+                usageDate: extraEpoch.usageDate,
+                timezoneIdentifier: generation.canonicalTimezone,
+                calendarIdentifier: "gregorian"
+            )
+            state.epochs[extraEpochID] = extraEpoch
+            state.routes[extraRouteID] = MeteringCallbackRoute(
+                routeID: extraRouteID,
+                activityName: activityName,
+                namespace: MeteringRouteNamespace.prefix,
+                generationID: generationID,
+                generationKey: MeteringGenerationKey(
+                    protocolVersion: 2,
+                    childDeviceID: owner,
+                    canonicalTimezone: generation.canonicalTimezone,
+                    policyRevision: generation.policyRevision,
+                    measurementSelectionDigest: generation.measurementSelectionDigest,
+                    enforcementSetID: generation.enforcementSetID
+                ),
+                ownerChildDeviceID: owner,
+                usageDate: extraEpoch.usageDate,
+                epochID: extraEpochID,
+                plannedSchedule: schedule,
+                installedSchedule: schedule,
+                plannedEvents: [event],
+                installedEvents: [event],
+                lifecycle: .active,
+                createdAt: start
+            )
+            state.installWork[extraInstallID] = ActivityInstallWork(
+                workID: extraInstallID,
+                ownerChildDeviceID: owner,
+                routeID: extraRouteID,
+                authorization: .registered,
+                phase: .active,
+                claim: nil,
+                retry: MeteringRetryState(
+                    attemptCount: 0,
+                    nextAttemptAt: start,
+                    lastErrorCode: nil,
+                    terminal: .succeeded
+                ),
+                createdAt: start
+            )
+        }
+        return ExtraCallbackRoute(
+            epochID: extraEpochID,
+            callback: MeteringAppleCallback(
+                activityName: MeteringRouteNamespace.activityName(routeID: extraRouteID),
+                eventName: MeteringRouteNamespace.eventName(routeID: extraRouteID, thresholdMinutes: 5),
+                observedAt: start.addingTimeInterval(5 * 60)
+            )
         )
     }
 

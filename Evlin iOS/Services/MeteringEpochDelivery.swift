@@ -539,11 +539,16 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
                 sampleWork.authorization = .v2Deliverable
                 state.sampleWork[sampleKey] = sampleWork
             }
-            for (installKey, var installWork) in state.installWork where
-                installWork.ownerChildDeviceID == owner
-                    && installWork.routeID == route.routeID
-                    && installWork.authorization == .registrationRequired
-                    && installWork.retry.terminal == .pending {
+            let matchingInstallKeys = state.installWork.compactMap { installKey, installWork in
+                installWork.ownerChildDeviceID == owner && installWork.routeID == route.routeID
+                    ? installKey
+                    : nil
+            }
+            if matchingInstallKeys.count == 1,
+               let installKey = matchingInstallKeys.first,
+               var installWork = state.installWork[installKey],
+               (installWork.authorization == .registrationRequired
+                    || installWork.authorization == .offlinePending) {
                 installWork.authorization = .registered
                 state.installWork[installKey] = installWork
             }

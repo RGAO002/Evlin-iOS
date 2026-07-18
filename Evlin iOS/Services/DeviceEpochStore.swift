@@ -673,8 +673,7 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
               generation.retiredAt == nil,
               route.plannedEvents.contains(where: {
                   $0.eventName == input.eventName && $0.thresholdMinutes == input.thresholdMinutes
-              }),
-              matchingCallbackInstall(routeID: route.routeID, owner: owner, state: state) != nil
+              })
         else {
             return .discarded(reason: "route_provenance_mismatch")
         }
@@ -686,7 +685,37 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
             return .discarded(reason: "too_early")
         }
 
+        guard hasCallbackCoverage(route: route, owner: owner, state: state),
+              let ratchet = state.ratchets[owner],
+              ratchet.localSelection != .v1
+        else {
+            return .discarded(reason: "epoch_not_active")
+        }
+
+        let sampleAuthorization: EpochSampleAuthorization
+        switch callbackInstallAuthorization(route: route, epoch: epoch, owner: owner, state: state) {
+        case .accepted(let authorization):
+            sampleAuthorization = authorization
+        case .discarded(let reason):
+            return .discarded(reason: reason)
+        }
+
         if epoch.status == .paused {
+            guard sampleAuthorization == .v2Deliverable else {
+                return .discarded(reason: "paused_route_unregistered")
+            }
+            switch pausedCallbackRouteAuthorization(
+                route: route,
+                epoch: epoch,
+                owner: owner,
+                ratchet: ratchet,
+                state: state
+            ) {
+            case .discarded(let reason):
+                return .discarded(reason: reason)
+            case .accepted:
+                break
+            }
             epoch.lastRawThresholdMinutes = max(epoch.lastRawThresholdMinutes, input.thresholdMinutes)
             epoch.excludedWhilePausedMinutes = max(epoch.excludedWhilePausedMinutes, input.thresholdMinutes)
             state.epochs[epoch.epochID] = epoch
@@ -696,20 +725,9 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         guard epoch.status == .active,
               epoch.retiredAt == nil,
               epoch.exhaustedAt == nil,
-              epoch.authoritativeBaseConflict == nil,
-              hasCallbackCoverage(route: route, owner: owner, state: state),
-              let ratchet = state.ratchets[owner],
-              ratchet.localSelection != .v1
+              epoch.authoritativeBaseConflict == nil
         else {
             return .discarded(reason: "epoch_not_active")
-        }
-
-        if epoch.resumeBoundaryPending {
-            epoch.lastRawThresholdMinutes = max(epoch.lastRawThresholdMinutes, input.thresholdMinutes)
-            epoch.excludedWhilePausedMinutes = max(epoch.excludedWhilePausedMinutes, input.thresholdMinutes)
-            epoch.resumeBoundaryPending = false
-            state.epochs[epoch.epochID] = epoch
-            return .discarded(reason: "resume_boundary")
         }
 
         switch callbackRouteAuthorization(route: route, epoch: epoch, owner: owner, ratchet: ratchet, state: state) {
@@ -717,6 +735,17 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
             return .discarded(reason: reason)
         case .accepted:
             break
+        }
+
+        if epoch.resumeBoundaryPending {
+            guard sampleAuthorization == .v2Deliverable else {
+                return .discarded(reason: "resume_boundary_unregistered")
+            }
+            epoch.lastRawThresholdMinutes = max(epoch.lastRawThresholdMinutes, input.thresholdMinutes)
+            epoch.excludedWhilePausedMinutes = max(epoch.excludedWhilePausedMinutes, input.thresholdMinutes)
+            epoch.resumeBoundaryPending = false
+            state.epochs[epoch.epochID] = epoch
+            return .discarded(reason: "resume_boundary")
         }
 
         let rawThreshold = max(epoch.lastRawThresholdMinutes, input.thresholdMinutes)
@@ -755,7 +784,7 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                 generationArmedAt: nil,
                 generationOffsetMinutes: nil
             ),
-            authorization: epoch.registeredAt == nil ? .waitingForRegistration : .v2Deliverable,
+            authorization: sampleAuthorization,
             claim: nil,
             retry: MeteringRetryState(
                 attemptCount: 0,
@@ -770,6 +799,11 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
 
     private enum CallbackAuthorization {
         case accepted
+        case discarded(String)
+    }
+
+    private enum CallbackInstallAuthorization {
+        case accepted(EpochSampleAuthorization)
         case discarded(String)
     }
 
@@ -818,6 +852,55 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         }
     }
 
+    private func pausedCallbackRouteAuthorization(
+        route: MeteringCallbackRoute,
+        epoch: DeviceDailyEpoch,
+        owner: UUID,
+        ratchet: MeteringOwnerRatchet,
+        state: DeviceEpochStoreState
+    ) -> CallbackAuthorization {
+        guard epoch.status == .paused,
+              epoch.registeredAt != nil,
+              epoch.retiredAt == nil,
+              epoch.exhaustedAt == nil,
+              epoch.authoritativeBaseConflict == nil,
+              state.ownerChildDeviceID == owner,
+              state.activeGenerationID == route.generationID,
+              state.activeEpochID == route.epochID
+        else { return .discarded("paused_route_not_current") }
+
+        if ratchet.localSelection == .dualActive {
+            return state.activeRouteID == nil
+                ? .accepted
+                : .discarded("paused_initial_dual_active_mismatch")
+        }
+
+        guard state.activeRouteID == route.routeID else {
+            return .discarded("paused_route_not_current")
+        }
+        guard let handoff = state.v2RouteHandoff else { return .accepted }
+        guard handoff.ownerChildDeviceID == owner else {
+            return .discarded("paused_handoff_owner_mismatch")
+        }
+
+        switch handoff.phase {
+        case .preparing:
+            return .discarded("paused_handoff_preparing")
+        case .dualV2:
+            // A replacement route has opened; the old paused lane is no longer
+            // proof that the usage gate remains closed.
+            return .discarded("paused_handoff_replacement")
+        case .cutoverReady:
+            return .discarded("handoff_prior_input_closed")
+        case .committed:
+            return handoff.toRouteID == route.routeID
+                && handoff.toEpochID == route.epochID
+                && handoff.toGenerationID == route.generationID
+                ? .accepted
+                : .discarded("paused_handoff_route_mismatch")
+        }
+    }
+
     private func hasCallbackCoverage(
         route: MeteringCallbackRoute,
         owner: UUID,
@@ -829,16 +912,35 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
             && (coverage.readyThroughUsageDate ?? "") >= route.usageDate
     }
 
-    private func matchingCallbackInstall(
-        routeID: UUID,
+    private func callbackInstallAuthorization(
+        route: MeteringCallbackRoute,
+        epoch: DeviceDailyEpoch,
         owner: UUID,
         state: DeviceEpochStoreState
-    ) -> ActivityInstallWork? {
-        let matches = state.installWork.values.filter {
-            $0.ownerChildDeviceID == owner && $0.routeID == routeID
-                && ($0.phase == .dualActive || $0.phase == .active)
+    ) -> CallbackInstallAuthorization {
+        let matches = state.installWork.values.filter { $0.routeID == route.routeID }
+        guard matches.count == 1, let install = matches.first,
+              install.ownerChildDeviceID == owner,
+              install.phase == .dualActive || install.phase == .active
+        else { return .discarded("install_not_exact") }
+
+        if epoch.registeredAt != nil {
+            return install.authorization == .registered
+                ? .accepted(.v2Deliverable)
+                : .discarded("install_registration_mismatch")
         }
-        return matches.count == 1 ? matches[0] : nil
+
+        guard install.authorization == .offlinePending,
+              let handoff = state.v2RouteHandoff,
+              handoff.ownerChildDeviceID == owner,
+              handoff.toRouteID == route.routeID,
+              handoff.toEpochID == route.epochID,
+              handoff.toGenerationID == route.generationID,
+              handoff.phase == .dualV2 || handoff.phase == .cutoverReady,
+              state.hasExactHandoffPriorProvenance(owner: owner, handoff: handoff),
+              state.routes[handoff.fromRouteID]?.usageDate == route.usageDate
+        else { return .discarded("unregistered_route_not_candidate") }
+        return .accepted(.waitingForRegistration)
     }
 
     func dueInstallWork(owner: UUID, now: Date) throws -> [ActivityInstallWork] {
