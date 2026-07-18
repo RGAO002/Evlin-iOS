@@ -404,6 +404,80 @@ final class EarnedBudgetSchedulerTests: XCTestCase {
         }
     }
 
+    func testLiveGenerationReusePrefersActiveThenNewestThenUUIDTieBreak() throws {
+        let owner = UUID(uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")!
+        let selectionBytes = Data([0x00, 0x01, 0xFE, 0xFF])
+        let key = generationKey(owner: owner)
+        let startedAt = Date(timeIntervalSince1970: 1_784_764_800)
+        let storeURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("metering-horizon-generation-order-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: storeURL) }
+        let store = DeviceEpochStore(fileURL: storeURL, ownerProvider: { owner })
+
+        func request(now: Date) -> MeteringHorizonRequest {
+            MeteringHorizonRequest(
+                ownerChildDeviceID: owner,
+                today: "2026-07-17",
+                generationKey: key,
+                persistedSelectionBytes: selectionBytes,
+                poolMinutes: 120,
+                deviceCapMinutes: 62,
+                authoritativeBaseAcceptedMinutes: 12,
+                now: now
+            )
+        }
+
+        func generation(id: UUID, createdAt: Date) -> MeteringPolicyGeneration {
+            MeteringPolicyGeneration(
+                generationID: id,
+                protocolVersion: key.protocolVersion,
+                childDeviceID: key.childDeviceID,
+                canonicalTimezone: key.canonicalTimezone,
+                policyRevision: key.policyRevision,
+                measurementSelectionDigest: key.measurementSelectionDigest,
+                enforcementSetID: key.enforcementSetID,
+                measurementSelectionBytes: selectionBytes,
+                createdAt: createdAt,
+                retiredAt: nil
+            )
+        }
+
+        let initial = try store.reconcileMeteringHorizon(request(now: startedAt))
+        let newerID = UUID(uuidString: "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee")!
+        try store.transaction(expectedOwner: owner) { state in
+            state.generations[newerID] = generation(
+                id: newerID,
+                createdAt: startedAt.addingTimeInterval(60)
+            )
+        }
+
+        let activePreferred = try store.reconcileMeteringHorizon(
+            request(now: startedAt.addingTimeInterval(120))
+        )
+        XCTAssertEqual(activePreferred.generationID, initial.generationID)
+
+        try store.transaction(expectedOwner: owner) { state in
+            state.activeGenerationID = nil
+        }
+        let newestPreferred = try store.reconcileMeteringHorizon(
+            request(now: startedAt.addingTimeInterval(180))
+        )
+        XCTAssertEqual(newestPreferred.generationID, newerID)
+
+        let lowerTieID = UUID(uuidString: "11111111-1111-1111-1111-111111111111")!
+        let upperTieID = UUID(uuidString: "22222222-2222-2222-2222-222222222222")!
+        let tiedCreatedAt = startedAt.addingTimeInterval(240)
+        try store.transaction(expectedOwner: owner) { state in
+            state.activeGenerationID = nil
+            state.generations[upperTieID] = generation(id: upperTieID, createdAt: tiedCreatedAt)
+            state.generations[lowerTieID] = generation(id: lowerTieID, createdAt: tiedCreatedAt)
+        }
+        let tieBroken = try store.reconcileMeteringHorizon(
+            request(now: startedAt.addingTimeInterval(300))
+        )
+        XCTAssertEqual(tieBroken.generationID, lowerTieID)
+    }
+
     private func generationKey(owner: UUID) -> MeteringGenerationKey {
         MeteringGenerationKey(
             protocolVersion: 2,
@@ -1019,6 +1093,51 @@ final class EarnedBudgetSchedulerTests: XCTestCase {
 
         XCTAssertEqual(result, stride(from: 10, through: 300, by: 10).map { $0 } + [301])
         XCTAssertLessThanOrEqual(result.count, EarnedBudgetScheduler.guardEventCount)
+    }
+
+    func test_thresholds_coverEveryLegalMinuteCeilingWithoutSilentGap() {
+        for ceiling in 1...1_440 {
+            let result = EarnedBudgetScheduler.thresholds(
+                poolMinutes: ceiling,
+                capMinutes: ceiling
+            )
+
+            XCTAssertFalse(result.isEmpty, "ceiling=\(ceiling)")
+            XCTAssertLessThanOrEqual(
+                result.count,
+                EarnedBudgetScheduler.guardEventCount,
+                "ceiling=\(ceiling)"
+            )
+            XCTAssertEqual(result.last, ceiling, "ceiling=\(ceiling)")
+            XCTAssertEqual(result, result.sorted(), "ceiling=\(ceiling)")
+            XCTAssertEqual(Set(result).count, result.count, "ceiling=\(ceiling)")
+
+            let minimumStep = (ceiling + EarnedBudgetScheduler.guardEventCount - 1)
+                / EarnedBudgetScheduler.guardEventCount
+            let expectedStep = max(
+                EarnedBudgetScheduler.earnedBucketMinutes,
+                ((minimumStep + EarnedBudgetScheduler.earnedBucketMinutes - 1)
+                    / EarnedBudgetScheduler.earnedBucketMinutes)
+                    * EarnedBudgetScheduler.earnedBucketMinutes
+            )
+            let points = [0] + result
+            for (lower, upper) in zip(points, points.dropFirst()) {
+                XCTAssertGreaterThan(upper, lower, "ceiling=\(ceiling)")
+                XCTAssertLessThanOrEqual(
+                    upper - lower,
+                    expectedStep,
+                    "ceiling=\(ceiling) gap=\(lower)...\(upper)"
+                )
+            }
+
+            if ceiling <= 240 {
+                var expected = stride(from: 5, through: ceiling, by: 5).map { $0 }
+                if expected.last != ceiling {
+                    expected.append(ceiling)
+                }
+                XCTAssertEqual(result, expected, "ceiling=\(ceiling)")
+            }
+        }
     }
 
     // MARK: - Threshold list never exceeds min(pool, cap)
