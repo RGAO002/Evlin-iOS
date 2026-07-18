@@ -72,6 +72,7 @@ nonisolated struct DeviceDailyEpoch: Codable, Equatable, Sendable {
     var retireReason: MeteringEpochRetireReason?
     var exhaustedAt: Date?
     var baseCorrectionState: BaseCorrectionState
+    var authoritativeBaseConflict: EpochRegistrationConflictDTO? = nil
 }
 
 nonisolated struct DatedSchedulePlan: Codable, Equatable, Sendable {
@@ -618,14 +619,28 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
 
     private static let encoder: JSONEncoder = {
         let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
+        encoder.dateEncodingStrategy = .secondsSince1970
         encoder.outputFormatting = [.sortedKeys]
         return encoder
     }()
 
     private static let decoder: JSONDecoder = {
         let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
+        decoder.dateDecodingStrategy = .custom { decoder in
+            let container = try decoder.singleValueContainer()
+            if let seconds = try? container.decode(Double.self) {
+                return Date(timeIntervalSince1970: seconds)
+            }
+            let value = try container.decode(String.self)
+            let formatter = ISO8601DateFormatter()
+            guard let date = formatter.date(from: value) else {
+                throw DecodingError.dataCorruptedError(
+                    in: container,
+                    debugDescription: "invalid device epoch date"
+                )
+            }
+            return date
+        }
         return decoder
     }()
 

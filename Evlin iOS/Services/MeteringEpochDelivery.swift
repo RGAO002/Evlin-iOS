@@ -8,6 +8,7 @@ extension URLSession: MeteringHTTPTransport {}
 
 nonisolated enum EpochSampleHTTPDisposition: Equatable, Sendable {
     case accepted(DeviceDaySnapshotDTO)
+    case acceptedDuplicate
     case terminal(code: String, snapshot: DeviceDaySnapshotDTO?)
     case retry(code: String)
 }
@@ -37,19 +38,22 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
     private let transport: any MeteringHTTPTransport
     private let clock: any MeteringClock
     private let legacySuiteName: String
+    private var simulateCrashAfterLegacyImportReadback: Bool
 
     init(
         baseURL: URL,
         store: DeviceEpochStore = .shared,
         transport: any MeteringHTTPTransport,
         clock: any MeteringClock = MeteringRuntimeClock.live(),
-        legacySuiteName: String = "group.com.evlin.ios"
+        legacySuiteName: String = "group.com.evlin.ios",
+        simulateCrashAfterLegacyImportReadback: Bool = false
     ) {
         self.baseURL = baseURL
         self.store = store
         self.transport = transport
         self.clock = clock
         self.legacySuiteName = legacySuiteName
+        self.simulateCrashAfterLegacyImportReadback = simulateCrashAfterLegacyImportReadback
     }
 
     func enqueueV1(_ request: EpochSampleRequestDTO, owner: UUID) throws {
@@ -131,7 +135,9 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
     }
 
     func drain(owner: UUID) async {
-        await importLegacyWork(owner: owner)
+        if await importLegacyWork(owner: owner) {
+            return
+        }
 
         while let next = nextDispatchable(owner: owner) {
             switch next.kind {
@@ -153,6 +159,9 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
         }
 
         if 200..<300 ~= statusCode || statusCode == 409 {
+            if statusCode == 409, errorCode(data: data) == "duplicate" {
+                return .acceptedDuplicate
+            }
             if let snapshot = decodeSnapshot(data) {
                 if let warning = snapshot.warning {
                     return .terminal(code: warning, snapshot: snapshot)
@@ -184,6 +193,12 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
             guard let response = try? JSONDecoder.metering.decode(EpochRegistrationResponseDTO.self, from: data) else {
                 return .terminal(code: "malformed_response")
             }
+            guard response.meteringProtocolVersion == 2 else {
+                return .terminal(code: "protocol_mismatch")
+            }
+            guard response.epochStatus == .active else {
+                return .terminal(code: response.epochStatus == nil ? "missing_epoch_status" : "epoch_not_active")
+            }
             return .registered(response)
         }
         if statusCode == 409, errorCode(data: data) == "authoritative_base_mismatch",
@@ -201,6 +216,15 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
             guard let response = try? JSONDecoder.metering.decode(EpochActivationResponseDTO.self, from: data) else {
                 return .terminal(code: "malformed_response")
             }
+            guard response.meteringProtocolVersion == 2 else {
+                return .terminal(code: "protocol_mismatch")
+            }
+            guard response.epochStatus == .active else {
+                return .terminal(code: "epoch_not_active")
+            }
+            guard response.status == .activated || response.status == .alreadyActivated else {
+                return .terminal(code: "activation_not_acknowledged")
+            }
             return .acknowledged(response)
         }
         return .terminal(code: errorCode(data: data) ?? "http_\(statusCode)")
@@ -213,14 +237,27 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
         let due = state.dueWork(now: clock.now)
         for item in due {
             switch item.kind {
-            case .registration, .sample:
+            case .registration:
+                return item
+            case .sample:
+                guard let sample = state.sampleWork.values.first(where: { $0.workID == item.workID }),
+                      !isSuppressedCandidate(sample.epochID, state: state)
+                else { continue }
                 return item
             case .activation:
+                guard let activation = state.activationWork.values.first(where: { $0.workID == item.workID }),
+                      !isSuppressedCandidate(activation.epochID, state: state)
+                else { continue }
                 let matchingRegistrations = state.registrationWork.values.filter {
                     $0.ownerChildDeviceID == owner
-                        && $0.epochID == state.activationWork.values.first(where: { $0.workID == item.workID })?.epochID
+                        && $0.epochID == activation.epochID
                 }
-                if matchingRegistrations.contains(where: { $0.retry.terminal != .succeeded }) { continue }
+                guard matchingRegistrations.contains(where: { $0.retry.terminal == .succeeded }) else { continue }
+                guard state.installWork.values.contains(where: {
+                    $0.ownerChildDeviceID == owner
+                        && $0.routeID == activation.routeID
+                        && isVerifiedOrLater($0.phase)
+                }) else { continue }
                 return item
             case .identityCleanup, .rollover, .install, .shield:
                 continue
@@ -229,16 +266,16 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
         return nil
     }
 
-    private func importLegacyWork(owner: UUID) async {
+    private func importLegacyWork(owner: UUID) async -> Bool {
         let entries = EarnedSampleReporter.legacyRetryEntries(suiteName: legacySuiteName)
             .filter { $0.deviceID == owner }
-        guard !entries.isEmpty else { return }
+        guard !entries.isEmpty else { return false }
 
         let imported = entries.compactMap { entry -> (EarnedSampleReporter.RetryEntry, EpochSampleRequestDTO)? in
             guard let request = EarnedSampleReporter.makeEpochSampleRequest(from: entry) else { return nil }
             return (entry, request)
         }
-        guard !imported.isEmpty else { return }
+        guard !imported.isEmpty else { return false }
 
         do {
             try store.transaction(expectedOwner: owner) { state in
@@ -259,6 +296,10 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
                     )
                 }
             }
+            if simulateCrashAfterLegacyImportReadback {
+                simulateCrashAfterLegacyImportReadback = false
+                return true
+            }
             for (entry, _) in imported {
                 EarnedSampleReporter.removeRetryEntry(entry, suiteName: legacySuiteName)
             }
@@ -266,6 +307,7 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
             // The legacy payload remains the recovery source until the root
             // transaction has completed its verified readback.
         }
+        return false
     }
 
     private func deliverRegistration(workID: UUID, owner: UUID) async {
@@ -283,9 +325,13 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
             let disposition = Self.registrationDisposition(data: data, statusCode: httpStatus(response))
             switch disposition {
             case let .registered(response):
+                guard response.epochID == work.epochID else {
+                    await terminalizeRegistration(workID: workID, owner: owner, code: "epoch_mismatch")
+                    return
+                }
                 await recordRegistrationSuccess(workID: workID, owner: owner, response: response)
-            case .authoritativeBaseMismatch:
-                await terminalizeRegistration(workID: workID, owner: owner, code: "authoritative_base_mismatch", terminal: .superseded)
+            case let .authoritativeBaseMismatch(conflict):
+                await recordAuthoritativeBaseMismatch(workID: workID, owner: owner, conflict: conflict)
             case let .terminal(code):
                 await terminalizeRegistration(workID: workID, owner: owner, code: code)
             case let .retry(code):
@@ -314,7 +360,11 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
         do {
             let (data, response) = try await transport.data(for: request)
             switch Self.activationDisposition(data: data, statusCode: httpStatus(response)) {
-            case .acknowledged:
+            case let .acknowledged(response):
+                guard response.epochID == work.epochID else {
+                    await terminalizeActivation(workID: workID, owner: owner, code: "epoch_mismatch")
+                    return
+                }
                 await terminalizeActivation(workID: workID, owner: owner, code: nil, terminal: .succeeded)
             case let .terminal(code):
                 await terminalizeActivation(workID: workID, owner: owner, code: code)
@@ -340,6 +390,8 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
             let (data, response) = try await transport.data(for: request)
             switch Self.sampleDisposition(data: data, statusCode: httpStatus(response)) {
             case .accepted:
+                await terminalizeSample(workID: workID, owner: owner, code: nil, terminal: .succeeded)
+            case .acceptedDuplicate:
                 await terminalizeSample(workID: workID, owner: owner, code: nil, terminal: .succeeded)
             case let .terminal(code, _):
                 await terminalizeSample(workID: workID, owner: owner, code: code)
@@ -373,6 +425,8 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
                   work.ownerChildDeviceID == owner,
                   let route = state.routes[work.routeID],
                   route.epochID == work.epochID,
+                  let epoch = state.epochs[work.epochID],
+                  epoch.status == .active,
                   response.epochID == work.epochID
             else { return }
             work.retry = completedRetry(from: work.retry, code: nil, terminal: .succeeded)
@@ -390,6 +444,26 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
             ratchet.registeredV2At = clock.now
             ratchet.localSelection = selection
             state.ratchets[owner] = ratchet
+        }
+    }
+
+    private func recordAuthoritativeBaseMismatch(
+        workID: UUID,
+        owner: UUID,
+        conflict: EpochRegistrationConflictDTO
+    ) async {
+        try? store.transaction(expectedOwner: owner) { state in
+            guard let key = state.registrationWork.first(where: { $0.value.workID == workID })?.key,
+                  var work = state.registrationWork[key],
+                  work.ownerChildDeviceID == owner,
+                  let route = state.routes[work.routeID],
+                  route.epochID == work.epochID,
+                  var epoch = state.epochs[work.epochID]
+            else { return }
+            epoch.authoritativeBaseConflict = conflict
+            state.epochs[work.epochID] = epoch
+            work.retry = completedRetry(from: work.retry, code: "authoritative_base_mismatch", terminal: .superseded)
+            state.registrationWork[key] = work
         }
     }
 
@@ -488,9 +562,17 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
 
     private func retryState(after prior: MeteringRetryState, code: String, now: Date) -> MeteringRetryState {
         let attempt = prior.attemptCount + 1
+        let nextAttemptAt: Date
+        if attempt < MeteringRetryPolicy.delays.count {
+            let priorIndex = min(max(prior.attemptCount, 0), MeteringRetryPolicy.delays.count - 1)
+            let origin = prior.nextAttemptAt.addingTimeInterval(-MeteringRetryPolicy.delays[priorIndex])
+            nextAttemptAt = origin.addingTimeInterval(MeteringRetryPolicy.delays[attempt])
+        } else {
+            nextAttemptAt = now.addingTimeInterval(MeteringRetryPolicy.delays.last ?? 0)
+        }
         return MeteringRetryState(
             attemptCount: attempt,
-            nextAttemptAt: MeteringRetryPolicy.nextAttempt(after: attempt, now: now),
+            nextAttemptAt: nextAttemptAt,
             lastErrorCode: code,
             terminal: .pending
         )
@@ -520,6 +602,20 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
     private static func errorCode(data: Data) -> String? {
         struct ErrorEnvelope: Decodable { let code: String }
         return try? JSONDecoder.metering.decode(ErrorEnvelope.self, from: data).code
+    }
+
+    private func isSuppressedCandidate(_ epochID: UUID?, state: DeviceEpochStoreState) -> Bool {
+        guard let epochID else { return false }
+        return state.epochs[epochID]?.authoritativeBaseConflict != nil
+    }
+
+    private func isVerifiedOrLater(_ phase: ActivityInstallPhase) -> Bool {
+        switch phase {
+        case .verified, .dualActive, .active, .pendingStop, .stopped:
+            return true
+        case .pendingStart, .starting, .installed:
+            return false
+        }
     }
 }
 

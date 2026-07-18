@@ -672,6 +672,40 @@ final class EarnedSampleReporterTests: XCTestCase {
         XCTAssertEqual(retained.first?.thresholdMinutes, 20)
     }
 
+    func testReportEnqueuesRootBeforeDrainAndTerminalizesThroughProductionPath() async throws {
+        let isolatedSuite = "EarnedSampleReporterTests.\(UUID().uuidString)"
+        defer { UserDefaults.standard.removePersistentDomain(forName: isolatedSuite) }
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("earned-reporter-epoch-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let deviceID = UUID()
+        let store = DeviceEpochStore(
+            fileURL: fileURL,
+            lock: ReporterTestLock(),
+            ownerProvider: { deviceID }
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(DeviceEpochStoreState(ownerChildDeviceID: deviceID)).write(to: fileURL)
+        let transport = ReporterRootTransport(store: store)
+
+        await EarnedSampleReporter.report(
+            baseURL: URL(string: "https://earned-sample-reporter.test")!,
+            deviceID: deviceID,
+            usageDate: "2026-07-12",
+            timezone: "America/New_York",
+            thresholdMinutes: 20,
+            estimatedMinutes: 20,
+            suiteName: isolatedSuite,
+            epochStore: store,
+            requestData: { request in try await transport.data(for: request) }
+        )
+
+        XCTAssertEqual(transport.sampleCountBeforePost, 1)
+        XCTAssertEqual(try store.read().sampleWork.values.first?.retry.terminal, .succeeded)
+        XCTAssertTrue(EarnedSampleReporter.loadRetryQueue(suiteName: isolatedSuite).isEmpty)
+    }
+
     func test_clearRetryQueue_emptiesQueue() {
         let deviceID = UUID()
         EarnedSampleReporter.enqueueRetry(
@@ -1602,6 +1636,30 @@ final class EarnedSampleReporterResponseTests: XCTestCase {
 
     private func removeIsolatedSuite(_ suiteName: String) {
         UserDefaults.standard.removePersistentDomain(forName: suiteName)
+    }
+}
+
+private final class ReporterTestLock: DeviceEpochStoreLocking, @unchecked Sendable {
+    func withLock<T>(_ body: () -> T) -> T? { body() }
+}
+
+private final class ReporterRootTransport: @unchecked Sendable {
+    let store: DeviceEpochStore
+    var sampleCountBeforePost: Int?
+
+    init(store: DeviceEpochStore) {
+        self.store = store
+    }
+
+    func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+        sampleCountBeforePost = try store.read().sampleWork.count
+        let response = HTTPURLResponse(
+            url: try XCTUnwrap(request.url),
+            statusCode: 409,
+            httpVersion: nil,
+            headerFields: nil
+        )!
+        return (Data(#"{"code":"duplicate"}"#.utf8), response)
     }
 }
 

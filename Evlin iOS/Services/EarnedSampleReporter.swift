@@ -321,6 +321,7 @@ enum EarnedSampleReporter {
         generationArmedAt: Date? = nil,
         generationOffsetMinutes: Int? = nil,
         suiteName: String = "group.com.evlin.ios",
+        epochStore: DeviceEpochStore? = nil,
         authorizationIsCurrent: @escaping () -> Bool = { true },
         requestData: @escaping (URLRequest) async throws -> (Data, URLResponse) = {
             try await URLSession.shared.data(for: $0)
@@ -341,6 +342,40 @@ enum EarnedSampleReporter {
             recordDebug("enqueue durability_failed t\(thresholdMinutes)", suiteName: suiteName)
             return
         }
+
+        let deliveryStore: DeviceEpochStore?
+        if let epochStore {
+            deliveryStore = epochStore
+        } else if suiteName == sharedSuiteName,
+                  let mirrored = EarnedActivityGeneration.canonicalDeviceID(
+                      UserDefaults(suiteName: suiteName)?.string(forKey: "evlin.childId")
+                  ),
+                  mirrored == deviceID.uuidString.lowercased() {
+            deliveryStore = .shared
+        } else {
+            deliveryStore = nil
+        }
+
+        if let deliveryStore,
+           let epochRequest = makeEpochSampleRequest(from: entry) {
+            let transport = ClosureMeteringTransport(handler: requestData)
+            let delivery = MeteringEpochDelivery(
+                baseURL: baseURL,
+                store: deliveryStore,
+                transport: transport,
+                legacySuiteName: suiteName
+            )
+            do {
+                try delivery.enqueueV1(epochRequest, owner: deviceID)
+            } catch {
+                recordDebug("enqueue epoch_root_failed t\(thresholdMinutes)", suiteName: suiteName)
+                return
+            }
+            await delivery.drain(owner: deviceID)
+            await delivery.drain(owner: deviceID)
+            return
+        }
+
         let body = makeSampleBody(
             deviceID: deviceID,
             usageDate: usageDate,
