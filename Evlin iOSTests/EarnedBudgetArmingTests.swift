@@ -270,6 +270,110 @@ final class EarnedBudgetArmingTests: XCTestCase {
         XCTAssertNil(store.latestDeviceEstimate)
     }
 
+    func test_epochIdentityTeardownPreparesAndClearsUsageBeforeRemovingMirror() throws {
+        let suiteName = "EarnedBudgetArmingTests.epochIdentity.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let oldOwner = UUID()
+        defaults.set(oldOwner.uuidString.lowercased(), forKey: "evlin.childId")
+        let usageStore = EarnedTimeStore(suiteName: suiteName)
+        usageStore.latestDeviceEstimate = 45
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("earned-budget-identity-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let epochStore = DeviceEpochStore(
+            fileURL: fileURL,
+            ownerProvider: {
+                defaults.string(forKey: "evlin.childId").flatMap(UUID.init(uuidString:))
+            }
+        )
+        let now = Date(timeIntervalSince1970: 1_784_419_200)
+        try seedEpochOwner(oldOwner, store: epochStore, now: now)
+        var observedPreparedBeforeClear = false
+
+        EarnedBudgetArming.teardownFamilyIdentity(
+            appGroupDefaults: defaults,
+            store: usageStore,
+            epochStore: epochStore,
+            stopMonitoring: {},
+            beforeUsageClear: {
+                XCTAssertEqual(
+                    defaults.string(forKey: "evlin.childId"),
+                    oldOwner.uuidString.lowercased()
+                )
+                XCTAssertNotNil(try? epochStore.read().identityCleanupWork)
+                observedPreparedBeforeClear = true
+            },
+            now: now
+        )
+
+        XCTAssertTrue(observedPreparedBeforeClear)
+        XCTAssertNil(usageStore.latestDeviceEstimate)
+        XCTAssertNil(defaults.string(forKey: "evlin.childId"))
+        let cleanup = try XCTUnwrap(epochStore.read().identityCleanupWork)
+        XCTAssertEqual(cleanup.clearedUsageDates, Set(cleanup.oldUsageDates))
+        XCTAssertTrue(cleanup.ownerMirrorTransitionAcknowledged)
+    }
+
+    func test_epochIdentityTeardownKeepsOldMirrorWhenCleanupCannotBePersisted() throws {
+        let suiteName = "EarnedBudgetArmingTests.epochIdentityFailure.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let oldOwner = UUID()
+        defaults.set(oldOwner.uuidString.lowercased(), forKey: "evlin.childId")
+        let usageStore = EarnedTimeStore(suiteName: suiteName)
+        usageStore.latestDeviceEstimate = 45
+        let epochStore = DeviceEpochStore(
+            fileURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent("unwritable-identity-\(UUID().uuidString).json"),
+            lock: IdentityCleanupUnavailableLock(),
+            ownerProvider: { oldOwner }
+        )
+        var stopped = false
+
+        EarnedBudgetArming.teardownFamilyIdentity(
+            appGroupDefaults: defaults,
+            store: usageStore,
+            epochStore: epochStore,
+            stopMonitoring: { stopped = true }
+        )
+
+        XCTAssertTrue(stopped)
+        XCTAssertEqual(
+            defaults.string(forKey: "evlin.childId"),
+            oldOwner.uuidString.lowercased()
+        )
+        XCTAssertEqual(usageStore.latestDeviceEstimate, 45)
+    }
+
+    private func seedEpochOwner(
+        _ owner: UUID,
+        store: DeviceEpochStore,
+        now: Date
+    ) throws {
+        let selection = Data([0x41, 0x42, 0x43])
+        let key = MeteringGenerationKey(
+            protocolVersion: 2,
+            childDeviceID: owner,
+            canonicalTimezone: "America/New_York",
+            policyRevision: "identity-ordering",
+            measurementSelectionDigest: MeteringEpochContract.selectionDigest(
+                persistedBytes: selection
+            ),
+            enforcementSetID: UUID()
+        )
+        _ = try store.reconcileMeteringHorizon(MeteringHorizonRequest(
+            ownerChildDeviceID: owner,
+            today: "2026-07-18",
+            generationKey: key,
+            persistedSelectionBytes: selection,
+            poolMinutes: 120,
+            deviceCapMinutes: 60,
+            authoritativeBaseAcceptedMinutes: 0,
+            now: now
+        ))
+    }
+
     func test_callbackAuthorizedBeforeTeardownCannotMutateAfterContinuationResumes() async {
         let suiteName = "EarnedBudgetArmingTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
@@ -516,4 +620,8 @@ final class EarnedBudgetArmingTests: XCTestCase {
 
         XCTAssertNotEqual(eastern, pacific)
     }
+}
+
+private struct IdentityCleanupUnavailableLock: DeviceEpochStoreLocking {
+    func withLock<T>(_ body: () -> T) -> T? { nil }
 }

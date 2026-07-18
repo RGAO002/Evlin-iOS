@@ -617,6 +617,10 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
     private let fileIO: any DeviceEpochFileIO
     private let ownerProvider: @Sendable () -> UUID?
 
+    private static func uuidLess(_ lhs: UUID, _ rhs: UUID) -> Bool {
+        lhs.uuidString.lowercased() < rhs.uuidString.lowercased()
+    }
+
     init(
         fileURL: URL? = nil,
         lock: any DeviceEpochStoreLocking = ActiveLockPersistenceLock.shared,
@@ -635,6 +639,131 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
 
     func isCurrentOwner(_ owner: UUID) -> Bool {
         ownerProvider() == owner
+    }
+
+    /// Durably closes every callback/work authority owned by `oldOwner` before
+    /// any external identity mirror is allowed to change. Replaying the same
+    /// transition returns the original work ID without rewriting bytes.
+    @discardableResult
+    func prepareIdentityCleanup(
+        oldOwner: UUID,
+        newOwner: UUID?,
+        oldFallbackKeys: [String],
+        now: Date
+    ) throws -> UUID {
+        try transaction(expectedOwner: oldOwner) { state in
+            if let existing = state.identityCleanupWork {
+                guard existing.oldOwnerChildDeviceID == oldOwner,
+                      existing.newOwnerChildDeviceID == newOwner,
+                      existing.oldFallbackKeys == Array(Set(oldFallbackKeys)).sorted()
+                else { throw DeviceEpochStoreError.ownerMismatch }
+                return existing.workID
+            }
+
+            let oldGenerations = state.generations.values.filter { $0.childDeviceID == oldOwner }
+            let oldEpochs = state.epochs.values.filter { $0.childDeviceID == oldOwner }
+            let oldRoutes = state.routes.values.filter { $0.ownerChildDeviceID == oldOwner }
+            let oldRouteIDs = Set(oldRoutes.map(\.routeID))
+            let oldEpochIDs = Set(oldEpochs.map(\.epochID))
+            let registrationIDs = state.registrationWork.values
+                .filter { $0.ownerChildDeviceID == oldOwner }.map(\.workID)
+            let activationIDs = state.activationWork.values
+                .filter { $0.ownerChildDeviceID == oldOwner }.map(\.workID)
+            let sampleIDs = state.sampleWork.values
+                .filter { $0.ownerChildDeviceID == oldOwner }.map(\.workID)
+            let installIDs = state.installWork.values
+                .filter { $0.ownerChildDeviceID == oldOwner }.map(\.workID)
+            let shieldIDs = state.shieldReferences.values
+                .filter { $0.ownerChildDeviceID == oldOwner }.map(\.operationID)
+            var activityNames = Set(oldRoutes.map(\.activityName))
+            if let legacy = state.legacy, legacy.ownerChildDeviceID == oldOwner {
+                [legacy.active?.activityName, legacy.pending?.activityName, legacy.scalarActiveActivityName]
+                    .compactMap { $0 }.forEach { activityNames.insert($0) }
+                legacy.retiringActivityNames.forEach { activityNames.insert($0) }
+                legacy.breadcrumbActivityNames.forEach { activityNames.insert($0) }
+            }
+
+            let workID = UUID()
+            state.identityCleanupWork = IdentityCleanupWork(
+                workID: workID,
+                oldOwnerChildDeviceID: oldOwner,
+                newOwnerChildDeviceID: newOwner,
+                oldEpochIDs: oldEpochIDs.sorted(by: Self.uuidLess),
+                oldRouteIDs: oldRouteIDs.sorted(by: Self.uuidLess),
+                oldActivityNames: activityNames.sorted(),
+                oldRegistrationWorkIDs: registrationIDs.sorted(by: Self.uuidLess),
+                oldActivationWorkIDs: activationIDs.sorted(by: Self.uuidLess),
+                oldSampleWorkIDs: sampleIDs.sorted(by: Self.uuidLess),
+                oldInstallWorkIDs: installIDs.sorted(by: Self.uuidLess),
+                oldFallbackKeys: Array(Set(oldFallbackKeys)).sorted(),
+                oldShieldOperationIDs: shieldIDs.sorted(by: Self.uuidLess),
+                oldUsageDates: Array(Set(oldEpochs.map(\.usageDate))).sorted(),
+                retry: MeteringRetryState(
+                    attemptCount: 0,
+                    nextAttemptAt: now,
+                    lastErrorCode: nil,
+                    terminal: .pending
+                ),
+                terminalizedWorkIDs: [],
+                purgedFallbackKeys: [],
+                releasedShieldOperationIDs: [],
+                stopAcknowledgedActivityNames: [],
+                clearedUsageDates: [],
+                ownerMirrorTransitionAcknowledged: false,
+                createdAt: now
+            )
+
+            for generation in oldGenerations {
+                state.generations[generation.generationID]?.retiredAt = now
+            }
+            for epoch in oldEpochs {
+                state.epochs[epoch.epochID]?.status = .retired
+                state.epochs[epoch.epochID]?.retiredAt = now
+                state.epochs[epoch.epochID]?.retireReason = .identityRecovery
+            }
+            for route in oldRoutes {
+                guard let epoch = state.epochs[route.epochID],
+                      let dayEnd = state.canonicalDayEnd(
+                        usageDate: route.usageDate,
+                        timeZoneIdentifier: epoch.canonicalTimezone
+                      )
+                else { throw DeviceEpochStoreError.readbackMismatch }
+                state.routes[route.routeID]?.lifecycle = .tombstoned
+                if state.tombstones[route.routeID] == nil {
+                    state.tombstones[route.routeID] = MeteringRouteTombstone(
+                        routeID: route.routeID,
+                        activityName: route.activityName,
+                        eventNames: route.plannedEvents.map(\.eventName),
+                        ownerChildDeviceID: oldOwner,
+                        usageDate: route.usageDate,
+                        epochID: route.epochID,
+                        generationID: route.generationID,
+                        canonicalDayEnd: dayEnd,
+                        stopAcknowledgedAt: nil,
+                        referencedWorkIDs: Set(sampleIDs.filter {
+                            state.sampleWork[$0]?.routeID == route.routeID
+                        }),
+                        retainedUntil: nil
+                    )
+                }
+            }
+            if state.activeGenerationID.map({ Set(oldGenerations.map(\.generationID)).contains($0) }) == true {
+                state.activeGenerationID = nil
+            }
+            if state.activeEpochID.map({ oldEpochIDs.contains($0) }) == true {
+                state.activeEpochID = nil
+            }
+            if state.activeRouteID.map({ oldRouteIDs.contains($0) }) == true {
+                state.activeRouteID = nil
+            }
+            if state.v2RouteHandoff?.ownerChildDeviceID == oldOwner {
+                state.v2RouteHandoff = nil
+            }
+            if state.coverage?.ownerChildDeviceID == oldOwner {
+                state.coverage = nil
+            }
+            return workID
+        }
     }
 
     /// Preflight only. The effect store calls this before it durably records a
@@ -672,8 +801,24 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
     /// referenced by this owner and the originating epoch must have entered one
     /// of the narrow terminal paths that is allowed to unwind earned shielding.
     func canReleaseEarnedShieldReference(_ expected: EarnedShieldReference) throws -> Bool {
-        try transaction(expectedOwner: expected.ownerChildDeviceID) { state in
-            guard let reference = state.shieldReferences[expected.operationID],
+        let snapshot = try read()
+        if let cleanup = snapshot.identityCleanupWork,
+           cleanup.oldOwnerChildDeviceID == expected.ownerChildDeviceID,
+           cleanup.oldShieldOperationIDs.contains(expected.operationID) {
+            return try identityCleanupTransaction(workID: cleanup.workID) { state, _ in
+                canReleaseEarnedShieldReference(expected, in: state)
+            }
+        }
+        return try transaction(expectedOwner: expected.ownerChildDeviceID) { state in
+            canReleaseEarnedShieldReference(expected, in: state)
+        }
+    }
+
+    private func canReleaseEarnedShieldReference(
+        _ expected: EarnedShieldReference,
+        in state: DeviceEpochStoreState
+    ) -> Bool {
+        guard let reference = state.shieldReferences[expected.operationID],
                   reference.matches(
                     operationID: expected.operationID,
                     ownerChildDeviceID: expected.ownerChildDeviceID,
@@ -690,7 +835,7 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                   route.ownerChildDeviceID == expected.ownerChildDeviceID,
                   route.generationID == reference.generationID,
                   route.epochID == reference.epochID
-            else { return false }
+        else { return false }
 
             let correctionOrRetirement = epoch.status == .retired
                 || epoch.retiredAt != nil
@@ -706,8 +851,7 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                 $0.oldOwnerChildDeviceID == expected.ownerChildDeviceID
                     && $0.oldShieldOperationIDs.contains(expected.operationID)
             } ?? false
-            return correctionOrRetirement || rollover || identityCleanup
-        }
+        return correctionOrRetirement || rollover || identityCleanup
     }
 
     private func canApplyEarnedShieldReference(
@@ -1443,6 +1587,149 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                 try validateStatic(readback, expectedOwner: expectedOwner, requireOwnerMatch: true)
                 try checkOwner(expectedOwner: expectedOwner, state: readback)
                 return value
+            } catch {
+                if writeAttempted {
+                    do {
+                        try restore(priorData, at: url)
+                    } catch {
+                        throw DeviceEpochStoreError.restorationFailed
+                    }
+                }
+                throw error
+            }
+        }
+    }
+
+    /// Continue one already-prepared identity retirement after the mutable
+    /// owner mirror has changed. Authority comes only from the exact durable
+    /// cleanup work ID; both the work ID and the old root owner are rechecked
+    /// before persistence and on readback.
+    @discardableResult
+    func identityCleanupTransaction<Value>(
+        workID: UUID,
+        _ mutate: (inout DeviceEpochStoreState, inout IdentityCleanupWork) throws -> Value
+    ) throws -> Value {
+        try withLock {
+            let url = try resolvedFileURL()
+            let priorData = try fileIO.read(from: url)
+            let state = try decodeState(priorData)
+            guard let oldOwner = state.ownerChildDeviceID,
+                  var cleanup = state.identityCleanupWork,
+                  cleanup.workID == workID
+            else { throw DeviceEpochStoreError.ownerMismatch }
+            try validateStatic(state, expectedOwner: oldOwner, requireOwnerMatch: true)
+
+            var candidate = state
+            let value = try mutate(&candidate, &cleanup)
+            guard candidate.ownerChildDeviceID == oldOwner,
+                  candidate.identityCleanupWork == state.identityCleanupWork
+            else { throw DeviceEpochStoreError.ownerMismatch }
+            candidate.identityCleanupWork = cleanup
+            guard candidate.identityCleanupWork?.workID == workID else {
+                throw DeviceEpochStoreError.ownerMismatch
+            }
+            try validateStatic(candidate, expectedOwner: oldOwner, requireOwnerMatch: true)
+            try validateTransactionDelta(candidate: candidate, priorState: state)
+            guard candidate != state else { return value }
+
+            let encoded = try Self.encoder.encode(candidate)
+            var writeAttempted = false
+            do {
+                writeAttempted = true
+                try fileIO.writeAtomically(encoded, to: url)
+                guard let readbackData = try fileIO.read(from: url),
+                      readbackData == encoded
+                else { throw DeviceEpochStoreError.readbackMismatch }
+                let readback = try decodeState(readbackData)
+                guard readback.ownerChildDeviceID == oldOwner,
+                      readback.identityCleanupWork?.workID == workID
+                else { throw DeviceEpochStoreError.ownerMismatch }
+                try validateStatic(readback, expectedOwner: oldOwner, requireOwnerMatch: true)
+                return value
+            } catch {
+                if writeAttempted {
+                    do {
+                        try restore(priorData, at: url)
+                    } catch {
+                        throw DeviceEpochStoreError.restorationFailed
+                    }
+                }
+                throw error
+            }
+        }
+    }
+
+    /// Marks the durable cleanup terminal only after every item captured in
+    /// its envelope has an exact acknowledgement. The succeeded envelope is
+    /// deliberately persisted before root handoff so a crash at this boundary
+    /// can resume without repeating external effects.
+    @discardableResult
+    func markIdentityCleanupSucceeded(workID: UUID) throws -> Bool {
+        try identityCleanupTransaction(workID: workID) { _, cleanup in
+            let allWorkIDs = Set(
+                cleanup.oldRegistrationWorkIDs
+                    + cleanup.oldActivationWorkIDs
+                    + cleanup.oldSampleWorkIDs
+                    + cleanup.oldInstallWorkIDs
+            )
+            guard cleanup.terminalizedWorkIDs == allWorkIDs,
+                  cleanup.purgedFallbackKeys == Set(cleanup.oldFallbackKeys),
+                  cleanup.releasedShieldOperationIDs == Set(cleanup.oldShieldOperationIDs),
+                  cleanup.stopAcknowledgedActivityNames == Set(cleanup.oldActivityNames),
+                  cleanup.clearedUsageDates == Set(cleanup.oldUsageDates),
+                  cleanup.ownerMirrorTransitionAcknowledged
+            else { return false }
+            cleanup.retry.terminal = .succeeded
+            cleanup.retry.lastErrorCode = nil
+            return true
+        }
+    }
+
+    /// Hands authority to the already-mirrored new owner only after the
+    /// succeeded cleanup envelope has survived a durable write. No old-owner
+    /// object is retained in the new root; delayed callbacks are rejected by
+    /// the mutable owner mirror before they can bootstrap work.
+    @discardableResult
+    func finalizeIdentityCleanup(workID: UUID) throws -> Bool {
+        try withLock {
+            let url = try resolvedFileURL()
+            let priorData = try fileIO.read(from: url)
+            let state = try decodeState(priorData)
+            guard let oldOwner = state.ownerChildDeviceID,
+                  let cleanup = state.identityCleanupWork,
+                  cleanup.workID == workID
+            else { return false }
+            try validateStatic(state, expectedOwner: oldOwner, requireOwnerMatch: true)
+            guard cleanup.retry.terminal == .succeeded,
+                  ownerProvider() == cleanup.newOwnerChildDeviceID
+            else { return false }
+
+            let candidate = DeviceEpochStoreState(
+                ownerChildDeviceID: cleanup.newOwnerChildDeviceID
+            )
+            try validateStatic(
+                candidate,
+                expectedOwner: cleanup.newOwnerChildDeviceID,
+                requireOwnerMatch: true
+            )
+            let encoded = try Self.encoder.encode(candidate)
+            var writeAttempted = false
+            do {
+                writeAttempted = true
+                try fileIO.writeAtomically(encoded, to: url)
+                guard let readbackData = try fileIO.read(from: url),
+                      readbackData == encoded
+                else { throw DeviceEpochStoreError.readbackMismatch }
+                let readback = try decodeState(readbackData)
+                try validateStatic(
+                    readback,
+                    expectedOwner: cleanup.newOwnerChildDeviceID,
+                    requireOwnerMatch: true
+                )
+                guard readback.ownerChildDeviceID == cleanup.newOwnerChildDeviceID,
+                      readback.identityCleanupWork == nil
+                else { throw DeviceEpochStoreError.readbackMismatch }
+                return true
             } catch {
                 if writeAttempted {
                     do {

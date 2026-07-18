@@ -84,12 +84,14 @@ final class BigKidStatePoller: ObservableObject {
         self.reconcileReflectionLock = { snapshot in
             await reflectionLockApplier.reconcile(snapshot: snapshot, childID: client.childId)
         }
-        self.reconcileIdentityTransition = EarnedBudgetArming.reconcileIdentityTransition
+        self.reconcileIdentityTransition = {
+            EarnedBudgetArming.reconcileIdentityTransition()
+        }
         self.applySnapshot = { snapshot, state in
             state.apply(snapshot)
         }
         self.mirrorChildIdentity = { childID in
-            EarnedBudgetArming.mirrorChildIdentity(childID)
+            EarnedBudgetArming.mirrorChildIdentity(childID, epochStore: .shared)
         }
         self.syncEarnedRuntime = Self.syncEarnedRuntimeFromSnapshot
         self.setUsageCountingAllowed = Self.writeUsageCountingAllowed

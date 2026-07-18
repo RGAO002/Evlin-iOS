@@ -671,6 +671,50 @@ enum EarnedSampleReporter {
         clearFallbackEntries(suiteName: suiteName)
     }
 
+    /// Capture the exact durable legacy retry keys owned by one identity.
+    /// Identity cleanup persists this list before the owner mirror changes.
+    static func retryKeys(
+        deviceID: UUID,
+        suiteName: String = "group.com.evlin.ios"
+    ) -> [String] {
+        Array(Set(
+            loadRetryQueue(suiteName: suiteName)
+                .filter { $0.deviceID == deviceID }
+                .map(logicalRetryKey)
+        )).sorted()
+    }
+
+    /// Remove only the old-owner retry entries captured by the cleanup
+    /// envelope. New-owner work and uncaptured entries are never touched.
+    /// Returns the captured keys proven absent after durable readback.
+    static func purgeRetryState(
+        deviceID: UUID,
+        capturedKeys: [String],
+        suiteName: String = "group.com.evlin.ios"
+    ) -> Set<String> {
+        let captured = Set(capturedKeys)
+        guard !captured.isEmpty else { return [] }
+        let primarySaved = withRetryQueueLock(suiteName: suiteName) { defaults in
+            var queue = loadRetryQueueUnlocked(defaults: defaults)
+            queue.removeAll {
+                $0.deviceID == deviceID && captured.contains(logicalRetryKey($0))
+            }
+            return saveRetryQueueUnlocked(queue, defaults: defaults)
+        } ?? false
+        guard primarySaved else { return [] }
+
+        for entry in loadFallbackEntries(suiteName: suiteName)
+            where entry.deviceID == deviceID && captured.contains(logicalRetryKey(entry)) {
+            removeFallback(entry, suiteName: suiteName)
+        }
+        let remaining = Set(
+            loadRetryQueue(suiteName: suiteName)
+                .filter { $0.deviceID == deviceID }
+                .map(logicalRetryKey)
+        )
+        return captured.subtracting(remaining)
+    }
+
     static func retryQueueDebugSummary(suiteName: String = "group.com.evlin.ios") -> String {
         let queue = loadRetryQueue(suiteName: suiteName)
         guard let newest = queue.last else { return "0 pending" }

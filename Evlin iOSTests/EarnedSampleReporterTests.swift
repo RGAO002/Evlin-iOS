@@ -816,6 +816,48 @@ final class EarnedSampleReporterTests: XCTestCase {
         XCTAssertTrue(EarnedSampleReporter.loadRetryQueue(suiteName: suiteName).isEmpty)
     }
 
+    func test_identityCleanupPurgesOnlyCapturedOldOwnerRetryState() {
+        let isolatedSuite = "EarnedSampleReporterTests.identity.\(UUID().uuidString)"
+        defer { EarnedSampleReporter.clearRetryQueue(suiteName: isolatedSuite) }
+        let oldOwner = UUID()
+        let newOwner = UUID()
+        let oldEntry = EarnedSampleReporter.makeRetryEntry(
+            deviceID: oldOwner,
+            usageDate: "2026-07-18",
+            timezone: "America/New_York",
+            thresholdMinutes: 5,
+            estimatedMinutes: 5
+        )
+        let newEntry = EarnedSampleReporter.makeRetryEntry(
+            deviceID: newOwner,
+            usageDate: "2026-07-18",
+            timezone: "America/New_York",
+            thresholdMinutes: 10,
+            estimatedMinutes: 10
+        )
+        XCTAssertTrue(EarnedSampleReporter.enqueueRetry(
+            oldEntry,
+            suiteName: isolatedSuite,
+            faultInjection: .lockUnavailable
+        ))
+        XCTAssertTrue(EarnedSampleReporter.enqueueRetry(newEntry, suiteName: isolatedSuite))
+
+        let captured = EarnedSampleReporter.retryKeys(
+            deviceID: oldOwner,
+            suiteName: isolatedSuite
+        )
+        XCTAssertEqual(captured, ["\(oldOwner.uuidString.lowercased()):2026-07-18:t5"])
+
+        let purged = EarnedSampleReporter.purgeRetryState(
+            deviceID: oldOwner,
+            capturedKeys: captured,
+            suiteName: isolatedSuite
+        )
+
+        XCTAssertEqual(purged, Set(captured))
+        XCTAssertEqual(EarnedSampleReporter.loadRetryQueue(suiteName: isolatedSuite), [newEntry])
+    }
+
     func test_concurrentRetryEnqueuesDoNotOverwriteEntries() {
         let isolatedSuite = "EarnedSampleReporterTests.\(UUID().uuidString)"
         defer { UserDefaults.standard.removePersistentDomain(forName: isolatedSuite) }

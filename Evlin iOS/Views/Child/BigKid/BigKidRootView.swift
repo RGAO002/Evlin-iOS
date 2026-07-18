@@ -47,7 +47,8 @@ struct BigKidRootView: View {
         if let groupDefaults = UserDefaults(suiteName: "group.com.evlin.ios") {
             EarnedBudgetArming.mirrorChildIdentity(
                 childId,
-                appGroupDefaults: groupDefaults
+                appGroupDefaults: groupDefaults,
+                epochStore: .shared
             )
             groupDefaults.set(baseURL.absoluteString, forKey: "evlin.baseURL")
         }
@@ -303,7 +304,7 @@ struct BigKidRootView: View {
     /// Earned monitoring is invalidated synchronously before restriction release.
     @MainActor
     private func performKidSignOut() async {
-        EarnedBudgetArming.teardownFamilyIdentity()
+        EarnedBudgetArming.teardownFamilyIdentity(epochStore: .shared)
 
         _ = await ActiveLockStore.shared.unshieldAll()
         _ = await ActiveLockStore.shared.unblockAll()

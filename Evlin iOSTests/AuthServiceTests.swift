@@ -161,10 +161,24 @@ final class AuthServiceTests: XCTestCase {
             defaults: appGroup
         ))
         appGroup.set(deviceID.uuidString, forKey: "evlin.childId")
+        let epochURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("auth-terminal-identity-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: epochURL) }
+        let epochStore = DeviceEpochStore(
+            fileURL: epochURL,
+            ownerProvider: {
+                appGroup.string(forKey: "evlin.childId").flatMap(UUID.init(uuidString:))
+            }
+        )
+        let usageStore = EarnedTimeStore(suiteName: suiteName)
         let teardown = expectation(description: "main teardown")
         let auth = makeAuth(
             terminalSessionPersistence: {
-                AuthService.persistTerminalFailClosed(appGroupDefaults: appGroup)
+                AuthService.persistTerminalFailClosed(
+                    appGroupDefaults: appGroup,
+                    epochStore: epochStore,
+                    usageStore: usageStore
+                )
             },
             terminalSessionTeardown: {
                 teardown.fulfill()

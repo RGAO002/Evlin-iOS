@@ -107,11 +107,25 @@ final class AuthService {
     nonisolated static func persistTerminalFailClosed(
         appGroupDefaults: UserDefaults? = UserDefaults(
             suiteName: EarnedTimeStore.appGroupSuiteName
-        )
+        ),
+        epochStore: DeviceEpochStore = .shared,
+        usageStore: EarnedTimeStore = .shared,
+        now: Date = Date()
     ) {
         terminalPersistenceLock.lock()
         defer { terminalPersistenceLock.unlock() }
         guard let appGroupDefaults else { return }
+
+        let oldOwner = appGroupDefaults.string(forKey: "evlin.childId")
+            .flatMap(UUID.init(uuidString:))
+        let cleanupWorkID = oldOwner.flatMap { owner in
+            try? epochStore.prepareIdentityCleanup(
+                oldOwner: owner,
+                newOwner: nil,
+                oldFallbackKeys: EarnedSampleReporter.retryKeys(deviceID: owner),
+                now: now
+            )
+        }
 
         let lifecycle = EarnedActivityGeneration.loadLifecycle(defaults: appGroupDefaults)
         let targets = EarnedActivityGeneration.stopTargets(lifecycle: lifecycle)
@@ -129,8 +143,28 @@ final class AuthService {
         )
         appGroupDefaults.removeObject(forKey: "evlin.earned.armSignature")
         appGroupDefaults.set(false, forKey: "evlin.usageCountingAllowed")
+        if oldOwner != nil && cleanupWorkID == nil {
+            // Keep the old owner mirror as the recovery authority. The main
+            // actor teardown will retry instead of exposing a new identity to
+            // an unretired old callback.
+            appGroupDefaults.synchronize()
+            return
+        }
+        usageStore.clearUsageStateForIdentityChange()
+        if let cleanupWorkID,
+           let cleanup = try? epochStore.read().identityCleanupWork,
+           cleanup.workID == cleanupWorkID {
+            try? epochStore.identityCleanupTransaction(workID: cleanupWorkID) { _, work in
+                work.clearedUsageDates = Set(work.oldUsageDates)
+            }
+        }
         appGroupDefaults.removeObject(forKey: "evlin.childId")
         appGroupDefaults.synchronize()
+        if let cleanupWorkID {
+            try? epochStore.identityCleanupTransaction(workID: cleanupWorkID) { _, work in
+                work.ownerMirrorTransitionAcknowledged = true
+            }
+        }
     }
 
     /// Restore session from the Keychain at launch. Does not hit the network;
@@ -213,11 +247,14 @@ final class AuthService {
             teardownEarned()
         } else {
             EarnedBudgetArming.teardownFamilyIdentity(
-                appGroupDefaults: appGroupDefaults
+                appGroupDefaults: appGroupDefaults,
+                epochStore: .shared
             )
         }
-        appGroupDefaults?.removeObject(forKey: "evlin.childId")
-        appGroupDefaults?.synchronize()
+        if teardownEarned != nil {
+            appGroupDefaults?.removeObject(forKey: "evlin.childId")
+            appGroupDefaults?.synchronize()
+        }
         var keys = [
             "evlin.accountID",
             "evlin.parentProfileID",

@@ -158,9 +158,54 @@ enum EarnedBudgetArming {
             suiteName: EarnedTimeStore.appGroupSuiteName
         ),
         store: EarnedTimeStore = .shared,
+        epochStore: DeviceEpochStore? = nil,
         stopMonitoring: (() -> Void)? = nil,
-        beforeUsageClear: () -> Void = {}
+        beforeUsageClear: () -> Void = {},
+        now: Date = Date()
     ) {
+        if let epochStore,
+           let oldOwner = appGroupDefaults?.string(forKey: "evlin.childId")
+            .flatMap(UUID.init(uuidString:)) {
+            let workID: UUID
+            do {
+                workID = try epochStore.prepareIdentityCleanup(
+                    oldOwner: oldOwner,
+                    newOwner: nil,
+                    oldFallbackKeys: EarnedSampleReporter.retryKeys(deviceID: oldOwner),
+                    now: now
+                )
+            } catch {
+                // Fail closed: invalidate callbacks, but keep the owner mirror
+                // intact so a later recovery attempt can still authorize and
+                // persist the cleanup envelope.
+                stopAndInvalidateSignature(
+                    defaults: appGroupDefaults,
+                    stopMonitoring: stopMonitoring
+                )
+                return
+            }
+            stopAndInvalidateSignature(
+                defaults: appGroupDefaults,
+                stopMonitoring: stopMonitoring
+            )
+            beforeUsageClear()
+            store.clearUsageStateForIdentityChange()
+            if let cleanup = try? epochStore.read().identityCleanupWork,
+               cleanup.workID == workID {
+                try? epochStore.identityCleanupTransaction(workID: workID) { _, work in
+                    work.clearedUsageDates = Set(work.oldUsageDates)
+                }
+            }
+            appGroupDefaults?.removeObject(forKey: "evlin.childId")
+            appGroupDefaults?.synchronize()
+            try? epochStore.identityCleanupTransaction(workID: workID) { _, work in
+                work.ownerMirrorTransitionAcknowledged = true
+            }
+            return
+        }
+
+        // Legacy/no-v2-root compatibility path. Production identity entry
+        // points pass DeviceEpochStore.shared and use the durable path above.
         stopAndInvalidateSignature(
             defaults: appGroupDefaults,
             stopMonitoring: stopMonitoring
@@ -177,8 +222,10 @@ enum EarnedBudgetArming {
             suiteName: EarnedTimeStore.appGroupSuiteName
         ),
         readinessStore: EarnedTimeStore = .shared,
+        epochStore: DeviceEpochStore? = nil,
         hasGenerationState: Bool? = nil,
-        stopMonitoring: (() -> Void)? = nil
+        stopMonitoring: (() -> Void)? = nil,
+        now: Date = Date()
     ) {
         let next = childID.uuidString.lowercased()
         let current = EarnedActivityGeneration.canonicalDeviceID(
@@ -199,6 +246,44 @@ enum EarnedBudgetArming {
             || appGroupDefaults?.string(
                 forKey: EarnedActivityGeneration.activeActivityNameKey
             ) != nil
+        if current != next,
+           let epochStore,
+           let oldOwner = current.flatMap(UUID.init(uuidString:)) {
+            let workID: UUID
+            do {
+                workID = try epochStore.prepareIdentityCleanup(
+                    oldOwner: oldOwner,
+                    newOwner: childID,
+                    oldFallbackKeys: EarnedSampleReporter.retryKeys(deviceID: oldOwner),
+                    now: now
+                )
+            } catch {
+                readinessStore.clearAuthoritativeStateReadiness()
+                stopAndInvalidateSignature(
+                    defaults: appGroupDefaults,
+                    stopMonitoring: stopMonitoring
+                )
+                return
+            }
+            readinessStore.clearAuthoritativeStateReadiness()
+            stopAndInvalidateSignature(
+                defaults: appGroupDefaults,
+                stopMonitoring: stopMonitoring
+            )
+            readinessStore.clearUsageStateForIdentityChange()
+            if let cleanup = try? epochStore.read().identityCleanupWork,
+               cleanup.workID == workID {
+                try? epochStore.identityCleanupTransaction(workID: workID) { _, work in
+                    work.clearedUsageDates = Set(work.oldUsageDates)
+                }
+            }
+            appGroupDefaults?.set(next, forKey: "evlin.childId")
+            appGroupDefaults?.synchronize()
+            try? epochStore.identityCleanupTransaction(workID: workID) { _, work in
+                work.ownerMirrorTransitionAcknowledged = true
+            }
+            return
+        }
         if current != next || boundDeviceMismatch {
             readinessStore.clearAuthoritativeStateReadiness()
             if hasGenerationState ?? inferredGenerationState {
@@ -230,7 +315,9 @@ enum EarnedBudgetArming {
     ///
     /// Returns true when a transition was detected and state was torn down.
     @discardableResult
-    static func reconcileIdentityTransition() -> Bool {
+    static func reconcileIdentityTransition(
+        epochStore: DeviceEpochStore? = .shared
+    ) -> Bool {
         guard let currentRaw = UserDefaults.standard.string(
                 forKey: CommandPoller.childDeviceIDDefaultsKey),
               !currentRaw.isEmpty
@@ -246,14 +333,23 @@ enum EarnedBudgetArming {
             return false
         }
 
-        defer { suite?.set(current, forKey: identityOwnerKey) }
         guard let ownerRaw, !ownerRaw.isEmpty else { return false }
         let owner = canonicalDeviceIdentity(ownerRaw) ?? ownerRaw
 
-        stopAndInvalidateSignature(defaults: suite)
-        suite?.removeObject(forKey: "evlin.childId")
-        suite?.synchronize()
-        EarnedTimeStore.shared.clearUsageStateForIdentityChange()
+        if let currentID = UUID(uuidString: currentRaw) {
+            mirrorChildIdentity(
+                currentID,
+                appGroupDefaults: suite,
+                readinessStore: .shared,
+                epochStore: epochStore
+            )
+        } else {
+            stopAndInvalidateSignature(defaults: suite)
+            suite?.removeObject(forKey: "evlin.childId")
+            suite?.synchronize()
+            EarnedTimeStore.shared.clearUsageStateForIdentityChange()
+        }
+        suite?.set(current, forKey: identityOwnerKey)
         CommandDeliveryDiagnostics.record(
             CommandDeliveryDiagnostics.keyEarnedIdentityTransition,
             "teardown owner=\(owner) current=\(current)"

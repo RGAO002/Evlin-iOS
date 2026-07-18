@@ -47,11 +47,14 @@ enum FamilyGoneDetector {
             teardownEarned()
         } else {
             EarnedBudgetArming.teardownFamilyIdentity(
-                appGroupDefaults: appGroupDefaults
+                appGroupDefaults: appGroupDefaults,
+                epochStore: .shared
             )
         }
-        appGroupDefaults?.removeObject(forKey: "evlin.childId")
-        appGroupDefaults?.synchronize()
+        if teardownEarned != nil {
+            appGroupDefaults?.removeObject(forKey: "evlin.childId")
+            appGroupDefaults?.synchronize()
+        }
 
         // Earned monitoring is invalidated synchronously before any suspension
         // point can expose a newly mirrored identity to an old callback.

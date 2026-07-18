@@ -9,6 +9,8 @@ final class EarnedMeteringRecoveryDriver {
     private let center: any MeteringDeviceActivityCenter
     private let processIdentity: MeteringProcessIdentity
     private let clock: any MeteringClock
+    private let purgeIdentityRetryState: (UUID, [String]) -> Set<String>
+    private let releaseIdentityShield: (UUID, UUID) throws -> Void
 
     init(
         store: DeviceEpochStore = .shared,
@@ -16,7 +18,9 @@ final class EarnedMeteringRecoveryDriver {
         installer: DatedRouteInstaller,
         center: any MeteringDeviceActivityCenter,
         processIdentity: MeteringProcessIdentity,
-        clock: any MeteringClock = MeteringRuntimeClock.live()
+        clock: any MeteringClock = MeteringRuntimeClock.live(),
+        purgeIdentityRetryState: ((UUID, [String]) -> Set<String>)? = nil,
+        releaseIdentityShield: ((UUID, UUID) throws -> Void)? = nil
     ) {
         self.store = store
         self.delivery = delivery
@@ -24,9 +28,17 @@ final class EarnedMeteringRecoveryDriver {
         self.center = center
         self.processIdentity = processIdentity
         self.clock = clock
+        self.purgeIdentityRetryState = purgeIdentityRetryState ?? { owner, keys in
+            EarnedSampleReporter.purgeRetryState(deviceID: owner, capturedKeys: keys)
+        }
+        let effectStore = EarnedShieldEffectStore(epochStore: store)
+        self.releaseIdentityShield = releaseIdentityShield ?? { operationID, owner in
+            try effectStore.release(operationID: operationID, expectedOwner: owner)
+        }
     }
 
     func recover(ownerChildDeviceID owner: UUID) async throws {
+        if try recoverIdentityCleanupIfPresent() { return }
         guard store.isCurrentOwner(owner) else { return }
 
         try prepareReplacementIfNeeded(owner: owner)
@@ -43,6 +55,113 @@ final class EarnedMeteringRecoveryDriver {
         try prepareReplacementIfNeeded(owner: owner)
         try stopRetiredLane(owner: owner)
         try stopAuthoritativeBaseRejectedCandidates(owner: owner)
+    }
+
+    /// Identity cleanup must run before the mutable-owner guard. Its exact
+    /// durable work ID is the authority that lets recovery continue after the
+    /// mirror has already moved to a new child or has been removed on sign-out.
+    private func recoverIdentityCleanupIfPresent() throws -> Bool {
+        let initial = try store.read()
+        guard let cleanup = initial.identityCleanupWork else { return false }
+        if cleanup.retry.terminal == .succeeded {
+            _ = try store.finalizeIdentityCleanup(workID: cleanup.workID)
+            return true
+        }
+
+        try store.identityCleanupTransaction(workID: cleanup.workID) { state, current in
+            func terminalize(_ ids: [UUID], in work: inout [UUID: EpochRegistrationWork]) {
+                for id in ids where work[id] != nil {
+                    work[id]?.claim = nil
+                    work[id]?.retry.terminal = .superseded
+                    work[id]?.retry.lastErrorCode = "identity_cleanup"
+                    current.terminalizedWorkIDs.insert(id)
+                }
+            }
+            func terminalize(_ ids: [UUID], in work: inout [UUID: EpochActivationWork]) {
+                for id in ids where work[id] != nil {
+                    work[id]?.claim = nil
+                    work[id]?.retry.terminal = .superseded
+                    work[id]?.retry.lastErrorCode = "identity_cleanup"
+                    current.terminalizedWorkIDs.insert(id)
+                }
+            }
+            func terminalize(_ ids: [UUID], in work: inout [UUID: EpochSampleWork]) {
+                for id in ids where work[id] != nil {
+                    work[id]?.claim = nil
+                    work[id]?.retry.terminal = .superseded
+                    work[id]?.retry.lastErrorCode = "identity_cleanup"
+                    current.terminalizedWorkIDs.insert(id)
+                }
+            }
+            func terminalize(_ ids: [UUID], in work: inout [UUID: ActivityInstallWork]) {
+                for id in ids where work[id] != nil {
+                    work[id]?.claim = nil
+                    work[id]?.retry.terminal = .superseded
+                    work[id]?.retry.lastErrorCode = "identity_cleanup"
+                    current.terminalizedWorkIDs.insert(id)
+                }
+            }
+            terminalize(current.oldRegistrationWorkIDs, in: &state.registrationWork)
+            terminalize(current.oldActivationWorkIDs, in: &state.activationWork)
+            terminalize(current.oldSampleWorkIDs, in: &state.sampleWork)
+            terminalize(current.oldInstallWorkIDs, in: &state.installWork)
+        }
+
+        var current = try requiredIdentityCleanup(workID: cleanup.workID)
+        let fallbackKeys = current.oldFallbackKeys.filter {
+            !current.purgedFallbackKeys.contains($0)
+        }
+        if !fallbackKeys.isEmpty {
+            let purged = purgeIdentityRetryState(current.oldOwnerChildDeviceID, fallbackKeys)
+            if !purged.isEmpty {
+                try store.identityCleanupTransaction(workID: current.workID) { _, work in
+                    work.purgedFallbackKeys.formUnion(purged.intersection(work.oldFallbackKeys))
+                }
+            }
+        }
+
+        current = try requiredIdentityCleanup(workID: cleanup.workID)
+        for operationID in current.oldShieldOperationIDs
+            where !current.releasedShieldOperationIDs.contains(operationID) {
+            try releaseIdentityShield(operationID, current.oldOwnerChildDeviceID)
+            try store.identityCleanupTransaction(workID: current.workID) { _, work in
+                guard work.oldShieldOperationIDs.contains(operationID) else { return }
+                work.releasedShieldOperationIDs.insert(operationID)
+            }
+        }
+
+        current = try requiredIdentityCleanup(workID: cleanup.workID)
+        let namesToStop = current.oldActivityNames.filter {
+            !current.stopAcknowledgedActivityNames.contains($0)
+        }
+        if !namesToStop.isEmpty {
+            let activities = namesToStop.map { DeviceActivityName($0) }
+            center.stopMonitoring(activities)
+            let stillActive = Set(center.activities.map(\.rawValue))
+            let absent = Set(namesToStop).subtracting(stillActive)
+            if !absent.isEmpty {
+                try store.identityCleanupTransaction(workID: current.workID) { state, work in
+                    work.stopAcknowledgedActivityNames.formUnion(absent)
+                    for routeID in work.oldRouteIDs {
+                        guard let route = state.routes[routeID], absent.contains(route.activityName) else { continue }
+                        state.tombstones[routeID]?.stopAcknowledgedAt = clock.now
+                        for (installID, install) in state.installWork where install.routeID == routeID {
+                            state.installWork[installID]?.phase = .stopped
+                        }
+                    }
+                }
+            }
+        }
+
+        _ = try store.markIdentityCleanupSucceeded(workID: cleanup.workID)
+        return true
+    }
+
+    private func requiredIdentityCleanup(workID: UUID) throws -> IdentityCleanupWork {
+        guard let cleanup = try store.read().identityCleanupWork,
+              cleanup.workID == workID
+        else { throw DeviceEpochStoreError.ownerMismatch }
+        return cleanup
     }
 
     private func prepareReplacementIfNeeded(owner: UUID) throws {
