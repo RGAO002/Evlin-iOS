@@ -652,6 +652,31 @@ final class EarnedTimeStoreTests: XCTestCase {
         }
     }
 
+    func test_meteringCoverageReadinessProjectsExhaustionAndClearsOnIdentityReset() {
+        withIsolatedStore { store in
+            store.reconcileMeteringCoverage(
+                MonitorCoverageState(
+                    ownerChildDeviceID: UUID(),
+                    requiredFromUsageDate: "2026-07-26",
+                    requiredThroughUsageDate: "2026-08-02",
+                    readyThroughUsageDate: "2026-07-25",
+                    status: .coverageExhausted,
+                    refreshedAt: Date(timeIntervalSince1970: 1_785_081_600),
+                    errorCode: nil
+                )
+            )
+
+            XCTAssertEqual(store.meteringCoverageStatus, .coverageExhausted)
+            XCTAssertEqual(store.meteringReadyThroughUsageDate, "2026-07-25")
+            XCTAssertFalse(store.isMeteringCoverageReady)
+
+            store.clearUsageStateForIdentityChange()
+            XCTAssertNil(store.meteringCoverageStatus)
+            XCTAssertNil(store.meteringReadyThroughUsageDate)
+            XCTAssertTrue(store.isMeteringCoverageReady)
+        }
+    }
+
     func test_counterRecoveryMarkerPersistsPerDeviceAndClearsOnIdentityReset() {
         withIsolatedStore { store in
             let deviceID = UUID()

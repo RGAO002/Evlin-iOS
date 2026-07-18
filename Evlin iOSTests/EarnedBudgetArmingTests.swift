@@ -537,6 +537,13 @@ final class EarnedBudgetArmingTests: XCTestCase {
         ))
     }
 
+    func test_legacyLadderCannotReplaceDualOrActivatedV2Routes() {
+        XCTAssertTrue(EarnedBudgetScheduler.canInstallLegacyLadder(localSelection: nil))
+        XCTAssertTrue(EarnedBudgetScheduler.canInstallLegacyLadder(localSelection: .v1))
+        XCTAssertFalse(EarnedBudgetScheduler.canInstallLegacyLadder(localSelection: .dualActive))
+        XCTAssertFalse(EarnedBudgetScheduler.canInstallLegacyLadder(localSelection: .v2))
+    }
+
     func test_armSignatureSkipsWhenIdentityDatePolicySelectionAndOffsetAreUnchanged() {
         let base = EarnedBudgetArming.makeArmSignature(
             deviceID: "device-a",

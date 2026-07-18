@@ -744,6 +744,8 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
     private let capKey           = "earned.capMinutes"
     private let usageCountingAllowedKey = "evlin.usageCountingAllowed"
     private let authoritativeStateReadyDeviceIDKey = "evlin.earned.authoritativeReadyDeviceID"
+    private let meteringCoverageStatusKey = "evlin.earned.meteringCoverageStatus"
+    private let meteringReadyThroughUsageDateKey = "evlin.earned.meteringReadyThroughUsageDate"
     private let earnedUsageOffsetKey = "earned.usageCountingOffset"
     private let appLimitUsageOffsetPrefix = "evlin.appLimitUsageOffset."
     private let appLimitReportedPrefix = "evlin.appLimitReported."
@@ -771,7 +773,38 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
     /// both present. The earned-time feature cannot be enabled until this is
     /// true ([R5/R18/§5.5]).
     var isEarnedTimeReady: Bool {
-        hasMeasurableSelection && lockedSetID != nil
+        hasMeasurableSelection && lockedSetID != nil && isMeteringCoverageReady
+    }
+
+    var meteringCoverageStatus: MonitorCoverageStatus? {
+        defaults?.string(forKey: meteringCoverageStatusKey)
+            .flatMap(MonitorCoverageStatus.init(rawValue:))
+    }
+
+    var meteringReadyThroughUsageDate: String? {
+        defaults?.string(forKey: meteringReadyThroughUsageDateKey)
+    }
+
+    /// Missing coverage is the wire-compatible v1 state. Explicit exhaustion
+    /// is the only state that makes production readiness false; installLimited
+    /// still measures every date through its verified ready-through value.
+    var isMeteringCoverageReady: Bool {
+        meteringCoverageStatus != .coverageExhausted
+    }
+
+    func reconcileMeteringCoverage(_ coverage: MonitorCoverageState?) {
+        if let coverage {
+            defaults?.set(coverage.status.rawValue, forKey: meteringCoverageStatusKey)
+            if let readyThrough = coverage.readyThroughUsageDate {
+                defaults?.set(readyThrough, forKey: meteringReadyThroughUsageDateKey)
+            } else {
+                defaults?.removeObject(forKey: meteringReadyThroughUsageDateKey)
+            }
+        } else {
+            defaults?.removeObject(forKey: meteringCoverageStatusKey)
+            defaults?.removeObject(forKey: meteringReadyThroughUsageDateKey)
+        }
+        defaults?.synchronize()
     }
 
     func markAuthoritativeStateReady(deviceID: UUID) {
@@ -1583,7 +1616,8 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
          lockedSetAllSelectedKey,
          backendKey, lastBackendSyncAtKey, estimateKey, acceptedUsageDateKey,
          acceptedEstimateKey, runtimeTimezoneKey, poolKey, capKey, usageCountingAllowedKey,
-         authoritativeStateReadyDeviceIDKey, earnedUsageOffsetKey].forEach {
+         authoritativeStateReadyDeviceIDKey, meteringCoverageStatusKey,
+         meteringReadyThroughUsageDateKey, earnedUsageOffsetKey].forEach {
             defaults?.removeObject(forKey: $0)
         }
         // Sweep any per-date override flags and per-app usage offsets.

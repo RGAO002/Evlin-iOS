@@ -401,6 +401,18 @@ enum EarnedBudgetArming {
         let current = canonicalDeviceIdentity(currentRaw) ?? currentRaw
         guard let currentDeviceID = UUID(uuidString: currentRaw) else { return }
 
+        let localProtocolSelection = (try? DeviceEpochStore.shared.read())?
+            .ratchets[currentDeviceID]?.localSelection
+        guard EarnedBudgetScheduler.canInstallLegacyLadder(
+            localSelection: localProtocolSelection
+        ) else {
+            CommandDeliveryDiagnostics.record(
+                CommandDeliveryDiagnostics.keyEarnedArmAttempt,
+                "skipped v2-metering-selected device=\(current)"
+            )
+            return
+        }
+
         let store = EarnedTimeStore.shared
         let defaults = UserDefaults(suiteName: EarnedTimeStore.appGroupSuiteName)
         guard EarnedActivityGeneration.canonicalDeviceID(

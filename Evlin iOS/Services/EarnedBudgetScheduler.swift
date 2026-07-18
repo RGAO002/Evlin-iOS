@@ -62,6 +62,15 @@ final class EarnedBudgetScheduler {
         )
     }
 
+    /// Once a v2 route is in handoff, the legacy monitor is a protected prior
+    /// lane. Re-arming it would replace the physical counter underneath the
+    /// epoch protocol and recreate the threshold-churn bug.
+    nonisolated static func canInstallLegacyLadder(
+        localSelection: MeteringLocalProtocolSelection?
+    ) -> Bool {
+        localSelection == nil || localSelection == .v1
+    }
+
     nonisolated static func makeEvent(
         selection: FamilyActivitySelection,
         thresholdMinutes: Int

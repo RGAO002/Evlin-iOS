@@ -212,13 +212,14 @@ final class BigKidStatePollerTests: XCTestCase {
                 XCTAssertEqual(receivedRuntime, runtime)
                 events.append("epoch")
             },
+            syncMeteringCoverage: { events.append("coverage") },
             markAuthoritativeReady: { _ in events.append("ready") },
             ensureEarnedArmed: { events.append("arm") }
         )
 
         await poller.refreshNow()
 
-        XCTAssertEqual(events, ["mirror", "apply", "runtime", "gate", "epoch", "ready", "arm"])
+        XCTAssertEqual(events, ["mirror", "apply", "runtime", "gate", "epoch", "coverage", "ready", "arm"])
     }
 
     func test_refresh_identityTransitionDoesNotArmBeforeRuntimeAndGate() async {

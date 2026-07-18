@@ -60,7 +60,12 @@ final class EarnedMeteringRecoveryDriver {
     func recover(ownerChildDeviceID owner: UUID) async throws {
         if try recoverIdentityCleanupIfPresent() { return }
         guard store.isCurrentOwner(owner) else { return }
-        if try await recoverCanonicalRolloverIfPresent(owner: owner) { return }
+        if try await recoverCanonicalRolloverIfPresent(owner: owner) {
+            if try store.read().rolloverEffectsWork?.activationAcknowledged == true {
+                try reconcileCoverage(owner: owner)
+            }
+            return
+        }
 
         try prepareReplacementIfNeeded(owner: owner)
         await delivery.drain(owner: owner)
@@ -78,6 +83,23 @@ final class EarnedMeteringRecoveryDriver {
         try stopRetiredLane(owner: owner)
         try stopAbandonedConservativeCandidates(owner: owner)
         try stopAuthoritativeBaseRejectedCandidates(owner: owner)
+        try reconcileCoverage(owner: owner)
+    }
+
+    private func reconcileCoverage(owner: UUID) throws {
+        guard let coverage = try installer.refreshCoverage(ownerChildDeviceID: owner),
+              coverage.status == .coverageExhausted
+        else { return }
+        let references = try store.read().shieldReferences.values
+            .filter { $0.ownerChildDeviceID == owner }
+            .sorted {
+                if $0.createdAt != $1.createdAt { return $0.createdAt < $1.createdAt }
+                return $0.operationID.uuidString.lowercased()
+                    < $1.operationID.uuidString.lowercased()
+            }
+        for reference in references {
+            try releaseIdentityShield(reference.operationID, owner)
+        }
     }
 
     /// Reconciles the server-authoritative accounting gate without stopping

@@ -50,6 +50,111 @@ final class DatedRouteInstaller {
         return results
     }
 
+    /// Projects the bounded product horizon from Apple's currently installed
+    /// activities. Persisted install phases are not sufficient proof: another
+    /// Screen Time client or the daemon may have removed a route after Evlin
+    /// last wrote its state.
+    @discardableResult
+    func refreshCoverage(ownerChildDeviceID owner: UUID) throws -> MonitorCoverageState? {
+        let state = try store.read()
+        guard state.ownerChildDeviceID == owner else { return nil }
+        let generation = state.activeGenerationID
+            .flatMap { state.generations[$0] }
+            ?? state.generations.values
+                .filter { $0.childDeviceID == owner && $0.retiredAt == nil }
+                .sorted {
+                    if $0.createdAt != $1.createdAt { return $0.createdAt > $1.createdAt }
+                    return $0.generationID.uuidString.lowercased()
+                        < $1.generationID.uuidString.lowercased()
+                }
+                .first
+        guard let generation,
+              generation.childDeviceID == owner,
+              generation.retiredAt == nil,
+              let timeZone = TimeZone(identifier: generation.canonicalTimezone)
+        else { return nil }
+
+        guard let today = MeteringEpochContract.canonicalUsageDate(
+            at: clock.now,
+            timezoneIdentifier: generation.canonicalTimezone
+        ) else { return nil }
+        let requiredDates = try MeteringHorizonPlanner.requiredUsageDates(
+            today: today,
+            timeZone: timeZone
+        )
+        guard let requiredFrom = requiredDates.first,
+              let requiredThrough = requiredDates.last
+        else { return nil }
+
+        let functioningRouteIDs = Set(state.installWork.values.compactMap { work -> UUID? in
+            switch work.phase {
+            case .verified, .dualActive, .active:
+                return work.routeID
+            case .pendingStart, .starting, .installed, .pendingStop, .stopped:
+                return nil
+            }
+        })
+        let routesByDate = Dictionary(grouping: state.routes.values.filter {
+            $0.ownerChildDeviceID == owner
+                && $0.generationID == generation.generationID
+                && requiredDates.contains($0.usageDate)
+                && state.hasEligibleRouteEpochGeneration(
+                    owner: owner,
+                    route: $0,
+                    epoch: state.epochs[$0.epochID],
+                    generation: generation
+                )
+        }, by: \.usageDate)
+
+        var readyThrough: String?
+        for usageDate in requiredDates {
+            let covered = routesByDate[usageDate, default: []].contains { route in
+                guard functioningRouteIDs.contains(route.routeID),
+                      let expected = try? expectedConfiguration(for: route, state: state)
+                else { return false }
+                return daemonMatches(
+                    activity: DeviceActivityName(route.activityName),
+                    expected: expected
+                )
+            }
+            guard covered else { break }
+            readyThrough = usageDate
+        }
+
+        let errorCode = state.installWork.values
+            .filter { work in
+                guard let route = state.routes[work.routeID] else { return false }
+                return route.generationID == generation.generationID
+                    && requiredDates.contains(route.usageDate)
+                    && work.retry.lastErrorCode == "excessiveActivities"
+                    && work.retry.terminal == .pending
+            }
+            .map(\.retry.lastErrorCode)
+            .compactMap { $0 }
+            .first
+        let status: MonitorCoverageStatus
+        if readyThrough == requiredThrough {
+            status = .ready
+        } else if readyThrough == nil || (readyThrough ?? "") < today {
+            status = .coverageExhausted
+        } else {
+            status = .installLimited
+        }
+        let coverage = MonitorCoverageState(
+            ownerChildDeviceID: owner,
+            requiredFromUsageDate: requiredFrom,
+            requiredThroughUsageDate: requiredThrough,
+            readyThroughUsageDate: readyThrough,
+            status: status,
+            refreshedAt: clock.now,
+            errorCode: status == .ready ? nil : errorCode
+        )
+        try store.transaction(expectedOwner: owner) { state in
+            state.coverage = coverage
+        }
+        return coverage
+    }
+
     private func reconcileClaimed(_ claimed: (work: ActivityInstallWork, priorPhase: ActivityInstallPhase, claim: ActivityInstallClaim), owner: UUID) throws -> ClaimedReconcileOutcome {
         let state: DeviceEpochStoreState
         do {

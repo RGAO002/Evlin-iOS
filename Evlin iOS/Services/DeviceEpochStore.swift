@@ -968,7 +968,12 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                 $0.oldOwnerChildDeviceID == expected.ownerChildDeviceID
                     && $0.oldShieldOperationIDs.contains(expected.operationID)
             } ?? false
-        return correctionOrRetirement || rollover || identityCleanup
+            let coverageExpired = state.coverage.map {
+                $0.ownerChildDeviceID == expected.ownerChildDeviceID
+                    && $0.status == .coverageExhausted
+                    && route.usageDate < $0.requiredFromUsageDate
+            } ?? false
+        return correctionOrRetirement || rollover || identityCleanup || coverageExpired
     }
 
     private func canApplyEarnedShieldReference(
@@ -1305,7 +1310,7 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
     ) -> Bool {
         guard let coverage = state.coverage else { return true }
         return coverage.ownerChildDeviceID == owner
-            && coverage.status == .ready
+            && coverage.status != .coverageExhausted
             && (coverage.readyThroughUsageDate ?? "") >= route.usageDate
     }
 
