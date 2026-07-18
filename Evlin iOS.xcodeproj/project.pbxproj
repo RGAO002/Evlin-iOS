@@ -162,6 +162,7 @@
 				Services/DefaultLockGroupStore.swift,
 				Services/DeviceEpochStore.swift,
 				Services/DatedRouteInstaller.swift,
+				Services/EarnedMeteringRecoveryDriver.swift,
 				Services/EarnedSampleReporter.swift,
 				Services/EarnedShieldEffectStore.swift,
 				Services/EarnedTimeStore.swift,

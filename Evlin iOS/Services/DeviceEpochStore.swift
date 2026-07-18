@@ -1336,9 +1336,7 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                 let candidateInstallIsActive = state.installWork.values.contains {
                     $0.routeID == handoff.toRouteID && $0.phase == .active
                 }
-                let priorInstallIsStopped = state.installWork.values.contains {
-                    $0.routeID == handoff.fromRouteID && $0.phase == .stopped
-                }
+                let priorInstallPhase = state.installWork.values.first { $0.routeID == handoff.fromRouteID }?.phase
                 let priorTombstone = state.tombstones[handoff.fromRouteID]
                 guard state.activeRouteID == handoff.toRouteID,
                       state.activeEpochID == handoff.toEpochID,
@@ -1353,13 +1351,24 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                       fromEpoch.retiredAt != nil,
                       fromEpoch.retireReason != nil,
                       fromRoute.lifecycle == .tombstoned,
-                      priorTombstone?.stopAcknowledgedAt != nil,
-                      priorInstallIsStopped,
+                      priorInstallPhase == .pendingStop || priorInstallPhase == .stopped,
                       handoff.registrationAcknowledgedAt != nil,
-                      handoff.activationAcknowledgedAt != nil,
-                      handoff.priorStopAcknowledgedAt != nil
+                      handoff.activationAcknowledgedAt != nil
                 else {
                     throw DeviceEpochStoreInvariantError.invalidState("handoff collection prerequisites are incomplete")
+                }
+                if priorInstallPhase == .stopped {
+                    guard priorTombstone?.stopAcknowledgedAt != nil,
+                          handoff.priorStopAcknowledgedAt != nil
+                    else {
+                        throw DeviceEpochStoreInvariantError.invalidState("stopped prior route is missing absence acknowledgement")
+                    }
+                } else {
+                    guard priorTombstone?.stopAcknowledgedAt == nil,
+                          handoff.priorStopAcknowledgedAt == nil
+                    else {
+                        throw DeviceEpochStoreInvariantError.invalidState("pending prior stop is unexpectedly acknowledged")
+                    }
                 }
             }
         }

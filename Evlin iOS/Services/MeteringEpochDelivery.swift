@@ -253,7 +253,7 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
             guard response.meteringProtocolVersion == 2 else {
                 return .terminal(code: "protocol_mismatch")
             }
-            guard response.epochStatus == .active else {
+            guard response.status == .alreadyActivated || response.epochStatus == .active else {
                 return .terminal(code: "epoch_not_active")
             }
             guard response.status == .activated || response.status == .alreadyActivated else {
