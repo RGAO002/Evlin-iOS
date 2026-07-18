@@ -96,7 +96,7 @@ final class MeteringEpochPhase3VectorTests: XCTestCase {
         )
     }
 
-    func testPhase3GoldenVectorsEvaluateAllProductionEffects() throws {
+    func testPhase3GoldenVectorsEvaluateAllReferenceEffects() throws {
         let suite = try MeteringGoldenVectorSuite.load()
         let executed = suite.phase3Cases.map { vector in
             let actual = MeteringReferenceRules.evaluatePhase3(vector.input)

@@ -66,6 +66,26 @@ final class ShieldRecordSourceMigrationTests: XCTestCase {
         XCTAssertEqual(record.sources, [.manual])
     }
 
+    func test_emptyLegacySourceFormsDecodeAsManual() throws {
+        let base = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: Data(legacyRecordJSON.utf8))
+                as? [String: Any]
+        )
+        let overrides: [[String: Any]] = [
+            ["source": ""],
+            ["sources": [""]],
+            ["sources": []]
+        ]
+
+        for override in overrides {
+            var object = base
+            override.forEach { object[$0.key] = $0.value }
+            let data = try JSONSerialization.data(withJSONObject: object)
+            let record = try evlinDecoder().decode(ShieldRecord.self, from: data)
+            XCTAssertEqual(record.sources, [.manual], "Empty source form must default to {.manual}: \(override)")
+        }
+    }
+
     /// A JSON object whose `source` is a value NO current case matches (e.g. a
     /// future `"schedule"` written by a newer app and read by an older extension
     /// binary). `ShieldSource`'s synthesized `RawRepresentable` decode would THROW

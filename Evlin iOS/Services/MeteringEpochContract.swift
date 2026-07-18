@@ -1641,6 +1641,9 @@ nonisolated enum MeteringReferenceRules {
         }
     }
 
+    /// Pure reference-model observations shared with the backend fixture.
+    /// Tasks 9-19 bind these expected effects to the concrete store, monitor,
+    /// transport, and shield implementations before the phase can close.
     static func evaluatePhase3(_ input: MeteringPhase3Input) -> MeteringPhase3Observation {
         let value = input.value.objectValue
         let kind = input.kind
