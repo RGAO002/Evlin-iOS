@@ -1,6 +1,17 @@
 import DeviceActivity
 import Foundation
 
+nonisolated enum MeteringRolloverLocalEffect: String, CaseIterable, Hashable, Sendable {
+    case earnedSource
+    case perApp
+    case taskState
+    case bypassExpiry
+}
+
+private enum EarnedMeteringRecoveryError: Error {
+    case invalidRollover(String)
+}
+
 @MainActor
 final class EarnedMeteringRecoveryDriver {
     private let store: DeviceEpochStore
@@ -11,6 +22,7 @@ final class EarnedMeteringRecoveryDriver {
     private let clock: any MeteringClock
     private let purgeIdentityRetryState: (UUID, [String]) -> Set<String>
     private let releaseIdentityShield: (UUID, UUID) throws -> Void
+    private let resetRolloverEffect: (MeteringRolloverLocalEffect, RolloverEffectsWork) throws -> Void
 
     init(
         store: DeviceEpochStore = .shared,
@@ -20,7 +32,8 @@ final class EarnedMeteringRecoveryDriver {
         processIdentity: MeteringProcessIdentity,
         clock: any MeteringClock = MeteringRuntimeClock.live(),
         purgeIdentityRetryState: ((UUID, [String]) -> Set<String>)? = nil,
-        releaseIdentityShield: ((UUID, UUID) throws -> Void)? = nil
+        releaseIdentityShield: ((UUID, UUID) throws -> Void)? = nil,
+        resetRolloverEffect: ((MeteringRolloverLocalEffect, RolloverEffectsWork) throws -> Void)? = nil
     ) {
         self.store = store
         self.delivery = delivery
@@ -35,11 +48,15 @@ final class EarnedMeteringRecoveryDriver {
         self.releaseIdentityShield = releaseIdentityShield ?? { operationID, owner in
             try effectStore.release(operationID: operationID, expectedOwner: owner)
         }
+        self.resetRolloverEffect = resetRolloverEffect ?? { _, _ in
+            throw EarnedMeteringRecoveryError.invalidRollover("reset adapter unavailable")
+        }
     }
 
     func recover(ownerChildDeviceID owner: UUID) async throws {
         if try recoverIdentityCleanupIfPresent() { return }
         guard store.isCurrentOwner(owner) else { return }
+        if try await recoverCanonicalRolloverIfPresent(owner: owner) { return }
 
         try prepareReplacementIfNeeded(owner: owner)
         await delivery.drain(owner: owner)
@@ -55,6 +72,244 @@ final class EarnedMeteringRecoveryDriver {
         try prepareReplacementIfNeeded(owner: owner)
         try stopRetiredLane(owner: owner)
         try stopAuthoritativeBaseRejectedCandidates(owner: owner)
+    }
+
+    private func recoverCanonicalRolloverIfPresent(owner: UUID) async throws -> Bool {
+        guard var work = try store.read().rolloverEffectsWork,
+              work.ownerChildDeviceID == owner
+        else { return false }
+        if work.retry.terminal == .succeeded { return false }
+
+        for effect in MeteringRolloverLocalEffect.allCases where !rolloverEffectAcknowledged(effect, work: work) {
+            try resetRolloverEffect(effect, work)
+            try acknowledgeRolloverEffect(effect, workID: work.workID, owner: owner)
+            guard let refreshed = try store.read().rolloverEffectsWork else {
+                throw EarnedMeteringRecoveryError.invalidRollover("work disappeared during reset")
+            }
+            work = refreshed
+        }
+
+        // Settle older-due horizon install work before the rollover envelope
+        // asks delivery to dispatch its registration and activation children.
+        // The exact new-day route must already verify before dualV2 begins.
+        _ = try installer.reconcile(ownerChildDeviceID: owner)
+        try prepareRolloverHandoff(workID: work.workID, owner: owner)
+        try advanceRolloverBarrier(workID: work.workID, owner: owner)
+        await delivery.drain(owner: owner)
+        try acknowledgeRolloverRegistrationAndEnqueueActivation(workID: work.workID, owner: owner)
+        await delivery.drain(owner: owner)
+        try commitRolloverActivation(workID: work.workID, owner: owner)
+        try stopRolloverPriorRoute(workID: work.workID, owner: owner)
+        if try store.read().rolloverEffectsWork?.retry.terminal == .succeeded {
+            await delivery.drain(owner: owner)
+        }
+        return true
+    }
+
+    private func rolloverEffectAcknowledged(
+        _ effect: MeteringRolloverLocalEffect,
+        work: RolloverEffectsWork
+    ) -> Bool {
+        switch effect {
+        case .earnedSource: return work.earnedSourceResetAcknowledged
+        case .perApp: return work.perAppResetAcknowledged
+        case .taskState: return work.taskStateResetAcknowledged
+        case .bypassExpiry: return work.bypassExpiryAcknowledged
+        }
+    }
+
+    private func acknowledgeRolloverEffect(
+        _ effect: MeteringRolloverLocalEffect,
+        workID: UUID,
+        owner: UUID
+    ) throws {
+        try store.transaction(expectedOwner: owner) { state in
+            guard var current = state.rolloverEffectsWork, current.workID == workID else {
+                throw EarnedMeteringRecoveryError.invalidRollover("work changed")
+            }
+            switch effect {
+            case .earnedSource: current.earnedSourceResetAcknowledged = true
+            case .perApp: current.perAppResetAcknowledged = true
+            case .taskState: current.taskStateResetAcknowledged = true
+            case .bypassExpiry: current.bypassExpiryAcknowledged = true
+            }
+            state.rolloverEffectsWork = current
+        }
+    }
+
+    private func prepareRolloverHandoff(workID: UUID, owner: UUID) throws {
+        try store.transaction(expectedOwner: owner) { state in
+            guard var work = state.rolloverEffectsWork, work.workID == workID,
+                  let oldRoute = state.routes[work.oldRouteID],
+                  let newRoute = state.routes[work.newRouteID],
+                  oldRoute.epochID == work.oldEpochID,
+                  newRoute.epochID == work.newEpochID,
+                  oldRoute.usageDate == work.fromUsageDate,
+                  newRoute.usageDate == work.toUsageDate,
+                  state.activeRouteID == oldRoute.routeID,
+                  state.activeEpochID == oldRoute.epochID,
+                  oldRoute.lifecycle == .active,
+                  let newInstallID = uniqueInstallKey(for: newRoute.routeID, in: state),
+                  state.installWork[newInstallID]?.phase == .verified
+            else { return }
+
+            if state.v2RouteHandoff == nil {
+                state.v2RouteHandoff = V2RouteHandoff(
+                    handoffID: work.workID,
+                    ownerChildDeviceID: owner,
+                    fromGenerationID: oldRoute.generationID,
+                    fromEpochID: oldRoute.epochID,
+                    fromRouteID: oldRoute.routeID,
+                    toGenerationID: newRoute.generationID,
+                    toEpochID: newRoute.epochID,
+                    toRouteID: newRoute.routeID,
+                    phase: .dualV2,
+                    priorRouteInputClosedAt: nil,
+                    registrationAcknowledgedAt: nil,
+                    activationAcknowledgedAt: nil,
+                    priorStopAcknowledgedAt: nil,
+                    createdAt: work.createdAt
+                )
+            }
+            guard state.v2RouteHandoff?.handoffID == work.workID else { return }
+            state.routes[newRoute.routeID]?.lifecycle = .active
+            state.installWork[newInstallID]?.authorization = .offlinePending
+            state.installWork[newInstallID]?.phase = .dualActive
+            work.installAcknowledged = true
+            state.rolloverEffectsWork = work
+        }
+    }
+
+    private func advanceRolloverBarrier(workID: UUID, owner: UUID) throws {
+        try store.transaction(expectedOwner: owner) { state in
+            guard let work = state.rolloverEffectsWork, work.workID == workID,
+                  var handoff = state.v2RouteHandoff,
+                  handoff.handoffID == workID,
+                  handoff.phase == .dualV2,
+                  !hasNonterminalPriorRouteWork(work.oldRouteID, in: state),
+                  let epoch = state.epochs[work.newEpochID]
+            else { return }
+            handoff.phase = .cutoverReady
+            handoff.priorRouteInputClosedAt = clock.now
+            state.v2RouteHandoff = handoff
+            guard !state.registrationWork.values.contains(where: {
+                $0.epochID == work.newEpochID && $0.routeID == work.newRouteID
+                    && ($0.retry.terminal == .pending || $0.retry.terminal == .succeeded)
+            }) else { return }
+            let registrationID = UUID()
+            state.registrationWork[registrationID] = EpochRegistrationWork(
+                workID: registrationID,
+                ownerChildDeviceID: owner,
+                epochID: work.newEpochID,
+                routeID: work.newRouteID,
+                request: registrationRequest(epoch: epoch, reason: .dayRollover),
+                claim: nil,
+                retry: pendingRetry(),
+                createdAt: clock.now
+            )
+        }
+    }
+
+    private func acknowledgeRolloverRegistrationAndEnqueueActivation(workID: UUID, owner: UUID) throws {
+        try store.transaction(expectedOwner: owner) { state in
+            guard var work = state.rolloverEffectsWork, work.workID == workID,
+                  var handoff = state.v2RouteHandoff,
+                  handoff.handoffID == workID,
+                  handoff.phase == .cutoverReady,
+                  let route = state.routes[work.newRouteID],
+                  hasUniqueSuccessfulRegistration(route, owner: owner, in: state)
+            else { return }
+            work.registrationAcknowledged = true
+            handoff.registrationAcknowledgedAt = clock.now
+            state.rolloverEffectsWork = work
+            state.v2RouteHandoff = handoff
+            enqueueActivationIfNeeded(route: route, owner: owner, state: &state)
+        }
+    }
+
+    private func commitRolloverActivation(workID: UUID, owner: UUID) throws {
+        try store.transaction(expectedOwner: owner) { state in
+            guard var work = state.rolloverEffectsWork, work.workID == workID,
+                  var handoff = state.v2RouteHandoff,
+                  handoff.handoffID == workID,
+                  handoff.phase == .cutoverReady,
+                  hasSuccessfulActivation(work.newRouteID, in: state),
+                  var oldRoute = state.routes[work.oldRouteID],
+                  var oldEpoch = state.epochs[work.oldEpochID],
+                  let newInstallID = uniqueInstallKey(for: work.newRouteID, in: state),
+                  state.installWork[newInstallID]?.phase == .dualActive,
+                  let oldInstallID = uniqueInstallKey(for: work.oldRouteID, in: state),
+                  state.installWork[oldInstallID]?.phase == .active,
+                  let dayEnd = state.canonicalDayEnd(
+                    usageDate: work.fromUsageDate,
+                    timeZoneIdentifier: oldEpoch.canonicalTimezone
+                  )
+            else { return }
+            state.activeGenerationID = oldRoute.generationID
+            state.activeEpochID = work.newEpochID
+            state.activeRouteID = work.newRouteID
+            state.routes[work.newRouteID]?.lifecycle = .active
+            state.installWork[newInstallID]?.phase = .active
+            oldRoute.lifecycle = .tombstoned
+            state.routes[oldRoute.routeID] = oldRoute
+            oldEpoch.status = .retired
+            oldEpoch.retiredAt = clock.now
+            oldEpoch.retireReason = .dayRollover
+            state.epochs[oldEpoch.epochID] = oldEpoch
+            state.tombstones[oldRoute.routeID] = MeteringRouteTombstone(
+                routeID: oldRoute.routeID,
+                activityName: oldRoute.activityName,
+                eventNames: oldRoute.plannedEvents.map(\.eventName),
+                ownerChildDeviceID: owner,
+                usageDate: oldRoute.usageDate,
+                epochID: oldRoute.epochID,
+                generationID: oldRoute.generationID,
+                canonicalDayEnd: dayEnd,
+                stopAcknowledgedAt: nil,
+                referencedWorkIDs: Set(state.sampleWork.values.filter { $0.routeID == oldRoute.routeID }.map(\.workID)),
+                retainedUntil: nil
+            )
+            state.installWork[oldInstallID]?.phase = .pendingStop
+            handoff.phase = .committed
+            handoff.activationAcknowledgedAt = clock.now
+            state.v2RouteHandoff = handoff
+            work.activationAcknowledged = true
+            state.rolloverEffectsWork = work
+        }
+    }
+
+    private func stopRolloverPriorRoute(workID: UUID, owner: UUID) throws {
+        let state = try store.read()
+        guard let work = state.rolloverEffectsWork, work.workID == workID,
+              !work.oldStopAcknowledged,
+              let route = state.routes[work.oldRouteID],
+              state.v2RouteHandoff?.phase == .committed
+        else { return }
+        let activity = DeviceActivityName(route.activityName)
+        center.stopMonitoring([activity])
+        guard !center.activities.contains(activity) else { return }
+        let acknowledgedAt = clock.now
+        try store.transaction(expectedOwner: owner) { state in
+            guard var current = state.rolloverEffectsWork, current.workID == workID,
+                  let installID = uniqueInstallKey(for: current.oldRouteID, in: state),
+                  state.installWork[installID]?.phase == .pendingStop,
+                  var tombstone = state.tombstones[current.oldRouteID]
+            else { return }
+            state.installWork[installID]?.phase = .stopped
+            tombstone.stopAcknowledgedAt = acknowledgedAt
+            tombstone.retainedUntil = max(
+                tombstone.canonicalDayEnd.addingTimeInterval(48 * 3_600),
+                acknowledgedAt.addingTimeInterval(24 * 3_600)
+            )
+            state.tombstones[current.oldRouteID] = tombstone
+            current.oldStopAcknowledged = true
+            current.retry.terminal = .succeeded
+            state.rolloverEffectsWork = current
+            if var handoff = state.v2RouteHandoff, handoff.handoffID == workID {
+                handoff.priorStopAcknowledgedAt = acknowledgedAt
+                state.v2RouteHandoff = handoff
+            }
+        }
     }
 
     /// Identity cleanup must run before the mutable-owner guard. Its exact
@@ -559,7 +814,10 @@ final class EarnedMeteringRecoveryDriver {
         )
     }
 
-    private func registrationRequest(epoch: DeviceDailyEpoch) -> EpochRegistrationRequestDTO {
+    private func registrationRequest(
+        epoch: DeviceDailyEpoch,
+        reason: EpochRegistrationReasonDTO = .initial
+    ) -> EpochRegistrationRequestDTO {
         EpochRegistrationRequestDTO(
             protocolVersion: 2,
             epochID: epoch.epochID,
@@ -571,7 +829,7 @@ final class EarnedMeteringRecoveryDriver {
             enforcementSetID: epoch.enforcementSetID,
             startedAt: epoch.startedAt,
             baseAcceptedMinutes: epoch.baseAcceptedMinutes,
-            reason: .initial
+            reason: reason
         )
     }
 

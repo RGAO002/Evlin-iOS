@@ -766,6 +766,123 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         }
     }
 
+    /// Adopts the already-reserved route for the next canonical usage date.
+    /// Preparation is one atomic, idempotent write and deliberately leaves the
+    /// old route active until recovery has verified every new-day effect.
+    @discardableResult
+    func prepareCanonicalRollover(
+        owner: UUID,
+        toUsageDate: String,
+        now: Date
+    ) throws -> UUID {
+        try transaction(expectedOwner: owner) { state in
+            guard let oldRouteID = state.activeRouteID,
+                  let oldRoute = state.routes[oldRouteID],
+                  oldRoute.ownerChildDeviceID == owner,
+                  oldRoute.lifecycle == .active,
+                  let oldEpoch = state.epochs[oldRoute.epochID],
+                  oldEpoch.childDeviceID == owner
+            else {
+                throw DeviceEpochStoreInvariantError.invalidState(
+                    "rollover has no active old route"
+                )
+            }
+
+            if let existing = state.rolloverEffectsWork,
+               existing.retry.terminal == .pending {
+                guard existing.ownerChildDeviceID == owner,
+                      existing.fromUsageDate == oldRoute.usageDate,
+                      existing.toUsageDate == toUsageDate,
+                      existing.oldEpochID == oldEpoch.epochID,
+                      existing.oldRouteID == oldRoute.routeID,
+                      let existingNewRoute = state.routes[existing.newRouteID],
+                      existingNewRoute.epochID == existing.newEpochID,
+                      existingNewRoute.usageDate == existing.toUsageDate,
+                      existingNewRoute.lifecycle == .planned || existingNewRoute.lifecycle == .active,
+                      let existingNewEpoch = state.epochs[existing.newEpochID],
+                      existingNewEpoch.usageDate == existing.toUsageDate
+                else {
+                    throw DeviceEpochStoreInvariantError.invalidState(
+                        "a different rollover is already pending"
+                    )
+                }
+                return existing.workID
+            }
+
+            let nextUsageDate = state.routes.values
+                .filter { route in
+                    route.ownerChildDeviceID == owner
+                        && route.generationID == oldRoute.generationID
+                        && route.usageDate > oldRoute.usageDate
+                        && route.lifecycle == .planned
+                }
+                .map(\.usageDate)
+                .min()
+            guard let nextUsageDate,
+                  nextUsageDate == toUsageDate,
+                  let newRoute = state.routes.values.first(where: {
+                      $0.ownerChildDeviceID == owner
+                          && $0.generationID == oldRoute.generationID
+                          && $0.usageDate == toUsageDate
+                          && $0.lifecycle == .planned
+                  }),
+                  let newEpoch = state.epochs[newRoute.epochID],
+                  newEpoch.childDeviceID == owner,
+                  newEpoch.usageDate == toUsageDate
+            else {
+                throw DeviceEpochStoreInvariantError.invalidState(
+                    "rollover does not target the next reserved canonical route"
+                )
+            }
+
+            if let existing = state.rolloverEffectsWork {
+                guard existing.retry.terminal == .succeeded,
+                      existing.ownerChildDeviceID == owner,
+                      existing.newEpochID == oldEpoch.epochID,
+                      existing.newRouteID == oldRoute.routeID,
+                      existing.oldStopAcknowledged,
+                      let completedHandoff = state.v2RouteHandoff,
+                      completedHandoff.handoffID == existing.workID,
+                      completedHandoff.phase == .committed,
+                      completedHandoff.priorStopAcknowledgedAt != nil
+                else {
+                    throw DeviceEpochStoreInvariantError.invalidState(
+                        "completed rollover cannot advance to the next day"
+                    )
+                }
+                state.v2RouteHandoff = nil
+            }
+
+            let workID = UUID()
+            state.rolloverEffectsWork = RolloverEffectsWork(
+                workID: workID,
+                ownerChildDeviceID: owner,
+                fromUsageDate: oldRoute.usageDate,
+                toUsageDate: toUsageDate,
+                oldEpochID: oldEpoch.epochID,
+                newEpochID: newEpoch.epochID,
+                oldRouteID: oldRoute.routeID,
+                newRouteID: newRoute.routeID,
+                retry: MeteringRetryState(
+                    attemptCount: 0,
+                    nextAttemptAt: now,
+                    lastErrorCode: nil,
+                    terminal: .pending
+                ),
+                earnedSourceResetAcknowledged: false,
+                perAppResetAcknowledged: false,
+                taskStateResetAcknowledged: false,
+                bypassExpiryAcknowledged: false,
+                registrationAcknowledged: false,
+                installAcknowledged: false,
+                activationAcknowledged: false,
+                oldStopAcknowledged: false,
+                createdAt: now
+            )
+            return workID
+        }
+    }
+
     /// Preflight only. The effect store calls this before it durably records a
     /// prepared envelope so failed authorization cannot leave orphaned effect
     /// state behind.
@@ -1202,7 +1319,12 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
               handoff.toGenerationID == route.generationID,
               handoff.phase == .dualV2 || handoff.phase == .cutoverReady,
               state.hasExactHandoffPriorProvenance(owner: owner, handoff: handoff),
-              state.routes[handoff.fromRouteID]?.usageDate == route.usageDate
+              (state.routes[handoff.fromRouteID]?.usageDate == route.usageDate
+                || state.isExactCanonicalRolloverCandidate(
+                    owner: owner,
+                    handoff: handoff,
+                    route: route
+                ))
         else { return .discarded("unregistered_route_not_candidate") }
         return .accepted(.waitingForRegistration)
     }
@@ -1454,6 +1576,44 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
             let due: MeteringDueWork
             if isEligible(state, first) {
                 due = first
+            } else if first.kind == .rollover,
+                      let rollover = state.rolloverEffectsWork,
+                      rollover.workID == first.workID,
+                      rollover.retry.terminal == .pending,
+                      let handoff = state.v2RouteHandoff,
+                      handoff.handoffID == rollover.workID,
+                      handoff.ownerChildDeviceID == owner,
+                      let childWork = dueWork.dropFirst().first(where: { item in
+                          guard isEligible(state, item) else { return false }
+                          switch item.kind {
+                          case .registration:
+                              return state.registrationWork.values.contains {
+                                  $0.workID == item.workID
+                                      && $0.epochID == rollover.newEpochID
+                                      && $0.routeID == rollover.newRouteID
+                              }
+                          case .activation:
+                              return state.activationWork.values.contains {
+                                  $0.workID == item.workID
+                                      && $0.epochID == rollover.newEpochID
+                                      && $0.routeID == rollover.newRouteID
+                              }
+                          case .sample:
+                              return handoff.phase == .dualV2
+                                  && state.sampleWork.values.contains {
+                                      $0.workID == item.workID
+                                          && $0.epochID == rollover.oldEpochID
+                                          && $0.routeID == rollover.oldRouteID
+                                  }
+                          case .identityCleanup, .rollover, .install, .shield:
+                              return false
+                          }
+                      })
+            {
+                // Rollover remains the controlling highest-priority envelope;
+                // only its exact old-route drain and new-route network children
+                // may pass it.
+                due = childWork
             } else {
                 guard let handoff = state.v2RouteHandoff,
                       handoff.ownerChildDeviceID == owner,
@@ -2417,6 +2577,25 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
 }
 
 extension DeviceEpochStoreState {
+    func isExactCanonicalRolloverCandidate(
+        owner: UUID,
+        handoff: V2RouteHandoff,
+        route: MeteringCallbackRoute
+    ) -> Bool {
+        guard let rollover = rolloverEffectsWork else { return false }
+        return rollover.retry.terminal == .pending
+            && rollover.ownerChildDeviceID == owner
+            && rollover.workID == handoff.handoffID
+            && rollover.oldEpochID == handoff.fromEpochID
+            && rollover.newEpochID == handoff.toEpochID
+            && rollover.oldRouteID == handoff.fromRouteID
+            && rollover.newRouteID == handoff.toRouteID
+            && rollover.newRouteID == route.routeID
+            && rollover.newEpochID == route.epochID
+            && rollover.toUsageDate == route.usageDate
+            && rollover.fromUsageDate != rollover.toUsageDate
+    }
+
     func hasCurrentRegistrationProvenance(owner: UUID, epochID: UUID, routeID: UUID) -> Bool {
         guard ownerChildDeviceID == owner,
               let route = routes[routeID],
