@@ -2994,6 +2994,109 @@ git commit -m 'refactor: remove stale raw threshold ceiling'
 
 ---
 
+## Task 23A: Connect Trusted V2 Terminal Callbacks To Durable Shield Receipts
+
+**Repository:** iOS.
+
+**Why inserted:** Task 24's replacement-first gate found that `EarnedShieldEffectStore`
+was compiled and recoverable but had no production envelope creator. Deleting T3 in
+that state would leave v2 exhaustion without a local shield and would make the legacy
+direct path lock on its first threshold. This task installs the already-registered
+`EarnedShieldEffectEnvelope` replacement before demolition; it introduces no new
+R-16 flag or guard.
+
+**Interfaces:** Consumes exact v2 route/epoch/generation authorization, immutable
+terminal event plans, canonical-day override, `EarnedShieldEffectEnvelope`,
+`EarnedShieldReference`, and `ActiveLockPersistenceLock`. Produces a crash-recoverable
+local self-lock receipt whose credential is the exact epoch ID + route ID and whose
+receipt snapshot is the intended-after `ShieldRecord` bytes required by D#6.
+
+**Files:**
+
+- Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS/Services/DeviceEpochStore.swift`
+- Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS/Services/EarnedMeteringCallback.swift`
+- Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS/Services/EarnedShieldEffectStore.swift`
+- Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS/Services/MeteringProcessEntries.swift`
+- Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/EvlinDeviceActivityMonitor/DeviceActivityMonitorExtension.swift`
+- Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/EarnedMeteringCallbackTests.swift`
+- Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/EarnedShieldEffectStoreTests.swift`
+- Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/MeteringProcessEntryTests.swift`
+- Create: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/MeteringTerminalShieldCompositionTests.swift`
+
+**TDD RED:** Drive the real DAM process entry with injected stores and projection.
+At minimum pin these four vectors, plus both crash boundaries:
+
+1. exact active v2 terminal callback -> prepared envelope -> one atomic sample +
+   exact `EarnedShieldReference` -> applied shield -> one projection;
+2. too-early/wrong-route terminal callback -> no sample, reference, envelope,
+   shield, or projection;
+3. canonical-day override present -> sample remains countable but no local
+   envelope/reference/shield/projection;
+4. paused/reflection accounting gate -> no local self-lock, envelope, reference,
+   or projection;
+5. crash after prepared envelope but before callback authorization -> reopen
+   deletes the orphan and never applies a shield;
+6. crash after atomic sample/reference commit but before shield mutation -> reopen
+   applies the exact receipt once.
+
+The successful vector must assert D#6 concretely: reference owner, generation ID,
+epoch ID, route ID, record key, operation ID, and `expectedRecordBytes` all match the
+persisted envelope's intended-after record. A source-count assertion is insufficient.
+
+```bash
+cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS
+SENTRY_SKIP_DSYM_UPLOAD=1 xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3.1' IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' -parallel-testing-enabled NO -only-testing:'Evlin iOSTests/MeteringTerminalShieldCompositionTests' test
+```
+
+Expected RED: terminal callback queues only sample work; no production path creates
+or applies an earned shield envelope.
+
+**Minimal GREEN:**
+
+- Add a read-only terminal-candidate preflight. It may identify only the exact
+  maximum planned event on one route; final trust remains exclusively inside the
+  callback transaction.
+- Add prepare/discard/apply-prepared operations to `EarnedShieldEffectStore`.
+  `prepared` is persisted before callback mutation. Recovery applies a prepared
+  envelope only when its exact D#6 reference exists; an orphan is deleted without
+  shield mutation.
+- Extend the authorized callback transaction to accept an optional prepared
+  reference. For an accepted exact terminal callback, sample work and that reference
+  commit atomically. Rejected callbacks create neither. Duplicate terminal callbacks
+  reuse the route-stable operation/receipt and never create a second reference.
+- `DAMMeteringEntry` owns the sequence: terminal preflight, override check, prepare,
+  authorized callback, apply-prepared or discard. It rechecks override while holding
+  `ActiveLockPersistenceLock`; a concurrent override can suppress only `.earnedTime`
+  and cannot remove manual/task/limit sources.
+- Projection always reloads the durable shield dictionary. Immediate success projects
+  once; DAM recovery also projects applied durable state so a crash after persistence
+  cannot leave a paper lock.
+- Reuse `EarnedShieldEffectEnvelope`, `EarnedShieldReference`, their retry terminal
+  states, and the existing override marker. Add no Boolean, freshness window,
+  quarantine, or replacement guard.
+
+**GREEN:**
+
+```bash
+cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS
+SENTRY_SKIP_DSYM_UPLOAD=1 xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3.1' IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' -parallel-testing-enabled NO -only-testing:'Evlin iOSTests/MeteringTerminalShieldCompositionTests' -only-testing:'Evlin iOSTests/EarnedMeteringCallbackTests' -only-testing:'Evlin iOSTests/EarnedShieldEffectStoreTests' -only-testing:'Evlin iOSTests/MeteringProcessEntryTests' test
+SENTRY_SKIP_DSYM_UPLOAD=1 xcodebuild -quiet -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' build
+```
+
+Expected GREEN: all six vectors pass; every accepted terminal self-lock has exact
+D#6 provenance and every rejection/suppression is zero-shield-effect.
+
+**Review and commit:**
+
+```bash
+cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS
+git add 'Evlin iOS/Services/DeviceEpochStore.swift' 'Evlin iOS/Services/EarnedMeteringCallback.swift' 'Evlin iOS/Services/EarnedShieldEffectStore.swift' 'Evlin iOS/Services/MeteringProcessEntries.swift' 'EvlinDeviceActivityMonitor/DeviceActivityMonitorExtension.swift' 'Evlin iOSTests/EarnedMeteringCallbackTests.swift' 'Evlin iOSTests/EarnedShieldEffectStoreTests.swift' 'Evlin iOSTests/MeteringProcessEntryTests.swift' 'Evlin iOSTests/MeteringTerminalShieldCompositionTests.swift'
+git diff --cached --check && git diff --cached --stat && git diff --cached && git diff --cached --name-only
+git commit -m 'feat: persist trusted terminal shield receipts'
+```
+
+---
+
 ## Task 24: Demolish R-16 T3 Fresh-At-Fire Gate
 
 **Repository:** iOS.
@@ -3017,7 +3120,13 @@ xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'plat
 
 Expected RED: production still contains `shouldApplyEarnedShieldFresh`.
 
-**Minimal GREEN:** Delete the helper, branch, and obsolete direct assertions. Trusted terminal route plus active epoch invokes Task 14; no freshness or first-threshold flag replaces it.
+**Minimal GREEN:** Delete the helper, branch, obsolete direct assertions, and the
+legacy v1 direct local-self-lock tail that depended on this mutable gate. V1 callback
+sample delivery remains functional and backend lock commands continue to converge;
+only Task 23A's exact v2 terminal route may create a new local earned self-lock. Do
+not let `thresholdHandlingDecision.shouldApplyLocalShield` fall through to the first
+legacy ladder threshold after helper deletion. Add no freshness, first-threshold,
+headroom, or renamed guard.
 
 **GREEN:**
 
@@ -3313,7 +3422,11 @@ git commit -m 'refactor: retire duplicate earned activity lifecycle'
 
 **Repository:** iOS.
 
-**Interfaces:** Consumes immutable baseline files, exact 30-subject manifest, both Git histories, all automated suites, real V30 harness, all six Release products, and R-16 hash. Produces raw logs, hashes, commit/order proof, product manifest, and machine-readable automated status. It cannot mark physical gates passed.
+**Interfaces:** Consumes immutable baseline files, exact 31-subject manifest
+(Tasks 01-30 plus inserted Task 23A), both Git histories, all automated suites,
+real V30 harness, all six Release products, and R-16 hash. Produces raw logs,
+hashes, commit/order proof, product manifest, and machine-readable automated
+status. It cannot mark physical gates passed.
 
 **Files:**
 
@@ -3328,8 +3441,8 @@ ancestry, absent/wrong cross-repo dependency trailer, base not ancestor, empty
 log, a content change beneath an existing untracked path with unchanged name,
 zero Release products, missing exact XCTest executable, DEBUG token in
 Release, wrong fixture hash, and a report that claims a physical pass. Also
-assert Task 29 pre-report mode expects Tasks 01-29 exactly once and final mode
-expects Tasks 01-30 exactly once.
+assert Task 29 pre-report mode expects Tasks 01-29 plus Task 23A exactly once and
+final mode expects Tasks 01-30 plus Task 23A exactly once.
 
 The real subprocess test uses one explicit verifier-test-only interface:
 
@@ -3384,14 +3497,22 @@ Task 20 iOS depends on Task 19 backend
 ```
 
 The same stdlib parser used by the fixture test mechanically pins this plan to
-30 task headings, 30 commit commands/unique subjects, 51 `Create` declarations,
-145 `Modify` declarations, 196 total declarations, 95 unique declared paths,
-94 literal `xcodebuild` commands. The Release scheme build is one dependency-
+31 task headings, 31 commit commands/unique subjects, 52 `Create` declarations,
+165 `Modify` declarations, 217 total declarations, 97 unique declared paths,
+97 literal `xcodebuild` commands. The Release scheme build is one dependency-
 graph invocation rather than an invalid per-target loop. It rejects a changed count unless the plan,
 fixture expectation, and review map are revised together; prose-only arithmetic
 does not satisfy this gate.
 
-`pre-report` runs after Task 29 commit and proves 01-29; it does not expect Task 30. `final` proves 01-30, requires its argument equal the unique Task 30 commit, requires that commit to contain the report, and records the report blob hash plus commit SHA in a hash-verified external post-commit attestation. The attestation is deliberately not described as a committed or self-authenticating artifact; downstream phases must rerun final mode against the named report commit and bind the resulting attestation hash in their own committed report. This explicitly avoids the impossible claim that a committed report embeds its own commit SHA.
+`pre-report` runs after Task 29 commit and proves 01-29 plus 23A; it does not
+expect Task 30. `final` proves 01-30 plus 23A, requires its argument equal the
+unique Task 30 commit, requires that commit to contain the report, and records
+the report blob hash plus commit SHA in a hash-verified external post-commit
+attestation. The attestation is deliberately not described as a committed or
+self-authenticating artifact; downstream phases must rerun final mode against
+the named report commit and bind the resulting attestation hash in their own
+committed report. This explicitly avoids the impossible claim that a committed
+report embeds its own commit SHA.
 
 The verifier writes every command's unfiltered stdout/stderr to a nonempty file below `.superpowers/evidence/metering-phase3/logs`, then writes `raw-log-sha256.txt` only after checking each file is nonempty. It runs:
 
@@ -3484,13 +3605,18 @@ bash scripts/verify_metering_phase3_completion.sh pre-report
 
 **Repository:** iOS.
 
-**Interfaces:** Consumes Task 29 pre-report evidence and all task SHAs. Produces the Phase 3 completion report; it records automated evidence but cannot claim Phase 3 complete or releasable.
+**Interfaces:** Consumes Task 29 pre-report evidence and all task SHAs, including
+Task 23A. Produces the Phase 3 completion report; it records automated evidence
+but cannot claim Phase 3 complete or releasable.
 
 **Files:**
 
 - Create: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/docs/superpowers/reports/2026-07-17-metering-epoch-phase-3-completion.md`
 
-**TDD RED:** Add the report with status `AUTOMATED PASSED; PHYSICAL PENDING; NOT RELEASABLE`, immutable bases, Tasks 01-29 SHAs, test/product/log hashes, and the exact table below. Before populating it, run final mode with a nonexistent SHA:
+**TDD RED:** Add the report with status `AUTOMATED PASSED; PHYSICAL PENDING; NOT
+RELEASABLE`, immutable bases, Tasks 01-29 plus Task 23A SHAs,
+test/product/log hashes, and the exact table below. Before populating it, run
+final mode with a nonexistent SHA:
 
 ```bash
 cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS
@@ -3539,7 +3665,10 @@ REPORT_COMMIT="$(git rev-parse HEAD)"
 bash scripts/verify_metering_phase3_completion.sh final "$REPORT_COMMIT"
 ```
 
-Expected GREEN: Tasks 01-30 are exact, unique, ordered, ancestral, and hash-attested; report is the only Task 30 committed file; the external post-commit attestation is nonempty and final mode can validate it again; status remains `phase_complete: false`, physical pending, and not releasable.
+Expected GREEN: Tasks 01-30 plus 23A are exact, unique, ordered, ancestral, and
+hash-attested; report is the only Task 30 committed file; the external
+post-commit attestation is nonempty and final mode can validate it again; status
+remains `phase_complete: false`, physical pending, and not releasable.
 
 ---
 
