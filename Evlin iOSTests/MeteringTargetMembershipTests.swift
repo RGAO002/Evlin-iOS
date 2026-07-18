@@ -45,6 +45,7 @@ final class MeteringTargetMembershipTests: XCTestCase {
         let paths = [
             "Services/MeteringCallbackRoute.swift",
             "Services/MeteringDatedSchedule.swift",
+            "Services/DatedRouteInstaller.swift",
         ]
 
         for path in paths {

@@ -143,7 +143,19 @@ nonisolated enum MeteringProcessRole: String, Codable, Sendable {
     case deviceActivityMonitor = "deviceActivityMonitor"
 }
 
+nonisolated struct MeteringProcessIdentity: Equatable, Sendable {
+    let role: MeteringProcessRole
+    let instanceID: UUID
+
+    init(role: MeteringProcessRole, instanceID: UUID) {
+        self.role = role
+        self.instanceID = instanceID
+    }
+}
+
 nonisolated struct ActivityInstallClaim: Codable, Equatable, Sendable {
+    static let leaseDuration: TimeInterval = 60
+
     let token: UUID
     let process: MeteringProcessRole
     let instanceID: UUID
@@ -583,6 +595,146 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
 
     func isCurrentOwner(_ owner: UUID) -> Bool {
         ownerProvider() == owner
+    }
+
+    func dueInstallWork(owner: UUID, now: Date) throws -> [ActivityInstallWork] {
+        let state = try read()
+        guard state.ownerChildDeviceID == owner else { throw DeviceEpochStoreError.ownerMismatch }
+        return state.dueWork(now: now).compactMap { due in
+            guard due.kind == .install else { return nil }
+            return state.installWork.values.first { $0.workID == due.workID }
+        }.filter { work in
+            switch work.phase {
+            case .pendingStart, .starting, .installed:
+                return true
+            case .verified, .dualActive, .active, .pendingStop, .stopped:
+                return false
+            }
+        }
+    }
+
+    func claimInstallWork(
+        workID: UUID,
+        owner: UUID,
+        processIdentity: MeteringProcessIdentity,
+        now: Date
+    ) throws -> (work: ActivityInstallWork, priorPhase: ActivityInstallPhase, claim: ActivityInstallClaim)? {
+        try transaction(expectedOwner: owner) { state -> (work: ActivityInstallWork, priorPhase: ActivityInstallPhase, claim: ActivityInstallClaim)? in
+            guard let key = state.installWork.first(where: { $0.value.workID == workID })?.key,
+                  var work = state.installWork[key],
+                  work.retry.terminal == .pending,
+                  work.retry.nextAttemptAt <= now
+            else { return nil }
+            switch work.phase {
+            case .pendingStart, .starting, .installed:
+                break
+            case .verified, .dualActive, .active, .pendingStop, .stopped:
+                return nil
+            }
+            if let claim = work.claim, claim.expiresAt > now {
+                return nil
+            }
+            let priorPhase = work.phase
+            let claim = ActivityInstallClaim(
+                token: UUID(),
+                process: processIdentity.role,
+                instanceID: processIdentity.instanceID,
+                claimedAt: now,
+                expiresAt: now.addingTimeInterval(ActivityInstallClaim.leaseDuration)
+            )
+            work.claim = claim
+            if work.phase == .pendingStart {
+                work.phase = .starting
+            }
+            state.installWork[key] = work
+            return (work, priorPhase, claim)
+        }
+    }
+
+    func recordInstalledRoute(workID: UUID, token: UUID, owner: UUID, now: Date) throws -> Bool {
+        try transaction(expectedOwner: owner) { state in
+            guard let key = state.installWork.first(where: { $0.value.workID == workID })?.key,
+                  var work = state.installWork[key],
+                  let claim = work.claim,
+                  claim.token == token,
+                  claim.expiresAt > now,
+                  let route = state.routes[work.routeID]
+            else { return false }
+            work.phase = .installed
+            state.installWork[key] = work
+            state.routes[route.routeID]?.installedSchedule = route.plannedSchedule
+            state.routes[route.routeID]?.installedEvents = route.plannedEvents
+            return true
+        }
+    }
+
+    func recordVerifiedRoute(workID: UUID, token: UUID, owner: UUID, now: Date) throws -> Bool {
+        try transaction(expectedOwner: owner) { state in
+            guard let key = state.installWork.first(where: { $0.value.workID == workID })?.key,
+                  var work = state.installWork[key],
+                  let claim = work.claim,
+                  claim.token == token,
+                  claim.expiresAt > now,
+                  let route = state.routes[work.routeID]
+            else { return false }
+            work.phase = .verified
+            work.claim = nil
+            state.installWork[key] = work
+            state.routes[route.routeID]?.installedSchedule = route.plannedSchedule
+            state.routes[route.routeID]?.installedEvents = route.plannedEvents
+            return true
+        }
+    }
+
+    func deferInstallWork(
+        workID: UUID,
+        token: UUID,
+        owner: UUID,
+        now: Date,
+        code: String,
+        installLimited: Bool
+    ) throws -> Bool {
+        try transaction(expectedOwner: owner) { state in
+            guard let key = state.installWork.first(where: { $0.value.workID == workID })?.key,
+                  var work = state.installWork[key],
+                  work.claim?.token == token
+            else { return false }
+            work.phase = .pendingStart
+            work.claim = nil
+            work.retry.attemptCount += 1
+            work.retry.nextAttemptAt = MeteringRetryPolicy.nextAttempt(after: work.retry.attemptCount, now: now)
+            work.retry.lastErrorCode = code
+            state.installWork[key] = work
+            if installLimited {
+                let routes = state.routes.values.filter { $0.ownerChildDeviceID == owner }.sorted { $0.usageDate < $1.usageDate }
+                guard let first = routes.first, let last = routes.last else { return true }
+                let verifiedRouteIDs = Set(state.installWork.values.filter { $0.phase == .verified }.map(\.routeID))
+                var coverage = state.coverage ?? MonitorCoverageState(
+                    ownerChildDeviceID: owner,
+                    requiredFromUsageDate: first.usageDate,
+                    requiredThroughUsageDate: last.usageDate,
+                    readyThroughUsageDate: nil,
+                    status: .installLimited,
+                    refreshedAt: now,
+                    errorCode: code
+                )
+                let requiredRoutes = routes.filter {
+                    $0.usageDate >= coverage.requiredFromUsageDate
+                        && $0.usageDate <= coverage.requiredThroughUsageDate
+                }
+                var readyThrough: String?
+                for route in requiredRoutes {
+                    guard verifiedRouteIDs.contains(route.routeID) else { break }
+                    readyThrough = route.usageDate
+                }
+                coverage.readyThroughUsageDate = readyThrough
+                coverage.status = .installLimited
+                coverage.refreshedAt = now
+                coverage.errorCode = code
+                state.coverage = coverage
+            }
+            return true
+        }
     }
 
     @discardableResult

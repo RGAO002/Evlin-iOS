@@ -366,6 +366,54 @@ final class MeteringEpochDeliveryTests: XCTestCase {
         XCTAssertEqual(final.ratchets[owner]?.localSelection, .v1)
     }
 
+    func testRegistration200PromotesPlannedRouteInstallWithoutActivatingRoute() async throws {
+        let fileURL = temporaryStoreURL()
+        defer { removeTemporaryStore(fileURL) }
+        let store = makeStore(fileURL: fileURL)
+        let installID = UUID()
+        try store.transaction(expectedOwner: owner) { state in
+            state = makeBaseState()
+            state.activeRouteID = nil
+            state.routes[routeID]?.lifecycle = .planned
+            state.installWork[installID] = ActivityInstallWork(
+                workID: installID,
+                ownerChildDeviceID: self.owner,
+                routeID: self.routeID,
+                authorization: .registrationRequired,
+                phase: .pendingStart,
+                claim: nil,
+                retry: MeteringRetryState(attemptCount: 0, nextAttemptAt: self.start, lastErrorCode: nil, terminal: .pending),
+                createdAt: self.start
+            )
+        }
+        let response = HTTPURLResponse(url: baseURL, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        let transport = DeliveryTestTransport()
+        transport.results = [(try encoded(EpochRegistrationResponseDTO(
+            status: .registered,
+            epochID: epochID,
+            meteringProtocolVersion: 2,
+            snapshot: makeSnapshot(counted: true, warning: nil),
+            epochStatus: .active
+        )), response)]
+        let clock = DeliveryTestClock(now: start)
+        let delivery = MeteringEpochDelivery(baseURL: baseURL, store: store, transport: transport, clock: clock)
+
+        try delivery.enqueueRegistration(makeValidRegistrationRequest(), owner: owner, epochID: epochID, routeID: routeID)
+        await delivery.drain(owner: owner)
+
+        let final = try store.read()
+        XCTAssertEqual(final.registrationWork.values.first?.retry.terminal, .succeeded)
+        XCTAssertEqual(final.epochs[epochID]?.registeredAt, start)
+        XCTAssertEqual(final.installWork[installID]?.authorization, .registered)
+        XCTAssertEqual(final.routes[routeID]?.lifecycle, .planned)
+        XCTAssertEqual(final.ratchets[owner]?.localSelection, .v1)
+    }
+
+    func testRegistration200DoesNotPromoteInstallForRetiredOrTombstonedRoute() async throws {
+        try await assertRegistration200DoesNotPromoteInstall(lifecycle: .retired)
+        try await assertRegistration200DoesNotPromoteInstall(lifecycle: .tombstoned)
+    }
+
     func testConcurrentDrainsAtomicallyClaimOneNetworkDispatch() async throws {
         let fileURL = temporaryStoreURL()
         defer { removeTemporaryStore(fileURL) }
@@ -1727,6 +1775,68 @@ final class MeteringEpochDeliveryTests: XCTestCase {
                 activatedV2At: nil
             )]
         )
+    }
+
+    private func assertRegistration200DoesNotPromoteInstall(lifecycle: MeteringRouteLifecycle) async throws {
+        let fileURL = temporaryStoreURL()
+        defer { removeTemporaryStore(fileURL) }
+        let store = makeStore(fileURL: fileURL)
+        let installID = UUID()
+        try store.transaction(expectedOwner: owner) { state in
+            state = makeBaseState()
+            state.activeRouteID = nil
+            state.routes[routeID]?.lifecycle = lifecycle
+            if case .tombstoned = lifecycle, let route = state.routes[routeID] {
+                state.tombstones[routeID] = MeteringRouteTombstone(
+                    routeID: route.routeID,
+                    activityName: route.activityName,
+                    eventNames: route.plannedEvents.map(\.eventName),
+                    ownerChildDeviceID: owner,
+                    usageDate: route.usageDate,
+                    epochID: route.epochID,
+                    generationID: route.generationID,
+                    canonicalDayEnd: start.addingTimeInterval(86_400),
+                    stopAcknowledgedAt: nil,
+                    referencedWorkIDs: [],
+                    retainedUntil: nil
+                )
+            }
+            state.installWork[installID] = ActivityInstallWork(
+                workID: installID,
+                ownerChildDeviceID: owner,
+                routeID: routeID,
+                authorization: .registrationRequired,
+                phase: .pendingStart,
+                claim: nil,
+                retry: MeteringRetryState(attemptCount: 0, nextAttemptAt: start, lastErrorCode: nil, terminal: .pending),
+                createdAt: start
+            )
+        }
+        let response = HTTPURLResponse(url: baseURL, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        let transport = DeliveryTestTransport()
+        transport.results = [(try encoded(EpochRegistrationResponseDTO(
+            status: .registered,
+            epochID: epochID,
+            meteringProtocolVersion: 2,
+            snapshot: makeSnapshot(counted: true, warning: nil),
+            epochStatus: .active
+        )), response)]
+        let delivery = MeteringEpochDelivery(
+            baseURL: baseURL,
+            store: store,
+            transport: transport,
+            clock: DeliveryTestClock(now: start)
+        )
+
+        try delivery.enqueueRegistration(makeValidRegistrationRequest(), owner: owner, epochID: epochID, routeID: routeID)
+        await delivery.drain(owner: owner)
+
+        let final = try store.read()
+        XCTAssertEqual(final.registrationWork.values.first?.retry.terminal, .pending)
+        XCTAssertNotNil(final.registrationWork.values.first?.claim)
+        XCTAssertNil(final.epochs[epochID]?.registeredAt)
+        XCTAssertEqual(final.installWork[installID]?.authorization, .registrationRequired)
+        XCTAssertEqual(final.routes[routeID]?.lifecycle.rawValue, lifecycle.rawValue)
     }
 }
 

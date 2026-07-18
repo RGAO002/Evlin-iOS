@@ -485,7 +485,7 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
                   work.request.usageDate == epoch.usageDate,
                   epoch.status == .active,
                   epoch.authoritativeBaseConflict == nil,
-                  route.lifecycle == .active,
+                  (route.lifecycle == .planned || route.lifecycle == .active),
                   response.epochID == work.epochID,
                   snapshotMatches(response.snapshot, owner: owner, usageDate: route.usageDate)
             else { return }
@@ -493,6 +493,14 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
             work.claim = nil
             state.registrationWork[key] = work
             state.epochs[work.epochID]?.registeredAt = clock.now
+            for (installKey, var installWork) in state.installWork where
+                installWork.ownerChildDeviceID == owner
+                    && installWork.routeID == route.routeID
+                    && installWork.authorization == .registrationRequired
+                    && installWork.retry.terminal == .pending {
+                installWork.authorization = .registered
+                state.installWork[installKey] = installWork
+            }
             var ratchet = state.ratchets[owner] ?? MeteringOwnerRatchet(
                 ownerChildDeviceID: owner,
                 advertisedVersion: 1,

@@ -161,6 +161,7 @@
 				Services/DefaultLockGroup.swift,
 				Services/DefaultLockGroupStore.swift,
 				Services/DeviceEpochStore.swift,
+				Services/DatedRouteInstaller.swift,
 				Services/EarnedSampleReporter.swift,
 				Services/EarnedShieldEffectStore.swift,
 				Services/EarnedTimeStore.swift,
