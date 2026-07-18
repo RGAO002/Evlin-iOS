@@ -564,7 +564,67 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
             ratchet.registeredV2At = clock.now
             ratchet.localSelection = selection
             state.ratchets[owner] = ratchet
+            enqueueExactReplacementActivationAfterRegistration(
+                registration: work,
+                owner: owner,
+                state: &state
+            )
         }
+    }
+
+    private func enqueueExactReplacementActivationAfterRegistration(
+        registration: EpochRegistrationWork,
+        owner: UUID,
+        state: inout DeviceEpochStoreState
+    ) {
+        guard let handoff = state.v2RouteHandoff,
+              handoff.ownerChildDeviceID == owner,
+              handoff.phase == .cutoverReady,
+              handoff.toEpochID == registration.epochID,
+              handoff.toRouteID == registration.routeID,
+              let route = state.routes[registration.routeID],
+              route.generationID == handoff.toGenerationID,
+              route.epochID == registration.epochID,
+              let epoch = state.epochs[registration.epochID],
+              epoch.baseSource == .registrationConflict409,
+              epoch.baseCorrectionState == .used,
+              epoch.authoritativeBaseConflict == nil,
+              !state.activationWork.values.contains(where: {
+                  $0.ownerChildDeviceID == owner
+                      && $0.epochID == registration.epochID
+                      && $0.routeID == registration.routeID
+              }),
+              state.registrationWork.values.filter({
+                  $0.ownerChildDeviceID == owner
+                      && $0.epochID == registration.epochID
+                      && $0.routeID == registration.routeID
+                      && $0.retry.terminal == .succeeded
+              }).count == 1,
+              state.installWork.values.filter({
+                  $0.ownerChildDeviceID == owner
+                      && $0.routeID == registration.routeID
+                      && isActivationReady($0.phase)
+              }).count == 1
+        else { return }
+
+        let workID = UUID()
+        let activation = EpochActivationWork(
+            workID: workID,
+            ownerChildDeviceID: owner,
+            epochID: registration.epochID,
+            routeID: registration.routeID,
+            request: EpochActivationRequestDTO(
+                protocolVersion: 2,
+                deviceID: owner,
+                routeID: registration.routeID,
+                verifiedAt: clock.now
+            ),
+            claim: nil,
+            retry: pendingRetry(at: clock.now),
+            createdAt: clock.now
+        )
+        guard hasExactActivationAuthorization(activation, owner: owner, state: state) else { return }
+        state.activationWork[workID] = activation
     }
 
     private func recordAuthoritativeBaseMismatch(
@@ -584,15 +644,34 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
             }
             guard hasNetworkRegistrationAuthorization(work, owner: owner, state: state),
                   let route = state.routes[work.routeID],
-                  var epoch = state.epochs[work.epochID],
+                  let epoch = state.epochs[work.epochID],
                   epoch.authoritativeBaseConflict == nil,
                   conflict.authoritativeSnapshot.childDeviceID == owner,
                   conflict.authoritativeSnapshot.usageDate == route.usageDate,
                   conflict.authoritativeSnapshot.usageDate == epoch.usageDate
             else { return }
-            epoch.authoritativeBaseConflict = conflict
-            state.epochs[work.epochID] = epoch
-            work.retry = completedRetry(from: work.retry, code: "authoritative_base_mismatch", terminal: .superseded)
+            let createdReplacement = state.replaceAuthoritativeBaseMismatchCandidate(
+                owner: owner,
+                rejectedEpochID: work.epochID,
+                rejectedRouteID: work.routeID,
+                conflict: conflict,
+                now: clock.now
+            )
+            guard !createdReplacement else { return }
+
+            // A consumed correction returns false after terminalizing its
+            // second rejected candidate. Only fall back to the pre-correction
+            // contract when this was an ordinary planned registration with no
+            // exact correction handoff to handle it.
+            guard state.epochs[work.epochID]?.authoritativeBaseConflict == nil else { return }
+            var terminalEpoch = epoch
+            terminalEpoch.authoritativeBaseConflict = conflict
+            state.epochs[work.epochID] = terminalEpoch
+            work.retry = completedRetry(
+                from: work.retry,
+                code: "authoritative_base_mismatch",
+                terminal: .superseded
+            )
             work.claim = nil
             state.registrationWork[key] = work
         }

@@ -42,6 +42,7 @@ final class EarnedMeteringRecoveryDriver {
         try promoteAcknowledgedActivation(owner: owner)
         try prepareReplacementIfNeeded(owner: owner)
         try stopRetiredLane(owner: owner)
+        try stopAuthoritativeBaseRejectedCandidates(owner: owner)
     }
 
     private func prepareReplacementIfNeeded(owner: UUID) throws {
@@ -309,6 +310,37 @@ final class EarnedMeteringRecoveryDriver {
             current.phase = .stoppedV1
             current.stopAcknowledgedAt = clock.now
             state.legacy = current
+        }
+    }
+
+    private func stopAuthoritativeBaseRejectedCandidates(owner: UUID) throws {
+        let state = try store.read()
+        let candidates = state.routes.values.compactMap { route -> (MeteringCallbackRoute, UUID)? in
+            guard route.ownerChildDeviceID == owner,
+                  route.lifecycle == .tombstoned,
+                  state.epochs[route.epochID]?.retireReason == .authoritativeBaseMismatch,
+                  state.tombstones[route.routeID]?.stopAcknowledgedAt == nil,
+                  let installKey = uniqueInstallKey(for: route.routeID, in: state),
+                  state.installWork[installKey]?.phase == .pendingStop
+            else { return nil }
+            return (route, installKey)
+        }
+
+        for (route, installKey) in candidates {
+            let activity = DeviceActivityName(route.activityName)
+            center.stopMonitoring([activity])
+            guard !center.activities.contains(activity) else { continue }
+            let acknowledgedAt = clock.now
+            try store.transaction(expectedOwner: owner) { state in
+                guard state.routes[route.routeID]?.lifecycle == .tombstoned,
+                      state.epochs[route.epochID]?.retireReason == .authoritativeBaseMismatch,
+                      state.tombstones[route.routeID]?.stopAcknowledgedAt == nil,
+                      uniqueInstallKey(for: route.routeID, in: state) == installKey,
+                      state.installWork[installKey]?.phase == .pendingStop
+                else { return }
+                state.installWork[installKey]?.phase = .stopped
+                state.tombstones[route.routeID]?.stopAcknowledgedAt = acknowledgedAt
+            }
         }
     }
 

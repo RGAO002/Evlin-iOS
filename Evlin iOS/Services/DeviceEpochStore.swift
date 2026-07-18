@@ -1185,9 +1185,64 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         isEligible: (DeviceEpochStoreState, MeteringDueWork) -> Bool
     ) throws -> MeteringClaimedNetworkWork? {
         try transaction(expectedOwner: owner) { state in
-            guard let due = state.dueWork(now: now).first,
-                  isEligible(state, due)
-            else { return nil }
+            let dueWork = state.dueWork(now: now)
+            guard let first = dueWork.first else { return nil }
+            let due: MeteringDueWork
+            if isEligible(state, first) {
+                due = first
+            } else {
+                guard let handoff = state.v2RouteHandoff,
+                      handoff.ownerChildDeviceID == owner,
+                      handoff.phase == .cutoverReady,
+                      state.activeGenerationID == handoff.fromGenerationID,
+                      state.activeEpochID == handoff.fromEpochID,
+                      state.activeRouteID == handoff.fromRouteID,
+                      state.hasExactHandoffPriorProvenance(owner: owner, handoff: handoff),
+                      let correctedRoute = state.routes[handoff.toRouteID],
+                      correctedRoute.ownerChildDeviceID == owner,
+                      correctedRoute.generationID == handoff.toGenerationID,
+                      correctedRoute.epochID == handoff.toEpochID,
+                      let correctedEpoch = state.epochs[handoff.toEpochID],
+                      correctedEpoch.childDeviceID == owner,
+                      correctedEpoch.baseSource == .registrationConflict409,
+                      correctedEpoch.baseCorrectionState == .used,
+                      correctedEpoch.authoritativeBaseConflict == nil,
+                      let correctionIndex = dueWork.firstIndex(where: { item in
+                          switch item.kind {
+                          case .registration:
+                              return state.registrationWork.values.contains {
+                                  $0.workID == item.workID
+                                      && $0.ownerChildDeviceID == owner
+                                      && $0.epochID == handoff.toEpochID
+                                      && $0.routeID == handoff.toRouteID
+                              }
+                          case .activation:
+                              return state.activationWork.values.contains {
+                                  $0.workID == item.workID
+                                      && $0.ownerChildDeviceID == owner
+                                      && $0.epochID == handoff.toEpochID
+                                      && $0.routeID == handoff.toRouteID
+                              }
+                          case .identityCleanup, .rollover, .install, .sample, .shield:
+                              return false
+                          }
+                      }),
+                      dueWork[..<correctionIndex].allSatisfy({ item in
+                          guard item.kind == .install,
+                                let install = state.installWork.values.first(where: { $0.workID == item.workID }),
+                                install.ownerChildDeviceID == owner
+                          else { return false }
+                          switch install.phase {
+                          case .verified, .dualActive, .active:
+                              return true
+                          case .pendingStart, .starting, .installed, .pendingStop, .stopped:
+                              return false
+                          }
+                      }),
+                      isEligible(state, dueWork[correctionIndex])
+                else { return nil }
+                due = dueWork[correctionIndex]
+            }
             let claim = MeteringNetworkClaim(
                 token: UUID(),
                 claimedAt: now,
@@ -1735,13 +1790,21 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
 
         if let priorHandoff {
             guard let candidateHandoff else {
-                guard canCollectHandoff(priorHandoff, from: priorState) else {
+                guard canCollectHandoff(priorHandoff, from: priorState)
+                        || canAbandonAuthoritativeBaseCorrection(priorHandoff, in: candidate) else {
                     throw DeviceEpochStoreInvariantError.invalidState("handoff was removed before exact stop acknowledgement")
                 }
                 return
             }
-            guard hasSameImmutableTuple(candidateHandoff, as: priorHandoff) else {
-                throw DeviceEpochStoreInvariantError.invalidState("handoff immutable tuple changed")
+            if !hasSameImmutableTuple(candidateHandoff, as: priorHandoff) {
+                guard isAuthoritativeBaseCorrectionHandoffReplacement(
+                    from: priorHandoff,
+                    to: candidateHandoff,
+                    in: candidate
+                ) else {
+                    throw DeviceEpochStoreInvariantError.invalidState("handoff immutable tuple changed")
+                }
+                return
             }
             guard isAllowedHandoffTransition(from: priorHandoff.phase, to: candidateHandoff.phase) else {
                 throw DeviceEpochStoreInvariantError.invalidState("handoff phase moved illegally")
@@ -1855,6 +1918,73 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         return true
     }
 
+    private func isAuthoritativeBaseCorrectionHandoffReplacement(
+        from prior: V2RouteHandoff,
+        to replacement: V2RouteHandoff,
+        in state: DeviceEpochStoreState
+    ) -> Bool {
+        guard prior.phase == .cutoverReady,
+              replacement.phase == .preparing,
+              replacement.ownerChildDeviceID == prior.ownerChildDeviceID,
+              replacement.fromGenerationID == prior.fromGenerationID,
+              replacement.fromEpochID == prior.fromEpochID,
+              replacement.fromRouteID == prior.fromRouteID,
+              replacement.toGenerationID != prior.toGenerationID,
+              replacement.toEpochID != prior.toEpochID,
+              replacement.toRouteID != prior.toRouteID,
+              state.activeGenerationID == prior.fromGenerationID,
+              state.activeEpochID == prior.fromEpochID,
+              state.activeRouteID == prior.fromRouteID,
+              let rejectedEpoch = state.epochs[prior.toEpochID],
+              rejectedEpoch.status == .retired,
+              rejectedEpoch.retireReason == .authoritativeBaseMismatch,
+              rejectedEpoch.baseCorrectionState == .used,
+              rejectedEpoch.authoritativeBaseConflict != nil,
+              state.routes[prior.toRouteID]?.lifecycle == .tombstoned,
+              state.tombstones[prior.toRouteID] != nil,
+              let correctedEpoch = state.epochs[replacement.toEpochID],
+              correctedEpoch.status == .active,
+              correctedEpoch.baseCorrectionState == .used,
+              correctedEpoch.baseSource == .registrationConflict409,
+              let correctedRoute = state.routes[replacement.toRouteID],
+              correctedRoute.lifecycle == .planned,
+              state.installWork.values.filter({
+                  $0.routeID == replacement.toRouteID
+                      && $0.authorization == .offlinePending
+                      && $0.phase == .pendingStart
+                      && $0.retry.terminal == .pending
+              }).count == 1,
+              state.registrationWork.values.filter({
+                  $0.epochID == replacement.toEpochID
+                      && $0.routeID == replacement.toRouteID
+                      && $0.retry.terminal == .pending
+              }).count == 1
+        else { return false }
+        return correctedEpoch.baseAcceptedMinutes
+            == rejectedEpoch.authoritativeBaseConflict?.authoritativeSnapshot.estimatedMinutes
+    }
+
+    private func canAbandonAuthoritativeBaseCorrection(
+        _ handoff: V2RouteHandoff,
+        in state: DeviceEpochStoreState
+    ) -> Bool {
+        guard handoff.phase == .cutoverReady,
+              state.activeGenerationID == handoff.fromGenerationID,
+              state.activeEpochID == handoff.fromEpochID,
+              state.activeRouteID == handoff.fromRouteID,
+              let rejectedEpoch = state.epochs[handoff.toEpochID],
+              rejectedEpoch.status == .retired,
+              rejectedEpoch.retireReason == .authoritativeBaseMismatch,
+              rejectedEpoch.baseCorrectionState == .used,
+              rejectedEpoch.authoritativeBaseConflict != nil,
+              state.routes[handoff.toRouteID]?.lifecycle == .tombstoned,
+              state.tombstones[handoff.toRouteID] != nil
+        else { return false }
+        return state.registrationWork.values
+            .filter { $0.epochID == handoff.toEpochID && $0.routeID == handoff.toRouteID }
+            .allSatisfy { $0.retry.terminal != .pending }
+    }
+
     private func restore(_ priorData: Data?, at url: URL) throws {
         var restoreError: Error?
         do {
@@ -1901,6 +2031,248 @@ extension DeviceEpochStoreState {
               handoff.phase == .preparing || handoff.phase == .dualV2 || handoff.phase == .cutoverReady
         else { return false }
         return hasExactHandoffPriorProvenance(owner: owner, handoff: handoff)
+    }
+
+    @discardableResult
+    mutating func replaceAuthoritativeBaseMismatchCandidate(
+        owner: UUID,
+        rejectedEpochID: UUID,
+        rejectedRouteID: UUID,
+        conflict: EpochRegistrationConflictDTO,
+        now: Date
+    ) -> Bool {
+        guard ownerChildDeviceID == owner,
+              var handoff = v2RouteHandoff,
+              handoff.ownerChildDeviceID == owner,
+              handoff.toEpochID == rejectedEpochID,
+              handoff.toRouteID == rejectedRouteID,
+              handoff.phase == .cutoverReady,
+              let rejectedRoute = routes[rejectedRouteID],
+              var rejectedEpoch = epochs[rejectedEpochID],
+              let rejectedGeneration = generations[rejectedRoute.generationID],
+              rejectedRoute.epochID == rejectedEpochID,
+              rejectedEpoch.childDeviceID == owner,
+              rejectedRoute.ownerChildDeviceID == owner,
+              rejectedEpoch.authoritativeBaseConflict == nil,
+              conflict.authoritativeSnapshot.childDeviceID == owner,
+              conflict.authoritativeSnapshot.usageDate == rejectedEpoch.usageDate,
+              conflict.authoritativeSnapshot.usageDate == rejectedRoute.usageDate
+        else { return false }
+
+        let correctionAvailable = rejectedEpoch.baseCorrectionState == .available
+        terminalizeAuthoritativeBaseCandidate(
+            epochID: rejectedEpochID,
+            routeID: rejectedRouteID,
+            conflict: conflict,
+            now: now
+        )
+
+        // A correction is intentionally single-use. A second 409 leaves the
+        // functioning prior route in place, but cannot mint a third candidate.
+        guard correctionAvailable else {
+            v2RouteHandoff = nil
+            return false
+        }
+
+        guard let terminalizedRejectedEpoch = epochs[rejectedEpochID] else { return false }
+        rejectedEpoch = terminalizedRejectedEpoch
+        let correctedGenerationID = UUID()
+        let correctedEpochID = UUID()
+        let correctedRouteID = UUID()
+        let correctedInstallID = UUID()
+        let correctedRegistrationID = UUID()
+        let correctedGeneration = MeteringPolicyGeneration(
+            generationID: correctedGenerationID,
+            protocolVersion: rejectedGeneration.protocolVersion,
+            childDeviceID: owner,
+            canonicalTimezone: rejectedGeneration.canonicalTimezone,
+            policyRevision: rejectedGeneration.policyRevision,
+            measurementSelectionDigest: rejectedGeneration.measurementSelectionDigest,
+            enforcementSetID: rejectedGeneration.enforcementSetID,
+            measurementSelectionBytes: rejectedGeneration.measurementSelectionBytes,
+            createdAt: now,
+            retiredAt: nil
+        )
+        let correctedEpoch = DeviceDailyEpoch(
+            epochID: correctedEpochID,
+            protocolVersion: rejectedEpoch.protocolVersion,
+            childDeviceID: owner,
+            usageDate: rejectedEpoch.usageDate,
+            canonicalTimezone: rejectedEpoch.canonicalTimezone,
+            policyRevision: rejectedEpoch.policyRevision,
+            measurementSelectionDigest: rejectedEpoch.measurementSelectionDigest,
+            enforcementSetID: rejectedEpoch.enforcementSetID,
+            startedAt: now,
+            registeredAt: nil,
+            baseAcceptedMinutes: conflict.authoritativeSnapshot.estimatedMinutes,
+            baseSource: .registrationConflict409,
+            lastRawThresholdMinutes: 0,
+            excludedWhilePausedMinutes: 0,
+            status: .active,
+            resumeBoundaryPending: false,
+            retiredAt: nil,
+            retireReason: nil,
+            exhaustedAt: nil,
+            baseCorrectionState: .used
+        )
+        let correctedRoute = MeteringCallbackRoute(
+            routeID: correctedRouteID,
+            activityName: callbackActivityName(routeID: correctedRouteID),
+            namespace: "evlin.earned.v2.",
+            generationID: correctedGenerationID,
+            generationKey: rejectedRoute.generationKey,
+            ownerChildDeviceID: owner,
+            usageDate: rejectedRoute.usageDate,
+            epochID: correctedEpochID,
+            plannedSchedule: rejectedRoute.plannedSchedule,
+            installedSchedule: nil,
+            plannedEvents: rejectedRoute.plannedEvents.map { event in
+                MeteringEventPlan(
+                    eventName: callbackEventName(routeID: correctedRouteID, thresholdMinutes: event.thresholdMinutes),
+                    thresholdMinutes: event.thresholdMinutes
+                )
+            },
+            installedEvents: nil,
+            lifecycle: .planned,
+            createdAt: now
+        )
+        let pendingRetry = MeteringRetryState(
+            attemptCount: 0,
+            nextAttemptAt: now,
+            lastErrorCode: nil,
+            terminal: .pending
+        )
+        let correctedRequest = EpochRegistrationRequestDTO(
+            protocolVersion: 2,
+            epochID: correctedEpochID,
+            deviceID: owner,
+            usageDate: correctedEpoch.usageDate,
+            timezone: correctedEpoch.canonicalTimezone,
+            policyRevision: correctedEpoch.policyRevision,
+            measurementSelectionDigest: correctedEpoch.measurementSelectionDigest,
+            enforcementSetID: correctedEpoch.enforcementSetID,
+            startedAt: correctedEpoch.startedAt,
+            baseAcceptedMinutes: correctedEpoch.baseAcceptedMinutes,
+            reason: .policyChange
+        )
+
+        generations[correctedGenerationID] = correctedGeneration
+        epochs[correctedEpochID] = correctedEpoch
+        routes[correctedRouteID] = correctedRoute
+        installWork[correctedInstallID] = ActivityInstallWork(
+            workID: correctedInstallID,
+            ownerChildDeviceID: owner,
+            routeID: correctedRouteID,
+            authorization: .offlinePending,
+            phase: .pendingStart,
+            claim: nil,
+            retry: pendingRetry,
+            createdAt: now
+        )
+        registrationWork[correctedRegistrationID] = EpochRegistrationWork(
+            workID: correctedRegistrationID,
+            ownerChildDeviceID: owner,
+            epochID: correctedEpochID,
+            routeID: correctedRouteID,
+            request: correctedRequest,
+            claim: nil,
+            retry: pendingRetry,
+            createdAt: now
+        )
+        handoff = V2RouteHandoff(
+            handoffID: UUID(),
+            ownerChildDeviceID: owner,
+            fromGenerationID: handoff.fromGenerationID,
+            fromEpochID: handoff.fromEpochID,
+            fromRouteID: handoff.fromRouteID,
+            toGenerationID: correctedGenerationID,
+            toEpochID: correctedEpochID,
+            toRouteID: correctedRouteID,
+            phase: .preparing,
+            priorRouteInputClosedAt: nil,
+            registrationAcknowledgedAt: nil,
+            activationAcknowledgedAt: nil,
+            priorStopAcknowledgedAt: nil,
+            createdAt: now
+        )
+        v2RouteHandoff = handoff
+        return true
+    }
+
+    private mutating func terminalizeAuthoritativeBaseCandidate(
+        epochID: UUID,
+        routeID: UUID,
+        conflict: EpochRegistrationConflictDTO,
+        now: Date
+    ) {
+        guard var epoch = epochs[epochID], var route = routes[routeID] else { return }
+        epoch.authoritativeBaseConflict = conflict
+        epoch.baseCorrectionState = .used
+        epoch.status = .retired
+        epoch.retiredAt = now
+        epoch.retireReason = .authoritativeBaseMismatch
+        epochs[epochID] = epoch
+        generations[route.generationID]?.retiredAt = now
+
+        route.lifecycle = .tombstoned
+        routes[routeID] = route
+        let relatedWorkIDs = Set(
+            registrationWork.values.filter { $0.epochID == epochID && $0.routeID == routeID }.map(\.workID)
+                + activationWork.values.filter { $0.epochID == epochID && $0.routeID == routeID }.map(\.workID)
+                + sampleWork.values.filter { $0.epochID == epochID && $0.routeID == routeID }.map(\.workID)
+                + installWork.values.filter { $0.routeID == routeID }.map(\.workID)
+        )
+        tombstones[routeID] = MeteringRouteTombstone(
+            routeID: routeID,
+            activityName: route.activityName,
+            eventNames: route.plannedEvents.map(\.eventName),
+            ownerChildDeviceID: route.ownerChildDeviceID,
+            usageDate: route.usageDate,
+            epochID: epochID,
+            generationID: route.generationID,
+            canonicalDayEnd: now,
+            stopAcknowledgedAt: nil,
+            referencedWorkIDs: relatedWorkIDs,
+            retainedUntil: nil
+        )
+        for (key, var work) in registrationWork where work.epochID == epochID && work.routeID == routeID {
+            work.claim = nil
+            work.retry = terminalRetry(work.retry, code: "authoritative_base_mismatch")
+            registrationWork[key] = work
+        }
+        for (key, var work) in activationWork where work.epochID == epochID && work.routeID == routeID {
+            work.claim = nil
+            work.retry = terminalRetry(work.retry, code: "authoritative_base_mismatch")
+            activationWork[key] = work
+        }
+        for (key, var work) in sampleWork where work.epochID == epochID && work.routeID == routeID {
+            work.claim = nil
+            work.retry = terminalRetry(work.retry, code: "authoritative_base_mismatch")
+            sampleWork[key] = work
+        }
+        for (key, var work) in installWork where work.routeID == routeID {
+            work.claim = nil
+            work.phase = .pendingStop
+            work.retry = terminalRetry(work.retry, code: "authoritative_base_mismatch")
+            installWork[key] = work
+        }
+    }
+
+    private func terminalRetry(_ retry: MeteringRetryState, code: String) -> MeteringRetryState {
+        MeteringRetryState(
+            attemptCount: retry.attemptCount,
+            nextAttemptAt: retry.nextAttemptAt,
+            lastErrorCode: code,
+            terminal: .superseded
+        )
+    }
+
+    private func callbackActivityName(routeID: UUID) -> String {
+        "evlin.earned.v2.\(routeID.uuidString.lowercased())"
+    }
+
+    private func callbackEventName(routeID: UUID, thresholdMinutes: Int) -> String {
+        "\(callbackActivityName(routeID: routeID)).t\(thresholdMinutes)"
     }
 
     func hasExactHandoffPriorProvenance(owner: UUID, handoff: V2RouteHandoff) -> Bool {
