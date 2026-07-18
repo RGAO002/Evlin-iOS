@@ -166,6 +166,8 @@
 				Services/EarnedTimeStore.swift,
 				Services/LimitShieldLogic.swift,
 				Services/MeteringDeviceActivityCenter.swift,
+				Services/MeteringCallbackRoute.swift,
+				Services/MeteringDatedSchedule.swift,
 				Services/MeteringEpochContract.swift,
 				Services/MeteringEpochDelivery.swift,
 				Services/MeteringEpochWire.swift,

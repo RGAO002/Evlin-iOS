@@ -9,6 +9,341 @@ import FamilyControls
 /// only. No DeviceActivity framework, no live system calls, no entitlements required.
 final class EarnedBudgetSchedulerTests: XCTestCase {
 
+    func testDatedScheduleUsesCanonicalMidnightsAcrossNewYorkDSTTransitions() throws {
+        let timeZone = try XCTUnwrap(TimeZone(identifier: "America/New_York"))
+
+        for usageDate in ["2026-03-08", "2026-11-01"] {
+            let schedule = try EarnedBudgetScheduler.datedSchedule(
+                usageDate: usageDate,
+                timeZone: timeZone
+            )
+
+            XCTAssertFalse(schedule.repeats)
+            XCTAssertEqual(schedule.intervalStart.year, Int(usageDate.prefix(4)))
+            XCTAssertEqual(schedule.intervalStart.month, Int(usageDate.dropFirst(5).prefix(2)))
+            XCTAssertEqual(schedule.intervalStart.day, Int(usageDate.suffix(2)))
+            XCTAssertEqual(schedule.intervalStart.hour, 0)
+            XCTAssertEqual(schedule.intervalStart.minute, 0)
+            XCTAssertEqual(schedule.intervalStart.timeZone, timeZone)
+
+            var calendar = Calendar(identifier: .gregorian)
+            calendar.locale = Locale(identifier: "en_US_POSIX")
+            calendar.timeZone = timeZone
+            let start = try XCTUnwrap(calendar.date(from: schedule.intervalStart))
+            let end = try XCTUnwrap(calendar.date(from: schedule.intervalEnd))
+            XCTAssertEqual(calendar.dateComponents([.day], from: start, to: end).day, 1)
+        }
+    }
+
+    func testDatedScheduleUsesSuppliedTimezoneAndRejectsNonCanonicalDates() throws {
+        let tokyo = try XCTUnwrap(TimeZone(identifier: "Asia/Tokyo"))
+        let newYork = try XCTUnwrap(TimeZone(identifier: "America/New_York"))
+        let tokyoSchedule = try MeteringDatedSchedule.datedSchedule(
+            usageDate: "2026-07-18",
+            timeZone: tokyo
+        )
+        let newYorkSchedule = try MeteringDatedSchedule.datedSchedule(
+            usageDate: "2026-07-17",
+            timeZone: newYork
+        )
+
+        XCTAssertEqual(tokyoSchedule.intervalStart.timeZone, tokyo)
+        XCTAssertEqual(tokyoSchedule.intervalStart.day, 18)
+        XCTAssertEqual(newYorkSchedule.intervalStart.timeZone, newYork)
+        XCTAssertEqual(newYorkSchedule.intervalStart.day, 17)
+        for invalidDate in ["2026-2-03", "2026-02-3", "2026-02-30", "2026/02/03", "20260203"] {
+            XCTAssertThrowsError(try MeteringDatedSchedule.datedSchedule(
+                usageDate: invalidDate,
+                timeZone: tokyo
+            ))
+        }
+    }
+
+    func testDatedScheduleRemainsGregorianWhenCallerSuppliesAnotherCalendar() throws {
+        let timeZone = try XCTUnwrap(TimeZone(identifier: "America/New_York"))
+        let schedule = try MeteringDatedSchedule.datedSchedule(
+            usageDate: "2026-07-17",
+            timeZone: timeZone,
+            calendar: Calendar(identifier: .buddhist)
+        )
+
+        XCTAssertEqual(schedule.intervalStart.calendar?.identifier, .gregorian)
+        XCTAssertEqual(schedule.intervalStart.year, 2026)
+        XCTAssertEqual(schedule.intervalStart.month, 7)
+        XCTAssertEqual(schedule.intervalStart.day, 17)
+    }
+
+    func testHorizonPlannerProducesTodayAndSevenFutureCanonicalDates() throws {
+        let timeZone = try XCTUnwrap(TimeZone(identifier: "America/New_York"))
+
+        XCTAssertEqual(
+            try MeteringHorizonPlanner.requiredUsageDates(today: "2026-03-08", timeZone: timeZone),
+            [
+                "2026-03-08", "2026-03-09", "2026-03-10", "2026-03-11",
+                "2026-03-12", "2026-03-13", "2026-03-14", "2026-03-15",
+            ]
+        )
+    }
+
+    func testHorizonReconciliationPersistsOneGenerationAndEightImmutableDatedRoutes() throws {
+        let owner = UUID(uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")!
+        let storeURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("metering-horizon-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: storeURL) }
+        let store = DeviceEpochStore(fileURL: storeURL, ownerProvider: { owner })
+        let selectionBytes = Data([0x00, 0x01, 0xFE, 0xFF])
+        let request = MeteringHorizonRequest(
+            ownerChildDeviceID: owner,
+            today: "2026-07-17",
+            generationKey: generationKey(owner: owner),
+            persistedSelectionBytes: selectionBytes,
+            poolMinutes: 120,
+            deviceCapMinutes: 62,
+            authoritativeBaseAcceptedMinutes: 12,
+            now: Date(timeIntervalSince1970: 1_784_764_800)
+        )
+
+        let first = try store.reconcileMeteringHorizon(request)
+        let firstState = try store.read()
+        let second = try store.reconcileMeteringHorizon(request)
+        let secondState = try store.read()
+
+        XCTAssertEqual(first, second)
+        XCTAssertEqual(firstState, secondState)
+        XCTAssertEqual(firstState.generations.count, 1)
+        XCTAssertEqual(firstState.routes.count, MeteringHorizonPlanner.dateCount)
+        XCTAssertEqual(firstState.epochs.count, MeteringHorizonPlanner.dateCount)
+        XCTAssertEqual(firstState.installWork.count, MeteringHorizonPlanner.dateCount)
+        XCTAssertEqual(firstState.registrationWork.count, 1)
+        XCTAssertEqual(firstState.generations[first.generationID]?.measurementSelectionBytes, selectionBytes)
+
+        let routesByDate = Dictionary(uniqueKeysWithValues: firstState.routes.values.map { ($0.usageDate, $0) })
+        XCTAssertEqual(routesByDate.keys.sorted(), try MeteringHorizonPlanner.requiredUsageDates(
+            today: request.today,
+            timeZone: try XCTUnwrap(TimeZone(identifier: "America/New_York"))
+        ))
+        XCTAssertEqual(routesByDate[request.today]?.lifecycle, .planned)
+        XCTAssertEqual(routesByDate[request.today]?.plannedSchedule.usageDate, request.today)
+        let todayRoute = try XCTUnwrap(routesByDate[request.today])
+        XCTAssertEqual(todayRoute.plannedEvents.map(\.thresholdMinutes), [
+            5, 10, 15, 20, 25, 30, 35, 40, 45, 50,
+        ])
+        XCTAssertEqual(todayRoute.plannedEvents.map(\.eventName), todayRoute.plannedEvents.map {
+            MeteringRouteNamespace.eventName(
+                routeID: todayRoute.routeID,
+                thresholdMinutes: $0.thresholdMinutes
+            )
+        })
+        let todayEpoch = try XCTUnwrap(firstState.epochs[todayRoute.epochID])
+        XCTAssertEqual(todayEpoch.baseAcceptedMinutes, 12)
+        XCTAssertEqual(todayEpoch.baseSource, .childState200)
+        XCTAssertEqual(firstState.installWork.values.first(where: { $0.routeID == todayRoute.routeID })?.authorization, .registrationRequired)
+        XCTAssertEqual(firstState.registrationWork.values.first?.routeID, todayRoute.routeID)
+
+        for route in firstState.routes.values where route.usageDate != request.today {
+            XCTAssertEqual(route.plannedEvents.map(\.thresholdMinutes), [
+                5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 62,
+            ])
+            XCTAssertEqual(route.plannedEvents.map(\.eventName), route.plannedEvents.map {
+                MeteringRouteNamespace.eventName(
+                    routeID: route.routeID,
+                    thresholdMinutes: $0.thresholdMinutes
+                )
+            })
+            XCTAssertEqual(
+                firstState.installWork.values.first(where: { $0.routeID == route.routeID })?.authorization,
+                .futurePlanned
+            )
+            XCTAssertNil(firstState.registrationWork.values.first(where: { $0.routeID == route.routeID }))
+        }
+    }
+
+    func testCurrentRouteUsesAuthoritativeBaseForRemainingLadderAndFutureRoutesUseFullLadder() throws {
+        let owner = UUID(uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")!
+        let storeURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("metering-horizon-ladder-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: storeURL) }
+        let store = DeviceEpochStore(fileURL: storeURL, ownerProvider: { owner })
+        let request = MeteringHorizonRequest(
+            ownerChildDeviceID: owner,
+            today: "2026-07-17",
+            generationKey: generationKey(owner: owner),
+            persistedSelectionBytes: Data([0x00, 0x01, 0xFE, 0xFF]),
+            poolMinutes: 60,
+            deviceCapMinutes: 12,
+            authoritativeBaseAcceptedMinutes: 5,
+            now: Date(timeIntervalSince1970: 1_784_764_800)
+        )
+
+        let plan = try store.reconcileMeteringHorizon(request)
+        let state = try store.read()
+        let todayRoute = try XCTUnwrap(state.routes[plan.routeIDsByUsageDate[request.today]!])
+        let futureRoute = try XCTUnwrap(state.routes[plan.routeIDsByUsageDate["2026-07-18"]!])
+
+        XCTAssertEqual(todayRoute.plannedEvents.map(\.thresholdMinutes), [5, 7])
+        XCTAssertEqual(futureRoute.plannedEvents.map(\.thresholdMinutes), [5, 10, 12])
+        XCTAssertEqual(
+            todayRoute.plannedEvents.first?.eventName,
+            MeteringRouteNamespace.eventName(routeID: todayRoute.routeID, thresholdMinutes: 5)
+        )
+        XCTAssertEqual(request.authoritativeBaseAcceptedMinutes + 5, 10)
+    }
+
+    func testExhaustedCurrentRouteHasNoEventsAndExistingRoutesIgnoreChangedPoolAndCap() throws {
+        let owner = UUID(uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")!
+        let storeURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("metering-horizon-exhausted-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: storeURL) }
+        let store = DeviceEpochStore(fileURL: storeURL, ownerProvider: { owner })
+        let exhausted = MeteringHorizonRequest(
+            ownerChildDeviceID: owner,
+            today: "2026-07-17",
+            generationKey: generationKey(owner: owner),
+            persistedSelectionBytes: Data([0x00, 0x01, 0xFE, 0xFF]),
+            poolMinutes: 60,
+            deviceCapMinutes: 12,
+            authoritativeBaseAcceptedMinutes: 12,
+            now: Date(timeIntervalSince1970: 1_784_764_800)
+        )
+        let first = try store.reconcileMeteringHorizon(exhausted)
+        let firstState = try store.read()
+        let changedRuntime = MeteringHorizonRequest(
+            ownerChildDeviceID: exhausted.ownerChildDeviceID,
+            today: exhausted.today,
+            generationKey: exhausted.generationKey,
+            persistedSelectionBytes: exhausted.persistedSelectionBytes,
+            poolMinutes: 30,
+            deviceCapMinutes: 30,
+            authoritativeBaseAcceptedMinutes: exhausted.authoritativeBaseAcceptedMinutes,
+            now: exhausted.now.addingTimeInterval(60)
+        )
+        let second = try store.reconcileMeteringHorizon(changedRuntime)
+        let secondState = try store.read()
+
+        XCTAssertTrue(firstState.routes[first.routeIDsByUsageDate[exhausted.today]!]!.plannedEvents.isEmpty)
+        XCTAssertEqual(first, second)
+        XCTAssertEqual(firstState, secondState)
+    }
+
+    func testGenerationDecisionChangesOnlyForTheSixGenerationIdentityFields() {
+        let owner = UUID(uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")!
+        let active = generationKey(owner: owner)
+        let alteredKeys = [
+            MeteringGenerationKey(protocolVersion: 3, childDeviceID: owner, canonicalTimezone: active.canonicalTimezone, policyRevision: active.policyRevision, measurementSelectionDigest: active.measurementSelectionDigest, enforcementSetID: active.enforcementSetID),
+            MeteringGenerationKey(protocolVersion: active.protocolVersion, childDeviceID: UUID(), canonicalTimezone: active.canonicalTimezone, policyRevision: active.policyRevision, measurementSelectionDigest: active.measurementSelectionDigest, enforcementSetID: active.enforcementSetID),
+            MeteringGenerationKey(protocolVersion: active.protocolVersion, childDeviceID: owner, canonicalTimezone: "Asia/Tokyo", policyRevision: active.policyRevision, measurementSelectionDigest: active.measurementSelectionDigest, enforcementSetID: active.enforcementSetID),
+            MeteringGenerationKey(protocolVersion: active.protocolVersion, childDeviceID: owner, canonicalTimezone: active.canonicalTimezone, policyRevision: "policy-r2", measurementSelectionDigest: active.measurementSelectionDigest, enforcementSetID: active.enforcementSetID),
+            MeteringGenerationKey(protocolVersion: active.protocolVersion, childDeviceID: owner, canonicalTimezone: active.canonicalTimezone, policyRevision: active.policyRevision, measurementSelectionDigest: "other-digest", enforcementSetID: active.enforcementSetID),
+            MeteringGenerationKey(protocolVersion: active.protocolVersion, childDeviceID: owner, canonicalTimezone: active.canonicalTimezone, policyRevision: active.policyRevision, measurementSelectionDigest: active.measurementSelectionDigest, enforcementSetID: UUID()),
+        ]
+
+        XCTAssertEqual(MeteringEpochContract.generationDecision(active: active, next: active), .keep)
+        for changed in alteredKeys {
+            XCTAssertEqual(MeteringEpochContract.generationDecision(active: active, next: changed), .install(changed))
+        }
+    }
+
+    func testMutableReconciliationAxesNeverReplaceExistingGenerationOrRoutes() throws {
+        let owner = UUID(uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")!
+        let storeURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("metering-horizon-mutable-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: storeURL) }
+        let store = DeviceEpochStore(fileURL: storeURL, ownerProvider: { owner })
+        let initial = MeteringHorizonRequest(
+            ownerChildDeviceID: owner,
+            today: "2026-07-17",
+            generationKey: generationKey(owner: owner),
+            persistedSelectionBytes: Data([0x00, 0x01, 0xFE, 0xFF]),
+            poolMinutes: 120,
+            deviceCapMinutes: 62,
+            authoritativeBaseAcceptedMinutes: 12,
+            now: Date(timeIntervalSince1970: 1_784_764_800)
+        )
+        let first = try store.reconcileMeteringHorizon(initial)
+        let originalRouteIDs = first.routeIDsByUsageDate
+        let todayRouteID = try XCTUnwrap(originalRouteIDs[initial.today])
+        let todayEpochID = try XCTUnwrap((try store.read()).routes[todayRouteID]?.epochID)
+
+        try store.transaction(expectedOwner: owner) { state in
+            let route = try XCTUnwrap(state.routes[todayRouteID])
+            let epoch = try XCTUnwrap(state.epochs[route.epochID])
+            state.epochs[route.epochID] = DeviceDailyEpoch(
+                epochID: epoch.epochID,
+                protocolVersion: epoch.protocolVersion,
+                childDeviceID: epoch.childDeviceID,
+                usageDate: epoch.usageDate,
+                canonicalTimezone: epoch.canonicalTimezone,
+                policyRevision: epoch.policyRevision,
+                measurementSelectionDigest: epoch.measurementSelectionDigest,
+                enforcementSetID: epoch.enforcementSetID,
+                startedAt: epoch.startedAt,
+                registeredAt: epoch.registeredAt,
+                baseAcceptedMinutes: 37,
+                baseSource: epoch.baseSource,
+                lastRawThresholdMinutes: 45,
+                excludedWhilePausedMinutes: epoch.excludedWhilePausedMinutes,
+                status: .paused,
+                resumeBoundaryPending: true,
+                retiredAt: epoch.retiredAt,
+                retireReason: epoch.retireReason,
+                exhaustedAt: epoch.exhaustedAt,
+                baseCorrectionState: epoch.baseCorrectionState,
+                authoritativeBaseConflict: epoch.authoritativeBaseConflict
+            )
+            let installKey = try XCTUnwrap(state.installWork.first(where: { $0.value.routeID == route.routeID })?.key)
+            var work = try XCTUnwrap(state.installWork[installKey])
+            work.retry = MeteringRetryState(
+                attemptCount: 3,
+                nextAttemptAt: initial.now.addingTimeInterval(60),
+                lastErrorCode: "transient",
+                terminal: .pending
+            )
+            state.installWork[installKey] = work
+        }
+
+        // V2 has no offset input: offset is deliberately absent from both the
+        // request and generation key. A changed canonical date and timestamp are
+        // represented by these two request fields without becoming generation identity.
+        let nextDay = MeteringHorizonRequest(
+            ownerChildDeviceID: initial.ownerChildDeviceID,
+            today: "2026-07-18",
+            generationKey: initial.generationKey,
+            persistedSelectionBytes: initial.persistedSelectionBytes,
+            poolMinutes: initial.poolMinutes,
+            deviceCapMinutes: initial.deviceCapMinutes,
+            authoritativeBaseAcceptedMinutes: 99,
+            now: initial.now.addingTimeInterval(300)
+        )
+        let second = try store.reconcileMeteringHorizon(nextDay)
+        let state = try store.read()
+
+        XCTAssertEqual(second.generationID, first.generationID)
+        for (usageDate, routeID) in originalRouteIDs {
+            XCTAssertEqual(state.routes[routeID]?.usageDate, usageDate)
+        }
+        XCTAssertEqual(state.routes[todayRouteID]?.epochID, todayEpochID)
+        XCTAssertEqual(state.epochs[todayEpochID]?.baseAcceptedMinutes, 37)
+        XCTAssertEqual(state.epochs[todayEpochID]?.lastRawThresholdMinutes, 45)
+        XCTAssertEqual(state.epochs[todayEpochID]?.status, .paused)
+        XCTAssertEqual(state.epochs[todayEpochID]?.resumeBoundaryPending, true)
+        XCTAssertEqual(state.installWork.values.first(where: { $0.routeID == todayRouteID })?.retry.attemptCount, 3)
+        XCTAssertEqual(state.installWork.values.first(where: { $0.routeID == todayRouteID })?.retry.lastErrorCode, "transient")
+        XCTAssertFalse(Mirror(reflecting: initial).children.compactMap(\.label).contains("offsetMinutes"))
+    }
+
+    private func generationKey(owner: UUID) -> MeteringGenerationKey {
+        MeteringGenerationKey(
+            protocolVersion: 2,
+            childDeviceID: owner,
+            canonicalTimezone: "America/New_York",
+            policyRevision: "policy-r1",
+            measurementSelectionDigest: MeteringEpochContract.selectionDigest(
+                persistedBytes: Data([0x00, 0x01, 0xFE, 0xFF])
+            ),
+            enforcementSetID: UUID(uuidString: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")!
+        )
+    }
+
     private func generation(
         id: String,
         deviceID: String = "b21411cb-63a5-4489-bc68-bf8ac26ee15b",

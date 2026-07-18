@@ -20,11 +20,11 @@ final class EarnedBudgetScheduler {
 
     /// The granularity of earned-time buckets (minutes).
     /// All event thresholds are derived from this value.
-    nonisolated static let earnedBucketMinutes: Int = 5
+    nonisolated static let earnedBucketMinutes = MeteringDatedSchedule.earnedBucketMinutes
 
     /// Hard ceiling on the number of DeviceActivity events that can be armed
     /// in one activity (240 min / 5 min per bucket = 48 max meaningful slots).
-    nonisolated static let guardEventCount: Int = 48
+    nonisolated static let guardEventCount = MeteringDatedSchedule.guardEventCount
 
     // MARK: - Singleton
 
@@ -47,31 +47,7 @@ final class EarnedBudgetScheduler {
     /// `nonisolated` so this pure function can be called from any context
     /// (including XCTestCase synchronous test methods) without actor-hop overhead.
     nonisolated static func thresholds(poolMinutes: Int, capMinutes: Int) -> [Int] {
-        let ceiling = min(poolMinutes, capMinutes)
-        guard ceiling > 0 else { return [] }
-
-        // Generate multiples of earnedBucketMinutes up to ceiling.
-        var result: [Int] = stride(
-            from: earnedBucketMinutes,
-            through: ceiling,
-            by: earnedBucketMinutes
-        ).map { $0 }
-
-        // Append exact cap if it is not already a multiple of the bucket.
-        // This ensures the cap threshold is always represented.
-        if ceiling % earnedBucketMinutes != 0 {
-            result.append(ceiling)
-        }
-
-        // Guard: cap at guardEventCount slots (safety valve).
-        if result.count > guardEventCount {
-            result = Array(result.prefix(guardEventCount - 1))
-            if result.last != ceiling {
-                result.append(ceiling)
-            }
-        }
-
-        return result
+        MeteringDatedSchedule.thresholds(poolMinutes: poolMinutes, capMinutes: capMinutes)
     }
 
     nonisolated static func remainingPolicy(
@@ -79,21 +55,32 @@ final class EarnedBudgetScheduler {
         capMinutes: Int,
         offsetMinutes: Int
     ) -> (poolMinutes: Int, capMinutes: Int)? {
-        let remainingCeiling = min(poolMinutes, capMinutes) - max(0, offsetMinutes)
-        guard remainingCeiling > 0 else { return nil }
-        return (remainingCeiling, remainingCeiling)
+        MeteringDatedSchedule.remainingPolicy(
+            poolMinutes: poolMinutes,
+            capMinutes: capMinutes,
+            offsetMinutes: offsetMinutes
+        )
     }
 
     nonisolated static func makeEvent(
         selection: FamilyActivitySelection,
         thresholdMinutes: Int
     ) -> DeviceActivityEvent {
-        DeviceActivityEvent(
-            applications: selection.applicationTokens,
-            categories: selection.categoryTokens,
-            webDomains: selection.webDomainTokens,
-            threshold: DateComponents(minute: thresholdMinutes),
-            includesPastActivity: false
+        MeteringDatedSchedule.makeEvent(
+            selection: selection,
+            thresholdMinutes: thresholdMinutes
+        )
+    }
+
+    nonisolated static func datedSchedule(
+        usageDate: String,
+        timeZone: TimeZone,
+        calendar: Calendar = Calendar(identifier: .gregorian)
+    ) throws -> DeviceActivitySchedule {
+        try MeteringDatedSchedule.datedSchedule(
+            usageDate: usageDate,
+            timeZone: timeZone,
+            calendar: calendar
         )
     }
 

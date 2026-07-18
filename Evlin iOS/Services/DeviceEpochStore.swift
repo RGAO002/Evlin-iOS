@@ -632,7 +632,7 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
     }
 
     @discardableResult
-    func transaction<Value>(
+    internal func transaction<Value>(
         expectedOwner: UUID?,
         _ mutate: (inout DeviceEpochStoreState) throws -> Value
     ) throws -> Value {

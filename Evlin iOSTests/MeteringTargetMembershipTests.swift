@@ -40,6 +40,20 @@ final class MeteringTargetMembershipTests: XCTestCase {
         XCTAssertTrue(isMember("Services/DeviceEpochStore.swift", of: .push, in: project))
     }
 
+    func testDatedRouteServicesBelongToAppAndMonitorButNotPushTargets() throws {
+        let project = try projectSource()
+        let paths = [
+            "Services/MeteringCallbackRoute.swift",
+            "Services/MeteringDatedSchedule.swift",
+        ]
+
+        for path in paths {
+            XCTAssertTrue(isMember(path, of: .app, in: project), path)
+            XCTAssertTrue(isMember(path, of: .deviceActivityMonitor, in: project), path)
+            XCTAssertFalse(isMember(path, of: .push, in: project), path)
+        }
+    }
+
     func testEpochDeliveryBelongsToAppAndMonitorButNotPushTargets() throws {
         let project = try projectSource()
 
