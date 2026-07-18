@@ -1192,7 +1192,8 @@ final class MeteringEpochDeliveryTests: XCTestCase {
         let fileURL = temporaryStoreURL()
         defer { removeTemporaryStore(fileURL) }
         let store = makeStore(fileURL: fileURL)
-        try store.transaction(expectedOwner: owner) { $0 = makeBaseState() }
+        let before = makeBaseState()
+        try store.transaction(expectedOwner: owner) { $0 = before }
         let conflict = EpochRegistrationConflictDTO(
             code: .authoritativeBaseMismatch,
             authoritativeSnapshot: DeviceDaySnapshotDTO(
@@ -1215,8 +1216,13 @@ final class MeteringEpochDeliveryTests: XCTestCase {
 
         await delivery.drain(owner: owner)
 
-        XCTAssertNil(try store.read().epochs[epochID]?.authoritativeBaseConflict)
-        XCTAssertEqual(try store.read().registrationWork.values.first?.retry.terminal, .pending)
+        let final = try store.read()
+        XCTAssertNil(final.epochs[epochID]?.authoritativeBaseConflict)
+        XCTAssertEqual(final.registrationWork.values.first?.retry.terminal, .rejected)
+        XCTAssertEqual(final.registrationWork.values.first?.retry.lastErrorCode, "snapshot_mismatch")
+        XCTAssertNil(final.registrationWork.values.first?.claim)
+        XCTAssertEqual(final.epochs, before.epochs)
+        XCTAssertEqual(final.ratchets, before.ratchets)
     }
 
     func testLegacySampleAuthorizationCannotReferenceV2Route() throws {
