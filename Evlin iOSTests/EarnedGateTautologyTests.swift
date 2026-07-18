@@ -6,19 +6,6 @@ final class EarnedGateTautologyTests: XCTestCase {
     override func setUp() { super.setUp(); EarnedTimeStore.shared.removeAll() }
     override func tearDown() { EarnedTimeStore.shared.removeAll(); super.tearDown() }
 
-    // backendRemaining writer contract: veto only when fresh AND margin.
-    func test_backendVeto_freshAndMargin_suppresses() {
-        let now = Date()
-        XCTAssertTrue(EarnedSampleReporter.backendVetoesSelfLock(
-            lastBackendRemaining: 40, lastBackendSyncAt: now.addingTimeInterval(-60), now: now))
-        XCTAssertFalse(EarnedSampleReporter.backendVetoesSelfLock(  // stale
-            lastBackendRemaining: 40, lastBackendSyncAt: now.addingTimeInterval(-1200), now: now))
-        XCTAssertFalse(EarnedSampleReporter.backendVetoesSelfLock(  // no margin
-            lastBackendRemaining: 3, lastBackendSyncAt: now, now: now))
-        XCTAssertFalse(EarnedSampleReporter.backendVetoesSelfLock(  // absent
-            lastBackendRemaining: nil, lastBackendSyncAt: nil, now: now))
-    }
-
     // Re-arm ceiling: BigKidStatePoller must arm with the REAL pool/cap, not
     //    pool=cap=remaining. Pure form: assert the arm inputs the fixed rearm
     //    would pass. (See Step 5 seam.)

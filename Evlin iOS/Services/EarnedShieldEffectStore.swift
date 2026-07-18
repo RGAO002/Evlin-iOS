@@ -393,7 +393,14 @@ nonisolated final class EarnedShieldEffectStore: @unchecked Sendable {
             case .releasePending:
                 try release(operationID: envelope.operationID, expectedOwner: expectedOwner)
                 requiresProjection = true
-            case .applied, .released:
+            case .applied:
+                let reference = try reference(for: envelope)
+                guard try epochStore.canReleaseEarnedShieldReference(reference) else {
+                    continue
+                }
+                try release(operationID: envelope.operationID, expectedOwner: expectedOwner)
+                requiresProjection = true
+            case .released:
                 continue
             case .conflicted:
                 throw EarnedShieldEffectError.casConflict(envelope.operationID)

@@ -974,20 +974,4 @@ enum EarnedSampleReporter {
         return thresholdN >= effectiveCap
     }
 
-    /// Defense-in-depth: refuse a LOCAL self-lock when the last synced backend
-    /// remaining says there is comfortable headroom AND that sync is fresh.
-    /// (Prevents the extension locking while the backend same-second reports
-    /// `available rem=40`.) A stale or absent sync does NOT suppress — offline
-    /// enforcement must still work.
-    static func backendVetoesSelfLock(
-        lastBackendRemaining: Int?,
-        lastBackendSyncAt: Date?,
-        now: Date,
-        marginMinutes: Int = 5,
-        freshnessSeconds: TimeInterval = 600
-    ) -> Bool {
-        guard let rem = lastBackendRemaining, let at = lastBackendSyncAt else { return false }
-        guard now.timeIntervalSince(at) < freshnessSeconds else { return false }
-        return rem > marginMinutes
-    }
 }
