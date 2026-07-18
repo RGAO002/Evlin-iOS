@@ -327,6 +327,12 @@ nonisolated struct MeteringDueWork: Equatable, Sendable {
     let createdAt: Date
 }
 
+nonisolated enum MeteringClaimedNetworkWork: Sendable {
+    case registration(EpochRegistrationWork, MeteringNetworkClaim)
+    case activation(EpochActivationWork, MeteringNetworkClaim)
+    case sample(EpochSampleWork, MeteringNetworkClaim)
+}
+
 nonisolated enum MeteringLocalProtocolSelection: String, Codable, Sendable {
     case v1, dualActive, v2
 }
@@ -580,29 +586,48 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
     }
 
     @discardableResult
-    func claimNetworkWork(
-        workID: UUID,
-        kind: MeteringWorkKind,
+    func claimFirstNetworkWork(
         owner: UUID,
         now: Date,
-        leaseDuration: TimeInterval = MeteringNetworkClaim.leaseDuration
-    ) throws -> MeteringNetworkClaim? {
+        isEligible: (DeviceEpochStoreState, MeteringDueWork) -> Bool
+    ) throws -> MeteringClaimedNetworkWork? {
         try transaction(expectedOwner: owner) { state in
-            guard let retry = state.retryState(for: workID, kind: kind),
-                  retry.terminal == .pending,
-                  retry.nextAttemptAt <= now
+            guard let due = state.dueWork(now: now).first,
+                  isEligible(state, due)
             else { return nil }
-
-            let currentClaim = state.networkClaim(for: workID, kind: kind)
-            if let currentClaim, currentClaim.expiresAt > now { return nil }
-
             let claim = MeteringNetworkClaim(
                 token: UUID(),
                 claimedAt: now,
-                expiresAt: now.addingTimeInterval(leaseDuration)
+                expiresAt: now.addingTimeInterval(MeteringNetworkClaim.leaseDuration)
             )
-            state.setNetworkClaim(claim, for: workID, kind: kind)
-            return claim
+            switch due.kind {
+            case .registration:
+                guard let key = state.registrationWork.first(where: { $0.value.workID == due.workID })?.key,
+                      var work = state.registrationWork[key],
+                      work.claim.map({ $0.expiresAt <= now }) ?? true
+                else { return nil }
+                work.claim = claim
+                state.registrationWork[key] = work
+                return .registration(work, claim)
+            case .activation:
+                guard let key = state.activationWork.first(where: { $0.value.workID == due.workID })?.key,
+                      var work = state.activationWork[key],
+                      work.claim.map({ $0.expiresAt <= now }) ?? true
+                else { return nil }
+                work.claim = claim
+                state.activationWork[key] = work
+                return .activation(work, claim)
+            case .sample:
+                guard let key = state.sampleWork.first(where: { $0.value.workID == due.workID })?.key,
+                      var work = state.sampleWork[key],
+                      work.claim.map({ $0.expiresAt <= now }) ?? true
+                else { return nil }
+                work.claim = claim
+                state.sampleWork[key] = work
+                return .sample(work, claim)
+            case .identityCleanup, .rollover, .install, .shield:
+                return nil
+            }
         }
     }
 
@@ -629,6 +654,7 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
             try validateTransactionDelta(candidate: candidate, priorState: state)
 
             let encoded = try Self.encoder.encode(candidate)
+            guard encoded != priorData else { return value }
             var writeAttempted = false
             do {
                 writeAttempted = true
@@ -636,10 +662,13 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                 guard let readbackData = try fileIO.read(from: url) else {
                     throw DeviceEpochStoreError.readbackMismatch
                 }
-                let readback = try decodeState(readbackData)
-                guard readback == candidate else {
+                // File IO must return the exact canonical payload we wrote. Comparing
+                // decoded values can reject a valid write when Codable normalizes Date.
+                guard readbackData == encoded else {
                     throw DeviceEpochStoreError.readbackMismatch
                 }
+                let readback = try decodeState(readbackData)
+                try validateStatic(readback, expectedOwner: expectedOwner, requireOwnerMatch: true)
                 try checkOwner(expectedOwner: expectedOwner, state: readback)
                 return value
             } catch {
@@ -920,6 +949,9 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
             guard work.ownerChildDeviceID == owner,
                   let route = state.routes[work.routeID],
                   route.epochID == work.epochID,
+                  let epoch = state.epochs[work.epochID],
+                  work.request.usageDate == route.usageDate,
+                  work.request.usageDate == epoch.usageDate,
                   work.request.protocolVersion == 2,
                   work.request.deviceID == owner,
                   work.request.epochID == work.epochID
@@ -945,24 +977,30 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
             else {
                 throw DeviceEpochStoreInvariantError.invalidState("sample work has the wrong owner")
             }
-            if let routeID = work.routeID {
-                guard let route = state.routes[routeID],
-                      work.epochID == route.epochID,
-                      work.request.deviceID == owner,
-                      work.request.epochID == route.epochID,
+            switch work.authorization {
+            case .legacyDeliverable:
+                guard work.epochID == nil,
+                      work.routeID == nil,
+                      work.request.lane == .v1
+                else {
+                    throw DeviceEpochStoreInvariantError.invalidState("legacy sample work is not a v1 sample")
+                }
+            case .waitingForRegistration, .v2Deliverable:
+                guard let routeID = work.routeID,
+                      let epochID = work.epochID,
+                      let route = state.routes[routeID],
+                      let epoch = state.epochs[epochID],
+                      route.ownerChildDeviceID == owner,
+                      route.epochID == epochID,
+                      epoch.childDeviceID == owner,
+                      work.request.epochID == epochID,
                       work.request.lane == .v2,
                       work.request.activityName == route.activityName,
                       work.request.usageDate == route.usageDate,
+                      work.request.usageDate == epoch.usageDate,
                       work.createdAt >= route.createdAt
                 else {
-                    throw DeviceEpochStoreInvariantError.invalidState("sample work references an invalid route")
-                }
-            } else {
-                guard work.epochID == nil,
-                      work.authorization == .legacyDeliverable,
-                      work.request.lane == .v1
-                else {
-                    throw DeviceEpochStoreInvariantError.invalidState("unrouted sample work is not a v1 sample")
+                    throw DeviceEpochStoreInvariantError.invalidState("v2 sample work references an invalid route")
                 }
             }
         }

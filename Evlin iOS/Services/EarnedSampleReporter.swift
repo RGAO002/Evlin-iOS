@@ -323,7 +323,7 @@ enum EarnedSampleReporter {
         suiteName: String = "group.com.evlin.ios",
         epochStore: DeviceEpochStore? = nil,
         authorizationIsCurrent: @escaping () -> Bool = { true },
-        requestData: @escaping (URLRequest) async throws -> (Data, URLResponse) = {
+        requestData: @escaping @Sendable (URLRequest) async throws -> (Data, URLResponse) = {
             try await URLSession.shared.data(for: $0)
         }
     ) async {
@@ -338,11 +338,6 @@ enum EarnedSampleReporter {
             generationArmedAt: generationArmedAt,
             generationOffsetMinutes: generationOffsetMinutes
         )
-        guard enqueueRetry(entry, suiteName: suiteName, epochStore: epochStore) else {
-            recordDebug("enqueue durability_failed t\(thresholdMinutes)", suiteName: suiteName)
-            return
-        }
-
         let deliveryStore: DeviceEpochStore?
         if let epochStore {
             deliveryStore = epochStore
@@ -356,8 +351,11 @@ enum EarnedSampleReporter {
             deliveryStore = nil
         }
 
-        if let deliveryStore,
-           let epochRequest = makeEpochSampleRequest(from: entry) {
+        if let deliveryStore {
+            guard let epochRequest = makeEpochSampleRequest(from: entry) else {
+                recordDebug("enqueue epoch_request_failed t\(thresholdMinutes)", suiteName: suiteName)
+                return
+            }
             let transport = ClosureMeteringTransport(handler: requestData)
             let delivery = MeteringEpochDelivery(
                 baseURL: baseURL,
@@ -368,10 +366,15 @@ enum EarnedSampleReporter {
             do {
                 try delivery.enqueueV1(epochRequest, owner: deviceID)
             } catch {
-                recordDebug("enqueue epoch_root_failed t\(thresholdMinutes)", suiteName: suiteName)
+                recordDebug("enqueue epoch_root_failed t\(thresholdMinutes) error=\(String(describing: error))", suiteName: suiteName)
                 return
             }
-            await delivery.drain(owner: deviceID)
+            await delivery.drain(owner: deviceID, importLegacyWork: false)
+            return
+        }
+
+        guard enqueueRetry(entry, suiteName: suiteName) else {
+            recordDebug("enqueue durability_failed t\(thresholdMinutes)", suiteName: suiteName)
             return
         }
 
@@ -428,7 +431,7 @@ enum EarnedSampleReporter {
         suiteName: String = sharedSuiteName,
         onlyDeviceID: UUID? = nil,
         authorizationIsCurrent: @escaping () -> Bool = { true },
-        requestData: @escaping (URLRequest) async throws -> (Data, URLResponse) = {
+        requestData: @escaping @Sendable (URLRequest) async throws -> (Data, URLResponse) = {
             try await URLSession.shared.data(for: $0)
         }
     ) async {
@@ -442,6 +445,7 @@ enum EarnedSampleReporter {
                 baseURL: baseURL,
                 store: .shared,
                 transport: transport,
+                clock: SystemMeteringClock(),
                 legacySuiteName: suiteName
             )
             await delivery.drain(owner: deviceID)
@@ -505,7 +509,7 @@ enum EarnedSampleReporter {
 
     static func drainRetryQueueFromStoredConfig(
         suiteName: String = sharedSuiteName,
-        requestData: @escaping (URLRequest) async throws -> (Data, URLResponse) = {
+        requestData: @escaping @Sendable (URLRequest) async throws -> (Data, URLResponse) = {
             try await URLSession.shared.data(for: $0)
         }
     ) async {

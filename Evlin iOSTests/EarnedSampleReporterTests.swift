@@ -755,6 +755,50 @@ final class EarnedSampleReporterTests: XCTestCase {
         XCTAssertEqual(try store.read().sampleWork.values.first?.retry.terminal, .succeeded)
     }
 
+    func testReportWritesInjectedEpochRootOnceBeforeItsSingleDrain() async throws {
+        let isolatedSuite = "EarnedSampleReporterTests.root-writes.\(UUID().uuidString)"
+        defer { UserDefaults.standard.removePersistentDomain(forName: isolatedSuite) }
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("earned-reporter-write-count-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let deviceID = UUID()
+        let fileIO = CountingReporterFileIO()
+        let store = DeviceEpochStore(
+            fileURL: fileURL,
+            fileIO: fileIO,
+            ownerProvider: { deviceID }
+        )
+        try JSONEncoder().encode(DeviceEpochStoreState(ownerChildDeviceID: deviceID)).write(to: fileURL)
+        let transport = ReporterRootTransport(store: store, fileIO: fileIO)
+
+        await EarnedSampleReporter.report(
+            baseURL: URL(string: "https://earned-sample-reporter.test")!,
+            deviceID: deviceID,
+            usageDate: "2026-07-12",
+            timezone: "America/New_York",
+            thresholdMinutes: 20,
+            estimatedMinutes: 20,
+            suiteName: isolatedSuite,
+            epochStore: store,
+            requestData: { request in try await transport.data(for: request) }
+        )
+
+        XCTAssertEqual(transport.writeCountBeforePost, 2)
+        XCTAssertEqual(fileIO.writeCount, 3)
+        XCTAssertEqual(transport.requestCount, 1)
+        XCTAssertEqual(try store.read().sampleWork.values.first?.retry.terminal, .succeeded)
+    }
+
+    func testEpochTransportClosureContractIsSendable() throws {
+        let source = try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("Evlin iOS/Services/EarnedSampleReporter.swift")
+        )
+        XCTAssertEqual(source.components(separatedBy: "requestData: @escaping @Sendable").count - 1, 3)
+    }
+
     func test_clearRetryQueue_emptiesQueue() {
         let deviceID = UUID()
         EarnedSampleReporter.enqueueRetry(
@@ -1690,15 +1734,19 @@ final class EarnedSampleReporterResponseTests: XCTestCase {
 
 private final class ReporterRootTransport: @unchecked Sendable {
     let store: DeviceEpochStore
+    let fileIO: CountingReporterFileIO?
     var sampleCountBeforePost: Int?
+    var writeCountBeforePost: Int?
     var requestCount = 0
 
-    init(store: DeviceEpochStore) {
+    init(store: DeviceEpochStore, fileIO: CountingReporterFileIO? = nil) {
         self.store = store
+        self.fileIO = fileIO
     }
 
     func data(for request: URLRequest) async throws -> (Data, URLResponse) {
         requestCount += 1
+        writeCountBeforePost = fileIO?.writeCount
         sampleCountBeforePost = try store.read().sampleWork.count
         let response = HTTPURLResponse(
             url: try XCTUnwrap(request.url),
@@ -1707,6 +1755,27 @@ private final class ReporterRootTransport: @unchecked Sendable {
             headerFields: nil
         )!
         return (Data(#"{"code":"duplicate"}"#.utf8), response)
+    }
+}
+
+private final class CountingReporterFileIO: DeviceEpochFileIO, @unchecked Sendable {
+    private let lock = NSLock()
+    private let backing = SystemDeviceEpochFileIO()
+    private(set) var writeCount = 0
+
+    func read(from url: URL) throws -> Data? {
+        try backing.read(from: url)
+    }
+
+    func writeAtomically(_ data: Data, to url: URL) throws {
+        lock.lock()
+        writeCount += 1
+        lock.unlock()
+        try backing.writeAtomically(data, to: url)
+    }
+
+    func remove(at url: URL) throws {
+        try backing.remove(at: url)
     }
 }
 
