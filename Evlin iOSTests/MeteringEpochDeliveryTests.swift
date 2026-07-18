@@ -451,6 +451,220 @@ final class MeteringEpochDeliveryTests: XCTestCase {
         try await assertRegistration200DoesNotPromoteInstall(lifecycle: .tombstoned)
     }
 
+    func testDelayedRegistration200SupersedesRetiredOrNoLongerCandidateGeneration() async throws {
+        for retired in [true, false] {
+            let fileURL = temporaryStoreURL()
+            defer { removeTemporaryStore(fileURL) }
+            let store = makeStore(fileURL: fileURL)
+            try store.transaction(expectedOwner: owner) { state in
+                state = makeBaseState()
+                let route = try XCTUnwrap(state.routes[routeID])
+                if retired {
+                    state.generations[route.generationID]?.retiredAt = self.start
+                } else {
+                    let generation = try XCTUnwrap(state.generations[route.generationID])
+                    let replacementID = UUID()
+                    state.generations[replacementID] = MeteringPolicyGeneration(
+                        generationID: replacementID,
+                        protocolVersion: generation.protocolVersion,
+                        childDeviceID: generation.childDeviceID,
+                        canonicalTimezone: generation.canonicalTimezone,
+                        policyRevision: generation.policyRevision,
+                        measurementSelectionDigest: generation.measurementSelectionDigest,
+                        enforcementSetID: generation.enforcementSetID,
+                        measurementSelectionBytes: generation.measurementSelectionBytes,
+                        createdAt: generation.createdAt,
+                        retiredAt: nil
+                    )
+                    state.activeGenerationID = replacementID
+                    state.activeRouteID = nil
+                }
+            }
+            let installID = UUID()
+            try store.transaction(expectedOwner: owner) { state in
+                state.installWork[installID] = ActivityInstallWork(
+                    workID: installID,
+                    ownerChildDeviceID: self.owner,
+                    routeID: self.routeID,
+                    authorization: .registrationRequired,
+                    phase: .pendingStart,
+                    claim: nil,
+                    retry: MeteringRetryState(attemptCount: 0, nextAttemptAt: self.start, lastErrorCode: nil, terminal: .pending),
+                    createdAt: self.start
+                )
+            }
+            let transport = DeliveryTestTransport()
+            transport.results = [(try encoded(EpochRegistrationResponseDTO(
+                status: .registered,
+                epochID: epochID,
+                meteringProtocolVersion: 2,
+                snapshot: makeSnapshot(counted: true, warning: nil),
+                epochStatus: .active
+            )), HTTPURLResponse(url: baseURL, statusCode: 200, httpVersion: nil, headerFields: nil)!)]
+            let delivery = MeteringEpochDelivery(baseURL: baseURL, store: store, transport: transport, clock: DeliveryTestClock(now: start))
+
+            try delivery.enqueueRegistration(makeValidRegistrationRequest(), owner: owner, epochID: epochID, routeID: routeID)
+            await delivery.drain(owner: owner)
+
+            let final = try store.read()
+            XCTAssertEqual(final.registrationWork.values.first?.retry.terminal, .superseded)
+            XCTAssertEqual(final.registrationWork.values.first?.retry.lastErrorCode, "route_superseded")
+            XCTAssertNil(final.registrationWork.values.first?.claim)
+            XCTAssertNil(final.epochs[epochID]?.registeredAt)
+            XCTAssertNil(final.ratchets[owner]?.registeredV2At)
+            XCTAssertEqual(final.installWork[installID]?.authorization, .registrationRequired)
+        }
+    }
+
+    func testRegistration200AcceptsExactPreparingHandoffCandidateWhilePriorRouteIsActive() async throws {
+        let fileURL = temporaryStoreURL()
+        defer { removeTemporaryStore(fileURL) }
+        let store = makeStore(fileURL: fileURL)
+        let candidateGenerationID = UUID()
+        let candidateEpochID = UUID()
+        let candidateRouteID = UUID()
+        try store.transaction(expectedOwner: owner) { state in
+            state = makeBaseState()
+            let generation = try XCTUnwrap(state.generations[state.activeGenerationID!])
+            let epoch = try XCTUnwrap(state.epochs[epochID])
+            let route = try XCTUnwrap(state.routes[routeID])
+            state.generations[candidateGenerationID] = MeteringPolicyGeneration(
+                generationID: candidateGenerationID,
+                protocolVersion: generation.protocolVersion,
+                childDeviceID: generation.childDeviceID,
+                canonicalTimezone: generation.canonicalTimezone,
+                policyRevision: generation.policyRevision,
+                measurementSelectionDigest: generation.measurementSelectionDigest,
+                enforcementSetID: generation.enforcementSetID,
+                measurementSelectionBytes: generation.measurementSelectionBytes,
+                createdAt: generation.createdAt,
+                retiredAt: nil
+            )
+            state.epochs[candidateEpochID] = DeviceDailyEpoch(
+                epochID: candidateEpochID,
+                protocolVersion: epoch.protocolVersion,
+                childDeviceID: epoch.childDeviceID,
+                usageDate: epoch.usageDate,
+                canonicalTimezone: epoch.canonicalTimezone,
+                policyRevision: epoch.policyRevision,
+                measurementSelectionDigest: epoch.measurementSelectionDigest,
+                enforcementSetID: epoch.enforcementSetID,
+                startedAt: epoch.startedAt,
+                registeredAt: nil,
+                baseAcceptedMinutes: epoch.baseAcceptedMinutes,
+                baseSource: epoch.baseSource,
+                lastRawThresholdMinutes: epoch.lastRawThresholdMinutes,
+                excludedWhilePausedMinutes: epoch.excludedWhilePausedMinutes,
+                status: .active,
+                resumeBoundaryPending: epoch.resumeBoundaryPending,
+                retiredAt: nil,
+                retireReason: nil,
+                exhaustedAt: nil,
+                baseCorrectionState: .available
+            )
+            state.routes[candidateRouteID] = MeteringCallbackRoute(
+                routeID: candidateRouteID,
+                activityName: MeteringRouteNamespace.activityName(routeID: candidateRouteID),
+                namespace: route.namespace,
+                generationID: candidateGenerationID,
+                generationKey: route.generationKey,
+                ownerChildDeviceID: self.owner,
+                usageDate: route.usageDate,
+                epochID: candidateEpochID,
+                plannedSchedule: route.plannedSchedule,
+                installedSchedule: nil,
+                plannedEvents: [MeteringEventPlan(eventName: MeteringRouteNamespace.eventName(routeID: candidateRouteID, thresholdMinutes: 10), thresholdMinutes: 10)],
+                installedEvents: nil,
+                lifecycle: .planned,
+                createdAt: self.start
+            )
+            state.v2RouteHandoff = V2RouteHandoff(
+                handoffID: UUID(),
+                ownerChildDeviceID: self.owner,
+                fromGenerationID: route.generationID,
+                fromEpochID: route.epochID,
+                fromRouteID: route.routeID,
+                toGenerationID: candidateGenerationID,
+                toEpochID: candidateEpochID,
+                toRouteID: candidateRouteID,
+                phase: .preparing,
+                priorRouteInputClosedAt: nil,
+                registrationAcknowledgedAt: nil,
+                activationAcknowledgedAt: nil,
+                priorStopAcknowledgedAt: nil,
+                createdAt: self.start
+            )
+        }
+        let request = EpochRegistrationRequestDTO(
+            protocolVersion: 2,
+            epochID: candidateEpochID,
+            deviceID: owner,
+            usageDate: "2026-07-16",
+            timezone: "America/New_York",
+            policyRevision: "policy-1",
+            measurementSelectionDigest: MeteringEpochContract.selectionDigest(persistedBytes: Data([0x01, 0x02])),
+            enforcementSetID: UUID(uuidString: "44444444-4444-4444-4444-444444444444")!,
+            startedAt: start,
+            baseAcceptedMinutes: 0,
+            reason: .initial
+        )
+        let transport = DeliveryTestTransport()
+        transport.results = [(try encoded(EpochRegistrationResponseDTO(
+            status: .registered,
+            epochID: candidateEpochID,
+            meteringProtocolVersion: 2,
+            snapshot: makeSnapshot(counted: true, warning: nil),
+            epochStatus: .active
+        )), HTTPURLResponse(url: baseURL, statusCode: 200, httpVersion: nil, headerFields: nil)!)]
+        let delivery = MeteringEpochDelivery(baseURL: baseURL, store: store, transport: transport, clock: DeliveryTestClock(now: start))
+
+        try delivery.enqueueRegistration(request, owner: owner, epochID: candidateEpochID, routeID: candidateRouteID)
+        await delivery.drain(owner: owner)
+
+        let final = try store.read()
+        XCTAssertEqual(final.registrationWork.values.first?.retry.terminal, .succeeded)
+        XCTAssertEqual(final.epochs[candidateEpochID]?.registeredAt, start)
+        XCTAssertNotNil(final.ratchets[owner]?.registeredV2At)
+        XCTAssertEqual(final.activeRouteID, routeID)
+        XCTAssertEqual(final.routes[routeID]?.lifecycle, .active)
+    }
+
+    func testAuthoritativeBaseMismatchWithMismatchedSnapshotTerminalizesImmediately() async throws {
+        let fileURL = temporaryStoreURL()
+        defer { removeTemporaryStore(fileURL) }
+        let store = makeStore(fileURL: fileURL)
+        let before = makeBaseState()
+        try store.transaction(expectedOwner: owner) { $0 = before }
+        let conflict = EpochRegistrationConflictDTO(
+            code: .authoritativeBaseMismatch,
+            authoritativeSnapshot: DeviceDaySnapshotDTO(
+                childDeviceID: UUID(),
+                usageDate: "2026-07-15",
+                estimatedMinutes: 30,
+                capMinutes: 60,
+                childDayState: "active",
+                usedMinutes: 30,
+                remainingMinutes: 30,
+                counted: true,
+                warning: nil
+            )
+        )
+        let transport = DeliveryTestTransport()
+        transport.results = [(try encoded(conflict), HTTPURLResponse(url: baseURL, statusCode: 409, httpVersion: nil, headerFields: nil)!)]
+        let delivery = MeteringEpochDelivery(baseURL: baseURL, store: store, transport: transport, clock: DeliveryTestClock(now: start))
+
+        try delivery.enqueueRegistration(makeValidRegistrationRequest(), owner: owner, epochID: epochID, routeID: routeID)
+        await delivery.drain(owner: owner)
+
+        let final = try store.read()
+        XCTAssertEqual(final.registrationWork.values.first?.retry.terminal, .rejected)
+        XCTAssertEqual(final.registrationWork.values.first?.retry.lastErrorCode, "snapshot_mismatch")
+        XCTAssertNil(final.registrationWork.values.first?.claim)
+        XCTAssertEqual(final.epochs, before.epochs)
+        XCTAssertEqual(final.ratchets, before.ratchets)
+        XCTAssertTrue(final.installWork.isEmpty)
+    }
+
     func testRegistrationResponseSupersedesMissingOrMismatchedRouteProvenance() throws {
         let delivery = MeteringEpochDelivery(
             baseURL: baseURL,

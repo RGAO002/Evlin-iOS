@@ -631,6 +631,19 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
             case .verified, .dualActive, .active, .pendingStop, .stopped:
                 return nil
             }
+            guard let route = state.routes[work.routeID],
+                  state.hasCurrentRegistrationProvenance(
+                      owner: owner,
+                      epochID: route.epochID,
+                      routeID: route.routeID
+                  )
+            else {
+                work.claim = nil
+                work.retry.terminal = .superseded
+                work.retry.lastErrorCode = "route_superseded"
+                state.installWork[key] = work
+                return nil
+            }
             if let claim = work.claim, claim.expiresAt > now {
                 return nil
             }
@@ -657,9 +670,17 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                   var work = state.installWork[key],
                   let claim = work.claim,
                   claim.token == token,
-                  claim.expiresAt > now,
-                  let route = state.routes[work.routeID]
+                  claim.expiresAt > now
             else { return false }
+            guard let route = state.routes[work.routeID],
+                  state.hasCurrentRegistrationProvenance(owner: owner, epochID: route.epochID, routeID: route.routeID)
+            else {
+                work.claim = nil
+                work.retry.terminal = .superseded
+                work.retry.lastErrorCode = "route_superseded"
+                state.installWork[key] = work
+                return false
+            }
             work.phase = .installed
             state.installWork[key] = work
             state.routes[route.routeID]?.installedSchedule = route.plannedSchedule
@@ -674,9 +695,17 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                   var work = state.installWork[key],
                   let claim = work.claim,
                   claim.token == token,
-                  claim.expiresAt > now,
-                  let route = state.routes[work.routeID]
+                  claim.expiresAt > now
             else { return false }
+            guard let route = state.routes[work.routeID],
+                  state.hasCurrentRegistrationProvenance(owner: owner, epochID: route.epochID, routeID: route.routeID)
+            else {
+                work.claim = nil
+                work.retry.terminal = .superseded
+                work.retry.lastErrorCode = "route_superseded"
+                state.installWork[key] = work
+                return false
+            }
             work.phase = .verified
             work.claim = nil
             state.installWork[key] = work
@@ -701,6 +730,19 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                   claim.token == token,
                   claim.expiresAt > now
             else { return false }
+            guard let failedRoute = state.routes[work.routeID],
+                  state.hasCurrentRegistrationProvenance(
+                      owner: owner,
+                      epochID: failedRoute.epochID,
+                      routeID: failedRoute.routeID
+                  )
+            else {
+                work.claim = nil
+                work.retry.terminal = .superseded
+                work.retry.lastErrorCode = "route_superseded"
+                state.installWork[key] = work
+                return false
+            }
             work.phase = .pendingStart
             work.claim = nil
             work.retry.attemptCount += 1
@@ -710,6 +752,7 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
             if installLimited {
                 let routes = state.routes.values.filter {
                     $0.ownerChildDeviceID == owner
+                        && $0.generationID == failedRoute.generationID
                         && ($0.lifecycle == .planned || $0.lifecycle == .active)
                 }
                 guard let first = routes.first, let last = routes.last else { return true }
@@ -759,6 +802,22 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                 coverage.errorCode = code
                 state.coverage = coverage
             }
+            return true
+        }
+    }
+
+    func supersedeInstallWork(workID: UUID, token: UUID, owner: UUID, now: Date) throws -> Bool {
+        try transaction(expectedOwner: owner) { state in
+            guard let key = state.installWork.first(where: { $0.value.workID == workID })?.key,
+                  var work = state.installWork[key],
+                  let claim = work.claim,
+                  claim.token == token,
+                  claim.expiresAt > now
+            else { return false }
+            work.claim = nil
+            work.retry.terminal = .superseded
+            work.retry.lastErrorCode = "route_superseded"
+            state.installWork[key] = work
             return true
         }
     }
@@ -1333,7 +1392,54 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
     }
 }
 
-private extension DeviceEpochStoreState {
+extension DeviceEpochStoreState {
+    func hasCurrentRegistrationProvenance(owner: UUID, epochID: UUID, routeID: UUID) -> Bool {
+        guard ownerChildDeviceID == owner,
+              let route = routes[routeID],
+              let epoch = epochs[epochID],
+              let generation = generations[route.generationID],
+              route.ownerChildDeviceID == owner,
+              route.routeID == routeID,
+              route.epochID == epochID,
+              epoch.childDeviceID == owner,
+              epoch.epochID == epochID,
+              generation.childDeviceID == owner,
+              generation.generationID == route.generationID,
+              generation.retiredAt == nil,
+              route.lifecycle == .planned || route.lifecycle == .active,
+              generation.protocolVersion == epoch.protocolVersion,
+              generation.canonicalTimezone == epoch.canonicalTimezone,
+              generation.policyRevision == epoch.policyRevision,
+              generation.measurementSelectionDigest == epoch.measurementSelectionDigest,
+              generation.enforcementSetID == epoch.enforcementSetID
+        else { return false }
+
+        if activeGenerationID == route.generationID {
+            return true
+        }
+
+        guard let handoff = v2RouteHandoff,
+              handoff.ownerChildDeviceID == owner,
+              handoff.toGenerationID == route.generationID,
+              handoff.toEpochID == epochID,
+              handoff.toRouteID == routeID,
+              handoff.phase == .preparing || handoff.phase == .dualV2 || handoff.phase == .cutoverReady,
+              let fromRoute = routes[handoff.fromRouteID],
+              let fromEpoch = epochs[handoff.fromEpochID],
+              let fromGeneration = generations[handoff.fromGenerationID],
+              fromRoute.ownerChildDeviceID == owner,
+              fromRoute.routeID == handoff.fromRouteID,
+              fromRoute.epochID == handoff.fromEpochID,
+              fromRoute.generationID == handoff.fromGenerationID,
+              fromEpoch.childDeviceID == owner,
+              fromEpoch.epochID == handoff.fromEpochID,
+              fromGeneration.childDeviceID == owner,
+              fromGeneration.generationID == handoff.fromGenerationID,
+              fromGeneration.retiredAt == nil
+        else { return false }
+        return true
+    }
+
     func retryState(for workID: UUID, kind: MeteringWorkKind) -> MeteringRetryState? {
         switch kind {
         case .registration:

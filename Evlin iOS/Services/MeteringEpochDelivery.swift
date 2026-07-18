@@ -378,6 +378,10 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
                 }
                 await recordRegistrationSuccess(workID: workID, owner: owner, claim: claim, response: response)
             case let .authoritativeBaseMismatch(conflict):
+                guard snapshotMatches(conflict.authoritativeSnapshot, owner: owner, usageDate: work.request.usageDate) else {
+                    await terminalizeRegistration(workID: workID, owner: owner, claim: claim, code: "snapshot_mismatch")
+                    return
+                }
                 await recordAuthoritativeBaseMismatch(workID: workID, owner: owner, claim: claim, conflict: conflict)
             case let .terminal(code):
                 await terminalizeRegistration(workID: workID, owner: owner, claim: claim, code: code)
@@ -480,16 +484,13 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
             if supersedeStaleRegistrationWork(&state, key: key, work: &work, owner: owner, claim: claim) {
                 return
             }
-            guard let route = state.routes[work.routeID],
-                  route.ownerChildDeviceID == owner,
-                  route.epochID == work.epochID,
+            guard state.hasCurrentRegistrationProvenance(owner: owner, epochID: work.epochID, routeID: work.routeID),
+                  let route = state.routes[work.routeID],
                   let epoch = state.epochs[work.epochID],
-                  epoch.childDeviceID == owner,
                   work.request.usageDate == route.usageDate,
                   work.request.usageDate == epoch.usageDate,
                   epoch.status == .active,
                   epoch.authoritativeBaseConflict == nil,
-                  (route.lifecycle == .planned || route.lifecycle == .active),
                   response.epochID == work.epochID,
                   snapshotMatches(response.snapshot, owner: owner, usageDate: route.usageDate)
             else { return }
@@ -535,12 +536,9 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
             if supersedeStaleRegistrationWork(&state, key: key, work: &work, owner: owner, claim: claim) {
                 return
             }
-            guard let route = state.routes[work.routeID],
-                  route.ownerChildDeviceID == owner,
-                  route.epochID == work.epochID,
-                  (route.lifecycle == .planned || route.lifecycle == .active),
+            guard state.hasCurrentRegistrationProvenance(owner: owner, epochID: work.epochID, routeID: work.routeID),
+                  let route = state.routes[work.routeID],
                   var epoch = state.epochs[work.epochID],
-                  epoch.childDeviceID == owner,
                   epoch.authoritativeBaseConflict == nil,
                   conflict.authoritativeSnapshot.childDeviceID == owner,
                   conflict.authoritativeSnapshot.usageDate == route.usageDate,
@@ -570,12 +568,9 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
             if supersedeStaleRegistrationWork(&state, key: key, work: &work, owner: owner, claim: claim) {
                 return
             }
-            guard let route = state.routes[work.routeID],
-                  route.ownerChildDeviceID == owner,
-                  (route.lifecycle == .planned || route.lifecycle == .active),
-                  route.epochID == work.epochID,
+            guard state.hasCurrentRegistrationProvenance(owner: owner, epochID: work.epochID, routeID: work.routeID),
+                  let route = state.routes[work.routeID],
                   let epoch = state.epochs[work.epochID],
-                  epoch.childDeviceID == owner,
                   epoch.authoritativeBaseConflict == nil,
                   work.request.usageDate == route.usageDate,
                   work.request.usageDate == epoch.usageDate
@@ -606,12 +601,9 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
             if supersedeStaleRegistrationWork(&state, key: key, work: &work, owner: owner, claim: claim) {
                 return
             }
-            guard let route = state.routes[work.routeID],
-                  route.ownerChildDeviceID == owner,
-                  (route.lifecycle == .planned || route.lifecycle == .active),
-                  route.epochID == work.epochID,
+            guard state.hasCurrentRegistrationProvenance(owner: owner, epochID: work.epochID, routeID: work.routeID),
+                  let route = state.routes[work.routeID],
                   let epoch = state.epochs[work.epochID],
-                  epoch.childDeviceID == owner,
                   epoch.authoritativeBaseConflict == nil,
                   work.request.usageDate == route.usageDate,
                   work.request.usageDate == epoch.usageDate
@@ -634,12 +626,9 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
         guard work.ownerChildDeviceID == owner,
               work.claim?.token == claim.token
         else { return false }
-        let routeIsCurrent = state.routes[work.routeID].map {
-            $0.ownerChildDeviceID == owner
-                && $0.epochID == work.epochID
-                && ($0.lifecycle == .planned || $0.lifecycle == .active)
-        } ?? false
-        guard !routeIsCurrent else { return false }
+        guard !state.hasCurrentRegistrationProvenance(owner: owner, epochID: work.epochID, routeID: work.routeID) else {
+            return false
+        }
         work.retry = completedRetry(from: work.retry, code: "route_superseded", terminal: .superseded)
         work.claim = nil
         state.registrationWork[key] = work

@@ -105,6 +105,146 @@ final class DatedRouteInstallerTests: XCTestCase {
         XCTAssertEqual(persisted?.retry.attemptCount, 0)
     }
 
+    func testExcessiveActivitiesStopsFillingWhenLeaseExpiresBeforeDeferCAS() throws {
+        let fixture = try makeFixture(leaveAllPending: true, registeredAll: true)
+        let work = try XCTUnwrap(try fixture.firstStore.read().installWork.values.first { $0.phase == .pendingStart })
+        let center = DatedCenter()
+        center.startError = DeviceActivityCenter.MonitoringError.excessiveActivities
+        center.onStart = { fixture.clock.date = self.start.addingTimeInterval(DatedRouteInstaller.claimLeaseSeconds) }
+        let installer = DatedRouteInstaller(
+            store: fixture.firstStore,
+            center: center,
+            processIdentity: MeteringProcessIdentity(role: .app, instanceID: UUID()),
+            clock: fixture.clock
+        )
+
+        XCTAssertEqual(try installer.reconcile(ownerChildDeviceID: owner), [.deferred(workID: work.workID, code: "claimLost")])
+
+        let persisted = try fixture.firstStore.read()
+        XCTAssertEqual(center.startCalls.count, 1)
+        XCTAssertEqual(persisted.installWork[work.workID]?.phase, .starting)
+        XCTAssertEqual(persisted.installWork[work.workID]?.retry.attemptCount, 0)
+        XCTAssertTrue(persisted.installWork.values.filter { $0.workID != work.workID }.allSatisfy {
+            $0.claim == nil && $0.phase == .pendingStart && $0.retry.attemptCount == 0
+        })
+    }
+
+    func testRetiredOrNonCandidateInstallWorkIsSupersededWithoutStartingApple() throws {
+        for retired in [true, false] {
+            let fixture = try makeFixture()
+            let work = try XCTUnwrap(try fixture.firstStore.read().installWork.values.first { $0.phase == .pendingStart })
+            let route = try XCTUnwrap(try fixture.firstStore.read().routes[work.routeID])
+            try fixture.firstStore.transaction(expectedOwner: owner) { state in
+                if retired {
+                    state.generations[route.generationID]?.retiredAt = self.start
+                } else {
+                    let generation = try XCTUnwrap(state.generations[route.generationID])
+                    let replacementID = UUID()
+                    state.generations[replacementID] = MeteringPolicyGeneration(
+                        generationID: replacementID,
+                        protocolVersion: generation.protocolVersion,
+                        childDeviceID: generation.childDeviceID,
+                        canonicalTimezone: generation.canonicalTimezone,
+                        policyRevision: generation.policyRevision,
+                        measurementSelectionDigest: generation.measurementSelectionDigest,
+                        enforcementSetID: generation.enforcementSetID,
+                        measurementSelectionBytes: generation.measurementSelectionBytes,
+                        createdAt: generation.createdAt,
+                        retiredAt: nil
+                    )
+                    state.activeGenerationID = replacementID
+                    state.activeRouteID = nil
+                }
+            }
+            let center = DatedCenter()
+            let installer = DatedRouteInstaller(
+                store: fixture.firstStore,
+                center: center,
+                processIdentity: MeteringProcessIdentity(role: .app, instanceID: UUID()),
+                clock: fixture.clock
+            )
+
+            XCTAssertTrue(try installer.reconcile(ownerChildDeviceID: owner).isEmpty)
+
+            let persisted = try fixture.firstStore.read().installWork[work.workID]
+            XCTAssertEqual(persisted?.retry.terminal, .superseded)
+            XCTAssertEqual(persisted?.retry.lastErrorCode, "route_superseded")
+            XCTAssertNil(persisted?.claim)
+            XCTAssertTrue(center.startCalls.isEmpty)
+        }
+    }
+
+    func testPreparingHandoffCandidateInstallsWhilePriorRouteRemainsActive() throws {
+        let fixture = try makeFixture(leaveAllPending: true, registeredAll: true)
+        let initial = try fixture.firstStore.read()
+        let priorRoute = try XCTUnwrap(initial.routes[try XCTUnwrap(initial.activeRouteID)])
+        let candidateWork = try XCTUnwrap(initial.installWork.values.first { $0.routeID != priorRoute.routeID })
+        let candidateRoute = try XCTUnwrap(initial.routes[candidateWork.routeID])
+        try fixture.firstStore.transaction(expectedOwner: owner) { state in
+            let generation = try XCTUnwrap(state.generations[candidateRoute.generationID])
+            let candidateGenerationID = UUID()
+            state.generations[candidateGenerationID] = MeteringPolicyGeneration(
+                generationID: candidateGenerationID,
+                protocolVersion: generation.protocolVersion,
+                childDeviceID: generation.childDeviceID,
+                canonicalTimezone: generation.canonicalTimezone,
+                policyRevision: generation.policyRevision,
+                measurementSelectionDigest: generation.measurementSelectionDigest,
+                enforcementSetID: generation.enforcementSetID,
+                measurementSelectionBytes: generation.measurementSelectionBytes,
+                createdAt: generation.createdAt,
+                retiredAt: nil
+            )
+            state.routes[candidateRoute.routeID] = MeteringCallbackRoute(
+                routeID: candidateRoute.routeID,
+                activityName: candidateRoute.activityName,
+                namespace: candidateRoute.namespace,
+                generationID: candidateGenerationID,
+                generationKey: candidateRoute.generationKey,
+                ownerChildDeviceID: candidateRoute.ownerChildDeviceID,
+                usageDate: candidateRoute.usageDate,
+                epochID: candidateRoute.epochID,
+                plannedSchedule: candidateRoute.plannedSchedule,
+                installedSchedule: candidateRoute.installedSchedule,
+                plannedEvents: candidateRoute.plannedEvents,
+                installedEvents: candidateRoute.installedEvents,
+                lifecycle: candidateRoute.lifecycle,
+                createdAt: candidateRoute.createdAt
+            )
+            state.v2RouteHandoff = V2RouteHandoff(
+                handoffID: UUID(),
+                ownerChildDeviceID: self.owner,
+                fromGenerationID: priorRoute.generationID,
+                fromEpochID: priorRoute.epochID,
+                fromRouteID: priorRoute.routeID,
+                toGenerationID: candidateGenerationID,
+                toEpochID: candidateRoute.epochID,
+                toRouteID: candidateRoute.routeID,
+                phase: .preparing,
+                priorRouteInputClosedAt: nil,
+                registrationAcknowledgedAt: nil,
+                activationAcknowledgedAt: nil,
+                priorStopAcknowledgedAt: nil,
+                createdAt: self.start
+            )
+            for (workID, work) in state.installWork where workID != candidateWork.workID {
+                state.installWork[workID]?.phase = .verified
+            }
+        }
+        let center = DatedCenter()
+        let installer = DatedRouteInstaller(
+            store: fixture.firstStore,
+            center: center,
+            processIdentity: MeteringProcessIdentity(role: .app, instanceID: UUID()),
+            clock: fixture.clock
+        )
+
+        XCTAssertEqual(try installer.reconcile(ownerChildDeviceID: owner), [.verified(workID: candidateWork.workID)])
+        XCTAssertEqual(center.startCalls, [DeviceActivityName(candidateRoute.activityName)])
+        XCTAssertTrue(center.stopCalls.isEmpty)
+        XCTAssertEqual(try fixture.firstStore.read().activeRouteID, priorRoute.routeID)
+    }
+
     func testRegistrationRequiredWaitsForRegistrationButFutureAndOfflineWorkStart() throws {
         let fixture = try makeFixture(leaveAllPending: true)
         let state = try fixture.firstStore.read()
@@ -398,6 +538,145 @@ final class DatedRouteInstallerTests: XCTestCase {
         XCTAssertTrue(center.activities.contains(DeviceActivityName(verifiedRoute.activityName)))
         XCTAssertEqual(persisted.installWork.values.filter { $0.retry.attemptCount > 0 }.count, 1)
         XCTAssertTrue(persisted.installWork.values.filter { $0.phase == .pendingStart }.allSatisfy { $0.retry.attemptCount <= 1 })
+    }
+
+    func testInstallLimitedCoverageIgnoresStalePriorGenerationDates() throws {
+        let fixture = try makeFixture(leaveAllPending: true, registeredAll: true)
+        let initial = try fixture.firstStore.read()
+        let failedWork = try work(forUsageDate: "2026-07-18", in: initial)
+        let failedRoute = try XCTUnwrap(initial.routes[failedWork.routeID])
+        try fixture.firstStore.transaction(expectedOwner: owner) { state in
+            let generation = try XCTUnwrap(state.generations[failedRoute.generationID])
+            let priorGenerationID = UUID()
+            state.generations[priorGenerationID] = MeteringPolicyGeneration(
+                generationID: priorGenerationID,
+                protocolVersion: generation.protocolVersion,
+                childDeviceID: generation.childDeviceID,
+                canonicalTimezone: generation.canonicalTimezone,
+                policyRevision: generation.policyRevision,
+                measurementSelectionDigest: generation.measurementSelectionDigest,
+                enforcementSetID: generation.enforcementSetID,
+                measurementSelectionBytes: generation.measurementSelectionBytes,
+                createdAt: self.start.addingTimeInterval(-60),
+                retiredAt: self.start
+            )
+            let priorEpochID = UUID()
+            let epoch = try XCTUnwrap(state.epochs[failedRoute.epochID])
+            state.epochs[priorEpochID] = DeviceDailyEpoch(
+                epochID: priorEpochID,
+                protocolVersion: epoch.protocolVersion,
+                childDeviceID: epoch.childDeviceID,
+                usageDate: "2026-07-17",
+                canonicalTimezone: epoch.canonicalTimezone,
+                policyRevision: epoch.policyRevision,
+                measurementSelectionDigest: epoch.measurementSelectionDigest,
+                enforcementSetID: epoch.enforcementSetID,
+                startedAt: epoch.startedAt,
+                registeredAt: epoch.registeredAt,
+                baseAcceptedMinutes: epoch.baseAcceptedMinutes,
+                baseSource: epoch.baseSource,
+                lastRawThresholdMinutes: epoch.lastRawThresholdMinutes,
+                excludedWhilePausedMinutes: epoch.excludedWhilePausedMinutes,
+                status: .retired,
+                resumeBoundaryPending: epoch.resumeBoundaryPending,
+                retiredAt: self.start,
+                retireReason: .policyChange,
+                exhaustedAt: epoch.exhaustedAt,
+                baseCorrectionState: epoch.baseCorrectionState
+            )
+            let priorRouteID = UUID()
+            state.routes[priorRouteID] = MeteringCallbackRoute(
+                routeID: priorRouteID,
+                activityName: MeteringRouteNamespace.activityName(routeID: priorRouteID),
+                namespace: failedRoute.namespace,
+                generationID: priorGenerationID,
+                generationKey: failedRoute.generationKey,
+                ownerChildDeviceID: self.owner,
+                usageDate: "2026-07-17",
+                epochID: priorEpochID,
+                plannedSchedule: DatedSchedulePlan(usageDate: "2026-07-17", timezoneIdentifier: failedRoute.plannedSchedule.timezoneIdentifier, calendarIdentifier: "gregorian"),
+                installedSchedule: nil,
+                plannedEvents: [MeteringEventPlan(eventName: MeteringRouteNamespace.eventName(routeID: priorRouteID, thresholdMinutes: 5), thresholdMinutes: 5)],
+                installedEvents: nil,
+                lifecycle: .active,
+                createdAt: self.start.addingTimeInterval(-60)
+            )
+            let priorWorkID = UUID()
+            state.installWork[priorWorkID] = ActivityInstallWork(
+                workID: priorWorkID,
+                ownerChildDeviceID: self.owner,
+                routeID: priorRouteID,
+                authorization: .registered,
+                phase: .verified,
+                claim: nil,
+                retry: MeteringRetryState(attemptCount: 0, nextAttemptAt: self.start, lastErrorCode: nil, terminal: .succeeded),
+                createdAt: self.start.addingTimeInterval(-60)
+            )
+        }
+        let claim = try XCTUnwrap(try fixture.firstStore.claimInstallWork(
+            workID: failedWork.workID,
+            owner: owner,
+            processIdentity: MeteringProcessIdentity(role: .app, instanceID: UUID()),
+            now: start
+        ))
+
+        XCTAssertTrue(try fixture.firstStore.deferInstallWork(
+            workID: failedWork.workID,
+            token: claim.claim.token,
+            owner: owner,
+            now: start,
+            code: "excessiveActivities",
+            installLimited: true
+        ))
+
+        let coverage = try XCTUnwrap(try fixture.firstStore.read().coverage)
+        XCTAssertEqual(coverage.requiredFromUsageDate, "2026-07-18")
+        XCTAssertEqual(coverage.requiredThroughUsageDate, "2026-07-25")
+    }
+
+    func testMalformedPersistedEventPlansDeferAndClearClaim() throws {
+        for plannedEvents in [
+            [MeteringEventPlan(eventName: "duplicate", thresholdMinutes: 5), MeteringEventPlan(eventName: "duplicate", thresholdMinutes: 10)],
+            [MeteringEventPlan(eventName: "invalid", thresholdMinutes: 0)],
+            [MeteringEventPlan(eventName: "invalid", thresholdMinutes: 5)]
+        ] {
+            let fixture = try makeFixture()
+            let work = try XCTUnwrap(try fixture.firstStore.read().installWork.values.first { $0.phase == .pendingStart })
+            let route = try XCTUnwrap(try fixture.firstStore.read().routes[work.routeID])
+            try fixture.firstStore.transaction(expectedOwner: owner) { state in
+                state.routes[route.routeID] = MeteringCallbackRoute(
+                    routeID: route.routeID,
+                    activityName: route.activityName,
+                    namespace: route.namespace,
+                    generationID: route.generationID,
+                    generationKey: route.generationKey,
+                    ownerChildDeviceID: route.ownerChildDeviceID,
+                    usageDate: route.usageDate,
+                    epochID: route.epochID,
+                    plannedSchedule: route.plannedSchedule,
+                    installedSchedule: route.installedSchedule,
+                    plannedEvents: plannedEvents,
+                    installedEvents: route.installedEvents,
+                    lifecycle: route.lifecycle,
+                    createdAt: route.createdAt
+                )
+            }
+            let center = DatedCenter()
+            let installer = DatedRouteInstaller(
+                store: fixture.firstStore,
+                center: center,
+                processIdentity: MeteringProcessIdentity(role: .app, instanceID: UUID()),
+                clock: fixture.clock
+            )
+
+            XCTAssertEqual(try installer.reconcile(ownerChildDeviceID: owner), [.deferred(workID: work.workID, code: "configurationFailed")])
+
+            let persisted = try fixture.firstStore.read().installWork[work.workID]
+            XCTAssertEqual(persisted?.phase, .pendingStart)
+            XCTAssertNil(persisted?.claim)
+            XCTAssertEqual(persisted?.retry.attemptCount, 1)
+            XCTAssertTrue(center.startCalls.isEmpty)
+        }
     }
 
     func testConfigurationFailureDefersInstallAndClearsOwnedClaim() throws {
