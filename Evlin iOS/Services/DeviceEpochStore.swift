@@ -697,7 +697,9 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         try transaction(expectedOwner: owner) { state in
             guard let key = state.installWork.first(where: { $0.value.workID == workID })?.key,
                   var work = state.installWork[key],
-                  work.claim?.token == token
+                  let claim = work.claim,
+                  claim.token == token,
+                  claim.expiresAt > now
             else { return false }
             work.phase = .pendingStart
             work.claim = nil
@@ -706,26 +708,50 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
             work.retry.lastErrorCode = code
             state.installWork[key] = work
             if installLimited {
-                let routes = state.routes.values.filter { $0.ownerChildDeviceID == owner }.sorted { $0.usageDate < $1.usageDate }
+                let routes = state.routes.values.filter {
+                    $0.ownerChildDeviceID == owner
+                        && ($0.lifecycle == .planned || $0.lifecycle == .active)
+                }
                 guard let first = routes.first, let last = routes.last else { return true }
-                let verifiedRouteIDs = Set(state.installWork.values.filter { $0.phase == .verified }.map(\.routeID))
-                var coverage = state.coverage ?? MonitorCoverageState(
+                let functioningRouteIDs = Set(state.installWork.values.compactMap { work -> UUID? in
+                    switch work.phase {
+                    case .verified, .dualActive, .active:
+                        return work.routeID
+                    case .pendingStart, .starting, .installed, .pendingStop, .stopped:
+                        return nil
+                    }
+                })
+                var coverage = MonitorCoverageState(
                     ownerChildDeviceID: owner,
-                    requiredFromUsageDate: first.usageDate,
-                    requiredThroughUsageDate: last.usageDate,
+                    requiredFromUsageDate: routes.map(\.usageDate).min() ?? first.usageDate,
+                    requiredThroughUsageDate: routes.map(\.usageDate).max() ?? last.usageDate,
                     readyThroughUsageDate: nil,
                     status: .installLimited,
                     refreshedAt: now,
                     errorCode: code
                 )
-                let requiredRoutes = routes.filter {
-                    $0.usageDate >= coverage.requiredFromUsageDate
-                        && $0.usageDate <= coverage.requiredThroughUsageDate
-                }
+                let coveredDates = Set(routes.compactMap { route -> String? in
+                    guard functioningRouteIDs.contains(route.routeID) else { return nil }
+                    return route.usageDate
+                })
+                var calendar = Calendar(identifier: .gregorian)
+                calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+                let formatter = DateFormatter()
+                formatter.calendar = calendar
+                formatter.locale = Locale(identifier: "en_US_POSIX")
+                formatter.timeZone = calendar.timeZone
+                formatter.dateFormat = "yyyy-MM-dd"
+                guard let firstRequiredDate = formatter.date(from: coverage.requiredFromUsageDate),
+                      let lastRequiredDate = formatter.date(from: coverage.requiredThroughUsageDate)
+                else { return true }
+                var date = firstRequiredDate
                 var readyThrough: String?
-                for route in requiredRoutes {
-                    guard verifiedRouteIDs.contains(route.routeID) else { break }
-                    readyThrough = route.usageDate
+                while date <= lastRequiredDate {
+                    let usageDate = formatter.string(from: date)
+                    guard coveredDates.contains(usageDate) else { break }
+                    readyThrough = usageDate
+                    guard let next = calendar.date(byAdding: .day, value: 1, to: date) else { break }
+                    date = next
                 }
                 coverage.readyThroughUsageDate = readyThrough
                 coverage.status = .installLimited

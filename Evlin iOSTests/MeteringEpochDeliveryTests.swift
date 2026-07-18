@@ -409,9 +409,88 @@ final class MeteringEpochDeliveryTests: XCTestCase {
         XCTAssertEqual(final.ratchets[owner]?.localSelection, .v1)
     }
 
+    func testPlannedRegistrationConflictRetryAndTerminalResponsesClearClaims() async throws {
+        let conflict = EpochRegistrationConflictDTO(
+            code: .authoritativeBaseMismatch,
+            authoritativeSnapshot: makeSnapshot(counted: true, warning: nil)
+        )
+        try await assertPlannedRegistrationOutcome(
+            data: encoded(conflict),
+            statusCode: 409,
+            expectedTerminal: .superseded,
+            expectedError: "authoritative_base_mismatch",
+            expectsConflict: true
+        )
+        try await assertPlannedRegistrationOutcome(
+            data: Data("not-json".utf8),
+            statusCode: 200,
+            expectedTerminal: .rejected,
+            expectedError: "malformed_response"
+        )
+        try await assertPlannedRegistrationOutcome(
+            data: Data(#"{"code":"registration_rejected"}"#.utf8),
+            statusCode: 422,
+            expectedTerminal: .rejected,
+            expectedError: "registration_rejected"
+        )
+        try await assertPlannedRegistrationOutcome(
+            data: Data(#"{"code":"server_busy"}"#.utf8),
+            statusCode: 500,
+            expectedTerminal: .pending,
+            expectedError: "server_busy"
+        )
+        try await assertPlannedRegistrationOutcome(
+            error: DeliveryTestError.offline,
+            expectedTerminal: .pending,
+            expectedError: "network_error"
+        )
+    }
+
     func testRegistration200DoesNotPromoteInstallForRetiredOrTombstonedRoute() async throws {
         try await assertRegistration200DoesNotPromoteInstall(lifecycle: .retired)
         try await assertRegistration200DoesNotPromoteInstall(lifecycle: .tombstoned)
+    }
+
+    func testRegistrationResponseSupersedesMissingOrMismatchedRouteProvenance() throws {
+        let delivery = MeteringEpochDelivery(
+            baseURL: baseURL,
+            store: makeStore(fileURL: temporaryStoreURL()),
+            transport: DeliveryTestTransport(),
+            clock: DeliveryTestClock(now: start)
+        )
+        for (routeID, workEpochID) in [(UUID(), epochID), (self.routeID, UUID())] {
+            let workID = UUID()
+            let claim = MeteringNetworkClaim(token: UUID(), claimedAt: start, expiresAt: start.addingTimeInterval(60))
+            var work = EpochRegistrationWork(
+                workID: workID,
+                ownerChildDeviceID: owner,
+                epochID: workEpochID,
+                routeID: routeID,
+                request: EpochRegistrationRequestDTO(
+                    protocolVersion: 2,
+                    epochID: workEpochID,
+                    deviceID: owner,
+                    usageDate: "2026-07-16",
+                    timezone: "America/New_York",
+                    policyRevision: "policy-1",
+                    measurementSelectionDigest: "digest",
+                    enforcementSetID: UUID(),
+                    startedAt: start,
+                    baseAcceptedMinutes: 0,
+                    reason: .initial
+                ),
+                claim: claim,
+                retry: MeteringRetryState(attemptCount: 0, nextAttemptAt: start, lastErrorCode: nil, terminal: .pending),
+                createdAt: start
+            )
+            var state = makeBaseState()
+            state.registrationWork[workID] = work
+
+            XCTAssertTrue(delivery.supersedeStaleRegistrationWork(&state, key: workID, work: &work, owner: owner, claim: claim))
+            XCTAssertEqual(state.registrationWork[workID]?.retry.terminal, .superseded)
+            XCTAssertEqual(state.registrationWork[workID]?.retry.lastErrorCode, "route_superseded")
+            XCTAssertNil(state.registrationWork[workID]?.claim)
+        }
     }
 
     func testConcurrentDrainsAtomicallyClaimOneNetworkDispatch() async throws {
@@ -1832,11 +1911,50 @@ final class MeteringEpochDeliveryTests: XCTestCase {
         await delivery.drain(owner: owner)
 
         let final = try store.read()
-        XCTAssertEqual(final.registrationWork.values.first?.retry.terminal, .pending)
-        XCTAssertNotNil(final.registrationWork.values.first?.claim)
+        XCTAssertEqual(final.registrationWork.values.first?.retry.terminal, .superseded)
+        XCTAssertEqual(final.registrationWork.values.first?.retry.lastErrorCode, "route_superseded")
+        XCTAssertNil(final.registrationWork.values.first?.claim)
         XCTAssertNil(final.epochs[epochID]?.registeredAt)
         XCTAssertEqual(final.installWork[installID]?.authorization, .registrationRequired)
         XCTAssertEqual(final.routes[routeID]?.lifecycle.rawValue, lifecycle.rawValue)
+    }
+
+    private func assertPlannedRegistrationOutcome(
+        data: Data = Data(),
+        statusCode: Int = 0,
+        error: Error? = nil,
+        expectedTerminal: MeteringWorkTerminal,
+        expectedError: String,
+        expectsConflict: Bool = false
+    ) async throws {
+        let fileURL = temporaryStoreURL()
+        defer { removeTemporaryStore(fileURL) }
+        let store = makeStore(fileURL: fileURL)
+        try store.transaction(expectedOwner: owner) { state in
+            state = makeBaseState()
+            state.activeRouteID = nil
+            state.routes[routeID]?.lifecycle = .planned
+        }
+        let transport = DeliveryTestTransport()
+        if let error {
+            transport.errors = [error]
+        } else {
+            transport.results = [(data, HTTPURLResponse(url: baseURL, statusCode: statusCode, httpVersion: nil, headerFields: nil)!)]
+        }
+        let clock = DeliveryTestClock(now: start)
+        let delivery = MeteringEpochDelivery(baseURL: baseURL, store: store, transport: transport, clock: clock)
+
+        try delivery.enqueueRegistration(makeValidRegistrationRequest(), owner: owner, epochID: epochID, routeID: routeID)
+        await delivery.drain(owner: owner)
+
+        let final = try store.read()
+        let work = try XCTUnwrap(final.registrationWork.values.first)
+        XCTAssertEqual(work.retry.terminal, expectedTerminal)
+        XCTAssertEqual(work.retry.lastErrorCode, expectedError)
+        XCTAssertNil(work.claim)
+        XCTAssertEqual(final.routes[routeID]?.lifecycle, .planned)
+        XCTAssertEqual(final.ratchets[owner]?.localSelection, .v1)
+        XCTAssertEqual(final.epochs[epochID]?.authoritativeBaseConflict != nil, expectsConflict)
     }
 }
 

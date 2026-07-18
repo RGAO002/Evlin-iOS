@@ -84,6 +84,27 @@ final class DatedRouteInstallerTests: XCTestCase {
         XCTAssertEqual(try fixture.firstStore.read().installWork[work.workID]?.claim, claim.claim)
     }
 
+    func testDeferredInstallCASRefusesExpiredClaimAndInstallerReportsClaimLost() throws {
+        let fixture = try makeFixture()
+        let work = try XCTUnwrap(try fixture.firstStore.read().installWork.values.first { $0.phase == .pendingStart })
+        let center = DatedCenter()
+        center.startError = DeviceActivityCenter.MonitoringError.excessiveActivities
+        center.onStart = { fixture.clock.date = self.start.addingTimeInterval(DatedRouteInstaller.claimLeaseSeconds) }
+        let installer = DatedRouteInstaller(
+            store: fixture.firstStore,
+            center: center,
+            processIdentity: MeteringProcessIdentity(role: .app, instanceID: UUID()),
+            clock: fixture.clock
+        )
+
+        XCTAssertEqual(try installer.reconcile(ownerChildDeviceID: owner), [.deferred(workID: work.workID, code: "claimLost")])
+
+        let persisted = try fixture.firstStore.read().installWork[work.workID]
+        XCTAssertEqual(persisted?.phase, .starting)
+        XCTAssertNotNil(persisted?.claim)
+        XCTAssertEqual(persisted?.retry.attemptCount, 0)
+    }
+
     func testRegistrationRequiredWaitsForRegistrationButFutureAndOfflineWorkStart() throws {
         let fixture = try makeFixture(leaveAllPending: true)
         let state = try fixture.firstStore.read()
@@ -237,17 +258,117 @@ final class DatedRouteInstallerTests: XCTestCase {
         XCTAssertTrue(center.activities.contains(DeviceActivityName(priorRoute.activityName)))
     }
 
-    func testExcessiveActivitiesKeepsVerifiedWorkAndMarksCoverageInstallLimited() throws {
+    func testWarningTimeMismatchReplacesCandidateWithoutStoppingPriorMonitor() throws {
+        let fixture = try makeFixture()
+        let state = try fixture.firstStore.read()
+        let work = try XCTUnwrap(state.installWork.values.first { $0.phase == .pendingStart })
+        let route = try XCTUnwrap(state.routes[work.routeID])
+        let priorRoute = try XCTUnwrap(state.routes.values.first { $0.routeID != route.routeID })
+        let priorWork = try XCTUnwrap(state.installWork.values.first { $0.routeID == priorRoute.routeID })
+        let center = DatedCenter()
+        center.install(route: priorRoute)
+        center.install(route: route, warningTimeOverride: DateComponents(minute: 1))
+        try fixture.firstStore.transaction(expectedOwner: owner) { state in
+            state.installWork[priorWork.workID]?.phase = .verified
+            state.installWork[work.workID]?.phase = .starting
+            state.installWork[work.workID]?.claim = ActivityInstallClaim(
+                token: UUID(), process: .app, instanceID: UUID(), claimedAt: self.start,
+                expiresAt: self.start.addingTimeInterval(DatedRouteInstaller.claimLeaseSeconds)
+            )
+        }
+        fixture.clock.date = start.addingTimeInterval(DatedRouteInstaller.claimLeaseSeconds)
+        let installer = DatedRouteInstaller(
+            store: fixture.secondStore,
+            center: center,
+            processIdentity: MeteringProcessIdentity(role: .deviceActivityMonitor, instanceID: UUID()),
+            clock: fixture.clock
+        )
+
+        XCTAssertEqual(try installer.reconcile(ownerChildDeviceID: owner), [.verified(workID: work.workID)])
+        XCTAssertEqual(center.startCalls, [DeviceActivityName(route.activityName)])
+        XCTAssertTrue(center.stopCalls.isEmpty)
+        XCTAssertTrue(center.activities.contains(DeviceActivityName(priorRoute.activityName)))
+    }
+
+    func testExcessiveActivitiesCoverageUsesEligibleCanonicalDatesAndStopsAfterFirstFailure() throws {
         let fixture = try makeFixture(leaveAllPending: true)
         let state = try fixture.firstStore.read()
         XCTAssertNil(state.coverage)
         let first = try work(forUsageDate: "2026-07-18", in: state)
         let nonContiguousVerified = try work(forUsageDate: "2026-07-20", in: state)
+        let tombstoned = try work(forUsageDate: "2026-07-19", in: state)
         let verifiedRoute = state.routes[first.routeID]!
         let laterVerifiedRoute = state.routes[nonContiguousVerified.routeID]!
         try fixture.firstStore.transaction(expectedOwner: owner) { state in
+            state.coverage = MonitorCoverageState(
+                ownerChildDeviceID: owner,
+                requiredFromUsageDate: "2026-07-17",
+                requiredThroughUsageDate: "2026-07-26",
+                readyThroughUsageDate: "2026-07-26",
+                status: .installLimited,
+                refreshedAt: start.addingTimeInterval(-60),
+                errorCode: "older_limit"
+            )
             state.installWork[first.workID]?.phase = .verified
             state.installWork[nonContiguousVerified.workID]?.phase = .verified
+            state.installWork[tombstoned.workID]?.phase = .verified
+            state.routes[tombstoned.routeID]?.lifecycle = .tombstoned
+            let tombstoneRoute = state.routes[tombstoned.routeID]!
+            state.tombstones[tombstoned.routeID] = MeteringRouteTombstone(
+                routeID: tombstoneRoute.routeID,
+                activityName: tombstoneRoute.activityName,
+                eventNames: tombstoneRoute.plannedEvents.map(\.eventName),
+                ownerChildDeviceID: owner,
+                usageDate: tombstoneRoute.usageDate,
+                epochID: tombstoneRoute.epochID,
+                generationID: tombstoneRoute.generationID,
+                canonicalDayEnd: start.addingTimeInterval(86_400),
+                stopAcknowledgedAt: nil,
+                referencedWorkIDs: [],
+                retainedUntil: nil
+            )
+            let duplicateRouteID = UUID()
+            let duplicateGenerationID = UUID()
+            let duplicateGeneration = state.generations[tombstoneRoute.generationID]!
+            state.generations[duplicateGenerationID] = MeteringPolicyGeneration(
+                generationID: duplicateGenerationID,
+                protocolVersion: duplicateGeneration.protocolVersion,
+                childDeviceID: duplicateGeneration.childDeviceID,
+                canonicalTimezone: duplicateGeneration.canonicalTimezone,
+                policyRevision: duplicateGeneration.policyRevision,
+                measurementSelectionDigest: duplicateGeneration.measurementSelectionDigest,
+                enforcementSetID: duplicateGeneration.enforcementSetID,
+                measurementSelectionBytes: duplicateGeneration.measurementSelectionBytes,
+                createdAt: start.addingTimeInterval(-1),
+                retiredAt: start
+            )
+            state.routes[duplicateRouteID] = MeteringCallbackRoute(
+                routeID: duplicateRouteID,
+                activityName: "evlin.earned.duplicate.\(duplicateRouteID.uuidString.lowercased())",
+                namespace: tombstoneRoute.namespace,
+                generationID: duplicateGenerationID,
+                generationKey: tombstoneRoute.generationKey,
+                ownerChildDeviceID: owner,
+                usageDate: tombstoneRoute.usageDate,
+                epochID: tombstoneRoute.epochID,
+                plannedSchedule: tombstoneRoute.plannedSchedule,
+                installedSchedule: tombstoneRoute.plannedSchedule,
+                plannedEvents: tombstoneRoute.plannedEvents,
+                installedEvents: tombstoneRoute.plannedEvents,
+                lifecycle: .retired,
+                createdAt: start
+            )
+            let duplicateWorkID = UUID()
+            state.installWork[duplicateWorkID] = ActivityInstallWork(
+                workID: duplicateWorkID,
+                ownerChildDeviceID: owner,
+                routeID: duplicateRouteID,
+                authorization: .registered,
+                phase: .verified,
+                claim: nil,
+                retry: MeteringRetryState(attemptCount: 0, nextAttemptAt: start, lastErrorCode: nil, terminal: .succeeded),
+                createdAt: start
+            )
             guard var route = state.routes[first.routeID] else { return }
             route.installedSchedule = route.plannedSchedule
             route.installedEvents = route.plannedEvents
@@ -271,11 +392,103 @@ final class DatedRouteInstallerTests: XCTestCase {
         let persisted = try fixture.firstStore.read()
         XCTAssertEqual(persisted.installWork[first.workID]?.phase, .verified)
         XCTAssertEqual(persisted.coverage?.status, .installLimited)
+        XCTAssertEqual(persisted.coverage?.requiredFromUsageDate, "2026-07-18")
+        XCTAssertEqual(persisted.coverage?.requiredThroughUsageDate, "2026-07-25")
         XCTAssertEqual(persisted.coverage?.readyThroughUsageDate, "2026-07-18")
         XCTAssertTrue(center.activities.contains(DeviceActivityName(verifiedRoute.activityName)))
-        let nextWork = try work(forUsageDate: "2026-07-19", in: persisted)
-        XCTAssertEqual(nextWork.phase, .pendingStart)
-        XCTAssertEqual(nextWork.retry.attemptCount, 0)
+        XCTAssertEqual(persisted.installWork.values.filter { $0.retry.attemptCount > 0 }.count, 1)
+        XCTAssertTrue(persisted.installWork.values.filter { $0.phase == .pendingStart }.allSatisfy { $0.retry.attemptCount <= 1 })
+    }
+
+    func testConfigurationFailureDefersInstallAndClearsOwnedClaim() throws {
+        let fixture = try makeFixture()
+        let initial = try fixture.firstStore.read()
+        let work = try XCTUnwrap(initial.installWork.values.first { $0.phase == .pendingStart })
+        let route = try XCTUnwrap(initial.routes[work.routeID])
+        let generation = try XCTUnwrap(initial.generations[route.generationID])
+        let invalidSelection = Data("not-a-selection".utf8)
+        let invalidDigest = MeteringEpochContract.selectionDigest(persistedBytes: invalidSelection)
+        let invalidKey = MeteringGenerationKey(
+            protocolVersion: generation.protocolVersion,
+            childDeviceID: generation.childDeviceID,
+            canonicalTimezone: generation.canonicalTimezone,
+            policyRevision: generation.policyRevision,
+            measurementSelectionDigest: invalidDigest,
+            enforcementSetID: generation.enforcementSetID
+        )
+        try fixture.firstStore.transaction(expectedOwner: owner) { state in
+            state.generations[route.generationID] = MeteringPolicyGeneration(
+                generationID: generation.generationID,
+                protocolVersion: generation.protocolVersion,
+                childDeviceID: generation.childDeviceID,
+                canonicalTimezone: generation.canonicalTimezone,
+                policyRevision: generation.policyRevision,
+                measurementSelectionDigest: invalidDigest,
+                enforcementSetID: generation.enforcementSetID,
+                measurementSelectionBytes: invalidSelection,
+                createdAt: generation.createdAt,
+                retiredAt: generation.retiredAt
+            )
+            for (epochID, epoch) in Array(state.epochs) {
+                state.epochs[epochID] = DeviceDailyEpoch(
+                    epochID: epoch.epochID,
+                    protocolVersion: epoch.protocolVersion,
+                    childDeviceID: epoch.childDeviceID,
+                    usageDate: epoch.usageDate,
+                    canonicalTimezone: epoch.canonicalTimezone,
+                    policyRevision: epoch.policyRevision,
+                    measurementSelectionDigest: invalidDigest,
+                    enforcementSetID: epoch.enforcementSetID,
+                    startedAt: epoch.startedAt,
+                    registeredAt: epoch.registeredAt,
+                    baseAcceptedMinutes: epoch.baseAcceptedMinutes,
+                    baseSource: epoch.baseSource,
+                    lastRawThresholdMinutes: epoch.lastRawThresholdMinutes,
+                    excludedWhilePausedMinutes: epoch.excludedWhilePausedMinutes,
+                    status: epoch.status,
+                    resumeBoundaryPending: epoch.resumeBoundaryPending,
+                    retiredAt: epoch.retiredAt,
+                    retireReason: epoch.retireReason,
+                    exhaustedAt: epoch.exhaustedAt,
+                    baseCorrectionState: epoch.baseCorrectionState,
+                    authoritativeBaseConflict: epoch.authoritativeBaseConflict
+                )
+            }
+            for (routeID, route) in Array(state.routes) {
+                state.routes[routeID] = MeteringCallbackRoute(
+                    routeID: route.routeID,
+                    activityName: route.activityName,
+                    namespace: route.namespace,
+                    generationID: route.generationID,
+                    generationKey: invalidKey,
+                    ownerChildDeviceID: route.ownerChildDeviceID,
+                    usageDate: route.usageDate,
+                    epochID: route.epochID,
+                    plannedSchedule: route.plannedSchedule,
+                    installedSchedule: route.installedSchedule,
+                    plannedEvents: route.plannedEvents,
+                    installedEvents: route.installedEvents,
+                    lifecycle: route.lifecycle,
+                    createdAt: route.createdAt
+                )
+            }
+        }
+        let center = DatedCenter()
+        let installer = DatedRouteInstaller(
+            store: fixture.firstStore,
+            center: center,
+            processIdentity: MeteringProcessIdentity(role: .app, instanceID: UUID()),
+            clock: fixture.clock
+        )
+
+        XCTAssertEqual(try installer.reconcile(ownerChildDeviceID: owner), [.deferred(workID: work.workID, code: "configurationFailed")])
+
+        let persisted = try fixture.firstStore.read().installWork[work.workID]
+        XCTAssertEqual(persisted?.phase, .pendingStart)
+        XCTAssertNil(persisted?.claim)
+        XCTAssertEqual(persisted?.retry.attemptCount, 1)
+        XCTAssertEqual(persisted?.retry.lastErrorCode, "configurationFailed")
+        XCTAssertTrue(center.startCalls.isEmpty)
     }
 
     func testEightRoutesStartOnceThenOneHundredTwentyPollsCauseNoChurn() throws {
@@ -472,6 +685,7 @@ private final class DatedCenter: MeteringDeviceActivityCenter {
     var stopCalls: [[DeviceActivityName]] = []
     var inspectionCalls = 0
     var startError: Error?
+    var onStart: (() -> Void)?
 
     var activities: [DeviceActivityName] { inspectionCalls += 1; return Array(records.keys) }
     func schedule(for activity: DeviceActivityName) -> DeviceActivitySchedule? { inspectionCalls += 1; return records[activity]?.0 }
@@ -481,13 +695,20 @@ private final class DatedCenter: MeteringDeviceActivityCenter {
     }
     func startMonitoring(_ activity: DeviceActivityName, during schedule: DeviceActivitySchedule, events: [DeviceActivityEvent.Name: DeviceActivityEvent]) throws {
         startCalls.append(activity)
+        onStart?()
         if let startError { throw startError }
         records[activity] = (schedule, events.mapValues(EventRecord.init))
     }
     func stopMonitoring(_ activities: [DeviceActivityName]) { stopCalls.append(activities); activities.forEach { records.removeValue(forKey: $0) } }
 
-    func install(route: MeteringCallbackRoute, thresholdOverride: Int? = nil) {
-        let schedule = try! MeteringDatedSchedule.datedSchedule(usageDate: route.usageDate, timeZone: TimeZone(identifier: route.plannedSchedule.timezoneIdentifier)!)
+    func install(route: MeteringCallbackRoute, thresholdOverride: Int? = nil, warningTimeOverride: DateComponents? = nil) {
+        let expectedSchedule = try! MeteringDatedSchedule.datedSchedule(usageDate: route.usageDate, timeZone: TimeZone(identifier: route.plannedSchedule.timezoneIdentifier)!)
+        let schedule = DeviceActivitySchedule(
+            intervalStart: expectedSchedule.intervalStart,
+            intervalEnd: expectedSchedule.intervalEnd,
+            repeats: expectedSchedule.repeats,
+            warningTime: warningTimeOverride
+        )
         let selection = FamilyActivitySelection()
         let events = Dictionary(uniqueKeysWithValues: route.plannedEvents.map { plan in
             let threshold = thresholdOverride ?? plan.thresholdMinutes

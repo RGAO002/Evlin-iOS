@@ -475,8 +475,12 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
             guard let key = state.registrationWork.first(where: { $0.value.workID == workID })?.key,
                   var work = state.registrationWork[key],
                   work.ownerChildDeviceID == owner,
-                  work.claim?.token == claim.token,
-                  let route = state.routes[work.routeID],
+                  work.claim?.token == claim.token
+            else { return }
+            if supersedeStaleRegistrationWork(&state, key: key, work: &work, owner: owner, claim: claim) {
+                return
+            }
+            guard let route = state.routes[work.routeID],
                   route.ownerChildDeviceID == owner,
                   route.epochID == work.epochID,
                   let epoch = state.epochs[work.epochID],
@@ -526,11 +530,15 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
             guard let key = state.registrationWork.first(where: { $0.value.workID == workID })?.key,
                   var work = state.registrationWork[key],
                   work.ownerChildDeviceID == owner,
-                  work.claim?.token == claim.token,
-                  let route = state.routes[work.routeID],
+                  work.claim?.token == claim.token
+            else { return }
+            if supersedeStaleRegistrationWork(&state, key: key, work: &work, owner: owner, claim: claim) {
+                return
+            }
+            guard let route = state.routes[work.routeID],
                   route.ownerChildDeviceID == owner,
                   route.epochID == work.epochID,
-                  route.lifecycle == .active,
+                  (route.lifecycle == .planned || route.lifecycle == .active),
                   var epoch = state.epochs[work.epochID],
                   epoch.childDeviceID == owner,
                   epoch.authoritativeBaseConflict == nil,
@@ -557,10 +565,14 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
             guard let key = state.registrationWork.first(where: { $0.value.workID == workID })?.key,
                   var work = state.registrationWork[key],
                   work.ownerChildDeviceID == owner,
-                  work.claim?.token == claim.token,
-                  let route = state.routes[work.routeID],
+                  work.claim?.token == claim.token
+            else { return }
+            if supersedeStaleRegistrationWork(&state, key: key, work: &work, owner: owner, claim: claim) {
+                return
+            }
+            guard let route = state.routes[work.routeID],
                   route.ownerChildDeviceID == owner,
-                  route.lifecycle == .active,
+                  (route.lifecycle == .planned || route.lifecycle == .active),
                   route.epochID == work.epochID,
                   let epoch = state.epochs[work.epochID],
                   epoch.childDeviceID == owner,
@@ -589,10 +601,14 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
             guard let key = state.registrationWork.first(where: { $0.value.workID == workID })?.key,
                   var work = state.registrationWork[key],
                   work.ownerChildDeviceID == owner,
-                  work.claim?.token == claim.token,
-                  let route = state.routes[work.routeID],
+                  work.claim?.token == claim.token
+            else { return }
+            if supersedeStaleRegistrationWork(&state, key: key, work: &work, owner: owner, claim: claim) {
+                return
+            }
+            guard let route = state.routes[work.routeID],
                   route.ownerChildDeviceID == owner,
-                  route.lifecycle == .active,
+                  (route.lifecycle == .planned || route.lifecycle == .active),
                   route.epochID == work.epochID,
                   let epoch = state.epochs[work.epochID],
                   epoch.childDeviceID == owner,
@@ -606,6 +622,28 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
             work.claim = nil
             state.registrationWork[key] = work
         }
+    }
+
+    func supersedeStaleRegistrationWork(
+        _ state: inout DeviceEpochStoreState,
+        key: UUID,
+        work: inout EpochRegistrationWork,
+        owner: UUID,
+        claim: MeteringNetworkClaim
+    ) -> Bool {
+        guard work.ownerChildDeviceID == owner,
+              work.claim?.token == claim.token
+        else { return false }
+        let routeIsCurrent = state.routes[work.routeID].map {
+            $0.ownerChildDeviceID == owner
+                && $0.epochID == work.epochID
+                && ($0.lifecycle == .planned || $0.lifecycle == .active)
+        } ?? false
+        guard !routeIsCurrent else { return false }
+        work.retry = completedRetry(from: work.retry, code: "route_superseded", terminal: .superseded)
+        work.claim = nil
+        state.registrationWork[key] = work
+        return true
     }
 
     private func terminalizeActivation(

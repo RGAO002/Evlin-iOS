@@ -46,9 +46,21 @@ final class DatedRouteInstaller {
     }
 
     private func reconcileClaimed(_ claimed: (work: ActivityInstallWork, priorPhase: ActivityInstallPhase, claim: ActivityInstallClaim), owner: UUID) throws -> DatedRouteInstallResult {
-        let state = try store.read()
-        guard let route = state.routes[claimed.work.routeID] else { return .noWork }
-        let expected = try expectedConfiguration(for: route, state: state)
+        let state: DeviceEpochStoreState
+        do {
+            state = try store.read()
+        } catch {
+            return try deferClaimedWork(claimed, owner: owner, code: "configurationFailed", installLimited: false)
+        }
+        guard let route = state.routes[claimed.work.routeID] else {
+            return try deferClaimedWork(claimed, owner: owner, code: "missingRoute", installLimited: false)
+        }
+        let expected: (schedule: DeviceActivitySchedule, events: [DeviceActivityEvent.Name: DeviceActivityEvent])
+        do {
+            expected = try expectedConfiguration(for: route, state: state)
+        } catch {
+            return try deferClaimedWork(claimed, owner: owner, code: "configurationFailed", installLimited: false)
+        }
         let activity = DeviceActivityName(route.activityName)
 
         if claimed.priorPhase != .pendingStart, daemonMatches(activity: activity, expected: expected) {
@@ -83,6 +95,25 @@ final class DatedRouteInstaller {
         }
     }
 
+    private func deferClaimedWork(
+        _ claimed: (work: ActivityInstallWork, priorPhase: ActivityInstallPhase, claim: ActivityInstallClaim),
+        owner: UUID,
+        code: String,
+        installLimited: Bool
+    ) throws -> DatedRouteInstallResult {
+        guard try store.deferInstallWork(
+            workID: claimed.work.workID,
+            token: claimed.claim.token,
+            owner: owner,
+            now: clock.now,
+            code: code,
+            installLimited: installLimited
+        ) else {
+            return .deferred(workID: claimed.work.workID, code: "claimLost")
+        }
+        return .deferred(workID: claimed.work.workID, code: code)
+    }
+
     private func expectedConfiguration(for route: MeteringCallbackRoute, state: DeviceEpochStoreState) throws -> (schedule: DeviceActivitySchedule, events: [DeviceActivityEvent.Name: DeviceActivityEvent]) {
         guard let timeZone = TimeZone(identifier: route.plannedSchedule.timezoneIdentifier), let generation = state.generations[route.generationID] else {
             throw MeteringDatedScheduleError.invalidUsageDate(route.usageDate)
@@ -112,5 +143,6 @@ final class DatedRouteInstaller {
         lhs.intervalStart == rhs.intervalStart
             && lhs.intervalEnd == rhs.intervalEnd
             && lhs.repeats == rhs.repeats
+            && lhs.warningTime == rhs.warningTime
     }
 }
