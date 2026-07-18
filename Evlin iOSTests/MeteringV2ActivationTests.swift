@@ -18,6 +18,13 @@ final class MeteringV2ActivationTests: XCTestCase {
         try await driver.recover(ownerChildDeviceID: owner)
 
         let state = try fixture.store.read()
+        let activation = try XCTUnwrap(state.activationWork.values.first)
+        XCTAssertEqual(fixture.transport.requests.map(\.url?.path), [
+            "/api/v1/child/earned-time/epochs/\(fixture.candidateEpochID.uuidString.lowercased())/activation"
+        ])
+        XCTAssertEqual(activation.retry.terminal, .succeeded)
+        XCTAssertNil(activation.retry.lastErrorCode)
+        XCTAssertNil(activation.claim)
         XCTAssertEqual(state.ratchets[owner]?.localSelection, .v2)
         XCTAssertEqual(state.ratchets[owner]?.advertisedVersion, 2)
         XCTAssertEqual(state.activeRouteID, fixture.candidateRouteID)
@@ -37,6 +44,11 @@ final class MeteringV2ActivationTests: XCTestCase {
         try await driver.recover(ownerChildDeviceID: owner)
 
         let state = try fixture.store.read()
+        let activation = try XCTUnwrap(state.activationWork.values.first)
+        XCTAssertEqual(fixture.transport.requests.count, 1)
+        XCTAssertEqual(activation.retry.terminal, .rejected)
+        XCTAssertEqual(activation.retry.lastErrorCode, "epoch_paused")
+        XCTAssertNil(activation.claim)
         XCTAssertEqual(state.ratchets[owner]?.localSelection, .v1)
         XCTAssertEqual(state.ratchets[owner]?.advertisedVersion, 1)
         XCTAssertEqual(state.legacy?.phase, .activeV1)

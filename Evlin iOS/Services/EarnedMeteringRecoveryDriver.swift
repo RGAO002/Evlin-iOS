@@ -166,7 +166,7 @@ final class EarnedMeteringRecoveryDriver {
     private func recoverTerminalInitialActivation(owner: UUID) throws {
         try store.transaction(expectedOwner: owner) { state in
             guard var ratchet = state.ratchets[owner], ratchet.localSelection == .dualActive,
-                  let candidate = initialCandidate(in: state, owner: owner),
+                  let candidate = initialDualActiveCandidate(in: state, owner: owner),
                   let activation = state.activationWork.values.first(where: {
                       $0.routeID == candidate.routeID && $0.epochID == candidate.epochID
                   }),
@@ -197,7 +197,7 @@ final class EarnedMeteringRecoveryDriver {
         try store.transaction(expectedOwner: owner) { state in
             guard var ratchet = state.ratchets[owner] else { return }
             if ratchet.localSelection == .dualActive {
-                guard let candidate = initialCandidate(in: state, owner: owner),
+                guard let candidate = initialDualActiveCandidate(in: state, owner: owner),
                       hasSuccessfulActivation(candidate.routeID, in: state),
                       var epoch = state.epochs[candidate.epochID]
                 else { return }
@@ -308,6 +308,21 @@ final class EarnedMeteringRecoveryDriver {
     private func initialCandidate(in state: DeviceEpochStoreState, owner: UUID) -> MeteringCallbackRoute? {
         candidateRoutes(in: state, owner: owner)
             .first { $0.generationID == state.activeGenerationID && state.activeRouteID == nil }
+    }
+
+    private func initialDualActiveCandidate(in state: DeviceEpochStoreState, owner: UUID) -> MeteringCallbackRoute? {
+        guard state.activeRouteID == nil,
+              let generationID = state.activeGenerationID,
+              let epochID = state.activeEpochID
+        else { return nil }
+        let matches = state.routes.values.filter {
+            $0.ownerChildDeviceID == owner
+                && $0.generationID == generationID
+                && $0.epochID == epochID
+                && $0.lifecycle == .active
+        }
+        guard matches.count == 1 else { return nil }
+        return matches[0]
     }
 
     private func candidateRoute(in state: DeviceEpochStoreState, owner: UUID, excluding routeID: UUID) -> MeteringCallbackRoute? {
