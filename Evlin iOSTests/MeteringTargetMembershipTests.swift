@@ -48,6 +48,23 @@ final class MeteringTargetMembershipTests: XCTestCase {
         XCTAssertFalse(isMember("Services/MeteringEpochDelivery.swift", of: .push, in: project))
     }
 
+    func testEarnedShieldEffectStoreClosureBelongsToAppMonitorAndPushTargets() throws {
+        let project = try projectSource()
+        let paths = [
+            "Services/EarnedShieldEffectStore.swift",
+            "Models/ShieldRecord.swift",
+            "Models/ShieldTier.swift",
+            "Services/ShieldSourceLogic.swift",
+            "Services/ActiveLockPersistenceLock.swift"
+        ]
+
+        for path in paths {
+            XCTAssertTrue(isMember(path, of: .app, in: project), path)
+            XCTAssertTrue(isMember(path, of: .deviceActivityMonitor, in: project), path)
+            XCTAssertTrue(isMember(path, of: .push, in: project), path)
+        }
+    }
+
     private func projectSource() throws -> String {
         let projectURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()

@@ -26,7 +26,7 @@ final class TaskPauseShieldMappingTests: XCTestCase {
 
     func test_shieldSource_rawValue_taskPause() {
         XCTAssertEqual(ShieldSource.taskPause.rawValue, "taskPause")
-        XCTAssertEqual(ShieldSource(rawValue: "nope") ?? .manual, .manual)
+        XCTAssertEqual(ShieldSource(rawValue: "nope").rawValue, "nope")
     }
 
     func test_unshieldUnlockSources_taskPause_removesOnlyTaskPauseSource() async throws {

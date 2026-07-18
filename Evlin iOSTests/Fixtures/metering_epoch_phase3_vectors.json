@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "P3V01",
+      "expected_sources_after_exact_release": ["manual", "taskPause"]
+    },
+    {
+      "id": "P3V02",
+      "future_source": "schedule",
+      "expected_sources_after_round_trip": ["limit", "schedule"]
+    }
+  ]
+}

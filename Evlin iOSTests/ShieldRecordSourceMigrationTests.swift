@@ -90,11 +90,11 @@ final class ShieldRecordSourceMigrationTests: XCTestCase {
     }
     """
 
-    func test_unknownFutureSource_decodesAsManual() throws {
+    func test_unknownFutureSource_roundTripsLosslessly() throws {
         let data = Data(futureSourceRecordJSON.utf8)
-        // Must NOT throw — an unknown future source value falls back to .manual.
+        // Must NOT throw and must preserve a newer binary's raw provenance.
         let record = try evlinDecoder().decode(ShieldRecord.self, from: data)
-        XCTAssertEqual(record.sources, [.manual], "Unknown future source value must fall back to {.manual}")
+        XCTAssertEqual(record.sources.map(\.rawValue), ["schedule"])
         // Rest of the record must survive intact.
         XCTAssertEqual(record.recordKey, "exactApp:com.burbn.instagram")
         XCTAssertEqual(record.tier, .exactApp)
@@ -105,7 +105,10 @@ final class ShieldRecordSourceMigrationTests: XCTestCase {
         let decoded = try evlinDecoder().decode([String: ShieldRecord].self, from: Data(dictJSON.utf8))
         XCTAssertEqual(decoded.count, 1)
         let dictRecord = try XCTUnwrap(decoded["exactApp:com.burbn.instagram"])
-        XCTAssertEqual(dictRecord.sources, [.manual])
+        XCTAssertEqual(dictRecord.sources.map(\.rawValue), ["schedule"])
+        let encoded = try evlinEncoder().encode(dictRecord)
+        let roundTripped = try evlinDecoder().decode(ShieldRecord.self, from: encoded)
+        XCTAssertEqual(roundTripped.sources.map(\.rawValue), ["schedule"])
     }
 
     /// Full-field round-trip guard. The `Codable` is HAND-WRITTEN (not

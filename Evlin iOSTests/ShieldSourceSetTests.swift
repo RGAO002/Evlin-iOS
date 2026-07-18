@@ -7,6 +7,15 @@ import XCTest
 /// branching via ActiveLockStore). No device features needed.
 final class ShieldSourceSetTests: XCTestCase {
 
+    func test_unknownFutureSource_survivesSetMergeAndRoundTrip() throws {
+        let source = try JSONDecoder().decode(ShieldSource.self, from: Data("\"schedule\"".utf8))
+        let merged = ShieldSourceLogic.unioning(makeRecord(sources: [.limit]), intoSources: [source])
+        let data = try JSONEncoder().encode(merged)
+        let decoded = try JSONDecoder().decode(ShieldRecord.self, from: data)
+
+        XCTAssertEqual(decoded.sources.map(\.rawValue).sorted(), ["limit", "schedule"])
+    }
+
     // MARK: - Helpers
 
     private func evlinDecoder() -> JSONDecoder {
@@ -145,9 +154,9 @@ final class ShieldSourceSetTests: XCTestCase {
         XCTAssertEqual(decoded.sources, [.earnedTime, .manual])
     }
 
-    // MARK: - Unknown future source still falls back to .manual (in set context)
+    // MARK: - Unknown future source survives in set context
 
-    func test_unknownSourceInSet_decodesAsManual() throws {
+    func test_unknownSourceInSet_roundTripsLosslessly() throws {
         let json = """
         {
           "recordKey": "exactApp:com.example.app",
@@ -166,8 +175,7 @@ final class ShieldSourceSetTests: XCTestCase {
         }
         """
         let record = try evlinDecoder().decode(ShieldRecord.self, from: Data(json.utf8))
-        XCTAssertEqual(record.sources, [.manual],
-                       "Unknown future scalar source must fall back to {.manual}")
+        XCTAssertEqual(record.sources.map(\.rawValue), ["schedule"])
     }
 
     // MARK: - addShield: earnedTime then manual on same recordKey → union {earnedTime, manual}

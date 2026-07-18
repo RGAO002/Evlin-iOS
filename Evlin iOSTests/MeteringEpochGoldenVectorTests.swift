@@ -2,14 +2,14 @@ import Foundation
 import XCTest
 @testable import Evlin_iOS
 
-private struct MeteringGoldenVectorCase<Input: Decodable, Observation: Decodable>: Decodable {
+struct MeteringGoldenVectorCase<Input: Decodable, Observation: Decodable>: Decodable {
     let id: String
     let description: String
     let input: Input
     let expected: Observation
 }
 
-private struct MeteringManualFixtureInput: Decodable {
+struct MeteringManualFixtureInput: Decodable {
     struct Command: Decodable {
         let at: Int
         let manual: ManualSourceAction
@@ -20,18 +20,18 @@ private struct MeteringManualFixtureInput: Decodable {
     let commands: [Command]
 }
 
-private struct MeteringManualFixtureObservation: Decodable, Equatable {
+struct MeteringManualFixtureObservation: Decodable, Equatable {
     let manualStates: [String]
     let meteringStateBytesBase64: String
     let effects: MeteringEffects
 }
 
-private typealias MeteringManualFixtureCase = MeteringGoldenVectorCase<
+typealias MeteringManualFixtureCase = MeteringGoldenVectorCase<
     MeteringManualFixtureInput,
     MeteringManualFixtureObservation
 >
 
-private struct MeteringGoldenVectorSuite: Decodable {
+struct MeteringGoldenVectorSuite: Decodable {
     let schemaVersion: Int
     let generationCases: [MeteringGoldenVectorCase<GenerationInput, GenerationObservation>]
     let callbackCases: [MeteringGoldenVectorCase<CallbackVectorInput, CallbackObservation>]
@@ -40,6 +40,16 @@ private struct MeteringGoldenVectorSuite: Decodable {
     let manualCases: [MeteringManualFixtureCase]
     let protocolCases: [MeteringGoldenVectorCase<ProtocolInput, ProtocolObservation>]
     let perAppOrderingCases: [MeteringGoldenVectorCase<PerAppOrderingInput, PerAppOrderingObservation>]
+    let phase3Cases: [MeteringGoldenVectorCase<MeteringPhase3Input, MeteringPhase3Observation>]
+
+    static func load() throws -> MeteringGoldenVectorSuite {
+        let fixtureURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("Fixtures/metering_epoch_vectors.json")
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try decoder.decode(Self.self, from: Data(contentsOf: fixtureURL))
+    }
 }
 
 final class MeteringEpochGoldenVectorTests: XCTestCase {
@@ -55,15 +65,7 @@ final class MeteringEpochGoldenVectorTests: XCTestCase {
     private static let ledgerRuleID = UUID(uuidString: "dddddddd-0000-0000-0000-000000000099")!
 
     private func loadSuite() throws -> MeteringGoldenVectorSuite {
-        let fixtureURL = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .appendingPathComponent("Fixtures/metering_epoch_vectors.json")
-        let decoder = JSONDecoder()
-        decoder.keyDecodingStrategy = .convertFromSnakeCase
-        return try decoder.decode(
-            MeteringGoldenVectorSuite.self,
-            from: Data(contentsOf: fixtureURL)
-        )
+        try MeteringGoldenVectorSuite.load()
     }
 
     func testGenerationVectors() throws {
@@ -104,11 +106,15 @@ final class MeteringEpochGoldenVectorTests: XCTestCase {
         executedIDs += try evaluateManualCases(suite)
         executedIDs += evaluateProtocolCases(suite)
         executedIDs += evaluatePerAppOrderingCases(suite)
+        executedIDs += suite.phase3Cases.map { vector in
+            XCTAssertEqual(MeteringReferenceRules.evaluatePhase3(vector.input), vector.expected, vector.id)
+            return vector.id
+        }
 
         XCTAssertEqual(suite.schemaVersion, 1)
         XCTAssertEqual(
             executedIDs.sorted(),
-            (1...23).map { String(format: "V%02d", $0) }
+            (1...39).map { String(format: "V%02d", $0) }
         )
     }
 
@@ -120,6 +126,7 @@ final class MeteringEpochGoldenVectorTests: XCTestCase {
         let _: (ManualInput) -> ManualObservation = MeteringReferenceRules.evaluateManual
         let _: (ProtocolInput) -> ProtocolObservation = MeteringReferenceRules.evaluateProtocol
         let _: (PerAppOrderingInput) -> PerAppOrderingObservation = MeteringReferenceRules.evaluatePerAppOrdering
+        let _: (MeteringPhase3Input) -> MeteringPhase3Observation = MeteringReferenceRules.evaluatePhase3
 
         let sourceURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -128,7 +135,7 @@ final class MeteringEpochGoldenVectorTests: XCTestCase {
         let source = try String(contentsOf: sourceURL, encoding: .utf8)
         for forbidden in [
             "MeteringGoldenVectorSuite", "MeteringGoldenVectorCase", "FixtureObservation",
-            "expected:", "\"V01\"", "\"V23\"", "metering_epoch_vectors.json"
+            "expected:", "\"V01\"", "\"V39\"", "metering_epoch_vectors.json"
         ] {
             XCTAssertFalse(source.contains(forbidden), "production source contains test-only token \(forbidden)")
         }

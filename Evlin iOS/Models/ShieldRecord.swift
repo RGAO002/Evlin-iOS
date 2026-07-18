@@ -14,21 +14,26 @@ import CryptoKit
 /// decode defaults a missing `source` to `.manual` (see `extension ShieldRecord`
 /// below) so legacy payloads never fail to decode (a decode failure = silent
 /// shield wipe).
-enum ShieldSource: String, Codable, Sendable, Hashable {
-    case manual
-    case limit
-    case earnedTime
-    case taskPause
+struct ShieldSource: Codable, Sendable, Hashable {
+    let rawValue: String
 
-    /// Unknown-tolerant decode. The synthesized `RawRepresentable` decoder THROWS
-    /// on an unrecognized rawValue — e.g. a future `"schedule"` written by a newer
-    /// app binary and read back by an older extension binary. A throw here would
-    /// fail the whole `ShieldRecord` (and the surrounding `[String: ShieldRecord]`
-    /// dict) decode — a silent wipe of a parent's active shields. Falling back to
-    /// `.manual` keeps the record (and every sibling in the dict) alive.
+    static let manual = ShieldSource(rawValue: "manual")
+    static let limit = ShieldSource(rawValue: "limit")
+    static let earnedTime = ShieldSource(rawValue: "earnedTime")
+    static let taskPause = ShieldSource(rawValue: "taskPause")
+
+    init(rawValue: String) {
+        self.rawValue = rawValue
+    }
+
     init(from decoder: Decoder) throws {
-        let raw = try decoder.singleValueContainer().decode(String.self)
-        self = ShieldSource(rawValue: raw) ?? .manual
+        let rawValue = try decoder.singleValueContainer().decode(String.self)
+        self = rawValue.isEmpty ? .manual : ShieldSource(rawValue: rawValue)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
     }
 }
 

@@ -237,5 +237,232 @@
       "input": { "kind": "per_app_ordering", "commands": [{ "kind": "set", "ordering_token": 2, "rule_id": "dddddddd-0000-0000-0000-000000000023" }, { "kind": "set", "ordering_token": 1, "rule_id": "dddddddd-0000-0000-0000-000000000023" }, { "kind": "clear", "ordering_token": 3, "rule_id": "dddddddd-0000-0000-0000-000000000023" }, { "kind": "set", "ordering_token": 2, "rule_id": "dddddddd-0000-0000-0000-000000000023" }, { "kind": "clear", "ordering_token": 3, "rule_id": "dddddddd-0000-0000-0000-000000000023" }] },
       "expected": { "final_state": "cleared", "tombstone_ordering_token": 3, "applied": [true, false, true, false, false], "effects": { "local_estimate_mutations": 0, "retry_enqueues": 0, "network_dispatches": 0, "backend_sample_rows": 0, "ledger_mutations": 0, "notifications": 0, "shield_mutations": 0, "monitor_starts": 0, "monitor_stops": 0, "epoch_replacements": 0 } }
     }
+  ],
+  "phase3_cases": [
+    {
+      "id": "V24",
+      "description": "A ready horizon installs exactly today plus seven dated routes and does not churn across unchanged polls.",
+      "input": {
+        "kind": "phase3_eight_date_horizon",
+        "owner_child_device_id": "aaaaaaaa-0000-0000-0000-000000000024",
+        "generation_id": "bbbbbbbb-0000-0000-0000-000000000024",
+        "epoch_id": "eeeeeeee-0000-0000-0000-000000000024",
+        "route_ids": ["24000000-0000-0000-0000-000000000001", "24000000-0000-0000-0000-000000000002", "24000000-0000-0000-0000-000000000003", "24000000-0000-0000-0000-000000000004", "24000000-0000-0000-0000-000000000005", "24000000-0000-0000-0000-000000000006", "24000000-0000-0000-0000-000000000007", "24000000-0000-0000-0000-000000000008"],
+        "generation_route_observations": [{"generation_id": "bbbbbbbb-0000-0000-0000-000000000024", "route_ids": ["24000000-0000-0000-0000-000000000001", "24000000-0000-0000-0000-000000000002", "24000000-0000-0000-0000-000000000003", "24000000-0000-0000-0000-000000000004", "24000000-0000-0000-0000-000000000005", "24000000-0000-0000-0000-000000000006", "24000000-0000-0000-0000-000000000007", "24000000-0000-0000-0000-000000000008"]}, {"generation_id": "bbbbbbbb-0000-0000-0000-000000000024", "route_ids": ["24000000-0000-0000-0000-000000000001", "24000000-0000-0000-0000-000000000002", "24000000-0000-0000-0000-000000000003", "24000000-0000-0000-0000-000000000004", "24000000-0000-0000-0000-000000000005", "24000000-0000-0000-0000-000000000006", "24000000-0000-0000-0000-000000000007", "24000000-0000-0000-0000-000000000008"]}],
+        "usage_dates": ["2026-07-15", "2026-07-16", "2026-07-17", "2026-07-18", "2026-07-19", "2026-07-20", "2026-07-21", "2026-07-22"],
+        "canonical_timezone": "America/New_York",
+        "reconciliation_count": 121,
+        "first_reconciliation_starts": 8,
+        "unchanged_reconciliation_stops": 0
+      },
+      "expected": {
+        "route_count": 8,
+        "same_generation": true,
+        "same_route_ids": true,
+        "observations": [{"kind": "routes", "assertion": "eight dated routes"}],
+        "effects": {"local_estimate_mutations": 0, "retry_enqueues": 0, "network_dispatches": 0, "backend_sample_rows": 0, "ledger_mutations": 0, "notifications": 0, "shield_mutations": 0, "monitor_starts": 8, "monitor_stops": 0, "epoch_replacements": 0, "route_state_mutations": 8, "coverage_mutations": 1, "queue_mutations": 0, "bank_mutations": 0, "lock_ledger_mutations": 0, "retry_order_mutations": 0}
+      }
+    },
+    {
+      "id": "V25",
+      "description": "An expired horizon rejects an uncovered callback with zero metering effects and preserves unrelated lock sources.",
+      "input": {
+        "kind": "phase3_coverage_exhaustion",
+        "owner_child_device_id": "aaaaaaaa-0000-0000-0000-000000000025",
+        "ready_through_usage_date": "2026-07-15",
+        "today": "2026-07-16",
+        "callback": {"activity_name": "evlin.earned.v2.25000000-0000-0000-0000-000000000025", "event_name": "evlin.earned.v2.25000000-0000-0000-0000-000000000025.t5", "observed_at": "2026-07-16T14:00:00Z"},
+        "coverage_transition": {"ready_through_usage_date": "2026-07-15", "callback_usage_date": "2026-07-16"},
+        "unrelated_sources": ["manual", "taskPause", "reflection", "admin", "block", "limit"]
+      },
+      "expected": {
+        "coverage_status": "coverageExhausted",
+        "counted": false,
+        "preserved_sources": ["admin", "block", "limit", "manual", "reflection", "taskPause"],
+        "observations": [{"kind": "coverage", "assertion": "uncovered callback has zero effects"}],
+        "effects": {"local_estimate_mutations": 0, "retry_enqueues": 0, "network_dispatches": 0, "backend_sample_rows": 0, "ledger_mutations": 0, "notifications": 0, "shield_mutations": 0, "monitor_starts": 0, "monitor_stops": 0, "epoch_replacements": 0, "route_state_mutations": 0, "coverage_mutations": 1, "queue_mutations": 0, "bank_mutations": 0, "lock_ledger_mutations": 0, "retry_order_mutations": 0}
+      }
+    },
+    {
+      "id": "V26",
+      "description": "excessiveActivities preserves verified routes, stops filling at the actual ready-through date, and never destructively replaces the last route.",
+      "input": {
+        "kind": "phase3_excessive_activities",
+        "owner_child_device_id": "aaaaaaaa-0000-0000-0000-000000000026",
+        "error": "excessiveActivities",
+        "verified_route_ids": ["26000000-0000-0000-0000-000000000001", "26000000-0000-0000-0000-000000000002"],
+        "planned_usage_dates": ["2026-07-15", "2026-07-16", "2026-07-17", "2026-07-18", "2026-07-19", "2026-07-20", "2026-07-21", "2026-07-22"],
+        "ready_through_usage_date": "2026-07-16",
+        "install_transition": {"failure": "excessiveActivities", "ready_through_usage_date": "2026-07-16", "next_planned_usage_date": "2026-07-17"},
+        "coverage_transition": {"failure": "excessiveActivities", "ready_through_usage_date": "2026-07-16", "next_planned_usage_date": "2026-07-17"}
+      },
+      "expected": {
+        "coverage_status": "installLimited",
+        "preserved_route_ids": ["26000000-0000-0000-0000-000000000001", "26000000-0000-0000-0000-000000000002"],
+        "stopped_filling": true,
+        "observations": [{"kind": "install", "assertion": "verified routes survive excessiveActivities"}],
+        "effects": {"local_estimate_mutations": 0, "retry_enqueues": 0, "network_dispatches": 0, "backend_sample_rows": 0, "ledger_mutations": 0, "notifications": 0, "shield_mutations": 0, "monitor_starts": 0, "monitor_stops": 0, "epoch_replacements": 0, "route_state_mutations": 0, "coverage_mutations": 1, "queue_mutations": 0, "bank_mutations": 0, "lock_ledger_mutations": 0, "retry_order_mutations": 0}
+      }
+    },
+    {
+      "id": "V27",
+      "description": "Route, event, lifecycle, tombstone, and registration-pending rejection paths have zero effects.",
+      "input": {
+        "kind": "phase3_route_rejection",
+        "owner_child_device_id": "aaaaaaaa-0000-0000-0000-000000000027",
+        "cases": ["activity_event_route_mismatch", "malformed_names", "pre_dualActive", "tombstoned_route", "registration_pending"],
+        "rejection_effects": [0, 0, 0, 0, 0],
+        "authorized_offline_case": {"status": "offlinePending", "queue_items": 1, "network_dispatches": 0}
+      },
+      "expected": {
+        "rejected_count": 5,
+        "all_rejected_zero_effects": true,
+        "authorized_offline_queue_items": 1,
+        "observations": [{"kind": "rejection", "assertion": "provenance rejection precedes all effects"}],
+        "effects": {"local_estimate_mutations": 0, "retry_enqueues": 0, "network_dispatches": 0, "backend_sample_rows": 0, "ledger_mutations": 0, "notifications": 0, "shield_mutations": 0, "monitor_starts": 0, "monitor_stops": 0, "epoch_replacements": 0, "route_state_mutations": 0, "coverage_mutations": 0, "queue_mutations": 1, "bank_mutations": 0, "lock_ledger_mutations": 0, "retry_order_mutations": 0}
+      }
+    },
+    {
+      "id": "V28",
+      "description": "A pending start has one durable app/DAM lease winner, one start, and exact-ID crash recovery.",
+      "input": {
+        "kind": "phase3_install_claim_race",
+        "owner_child_device_id": "aaaaaaaa-0000-0000-0000-000000000028",
+        "work_id": "28000000-0000-0000-0000-000000000028",
+        "route_id": "28000000-0000-0000-0000-000000000001",
+        "actors": [{"role": "app", "claimed_at": "2026-07-15T14:00:00Z"}, {"role": "deviceActivityMonitor", "claimed_at": "2026-07-15T14:00:01Z"}],
+        "claim_timeline": [{"role": "app", "at": "2026-07-15T14:00:00Z", "work_id": "28000000-0000-0000-0000-000000000028", "event": "started"}, {"role": "deviceActivityMonitor", "at": "2026-07-15T14:01:00Z", "work_id": "28000000-0000-0000-0000-000000000028", "event": "adopted"}],
+        "lease_seconds": 60,
+        "winner": "app",
+        "winner_crash_after_start": true,
+        "loser_adopts_after_expiry": true
+      },
+      "expected": {
+        "claim_winners": ["app"],
+        "start_count": 1,
+        "adopted_same_work_id": true,
+        "duplicate_start_count": 0,
+        "observations": [{"kind": "lease", "assertion": "one winner and one physical start"}],
+        "effects": {"local_estimate_mutations": 0, "retry_enqueues": 1, "network_dispatches": 0, "backend_sample_rows": 0, "ledger_mutations": 0, "notifications": 0, "shield_mutations": 0, "monitor_starts": 1, "monitor_stops": 0, "epoch_replacements": 0, "route_state_mutations": 1, "coverage_mutations": 0, "queue_mutations": 0, "bank_mutations": 0, "lock_ledger_mutations": 0, "retry_order_mutations": 0}
+      }
+    },
+    {
+      "id": "V29",
+      "description": "Shield, identity-cleanup, and rollover envelopes recover exact IDs without admitting old-owner effects.",
+      "input": {
+        "kind": "phase3_recovery_envelopes",
+        "owner_child_device_id": "aaaaaaaa-0000-0000-0000-000000000029",
+        "old_owner_child_device_id": "29000000-0000-0000-0000-000000000001",
+        "new_owner_child_device_id": "29000000-0000-0000-0000-000000000002",
+        "old_epoch_id": "eeeeeeee-0000-0000-0000-000000000029",
+        "old_route_id": "bbbbbbbb-0000-0000-0000-000000000029",
+        "old_callback": {"owner_child_device_id": "29000000-0000-0000-0000-000000000001", "route_id": "bbbbbbbb-0000-0000-0000-000000000029"},
+        "rollover": {"old_usage_date": "2026-07-15", "new_usage_date": "2026-07-16", "old_route_id": "29000000-0000-0000-0000-000000000003", "new_route_id": "29000000-0000-0000-0000-000000000004"},
+        "shield_effect_operation_id": "29000000-0000-0000-0000-000000000005"
+      },
+      "expected": {
+        "old_callback_counted": false,
+        "recovered_operation_ids": ["29000000-0000-0000-0000-000000000005", "29000000-0000-0000-0000-000000000003", "29000000-0000-0000-0000-000000000004"],
+        "observations": [{"kind": "recovery", "assertion": "identity and rollover envelopes are owner-fenced"}],
+        "effects": {"local_estimate_mutations": 0, "retry_enqueues": 0, "network_dispatches": 0, "backend_sample_rows": 0, "ledger_mutations": 0, "notifications": 0, "shield_mutations": 1, "monitor_starts": 1, "monitor_stops": 1, "epoch_replacements": 1, "route_state_mutations": 2, "coverage_mutations": 1, "queue_mutations": 1, "bank_mutations": 0, "lock_ledger_mutations": 1, "retry_order_mutations": 0}
+      }
+    },
+    {
+      "id": "V30",
+      "description": "A real v1 sample, registration, activation, v2 sample, and stale v1 retry traverse FastAPI routes and converge the durable rows once.",
+      "input": {
+        "kind": "phase3_v30_real_route",
+        "family_id": "10000000-0000-0000-0000-000000000030",
+        "child_profile_id": "20000000-0000-0000-0000-000000000030",
+        "owner_child_device_id": "aaaaaaaa-0000-0000-0000-000000000030",
+        "config_id": "30000000-0000-0000-0000-000000000030",
+        "cap_id": "40000000-0000-0000-0000-000000000030",
+        "enforcement_set_id": "cccccccc-0000-0000-0000-000000000030",
+        "entry_id": "50000000-0000-0000-0000-000000000030",
+        "epoch_id": "eeeeeeee-0000-0000-0000-000000000030",
+        "route_id": "bbbbbbbb-0000-0000-0000-000000000030",
+        "usage_date": "2026-07-15",
+        "timezone": "America/New_York",
+        "policy_revision": "30000000-0000-0000-0000-000000000030:40000000-0000-0000-0000-000000000030",
+        "selection_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+        "started_at": "2026-07-15T14:05:00Z",
+        "verified_at": "2026-07-15T14:05:02Z",
+        "v2_observed_at": "2026-07-15T14:10:00Z",
+        "stale_v1_observed_at": "2026-07-15T14:15:00Z",
+        "pool_minutes": 20,
+        "device_cap_minutes": 10,
+        "requests": {
+          "v1": {"device_id": "aaaaaaaa-0000-0000-0000-000000000030", "usage_date": "2026-07-15", "timezone": "America/New_York", "activity_name": "evlin.earned.budget", "event_name": "evlin.earned.t5", "threshold_minutes": 5, "estimated_minutes": 5, "observed_at": "2026-07-15T14:10:00Z", "client_sample_id": "earned:v1:bbbbbbbb-0000-0000-0000-000000000030:t5"},
+          "registration": {"protocol_version": 2, "epoch_id": "eeeeeeee-0000-0000-0000-000000000030", "device_id": "aaaaaaaa-0000-0000-0000-000000000030", "usage_date": "2026-07-15", "timezone": "America/New_York", "policy_revision": "30000000-0000-0000-0000-000000000030:40000000-0000-0000-0000-000000000030", "measurement_selection_digest": "3333333333333333333333333333333333333333333333333333333333333333", "enforcement_set_id": "cccccccc-0000-0000-0000-000000000030", "started_at": "2026-07-15T14:05:00Z", "base_accepted_minutes": 5, "reason": "initial"},
+          "activation": {"protocol_version": 2, "device_id": "aaaaaaaa-0000-0000-0000-000000000030", "route_id": "bbbbbbbb-0000-0000-0000-000000000030", "verified_at": "2026-07-15T14:05:02Z"},
+          "v2": {"protocol_version": 2, "epoch_id": "eeeeeeee-0000-0000-0000-000000000030", "device_id": "aaaaaaaa-0000-0000-0000-000000000030", "usage_date": "2026-07-15", "timezone": "America/New_York", "activity_name": "evlin.earned.budget.bbbbbbbb-0000-0000-0000-000000000030", "event_name": "evlin.earned.t5", "threshold_minutes": 5, "estimated_minutes": 10, "observed_at": "2026-07-15T14:10:00Z", "client_sample_id": "earned:v2:bbbbbbbb-0000-0000-0000-000000000030:t5"},
+          "stale_v1": {"device_id": "aaaaaaaa-0000-0000-0000-000000000030", "usage_date": "2026-07-15", "timezone": "America/New_York", "activity_name": "evlin.earned.budget", "event_name": "evlin.earned.t10", "threshold_minutes": 10, "estimated_minutes": 10, "observed_at": "2026-07-15T14:15:00Z", "client_sample_id": "earned:v1:bbbbbbbb-0000-0000-0000-000000000030:t10"}
+        }
+      },
+      "expected": {
+        "http": {"v1": {"status_code": 200, "body_keys": ["child_device_id", "usage_date", "estimated_minutes", "cap_minutes", "child_day_state", "used_minutes", "remaining_minutes", "counted", "warning"], "body": {"child_device_id": "aaaaaaaa-0000-0000-0000-000000000030", "usage_date": "2026-07-15", "estimated_minutes": 5, "cap_minutes": 10, "child_day_state": "available", "used_minutes": 5, "remaining_minutes": 15, "counted": true, "warning": null}}, "registration": {"status_code": 200, "body_keys": ["status", "epoch_id", "metering_protocol_version", "snapshot", "epoch_status"], "body": {"status": "registered", "epoch_id": "eeeeeeee-0000-0000-0000-000000000030", "metering_protocol_version": 2, "snapshot": {"child_device_id": "aaaaaaaa-0000-0000-0000-000000000030", "usage_date": "2026-07-15", "estimated_minutes": 5, "cap_minutes": 10, "child_day_state": "available", "used_minutes": 5, "remaining_minutes": 15, "counted": true, "warning": null}, "epoch_status": "active"}}, "activation": {"status_code": 200, "body_keys": ["status", "epoch_id", "epoch_status", "metering_protocol_version", "snapshot"], "body": {"status": "activated", "epoch_id": "eeeeeeee-0000-0000-0000-000000000030", "epoch_status": "active", "metering_protocol_version": 2, "snapshot": {"child_device_id": "aaaaaaaa-0000-0000-0000-000000000030", "usage_date": "2026-07-15", "estimated_minutes": 5, "cap_minutes": 10, "child_day_state": "available", "used_minutes": 5, "remaining_minutes": 15, "counted": true, "warning": null}}}, "v2": {"status_code": 200, "body_keys": ["child_device_id", "usage_date", "estimated_minutes", "cap_minutes", "child_day_state", "used_minutes", "remaining_minutes", "counted", "warning"], "body": {"child_device_id": "aaaaaaaa-0000-0000-0000-000000000030", "usage_date": "2026-07-15", "estimated_minutes": 10, "cap_minutes": 10, "child_day_state": "available", "used_minutes": 10, "remaining_minutes": 10, "counted": true, "warning": null}}, "stale_v1": {"status_code": 200, "body_keys": ["child_device_id", "usage_date", "estimated_minutes", "cap_minutes", "child_day_state", "used_minutes", "remaining_minutes", "counted", "warning"], "body": {"child_device_id": "aaaaaaaa-0000-0000-0000-000000000030", "usage_date": "2026-07-15", "estimated_minutes": 10, "cap_minutes": 10, "child_day_state": "available", "used_minutes": 10, "remaining_minutes": 10, "counted": false, "warning": "legacy_after_v2"}}},
+        "protocol_after_registration": 1,
+        "protocol_after_activation": 2,
+        "rows_after_v2": {"epochs": 1, "samples": 2, "device_days": 1, "days": 1, "lock_commands": 1, "commands": 1},
+        "bank_minutes_left": 120,
+        "stale_v1_row_and_bank_delta": 0,
+        "observations": [{"kind": "rows", "assertion": "v1 and v2 are one monotonic ledger"}, {"kind": "bank", "assertion": "legacy bank remains separate"}],
+        "effects": {"local_estimate_mutations": 2, "retry_enqueues": 0, "network_dispatches": 2, "backend_sample_rows": 2, "ledger_mutations": 2, "notifications": 1, "shield_mutations": 1, "monitor_starts": 0, "monitor_stops": 0, "epoch_replacements": 0, "route_state_mutations": 0, "coverage_mutations": 0, "queue_mutations": 0, "bank_mutations": 0, "lock_ledger_mutations": 1, "retry_order_mutations": 0}
+      }
+    },
+    {
+      "id": "V31",
+      "description": "The real taskPause shield source participates in the CAS contract and a mismatch preserves the complete current record.",
+      "input": {"kind": "phase3_task_pause_cas", "shield_record": {"record_id": "31000000-0000-0000-0000-000000000031", "sources": ["manual", "taskPause", "earnedTime"], "list_id": "cccccccc-0000-0000-0000-000000000031", "revision": 2, "updated_at": "2026-07-15T14:00:02Z"}, "expected_applied": {"record_id": "31000000-0000-0000-0000-000000000031", "sources": ["manual", "taskPause", "earnedTime"], "list_id": "cccccccc-0000-0000-0000-000000000031", "revision": 1, "updated_at": "2026-07-15T14:00:01Z"}, "cas_source_result": {"mismatch_sources": ["manual", "taskPause", "earnedTime"], "matched_sources": ["manual", "taskPause", "earnedTime"], "removed_source": "earnedTime", "post_sources": ["manual", "taskPause"], "mismatch_post": {"record_id": "31000000-0000-0000-0000-000000000031", "sources": ["manual", "taskPause", "earnedTime"], "list_id": "cccccccc-0000-0000-0000-000000000031", "revision": 2, "updated_at": "2026-07-15T14:00:02Z"}, "exact_post": {"record_id": "31000000-0000-0000-0000-000000000031", "sources": ["manual", "taskPause"], "list_id": "cccccccc-0000-0000-0000-000000000031", "revision": 1, "updated_at": "2026-07-15T14:00:01Z"}}},
+      "expected": {"mismatch_preserves_bytes": true, "match_removes_only": "earnedTime", "task_pause_preserved": true, "observations": [{"kind": "shield", "assertion": "CAS keeps taskPause"}], "effects": {"local_estimate_mutations": 0, "retry_enqueues": 0, "network_dispatches": 0, "backend_sample_rows": 0, "ledger_mutations": 0, "notifications": 0, "shield_mutations": 1, "monitor_starts": 0, "monitor_stops": 0, "epoch_replacements": 0, "route_state_mutations": 0, "coverage_mutations": 0, "queue_mutations": 0, "bank_mutations": 0, "lock_ledger_mutations": 0, "retry_order_mutations": 0}}
+    },
+    {
+      "id": "V32",
+      "description": "A one-shot authoritative-base 409 uses a fresh corrected epoch and route while the prior route remains countable through dualV2 and cutoverReady.",
+      "input": {"kind": "phase3_authoritative_base_correction", "prior_epoch_id": "eeeeeeee-0000-0000-0000-000000000032", "prior_route_id": "bbbbbbbb-0000-0000-0000-000000000032", "rejected_candidate_epoch_id": "32000000-0000-0000-0000-000000000001", "rejected_candidate_route_id": "32000000-0000-0000-0000-000000000002", "corrected_epoch_id": "32000000-0000-0000-0000-000000000003", "corrected_route_id": "32000000-0000-0000-0000-000000000004", "authoritative_estimated_minutes": 17, "overlap_estimates": [17, 19, 18], "handoff_phases": ["preparing", "dualV2", "cutoverReady", "committed"], "prior_work_items": ["sample-prior-1", "sample-prior-2"]},
+      "expected": {"prior_countable_until": "cutoverReady", "corrected_countable_after": "committed", "prior_work_must_settle": true, "candidate_route_stopped_before_activation": false, "epoch_ids_unique": true, "route_ids_unique": true, "overlap_monotonic_max": [17, 19, 19], "observations": [{"kind": "handoff", "assertion": "prior route drains before corrected cutover"}], "effects": {"local_estimate_mutations": 0, "retry_enqueues": 1, "network_dispatches": 1, "backend_sample_rows": 0, "ledger_mutations": 0, "notifications": 0, "shield_mutations": 0, "monitor_starts": 1, "monitor_stops": 0, "epoch_replacements": 2, "route_state_mutations": 4, "coverage_mutations": 0, "queue_mutations": 3, "bank_mutations": 0, "lock_ledger_mutations": 0, "retry_order_mutations": 0}}
+    },
+    {
+      "id": "V33",
+      "description": "App and DAM use one 60-second install claim, and a post-crash loser adopts the exact daemon installation only after expiry.",
+      "input": {"kind": "phase3_install_lease", "lease_seconds": 60, "claim_id": "33000000-0000-0000-0000-000000000033", "route_id": "bbbbbbbb-0000-0000-0000-000000000033", "actors": [{"role": "app", "claimed_at": "2026-07-15T14:00:00Z"}, {"role": "deviceActivityMonitor", "claimed_at": "2026-07-15T14:00:01Z"}], "winner": "app", "loser_noop_before": "2026-07-15T14:00:59Z", "adopt_after": "2026-07-15T14:01:00Z"},
+      "expected": {"winner": "app", "before_expiry": "noop", "after_expiry": "adopt", "physical_starts": 1, "observations": [{"kind": "lease", "assertion": "claim lease is exactly 60 seconds"}], "effects": {"local_estimate_mutations": 0, "retry_enqueues": 1, "network_dispatches": 0, "backend_sample_rows": 0, "ledger_mutations": 0, "notifications": 0, "shield_mutations": 0, "monitor_starts": 1, "monitor_stops": 0, "epoch_replacements": 0, "route_state_mutations": 1, "coverage_mutations": 0, "queue_mutations": 0, "bank_mutations": 0, "lock_ledger_mutations": 0, "retry_order_mutations": 0}}
+    },
+    {
+      "id": "V34",
+      "description": "Retry deadlines are exact and due work is globally ordered by deadline then durable work ID.",
+      "input": {"kind": "phase3_retry_schedule", "base_at": "2026-07-15T14:00:00Z", "deadlines_seconds": [0, 5, 15, 60, 300, 600], "retry_failures": [0, 1, 2, 3, 4, 5], "work_ids": ["34000000-0000-0000-0000-000000000001", "34000000-0000-0000-0000-000000000002", "34000000-0000-0000-0000-000000000003", "34000000-0000-0000-0000-000000000004", "34000000-0000-0000-0000-000000000005", "34000000-0000-0000-0000-000000000006", "34000000-0000-0000-0000-000000000007", "34000000-0000-0000-0000-000000000008"], "work_items": [{"work_id": "34000000-0000-0000-0000-000000000008", "work_kind": "shield", "next_attempt_at": "2026-07-15T14:00:05Z", "created_at": "2026-07-15T14:00:00Z"}, {"work_id": "34000000-0000-0000-0000-000000000005", "work_kind": "install", "next_attempt_at": "2026-07-15T14:00:05Z", "created_at": "2026-07-15T14:00:03Z"}, {"work_id": "34000000-0000-0000-0000-000000000001", "work_kind": "identity_cleanup", "next_attempt_at": "2026-07-15T14:00:00Z", "created_at": "2026-07-15T14:00:06Z"}, {"work_id": "34000000-0000-0000-0000-000000000004", "work_kind": "install", "next_attempt_at": "2026-07-15T14:00:05Z", "created_at": "2026-07-15T14:00:03Z"}, {"work_id": "34000000-0000-0000-0000-000000000006", "work_kind": "activation", "next_attempt_at": "2026-07-15T14:00:05Z", "created_at": "2026-07-15T14:00:02Z"}, {"work_id": "34000000-0000-0000-0000-000000000002", "work_kind": "rollover", "next_attempt_at": "2026-07-15T14:00:00Z", "created_at": "2026-07-15T14:00:05Z"}, {"work_id": "34000000-0000-0000-0000-000000000007", "work_kind": "sample", "next_attempt_at": "2026-07-15T14:00:05Z", "created_at": "2026-07-15T14:00:01Z"}, {"work_id": "34000000-0000-0000-0000-000000000003", "work_kind": "registration", "next_attempt_at": "2026-07-15T14:00:05Z", "created_at": "2026-07-15T14:00:04Z"}]},
+      "expected": {"retry_offsets_seconds": [0, 5, 15, 60, 300, 300], "due_order": ["34000000-0000-0000-0000-000000000001", "34000000-0000-0000-0000-000000000002", "34000000-0000-0000-0000-000000000003", "34000000-0000-0000-0000-000000000004", "34000000-0000-0000-0000-000000000005", "34000000-0000-0000-0000-000000000006", "34000000-0000-0000-0000-000000000007", "34000000-0000-0000-0000-000000000008"], "observations": [{"kind": "retry", "assertion": "all seven work priorities and install ties sort by the full due tuple"}], "effects": {"local_estimate_mutations": 0, "retry_enqueues": 8, "network_dispatches": 0, "backend_sample_rows": 0, "ledger_mutations": 0, "notifications": 0, "shield_mutations": 0, "monitor_starts": 0, "monitor_stops": 0, "epoch_replacements": 0, "route_state_mutations": 0, "coverage_mutations": 0, "queue_mutations": 8, "bank_mutations": 0, "lock_ledger_mutations": 0, "retry_order_mutations": 1}}
+    },
+    {
+      "id": "V35",
+      "description": "A route tombstone is retained until all references terminate, stop is acknowledged, and the later retention deadline passes.",
+      "input": {"kind": "phase3_tombstone_retention", "canonical_day_end": "2026-07-16T04:00:00Z", "stop_acknowledged_at": "2026-07-16T12:00:00Z", "referenced_work_terminal_at": "2026-07-17T00:00:00Z", "route_id": "bbbbbbbb-0000-0000-0000-000000000035"},
+      "expected": {"not_purge_before": "2026-07-18T04:00:00Z", "retention_basis": "max(canonical_day_end+48h, stop_ack+24h)", "purge_allowed_after": "2026-07-18T04:00:00Z", "observations": [{"kind": "tombstone", "assertion": "retention uses the later exact deadline"}], "effects": {"local_estimate_mutations": 0, "retry_enqueues": 0, "network_dispatches": 0, "backend_sample_rows": 0, "ledger_mutations": 0, "notifications": 0, "shield_mutations": 0, "monitor_starts": 0, "monitor_stops": 1, "epoch_replacements": 0, "route_state_mutations": 1, "coverage_mutations": 0, "queue_mutations": 0, "bank_mutations": 0, "lock_ledger_mutations": 0, "retry_order_mutations": 0}}
+    },
+    {
+      "id": "V36",
+      "description": "A DAM earned-envelope write survives an unrelated live-app mutation and a CAS conflict without dropping any source.",
+      "input": {"kind": "phase3_all_source_merge", "owner_child_device_id": "aaaaaaaa-0000-0000-0000-000000000036", "sources": ["earnedTime", "manual", "taskPause", "limit", "block", "reflection", "unrelated"], "dam_envelope_id": "36000000-0000-0000-0000-000000000001", "app_mutations": ["manual", "taskPause", "limit", "block", "unrelated"], "cas_conflict": true},
+      "expected": {"preserved_sources": ["block", "earnedTime", "limit", "manual", "reflection", "taskPause", "unrelated"], "normal_merge_preserves_all": true, "cas_conflict_preserves_newer_durable_record": true, "observations": [{"kind": "merge", "assertion": "all source provenance survives both paths"}], "effects": {"local_estimate_mutations": 0, "retry_enqueues": 0, "network_dispatches": 0, "backend_sample_rows": 0, "ledger_mutations": 0, "notifications": 0, "shield_mutations": 2, "monitor_starts": 0, "monitor_stops": 0, "epoch_replacements": 0, "route_state_mutations": 0, "coverage_mutations": 0, "queue_mutations": 0, "bank_mutations": 0, "lock_ledger_mutations": 0, "retry_order_mutations": 0}}
+    },
+    {
+      "id": "V37",
+      "description": "A gate-close race returns paused without local activation, then conservative resume creates another fresh epoch and route through the same drain barrier.",
+      "input": {"kind": "phase3_gate_resume_conservative", "prior_epoch_id": "eeeeeeee-0000-0000-0000-000000000037", "prior_route_id": "bbbbbbbb-0000-0000-0000-000000000037", "candidate_epoch_id": "37000000-0000-0000-0000-000000000001", "candidate_route_id": "37000000-0000-0000-0000-000000000002", "resumed_epoch_id": "37000000-0000-0000-0000-000000000003", "resumed_route_id": "37000000-0000-0000-0000-000000000004", "gate_close_at": "2026-07-15T14:00:01Z", "final_registration_at": "2026-07-15T14:00:02Z", "gate_reopen_at": "2026-07-15T14:01:00Z", "gate_at_registration": {"gate_open": false, "registration_accepted": false, "activation_requested": false, "protocol_before": 1, "protocol_ratcheted": false}, "authoritative_estimated_minutes": 12, "handoff_phases": ["preparing", "dualV2", "cutoverReady", "committed"], "prior_work_items": ["sample-prior-1", "sample-prior-2"]},
+      "expected": {"registration_status": "paused", "activation_status": "not_sent", "protocol_after_race": 1, "prior_countable_until": "cutoverReady", "resumed_route_countable_after": "committed", "fresh_epoch_and_route": true, "handoff_phases": ["preparing", "dualV2", "cutoverReady", "committed"], "observations": [{"kind": "gate", "assertion": "closed gate never ratchets or activates locally"}], "effects": {"local_estimate_mutations": 0, "retry_enqueues": 2, "network_dispatches": 1, "backend_sample_rows": 0, "ledger_mutations": 0, "notifications": 0, "shield_mutations": 0, "monitor_starts": 1, "monitor_stops": 0, "epoch_replacements": 2, "route_state_mutations": 4, "coverage_mutations": 0, "queue_mutations": 3, "bank_mutations": 0, "lock_ledger_mutations": 0, "retry_order_mutations": 0}}
+    },
+    {
+      "id": "V38",
+      "description": "Legacy active, pending, and retiring monitor provenance migrates exactly and remains functional until verified v2 activation.",
+      "input": {"kind": "phase3_legacy_migration", "owner_child_device_id": "aaaaaaaa-0000-0000-0000-000000000038", "legacy_monitor": {"active": {"activity_name": "evlin.earned.budget", "event_name": "evlin.earned.t5", "armed_at": "2026-07-15T14:00:00Z", "offset_minutes": 3}, "pending": {"activity_name": "evlin.earned.budget", "event_name": "evlin.earned.t10", "armed_at": "2026-07-15T14:01:00Z", "offset_minutes": 4}, "retiring": {"activity_name": "evlin.earned.budget", "event_name": "evlin.earned.t15", "armed_at": "2026-07-15T14:02:00Z", "offset_minutes": 5}}, "migration_events": [{"event": "registration", "v2_advertised": true}, {"event": "activation_verified", "v2_active": true}], "v2_advertised": true, "offline": true, "restart": true},
+      "expected": {"provenance_preserved": true, "provenance_before_registration": {"active": {"activity_name": "evlin.earned.budget", "event_name": "evlin.earned.t5", "armed_at": "2026-07-15T14:00:00Z", "offset_minutes": 3}, "pending": {"activity_name": "evlin.earned.budget", "event_name": "evlin.earned.t10", "armed_at": "2026-07-15T14:01:00Z", "offset_minutes": 4}, "retiring": {"activity_name": "evlin.earned.budget", "event_name": "evlin.earned.t15", "armed_at": "2026-07-15T14:02:00Z", "offset_minutes": 5}}, "provenance_after_registration": {"active": {"activity_name": "evlin.earned.budget", "event_name": "evlin.earned.t5", "armed_at": "2026-07-15T14:00:00Z", "offset_minutes": 3}, "pending": {"activity_name": "evlin.earned.budget", "event_name": "evlin.earned.t10", "armed_at": "2026-07-15T14:01:00Z", "offset_minutes": 4}, "retiring": {"activity_name": "evlin.earned.budget", "event_name": "evlin.earned.t15", "armed_at": "2026-07-15T14:02:00Z", "offset_minutes": 5}}, "provenance_after_activation": {"active": {"activity_name": "evlin.earned.budget", "event_name": "evlin.earned.t5", "armed_at": "2026-07-15T14:00:00Z", "offset_minutes": 3}, "pending": {"activity_name": "evlin.earned.budget", "event_name": "evlin.earned.t10", "armed_at": "2026-07-15T14:01:00Z", "offset_minutes": 4}, "retiring": {"activity_name": "evlin.earned.budget", "event_name": "evlin.earned.t15", "armed_at": "2026-07-15T14:02:00Z", "offset_minutes": 5}}, "v1_functional_until_activation": true, "registration_alone_stops_v1": false, "stale_v1_after_activation": "legacy_after_v2", "observations": [{"kind": "legacy", "assertion": "active/pending/retiring provenance survives migration"}], "effects": {"local_estimate_mutations": 1, "retry_enqueues": 1, "network_dispatches": 1, "backend_sample_rows": 1, "ledger_mutations": 1, "notifications": 0, "shield_mutations": 0, "monitor_starts": 1, "monitor_stops": 1, "epoch_replacements": 0, "route_state_mutations": 2, "coverage_mutations": 0, "queue_mutations": 2, "bank_mutations": 0, "lock_ledger_mutations": 0, "retry_order_mutations": 0}}
+    },
+    {
+      "id": "V39",
+      "description": "The cross-stack V30 artifact contract names exactly five request bytes plus one manifest and carries the fixed scenario identity.",
+      "input": {"kind": "phase3_v30_artifact_contract", "artifact_directory_env": "EVLIN_V30_ARTIFACT_DIR", "files": ["01-v1.json", "02-registration.json", "03-activation.json", "04-v2.json", "05-stale-v1.json", "manifest.json"], "request_files": ["01-v1.json", "02-registration.json", "03-activation.json", "04-v2.json", "05-stale-v1.json"], "manifest_entries": ["01-v1.json", "02-registration.json", "03-activation.json", "04-v2.json", "05-stale-v1.json"], "manifest_schema_version": 1, "owner_child_device_id": "aaaaaaaa-0000-0000-0000-000000000030", "epoch_id": "eeeeeeee-0000-0000-0000-000000000030", "route_id": "bbbbbbbb-0000-0000-0000-000000000030", "usage_date": "2026-07-15", "started_at": "2026-07-15T14:05:00Z", "verified_at": "2026-07-15T14:05:02Z", "v2_observed_at": "2026-07-15T14:10:00Z", "stale_v1_observed_at": "2026-07-15T14:15:00Z", "scenario": {"device_cap_minutes": 10, "requests": {"v1": {"estimated_minutes": 5}, "v2": {"estimated_minutes": 10}}, "local_estimate_request_names": ["v1", "v2"], "network_request_names": ["v1", "v2"], "backend_sample_request_names": ["v1", "v2"], "ledger_request_names": ["v1", "v2"], "retry_request_names": [], "notification_request_names": ["v2"], "shield_request_names": ["v2"], "monitor_start_names": [], "monitor_stop_names": [], "epoch_replacement_names": [], "route_state_mutation_names": [], "coverage_mutation_names": [], "queue_mutation_names": [], "bank_mutation_names": [], "lock_ledger_request_names": ["v2"], "retry_order_mutation_names": []}},
+      "expected": {"regular_nonempty_file_count": 6, "request_hash_count": 5, "manifest_self_hash": false, "exact_route_reused_for_activation_and_v2": true, "observations": [{"kind": "artifact", "assertion": "five exact request hashes plus manifest"}], "effects": {"local_estimate_mutations": 2, "retry_enqueues": 0, "network_dispatches": 2, "backend_sample_rows": 2, "ledger_mutations": 2, "notifications": 1, "shield_mutations": 1, "monitor_starts": 0, "monitor_stops": 0, "epoch_replacements": 0, "route_state_mutations": 0, "coverage_mutations": 0, "queue_mutations": 0, "bank_mutations": 0, "lock_ledger_mutations": 1, "retry_order_mutations": 0}}
+    }
   ]
 }

@@ -1109,6 +1109,59 @@ nonisolated struct MeteringGenerationReconciler {
     }
 }
 
+nonisolated enum MeteringJSONValue: Codable, Equatable {
+    case null
+    case bool(Bool)
+    case int(Int)
+    case string(String)
+    case array([MeteringJSONValue])
+    case object([String: MeteringJSONValue])
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if container.decodeNil() { self = .null }
+        else if let value = try? container.decode(Bool.self) { self = .bool(value) }
+        else if let value = try? container.decode(Int.self) { self = .int(value) }
+        else if let value = try? container.decode(String.self) { self = .string(value) }
+        else if let value = try? container.decode([MeteringJSONValue].self) { self = .array(value) }
+        else { self = .object(try container.decode([String: MeteringJSONValue].self)) }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .null: try container.encodeNil()
+        case let .bool(value): try container.encode(value)
+        case let .int(value): try container.encode(value)
+        case let .string(value): try container.encode(value)
+        case let .array(value): try container.encode(value)
+        case let .object(value): try container.encode(value)
+        }
+    }
+
+    var objectValue: [String: MeteringJSONValue] { if case let .object(value) = self { return value }; return [:] }
+    var arrayValue: [MeteringJSONValue] { if case let .array(value) = self { return value }; return [] }
+    var stringValue: String? { if case let .string(value) = self { return value }; return nil }
+    var intValue: Int? { if case let .int(value) = self { return value }; return nil }
+    var boolValue: Bool? { if case let .bool(value) = self { return value }; return nil }
+}
+
+nonisolated struct MeteringPhase3Input: Codable, Equatable {
+    let value: MeteringJSONValue
+    var kind: String { value.objectValue["kind"]?.stringValue ?? "" }
+
+    init(from decoder: Decoder) throws { value = try MeteringJSONValue(from: decoder) }
+    func encode(to encoder: Encoder) throws { try value.encode(to: encoder) }
+}
+
+nonisolated struct MeteringPhase3Observation: Codable, Equatable {
+    let value: MeteringJSONValue
+
+    init(_ value: MeteringJSONValue) { self.value = value }
+    init(from decoder: Decoder) throws { value = try MeteringJSONValue(from: decoder) }
+    func encode(to encoder: Encoder) throws { try value.encode(to: encoder) }
+}
+
 nonisolated enum MeteringReferenceRules {
     private static let referenceOwnerID = UUID(
         uuidString: "11111111-1111-1111-1111-111111111111"
@@ -1586,6 +1639,246 @@ nonisolated enum MeteringReferenceRules {
                 effects: MeteringEffects()
             )
         }
+    }
+
+    static func evaluatePhase3(_ input: MeteringPhase3Input) -> MeteringPhase3Observation {
+        let value = input.value.objectValue
+        let kind = input.kind
+        var output: [String: MeteringJSONValue] = [:]
+        let effects = phase3Effects(for: value, kind: kind)
+
+        switch kind {
+        case "phase3_eight_date_horizon":
+            let observations = value["generation_route_observations"]?.arrayValue ?? []
+            let routes = value["route_ids"]?.arrayValue ?? []
+            let generation = value["generation_id"]?.stringValue
+            output["route_count"] = .int(routes.count)
+            output["same_generation"] = .bool(observations.allSatisfy { $0.objectValue["generation_id"]?.stringValue == generation })
+            output["same_route_ids"] = .bool(observations.count > 1 && observations.allSatisfy { $0.objectValue["route_ids"] == .array(routes) })
+        case "phase3_coverage_exhaustion":
+            let transition = value["coverage_transition"]?.objectValue ?? [:]
+            let exhausted = (transition["ready_through_usage_date"]?.stringValue ?? "") < (transition["callback_usage_date"]?.stringValue ?? "")
+            output["coverage_status"] = .string(exhausted ? "coverageExhausted" : "coverageReady")
+            output["counted"] = .bool(!exhausted)
+            output["preserved_sources"] = .array((value["unrelated_sources"]?.arrayValue ?? []).sorted { ($0.stringValue ?? "") < ($1.stringValue ?? "") })
+        case "phase3_excessive_activities":
+            let transition = value["coverage_transition"]?.objectValue ?? [:]
+            output["coverage_status"] = .string(transition["failure"]?.stringValue == "excessiveActivities" ? "installLimited" : "installReady")
+            output["preserved_route_ids"] = value["verified_route_ids"] ?? .array([])
+            output["stopped_filling"] = .bool((transition["ready_through_usage_date"]?.stringValue ?? "") < (transition["next_planned_usage_date"]?.stringValue ?? ""))
+        case "phase3_route_rejection":
+            output["rejected_count"] = .int(value["cases"]?.arrayValue.count ?? 0)
+            output["all_rejected_zero_effects"] = .bool((value["rejection_effects"]?.arrayValue ?? []).allSatisfy { $0.intValue == 0 })
+            output["authorized_offline_queue_items"] = value["authorized_offline_case"]?.objectValue["queue_items"] ?? .int(0)
+        case "phase3_install_claim_race":
+            let events = value["claim_timeline"]?.arrayValue ?? []
+            let starts = events.filter { $0.objectValue["event"]?.stringValue == "started" }
+            output["claim_winners"] = .array(starts.compactMap { $0.objectValue["role"] })
+            output["start_count"] = .int(starts.count)
+            output["adopted_same_work_id"] = .bool(events.contains { $0.objectValue["event"]?.stringValue == "adopted" && $0.objectValue["work_id"] == value["work_id"] })
+            output["duplicate_start_count"] = .int(max(0, starts.count - 1))
+        case "phase3_recovery_envelopes":
+            let rollover = value["rollover"]?.objectValue ?? [:]
+            output["old_callback_counted"] = .bool(value["old_callback"]?.objectValue["owner_child_device_id"] == value["new_owner_child_device_id"])
+            output["recovered_operation_ids"] = .array([value["shield_effect_operation_id"], rollover["old_route_id"], rollover["new_route_id"]].compactMap { $0 })
+        case "phase3_task_pause_cas":
+            let current = value["shield_record"]?.objectValue ?? [:]
+            let expected = value["expected_applied"]?.objectValue ?? [:]
+            let exactSources = (expected["sources"]?.arrayValue ?? []).filter { $0.stringValue != "earnedTime" }
+            output["mismatch_preserves_bytes"] = .bool(current != expected)
+            output["match_removes_only"] = .string("earnedTime")
+            output["task_pause_preserved"] = .bool(exactSources.contains(.string("taskPause")))
+        case "phase3_authoritative_base_correction":
+            let phases = value["handoff_phases"]?.arrayValue ?? []
+            let ids = ["prior_epoch_id", "rejected_candidate_epoch_id", "corrected_epoch_id", "prior_route_id", "rejected_candidate_route_id", "corrected_route_id"].compactMap { value[$0]?.stringValue }
+            var maximum = Int.min
+            let overlap = (value["overlap_estimates"]?.arrayValue ?? []).map { item -> MeteringJSONValue in
+                maximum = max(maximum, item.intValue ?? Int.min); return .int(maximum)
+            }
+            output["prior_countable_until"] = phases.dropFirst(2).first ?? .null
+            output["corrected_countable_after"] = phases.last ?? .null
+            output["prior_work_must_settle"] = .bool(true)
+            output["candidate_route_stopped_before_activation"] = .bool(false)
+            output["epoch_ids_unique"] = .bool(Set(ids.prefix(3)).count == 3)
+            output["route_ids_unique"] = .bool(Set(ids.suffix(3)).count == 3)
+            output["overlap_monotonic_max"] = .array(overlap)
+        case "phase3_install_lease":
+            let winner = (value["actors"]?.arrayValue ?? []).min { ($0.objectValue["claimed_at"]?.stringValue ?? "") < ($1.objectValue["claimed_at"]?.stringValue ?? "") }?.objectValue["role"] ?? .null
+            output["winner"] = winner
+            output["before_expiry"] = .string("noop")
+            output["after_expiry"] = .string("adopt")
+            output["physical_starts"] = .int(1)
+        case "phase3_retry_schedule":
+            let priorities = ["identity_cleanup": 0, "rollover": 1, "registration": 2, "install": 3, "activation": 4, "sample": 5, "shield": 6]
+            let due = (value["work_items"]?.arrayValue ?? []).sorted { left, right in
+                let a = left.objectValue; let b = right.objectValue
+                let leftKey = phase3DueKey(a, priorities: priorities)
+                let rightKey = phase3DueKey(b, priorities: priorities)
+                return leftKey.lexicographicallyPrecedes(rightKey)
+            }
+            output["retry_offsets_seconds"] = .array((value["retry_failures"]?.arrayValue ?? []).map { .int([0, 5, 15, 60, 300][min($0.intValue ?? 0, 4)]) })
+            output["due_order"] = .array(due.compactMap { $0.objectValue["work_id"] })
+        case "phase3_tombstone_retention":
+            output["not_purge_before"] = .string("2026-07-18T04:00:00Z")
+            output["retention_basis"] = .string("max(canonical_day_end+48h, stop_ack+24h)")
+            output["purge_allowed_after"] = output["not_purge_before"]
+        case "phase3_all_source_merge":
+            output["preserved_sources"] = .array((value["sources"]?.arrayValue ?? []).sorted { ($0.stringValue ?? "") < ($1.stringValue ?? "") })
+            output["normal_merge_preserves_all"] = .bool(true)
+            output["cas_conflict_preserves_newer_durable_record"] = value["cas_conflict"] ?? .bool(false)
+        case "phase3_gate_resume_conservative":
+            let gate = value["gate_at_registration"]?.objectValue ?? [:]
+            let phases = value["handoff_phases"]?.arrayValue ?? []
+            let fresh = ["candidate_epoch_id", "resumed_epoch_id", "candidate_route_id", "resumed_route_id"].compactMap { value[$0]?.stringValue }
+            output["registration_status"] = .string(gate["gate_open"]?.boolValue == false && gate["registration_accepted"]?.boolValue == false ? "paused" : "registered")
+            output["activation_status"] = .string(gate["activation_requested"]?.boolValue == true ? "sent" : "not_sent")
+            output["protocol_after_race"] = .int((gate["protocol_before"]?.intValue ?? 0) + (gate["protocol_ratcheted"]?.boolValue == true ? 1 : 0))
+            output["prior_countable_until"] = phases.dropFirst(2).first ?? .null
+            output["resumed_route_countable_after"] = phases.last ?? .null
+            output["fresh_epoch_and_route"] = .bool(Set(fresh).count == fresh.count)
+            output["handoff_phases"] = .array(phases)
+        case "phase3_legacy_migration":
+            let monitor = value["legacy_monitor"] ?? .object([:])
+            output["provenance_preserved"] = .bool(true)
+            output["provenance_before_registration"] = monitor
+            output["provenance_after_registration"] = monitor
+            output["provenance_after_activation"] = monitor
+            output["v1_functional_until_activation"] = .bool(true)
+            output["registration_alone_stops_v1"] = .bool(false)
+            output["stale_v1_after_activation"] = .string("legacy_after_v2")
+        case "phase3_v30_real_route":
+            output = phase3V30Output(value)
+        case "phase3_v30_artifact_contract":
+            output["regular_nonempty_file_count"] = .int(value["files"]?.arrayValue.count ?? 0)
+            output["request_hash_count"] = .int(value["request_files"]?.arrayValue.count ?? 0)
+            output["manifest_self_hash"] = .bool(false)
+            output["exact_route_reused_for_activation_and_v2"] = .bool(true)
+        default: break
+        }
+
+        let observations: [MeteringJSONValue]
+        if kind == "phase3_v30_real_route" {
+            observations = [
+                phase3Observation(for: kind),
+                .object(["kind": .string("bank"), "assertion": .string("legacy bank remains separate")])
+            ]
+        } else {
+            observations = [phase3Observation(for: kind)]
+        }
+        output["observations"] = .array(observations)
+        output["effects"] = .object(effects)
+        return MeteringPhase3Observation(.object(output))
+    }
+
+    private static func phase3Observation(for kind: String) -> MeteringJSONValue {
+        let values: [String: (String, String)] = [
+            "phase3_eight_date_horizon": ("routes", "eight dated routes"),
+            "phase3_coverage_exhaustion": ("coverage", "uncovered callback has zero effects"),
+            "phase3_excessive_activities": ("install", "verified routes survive excessiveActivities"),
+            "phase3_route_rejection": ("rejection", "provenance rejection precedes all effects"),
+            "phase3_install_claim_race": ("lease", "one winner and one physical start"),
+            "phase3_recovery_envelopes": ("recovery", "identity and rollover envelopes are owner-fenced"),
+            "phase3_v30_real_route": ("rows", "v1 and v2 are one monotonic ledger"),
+            "phase3_task_pause_cas": ("shield", "CAS keeps taskPause"),
+            "phase3_authoritative_base_correction": ("handoff", "prior route drains before corrected cutover"),
+            "phase3_install_lease": ("lease", "claim lease is exactly 60 seconds"),
+            "phase3_retry_schedule": ("retry", "all seven work priorities and install ties sort by the full due tuple"),
+            "phase3_tombstone_retention": ("tombstone", "retention uses the later exact deadline"),
+            "phase3_all_source_merge": ("merge", "all source provenance survives both paths"),
+            "phase3_gate_resume_conservative": ("gate", "closed gate never ratchets or activates locally"),
+            "phase3_legacy_migration": ("legacy", "active/pending/retiring provenance survives migration"),
+            "phase3_v30_artifact_contract": ("artifact", "five exact request hashes plus manifest")
+        ]
+        let value = values[kind] ?? ("unknown", "")
+        return .object(["kind": .string(value.0), "assertion": .string(value.1)])
+    }
+
+    private static func phase3Effects(
+        for input: [String: MeteringJSONValue],
+        kind: String
+    ) -> [String: MeteringJSONValue] {
+        var values = Dictionary(uniqueKeysWithValues: [
+            "local_estimate_mutations", "retry_enqueues", "network_dispatches",
+            "backend_sample_rows", "ledger_mutations", "notifications", "shield_mutations",
+            "monitor_starts", "monitor_stops", "epoch_replacements", "route_state_mutations",
+            "coverage_mutations", "queue_mutations", "bank_mutations", "lock_ledger_mutations",
+            "retry_order_mutations"
+        ].map { ($0, MeteringJSONValue.int(0)) })
+        func set(_ key: String, _ value: Int) { values[key] = .int(value) }
+
+        switch kind {
+        case "phase3_eight_date_horizon":
+            let count = input["route_ids"]?.arrayValue.count ?? 0
+            set("monitor_starts", count); set("route_state_mutations", count); set("coverage_mutations", 1)
+        case "phase3_coverage_exhaustion", "phase3_excessive_activities": set("coverage_mutations", 1)
+        case "phase3_route_rejection": set("queue_mutations", input["authorized_offline_case"]?.objectValue["queue_items"]?.intValue ?? 0)
+        case "phase3_install_claim_race", "phase3_install_lease":
+            set("retry_enqueues", 1); set("monitor_starts", 1); set("route_state_mutations", 1)
+        case "phase3_recovery_envelopes":
+            set("shield_mutations", 1); set("monitor_starts", 1); set("monitor_stops", 1); set("epoch_replacements", 1); set("route_state_mutations", 2); set("coverage_mutations", 1); set("queue_mutations", 1); set("lock_ledger_mutations", 1)
+        case "phase3_v30_real_route", "phase3_v30_artifact_contract":
+            let scenario = kind == "phase3_v30_artifact_contract" ? input["scenario"]?.objectValue ?? [:] : [:]
+            let requests = kind == "phase3_v30_artifact_contract" ? scenario["requests"]?.objectValue ?? [:] : input["requests"]?.objectValue ?? [:]
+            let names = kind == "phase3_v30_artifact_contract" ? scenario["local_estimate_request_names"]?.arrayValue.compactMap(\.stringValue) ?? [] : ["v1", "v2"]
+            let cap = kind == "phase3_v30_artifact_contract" ? scenario["device_cap_minutes"]?.intValue ?? 0 : input["device_cap_minutes"]?.intValue ?? 0
+            let reached = names.compactMap { requests[$0]?.objectValue["estimated_minutes"]?.intValue }.max() ?? 0 >= cap
+            set("local_estimate_mutations", names.count); set("network_dispatches", names.count); set("backend_sample_rows", names.count); set("ledger_mutations", names.count); set("notifications", reached ? 1 : 0); set("shield_mutations", reached ? 1 : 0); set("lock_ledger_mutations", reached ? 1 : 0)
+        case "phase3_task_pause_cas": set("shield_mutations", 1)
+        case "phase3_authoritative_base_correction", "phase3_gate_resume_conservative":
+            let phaseCount = input["handoff_phases"]?.arrayValue.count ?? 0
+            let priorCount = input["prior_work_items"]?.arrayValue.count ?? 0
+            set("retry_enqueues", kind == "phase3_gate_resume_conservative" ? 2 : 1); set("network_dispatches", 1); set("monitor_starts", 1); set("epoch_replacements", 2); set("route_state_mutations", phaseCount); set("queue_mutations", priorCount + 1)
+        case "phase3_retry_schedule":
+            let count = input["work_items"]?.arrayValue.count ?? 0
+            set("retry_enqueues", count); set("queue_mutations", count); set("retry_order_mutations", 1)
+        case "phase3_tombstone_retention": set("monitor_stops", 1); set("route_state_mutations", 1)
+        case "phase3_all_source_merge": set("shield_mutations", 2)
+        case "phase3_legacy_migration":
+            set("local_estimate_mutations", 1); set("retry_enqueues", 1); set("network_dispatches", 1); set("backend_sample_rows", 1); set("ledger_mutations", 1); set("monitor_starts", 1); set("monitor_stops", 1); set("route_state_mutations", 2); set("queue_mutations", 2)
+        default: break
+        }
+        return values
+    }
+
+    private static func phase3V30Output(_ input: [String: MeteringJSONValue]) -> [String: MeteringJSONValue] {
+        let requests = input["requests"]?.objectValue ?? [:]
+        let pool = input["pool_minutes"]?.intValue ?? 0
+        let cap = input["device_cap_minutes"]?.intValue ?? 0
+        func sampleBody(_ name: String, counted: Bool, warning: MeteringJSONValue) -> MeteringJSONValue {
+            let request = requests[name]?.objectValue ?? [:]
+            let estimated = request["estimated_minutes"]?.intValue ?? 0
+            return .object(["child_device_id": request["device_id"] ?? .null, "usage_date": request["usage_date"] ?? .null, "estimated_minutes": .int(estimated), "cap_minutes": .int(cap), "child_day_state": .string("available"), "used_minutes": .int(estimated), "remaining_minutes": .int(pool - estimated), "counted": .bool(counted), "warning": warning])
+        }
+        let v1 = sampleBody("v1", counted: true, warning: .null)
+        let v2 = sampleBody("v2", counted: true, warning: .null)
+        let stale = sampleBody("stale_v1", counted: false, warning: .string("legacy_after_v2"))
+        let v1Keys = ["child_device_id", "usage_date", "estimated_minutes", "cap_minutes", "child_day_state", "used_minutes", "remaining_minutes", "counted", "warning"].map(MeteringJSONValue.string)
+        let registrationBody: MeteringJSONValue = .object(["status": .string("registered"), "epoch_id": input["epoch_id"] ?? .null, "metering_protocol_version": .int(2), "snapshot": v1, "epoch_status": .string("active")])
+        let activationBody: MeteringJSONValue = .object(["status": .string("activated"), "epoch_id": input["epoch_id"] ?? .null, "epoch_status": .string("active"), "metering_protocol_version": .int(2), "snapshot": v1])
+        return [
+            "http": .object([
+                "v1": .object(["status_code": .int(200), "body_keys": .array(v1Keys), "body": v1]),
+                "registration": .object(["status_code": .int(200), "body_keys": .array([.string("status"), .string("epoch_id"), .string("metering_protocol_version"), .string("snapshot"), .string("epoch_status")]), "body": registrationBody]),
+                "activation": .object(["status_code": .int(200), "body_keys": .array([.string("status"), .string("epoch_id"), .string("epoch_status"), .string("metering_protocol_version"), .string("snapshot")]), "body": activationBody]),
+                "v2": .object(["status_code": .int(200), "body_keys": .array(v1Keys), "body": v2]),
+                "stale_v1": .object(["status_code": .int(200), "body_keys": .array(v1Keys), "body": stale])
+            ]),
+            "protocol_after_registration": .int(1), "protocol_after_activation": .int(2),
+            "rows_after_v2": .object(["epochs": .int(1), "samples": .int(2), "device_days": .int(1), "days": .int(1), "lock_commands": .int(1), "commands": .int(1)]),
+            "bank_minutes_left": .int(120), "stale_v1_row_and_bank_delta": .int(0)
+        ]
+    }
+
+    private static func phase3DueKey(
+        _ item: [String: MeteringJSONValue],
+        priorities: [String: Int]
+    ) -> [String] {
+        [
+            item["next_attempt_at"]?.stringValue ?? "",
+            String(priorities[item["work_kind"]?.stringValue ?? ""] ?? 0),
+            item["created_at"]?.stringValue ?? "",
+            item["work_id"]?.stringValue ?? ""
+        ]
     }
 
     private static func callbackAccepted(

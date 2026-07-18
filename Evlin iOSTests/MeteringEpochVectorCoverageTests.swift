@@ -36,6 +36,7 @@ final class MeteringEpochVectorCoverageTests: XCTestCase {
         let manualCases: [VectorCase]
         let protocolCases: [VectorCase]
         let perAppOrderingCases: [VectorCase]
+        let phase3Cases: [VectorCase]
 
         enum CodingKeys: String, CodingKey {
             case schemaVersion = "schema_version"
@@ -46,11 +47,13 @@ final class MeteringEpochVectorCoverageTests: XCTestCase {
             case manualCases = "manual_cases"
             case protocolCases = "protocol_cases"
             case perAppOrderingCases = "per_app_ordering_cases"
+            case phase3Cases = "phase3_cases"
         }
 
         var allCases: [VectorCase] {
             generationCases + callbackCases + gateCases + ledgerCases + manualCases
                 + protocolCases + perAppOrderingCases
+                + phase3Cases
         }
     }
 
@@ -61,7 +64,8 @@ final class MeteringEpochVectorCoverageTests: XCTestCase {
         ("ledger_cases", ["V14", "V15", "V16", "V17"]),
         ("manual_cases", ["V18"]),
         ("protocol_cases", ["V19", "V20"]),
-        ("per_app_ordering_cases", ["V23"])
+        ("per_app_ordering_cases", ["V23"]),
+        ("phase3_cases", (24...39).map { String(format: "V%02d", $0) })
     ]
 
     private static let expectedInputKinds = [
@@ -76,7 +80,15 @@ final class MeteringEpochVectorCoverageTests: XCTestCase {
         "V17": "ledger_per_app_limit", "V18": "manual_lock_unlock",
         "V19": "protocol_v1_compatibility", "V20": "protocol_v1_terminal_drop",
         "V21": "gate_timezone_split", "V22": "gate_canonical_timezone_replacement",
-        "V23": "per_app_ordering"
+        "V23": "per_app_ordering",
+        "V24": "phase3_eight_date_horizon", "V25": "phase3_coverage_exhaustion",
+        "V26": "phase3_excessive_activities", "V27": "phase3_route_rejection",
+        "V28": "phase3_install_claim_race", "V29": "phase3_recovery_envelopes",
+        "V30": "phase3_v30_real_route", "V31": "phase3_task_pause_cas",
+        "V32": "phase3_authoritative_base_correction", "V33": "phase3_install_lease",
+        "V34": "phase3_retry_schedule", "V35": "phase3_tombstone_retention",
+        "V36": "phase3_all_source_merge", "V37": "phase3_gate_resume_conservative",
+        "V38": "phase3_legacy_migration", "V39": "phase3_v30_artifact_contract"
     ]
 
     private static let effectKeys: Set<String> = [
@@ -85,13 +97,18 @@ final class MeteringEpochVectorCoverageTests: XCTestCase {
         "shield_mutations", "monitor_starts", "monitor_stops", "epoch_replacements"
     ]
 
+    private static let phase3EffectKeys = effectKeys.union([
+        "route_state_mutations", "coverage_mutations", "queue_mutations",
+        "bank_mutations", "lock_ledger_mutations", "retry_order_mutations"
+    ])
+
     private static let observationKeys: Set<String> = [
         "kind", "child_device_id", "source", "credential_kind", "credential_id"
     ]
 
     private static let rootKeys: Set<String> = [
         "schema_version", "generation_cases", "callback_cases", "gate_cases",
-        "ledger_cases", "manual_cases", "protocol_cases", "per_app_ordering_cases"
+        "ledger_cases", "manual_cases", "protocol_cases", "per_app_ordering_cases", "phase3_cases"
     ]
 
     private static let caseKeys: Set<String> = ["id", "description", "input", "expected"]
@@ -132,8 +149,8 @@ final class MeteringEpochVectorCoverageTests: XCTestCase {
         let allIDs = suite.allCases.map(\.id).sorted()
 
         XCTAssertEqual(suite.schemaVersion, 1)
-        XCTAssertEqual(allIDs, (1...23).map { String(format: "V%02d", $0) })
-        XCTAssertEqual(Set(allIDs).count, 23)
+        XCTAssertEqual(allIDs, (1...39).map { String(format: "V%02d", $0) })
+        XCTAssertEqual(Set(allIDs).count, 39)
 
         let root = try XCTUnwrap(JSONSerialization.jsonObject(with: sourceData) as? JSONObject)
         XCTAssertEqual(Set(root.keys), Self.rootKeys, "fixture root keys")
@@ -147,7 +164,11 @@ final class MeteringEpochVectorCoverageTests: XCTestCase {
                 XCTAssertEqual(input["kind"] as? String, Self.expectedInputKinds[id], "\(id) input.kind")
                 let expected = try XCTUnwrap(vector["expected"] as? JSONObject, "\(id) expected")
                 let effects = try XCTUnwrap(expected["effects"] as? JSONObject, "\(id) effects")
-                XCTAssertEqual(Set(effects.keys), Self.effectKeys, "\(id) effects keys")
+                XCTAssertEqual(
+                    Set(effects.keys),
+                    group == "phase3_cases" ? Self.phase3EffectKeys : Self.effectKeys,
+                    "\(id) effects keys"
+                )
             }
         }
 
