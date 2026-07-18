@@ -53,7 +53,10 @@ final class EarnedMeteringRecoveryDriver {
                   let fromGeneration = state.generations[fromRoute.generationID],
                   let candidate = candidateRoute(in: state, owner: owner, excluding: fromRouteID),
                   let candidateEpoch = state.epochs[candidate.epochID],
-                  let candidateGeneration = state.generations[candidate.generationID]
+                  let candidateGeneration = state.generations[candidate.generationID],
+                  let priorInstallKey = uniqueInstallKey(for: fromRouteID, in: state),
+                  state.installWork[priorInstallKey]?.phase == .active,
+                  let candidateInstallKey = uniqueInstallKey(for: candidate.routeID, in: state)
             else { return }
             state.v2RouteHandoff = V2RouteHandoff(
                 handoffID: UUID(),
@@ -71,11 +74,8 @@ final class EarnedMeteringRecoveryDriver {
                 priorStopAcknowledgedAt: nil,
                 createdAt: clock.now
             )
-            for (key, var work) in state.installWork where work.routeID == candidate.routeID {
-                if work.phase == .pendingStart {
-                    work.authorization = .offlinePending
-                    state.installWork[key] = work
-                }
+            if state.installWork[candidateInstallKey]?.phase == .pendingStart {
+                state.installWork[candidateInstallKey]?.authorization = .offlinePending
             }
             for (key, var work) in state.registrationWork where
                 work.routeID == candidate.routeID && work.retry.terminal == .pending {
@@ -92,11 +92,12 @@ final class EarnedMeteringRecoveryDriver {
             guard let ratchet = state.ratchets[owner] else { return }
             if ratchet.localSelection == .v1 {
                 guard let candidate = initialCandidate(in: state, owner: owner),
-                      isVerified(candidate.routeID, in: state),
-                      hasSuccessfulRegistration(candidate.routeID, in: state)
+                      let installKey = uniqueInstallKey(for: candidate.routeID, in: state),
+                      state.installWork[installKey]?.phase == .verified,
+                      hasUniqueSuccessfulRegistration(candidate, owner: owner, in: state)
                 else { return }
                 state.routes[candidate.routeID]?.lifecycle = .active
-                promoteInstall(candidate.routeID, in: &state)
+                state.installWork[installKey]?.phase = .dualActive
                 var updated = ratchet
                 updated.localSelection = .dualActive
                 updated.dualActiveAt = clock.now
@@ -109,10 +110,11 @@ final class EarnedMeteringRecoveryDriver {
                   var handoff = state.v2RouteHandoff,
                   handoff.phase == .preparing,
                   let candidate = state.routes[handoff.toRouteID],
-                  isVerified(candidate.routeID, in: state)
+                  let installKey = uniqueInstallKey(for: candidate.routeID, in: state),
+                  state.installWork[installKey]?.phase == .verified
             else { return }
             state.routes[candidate.routeID]?.lifecycle = .active
-            promoteInstall(candidate.routeID, in: &state)
+            state.installWork[installKey]?.phase = .dualActive
             handoff.phase = .dualV2
             state.v2RouteHandoff = handoff
         }
@@ -157,7 +159,7 @@ final class EarnedMeteringRecoveryDriver {
             guard let handoff = state.v2RouteHandoff,
                   handoff.phase == .cutoverReady,
                   let candidate = state.routes[handoff.toRouteID],
-                  hasSuccessfulRegistration(candidate.routeID, in: state)
+                  hasUniqueSuccessfulRegistration(candidate, owner: owner, in: state)
             else { return }
             enqueueActivationIfNeeded(route: candidate, owner: owner, state: &state)
         }
@@ -171,15 +173,12 @@ final class EarnedMeteringRecoveryDriver {
                       $0.routeID == candidate.routeID && $0.epochID == candidate.epochID
                   }),
                   activation.retry.terminal != .pending,
-                  activation.retry.terminal != .succeeded
+                  activation.retry.terminal != .succeeded,
+                  let installKey = uniqueInstallKey(for: candidate.routeID, in: state),
+                  state.installWork[installKey]?.phase == .dualActive
             else { return }
             state.routes[candidate.routeID]?.lifecycle = .planned
-            state.installWork = state.installWork.mapValues { work in
-                guard work.routeID == candidate.routeID, work.phase == .dualActive else { return work }
-                var verified = work
-                verified.phase = .verified
-                return verified
-            }
+            state.installWork[installKey]?.phase = .verified
             if activation.retry.lastErrorCode == "epoch_not_active" || activation.retry.lastErrorCode == "epoch_paused" {
                 // The first activation never commits v2 while the gate is
                 // closed. Keep v1 countable and leave this epoch durably
@@ -199,7 +198,9 @@ final class EarnedMeteringRecoveryDriver {
             if ratchet.localSelection == .dualActive {
                 guard let candidate = initialDualActiveCandidate(in: state, owner: owner),
                       hasSuccessfulActivation(candidate.routeID, in: state),
-                      var epoch = state.epochs[candidate.epochID]
+                      var epoch = state.epochs[candidate.epochID],
+                      let installKey = uniqueInstallKey(for: candidate.routeID, in: state),
+                      state.installWork[installKey]?.phase == .dualActive
                 else { return }
                 epoch.registeredAt = epoch.registeredAt ?? clock.now
                 state.epochs[candidate.epochID] = epoch
@@ -207,7 +208,7 @@ final class EarnedMeteringRecoveryDriver {
                 state.activeEpochID = candidate.epochID
                 state.activeRouteID = candidate.routeID
                 state.routes[candidate.routeID]?.lifecycle = .active
-                activateInstall(candidate.routeID, in: &state)
+                state.installWork[installKey]?.phase = .active
                 ratchet.localSelection = .v2
                 ratchet.advertisedVersion = 2
                 ratchet.activatedV2At = clock.now
@@ -225,14 +226,18 @@ final class EarnedMeteringRecoveryDriver {
                   let candidate = state.routes[handoff.toRouteID],
                   var prior = state.routes[handoff.fromRouteID],
                   var priorEpoch = state.epochs[handoff.fromEpochID],
-                  hasSuccessfulActivation(candidate.routeID, in: state)
+                  hasSuccessfulActivation(candidate.routeID, in: state),
+                  let candidateInstallKey = uniqueInstallKey(for: candidate.routeID, in: state),
+                  state.installWork[candidateInstallKey]?.phase == .dualActive,
+                  let priorInstallKey = uniqueInstallKey(for: prior.routeID, in: state),
+                  state.installWork[priorInstallKey]?.phase == .active
             else { return }
 
             state.activeGenerationID = candidate.generationID
             state.activeEpochID = candidate.epochID
             state.activeRouteID = candidate.routeID
             state.routes[candidate.routeID]?.lifecycle = .active
-            activateInstall(candidate.routeID, in: &state)
+            state.installWork[candidateInstallKey]?.phase = .active
             prior.lifecycle = .tombstoned
             state.routes[prior.routeID] = prior
             priorEpoch.status = .retired
@@ -253,7 +258,7 @@ final class EarnedMeteringRecoveryDriver {
                 referencedWorkIDs: Set(state.sampleWork.values.filter { $0.routeID == prior.routeID }.map(\.workID)),
                 retainedUntil: nil
             )
-            markInstallPendingStop(prior.routeID, in: &state)
+            state.installWork[priorInstallKey]?.phase = .pendingStop
             handoff.phase = .committed
             handoff.registrationAcknowledgedAt = clock.now
             handoff.activationAcknowledgedAt = clock.now
@@ -266,7 +271,9 @@ final class EarnedMeteringRecoveryDriver {
         if let handoff = state.v2RouteHandoff,
            handoff.phase == .committed,
            handoff.priorStopAcknowledgedAt == nil,
-           let route = state.routes[handoff.fromRouteID] {
+           let route = state.routes[handoff.fromRouteID],
+           let priorInstallKey = uniqueInstallKey(for: handoff.fromRouteID, in: state),
+           state.installWork[priorInstallKey]?.phase == .pendingStop {
             let name = DeviceActivityName(route.activityName)
             center.stopMonitoring([name])
             guard !center.activities.contains(name) else { return }
@@ -274,14 +281,12 @@ final class EarnedMeteringRecoveryDriver {
                 guard var current = state.v2RouteHandoff,
                       current.handoffID == handoff.handoffID,
                       current.phase == .committed,
-                      state.tombstones[handoff.fromRouteID]?.stopAcknowledgedAt == nil
+                      state.tombstones[handoff.fromRouteID]?.stopAcknowledgedAt == nil,
+                      let currentInstallKey = uniqueInstallKey(for: handoff.fromRouteID, in: state),
+                      currentInstallKey == priorInstallKey,
+                      state.installWork[currentInstallKey]?.phase == .pendingStop
                 else { return }
-                state.installWork = state.installWork.mapValues { work in
-                    guard work.routeID == handoff.fromRouteID else { return work }
-                    var stopped = work
-                    stopped.phase = .stopped
-                    return stopped
-                }
+                state.installWork[currentInstallKey]?.phase = .stopped
                 state.tombstones[handoff.fromRouteID]?.stopAcknowledgedAt = clock.now
                 current.priorStopAcknowledgedAt = clock.now
                 state.v2RouteHandoff = current
@@ -306,8 +311,19 @@ final class EarnedMeteringRecoveryDriver {
     }
 
     private func initialCandidate(in state: DeviceEpochStoreState, owner: UUID) -> MeteringCallbackRoute? {
-        candidateRoutes(in: state, owner: owner)
-            .first { $0.generationID == state.activeGenerationID && state.activeRouteID == nil }
+        guard state.activeRouteID == nil,
+              let generationID = state.activeGenerationID,
+              let epochID = state.activeEpochID
+        else { return nil }
+        let matches = state.routes.values.filter {
+            $0.ownerChildDeviceID == owner
+                && $0.generationID == generationID
+                && $0.epochID == epochID
+                && $0.lifecycle == .planned
+                && state.epochs[$0.epochID]?.status == .active
+        }
+        guard matches.count == 1 else { return nil }
+        return matches[0]
     }
 
     private func initialDualActiveCandidate(in state: DeviceEpochStoreState, owner: UUID) -> MeteringCallbackRoute? {
@@ -343,12 +359,18 @@ final class EarnedMeteringRecoveryDriver {
         }
     }
 
-    private func isVerified(_ routeID: UUID, in state: DeviceEpochStoreState) -> Bool {
-        state.installWork.values.contains { $0.routeID == routeID && $0.phase == .verified }
-    }
-
-    private func hasSuccessfulRegistration(_ routeID: UUID, in state: DeviceEpochStoreState) -> Bool {
-        state.registrationWork.values.contains { $0.routeID == routeID && $0.retry.terminal == .succeeded }
+    private func hasUniqueSuccessfulRegistration(
+        _ route: MeteringCallbackRoute,
+        owner: UUID,
+        in state: DeviceEpochStoreState
+    ) -> Bool {
+        let usable = state.registrationWork.values.filter {
+            $0.ownerChildDeviceID == owner
+                && $0.epochID == route.epochID
+                && $0.routeID == route.routeID
+                && ($0.retry.terminal == .pending || $0.retry.terminal == .succeeded)
+        }
+        return usable.count == 1 && usable[0].retry.terminal == .succeeded
     }
 
     private func hasSuccessfulActivation(_ routeID: UUID, in state: DeviceEpochStoreState) -> Bool {
@@ -359,31 +381,10 @@ final class EarnedMeteringRecoveryDriver {
         state.sampleWork.values.contains { $0.routeID == routeID && $0.retry.terminal == .pending }
     }
 
-    private func promoteInstall(_ routeID: UUID, in state: inout DeviceEpochStoreState) {
-        state.installWork = state.installWork.mapValues { work in
-            guard work.routeID == routeID else { return work }
-            var promoted = work
-            promoted.phase = .dualActive
-            return promoted
-        }
-    }
-
-    private func activateInstall(_ routeID: UUID, in state: inout DeviceEpochStoreState) {
-        state.installWork = state.installWork.mapValues { work in
-            guard work.routeID == routeID else { return work }
-            var active = work
-            active.phase = .active
-            return active
-        }
-    }
-
-    private func markInstallPendingStop(_ routeID: UUID, in state: inout DeviceEpochStoreState) {
-        state.installWork = state.installWork.mapValues { work in
-            guard work.routeID == routeID else { return work }
-            var pending = work
-            pending.phase = .pendingStop
-            return pending
-        }
+    private func uniqueInstallKey(for routeID: UUID, in state: DeviceEpochStoreState) -> UUID? {
+        let matches = state.installWork.filter { $0.value.routeID == routeID }
+        guard matches.count == 1 else { return nil }
+        return matches.first?.key
     }
 
     private func enqueueActivationIfNeeded(route: MeteringCallbackRoute, owner: UUID, state: inout DeviceEpochStoreState) {

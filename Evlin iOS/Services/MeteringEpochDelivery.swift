@@ -293,19 +293,26 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
                       route.lifecycle == .active,
                       let epoch = state.epochs[activation.epochID],
                       epoch.childDeviceID == owner,
-                      epoch.status == .active
+                      epoch.authoritativeBaseConflict == nil,
+                      epoch.status == .active || hasExactNonActiveActivationAuthorization(
+                          activation,
+                          owner: owner,
+                          state: state
+                      )
                 else { return false }
                 let matchingRegistrations = state.registrationWork.values.filter {
                     $0.ownerChildDeviceID == owner
                         && $0.epochID == activation.epochID
                         && $0.routeID == activation.routeID
+                        && $0.retry.terminal == .succeeded
                 }
-                guard matchingRegistrations.contains(where: { $0.retry.terminal == .succeeded }) else { return false }
-                guard state.installWork.values.contains(where: {
+                guard matchingRegistrations.count == 1 else { return false }
+                let matchingInstalls = state.installWork.values.filter {
                     $0.ownerChildDeviceID == owner
                         && $0.routeID == activation.routeID
                         && isActivationReady($0.phase)
-                }) else { return false }
+                }
+                guard matchingInstalls.count == 1 else { return false }
                 return true
             case .install:
                 return false
@@ -443,7 +450,15 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
                     await terminalizeActivation(workID: workID, owner: owner, claim: claim, code: "snapshot_mismatch")
                     return
                 }
-                await terminalizeActivation(workID: workID, owner: owner, claim: claim, code: nil, terminal: .succeeded, snapshot: response.snapshot)
+                await terminalizeActivation(
+                    workID: workID,
+                    owner: owner,
+                    claim: claim,
+                    code: nil,
+                    terminal: .succeeded,
+                    snapshot: response.snapshot,
+                    epochStatus: response.epochStatus
+                )
             case let .terminal(code):
                 await terminalizeActivation(workID: workID, owner: owner, claim: claim, code: code)
             case let .retry(code):
@@ -708,9 +723,18 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
         claim: MeteringNetworkClaim,
         code: String?,
         terminal: MeteringWorkTerminal = .rejected,
-        snapshot: DeviceDaySnapshotDTO? = nil
+        snapshot: DeviceDaySnapshotDTO? = nil,
+        epochStatus: EpochStatusDTO? = nil
     ) async {
-        updateActivation(workID: workID, owner: owner, claim: claim, code: code, terminal: terminal, snapshot: snapshot)
+        updateActivation(
+            workID: workID,
+            owner: owner,
+            claim: claim,
+            code: code,
+            terminal: terminal,
+            snapshot: snapshot,
+            epochStatus: epochStatus
+        )
     }
 
     private func retryActivation(workID: UUID, owner: UUID, claim: MeteringNetworkClaim, code: String) async {
@@ -723,35 +747,46 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
         claim: MeteringNetworkClaim,
         code: String?,
         terminal: MeteringWorkTerminal,
-        snapshot: DeviceDaySnapshotDTO? = nil
+        snapshot: DeviceDaySnapshotDTO? = nil,
+        epochStatus: EpochStatusDTO? = nil
     ) {
         try? store.transaction(expectedOwner: owner) { state in
             guard let key = state.activationWork.first(where: { $0.value.workID == workID })?.key,
                   var work = state.activationWork[key],
                   work.ownerChildDeviceID == owner,
                   work.claim?.token == claim.token,
-                  let epoch = state.epochs[work.epochID],
+                  var epoch = state.epochs[work.epochID],
                   epoch.childDeviceID == owner,
-                  epoch.status == .active,
                   epoch.authoritativeBaseConflict == nil,
+                  epoch.status == .active || hasExactNonActiveActivationAuthorization(
+                      work,
+                      owner: owner,
+                      state: state
+                  ),
                   let route = state.routes[work.routeID],
                   route.ownerChildDeviceID == owner,
                   route.lifecycle == .active,
                   route.epochID == work.epochID,
-                  state.registrationWork.values.contains(where: {
+                  state.registrationWork.values.filter({
                       $0.ownerChildDeviceID == owner
                           && $0.epochID == work.epochID
                           && $0.routeID == work.routeID
                           && $0.retry.terminal == .succeeded
-                  }),
-                  state.installWork.values.contains(where: {
+                  }).count == 1,
+                  state.installWork.values.filter({
                       $0.ownerChildDeviceID == owner
                           && $0.routeID == work.routeID
                           && isActivationReady($0.phase)
-                  })
+                  }).count == 1
             else { return }
             if terminal == .succeeded {
-                guard let snapshot, snapshotMatches(snapshot, owner: owner, usageDate: epoch.usageDate) else { return }
+                guard let snapshot,
+                      let epochStatus,
+                      let acknowledgedStatus = DeviceDailyEpochStatus(rawValue: epochStatus.rawValue),
+                      snapshotMatches(snapshot, owner: owner, usageDate: epoch.usageDate)
+                else { return }
+                epoch.status = acknowledgedStatus
+                state.epochs[work.epochID] = epoch
             }
             work.retry = terminal == .pending
                 ? retryState(after: work.retry, code: code ?? "network_error", now: clock.now)
@@ -864,6 +899,65 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
     private func isSuppressedCandidate(_ epochID: UUID?, state: DeviceEpochStoreState) -> Bool {
         guard let epochID else { return false }
         return state.epochs[epochID]?.authoritativeBaseConflict != nil
+    }
+
+    private func hasExactNonActiveActivationAuthorization(
+        _ work: EpochActivationWork,
+        owner: UUID,
+        state: DeviceEpochStoreState
+    ) -> Bool {
+        guard let route = state.routes[work.routeID],
+              route.ownerChildDeviceID == owner,
+              route.epochID == work.epochID,
+              route.lifecycle == .active
+        else { return false }
+
+        if let ratchet = state.ratchets[owner],
+           ratchet.localSelection == .dualActive,
+           state.activeRouteID == nil,
+           state.activeGenerationID == route.generationID,
+           state.activeEpochID == work.epochID,
+           let legacy = state.legacy,
+           legacy.ownerChildDeviceID == owner,
+           legacy.phase == .activeV1,
+           !legacy.isStopped {
+            let exactRoutes = state.routes.values.filter {
+                $0.ownerChildDeviceID == owner
+                    && $0.generationID == route.generationID
+                    && $0.epochID == work.epochID
+                    && $0.lifecycle == .active
+            }
+            return exactRoutes.count == 1 && exactRoutes[0].routeID == work.routeID
+        }
+
+        guard let ratchet = state.ratchets[owner],
+              ratchet.localSelection == .v2,
+              let handoff = state.v2RouteHandoff,
+              handoff.ownerChildDeviceID == owner,
+              handoff.phase == .cutoverReady,
+              handoff.toGenerationID == route.generationID,
+              handoff.toEpochID == work.epochID,
+              handoff.toRouteID == work.routeID,
+              state.activeGenerationID == handoff.fromGenerationID,
+              state.activeEpochID == handoff.fromEpochID,
+              state.activeRouteID == handoff.fromRouteID,
+              let priorRoute = state.routes[handoff.fromRouteID],
+              priorRoute.ownerChildDeviceID == owner,
+              priorRoute.generationID == handoff.fromGenerationID,
+              priorRoute.epochID == handoff.fromEpochID,
+              priorRoute.lifecycle == .active,
+              let priorEpoch = state.epochs[handoff.fromEpochID],
+              priorEpoch.childDeviceID == owner,
+              priorEpoch.status == .active,
+              priorEpoch.retiredAt == nil
+        else { return false }
+
+        let priorInstalls = state.installWork.values.filter {
+            $0.ownerChildDeviceID == owner
+                && $0.routeID == handoff.fromRouteID
+                && $0.phase == .active
+        }
+        return priorInstalls.count == 1
     }
 
     private func isSampleDispatchable(

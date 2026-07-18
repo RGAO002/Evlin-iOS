@@ -71,6 +71,54 @@ final class MeteringV2ActivationTests: XCTestCase {
         XCTAssertTrue(fixture.center.stopCalls.isEmpty)
     }
 
+    func testInitialActivationFailsClosedForDuplicateSuccessfulRegistration() async throws {
+        let fixture = try makeInitialFixture()
+        defer { fixture.cleanup() }
+        try fixture.addDuplicateCandidateRegistration()
+
+        try await makeDriver(fixture).recover(ownerChildDeviceID: owner)
+
+        let state = try fixture.store.read()
+        XCTAssertTrue(fixture.transport.requests.isEmpty)
+        XCTAssertTrue(state.activationWork.isEmpty)
+        XCTAssertEqual(state.ratchets[owner]?.localSelection, .v1)
+        XCTAssertEqual(state.legacy?.phase, .activeV1)
+        XCTAssertEqual(state.installWork[fixture.candidateInstallID]?.phase, .verified)
+    }
+
+    func testInitialActivationSelectsExactCurrentEpochAcrossEightRouteHorizon() async throws {
+        let fixture = try makeInitialFixture()
+        defer { fixture.cleanup() }
+        try fixture.addFutureHorizonRoutes()
+        fixture.transport.results = [activationResult(epochID: fixture.candidateEpochID)]
+
+        try await makeDriver(fixture).recover(ownerChildDeviceID: owner)
+
+        let state = try fixture.store.read()
+        XCTAssertEqual(state.routes.count, 8)
+        XCTAssertEqual(fixture.transport.requests.map(\.url?.path), [
+            "/api/v1/child/earned-time/epochs/\(fixture.candidateEpochID.uuidString.lowercased())/activation"
+        ])
+        XCTAssertEqual(state.activeEpochID, fixture.candidateEpochID)
+        XCTAssertEqual(state.activeRouteID, fixture.candidateRouteID)
+        XCTAssertEqual(state.ratchets[owner]?.localSelection, .v2)
+    }
+
+    func testInitialActivationFailsClosedWhenCurrentEpochRouteIsAmbiguous() async throws {
+        let fixture = try makeInitialFixture()
+        defer { fixture.cleanup() }
+        try fixture.addAmbiguousCurrentRoute()
+        fixture.transport.results = [activationResult(epochID: fixture.candidateEpochID)]
+
+        try await makeDriver(fixture).recover(ownerChildDeviceID: owner)
+
+        let state = try fixture.store.read()
+        XCTAssertTrue(fixture.transport.requests.isEmpty)
+        XCTAssertTrue(state.activationWork.isEmpty)
+        XCTAssertEqual(state.ratchets[owner]?.localSelection, .v1)
+        XCTAssertEqual(state.legacy?.phase, .activeV1)
+    }
+
     func testLostActivationResponseSurvivesRestartAndOnlyThenStopsLegacy() async throws {
         let fixture = try makeInitialFixture()
         defer { fixture.cleanup() }
@@ -92,19 +140,92 @@ final class MeteringV2ActivationTests: XCTestCase {
         XCTAssertEqual(fixture.center.stopCalls.count, 1)
     }
 
-    func testAlreadyActivatedAcknowledgesImmutableRatchetDespitePausedStatusDrift() async throws {
-        let fixture = try makeInitialFixture()
-        defer { fixture.cleanup() }
-        fixture.transport.results = [
-            activationResult(epochID: fixture.candidateEpochID, status: .alreadyActivated, epochStatus: .paused)
+    func testAlreadyActivatedPersistsMutableStatusWhileAcknowledgingImmutableRatchet() async throws {
+        let cases: [(EpochStatusDTO, DeviceDailyEpochStatus)] = [
+            (.paused, .paused),
+            (.exhausted, .exhausted),
+            (.retired, .retired)
         ]
 
-        try await makeDriver(fixture).recover(ownerChildDeviceID: owner)
+        for (responseStatus, expectedStatus) in cases {
+            let fixture = try makeInitialFixture()
+            defer { fixture.cleanup() }
+            fixture.transport.results = [
+                activationResult(
+                    epochID: fixture.candidateEpochID,
+                    status: .alreadyActivated,
+                    epochStatus: responseStatus
+                )
+            ]
 
-        let state = try fixture.store.read()
-        XCTAssertEqual(state.ratchets[owner]?.localSelection, .v2)
-        XCTAssertEqual(state.ratchets[owner]?.advertisedVersion, 2)
-        XCTAssertEqual(state.legacy?.phase, .stoppedV1)
+            try await makeDriver(fixture).recover(ownerChildDeviceID: owner)
+
+            let state = try fixture.store.read()
+            XCTAssertEqual(state.epochs[fixture.candidateEpochID]?.status, expectedStatus, "status \(responseStatus)")
+            XCTAssertEqual(state.ratchets[owner]?.localSelection, .v2, "status \(responseStatus)")
+            XCTAssertEqual(state.ratchets[owner]?.advertisedVersion, 2, "status \(responseStatus)")
+            XCTAssertEqual(state.legacy?.phase, .stoppedV1, "status \(responseStatus)")
+            XCTAssertEqual(fixture.center.stopCalls.count, 1, "status \(responseStatus)")
+        }
+    }
+
+    func testLostActivationResponseRetriesExactNonActiveInitialCandidate() async throws {
+        for responseStatus in [EpochStatusDTO.paused, .exhausted, .retired] {
+            let fixture = try makeInitialFixture()
+            defer { fixture.cleanup() }
+            fixture.transport.errors = [.noResponse]
+
+            try await makeDriver(fixture).recover(ownerChildDeviceID: owner)
+            try fixture.setCandidateEpochStatus(DeviceDailyEpochStatus(rawValue: responseStatus.rawValue)!)
+            fixture.transport.results = [
+                activationResult(
+                    epochID: fixture.candidateEpochID,
+                    status: .alreadyActivated,
+                    epochStatus: responseStatus
+                )
+            ]
+
+            try await makeDriver(fixture, at: start.addingTimeInterval(5)).recover(ownerChildDeviceID: owner)
+
+            let state = try fixture.store.read()
+            XCTAssertEqual(fixture.transport.requests.count, 2, "status \(responseStatus)")
+            XCTAssertEqual(state.activationWork.values.first?.retry.terminal, .succeeded, "status \(responseStatus)")
+            XCTAssertEqual(state.epochs[fixture.candidateEpochID]?.status.rawValue, responseStatus.rawValue)
+            XCTAssertEqual(state.ratchets[owner]?.localSelection, .v2, "status \(responseStatus)")
+            XCTAssertEqual(state.legacy?.phase, .stoppedV1, "status \(responseStatus)")
+        }
+    }
+
+    func testNonActiveActivationRetryRejectsWrongEpochDifferentRouteAndRetiredRoute() async throws {
+        let mutations: [(String, (ActivationFixture) throws -> Void)] = [
+            ("wrong active epoch", { try $0.pointActiveEpochAtDifferentEpoch() }),
+            ("different route", { try $0.replacePendingActivationWithUnrelatedRoute(lifecycle: .active) }),
+            ("retired route", { try $0.replacePendingActivationWithUnrelatedRoute(lifecycle: .retired) })
+        ]
+
+        for (name, mutate) in mutations {
+            let fixture = try makeInitialFixture()
+            defer { fixture.cleanup() }
+            fixture.transport.errors = [.noResponse]
+            try await makeDriver(fixture).recover(ownerChildDeviceID: owner)
+            try fixture.setCandidateEpochStatus(.retired)
+            try mutate(fixture)
+            fixture.transport.results = [
+                activationResult(
+                    epochID: fixture.candidateEpochID,
+                    status: .alreadyActivated,
+                    epochStatus: .retired
+                )
+            ]
+
+            try await makeDriver(fixture, at: start.addingTimeInterval(5)).recover(ownerChildDeviceID: owner)
+
+            let state = try fixture.store.read()
+            XCTAssertEqual(fixture.transport.requests.count, 1, name)
+            XCTAssertEqual(state.activationWork.values.first?.retry.terminal, .pending, name)
+            XCTAssertEqual(state.ratchets[owner]?.localSelection, .dualActive, name)
+            XCTAssertEqual(state.legacy?.phase, .activeV1, name)
+        }
     }
 
     func testReplacementKeepsPriorRouteUntilCandidateActivationThenStopsPrior() async throws {
@@ -186,6 +307,36 @@ final class MeteringV2ActivationTests: XCTestCase {
 
         state = try fixture.store.read()
         XCTAssertEqual(state.v2RouteHandoff?.phase, .committed)
+        XCTAssertEqual(state.activeRouteID, fixture.candidateRouteID)
+        XCTAssertEqual(state.installWork[fixture.priorInstallID]?.phase, .stopped)
+    }
+
+    func testLostReplacementActivationResponseRetriesExactNonActiveCutoverCandidate() async throws {
+        let fixture = try makeReplacementFixture()
+        defer { fixture.cleanup() }
+        fixture.transport.results = [registrationResult(epochID: fixture.candidateEpochID)]
+
+        try await makeDriver(fixture).recover(ownerChildDeviceID: owner)
+
+        var state = try fixture.store.read()
+        XCTAssertEqual(state.v2RouteHandoff?.phase, .cutoverReady)
+        XCTAssertEqual(state.activationWork.values.first?.retry.terminal, .pending)
+        XCTAssertEqual(fixture.transport.requests.count, 2)
+
+        try fixture.setCandidateEpochStatus(.exhausted)
+        fixture.transport.results = [
+            activationResult(
+                epochID: fixture.candidateEpochID,
+                status: .alreadyActivated,
+                epochStatus: .exhausted
+            )
+        ]
+        try await makeDriver(fixture, at: start.addingTimeInterval(5)).recover(ownerChildDeviceID: owner)
+
+        state = try fixture.store.read()
+        XCTAssertEqual(fixture.transport.requests.count, 3)
+        XCTAssertEqual(state.activationWork.values.first?.retry.terminal, .succeeded)
+        XCTAssertEqual(state.epochs[fixture.candidateEpochID]?.status, .exhausted)
         XCTAssertEqual(state.activeRouteID, fixture.candidateRouteID)
         XCTAssertEqual(state.installWork[fixture.priorInstallID]?.phase, .stopped)
     }
@@ -419,6 +570,143 @@ private final class ActivationFixture {
         )
     }
 
+    func addFutureHorizonRoutes() throws {
+        let futureDates = [
+            "2026-07-18", "2026-07-19", "2026-07-20", "2026-07-21",
+            "2026-07-22", "2026-07-23", "2026-07-24"
+        ]
+        try store.transaction(expectedOwner: owner) { state in
+            guard let generation = state.generations[candidateGenerationID] else { return }
+            for (index, usageDate) in futureDates.enumerated() {
+                let suffix = String(format: "%012d", index + 1)
+                let epochID = UUID(uuidString: "01000000-0000-4000-8000-\(suffix)")!
+                let routeID = UUID(uuidString: "00000000-0000-4000-8000-\(suffix)")!
+                let epoch = makeEpoch(
+                    id: epochID,
+                    generation: generation,
+                    registeredAt: nil,
+                    usageDate: usageDate
+                )
+                let route = makeRoute(
+                    id: routeID,
+                    epoch: epoch,
+                    generation: generation,
+                    name: "evlin.earned.future.\(index + 1)",
+                    lifecycle: .planned
+                )
+                state.epochs[epochID] = epoch
+                state.routes[routeID] = route
+            }
+        }
+    }
+
+    func addDuplicateCandidateRegistration() throws {
+        try store.transaction(expectedOwner: owner) { state in
+            guard let route = state.routes[candidateRouteID],
+                  let epoch = state.epochs[candidateEpochID]
+            else { return }
+            let duplicate = registration(route: route, epoch: epoch, terminal: .succeeded)
+            state.registrationWork[duplicate.workID] = duplicate
+        }
+    }
+
+    func addAmbiguousCurrentRoute() throws {
+        try store.transaction(expectedOwner: owner) { state in
+            guard let generation = state.generations[candidateGenerationID],
+                  let epoch = state.epochs[candidateEpochID]
+            else { return }
+            let routeID = UUID(uuidString: "00000000-0000-4000-8000-000000000099")!
+            let installID = UUID(uuidString: "00000000-0000-4000-8000-000000000098")!
+            let route = makeRoute(
+                id: routeID,
+                epoch: epoch,
+                generation: generation,
+                name: "evlin.earned.ambiguous",
+                lifecycle: .planned
+            )
+            state.routes[routeID] = route
+            state.registrationWork[UUID()] = registration(route: route, epoch: epoch, terminal: .succeeded)
+            state.installWork[installID] = ActivityInstallWork(
+                workID: installID,
+                ownerChildDeviceID: owner,
+                routeID: routeID,
+                authorization: .registered,
+                phase: .verified,
+                claim: nil,
+                retry: retry(.succeeded),
+                createdAt: start
+            )
+        }
+    }
+
+    func setCandidateEpochStatus(_ status: DeviceDailyEpochStatus) throws {
+        try store.transaction(expectedOwner: owner) { state in
+            state.epochs[candidateEpochID]?.status = status
+        }
+    }
+
+    func pointActiveEpochAtDifferentEpoch() throws {
+        try store.transaction(expectedOwner: owner) { state in
+            guard let generation = state.generations[candidateGenerationID] else { return }
+            let epochID = UUID(uuidString: "40000000-0000-4000-8000-000000000002")!
+            state.epochs[epochID] = makeEpoch(
+                id: epochID,
+                generation: generation,
+                registeredAt: start
+            )
+            state.activeEpochID = epochID
+        }
+    }
+
+    func replacePendingActivationWithUnrelatedRoute(lifecycle: MeteringRouteLifecycle) throws {
+        try store.transaction(expectedOwner: owner) { state in
+            guard let generation = state.generations[candidateGenerationID],
+                  let activationKey = state.activationWork.keys.first,
+                  let prior = state.activationWork[activationKey]
+            else { return }
+            let epochID = UUID(uuidString: "30000000-0000-4000-8000-000000000002")!
+            let routeID = UUID(uuidString: "30000000-0000-4000-8000-000000000003")!
+            var epoch = makeEpoch(id: epochID, generation: generation, registeredAt: start)
+            epoch.status = .retired
+            let route = makeRoute(
+                id: routeID,
+                epoch: epoch,
+                generation: generation,
+                name: "evlin.earned.unrelated",
+                lifecycle: lifecycle
+            )
+            state.epochs[epochID] = epoch
+            state.routes[routeID] = route
+            state.registrationWork[UUID()] = registration(route: route, epoch: epoch, terminal: .succeeded)
+            let installID = UUID(uuidString: "30000000-0000-4000-8000-000000000004")!
+            state.installWork[installID] = ActivityInstallWork(
+                workID: installID,
+                ownerChildDeviceID: owner,
+                routeID: routeID,
+                authorization: .registered,
+                phase: .dualActive,
+                claim: nil,
+                retry: retry(.succeeded),
+                createdAt: start
+            )
+            state.activationWork[activationKey] = EpochActivationWork(
+                workID: prior.workID,
+                ownerChildDeviceID: owner,
+                epochID: epochID,
+                routeID: routeID,
+                request: EpochActivationRequestDTO(
+                    protocolVersion: 2,
+                    deviceID: owner,
+                    routeID: routeID,
+                    verifiedAt: prior.request.verifiedAt
+                ),
+                claim: nil,
+                retry: prior.retry,
+                createdAt: prior.createdAt
+            )
+        }
+    }
+
     func replacementState() -> DeviceEpochStoreState {
         let priorGeneration = makeGeneration(id: priorGenerationID, policy: "prior")
         let candidateGeneration = makeGeneration(id: candidateGenerationID, policy: "candidate")
@@ -516,9 +804,14 @@ private final class ActivationFixture {
         )
     }
 
-    private func makeEpoch(id: UUID, generation: MeteringPolicyGeneration, registeredAt: Date?) -> DeviceDailyEpoch {
+    private func makeEpoch(
+        id: UUID,
+        generation: MeteringPolicyGeneration,
+        registeredAt: Date?,
+        usageDate: String = "2026-07-17"
+    ) -> DeviceDailyEpoch {
         DeviceDailyEpoch(
-            epochID: id, protocolVersion: 2, childDeviceID: owner, usageDate: "2026-07-17",
+            epochID: id, protocolVersion: 2, childDeviceID: owner, usageDate: usageDate,
             canonicalTimezone: generation.canonicalTimezone, policyRevision: generation.policyRevision,
             measurementSelectionDigest: generation.measurementSelectionDigest, enforcementSetID: generation.enforcementSetID,
             startedAt: start, registeredAt: registeredAt, baseAcceptedMinutes: 0, baseSource: .childState200,

@@ -335,83 +335,20 @@ final class DeviceEpochStoreTests: XCTestCase {
         XCTAssertThrowsError(try store.transaction(expectedOwner: owner) { $0 = invalid })
     }
 
-    func testCommittedHandoffRequiresCandidateActivationAndPriorStopAcknowledgements() throws {
+    func testCommittedHandoffPersistsPendingStopBeforeAcknowledgedStop() throws {
         let io = TestFileIO()
         let store = makeStore(io: io)
         let state = makeState()
         try store.transaction(expectedOwner: owner) { $0 = state }
 
-        var committed = state
-        committed.v2RouteHandoff?.phase = .committed
-        committed.activeRouteID = committed.v2RouteHandoff?.toRouteID
-        committed.activeEpochID = committed.v2RouteHandoff?.toEpochID
-        committed.activeGenerationID = committed.v2RouteHandoff?.toGenerationID
-        committed.epochs[committed.v2RouteHandoff!.fromEpochID]?.status = .retired
-        committed.epochs[committed.v2RouteHandoff!.fromEpochID]?.retiredAt = Date(timeIntervalSince1970: 300)
-        committed.epochs[committed.v2RouteHandoff!.fromEpochID]?.retireReason = .activationSuperseded
-        committed.epochs[committed.v2RouteHandoff!.toEpochID]?.registeredAt = Date(timeIntervalSince1970: 250)
-        committed.routes[committed.v2RouteHandoff!.fromRouteID]?.lifecycle = .tombstoned
-        committed.tombstones[committed.v2RouteHandoff!.fromRouteID] = MeteringRouteTombstone(
-            routeID: committed.v2RouteHandoff!.fromRouteID,
-            activityName: state.routes[committed.v2RouteHandoff!.fromRouteID]!.activityName,
-            eventNames: ["t5"],
-            ownerChildDeviceID: owner,
-            usageDate: "2026-07-17",
-            epochID: committed.v2RouteHandoff!.fromEpochID,
-            generationID: committed.v2RouteHandoff!.fromGenerationID,
-            canonicalDayEnd: Date(timeIntervalSince1970: 86_500),
-            stopAcknowledgedAt: Date(timeIntervalSince1970: 301),
-            referencedWorkIDs: [],
-            retainedUntil: nil
-        )
-        committed.v2RouteHandoff?.registrationAcknowledgedAt = Date(timeIntervalSince1970: 250)
-        committed.v2RouteHandoff?.activationAcknowledgedAt = Date(timeIntervalSince1970: 300)
-        committed.v2RouteHandoff?.priorStopAcknowledgedAt = Date(timeIntervalSince1970: 301)
-        committed.v2RouteHandoff?.priorRouteInputClosedAt = Date(timeIntervalSince1970: 150)
-        committed.sampleWork = committed.sampleWork.mapValues { work in
-            var copy = work
-            copy.retry.terminal = .succeeded
-            return copy
-        }
-        committed.registrationWork = committed.registrationWork.mapValues { work in
-            var copy = work
-            copy.retry.terminal = .succeeded
-            return copy
-        }
-        committed.activationWork = committed.activationWork.mapValues { work in
-            var copy = work
-            copy.retry.terminal = .succeeded
-            return copy
-        }
-        let priorInstallID = UUID(uuidString: "12121212-1212-1212-1212-121212121212")!
-        committed.installWork[priorInstallID] = ActivityInstallWork(
-            workID: priorInstallID,
-            ownerChildDeviceID: owner,
-            routeID: committed.v2RouteHandoff!.fromRouteID,
-            authorization: .registered,
-            phase: .stopped,
-            claim: nil,
-            retry: MeteringRetryState(attemptCount: 0, nextAttemptAt: Date(timeIntervalSince1970: 300), lastErrorCode: nil, terminal: .succeeded),
-            createdAt: Date(timeIntervalSince1970: 100)
-        )
-        let candidateInstallID = committed.installWork.first { $0.value.routeID == committed.v2RouteHandoff!.toRouteID }!.key
-        committed.installWork[candidateInstallID]?.phase = .active
-        committed.ratchets[owner] = MeteringOwnerRatchet(
-            ownerChildDeviceID: owner,
-            advertisedVersion: 2,
-            localSelection: .v2,
-            registeredV2At: Date(timeIntervalSince1970: 250),
-            dualActiveAt: Date(timeIntervalSince1970: 200),
-            activatedV2At: Date(timeIntervalSince1970: 300)
-        )
+        let cutoverReady = makeCutoverReadyState(from: state)
+        try store.transaction(expectedOwner: owner) { $0 = cutoverReady }
 
+        let committed = makeCommittedPendingStopState(from: cutoverReady)
         var notActivated = committed
+        let candidateInstallID = committed.installWork.first { $0.value.routeID == committed.v2RouteHandoff!.toRouteID }!.key
         notActivated.installWork[candidateInstallID]?.phase = .verified
         XCTAssertThrowsError(try store.transaction(expectedOwner: owner) { $0 = notActivated })
-
-        var missingStop = committed
-        missingStop.tombstones[committed.v2RouteHandoff!.fromRouteID]?.stopAcknowledgedAt = nil
-        XCTAssertThrowsError(try store.transaction(expectedOwner: owner) { $0 = missingStop })
 
         var missingClosure = committed
         missingClosure.v2RouteHandoff?.priorRouteInputClosedAt = nil
@@ -426,8 +363,114 @@ final class DeviceEpochStoreTests: XCTestCase {
         XCTAssertThrowsError(try store.transaction(expectedOwner: owner) { $0 = pendingPriorWork })
 
         try store.transaction(expectedOwner: owner) { $0 = committed }
+        let persistedPendingStop = try store.read()
+        let priorInstallID = try XCTUnwrap(persistedPendingStop.installWork.first {
+            $0.value.routeID == persistedPendingStop.v2RouteHandoff?.fromRouteID
+        }?.key)
+        XCTAssertEqual(persistedPendingStop.installWork[priorInstallID]?.phase, .pendingStop)
+        XCTAssertNil(persistedPendingStop.tombstones[persistedPendingStop.v2RouteHandoff!.fromRouteID]?.stopAcknowledgedAt)
+        XCTAssertNil(persistedPendingStop.v2RouteHandoff?.priorStopAcknowledgedAt)
+
+        let stopped = makeStoppedCommittedState(from: persistedPendingStop)
+        try store.transaction(expectedOwner: owner) { $0 = stopped }
         let reopenedStore = makeStore(io: io)
-        XCTAssertEqual(try reopenedStore.read(), committed)
+        XCTAssertEqual(try reopenedStore.read(), stopped)
+    }
+
+    func testCutoverReadyCannotJumpDirectlyToStoppedOrUseAmbiguousInstalls() throws {
+        let io = TestFileIO()
+        let store = makeStore(io: io)
+        let state = makeState()
+        try store.transaction(expectedOwner: owner) { $0 = state }
+        let cutoverReady = makeCutoverReadyState(from: state)
+        try store.transaction(expectedOwner: owner) { $0 = cutoverReady }
+
+        let directStopped = makeStoppedCommittedState(
+            from: makeCommittedPendingStopState(from: cutoverReady)
+        )
+        XCTAssertThrowsError(try store.transaction(expectedOwner: owner) { $0 = directStopped })
+
+        var differentHandoff = directStopped
+        let originalHandoff = try XCTUnwrap(differentHandoff.v2RouteHandoff)
+        differentHandoff.v2RouteHandoff = V2RouteHandoff(
+            handoffID: UUID(uuidString: "15151515-1515-1515-1515-151515151515")!,
+            ownerChildDeviceID: originalHandoff.ownerChildDeviceID,
+            fromGenerationID: originalHandoff.fromGenerationID,
+            fromEpochID: originalHandoff.fromEpochID,
+            fromRouteID: originalHandoff.fromRouteID,
+            toGenerationID: originalHandoff.toGenerationID,
+            toEpochID: originalHandoff.toEpochID,
+            toRouteID: originalHandoff.toRouteID,
+            phase: originalHandoff.phase,
+            priorRouteInputClosedAt: originalHandoff.priorRouteInputClosedAt,
+            registrationAcknowledgedAt: originalHandoff.registrationAcknowledgedAt,
+            activationAcknowledgedAt: originalHandoff.activationAcknowledgedAt,
+            priorStopAcknowledgedAt: originalHandoff.priorStopAcknowledgedAt,
+            createdAt: originalHandoff.createdAt
+        )
+        XCTAssertThrowsError(try store.transaction(expectedOwner: owner) { $0 = differentHandoff })
+
+        let noHandoffStore = makeStore(io: TestFileIO())
+        var noHandoff = state
+        noHandoff.v2RouteHandoff = nil
+        try noHandoffStore.transaction(expectedOwner: owner) { $0 = noHandoff }
+        let directCommitted = makeCommittedPendingStopState(from: cutoverReady)
+        XCTAssertThrowsError(try noHandoffStore.transaction(expectedOwner: owner) { $0 = directCommitted })
+
+        var ambiguous = makeCommittedPendingStopState(from: cutoverReady)
+        let priorRouteID = ambiguous.v2RouteHandoff!.fromRouteID
+        let duplicateID = UUID(uuidString: "13131313-1313-1313-1313-131313131313")!
+        ambiguous.installWork[duplicateID] = ActivityInstallWork(
+            workID: duplicateID,
+            ownerChildDeviceID: owner,
+            routeID: priorRouteID,
+            authorization: .registered,
+            phase: .pendingStop,
+            claim: nil,
+            retry: MeteringRetryState(
+                attemptCount: 0,
+                nextAttemptAt: Date(timeIntervalSince1970: 300),
+                lastErrorCode: nil,
+                terminal: .succeeded
+            ),
+            createdAt: Date(timeIntervalSince1970: 100)
+        )
+        XCTAssertThrowsError(try store.transaction(expectedOwner: owner) { $0 = ambiguous })
+
+        var ambiguousCandidate = makeCommittedPendingStopState(from: cutoverReady)
+        let candidateRouteID = ambiguousCandidate.v2RouteHandoff!.toRouteID
+        let duplicateCandidateID = UUID(uuidString: "14141414-1414-1414-1414-141414141414")!
+        ambiguousCandidate.installWork[duplicateCandidateID] = ActivityInstallWork(
+            workID: duplicateCandidateID,
+            ownerChildDeviceID: owner,
+            routeID: candidateRouteID,
+            authorization: .registered,
+            phase: .active,
+            claim: nil,
+            retry: MeteringRetryState(
+                attemptCount: 0,
+                nextAttemptAt: Date(timeIntervalSince1970: 300),
+                lastErrorCode: nil,
+                terminal: .succeeded
+            ),
+            createdAt: Date(timeIntervalSince1970: 200)
+        )
+        XCTAssertThrowsError(try store.transaction(expectedOwner: owner) { $0 = ambiguousCandidate })
+    }
+
+    func testStoppedCommittedHandoffCannotReverseToPendingStop() throws {
+        let io = TestFileIO()
+        let store = makeStore(io: io)
+        let state = makeState()
+        try store.transaction(expectedOwner: owner) { $0 = state }
+        let cutoverReady = makeCutoverReadyState(from: state)
+        try store.transaction(expectedOwner: owner) { $0 = cutoverReady }
+        let committed = makeCommittedPendingStopState(from: cutoverReady)
+        try store.transaction(expectedOwner: owner) { $0 = committed }
+        let stopped = makeStoppedCommittedState(from: committed)
+        try store.transaction(expectedOwner: owner) { $0 = stopped }
+
+        XCTAssertThrowsError(try store.transaction(expectedOwner: owner) { $0 = committed })
     }
 
     func testReadReopensCutoverReadyRootWithSucceededPreBarrierPriorSampleWork() throws {
@@ -606,6 +649,95 @@ final class DeviceEpochStoreTests: XCTestCase {
             ),
             createdAt: createdAt
         )
+    }
+
+    private func makeCutoverReadyState(from state: DeviceEpochStoreState) -> DeviceEpochStoreState {
+        var result = state
+        result.v2RouteHandoff?.phase = .cutoverReady
+        result.v2RouteHandoff?.priorRouteInputClosedAt = Date(timeIntervalSince1970: 150)
+        result.sampleWork = result.sampleWork.mapValues { work in
+            var copy = work
+            copy.retry.terminal = .succeeded
+            return copy
+        }
+        return result
+    }
+
+    private func makeCommittedPendingStopState(from state: DeviceEpochStoreState) -> DeviceEpochStoreState {
+        var result = state
+        let handoff = result.v2RouteHandoff!
+        result.v2RouteHandoff?.phase = .committed
+        result.v2RouteHandoff?.registrationAcknowledgedAt = Date(timeIntervalSince1970: 250)
+        result.v2RouteHandoff?.activationAcknowledgedAt = Date(timeIntervalSince1970: 300)
+        result.v2RouteHandoff?.priorStopAcknowledgedAt = nil
+        result.activeRouteID = handoff.toRouteID
+        result.activeEpochID = handoff.toEpochID
+        result.activeGenerationID = handoff.toGenerationID
+        result.epochs[handoff.fromEpochID]?.status = .retired
+        result.epochs[handoff.fromEpochID]?.retiredAt = Date(timeIntervalSince1970: 300)
+        result.epochs[handoff.fromEpochID]?.retireReason = .activationSuperseded
+        result.epochs[handoff.toEpochID]?.registeredAt = Date(timeIntervalSince1970: 250)
+        result.routes[handoff.fromRouteID]?.lifecycle = .tombstoned
+        result.tombstones[handoff.fromRouteID] = MeteringRouteTombstone(
+            routeID: handoff.fromRouteID,
+            activityName: state.routes[handoff.fromRouteID]!.activityName,
+            eventNames: state.routes[handoff.fromRouteID]!.plannedEvents.map(\.eventName),
+            ownerChildDeviceID: owner,
+            usageDate: state.routes[handoff.fromRouteID]!.usageDate,
+            epochID: handoff.fromEpochID,
+            generationID: handoff.fromGenerationID,
+            canonicalDayEnd: Date(timeIntervalSince1970: 86_500),
+            stopAcknowledgedAt: nil,
+            referencedWorkIDs: [],
+            retainedUntil: nil
+        )
+        result.registrationWork = result.registrationWork.mapValues { work in
+            var copy = work
+            copy.retry.terminal = .succeeded
+            return copy
+        }
+        result.activationWork = result.activationWork.mapValues { work in
+            var copy = work
+            copy.retry.terminal = .succeeded
+            return copy
+        }
+        let candidateInstallID = result.installWork.first { $0.value.routeID == handoff.toRouteID }!.key
+        result.installWork[candidateInstallID]?.phase = .active
+        let priorInstallID = UUID(uuidString: "12121212-1212-1212-1212-121212121212")!
+        result.installWork[priorInstallID] = ActivityInstallWork(
+            workID: priorInstallID,
+            ownerChildDeviceID: owner,
+            routeID: handoff.fromRouteID,
+            authorization: .registered,
+            phase: .pendingStop,
+            claim: nil,
+            retry: MeteringRetryState(
+                attemptCount: 0,
+                nextAttemptAt: Date(timeIntervalSince1970: 300),
+                lastErrorCode: nil,
+                terminal: .succeeded
+            ),
+            createdAt: Date(timeIntervalSince1970: 100)
+        )
+        result.ratchets[owner] = MeteringOwnerRatchet(
+            ownerChildDeviceID: owner,
+            advertisedVersion: 2,
+            localSelection: .v2,
+            registeredV2At: Date(timeIntervalSince1970: 250),
+            dualActiveAt: Date(timeIntervalSince1970: 200),
+            activatedV2At: Date(timeIntervalSince1970: 300)
+        )
+        return result
+    }
+
+    private func makeStoppedCommittedState(from state: DeviceEpochStoreState) -> DeviceEpochStoreState {
+        var result = state
+        let handoff = result.v2RouteHandoff!
+        let priorInstallID = result.installWork.first { $0.value.routeID == handoff.fromRouteID }!.key
+        result.installWork[priorInstallID]?.phase = .stopped
+        result.tombstones[handoff.fromRouteID]?.stopAcknowledgedAt = Date(timeIntervalSince1970: 301)
+        result.v2RouteHandoff?.priorStopAcknowledgedAt = Date(timeIntervalSince1970: 301)
+        return result
     }
 
     private func makeState() -> DeviceEpochStoreState {

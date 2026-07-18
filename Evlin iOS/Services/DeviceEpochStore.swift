@@ -1333,31 +1333,37 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                 }), !priorRouteSampleWork.contains(where: { $0.createdAt > closedAt }) else {
                     throw DeviceEpochStoreInvariantError.invalidState("prior route sample work is not closed")
                 }
-                let candidateInstallIsActive = state.installWork.values.contains {
-                    $0.routeID == handoff.toRouteID && $0.phase == .active
+                let candidateInstalls = state.installWork.values.filter { $0.routeID == handoff.toRouteID }
+                let priorInstalls = state.installWork.values.filter { $0.routeID == handoff.fromRouteID }
+                let successfulActivations = state.activationWork.values.filter {
+                    $0.ownerChildDeviceID == owner
+                        && $0.epochID == handoff.toEpochID
+                        && $0.routeID == handoff.toRouteID
+                        && $0.retry.terminal == .succeeded
                 }
-                let priorInstallPhase = state.installWork.values.first { $0.routeID == handoff.fromRouteID }?.phase
                 let priorTombstone = state.tombstones[handoff.fromRouteID]
-                guard state.activeRouteID == handoff.toRouteID,
+                guard candidateInstalls.count == 1,
+                      priorInstalls.count == 1,
+                      successfulActivations.count == 1,
+                      state.activeRouteID == handoff.toRouteID,
                       state.activeEpochID == handoff.toEpochID,
                       state.activeGenerationID == handoff.toGenerationID,
-                      toEpoch.status == .active,
                       toEpoch.registeredAt != nil,
                       toRoute.lifecycle == .active,
                       toRoute.installedSchedule != nil,
                       toRoute.installedEvents != nil,
-                      candidateInstallIsActive,
+                      candidateInstalls[0].phase == .active,
                       fromEpoch.status == .retired,
                       fromEpoch.retiredAt != nil,
                       fromEpoch.retireReason != nil,
                       fromRoute.lifecycle == .tombstoned,
-                      priorInstallPhase == .pendingStop || priorInstallPhase == .stopped,
+                      priorInstalls[0].phase == .pendingStop || priorInstalls[0].phase == .stopped,
                       handoff.registrationAcknowledgedAt != nil,
                       handoff.activationAcknowledgedAt != nil
                 else {
                     throw DeviceEpochStoreInvariantError.invalidState("handoff collection prerequisites are incomplete")
                 }
-                if priorInstallPhase == .stopped {
+                if priorInstalls[0].phase == .stopped {
                     guard priorTombstone?.stopAcknowledgedAt != nil,
                           handoff.priorStopAcknowledgedAt != nil
                     else {
@@ -1388,6 +1394,53 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         }
         guard !newlyAppendedPriorWork else {
             throw DeviceEpochStoreInvariantError.invalidState("prior route work was appended with barrier")
+        }
+
+        guard handoff.phase == .committed else { return }
+        guard let priorHandoff = priorState.v2RouteHandoff else {
+            throw DeviceEpochStoreInvariantError.invalidState("committed handoff has no durable predecessor")
+        }
+        guard priorHandoff.handoffID == handoff.handoffID else {
+            throw DeviceEpochStoreInvariantError.invalidState("handoff identity changed during cutover")
+        }
+
+        let candidatePriorInstalls = candidate.installWork.values.filter {
+            $0.routeID == handoff.fromRouteID
+        }
+        guard candidatePriorInstalls.count == 1 else {
+            throw DeviceEpochStoreInvariantError.invalidState("prior route install is ambiguous")
+        }
+        let candidatePriorPhase = candidatePriorInstalls[0].phase
+
+        switch priorHandoff.phase {
+        case .cutoverReady:
+            guard candidatePriorPhase == .pendingStop,
+                  candidate.tombstones[handoff.fromRouteID]?.stopAcknowledgedAt == nil,
+                  handoff.priorStopAcknowledgedAt == nil
+            else {
+                throw DeviceEpochStoreInvariantError.invalidState("cutover must persist pending stop before acknowledgement")
+            }
+        case .committed:
+            let priorInstalls = priorState.installWork.values.filter {
+                $0.routeID == handoff.fromRouteID
+            }
+            guard priorInstalls.count == 1 else {
+                throw DeviceEpochStoreInvariantError.invalidState("prior committed install is ambiguous")
+            }
+            let priorPhase = priorInstalls[0].phase
+            if priorPhase == .pendingStop && candidatePriorPhase == .stopped {
+                guard priorState.tombstones[handoff.fromRouteID]?.stopAcknowledgedAt == nil,
+                      priorHandoff.priorStopAcknowledgedAt == nil,
+                      candidate.tombstones[handoff.fromRouteID]?.stopAcknowledgedAt != nil,
+                      handoff.priorStopAcknowledgedAt != nil
+                else {
+                    throw DeviceEpochStoreInvariantError.invalidState("stop acknowledgement was not atomic")
+                }
+            } else if priorPhase != candidatePriorPhase {
+                throw DeviceEpochStoreInvariantError.invalidState("prior install stop phase moved illegally")
+            }
+        case .preparing, .dualV2:
+            throw DeviceEpochStoreInvariantError.invalidState("handoff committed before cutover barrier")
         }
     }
 
