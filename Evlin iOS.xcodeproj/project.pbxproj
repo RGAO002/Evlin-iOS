@@ -150,6 +150,7 @@
 			membershipExceptions = (
 				Models/BlockRecord.swift,
 				Models/CommandModels.swift,
+				Models/BigKid/BigKidModels.swift,
 				Models/ScreenTimeEvent.swift,
 				Models/ShieldRecord.swift,
 				Models/ShieldTier.swift,
@@ -164,6 +165,7 @@
 				Services/LimitShieldLogic.swift,
 				Services/MeteringDeviceActivityCenter.swift,
 				Services/MeteringEpochContract.swift,
+				Services/MeteringEpochDelivery.swift,
 				Services/MeteringEpochWire.swift,
 				Services/MeteringMonitorCapabilityProbe.swift,
 				Services/MeteringRuntimeInfrastructure.swift,

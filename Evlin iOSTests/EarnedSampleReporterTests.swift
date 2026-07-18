@@ -189,6 +189,21 @@ final class EarnedSampleReporterTests: XCTestCase {
         XCTAssertNil(request.value(forHTTPHeaderField: "X-Child-Id"))
     }
 
+    func test_legacyRetryEntryCanBeReopenedAsByteStableV1Request() throws {
+        let entry = EarnedSampleReporter.RetryEntry(
+            deviceID: UUID(uuidString: "A1B2C3D4-E5F6-7890-ABCD-EF1234567890")!,
+            usageDate: "2026-06-23",
+            timezone: "UTC",
+            thresholdMinutes: 40,
+            estimatedMinutes: 40,
+            observedAt: "2026-06-23T10:00:00Z"
+        )
+
+        let request = try XCTUnwrap(EarnedSampleReporter.makeEpochSampleRequest(from: entry))
+        XCTAssertEqual(request.lane, .v1)
+        XCTAssertEqual(request.clientSampleID, "earned:a1b2c3d4-e5f6-7890-abcd-ef1234567890:2026-06-23:t40")
+    }
+
     // MARK: - 2. Retry-queue enqueue on simulated POST failure
 
     func test_enqueueRetry_appendsToAppGroup() throws {

@@ -84,6 +84,14 @@ nonisolated private final class EarnedSampleRetryQueueLock: @unchecked Sendable 
     }
 }
 
+private struct ClosureMeteringTransport: MeteringHTTPTransport, @unchecked Sendable {
+    let handler: @Sendable (URLRequest) async throws -> (Data, URLResponse)
+
+    func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+        try await handler(request)
+    }
+}
+
 /// B5 — Lean earned-time sample reporter.
 ///
 /// Responsibilities:
@@ -275,6 +283,29 @@ enum EarnedSampleReporter {
         return req
     }
 
+    static func makeEpochSampleRequest(from entry: RetryEntry) -> EpochSampleRequestDTO? {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let observedAt = formatter.date(from: entry.observedAt)
+            ?? ISO8601DateFormatter().date(from: entry.observedAt)
+        guard let observedAt else { return nil }
+        return EpochSampleRequestDTO(
+            deviceID: entry.deviceID,
+            usageDate: entry.usageDate,
+            timezone: entry.timezone,
+            activityName: "evlin.earned.budget",
+            eventName: "evlin.earned.t\(entry.thresholdMinutes)",
+            thresholdMinutes: entry.thresholdMinutes,
+            estimatedMinutes: entry.estimatedMinutes,
+            observedAt: observedAt,
+            clientSampleID: "earned:\(entry.deviceID.uuidString.lowercased()):\(entry.usageDate):t\(entry.thresholdMinutes)",
+            protocolVersion: nil,
+            epochID: nil,
+            generationArmedAt: entry.generationArmedAt,
+            generationOffsetMinutes: entry.generationOffsetMinutes
+        )
+    }
+
     // MARK: - Network POST + retry enqueue
 
     /// POST the sample to `{base}/child/earned-time/sample`.
@@ -367,6 +398,22 @@ enum EarnedSampleReporter {
             try await URLSession.shared.data(for: $0)
         }
     ) async {
+        if suiteName == sharedSuiteName,
+           let deviceID = onlyDeviceID ?? UUID(uuidString: UserDefaults(suiteName: suiteName)?.string(forKey: "evlin.childId") ?? ""),
+           EarnedActivityGeneration.canonicalDeviceID(
+               UserDefaults(suiteName: suiteName)?.string(forKey: "evlin.childId")
+           ) == deviceID.uuidString.lowercased() {
+            let transport = ClosureMeteringTransport(handler: requestData)
+            let delivery = MeteringEpochDelivery(
+                baseURL: baseURL,
+                store: .shared,
+                transport: transport,
+                legacySuiteName: suiteName
+            )
+            await delivery.drain(owner: deviceID)
+            return
+        }
+
         let queue = loadRetryQueue(suiteName: suiteName)
         guard !queue.isEmpty else { return }
         let partitioned = partitionRetryQueue(queue, onlyDeviceID: onlyDeviceID)
@@ -551,8 +598,11 @@ enum EarnedSampleReporter {
                 )
             } ?? false
         }
-        if primarySaved { return true }
-        return persistFallback(entry, suiteName: suiteName)
+        let durable = primarySaved || persistFallback(entry, suiteName: suiteName)
+        if durable {
+            persistEpochSampleIfCurrentOwner(entry, suiteName: suiteName)
+        }
+        return durable
     }
 
     static func loadRetryQueue(suiteName: String = "group.com.evlin.ios") -> [RetryEntry] {
@@ -560,6 +610,14 @@ enum EarnedSampleReporter {
             loadRetryQueueUnlocked(defaults: defaults)
         } ?? []
         return deduplicatedRetryEntries(primary + loadFallbackEntries(suiteName: suiteName))
+    }
+
+    static func legacyRetryEntries(suiteName: String = "group.com.evlin.ios") -> [RetryEntry] {
+        loadRetryQueue(suiteName: suiteName)
+    }
+
+    static func removeRetryEntry(_ entry: RetryEntry, suiteName: String = "group.com.evlin.ios") {
+        removeAcceptedRetry(entry, suiteName: suiteName)
     }
 
     static func clearRetryQueue(suiteName: String = "group.com.evlin.ios") {
@@ -600,6 +658,37 @@ enum EarnedSampleReporter {
             return saveRetryQueueUnlocked(queue, defaults: defaults)
         }
         removeFallback(entry, suiteName: suiteName)
+    }
+
+    private static func persistEpochSampleIfCurrentOwner(_ entry: RetryEntry, suiteName: String) {
+        guard suiteName == sharedSuiteName,
+              let mirrored = EarnedActivityGeneration.canonicalDeviceID(
+                  UserDefaults(suiteName: suiteName)?.string(forKey: "evlin.childId")
+              ),
+              mirrored == entry.deviceID.uuidString.lowercased(),
+              let request = makeEpochSampleRequest(from: entry)
+        else { return }
+
+        let now = Date()
+        try? DeviceEpochStore.shared.transaction(expectedOwner: entry.deviceID) { state in
+            guard !state.sampleWork.values.contains(where: { $0.request.clientSampleID == request.clientSampleID }) else { return }
+            let workID = UUID()
+            state.sampleWork[workID] = EpochSampleWork(
+                workID: workID,
+                ownerChildDeviceID: entry.deviceID,
+                epochID: nil,
+                routeID: nil,
+                request: request,
+                authorization: .legacyDeliverable,
+                retry: MeteringRetryState(
+                    attemptCount: 0,
+                    nextAttemptAt: now,
+                    lastErrorCode: nil,
+                    terminal: .pending
+                ),
+                createdAt: now
+            )
+        }
     }
 
     private static func withRetryQueueLock<T>(

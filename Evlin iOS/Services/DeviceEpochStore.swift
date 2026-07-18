@@ -286,6 +286,35 @@ nonisolated struct RolloverEffectsWork: Codable, Equatable, Sendable {
     let createdAt: Date
 }
 
+nonisolated enum MeteringWorkKind: String, Codable, Equatable, Sendable {
+    case identityCleanup = "identity_cleanup"
+    case rollover
+    case registration
+    case install
+    case activation
+    case sample
+    case shield
+
+    var priority: Int {
+        switch self {
+        case .identityCleanup: return 0
+        case .rollover: return 1
+        case .registration: return 2
+        case .install: return 3
+        case .activation: return 4
+        case .sample: return 5
+        case .shield: return 6
+        }
+    }
+}
+
+nonisolated struct MeteringDueWork: Equatable, Sendable {
+    let workID: UUID
+    let kind: MeteringWorkKind
+    let nextAttemptAt: Date
+    let createdAt: Date
+}
+
 nonisolated enum MeteringLocalProtocolSelection: String, Codable, Sendable {
     case v1, dualActive, v2
 }
@@ -421,6 +450,46 @@ nonisolated struct DeviceEpochStoreState: Codable, Equatable, Sendable {
     }
 }
 
+extension DeviceEpochStoreState {
+    func dueWork(now: Date) -> [MeteringDueWork] {
+        var work: [MeteringDueWork] = []
+
+        func append(_ workID: UUID, kind: MeteringWorkKind, retry: MeteringRetryState, createdAt: Date) {
+            guard retry.terminal == .pending, retry.nextAttemptAt <= now else { return }
+            work.append(MeteringDueWork(workID: workID, kind: kind, nextAttemptAt: retry.nextAttemptAt, createdAt: createdAt))
+        }
+
+        if let identityCleanupWork {
+            append(identityCleanupWork.workID, kind: .identityCleanup, retry: identityCleanupWork.retry, createdAt: identityCleanupWork.createdAt)
+        }
+        if let rolloverEffectsWork {
+            append(rolloverEffectsWork.workID, kind: .rollover, retry: rolloverEffectsWork.retry, createdAt: rolloverEffectsWork.createdAt)
+        }
+        for value in registrationWork.values {
+            append(value.workID, kind: .registration, retry: value.retry, createdAt: value.createdAt)
+        }
+        for value in installWork.values {
+            append(value.workID, kind: .install, retry: value.retry, createdAt: value.createdAt)
+        }
+        for value in activationWork.values {
+            append(value.workID, kind: .activation, retry: value.retry, createdAt: value.createdAt)
+        }
+        for value in sampleWork.values {
+            append(value.workID, kind: .sample, retry: value.retry, createdAt: value.createdAt)
+        }
+        for value in shieldReferences.values {
+            append(value.operationID, kind: .shield, retry: value.retry, createdAt: value.createdAt)
+        }
+
+        return work.sorted {
+            if $0.nextAttemptAt != $1.nextAttemptAt { return $0.nextAttemptAt < $1.nextAttemptAt }
+            if $0.kind.priority != $1.kind.priority { return $0.kind.priority < $1.kind.priority }
+            if $0.createdAt != $1.createdAt { return $0.createdAt < $1.createdAt }
+            return $0.workID.uuidString.lowercased() < $1.workID.uuidString.lowercased()
+        }
+    }
+}
+
 nonisolated protocol DeviceEpochStoreLocking: Sendable {
     func withLock<T>(_ body: () -> T) -> T?
 }
@@ -492,6 +561,10 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
 
     func read() throws -> DeviceEpochStoreState {
         try withLock { try loadState() }
+    }
+
+    func isCurrentOwner(_ owner: UUID) -> Bool {
+        ownerProvider() == owner
     }
 
     @discardableResult
@@ -793,7 +866,10 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         for work in state.registrationWork.values {
             guard work.ownerChildDeviceID == owner,
                   let route = state.routes[work.routeID],
-                  route.epochID == work.epochID
+                  route.epochID == work.epochID,
+                  work.request.protocolVersion == 2,
+                  work.request.deviceID == owner,
+                  work.request.epochID == work.epochID
             else {
                 throw DeviceEpochStoreInvariantError.invalidState("registration work references an invalid route")
             }
@@ -801,13 +877,19 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         for work in state.activationWork.values {
             guard work.ownerChildDeviceID == owner,
                   let route = state.routes[work.routeID],
-                  route.epochID == work.epochID
+                  route.epochID == work.epochID,
+                  work.request.protocolVersion == 2,
+                  work.request.deviceID == owner,
+                  work.request.routeID == work.routeID
             else {
                 throw DeviceEpochStoreInvariantError.invalidState("activation work references an invalid route")
             }
         }
         for work in state.sampleWork.values {
-            guard work.ownerChildDeviceID == owner else {
+            guard work.ownerChildDeviceID == owner,
+                  work.request.deviceID == owner,
+                  work.request.lane != nil
+            else {
                 throw DeviceEpochStoreInvariantError.invalidState("sample work has the wrong owner")
             }
             if let routeID = work.routeID {
@@ -815,11 +897,19 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                       work.epochID == route.epochID,
                       work.request.deviceID == owner,
                       work.request.epochID == route.epochID,
+                      work.request.lane == .v2,
                       work.request.activityName == route.activityName,
                       work.request.usageDate == route.usageDate,
                       work.createdAt >= route.createdAt
                 else {
                     throw DeviceEpochStoreInvariantError.invalidState("sample work references an invalid route")
+                }
+            } else {
+                guard work.epochID == nil,
+                      work.authorization == .legacyDeliverable,
+                      work.request.lane == .v1
+                else {
+                    throw DeviceEpochStoreInvariantError.invalidState("unrouted sample work is not a v1 sample")
                 }
             }
         }
