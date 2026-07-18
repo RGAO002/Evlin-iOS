@@ -69,9 +69,147 @@ final class EarnedMeteringRecoveryDriver {
         try advanceReplacementBarrier(owner: owner)
         await delivery.drain(owner: owner)
         try promoteAcknowledgedActivation(owner: owner)
+        try abandonTerminalConservativeCandidate(owner: owner)
         try prepareReplacementIfNeeded(owner: owner)
         try stopRetiredLane(owner: owner)
+        try stopAbandonedConservativeCandidates(owner: owner)
         try stopAuthoritativeBaseRejectedCandidates(owner: owner)
+    }
+
+    /// Reconciles the server-authoritative accounting gate without stopping
+    /// Apple's dated monitor. A reopened gate always receives a fresh route:
+    /// Apple exposes no exact raw counter that can safely resume the old one.
+    func reconcileUsageGate(
+        ownerChildDeviceID owner: UUID,
+        allowed: Bool,
+        runtime: EarnedTimeRuntime
+    ) throws {
+        guard store.isCurrentOwner(owner) else { return }
+        try store.transaction(expectedOwner: owner) { state in
+            guard state.ratchets[owner]?.localSelection == .v2,
+                  let priorRouteID = state.activeRouteID,
+                  let priorEpochID = state.activeEpochID,
+                  let generationID = state.activeGenerationID,
+                  var priorEpoch = state.epochs[priorEpochID],
+                  let priorRoute = state.routes[priorRouteID],
+                  let generation = state.generations[generationID],
+                  priorRoute.ownerChildDeviceID == owner,
+                  priorRoute.epochID == priorEpochID,
+                  priorRoute.generationID == generationID,
+                  priorRoute.lifecycle == .active,
+                  generation.childDeviceID == owner,
+                  generation.retiredAt == nil
+            else { return }
+
+            if !allowed {
+                guard priorEpoch.status == .active || priorEpoch.status == .paused else { return }
+                priorEpoch.status = .paused
+                state.epochs[priorEpochID] = priorEpoch
+                return
+            }
+
+            guard priorEpoch.status == .paused,
+                  state.v2RouteHandoff == nil,
+                  runtime.usageDate == priorEpoch.usageDate,
+                  runtime.timezone == generation.canonicalTimezone,
+                  runtime.policyRevision == generation.policyRevision,
+                  runtime.dailyPoolMinutes > 0,
+                  runtime.deviceCapMinutes > 0,
+                  runtime.estimatedMinutes >= 0,
+                  runtime.estimatedMinutes < min(runtime.dailyPoolMinutes, runtime.deviceCapMinutes)
+            else { return }
+
+            let existingCandidate = state.routes.values.contains { route in
+                guard route.ownerChildDeviceID == owner,
+                      route.routeID != priorRouteID,
+                      route.generationID == generationID,
+                      route.usageDate == runtime.usageDate,
+                      route.lifecycle == .planned,
+                      let epoch = state.epochs[route.epochID]
+                else { return false }
+                return epoch.status == .active
+                    && epoch.resumeBoundaryPending
+                    && epoch.baseAcceptedMinutes == runtime.estimatedMinutes
+                    && epoch.baseSource == .childState200
+            }
+            guard !existingCandidate else { return }
+
+            let epochID = UUID()
+            let routeID = UUID()
+            let epoch = DeviceDailyEpoch(
+                epochID: epochID,
+                protocolVersion: 2,
+                childDeviceID: owner,
+                usageDate: runtime.usageDate,
+                canonicalTimezone: generation.canonicalTimezone,
+                policyRevision: generation.policyRevision,
+                measurementSelectionDigest: generation.measurementSelectionDigest,
+                enforcementSetID: generation.enforcementSetID,
+                startedAt: clock.now,
+                registeredAt: nil,
+                baseAcceptedMinutes: runtime.estimatedMinutes,
+                baseSource: .childState200,
+                lastRawThresholdMinutes: 0,
+                excludedWhilePausedMinutes: 0,
+                status: .active,
+                resumeBoundaryPending: true,
+                retiredAt: nil,
+                retireReason: nil,
+                exhaustedAt: nil,
+                baseCorrectionState: .available
+            )
+            let remaining = MeteringDatedSchedule.remainingPolicy(
+                poolMinutes: runtime.dailyPoolMinutes,
+                capMinutes: runtime.deviceCapMinutes,
+                offsetMinutes: runtime.estimatedMinutes
+            )
+            let thresholds = remaining.map {
+                MeteringDatedSchedule.thresholds(
+                    poolMinutes: $0.poolMinutes,
+                    capMinutes: $0.capMinutes
+                )
+            } ?? []
+            state.epochs[epochID] = epoch
+            state.routes[routeID] = MeteringCallbackRoute(
+                routeID: routeID,
+                activityName: MeteringRouteNamespace.activityName(routeID: routeID),
+                namespace: MeteringRouteNamespace.prefix,
+                generationID: generationID,
+                generationKey: priorRoute.generationKey,
+                ownerChildDeviceID: owner,
+                usageDate: runtime.usageDate,
+                epochID: epochID,
+                plannedSchedule: DatedSchedulePlan(
+                    usageDate: runtime.usageDate,
+                    timezoneIdentifier: generation.canonicalTimezone,
+                    calendarIdentifier: "gregorian"
+                ),
+                installedSchedule: nil,
+                plannedEvents: thresholds.map { threshold in
+                    MeteringEventPlan(
+                        eventName: MeteringRouteNamespace.eventName(
+                            routeID: routeID,
+                            thresholdMinutes: threshold
+                        ),
+                        thresholdMinutes: threshold
+                    )
+                },
+                installedEvents: nil,
+                lifecycle: .planned,
+                createdAt: clock.now
+            )
+            let installID = UUID()
+            state.installWork[installID] = ActivityInstallWork(
+                workID: installID,
+                ownerChildDeviceID: owner,
+                routeID: routeID,
+                authorization: .offlinePending,
+                phase: .pendingStart,
+                claim: nil,
+                retry: pendingRetry(),
+                createdAt: clock.now
+            )
+        }
     }
 
     private func recoverCanonicalRolloverIfPresent(owner: UUID) async throws -> Bool {
@@ -523,7 +661,10 @@ final class EarnedMeteringRecoveryDriver {
                     ownerChildDeviceID: owner,
                     epochID: epoch.epochID,
                     routeID: candidate.routeID,
-                    request: registrationRequest(epoch: epoch),
+                    request: registrationRequest(
+                        epoch: epoch,
+                        reason: epoch.resumeBoundaryPending ? .gateResumeConservative : .initial
+                    ),
                     claim: nil,
                     retry: pendingRetry(),
                     createdAt: clock.now
@@ -622,9 +763,13 @@ final class EarnedMeteringRecoveryDriver {
             state.routes[prior.routeID] = prior
             priorEpoch.status = .retired
             priorEpoch.retiredAt = clock.now
-            priorEpoch.retireReason = .policyChange
+            let isConservativeResume = candidate.generationID == prior.generationID
+                && state.epochs[candidate.epochID]?.resumeBoundaryPending == true
+            priorEpoch.retireReason = isConservativeResume ? .gateResumeConservative : .policyChange
             state.epochs[priorEpoch.epochID] = priorEpoch
-            state.generations[handoff.fromGenerationID]?.retiredAt = clock.now
+            if !isConservativeResume {
+                state.generations[handoff.fromGenerationID]?.retiredAt = clock.now
+            }
             state.tombstones[prior.routeID] = MeteringRouteTombstone(
                 routeID: prior.routeID,
                 activityName: prior.activityName,
@@ -688,6 +833,96 @@ final class EarnedMeteringRecoveryDriver {
             current.phase = .stoppedV1
             current.stopAcknowledgedAt = clock.now
             state.legacy = current
+        }
+    }
+
+    private func abandonTerminalConservativeCandidate(owner: UUID) throws {
+        try store.transaction(expectedOwner: owner) { state in
+            guard let handoff = state.v2RouteHandoff,
+                  handoff.phase == .cutoverReady,
+                  handoff.fromGenerationID == handoff.toGenerationID,
+                  state.activeGenerationID == handoff.fromGenerationID,
+                  state.activeEpochID == handoff.fromEpochID,
+                  state.activeRouteID == handoff.fromRouteID,
+                  state.epochs[handoff.fromEpochID]?.status == .paused,
+                  var candidateEpoch = state.epochs[handoff.toEpochID],
+                  candidateEpoch.resumeBoundaryPending,
+                  candidateEpoch.baseSource == .childState200,
+                  var candidateRoute = state.routes[handoff.toRouteID],
+                  let candidateInstallKey = uniqueInstallKey(for: handoff.toRouteID, in: state),
+                  state.installWork[candidateInstallKey]?.phase == .dualActive,
+                  let dayEnd = state.canonicalDayEnd(
+                      usageDate: candidateRoute.usageDate,
+                      timeZoneIdentifier: candidateEpoch.canonicalTimezone
+                  )
+            else { return }
+            let registrationTerminated = state.registrationWork.values.contains {
+                $0.epochID == handoff.toEpochID
+                    && $0.routeID == handoff.toRouteID
+                    && $0.retry.terminal != .pending
+                    && $0.retry.terminal != .succeeded
+            }
+            let activationTerminated = state.activationWork.values.contains {
+                $0.epochID == handoff.toEpochID
+                    && $0.routeID == handoff.toRouteID
+                    && $0.retry.terminal != .pending
+                    && $0.retry.terminal != .succeeded
+            }
+            guard registrationTerminated || activationTerminated else { return }
+
+            candidateEpoch.status = .retired
+            candidateEpoch.retiredAt = clock.now
+            candidateEpoch.retireReason = .gateResumeConservative
+            state.epochs[candidateEpoch.epochID] = candidateEpoch
+            candidateRoute.lifecycle = .tombstoned
+            state.routes[candidateRoute.routeID] = candidateRoute
+            state.tombstones[candidateRoute.routeID] = MeteringRouteTombstone(
+                routeID: candidateRoute.routeID,
+                activityName: candidateRoute.activityName,
+                eventNames: candidateRoute.plannedEvents.map(\.eventName),
+                ownerChildDeviceID: owner,
+                usageDate: candidateRoute.usageDate,
+                epochID: candidateEpoch.epochID,
+                generationID: candidateRoute.generationID,
+                canonicalDayEnd: dayEnd,
+                stopAcknowledgedAt: nil,
+                referencedWorkIDs: [],
+                retainedUntil: nil
+            )
+            state.installWork[candidateInstallKey]?.phase = .pendingStop
+            state.v2RouteHandoff = nil
+        }
+    }
+
+    private func stopAbandonedConservativeCandidates(owner: UUID) throws {
+        let state = try store.read()
+        let candidates = state.routes.values.compactMap { route -> (MeteringCallbackRoute, UUID)? in
+            guard route.ownerChildDeviceID == owner,
+                  route.routeID != state.activeRouteID,
+                  route.lifecycle == .tombstoned,
+                  state.epochs[route.epochID]?.retireReason == .gateResumeConservative,
+                  state.tombstones[route.routeID]?.stopAcknowledgedAt == nil,
+                  let installKey = uniqueInstallKey(for: route.routeID, in: state),
+                  state.installWork[installKey]?.phase == .pendingStop
+            else { return nil }
+            return (route, installKey)
+        }
+        for (route, installKey) in candidates {
+            let activity = DeviceActivityName(route.activityName)
+            center.stopMonitoring([activity])
+            guard !center.activities.contains(activity) else { continue }
+            let acknowledgedAt = clock.now
+            try store.transaction(expectedOwner: owner) { state in
+                guard state.routes[route.routeID]?.lifecycle == .tombstoned,
+                      state.epochs[route.epochID]?.retireReason == .gateResumeConservative,
+                      state.tombstones[route.routeID]?.stopAcknowledgedAt == nil,
+                      uniqueInstallKey(for: route.routeID, in: state) == installKey,
+                      state.installWork[installKey]?.phase == .pendingStop
+                else { return }
+                state.installWork[installKey]?.phase = .stopped
+                state.tombstones[route.routeID]?.stopAcknowledgedAt = acknowledgedAt
+                state.tombstones[route.routeID]?.retainedUntil = acknowledgedAt.addingTimeInterval(24 * 3_600)
+            }
         }
     }
 
@@ -757,7 +992,8 @@ final class EarnedMeteringRecoveryDriver {
         guard let activeRoute = state.routes[routeID] else { return nil }
         return candidateRoutes(in: state, owner: owner).first {
             $0.routeID != routeID
-                && $0.generationID != state.activeGenerationID
+                && ($0.generationID != state.activeGenerationID
+                    || state.epochs[$0.epochID]?.resumeBoundaryPending == true)
                 && $0.usageDate == activeRoute.usageDate
         }
     }

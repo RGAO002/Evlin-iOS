@@ -87,7 +87,7 @@ final class BigKidStatePollerTests: XCTestCase {
         XCTAssertEqual(state.childName, "Liam")
     }
 
-    func test_refresh_disablesUsageCountingWhenAnyTaskIsNotDone() async {
+    func test_refresh_pausesUsageCountingWithoutStoppingMonitorsWhenAnyTaskIsNotDone() async {
         EarnedTimeStore.shared.usageCountingAllowed = true
         let initial = ChildStateResponse.fixture(tasks: [])
         let pending = ChildStateResponse.fixture(tasks: [
@@ -106,7 +106,7 @@ final class BigKidStatePollerTests: XCTestCase {
         await poller.refreshNow()
 
         XCTAssertFalse(EarnedTimeStore.shared.usageCountingAllowed)
-        XCTAssertEqual(stopCount, 1)
+        XCTAssertEqual(stopCount, 0)
     }
 
     func test_refresh_enablesUsageCountingWhenTasksAreDoneOrBypassed() async {
@@ -730,7 +730,7 @@ final class BigKidStatePollerTests: XCTestCase {
         XCTAssertEqual(BigKidStatePoller.earnedRearmInputs(store: store).offset, 3)
     }
 
-    func test_refresh_stopsCountersOnEveryStableFalsePoll() async {
+    func test_refresh_keepsCountersInstalledOnEveryStableFalsePoll() async {
         EarnedTimeStore.shared.usageCountingAllowed = false
         let response = snapshot(usageCountingAllowed: false)
         let state = BigKidState(snapshot: response)
@@ -745,7 +745,7 @@ final class BigKidStatePollerTests: XCTestCase {
         await poller.refreshNow()
         await poller.refreshNow()
 
-        XCTAssertEqual(stopCount, 2)
+        XCTAssertEqual(stopCount, 0)
     }
 
     func test_stopUsageCountersForTaskPause_stopsAllThreeCounterSystems() {

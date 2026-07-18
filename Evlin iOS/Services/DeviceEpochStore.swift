@@ -1259,6 +1259,22 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         guard state.activeRouteID == route.routeID else {
             return .discarded("paused_route_not_current")
         }
+        let conservativeReplacementPending = state.routes.values.contains { candidate in
+            guard candidate.routeID != route.routeID,
+                  candidate.ownerChildDeviceID == owner,
+                  candidate.generationID == route.generationID,
+                  candidate.usageDate == route.usageDate,
+                  candidate.lifecycle == .planned,
+                  let candidateEpoch = state.epochs[candidate.epochID]
+            else { return false }
+            return candidateEpoch.status == .active
+                && candidateEpoch.retiredAt == nil
+                && candidateEpoch.resumeBoundaryPending
+                && candidateEpoch.baseSource == .childState200
+        }
+        guard !conservativeReplacementPending else {
+            return .discarded("paused_replacement_pending")
+        }
         guard let handoff = state.v2RouteHandoff else { return .accepted }
         guard handoff.ownerChildDeviceID == owner else {
             return .discarded("paused_handoff_owner_mismatch")
@@ -1622,16 +1638,19 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                       state.activeEpochID == handoff.fromEpochID,
                       state.activeRouteID == handoff.fromRouteID,
                       state.hasExactHandoffPriorProvenance(owner: owner, handoff: handoff),
-                      let correctedRoute = state.routes[handoff.toRouteID],
-                      correctedRoute.ownerChildDeviceID == owner,
-                      correctedRoute.generationID == handoff.toGenerationID,
-                      correctedRoute.epochID == handoff.toEpochID,
-                      let correctedEpoch = state.epochs[handoff.toEpochID],
-                      correctedEpoch.childDeviceID == owner,
-                      correctedEpoch.baseSource == .registrationConflict409,
-                      correctedEpoch.baseCorrectionState == .used,
-                      correctedEpoch.authoritativeBaseConflict == nil,
-                      let correctionIndex = dueWork.firstIndex(where: { item in
+                      let candidateRoute = state.routes[handoff.toRouteID],
+                      candidateRoute.ownerChildDeviceID == owner,
+                      candidateRoute.generationID == handoff.toGenerationID,
+                      candidateRoute.epochID == handoff.toEpochID,
+                      let candidateEpoch = state.epochs[handoff.toEpochID],
+                      candidateEpoch.childDeviceID == owner,
+                      candidateEpoch.authoritativeBaseConflict == nil,
+                      isAuthorizedBarrierCandidate(
+                          handoff: handoff,
+                          candidateEpoch: candidateEpoch,
+                          state: state
+                      ),
+                      let candidateIndex = dueWork.firstIndex(where: { item in
                           switch item.kind {
                           case .registration:
                               return state.registrationWork.values.contains {
@@ -1651,7 +1670,7 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                               return false
                           }
                       }),
-                      dueWork[..<correctionIndex].allSatisfy({ item in
+                      dueWork[..<candidateIndex].allSatisfy({ item in
                           guard item.kind == .install,
                                 let install = state.installWork.values.first(where: { $0.workID == item.workID }),
                                 install.ownerChildDeviceID == owner
@@ -1663,9 +1682,9 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                               return false
                           }
                       }),
-                      isEligible(state, dueWork[correctionIndex])
+                      isEligible(state, dueWork[candidateIndex])
                 else { return nil }
-                due = dueWork[correctionIndex]
+                due = dueWork[candidateIndex]
             }
             let claim = MeteringNetworkClaim(
                 token: UUID(),
@@ -1701,6 +1720,20 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                 return nil
             }
         }
+    }
+
+    private func isAuthorizedBarrierCandidate(
+        handoff: V2RouteHandoff,
+        candidateEpoch: DeviceDailyEpoch,
+        state: DeviceEpochStoreState
+    ) -> Bool {
+        let authoritativeCorrection = candidateEpoch.baseSource == .registrationConflict409
+            && candidateEpoch.baseCorrectionState == .used
+        let conservativeResume = handoff.fromGenerationID == handoff.toGenerationID
+            && candidateEpoch.baseSource == .childState200
+            && candidateEpoch.resumeBoundaryPending
+            && state.epochs[handoff.fromEpochID]?.status == .paused
+        return authoritativeCorrection || conservativeResume
     }
 
     @discardableResult
@@ -2358,7 +2391,8 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         if let priorHandoff {
             guard let candidateHandoff else {
                 guard canCollectHandoff(priorHandoff, from: priorState)
-                        || canAbandonAuthoritativeBaseCorrection(priorHandoff, in: candidate) else {
+                        || canAbandonAuthoritativeBaseCorrection(priorHandoff, in: candidate)
+                        || canAbandonConservativeResume(priorHandoff, in: candidate) else {
                     throw DeviceEpochStoreInvariantError.invalidState("handoff was removed before exact stop acknowledgement")
                 }
                 return
@@ -2550,6 +2584,42 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         return state.registrationWork.values
             .filter { $0.epochID == handoff.toEpochID && $0.routeID == handoff.toRouteID }
             .allSatisfy { $0.retry.terminal != .pending }
+    }
+
+    private func canAbandonConservativeResume(
+        _ handoff: V2RouteHandoff,
+        in state: DeviceEpochStoreState
+    ) -> Bool {
+        guard handoff.phase == .cutoverReady,
+              handoff.fromGenerationID == handoff.toGenerationID,
+              state.activeGenerationID == handoff.fromGenerationID,
+              state.activeEpochID == handoff.fromEpochID,
+              state.activeRouteID == handoff.fromRouteID,
+              state.epochs[handoff.fromEpochID]?.status == .paused,
+              let rejectedEpoch = state.epochs[handoff.toEpochID],
+              rejectedEpoch.status == .retired,
+              rejectedEpoch.retireReason == .gateResumeConservative,
+              rejectedEpoch.resumeBoundaryPending,
+              rejectedEpoch.baseSource == .childState200,
+              state.routes[handoff.toRouteID]?.lifecycle == .tombstoned,
+              state.tombstones[handoff.toRouteID] != nil,
+              state.installWork.values.filter({
+                  $0.routeID == handoff.toRouteID && $0.phase == .pendingStop
+              }).count == 1
+        else { return false }
+        let registrationTerminated = state.registrationWork.values.contains {
+            $0.epochID == handoff.toEpochID
+                && $0.routeID == handoff.toRouteID
+                && $0.retry.terminal != .pending
+                && $0.retry.terminal != .succeeded
+        }
+        let activationTerminated = state.activationWork.values.contains {
+            $0.epochID == handoff.toEpochID
+                && $0.routeID == handoff.toRouteID
+                && $0.retry.terminal != .pending
+                && $0.retry.terminal != .succeeded
+        }
+        return registrationTerminated || activationTerminated
     }
 
     private func restore(_ priorData: Data?, at url: URL) throws {
@@ -2907,6 +2977,7 @@ extension DeviceEpochStoreState {
               let fromEpoch = epochs[handoff.fromEpochID],
               let fromGeneration = generations[handoff.fromGenerationID],
               let toRoute = routes[handoff.toRouteID],
+              let toEpoch = epochs[handoff.toEpochID],
               fromRoute.ownerChildDeviceID == owner,
               fromRoute.routeID == handoff.fromRouteID,
               fromRoute.epochID == handoff.fromEpochID,
@@ -2935,6 +3006,23 @@ extension DeviceEpochStoreState {
                 generationID: handoff.fromGenerationID
             ).contains(fromRoute.usageDate)
         if hasActivePrior { return true }
+
+        let hasPausedPriorConservativeResume = fromEpoch.status == .paused
+            && fromEpoch.retiredAt == nil
+            && toEpoch.status == .active
+            && toEpoch.retiredAt == nil
+            && toEpoch.resumeBoundaryPending
+            && toEpoch.baseSource == .childState200
+            && handoff.fromGenerationID == handoff.toGenerationID
+            && fromRoute.usageDate == toRoute.usageDate
+            && fromRoute.usageDate == fromEpoch.usageDate
+            && toRoute.usageDate == toEpoch.usageDate
+            && fromEpoch.canonicalTimezone == toEpoch.canonicalTimezone
+            && fromEpoch.policyRevision == toEpoch.policyRevision
+            && fromEpoch.measurementSelectionDigest == toEpoch.measurementSelectionDigest
+            && fromEpoch.enforcementSetID == toEpoch.enforcementSetID
+            && ratchets[owner]?.localSelection == .v2
+        if hasPausedPriorConservativeResume { return true }
 
         // An already-activated initial epoch can be authoritatively retired
         // before this device observes the response. It may make exactly one

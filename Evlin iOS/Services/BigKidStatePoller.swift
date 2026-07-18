@@ -295,7 +295,9 @@ final class BigKidStatePoller: ObservableObject {
             }
             let shouldRecoverSkippedUsage = allowed && Self.hasSkippedUnfinishedUsageEvent()
             if !allowed {
-                stopUsageCounters()
+                // A closed task/reflection gate pauses accounting, not Apple's
+                // monitors. Keeping the dated routes installed preserves raw
+                // high-water so resume can replace the epoch conservatively.
                 requiresCounterRecovery = false
                 if let expectedChildID {
                     setCounterRecoveryRequired(expectedChildID, false)
