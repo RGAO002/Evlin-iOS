@@ -338,7 +338,7 @@ enum EarnedSampleReporter {
             generationArmedAt: generationArmedAt,
             generationOffsetMinutes: generationOffsetMinutes
         )
-        guard enqueueRetry(entry, suiteName: suiteName) else {
+        guard enqueueRetry(entry, suiteName: suiteName, epochStore: epochStore) else {
             recordDebug("enqueue durability_failed t\(thresholdMinutes)", suiteName: suiteName)
             return
         }
@@ -371,7 +371,6 @@ enum EarnedSampleReporter {
                 recordDebug("enqueue epoch_root_failed t\(thresholdMinutes)", suiteName: suiteName)
                 return
             }
-            await delivery.drain(owner: deviceID)
             await delivery.drain(owner: deviceID)
             return
         }
@@ -616,7 +615,8 @@ enum EarnedSampleReporter {
     static func enqueueRetry(
         _ entry: RetryEntry,
         suiteName: String = "group.com.evlin.ios",
-        faultInjection: RetryQueueFault? = nil
+        faultInjection: RetryQueueFault? = nil,
+        epochStore: DeviceEpochStore? = nil
     ) -> Bool {
         let primarySaved: Bool
         if faultInjection == .lockUnavailable {
@@ -635,7 +635,11 @@ enum EarnedSampleReporter {
         }
         let durable = primarySaved || persistFallback(entry, suiteName: suiteName)
         if durable {
-            persistEpochSampleIfCurrentOwner(entry, suiteName: suiteName)
+            if let epochStore {
+                persistEpochSample(entry, store: epochStore)
+            } else {
+                persistEpochSampleIfCurrentOwner(entry, suiteName: suiteName)
+            }
         }
         return durable
     }
@@ -700,12 +704,16 @@ enum EarnedSampleReporter {
               let mirrored = EarnedActivityGeneration.canonicalDeviceID(
                   UserDefaults(suiteName: suiteName)?.string(forKey: "evlin.childId")
               ),
-              mirrored == entry.deviceID.uuidString.lowercased(),
-              let request = makeEpochSampleRequest(from: entry)
+              mirrored == entry.deviceID.uuidString.lowercased()
         else { return }
 
+        persistEpochSample(entry, store: .shared)
+    }
+
+    private static func persistEpochSample(_ entry: RetryEntry, store: DeviceEpochStore) {
+        guard let request = makeEpochSampleRequest(from: entry) else { return }
         let now = Date()
-        try? DeviceEpochStore.shared.transaction(expectedOwner: entry.deviceID) { state in
+        try? store.transaction(expectedOwner: entry.deviceID) { state in
             guard !state.sampleWork.values.contains(where: { $0.request.clientSampleID == request.clientSampleID }) else { return }
             let workID = UUID()
             state.sampleWork[workID] = EpochSampleWork(
@@ -715,6 +723,7 @@ enum EarnedSampleReporter {
                 routeID: nil,
                 request: request,
                 authorization: .legacyDeliverable,
+                claim: nil,
                 retry: MeteringRetryState(
                     attemptCount: 0,
                     nextAttemptAt: now,

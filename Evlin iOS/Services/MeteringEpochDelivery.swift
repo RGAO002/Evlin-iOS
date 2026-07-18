@@ -38,23 +38,44 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
     private let transport: any MeteringHTTPTransport
     private let clock: any MeteringClock
     private let legacySuiteName: String
-    private var simulateCrashAfterLegacyImportReadback: Bool
+#if DEBUG
+    private let debugAfterLegacyImportReadback: (@Sendable () -> Void)?
+#endif
 
     init(
         baseURL: URL,
         store: DeviceEpochStore = .shared,
         transport: any MeteringHTTPTransport,
         clock: any MeteringClock = MeteringRuntimeClock.live(),
-        legacySuiteName: String = "group.com.evlin.ios",
-        simulateCrashAfterLegacyImportReadback: Bool = false
+        legacySuiteName: String = "group.com.evlin.ios"
     ) {
         self.baseURL = baseURL
         self.store = store
         self.transport = transport
         self.clock = clock
         self.legacySuiteName = legacySuiteName
-        self.simulateCrashAfterLegacyImportReadback = simulateCrashAfterLegacyImportReadback
+#if DEBUG
+        self.debugAfterLegacyImportReadback = nil
+#endif
     }
+
+#if DEBUG
+    init(
+        baseURL: URL,
+        store: DeviceEpochStore = .shared,
+        transport: any MeteringHTTPTransport,
+        clock: any MeteringClock = MeteringRuntimeClock.live(),
+        legacySuiteName: String = "group.com.evlin.ios",
+        debugAfterLegacyImportReadback: @escaping @Sendable () -> Void
+    ) {
+        self.baseURL = baseURL
+        self.store = store
+        self.transport = transport
+        self.clock = clock
+        self.legacySuiteName = legacySuiteName
+        self.debugAfterLegacyImportReadback = debugAfterLegacyImportReadback
+    }
+#endif
 
     func enqueueV1(_ request: EpochSampleRequestDTO, owner: UUID) throws {
         guard request.lane == .v1 else { throw MeteringEpochDeliveryError.malformedLane }
@@ -71,6 +92,7 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
                 routeID: nil,
                 request: request,
                 authorization: .legacyDeliverable,
+                claim: nil,
                 retry: pendingRetry(at: now),
                 createdAt: now
             )
@@ -95,6 +117,7 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
                 epochID: epochID,
                 routeID: routeID,
                 request: request,
+                claim: nil,
                 retry: pendingRetry(at: now),
                 createdAt: now
             )
@@ -119,6 +142,7 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
                 epochID: epochID,
                 routeID: routeID,
                 request: request,
+                claim: nil,
                 retry: pendingRetry(at: now),
                 createdAt: now
             )
@@ -238,29 +262,45 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
         for item in due {
             switch item.kind {
             case .registration:
+                guard let registration = state.registrationWork.values.first(where: { $0.workID == item.workID }),
+                      !isSuppressedCandidate(registration.epochID, state: state)
+                else { return nil }
                 return item
             case .sample:
                 guard let sample = state.sampleWork.values.first(where: { $0.workID == item.workID }),
                       !isSuppressedCandidate(sample.epochID, state: state)
-                else { continue }
+                else { return nil }
                 return item
             case .activation:
                 guard let activation = state.activationWork.values.first(where: { $0.workID == item.workID }),
-                      !isSuppressedCandidate(activation.epochID, state: state)
-                else { continue }
+                      !isSuppressedCandidate(activation.epochID, state: state),
+                      let route = state.routes[activation.routeID],
+                      route.ownerChildDeviceID == owner,
+                      route.epochID == activation.epochID,
+                      route.lifecycle == .active,
+                      let epoch = state.epochs[activation.epochID],
+                      epoch.childDeviceID == owner,
+                      epoch.status == .active
+                else { return nil }
                 let matchingRegistrations = state.registrationWork.values.filter {
                     $0.ownerChildDeviceID == owner
                         && $0.epochID == activation.epochID
+                        && $0.routeID == activation.routeID
                 }
-                guard matchingRegistrations.contains(where: { $0.retry.terminal == .succeeded }) else { continue }
+                guard matchingRegistrations.contains(where: { $0.retry.terminal == .succeeded }) else { return nil }
                 guard state.installWork.values.contains(where: {
                     $0.ownerChildDeviceID == owner
                         && $0.routeID == activation.routeID
-                        && isVerifiedOrLater($0.phase)
-                }) else { continue }
+                        && isActivationReady($0.phase)
+                }) else { return nil }
                 return item
-            case .identityCleanup, .rollover, .install, .shield:
+            case .install:
+                guard let install = state.installWork.values.first(where: { $0.workID == item.workID }),
+                      isActivationReady(install.phase)
+                else { return nil }
                 continue
+            case .identityCleanup, .rollover, .shield:
+                return nil
             }
         }
         return nil
@@ -291,15 +331,18 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
                         routeID: nil,
                         request: request,
                         authorization: .legacyDeliverable,
+                        claim: nil,
                         retry: pendingRetry(at: clock.now),
                         createdAt: clock.now
                     )
                 }
             }
-            if simulateCrashAfterLegacyImportReadback {
-                simulateCrashAfterLegacyImportReadback = false
+#if DEBUG
+            if let debugAfterLegacyImportReadback {
+                debugAfterLegacyImportReadback()
                 return true
             }
+#endif
             for (entry, _) in imported {
                 EarnedSampleReporter.removeRetryEntry(entry, suiteName: legacySuiteName)
             }
@@ -311,12 +354,14 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
     }
 
     private func deliverRegistration(workID: UUID, owner: UUID) async {
-        guard let work = registrationWork(withID: workID, owner: owner) else { return }
+        guard let claimed = claimRegistration(workID: workID, owner: owner) else { return }
+        let work = claimed.work
+        let claim = claimed.claim
         let request: URLRequest
         do {
             request = try MeteringEpochRequests.registration(baseURL: baseURL, ownerChildDeviceID: owner, body: work.request)
         } catch {
-            await terminalizeRegistration(workID: workID, owner: owner, code: "malformed_request")
+            await terminalizeRegistration(workID: workID, owner: owner, claim: claim, code: "malformed_request")
             return
         }
 
@@ -326,24 +371,30 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
             switch disposition {
             case let .registered(response):
                 guard response.epochID == work.epochID else {
-                    await terminalizeRegistration(workID: workID, owner: owner, code: "epoch_mismatch")
+                    await terminalizeRegistration(workID: workID, owner: owner, claim: claim, code: "epoch_mismatch")
                     return
                 }
-                await recordRegistrationSuccess(workID: workID, owner: owner, response: response)
+                guard snapshotMatches(response.snapshot, owner: owner, usageDate: work.request.usageDate) else {
+                    await terminalizeRegistration(workID: workID, owner: owner, claim: claim, code: "snapshot_mismatch")
+                    return
+                }
+                await recordRegistrationSuccess(workID: workID, owner: owner, claim: claim, response: response)
             case let .authoritativeBaseMismatch(conflict):
-                await recordAuthoritativeBaseMismatch(workID: workID, owner: owner, conflict: conflict)
+                await recordAuthoritativeBaseMismatch(workID: workID, owner: owner, claim: claim, conflict: conflict)
             case let .terminal(code):
-                await terminalizeRegistration(workID: workID, owner: owner, code: code)
+                await terminalizeRegistration(workID: workID, owner: owner, claim: claim, code: code)
             case let .retry(code):
-                await retryRegistration(workID: workID, owner: owner, code: code)
+                await retryRegistration(workID: workID, owner: owner, claim: claim, code: code)
             }
         } catch {
-            await retryRegistration(workID: workID, owner: owner, code: "network_error")
+            await retryRegistration(workID: workID, owner: owner, claim: claim, code: "network_error")
         }
     }
 
     private func deliverActivation(workID: UUID, owner: UUID) async {
-        guard let work = activationWork(withID: workID, owner: owner) else { return }
+        guard let claimed = claimActivation(workID: workID, owner: owner) else { return }
+        let work = claimed.work
+        let claim = claimed.claim
         let request: URLRequest
         do {
             request = try MeteringEpochRequests.activation(
@@ -353,7 +404,7 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
                 body: work.request
             )
         } catch {
-            await terminalizeActivation(workID: workID, owner: owner, code: "malformed_request")
+            await terminalizeActivation(workID: workID, owner: owner, claim: claim, code: "malformed_request")
             return
         }
 
@@ -362,74 +413,127 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
             switch Self.activationDisposition(data: data, statusCode: httpStatus(response)) {
             case let .acknowledged(response):
                 guard response.epochID == work.epochID else {
-                    await terminalizeActivation(workID: workID, owner: owner, code: "epoch_mismatch")
+                    await terminalizeActivation(workID: workID, owner: owner, claim: claim, code: "epoch_mismatch")
                     return
                 }
-                await terminalizeActivation(workID: workID, owner: owner, code: nil, terminal: .succeeded)
+                guard let usageDate = (try? store.read())?.epochs[work.epochID]?.usageDate,
+                      snapshotMatches(response.snapshot, owner: owner, usageDate: usageDate) else {
+                    await terminalizeActivation(workID: workID, owner: owner, claim: claim, code: "snapshot_mismatch")
+                    return
+                }
+                await terminalizeActivation(workID: workID, owner: owner, claim: claim, code: nil, terminal: .succeeded)
             case let .terminal(code):
-                await terminalizeActivation(workID: workID, owner: owner, code: code)
+                await terminalizeActivation(workID: workID, owner: owner, claim: claim, code: code)
             case let .retry(code):
-                await retryActivation(workID: workID, owner: owner, code: code)
+                await retryActivation(workID: workID, owner: owner, claim: claim, code: code)
             }
         } catch {
-            await retryActivation(workID: workID, owner: owner, code: "network_error")
+            await retryActivation(workID: workID, owner: owner, claim: claim, code: "network_error")
         }
     }
 
     private func deliverSample(workID: UUID, owner: UUID) async {
-        guard let work = sampleWork(withID: workID, owner: owner) else { return }
+        guard let claimed = claimSample(workID: workID, owner: owner) else { return }
+        let work = claimed.work
+        let claim = claimed.claim
         let request: URLRequest
         do {
             request = try MeteringEpochRequests.sample(baseURL: baseURL, ownerChildDeviceID: owner, body: work.request)
         } catch {
-            await terminalizeSample(workID: workID, owner: owner, code: "malformed_request")
+            await terminalizeSample(workID: workID, owner: owner, claim: claim, code: "malformed_request")
             return
         }
 
         do {
             let (data, response) = try await transport.data(for: request)
             switch Self.sampleDisposition(data: data, statusCode: httpStatus(response)) {
-            case .accepted:
-                await terminalizeSample(workID: workID, owner: owner, code: nil, terminal: .succeeded)
+            case let .accepted(snapshot):
+                guard snapshotMatches(snapshot, owner: owner, usageDate: work.request.usageDate) else {
+                    await terminalizeSample(workID: workID, owner: owner, claim: claim, code: "snapshot_mismatch")
+                    return
+                }
+                await terminalizeSample(workID: workID, owner: owner, claim: claim, code: nil, terminal: .succeeded)
             case .acceptedDuplicate:
-                await terminalizeSample(workID: workID, owner: owner, code: nil, terminal: .succeeded)
+                await terminalizeSample(workID: workID, owner: owner, claim: claim, code: nil, terminal: .succeeded)
             case let .terminal(code, _):
-                await terminalizeSample(workID: workID, owner: owner, code: code)
+                await terminalizeSample(workID: workID, owner: owner, claim: claim, code: code)
             case let .retry(code):
-                await retrySample(workID: workID, owner: owner, code: code)
+                await retrySample(workID: workID, owner: owner, claim: claim, code: code)
             }
         } catch {
-            await retrySample(workID: workID, owner: owner, code: "network_error")
+            await retrySample(workID: workID, owner: owner, claim: claim, code: "network_error")
         }
     }
 
-    private func registrationWork(withID workID: UUID, owner: UUID) -> EpochRegistrationWork? {
-        guard let state = try? store.read(), state.ownerChildDeviceID == owner else { return nil }
-        return state.registrationWork.values.first { $0.workID == workID }
+    private func claimRegistration(workID: UUID, owner: UUID) -> (work: EpochRegistrationWork, claim: MeteringNetworkClaim)? {
+        let claim: MeteringNetworkClaim?
+        do {
+            claim = try store.claimNetworkWork(workID: workID, kind: .registration, owner: owner, now: clock.now)
+        } catch {
+            return nil
+        }
+        guard let claim,
+              let state = try? store.read(),
+              let work = state.registrationWork.values.first(where: { $0.workID == workID }),
+              work.claim?.token == claim.token
+        else { return nil }
+        return (work, claim)
     }
 
-    private func activationWork(withID workID: UUID, owner: UUID) -> EpochActivationWork? {
-        guard let state = try? store.read(), state.ownerChildDeviceID == owner else { return nil }
-        return state.activationWork.values.first { $0.workID == workID }
+    private func claimActivation(workID: UUID, owner: UUID) -> (work: EpochActivationWork, claim: MeteringNetworkClaim)? {
+        let claim: MeteringNetworkClaim?
+        do {
+            claim = try store.claimNetworkWork(workID: workID, kind: .activation, owner: owner, now: clock.now)
+        } catch {
+            return nil
+        }
+        guard let claim,
+              let state = try? store.read(),
+              let work = state.activationWork.values.first(where: { $0.workID == workID }),
+              work.claim?.token == claim.token
+        else { return nil }
+        return (work, claim)
     }
 
-    private func sampleWork(withID workID: UUID, owner: UUID) -> EpochSampleWork? {
-        guard let state = try? store.read(), state.ownerChildDeviceID == owner else { return nil }
-        return state.sampleWork.values.first { $0.workID == workID }
+    private func claimSample(workID: UUID, owner: UUID) -> (work: EpochSampleWork, claim: MeteringNetworkClaim)? {
+        let claim: MeteringNetworkClaim?
+        do {
+            claim = try store.claimNetworkWork(workID: workID, kind: .sample, owner: owner, now: clock.now)
+        } catch {
+            return nil
+        }
+        guard let claim,
+              let state = try? store.read(),
+              let work = state.sampleWork.values.first(where: { $0.workID == workID }),
+              work.claim?.token == claim.token
+        else { return nil }
+        return (work, claim)
     }
 
-    private func recordRegistrationSuccess(workID: UUID, owner: UUID, response: EpochRegistrationResponseDTO) async {
+    private func recordRegistrationSuccess(
+        workID: UUID,
+        owner: UUID,
+        claim: MeteringNetworkClaim,
+        response: EpochRegistrationResponseDTO
+    ) async {
         try? store.transaction(expectedOwner: owner) { state in
             guard let key = state.registrationWork.first(where: { $0.value.workID == workID })?.key,
                   var work = state.registrationWork[key],
                   work.ownerChildDeviceID == owner,
+                  work.claim?.token == claim.token,
                   let route = state.routes[work.routeID],
+                  route.ownerChildDeviceID == owner,
                   route.epochID == work.epochID,
                   let epoch = state.epochs[work.epochID],
+                  epoch.childDeviceID == owner,
                   epoch.status == .active,
+                  epoch.authoritativeBaseConflict == nil,
+                  route.lifecycle == .active,
                   response.epochID == work.epochID
+                  , snapshotMatches(response.snapshot, owner: owner, usageDate: work.request.usageDate)
             else { return }
             work.retry = completedRetry(from: work.retry, code: nil, terminal: .succeeded)
+            work.claim = nil
             state.registrationWork[key] = work
             state.epochs[work.epochID]?.registeredAt = clock.now
             var ratchet = state.ratchets[owner] ?? MeteringOwnerRatchet(
@@ -450,19 +554,26 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
     private func recordAuthoritativeBaseMismatch(
         workID: UUID,
         owner: UUID,
+        claim: MeteringNetworkClaim,
         conflict: EpochRegistrationConflictDTO
     ) async {
         try? store.transaction(expectedOwner: owner) { state in
             guard let key = state.registrationWork.first(where: { $0.value.workID == workID })?.key,
                   var work = state.registrationWork[key],
                   work.ownerChildDeviceID == owner,
+                  work.claim?.token == claim.token,
                   let route = state.routes[work.routeID],
+                  route.ownerChildDeviceID == owner,
                   route.epochID == work.epochID,
+                  route.lifecycle == .active,
                   var epoch = state.epochs[work.epochID]
+                  , epoch.childDeviceID == owner,
+                  epoch.authoritativeBaseConflict == nil
             else { return }
             epoch.authoritativeBaseConflict = conflict
             state.epochs[work.epochID] = epoch
             work.retry = completedRetry(from: work.retry, code: "authoritative_base_mismatch", terminal: .superseded)
+            work.claim = nil
             state.registrationWork[key] = work
         }
     }
@@ -470,6 +581,7 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
     private func terminalizeRegistration(
         workID: UUID,
         owner: UUID,
+        claim: MeteringNetworkClaim,
         code: String,
         terminal: MeteringWorkTerminal = .rejected
     ) async {
@@ -477,27 +589,47 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
             guard let key = state.registrationWork.first(where: { $0.value.workID == workID })?.key,
                   var work = state.registrationWork[key],
                   work.ownerChildDeviceID == owner,
+                  work.claim?.token == claim.token,
+                  let epoch = state.epochs[work.epochID],
+                  epoch.childDeviceID == owner,
+                  epoch.authoritativeBaseConflict == nil,
+                  state.routes[work.routeID]?.ownerChildDeviceID == owner,
+                  state.routes[work.routeID]?.lifecycle == .active,
                   state.routes[work.routeID]?.epochID == work.epochID
             else { return }
             work.retry = completedRetry(from: work.retry, code: code, terminal: terminal)
+            work.claim = nil
             state.registrationWork[key] = work
         }
     }
 
-    private func retryRegistration(workID: UUID, owner: UUID, code: String) async {
-        updateRegistration(workID: workID, owner: owner, code: code, terminal: .pending)
+    private func retryRegistration(workID: UUID, owner: UUID, claim: MeteringNetworkClaim, code: String) async {
+        updateRegistration(workID: workID, owner: owner, claim: claim, code: code, terminal: .pending)
     }
 
-    private func updateRegistration(workID: UUID, owner: UUID, code: String, terminal: MeteringWorkTerminal) {
+    private func updateRegistration(
+        workID: UUID,
+        owner: UUID,
+        claim: MeteringNetworkClaim,
+        code: String,
+        terminal: MeteringWorkTerminal
+    ) {
         try? store.transaction(expectedOwner: owner) { state in
             guard let key = state.registrationWork.first(where: { $0.value.workID == workID })?.key,
                   var work = state.registrationWork[key],
                   work.ownerChildDeviceID == owner,
+                  work.claim?.token == claim.token,
+                  let epoch = state.epochs[work.epochID],
+                  epoch.childDeviceID == owner,
+                  epoch.authoritativeBaseConflict == nil,
+                  state.routes[work.routeID]?.ownerChildDeviceID == owner,
+                  state.routes[work.routeID]?.lifecycle == .active,
                   state.routes[work.routeID]?.epochID == work.epochID
             else { return }
             work.retry = terminal == .pending
                 ? retryState(after: work.retry, code: code, now: clock.now)
                 : completedRetry(from: work.retry, code: code, terminal: terminal)
+            work.claim = nil
             state.registrationWork[key] = work
         }
     }
@@ -505,26 +637,53 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
     private func terminalizeActivation(
         workID: UUID,
         owner: UUID,
+        claim: MeteringNetworkClaim,
         code: String?,
         terminal: MeteringWorkTerminal = .rejected
     ) async {
-        updateActivation(workID: workID, owner: owner, code: code, terminal: terminal)
+        updateActivation(workID: workID, owner: owner, claim: claim, code: code, terminal: terminal)
     }
 
-    private func retryActivation(workID: UUID, owner: UUID, code: String) async {
-        updateActivation(workID: workID, owner: owner, code: code, terminal: .pending)
+    private func retryActivation(workID: UUID, owner: UUID, claim: MeteringNetworkClaim, code: String) async {
+        updateActivation(workID: workID, owner: owner, claim: claim, code: code, terminal: .pending)
     }
 
-    private func updateActivation(workID: UUID, owner: UUID, code: String?, terminal: MeteringWorkTerminal) {
+    private func updateActivation(
+        workID: UUID,
+        owner: UUID,
+        claim: MeteringNetworkClaim,
+        code: String?,
+        terminal: MeteringWorkTerminal
+    ) {
         try? store.transaction(expectedOwner: owner) { state in
             guard let key = state.activationWork.first(where: { $0.value.workID == workID })?.key,
                   var work = state.activationWork[key],
                   work.ownerChildDeviceID == owner,
+                  work.claim?.token == claim.token,
+                  let epoch = state.epochs[work.epochID],
+                  epoch.childDeviceID == owner,
+                  epoch.status == .active,
+                  epoch.authoritativeBaseConflict == nil,
+                  let route = state.routes[work.routeID],
+                  route.ownerChildDeviceID == owner,
+                  route.lifecycle == .active,
                   state.routes[work.routeID]?.epochID == work.epochID
+                  , state.registrationWork.values.contains(where: {
+                      $0.ownerChildDeviceID == owner
+                          && $0.epochID == work.epochID
+                          && $0.routeID == work.routeID
+                          && $0.retry.terminal == .succeeded
+                  })
+                  , state.installWork.values.contains(where: {
+                      $0.ownerChildDeviceID == owner
+                          && $0.routeID == work.routeID
+                          && isActivationReady($0.phase)
+                  })
             else { return }
             work.retry = terminal == .pending
                 ? retryState(after: work.retry, code: code ?? "network_error", now: clock.now)
                 : completedRetry(from: work.retry, code: code, terminal: terminal)
+            work.claim = nil
             state.activationWork[key] = work
         }
     }
@@ -532,26 +691,46 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
     private func terminalizeSample(
         workID: UUID,
         owner: UUID,
+        claim: MeteringNetworkClaim,
         code: String?,
         terminal: MeteringWorkTerminal = .rejected
     ) async {
-        updateSample(workID: workID, owner: owner, code: code, terminal: terminal)
+        updateSample(workID: workID, owner: owner, claim: claim, code: code, terminal: terminal)
     }
 
-    private func retrySample(workID: UUID, owner: UUID, code: String) async {
-        updateSample(workID: workID, owner: owner, code: code, terminal: .pending)
+    private func retrySample(workID: UUID, owner: UUID, claim: MeteringNetworkClaim, code: String) async {
+        updateSample(workID: workID, owner: owner, claim: claim, code: code, terminal: .pending)
     }
 
-    private func updateSample(workID: UUID, owner: UUID, code: String?, terminal: MeteringWorkTerminal) {
+    private func updateSample(
+        workID: UUID,
+        owner: UUID,
+        claim: MeteringNetworkClaim,
+        code: String?,
+        terminal: MeteringWorkTerminal
+    ) {
         try? store.transaction(expectedOwner: owner) { state in
             guard let key = state.sampleWork.first(where: { $0.value.workID == workID })?.key,
                   var work = state.sampleWork[key],
-                  work.ownerChildDeviceID == owner
+                  work.ownerChildDeviceID == owner,
+                  work.claim?.token == claim.token
             else { return }
-            if let routeID = work.routeID, state.routes[routeID]?.epochID != work.epochID { return }
+            if let routeID = work.routeID {
+                guard let route = state.routes[routeID],
+                      route.ownerChildDeviceID == owner,
+                      route.lifecycle == .active,
+                      route.epochID == work.epochID,
+                      let epochID = work.epochID,
+                      let epoch = state.epochs[epochID],
+                      epoch.childDeviceID == owner,
+                      epoch.status == .active,
+                      epoch.authoritativeBaseConflict == nil
+                else { return }
+            }
             work.retry = terminal == .pending
                 ? retryState(after: work.retry, code: code ?? "network_error", now: clock.now)
                 : completedRetry(from: work.retry, code: code, terminal: terminal)
+            work.claim = nil
             state.sampleWork[key] = work
         }
     }
@@ -609,13 +788,17 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
         return state.epochs[epochID]?.authoritativeBaseConflict != nil
     }
 
-    private func isVerifiedOrLater(_ phase: ActivityInstallPhase) -> Bool {
+    private func isActivationReady(_ phase: ActivityInstallPhase) -> Bool {
         switch phase {
-        case .verified, .dualActive, .active, .pendingStop, .stopped:
+        case .verified, .dualActive, .active:
             return true
-        case .pendingStart, .starting, .installed:
+        case .pendingStart, .starting, .installed, .pendingStop, .stopped:
             return false
         }
+    }
+
+    private func snapshotMatches(_ snapshot: DeviceDaySnapshotDTO, owner: UUID, usageDate: String) -> Bool {
+        snapshot.childDeviceID == owner && snapshot.usageDate == usageDate
     }
 }
 

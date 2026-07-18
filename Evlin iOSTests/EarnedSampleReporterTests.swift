@@ -204,6 +204,25 @@ final class EarnedSampleReporterTests: XCTestCase {
         XCTAssertEqual(request.clientSampleID, "earned:a1b2c3d4-e5f6-7890-abcd-ef1234567890:2026-06-23:t40")
     }
 
+    func test_legacyV1RequestMatchesIndependentGoldenBytes() throws {
+        let entry = EarnedSampleReporter.RetryEntry(
+            deviceID: UUID(uuidString: "11111111-1111-1111-1111-111111111111")!,
+            usageDate: "2026-07-16",
+            timezone: "America/New_York",
+            thresholdMinutes: 10,
+            estimatedMinutes: 10,
+            observedAt: "2026-07-16T05:20:00Z"
+        )
+        let request = try XCTUnwrap(EarnedSampleReporter.makeEpochSampleRequest(from: entry))
+        let urlRequest = try MeteringEpochRequests.sample(
+            baseURL: URL(string: "https://metering-epoch-delivery.test")!,
+            ownerChildDeviceID: entry.deviceID,
+            body: request
+        )
+        let golden = Data(#"{"activity_name":"evlin.earned.budget","client_sample_id":"earned:11111111-1111-1111-1111-111111111111:2026-07-16:t10","device_id":"11111111-1111-1111-1111-111111111111","estimated_minutes":10,"event_name":"evlin.earned.t10","observed_at":"2026-07-16T05:20:00Z","threshold_minutes":10,"timezone":"America\/New_York","usage_date":"2026-07-16"}"#.utf8)
+        XCTAssertEqual(urlRequest.httpBody, golden)
+    }
+
     // MARK: - 2. Retry-queue enqueue on simulated POST failure
 
     func test_enqueueRetry_appendsToAppGroup() throws {
@@ -681,7 +700,6 @@ final class EarnedSampleReporterTests: XCTestCase {
         let deviceID = UUID()
         let store = DeviceEpochStore(
             fileURL: fileURL,
-            lock: ReporterTestLock(),
             ownerProvider: { deviceID }
         )
         let encoder = JSONEncoder()
@@ -704,6 +722,37 @@ final class EarnedSampleReporterTests: XCTestCase {
         XCTAssertEqual(transport.sampleCountBeforePost, 1)
         XCTAssertEqual(try store.read().sampleWork.values.first?.retry.terminal, .succeeded)
         XCTAssertTrue(EarnedSampleReporter.loadRetryQueue(suiteName: isolatedSuite).isEmpty)
+    }
+
+    func testInjectedReporterStoreIsOnlyEpochRootAndProductionPathDispatchesOnce() async throws {
+        let isolatedSuite = "EarnedSampleReporterTests.injected.\(UUID().uuidString)"
+        defer {
+            EarnedSampleReporter.clearRetryQueue(suiteName: isolatedSuite)
+            UserDefaults.standard.removePersistentDomain(forName: isolatedSuite)
+        }
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("earned-reporter-injected-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let deviceID = UUID()
+        let store = DeviceEpochStore(fileURL: fileURL, ownerProvider: { deviceID })
+        try JSONEncoder().encode(DeviceEpochStoreState(ownerChildDeviceID: deviceID)).write(to: fileURL)
+        let transport = ReporterRootTransport(store: store)
+
+        await EarnedSampleReporter.report(
+            baseURL: URL(string: "https://earned-sample-reporter.test")!,
+            deviceID: deviceID,
+            usageDate: "2026-07-12",
+            timezone: "America/New_York",
+            thresholdMinutes: 20,
+            estimatedMinutes: 20,
+            suiteName: isolatedSuite,
+            epochStore: store,
+            requestData: { request in try await transport.data(for: request) }
+        )
+
+        XCTAssertEqual(transport.requestCount, 1)
+        XCTAssertEqual(try store.read().sampleWork.count, 1)
+        XCTAssertEqual(try store.read().sampleWork.values.first?.retry.terminal, .succeeded)
     }
 
     func test_clearRetryQueue_emptiesQueue() {
@@ -1639,19 +1688,17 @@ final class EarnedSampleReporterResponseTests: XCTestCase {
     }
 }
 
-private final class ReporterTestLock: DeviceEpochStoreLocking, @unchecked Sendable {
-    func withLock<T>(_ body: () -> T) -> T? { body() }
-}
-
 private final class ReporterRootTransport: @unchecked Sendable {
     let store: DeviceEpochStore
     var sampleCountBeforePost: Int?
+    var requestCount = 0
 
     init(store: DeviceEpochStore) {
         self.store = store
     }
 
     func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+        requestCount += 1
         sampleCountBeforePost = try store.read().sampleWork.count
         let response = HTTPURLResponse(
             url: try XCTUnwrap(request.url),

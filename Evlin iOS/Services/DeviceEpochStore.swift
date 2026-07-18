@@ -11,6 +11,14 @@ nonisolated struct MeteringRetryState: Codable, Equatable, Sendable {
     var terminal: MeteringWorkTerminal
 }
 
+nonisolated struct MeteringNetworkClaim: Codable, Equatable, Sendable {
+    static let leaseDuration: TimeInterval = 60
+
+    let token: UUID
+    let claimedAt: Date
+    let expiresAt: Date
+}
+
 nonisolated enum MeteringRetryPolicy {
     static let delays: [TimeInterval] = [0, 5, 15, 60, 300]
 
@@ -160,6 +168,7 @@ nonisolated struct EpochRegistrationWork: Codable, Equatable, Sendable {
     let epochID: UUID
     let routeID: UUID
     let request: EpochRegistrationRequestDTO
+    var claim: MeteringNetworkClaim?
     var retry: MeteringRetryState
     let createdAt: Date
 }
@@ -170,6 +179,7 @@ nonisolated struct EpochActivationWork: Codable, Equatable, Sendable {
     let epochID: UUID
     let routeID: UUID
     let request: EpochActivationRequestDTO
+    var claim: MeteringNetworkClaim?
     var retry: MeteringRetryState
     let createdAt: Date
 }
@@ -185,6 +195,7 @@ nonisolated struct EpochSampleWork: Codable, Equatable, Sendable {
     let routeID: UUID?
     let request: EpochSampleRequestDTO
     var authorization: EpochSampleAuthorization
+    var claim: MeteringNetworkClaim?
     var retry: MeteringRetryState
     let createdAt: Date
 }
@@ -566,6 +577,33 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
 
     func isCurrentOwner(_ owner: UUID) -> Bool {
         ownerProvider() == owner
+    }
+
+    @discardableResult
+    func claimNetworkWork(
+        workID: UUID,
+        kind: MeteringWorkKind,
+        owner: UUID,
+        now: Date,
+        leaseDuration: TimeInterval = MeteringNetworkClaim.leaseDuration
+    ) throws -> MeteringNetworkClaim? {
+        try transaction(expectedOwner: owner) { state in
+            guard let retry = state.retryState(for: workID, kind: kind),
+                  retry.terminal == .pending,
+                  retry.nextAttemptAt <= now
+            else { return nil }
+
+            let currentClaim = state.networkClaim(for: workID, kind: kind)
+            if let currentClaim, currentClaim.expiresAt > now { return nil }
+
+            let claim = MeteringNetworkClaim(
+                token: UUID(),
+                claimedAt: now,
+                expiresAt: now.addingTimeInterval(leaseDuration)
+            )
+            state.setNetworkClaim(claim, for: workID, kind: kind)
+            return claim
+        }
     }
 
     @discardableResult
@@ -1075,6 +1113,50 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         }
         guard restoreError == nil, restoredData == priorData else {
             throw DeviceEpochStoreError.restorationFailed
+        }
+    }
+}
+
+private extension DeviceEpochStoreState {
+    func retryState(for workID: UUID, kind: MeteringWorkKind) -> MeteringRetryState? {
+        switch kind {
+        case .registration:
+            return registrationWork.values.first { $0.workID == workID }?.retry
+        case .activation:
+            return activationWork.values.first { $0.workID == workID }?.retry
+        case .sample:
+            return sampleWork.values.first { $0.workID == workID }?.retry
+        case .identityCleanup, .rollover, .install, .shield:
+            return nil
+        }
+    }
+
+    func networkClaim(for workID: UUID, kind: MeteringWorkKind) -> MeteringNetworkClaim? {
+        switch kind {
+        case .registration:
+            return registrationWork.values.first { $0.workID == workID }?.claim
+        case .activation:
+            return activationWork.values.first { $0.workID == workID }?.claim
+        case .sample:
+            return sampleWork.values.first { $0.workID == workID }?.claim
+        case .identityCleanup, .rollover, .install, .shield:
+            return nil
+        }
+    }
+
+    mutating func setNetworkClaim(_ claim: MeteringNetworkClaim?, for workID: UUID, kind: MeteringWorkKind) {
+        switch kind {
+        case .registration:
+            guard let key = registrationWork.first(where: { $0.value.workID == workID })?.key else { return }
+            registrationWork[key]?.claim = claim
+        case .activation:
+            guard let key = activationWork.first(where: { $0.value.workID == workID })?.key else { return }
+            activationWork[key]?.claim = claim
+        case .sample:
+            guard let key = sampleWork.first(where: { $0.value.workID == workID })?.key else { return }
+            sampleWork[key]?.claim = claim
+        case .identityCleanup, .rollover, .install, .shield:
+            break
         }
     }
 }
