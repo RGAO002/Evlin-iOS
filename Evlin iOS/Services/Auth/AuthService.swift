@@ -141,7 +141,6 @@ final class AuthService {
         appGroupDefaults.removeObject(
             forKey: EarnedActivityGeneration.activeActivityNameKey
         )
-        appGroupDefaults.removeObject(forKey: "evlin.earned.armSignature")
         appGroupDefaults.set(false, forKey: "evlin.usageCountingAllowed")
         if oldOwner != nil && cleanupWorkID == nil {
             // Keep the old owner mirror as the recovery authority. The main

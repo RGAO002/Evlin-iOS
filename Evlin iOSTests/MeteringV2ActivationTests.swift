@@ -1021,7 +1021,7 @@ private final class ActivationFixture {
 
     private func legacy() -> LegacyCompatibilityMonitorState {
         LegacyCompatibilityMonitorState(ownerChildDeviceID: owner, lifecycleVersion: 1,
-            active: LegacyGenerationProvenance(activityName: "evlin.earned.legacy", deviceID: owner.uuidString, offsetMinutes: 0, armSignature: "legacy", usageDate: "2026-07-17", timezoneIdentifier: "America/New_York", armedAt: start),
+            active: LegacyGenerationProvenance(activityName: "evlin.earned.legacy", deviceID: owner.uuidString, offsetMinutes: 0, usageDate: "2026-07-17", timezoneIdentifier: "America/New_York", armedAt: start),
             pending: nil, retiringActivityNames: [], breadcrumbActivityNames: [], scalarActiveActivityName: "evlin.earned.legacy", isStopped: false, phase: .activeV1, stopAcknowledgedAt: nil)
     }
 }

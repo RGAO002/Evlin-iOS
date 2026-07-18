@@ -19,7 +19,6 @@ final class DeviceEpochStoreMigrationTests: XCTestCase {
             activityName: "evlin.earned.budget.active",
             deviceID: owner.uuidString,
             offsetMinutes: 10,
-            armSignature: "active-signature",
             usageDate: "2026-07-17",
             timezoneIdentifier: "America/New_York",
             armedAt: Date(timeIntervalSince1970: 10)
@@ -28,7 +27,6 @@ final class DeviceEpochStoreMigrationTests: XCTestCase {
             activityName: "evlin.earned.budget.pending",
             deviceID: owner.uuidString,
             offsetMinutes: 15,
-            armSignature: "pending-signature",
             usageDate: "2026-07-17",
             timezoneIdentifier: "America/New_York",
             armedAt: Date(timeIntervalSince1970: 20)
@@ -59,8 +57,8 @@ final class DeviceEpochStoreMigrationTests: XCTestCase {
             XCTAssertEqual(state.legacy, LegacyCompatibilityMonitorState(
                 ownerChildDeviceID: owner,
                 lifecycleVersion: 2,
-                active: LegacyGenerationProvenance(activityName: active.activityName, deviceID: active.deviceID, offsetMinutes: active.offsetMinutes, armSignature: active.armSignature, usageDate: active.usageDate, timezoneIdentifier: active.timezoneIdentifier, armedAt: active.armedAt),
-                pending: LegacyGenerationProvenance(activityName: pending.activityName, deviceID: pending.deviceID, offsetMinutes: pending.offsetMinutes, armSignature: pending.armSignature, usageDate: pending.usageDate, timezoneIdentifier: pending.timezoneIdentifier, armedAt: pending.armedAt),
+                active: LegacyGenerationProvenance(activityName: active.activityName, deviceID: active.deviceID, offsetMinutes: active.offsetMinutes, usageDate: active.usageDate, timezoneIdentifier: active.timezoneIdentifier, armedAt: active.armedAt),
+                pending: LegacyGenerationProvenance(activityName: pending.activityName, deviceID: pending.deviceID, offsetMinutes: pending.offsetMinutes, usageDate: pending.usageDate, timezoneIdentifier: pending.timezoneIdentifier, armedAt: pending.armedAt),
                 retiringActivityNames: lifecycle.retiringActivityNames,
                 breadcrumbActivityNames: breadcrumbs ?? [],
                 scalarActiveActivityName: active.activityName,

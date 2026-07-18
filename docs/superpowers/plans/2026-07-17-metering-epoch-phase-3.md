@@ -2872,9 +2872,21 @@ git commit -m 'feat: recover every metering process entry point'
 
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS/Services/EarnedBudgetArming.swift`
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS/Services/EarnedTimeStore.swift`
+- Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS/Services/DeviceEpochStore.swift`
+- Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS/Services/BigKidStatePoller.swift`
+- Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS/Services/CommandPoller.swift`
+- Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS/Services/Auth/AuthService.swift`
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/EarnedBudgetArmingTests.swift`
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/EarnedTimeStoreTests.swift`
+- Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/AuthServiceTests.swift`
+- Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/DeviceEpochStoreMigrationTests.swift`
+- Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/EarnedBudgetSchedulerTests.swift`
+- Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/EarnedSampleReporterTests.swift`
+- Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/MeteringEpochDeliveryTests.swift`
+- Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/MeteringV2ActivationTests.swift`
 - Create: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/MeteringT1DemolitionTests.swift`
+
+Execution scope correction: the persisted scalar field also existed in the legacy-compatibility mirror and its migration fixtures. The typed six-field replacement identity requires the runtime policy revision to be mirrored atomically with the existing pool/cap snapshot. These files are therefore part of Task 22 rather than being left as dangling compile-time or migration references.
 
 **TDD RED:** Add a source architecture test requiring absence of `armSignatureKey`, `makeArmSignature`, `shouldStartMonitoring`, `previousArmSignature`, `selectionFingerprint`, `currentArmSignature`, and the persisted `armSignature` generation field. Construct forbidden tokens from string segments so the final repository scan checks tests as well as production. Pair it with Task 10's starts `8,0`/stops `0` proof.
 
@@ -2916,7 +2928,7 @@ test -z "$(rg -l 'armSignatureKey|makeArmSignature|shouldStartMonitoring|previou
 
 ```bash
 cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS
-git add 'Evlin iOS/Services/EarnedBudgetArming.swift' 'Evlin iOS/Services/EarnedTimeStore.swift' 'Evlin iOSTests/EarnedBudgetArmingTests.swift' 'Evlin iOSTests/EarnedTimeStoreTests.swift' 'Evlin iOSTests/MeteringT1DemolitionTests.swift'
+git add 'Evlin iOS/Services/EarnedBudgetArming.swift' 'Evlin iOS/Services/EarnedTimeStore.swift' 'Evlin iOS/Services/DeviceEpochStore.swift' 'Evlin iOS/Services/BigKidStatePoller.swift' 'Evlin iOS/Services/CommandPoller.swift' 'Evlin iOS/Services/Auth/AuthService.swift' 'Evlin iOSTests/EarnedBudgetArmingTests.swift' 'Evlin iOSTests/EarnedTimeStoreTests.swift' 'Evlin iOSTests/AuthServiceTests.swift' 'Evlin iOSTests/DeviceEpochStoreMigrationTests.swift' 'Evlin iOSTests/EarnedBudgetSchedulerTests.swift' 'Evlin iOSTests/EarnedSampleReporterTests.swift' 'Evlin iOSTests/MeteringEpochDeliveryTests.swift' 'Evlin iOSTests/MeteringV2ActivationTests.swift' 'Evlin iOSTests/MeteringT1DemolitionTests.swift' 'docs/superpowers/plans/2026-07-17-metering-epoch-phase-3.md'
 git diff --cached --check && git diff --cached --stat && git diff --cached && git diff --cached --name-only
 git commit -m 'refactor: remove earned arm signature churn'
 ```

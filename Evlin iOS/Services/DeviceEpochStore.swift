@@ -236,10 +236,28 @@ nonisolated struct LegacyGenerationProvenance: Codable, Equatable, Sendable {
     let activityName: String
     let deviceID: String
     let offsetMinutes: Int
-    let armSignature: String
     let usageDate: String
     let timezoneIdentifier: String
+    let generationKey: MeteringGenerationKey?
     let armedAt: Date?
+
+    init(
+        activityName: String,
+        deviceID: String,
+        offsetMinutes: Int,
+        usageDate: String,
+        timezoneIdentifier: String,
+        generationKey: MeteringGenerationKey? = nil,
+        armedAt: Date?
+    ) {
+        self.activityName = activityName
+        self.deviceID = deviceID
+        self.offsetMinutes = offsetMinutes
+        self.usageDate = usageDate
+        self.timezoneIdentifier = timezoneIdentifier
+        self.generationKey = generationKey
+        self.armedAt = armedAt
+    }
 }
 
 nonisolated struct LegacyCompatibilityMonitorState: Codable, Equatable, Sendable {
@@ -2028,9 +2046,9 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                 activityName: generation.activityName,
                 deviceID: generation.deviceID,
                 offsetMinutes: generation.offsetMinutes,
-                armSignature: generation.armSignature,
                 usageDate: generation.usageDate,
                 timezoneIdentifier: generation.timezoneIdentifier,
+                generationKey: generation.generationKey,
                 armedAt: generation.armedAt
             )
         }

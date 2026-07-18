@@ -16,26 +16,26 @@ nonisolated enum EarnedActivityGeneration {
         let activityName: String
         let deviceID: String
         let offsetMinutes: Int
-        let armSignature: String
         let usageDate: String
         let timezoneIdentifier: String
+        let generationKey: MeteringGenerationKey?
         let armedAt: Date?
 
         init(
             activityName: String,
             deviceID: String,
             offsetMinutes: Int,
-            armSignature: String,
             usageDate: String,
             timezoneIdentifier: String,
+            generationKey: MeteringGenerationKey? = nil,
             armedAt: Date? = nil
         ) {
             self.activityName = activityName
             self.deviceID = deviceID
             self.offsetMinutes = offsetMinutes
-            self.armSignature = armSignature
             self.usageDate = usageDate
             self.timezoneIdentifier = timezoneIdentifier
+            self.generationKey = generationKey
             self.armedAt = armedAt
         }
 
@@ -43,7 +43,6 @@ nonisolated enum EarnedActivityGeneration {
             isEarnedActivityName(activityName)
                 && canonicalDeviceID(deviceID) != nil
                 && offsetMinutes >= 0
-                && !armSignature.isEmpty
                 && EarnedTimeStore.isCanonicalUsageDate(usageDate)
                 && TimeZone(identifier: timezoneIdentifier) != nil
         }
@@ -740,6 +739,7 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
     private let acceptedUsageDateKey = "earned.acceptedUsageDate"
     private let acceptedEstimateKey = "earned.acceptedEstimateMinutes"
     private let runtimeTimezoneKey = "earned.runtimeTimezoneIdentifier"
+    private let runtimePolicyRevisionKey = "earned.runtimePolicyRevision"
     private let poolKey          = "earned.poolMinutes"
     private let capKey           = "earned.capMinutes"
     private let usageCountingAllowedKey = "evlin.usageCountingAllowed"
@@ -831,8 +831,12 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
     /// The `FamilyActivityPicker`-captured selection that covers the whole
     /// device (all categories). Nil until the one-time capture flow completes.
     var measurementSelection: FamilyActivitySelection? {
-        guard let data = defaults?.data(forKey: measurementKey) else { return nil }
+        guard let data = measurementSelectionBytes else { return nil }
         return try? JSONDecoder().decode(FamilyActivitySelection.self, from: data)
+    }
+
+    var measurementSelectionBytes: Data? {
+        defaults?.data(forKey: measurementKey)
     }
 
     /// Persist the all-category selection from the capture flow.
@@ -1013,6 +1017,12 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
               TimeZone(identifier: identifier) != nil
         else { return nil }
         return identifier
+    }
+
+    var runtimePolicyRevision: String? {
+        guard let revision = defaults?.string(forKey: runtimePolicyRevisionKey),
+              !revision.isEmpty else { return nil }
+        return revision
     }
 
     func currentCanonicalPolicyUsageDate(now: Date = Date()) -> String? {
@@ -1209,6 +1219,7 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
         capMinutes: Int,
         remainingMinutes: Int,
         estimatedMinutes: Int,
+        policyRevision: String = "",
         syncedAt: Date = Date()
     ) -> RuntimePolicyReconciliation {
         withReconciliationTransaction(rollbackKeys: runtimePolicyRollbackKeys) {
@@ -1241,6 +1252,11 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
             self.poolMinutes = poolMinutes
             self.capMinutes = capMinutes
             defaults?.set(timezoneIdentifier, forKey: runtimeTimezoneKey)
+            if !policyRevision.isEmpty {
+                defaults?.set(policyRevision, forKey: runtimePolicyRevisionKey)
+            } else {
+                defaults?.removeObject(forKey: runtimePolicyRevisionKey)
+            }
             backendRemainingAtLastSync = remainingMinutes
             lastBackendSyncAt = syncedAt
             let accepted = reconcileAcceptedUsageLocked(
@@ -1295,7 +1311,8 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
 
     private var runtimePolicyRollbackKeys: [String] {
         var keys = [
-            poolKey, capKey, runtimeTimezoneKey, backendKey, lastBackendSyncAtKey,
+            poolKey, capKey, runtimeTimezoneKey, runtimePolicyRevisionKey,
+            backendKey, lastBackendSyncAtKey,
             acceptedUsageDateKey, acceptedEstimateKey, estimateKey,
         ]
         if let mirrored = EarnedActivityGeneration.canonicalDeviceID(
@@ -1615,7 +1632,8 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
         [lockedSetIDKey, lockedSetDataKey, lockedSetListAliasKeyKey,
          lockedSetAllSelectedKey,
          backendKey, lastBackendSyncAtKey, estimateKey, acceptedUsageDateKey,
-         acceptedEstimateKey, runtimeTimezoneKey, poolKey, capKey, usageCountingAllowedKey,
+         acceptedEstimateKey, runtimeTimezoneKey, runtimePolicyRevisionKey,
+         poolKey, capKey, usageCountingAllowedKey,
          authoritativeStateReadyDeviceIDKey, meteringCoverageStatusKey,
          meteringReadyThroughUsageDateKey, earnedUsageOffsetKey].forEach {
             defaults?.removeObject(forKey: $0)

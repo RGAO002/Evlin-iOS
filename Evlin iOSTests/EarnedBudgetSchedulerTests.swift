@@ -506,7 +506,6 @@ final class EarnedBudgetSchedulerTests: XCTestCase {
             ),
             deviceID: deviceID,
             offsetMinutes: offset,
-            armSignature: signature,
             usageDate: usageDate,
             timezoneIdentifier: timezone,
             armedAt: armedAt
@@ -649,7 +648,6 @@ final class EarnedBudgetSchedulerTests: XCTestCase {
             activityName: EarnedActivityGeneration.legacyActivityName,
             deviceID: "b21411cb-63a5-4489-bc68-bf8ac26ee15b",
             offsetMinutes: 10,
-            armSignature: "legacy-signature",
             usageDate: "2026-07-11",
             timezoneIdentifier: "America/New_York"
         )
@@ -680,7 +678,6 @@ final class EarnedBudgetSchedulerTests: XCTestCase {
             activityName: EarnedActivityGeneration.legacyActivityName,
             deviceID: "b21411cb-63a5-4489-bc68-bf8ac26ee15b",
             offsetMinutes: 10,
-            armSignature: "legacy-signature",
             usageDate: "2026-07-11",
             timezoneIdentifier: "America/New_York"
         )

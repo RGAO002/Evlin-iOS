@@ -2133,7 +2133,6 @@ final class MeteringEpochDeliveryTests: XCTestCase {
                 activityName: "evlin.earned.legacy",
                 deviceID: owner.uuidString,
                 offsetMinutes: 0,
-                armSignature: "legacy",
                 usageDate: "2026-07-16",
                 timezoneIdentifier: "America/New_York",
                 armedAt: start

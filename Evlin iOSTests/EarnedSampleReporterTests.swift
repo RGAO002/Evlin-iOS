@@ -517,7 +517,6 @@ final class EarnedSampleReporterTests: XCTestCase {
             activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
             deviceID: UUID().uuidString,
             offsetMinutes: 50,
-            armSignature: "signature",
             usageDate: "2026-07-13",
             timezoneIdentifier: "America/New_York",
             armedAt: armedAt
@@ -550,7 +549,6 @@ final class EarnedSampleReporterTests: XCTestCase {
             activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
             deviceID: UUID().uuidString,
             offsetMinutes: 50,
-            armSignature: "signature",
             usageDate: "2026-07-13",
             timezoneIdentifier: "America/New_York",
             armedAt: armedAt
@@ -581,7 +579,6 @@ final class EarnedSampleReporterTests: XCTestCase {
             activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
             deviceID: UUID().uuidString,
             offsetMinutes: 50,
-            armSignature: "signature",
             usageDate: "2026-07-13",
             timezoneIdentifier: "America/New_York",
             armedAt: armedAt

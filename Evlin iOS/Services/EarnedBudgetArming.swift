@@ -1,6 +1,5 @@
 import Foundation
 import FamilyControls
-import CryptoKit
 
 /// Shared entry points for arming the earned-budget DeviceActivity ladder and
 /// for tearing down earned-time state when the child-device identity changes
@@ -25,7 +24,6 @@ enum EarnedBudgetArming {
     /// App-Group key remembering which child-device identity last owned the
     /// earned-budget ladder + EarnedTimeStore day state.
     static let identityOwnerKey = "evlin.earned.identityOwner"
-    static let armSignatureKey = "evlin.earned.armSignature"
 
     nonisolated static func canonicalDeviceIdentity(_ raw: String?) -> String? {
         guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -45,74 +43,47 @@ enum EarnedBudgetArming {
         return !leftRaw.isEmpty && leftRaw == rightRaw
     }
 
-    nonisolated static func makeArmSignature(
-        deviceID: String,
-        usageDate: String,
-        timezoneIdentifier: String,
-        poolMinutes: Int,
-        capMinutes: Int,
-        offsetMinutes: Int,
-        selectionFingerprint: String
-    ) -> String {
-        [
-            canonicalDeviceIdentity(deviceID) ?? deviceID,
-            usageDate,
-            timezoneIdentifier,
-            "pool=\(poolMinutes)",
-            "cap=\(capMinutes)",
-            "offset=\(max(0, offsetMinutes))",
-            "selection=\(selectionFingerprint)",
-        ].joined(separator: "|")
-    }
-
-    nonisolated static func shouldStartMonitoring(
-        previousSignature: String?,
-        nextSignature: String,
-        force: Bool
-    ) -> Bool {
-        force || previousSignature != nextSignature
-    }
-
     nonisolated static func requiresGenerationReplacement(
         _ activeGeneration: EarnedActivityGeneration.Generation?
     ) -> Bool {
         activeGeneration?.armedAt == nil
     }
 
-    nonisolated static func previousArmSignature(
-        lifecycle: EarnedActivityGeneration.Lifecycle?,
-        scalarSignature: String?
-    ) -> String? {
-        guard lifecycle?.isStopped != true else { return nil }
-        return lifecycle?.active?.armSignature ?? scalarSignature
-    }
-
-    private static func selectionFingerprint(_ selection: FamilyActivitySelection) -> String {
-        guard let data = try? JSONEncoder().encode(selection) else {
-            return EarnedBudgetScheduler.selectionSummary(selection)
-        }
-        let digest = SHA256.hash(data: data)
-        return digest.map { String(format: "%02x", $0) }.joined()
-    }
-
-    private static func currentArmSignature(
-        deviceID: String,
-        usageDate: String,
+    nonisolated static func legacyGenerationKey(
+        deviceID: UUID,
         timezoneIdentifier: String,
-        poolMinutes: Int,
-        capMinutes: Int,
-        offsetMinutes: Int,
-        selection: FamilyActivitySelection
-    ) -> String {
-        makeArmSignature(
-            deviceID: deviceID,
-            usageDate: usageDate,
-            timezoneIdentifier: timezoneIdentifier,
-            poolMinutes: poolMinutes,
-            capMinutes: capMinutes,
-            offsetMinutes: offsetMinutes,
-            selectionFingerprint: selectionFingerprint(selection)
+        policyRevision: String,
+        selectionBytes: Data,
+        enforcementSetID: UUID
+    ) -> MeteringGenerationKey {
+        MeteringGenerationKey(
+            protocolVersion: 2,
+            childDeviceID: deviceID,
+            canonicalTimezone: timezoneIdentifier,
+            policyRevision: policyRevision,
+            measurementSelectionDigest: MeteringEpochContract.selectionDigest(
+                persistedBytes: selectionBytes
+            ),
+            enforcementSetID: enforcementSetID
         )
+    }
+
+    nonisolated static func shouldReplaceLegacyGeneration(
+        _ active: EarnedActivityGeneration.Generation?,
+        with nextKey: MeteringGenerationKey,
+        usageDate: String,
+        force: Bool
+    ) -> Bool {
+        guard !force,
+              let active,
+              active.armedAt != nil,
+              active.generationKey == nextKey,
+              active.usageDate == usageDate,
+              active.timezoneIdentifier == nextKey.canonicalTimezone,
+              EarnedActivityGeneration.canonicalDeviceID(active.deviceID)
+                == nextKey.childDeviceID.uuidString.lowercased()
+        else { return true }
+        return false
     }
 
     nonisolated static func replacementOffset(
@@ -125,19 +96,15 @@ enum EarnedBudgetArming {
     @discardableResult
     static func installReplacement(
         replacementOffset: Int,
-        replacementSignature: String,
         store: EarnedTimeStore,
-        defaults: UserDefaults?,
         startMonitoring: () -> Bool
     ) -> Bool {
         guard startMonitoring() else { return false }
         store.earnedUsageOffsetMinutes = replacementOffset
-        defaults?.set(replacementSignature, forKey: armSignatureKey)
-        defaults?.synchronize()
         return true
     }
 
-    static func stopAndInvalidateSignature(
+    static func stopLegacyMonitoring(
         defaults: UserDefaults? = UserDefaults(suiteName: "group.com.evlin.ios"),
         stopMonitoring: (() -> Void)? = nil
     ) {
@@ -149,7 +116,6 @@ enum EarnedBudgetArming {
         } else {
             EarnedBudgetScheduler.shared.stop()
         }
-        defaults?.removeObject(forKey: armSignatureKey)
         defaults?.synchronize()
     }
 
@@ -178,13 +144,13 @@ enum EarnedBudgetArming {
                 // Fail closed: invalidate callbacks, but keep the owner mirror
                 // intact so a later recovery attempt can still authorize and
                 // persist the cleanup envelope.
-                stopAndInvalidateSignature(
+                stopLegacyMonitoring(
                     defaults: appGroupDefaults,
                     stopMonitoring: stopMonitoring
                 )
                 return
             }
-            stopAndInvalidateSignature(
+            stopLegacyMonitoring(
                 defaults: appGroupDefaults,
                 stopMonitoring: stopMonitoring
             )
@@ -206,7 +172,7 @@ enum EarnedBudgetArming {
 
         // Legacy/no-v2-root compatibility path. Production identity entry
         // points pass DeviceEpochStore.shared and use the durable path above.
-        stopAndInvalidateSignature(
+        stopLegacyMonitoring(
             defaults: appGroupDefaults,
             stopMonitoring: stopMonitoring
         )
@@ -259,14 +225,14 @@ enum EarnedBudgetArming {
                 )
             } catch {
                 readinessStore.clearAuthoritativeStateReadiness()
-                stopAndInvalidateSignature(
+                stopLegacyMonitoring(
                     defaults: appGroupDefaults,
                     stopMonitoring: stopMonitoring
                 )
                 return
             }
             readinessStore.clearAuthoritativeStateReadiness()
-            stopAndInvalidateSignature(
+            stopLegacyMonitoring(
                 defaults: appGroupDefaults,
                 stopMonitoring: stopMonitoring
             )
@@ -287,7 +253,7 @@ enum EarnedBudgetArming {
         if current != next || boundDeviceMismatch {
             readinessStore.clearAuthoritativeStateReadiness()
             if hasGenerationState ?? inferredGenerationState {
-                stopAndInvalidateSignature(
+                stopLegacyMonitoring(
                     defaults: appGroupDefaults,
                     stopMonitoring: stopMonitoring
                 )
@@ -344,7 +310,7 @@ enum EarnedBudgetArming {
                 epochStore: epochStore
             )
         } else {
-            stopAndInvalidateSignature(defaults: suite)
+            stopLegacyMonitoring(defaults: suite)
             suite?.removeObject(forKey: "evlin.childId")
             suite?.synchronize()
             EarnedTimeStore.shared.clearUsageStateForIdentityChange()
@@ -447,7 +413,7 @@ enum EarnedBudgetArming {
             return
         }
         guard store.usageCountingAllowed else {
-            stopAndInvalidateSignature()
+            stopLegacyMonitoring()
             CommandDeliveryDiagnostics.record(
                 CommandDeliveryDiagnostics.keyEarnedArmAttempt,
                 "skipped usage-counting-paused \(EarnedBudgetScheduler.selectionSummary(selection))"
@@ -457,19 +423,28 @@ enum EarnedBudgetArming {
 
         let poolMinutes = store.poolMinutes ?? 60
         let capMinutes = store.capMinutes ?? poolMinutes
-        let usageContext = store.usageContext()
+        let usageContext = store.currentPolicyDateContext()
         let usageDate = usageContext.usageDate
         let timezoneIdentifier = usageContext.timezoneIdentifier
         let scalarOffset = store.earnedUsageOffsetMinutes
-        let scalarSignature = defaults?.string(forKey: armSignatureKey)
-        let migrationSignature = currentArmSignature(
-            deviceID: current,
-            usageDate: usageDate,
+        guard let selectionBytes = store.measurementSelectionBytes,
+              let enforcementSetRaw = store.lockedSetID,
+              let enforcementSetID = UUID(uuidString: enforcementSetRaw)
+        else {
+            CommandDeliveryDiagnostics.record(
+                CommandDeliveryDiagnostics.keyEarnedArmAttempt,
+                "skipped incomplete-generation-identity"
+            )
+            return
+        }
+        let policyRevision = store.runtimePolicyRevision
+            ?? "legacy-pool:\(poolMinutes)-cap:\(capMinutes)"
+        let nextGenerationKey = legacyGenerationKey(
+            deviceID: currentDeviceID,
             timezoneIdentifier: timezoneIdentifier,
-            poolMinutes: poolMinutes,
-            capMinutes: capMinutes,
-            offsetMinutes: scalarOffset,
-            selection: selection
+            policyRevision: policyRevision,
+            selectionBytes: selectionBytes,
+            enforcementSetID: enforcementSetID
         )
         if EarnedActivityGeneration.loadLifecycle(defaults: defaults) == nil,
            defaults?.data(forKey: EarnedActivityGeneration.lifecycleKey) == nil {
@@ -481,9 +456,7 @@ enum EarnedBudgetArming {
                    persistedName.hasPrefix(EarnedActivityGeneration.generatedActivityPrefix) {
                     return persistedName
                 }
-                return scalarSignature == nil
-                    ? nil
-                    : EarnedActivityGeneration.legacyActivityName
+                return nil
             }()
             if let migrationName {
                 EarnedActivityGeneration.migrateActiveIfNeeded(
@@ -491,9 +464,9 @@ enum EarnedBudgetArming {
                         activityName: migrationName,
                         deviceID: current,
                         offsetMinutes: scalarOffset,
-                        armSignature: scalarSignature ?? migrationSignature,
                         usageDate: usageDate,
-                        timezoneIdentifier: timezoneIdentifier
+                        timezoneIdentifier: timezoneIdentifier,
+                        generationKey: nextGenerationKey
                     ),
                     defaults: defaults
                 )
@@ -504,29 +477,17 @@ enum EarnedBudgetArming {
         let runningOffset = activeGeneration?.offsetMinutes ?? scalarOffset
         if let activeGeneration {
             store.earnedUsageOffsetMinutes = activeGeneration.offsetMinutes
-            defaults?.set(activeGeneration.armSignature, forKey: armSignatureKey)
             defaults?.set(
                 activeGeneration.activityName,
                 forKey: EarnedActivityGeneration.activeActivityNameKey
             )
             defaults?.synchronize()
         }
-        let stableSignature = currentArmSignature(
-            deviceID: current,
+        guard shouldReplaceLegacyGeneration(
+            activeGeneration,
+            with: nextGenerationKey,
             usageDate: usageDate,
-            timezoneIdentifier: timezoneIdentifier,
-            poolMinutes: poolMinutes,
-            capMinutes: capMinutes,
-            offsetMinutes: runningOffset,
-            selection: selection
-        )
-        guard shouldStartMonitoring(
-            previousSignature: previousArmSignature(
-                lifecycle: lifecycle,
-                scalarSignature: defaults?.string(forKey: armSignatureKey)
-            ),
-            nextSignature: stableSignature,
-            force: force || requiresGenerationReplacement(activeGeneration)
+            force: force
         ) else {
             CommandDeliveryDiagnostics.record(
                 CommandDeliveryDiagnostics.keyEarnedArmAttempt,
@@ -544,36 +505,25 @@ enum EarnedBudgetArming {
             capMinutes: capMinutes,
             offsetMinutes: replacementOffset
         ) else {
-            stopAndInvalidateSignature(defaults: defaults)
+            stopLegacyMonitoring(defaults: defaults)
             CommandDeliveryDiagnostics.record(
                 CommandDeliveryDiagnostics.keyEarnedArmAttempt,
                 "skipped no-remaining pool=\(poolMinutes) cap=\(capMinutes) offset=\(replacementOffset) \(EarnedBudgetScheduler.selectionSummary(selection))"
             )
             return
         }
-        let replacementSignature = currentArmSignature(
-            deviceID: current,
-            usageDate: usageDate,
-            timezoneIdentifier: timezoneIdentifier,
-            poolMinutes: poolMinutes,
-            capMinutes: capMinutes,
-            offsetMinutes: replacementOffset,
-            selection: selection
-        )
         let replacementGeneration = EarnedActivityGeneration.Generation(
             activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
             deviceID: current,
             offsetMinutes: replacementOffset,
-            armSignature: replacementSignature,
             usageDate: usageDate,
             timezoneIdentifier: timezoneIdentifier,
+            generationKey: nextGenerationKey,
             armedAt: Date()
         )
         _ = installReplacement(
             replacementOffset: replacementOffset,
-            replacementSignature: replacementSignature,
             store: store,
-            defaults: defaults,
             startMonitoring: {
                 EarnedBudgetScheduler.shared.armFromNow(
                     poolMinutes: remainingPolicy.poolMinutes,

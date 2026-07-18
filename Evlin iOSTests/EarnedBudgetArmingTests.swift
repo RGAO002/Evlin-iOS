@@ -8,7 +8,6 @@ final class EarnedBudgetArmingTests: XCTestCase {
             activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
             deviceID: UUID().uuidString,
             offsetMinutes: 5,
-            armSignature: "legacy-signature",
             usageDate: "2026-07-13",
             timezoneIdentifier: "America/New_York"
         )
@@ -16,7 +15,6 @@ final class EarnedBudgetArmingTests: XCTestCase {
             activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
             deviceID: UUID().uuidString,
             offsetMinutes: 5,
-            armSignature: "timestamped-signature",
             usageDate: "2026-07-13",
             timezoneIdentifier: "America/New_York",
             armedAt: Date()
@@ -24,34 +22,6 @@ final class EarnedBudgetArmingTests: XCTestCase {
 
         XCTAssertTrue(EarnedBudgetArming.requiresGenerationReplacement(legacy))
         XCTAssertFalse(EarnedBudgetArming.requiresGenerationReplacement(timestamped))
-    }
-
-    func test_acceptedAdvanceDoesNotChangeSignatureForRunningOffset() {
-        let base = EarnedBudgetArming.makeArmSignature(
-            deviceID: "b21411cb-63a5-4489-bc68-bf8ac26ee15b",
-            usageDate: "2026-07-03",
-            timezoneIdentifier: "America/New_York",
-            poolMinutes: 15,
-            capMinutes: 15,
-            offsetMinutes: 0,
-            selectionFingerprint: "selection-a"
-        )
-        let afterAcceptedT5 = EarnedBudgetArming.makeArmSignature(
-            deviceID: "b21411cb-63a5-4489-bc68-bf8ac26ee15b",
-            usageDate: "2026-07-03",
-            timezoneIdentifier: "America/New_York",
-            poolMinutes: 15,
-            capMinutes: 15,
-            offsetMinutes: 0,
-            selectionFingerprint: "selection-a"
-        )
-
-        XCTAssertEqual(base, afterAcceptedT5)
-        XCTAssertFalse(EarnedBudgetArming.shouldStartMonitoring(
-            previousSignature: base,
-            nextSignature: afterAcceptedT5,
-            force: false
-        ))
     }
 
     func test_realReplacementUsesAcceptedEstimateAsNewOffset() {
@@ -71,45 +41,39 @@ final class EarnedBudgetArmingTests: XCTestCase {
         )
     }
 
-    func test_failedReplacementPreservesOffsetSignatureAndGeneration() {
+    func test_failedReplacementPreservesOffsetAndGeneration() {
         let suiteName = "EarnedBudgetArmingTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
         let store = EarnedTimeStore(suiteName: suiteName)
         let priorGeneration = EarnedActivityGeneration.generatedActivityName(id: UUID())
         store.earnedUsageOffsetMinutes = 5
-        defaults.set("old-signature", forKey: EarnedBudgetArming.armSignatureKey)
         defaults.set(priorGeneration, forKey: EarnedActivityGeneration.activeActivityNameKey)
 
         let installed = EarnedBudgetArming.installReplacement(
             replacementOffset: 15,
-            replacementSignature: "new-signature",
             store: store,
-            defaults: defaults,
             startMonitoring: { false }
         )
 
         XCTAssertFalse(installed)
         XCTAssertEqual(store.earnedUsageOffsetMinutes, 5)
-        XCTAssertEqual(defaults.string(forKey: EarnedBudgetArming.armSignatureKey), "old-signature")
         XCTAssertEqual(
             defaults.string(forKey: EarnedActivityGeneration.activeActivityNameKey),
             priorGeneration
         )
     }
 
-    func test_stopInvalidatesSignatureSoFalseToTrueReinstallsExactlyOnce() {
+    func test_stopPersistsStoppedLifecycle() {
         let suiteName = "EarnedBudgetArmingTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
-        defaults.set("stable-signature", forKey: EarnedBudgetArming.armSignatureKey)
         EarnedActivityGeneration.persistLifecycle(
             .init(
                 active: .init(
                     activityName: EarnedActivityGeneration.legacyActivityName,
                     deviceID: "b21411cb-63a5-4489-bc68-bf8ac26ee15b",
                     offsetMinutes: 5,
-                    armSignature: "stable-signature",
                     usageDate: "2026-07-11",
                     timezoneIdentifier: "America/New_York"
                 ),
@@ -119,39 +83,20 @@ final class EarnedBudgetArmingTests: XCTestCase {
         )
         var stopCount = 0
 
-        EarnedBudgetArming.stopAndInvalidateSignature(
+        EarnedBudgetArming.stopLegacyMonitoring(
             defaults: defaults,
             stopMonitoring: { stopCount += 1 }
         )
 
         XCTAssertEqual(stopCount, 1)
-        XCTAssertNil(defaults.string(forKey: EarnedBudgetArming.armSignatureKey))
         let stoppedLifecycle = EarnedActivityGeneration.loadLifecycle(defaults: defaults)
         XCTAssertEqual(stoppedLifecycle?.isStopped, true)
-        XCTAssertTrue(EarnedBudgetArming.shouldStartMonitoring(
-            previousSignature: EarnedBudgetArming.previousArmSignature(
-                lifecycle: stoppedLifecycle,
-                scalarSignature: defaults.string(forKey: EarnedBudgetArming.armSignatureKey)
-            ),
-            nextSignature: "stable-signature",
-            force: false
-        ))
-        defaults.set("stable-signature", forKey: EarnedBudgetArming.armSignatureKey)
-        XCTAssertTrue(EarnedBudgetArming.shouldStartMonitoring(
-            previousSignature: EarnedBudgetArming.previousArmSignature(
-                lifecycle: stoppedLifecycle,
-                scalarSignature: defaults.string(forKey: EarnedBudgetArming.armSignatureKey)
-            ),
-            nextSignature: "stable-signature",
-            force: false
-        ))
     }
 
     func test_interruptedStopTombstonePreventsLegacyMigrationAndForcesInstall() {
         let suiteName = "EarnedBudgetArmingTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
-        defaults.set("stale-signature", forKey: EarnedBudgetArming.armSignatureKey)
         var stopped: [String] = []
 
         EarnedActivityGeneration.stopPersisted(
@@ -163,7 +108,6 @@ final class EarnedBudgetArmingTests: XCTestCase {
             activityName: EarnedActivityGeneration.legacyActivityName,
             deviceID: "b21411cb-63a5-4489-bc68-bf8ac26ee15b",
             offsetMinutes: 5,
-            armSignature: "stale-signature",
             usageDate: "2026-07-11",
             timezoneIdentifier: "America/New_York"
         )
@@ -175,10 +119,6 @@ final class EarnedBudgetArmingTests: XCTestCase {
             activityName: EarnedActivityGeneration.legacyActivityName,
             currentDeviceID: legacy.deviceID,
             lifecycle: EarnedActivityGeneration.loadLifecycle(defaults: defaults)
-        ))
-        XCTAssertNil(EarnedBudgetArming.previousArmSignature(
-            lifecycle: EarnedActivityGeneration.loadLifecycle(defaults: defaults),
-            scalarSignature: defaults.string(forKey: EarnedBudgetArming.armSignatureKey)
         ))
     }
 
@@ -238,7 +178,6 @@ final class EarnedBudgetArmingTests: XCTestCase {
             activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
             deviceID: oldID.uuidString,
             offsetMinutes: 10,
-            armSignature: "old-generation",
             usageDate: "2026-07-12",
             timezoneIdentifier: "America/New_York"
         )
@@ -384,7 +323,6 @@ final class EarnedBudgetArmingTests: XCTestCase {
             activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
             deviceID: oldID.uuidString,
             offsetMinutes: 0,
-            armSignature: "old-generation",
             usageDate: "2026-07-12",
             timezoneIdentifier: "America/New_York"
         )
@@ -432,7 +370,6 @@ final class EarnedBudgetArmingTests: XCTestCase {
             activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
             deviceID: oldID.uuidString,
             offsetMinutes: 0,
-            armSignature: "old-generation",
             usageDate: "2026-07-12",
             timezoneIdentifier: "America/New_York"
         )
@@ -473,7 +410,6 @@ final class EarnedBudgetArmingTests: XCTestCase {
             activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
             deviceID: oldID.uuidString,
             offsetMinutes: 0,
-            armSignature: "old-generation",
             usageDate: "2026-07-12",
             timezoneIdentifier: "America/New_York"
         )
@@ -481,7 +417,6 @@ final class EarnedBudgetArmingTests: XCTestCase {
             activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
             deviceID: newID.uuidString,
             offsetMinutes: 0,
-            armSignature: "new-generation",
             usageDate: "2026-07-12",
             timezoneIdentifier: "America/New_York"
         )
@@ -544,89 +479,77 @@ final class EarnedBudgetArmingTests: XCTestCase {
         XCTAssertFalse(EarnedBudgetScheduler.canInstallLegacyLadder(localSelection: .v2))
     }
 
-    func test_armSignatureSkipsWhenIdentityDatePolicySelectionAndOffsetAreUnchanged() {
-        let base = EarnedBudgetArming.makeArmSignature(
-            deviceID: "device-a",
-            usageDate: "2026-07-03",
+    func test_legacyGenerationIdentityReplacesPolicyAndSelectionButNotOffset() {
+        let deviceID = UUID()
+        let enforcementSetID = UUID()
+        let baseKey = EarnedBudgetArming.legacyGenerationKey(
+            deviceID: deviceID,
             timezoneIdentifier: "America/New_York",
-            poolMinutes: 15,
-            capMinutes: 15,
+            policyRevision: "policy-1",
+            selectionBytes: Data("persisted-selection-a".utf8),
+            enforcementSetID: enforcementSetID
+        )
+        let active = EarnedActivityGeneration.Generation(
+            activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
+            deviceID: deviceID.uuidString,
             offsetMinutes: 5,
-            selectionFingerprint: "selection-a"
+            usageDate: "2026-07-18",
+            timezoneIdentifier: "America/New_York",
+            generationKey: baseKey,
+            armedAt: Date()
+        )
+        let sameIdentityWithAdvancedOffset = EarnedActivityGeneration.Generation(
+            activityName: active.activityName,
+            deviceID: active.deviceID,
+            offsetMinutes: 25,
+            usageDate: active.usageDate,
+            timezoneIdentifier: active.timezoneIdentifier,
+            generationKey: baseKey,
+            armedAt: active.armedAt
         )
 
-        let unchanged = EarnedBudgetArming.makeArmSignature(
-            deviceID: "device-a",
-            usageDate: "2026-07-03",
+        XCTAssertFalse(EarnedBudgetArming.shouldReplaceLegacyGeneration(
+            sameIdentityWithAdvancedOffset,
+            with: baseKey,
+            usageDate: "2026-07-18",
+            force: false
+        ))
+
+        let changedPolicy = EarnedBudgetArming.legacyGenerationKey(
+            deviceID: deviceID,
             timezoneIdentifier: "America/New_York",
-            poolMinutes: 15,
-            capMinutes: 15,
-            offsetMinutes: 5,
-            selectionFingerprint: "selection-a"
+            policyRevision: "policy-2",
+            selectionBytes: Data("persisted-selection-a".utf8),
+            enforcementSetID: enforcementSetID
+        )
+        let changedSelection = EarnedBudgetArming.legacyGenerationKey(
+            deviceID: deviceID,
+            timezoneIdentifier: "America/New_York",
+            policyRevision: "policy-1",
+            selectionBytes: Data("persisted-selection-b".utf8),
+            enforcementSetID: enforcementSetID
         )
 
-        XCTAssertEqual(base, unchanged)
-        XCTAssertFalse(EarnedBudgetArming.shouldStartMonitoring(
-            previousSignature: base,
-            nextSignature: unchanged,
+        XCTAssertTrue(EarnedBudgetArming.shouldReplaceLegacyGeneration(
+            active,
+            with: changedPolicy,
+            usageDate: active.usageDate,
+            force: false
+        ))
+        XCTAssertTrue(EarnedBudgetArming.shouldReplaceLegacyGeneration(
+            active,
+            with: changedSelection,
+            usageDate: active.usageDate,
+            force: false
+        ))
+        XCTAssertTrue(EarnedBudgetArming.shouldReplaceLegacyGeneration(
+            active,
+            with: baseKey,
+            usageDate: "2026-07-19",
             force: false
         ))
     }
 
-    func test_armSignatureChangesWhenPolicyOrSelectionChanges() {
-        let base = EarnedBudgetArming.makeArmSignature(
-            deviceID: "device-a",
-            usageDate: "2026-07-03",
-            timezoneIdentifier: "America/New_York",
-            poolMinutes: 15,
-            capMinutes: 15,
-            offsetMinutes: 5,
-            selectionFingerprint: "selection-a"
-        )
-
-        XCTAssertNotEqual(base, EarnedBudgetArming.makeArmSignature(
-            deviceID: "device-a",
-            usageDate: "2026-07-03",
-            timezoneIdentifier: "America/New_York",
-            poolMinutes: 20,
-            capMinutes: 15,
-            offsetMinutes: 5,
-            selectionFingerprint: "selection-a"
-        ))
-        XCTAssertNotEqual(base, EarnedBudgetArming.makeArmSignature(
-            deviceID: "device-a",
-            usageDate: "2026-07-03",
-            timezoneIdentifier: "America/New_York",
-            poolMinutes: 15,
-            capMinutes: 15,
-            offsetMinutes: 5,
-            selectionFingerprint: "selection-b"
-        ))
-        XCTAssertTrue(EarnedBudgetArming.shouldStartMonitoring(previousSignature: base, nextSignature: base, force: true))
-    }
-
-    func test_policyTimezoneChangesArmSignatureEvenWhenDeviceTimezoneDoesNot() {
-        let eastern = EarnedBudgetArming.makeArmSignature(
-            deviceID: "device-a",
-            usageDate: "2026-07-11",
-            timezoneIdentifier: "America/New_York",
-            poolMinutes: 60,
-            capMinutes: 45,
-            offsetMinutes: 5,
-            selectionFingerprint: "selection-a"
-        )
-        let pacific = EarnedBudgetArming.makeArmSignature(
-            deviceID: "device-a",
-            usageDate: "2026-07-11",
-            timezoneIdentifier: "America/Los_Angeles",
-            poolMinutes: 60,
-            capMinutes: 45,
-            offsetMinutes: 5,
-            selectionFingerprint: "selection-a"
-        )
-
-        XCTAssertNotEqual(eastern, pacific)
-    }
 }
 
 private struct IdentityCleanupUnavailableLock: DeviceEpochStoreLocking {

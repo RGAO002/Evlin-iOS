@@ -391,6 +391,7 @@ final class EarnedTimeStoreTests: XCTestCase {
         )
 
         XCTAssertNil(generation.armedAt)
+        XCTAssertNil(generation.generationKey)
         XCTAssertTrue(generation.isValid)
     }
 
@@ -400,7 +401,6 @@ final class EarnedTimeStoreTests: XCTestCase {
             activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
             deviceID: UUID().uuidString,
             offsetMinutes: 5,
-            armSignature: "timestamped-signature",
             usageDate: "2026-07-13",
             timezoneIdentifier: "America/New_York",
             armedAt: armedAt
@@ -415,6 +415,64 @@ final class EarnedTimeStoreTests: XCTestCase {
         XCTAssertEqual(decoded.armedAt, armedAt)
     }
 
+    func test_runtimePolicyPersistsRevisionAndIdentityResetClearsIt() {
+        let store = freshStore()
+
+        XCTAssertEqual(store.reconcileRuntimePolicy(
+            usageDate: "2026-07-18",
+            timezoneIdentifier: "America/New_York",
+            poolMinutes: 120,
+            capMinutes: 60,
+            remainingMinutes: 60,
+            estimatedMinutes: 0,
+            policyRevision: "policy-revision-18"
+        ), .reconciled(0))
+        XCTAssertEqual(store.runtimePolicyRevision, "policy-revision-18")
+
+        _ = store.reconcileRuntimePolicy(
+            usageDate: "2026-07-18",
+            timezoneIdentifier: "America/New_York",
+            poolMinutes: 120,
+            capMinutes: 60,
+            remainingMinutes: 60,
+            estimatedMinutes: 0
+        )
+        XCTAssertNil(store.runtimePolicyRevision)
+
+        _ = store.reconcileRuntimePolicy(
+            usageDate: "2026-07-18",
+            timezoneIdentifier: "America/New_York",
+            poolMinutes: 120,
+            capMinutes: 60,
+            remainingMinutes: 60,
+            estimatedMinutes: 0,
+            policyRevision: "policy-revision-18"
+        )
+
+        store.clearUsageStateForIdentityChange()
+        XCTAssertNil(store.runtimePolicyRevision)
+    }
+
+    func test_policyDateContextDoesNotReuseYesterdayAcceptedUsageDate() {
+        let store = freshStore()
+        _ = store.reconcileRuntimePolicy(
+            usageDate: "2026-07-18",
+            timezoneIdentifier: "America/New_York",
+            poolMinutes: 120,
+            capMinutes: 60,
+            remainingMinutes: 60,
+            estimatedMinutes: 0,
+            policyRevision: "policy-revision-18"
+        )
+
+        let afterCanonicalMidnight = Date(timeIntervalSince1970: 1_784_438_400)
+        XCTAssertEqual(
+            store.currentPolicyDateContext(now: afterCanonicalMidnight).usageDate,
+            "2026-07-19"
+        )
+        XCTAssertEqual(store.acceptedUsageDate, "2026-07-18")
+    }
+
     func test_futureLifecycleVersionIsCorruptAndCannotAuthorizeCallback() throws {
         let suiteName = "EarnedTimeStoreTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
@@ -423,7 +481,6 @@ final class EarnedTimeStoreTests: XCTestCase {
             activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
             deviceID: UUID().uuidString,
             offsetMinutes: 0,
-            armSignature: "future-signature",
             usageDate: "2026-07-12",
             timezoneIdentifier: "America/New_York"
         )
@@ -464,7 +521,6 @@ final class EarnedTimeStoreTests: XCTestCase {
             activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
             deviceID: UUID().uuidString,
             offsetMinutes: 10,
-            armSignature: "prior-signature",
             usageDate: "2026-07-12",
             timezoneIdentifier: "America/New_York"
         )
@@ -475,7 +531,6 @@ final class EarnedTimeStoreTests: XCTestCase {
             activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
             deviceID: prior.deviceID,
             offsetMinutes: 20,
-            armSignature: "next-signature",
             usageDate: "2026-07-12",
             timezoneIdentifier: "America/New_York"
         )
@@ -520,7 +575,6 @@ final class EarnedTimeStoreTests: XCTestCase {
             activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
             deviceID: UUID().uuidString,
             offsetMinutes: 0,
-            armSignature: "false-sync-signature",
             usageDate: "2026-07-13",
             timezoneIdentifier: "America/New_York"
         )
@@ -552,7 +606,6 @@ final class EarnedTimeStoreTests: XCTestCase {
             activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
             deviceID: UUID().uuidString,
             offsetMinutes: 0,
-            armSignature: "mismatch-signature",
             usageDate: "2026-07-13",
             timezoneIdentifier: "America/New_York"
         )

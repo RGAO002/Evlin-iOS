@@ -778,7 +778,7 @@ final class CommandPoller {
                 if let stopEarnedBudgetOverride {
                     stopEarnedBudgetOverride()
                 } else {
-                    EarnedBudgetArming.stopAndInvalidateSignature()
+                    EarnedBudgetArming.stopLegacyMonitoring()
                 }
                 return await ackEarnedTimeConfig(
                     commandID: commandID,

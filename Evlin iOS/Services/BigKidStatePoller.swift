@@ -430,7 +430,8 @@ final class BigKidStatePoller: ObservableObject {
             poolMinutes: runtime.dailyPoolMinutes,
             capMinutes: runtime.deviceCapMinutes,
             remainingMinutes: runtime.remainingMinutes,
-            estimatedMinutes: runtime.estimatedMinutes
+            estimatedMinutes: runtime.estimatedMinutes,
+            policyRevision: runtime.policyRevision
         )
     }
 
@@ -441,7 +442,7 @@ final class BigKidStatePoller: ObservableObject {
 
     private static func stopUsageCountersForTaskPause() {
         stopUsageCounters(
-            stopEarned: { EarnedBudgetArming.stopAndInvalidateSignature() },
+            stopEarned: { EarnedBudgetArming.stopLegacyMonitoring() },
             stopDeviceTotal: { BigKidActivityScheduler.shared.stop() },
             stopPerApp: { _ = AppLimitPlanner().arm(rules: []) }
         )

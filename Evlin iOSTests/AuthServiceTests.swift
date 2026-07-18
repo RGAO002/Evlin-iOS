@@ -152,7 +152,6 @@ final class AuthServiceTests: XCTestCase {
             activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
             deviceID: deviceID.uuidString,
             offsetMinutes: 0,
-            armSignature: "auth-terminal",
             usageDate: "2026-07-12",
             timezoneIdentifier: "America/New_York"
         )
