@@ -516,6 +516,38 @@ final class MeteringEpochDeliveryTests: XCTestCase {
         }
     }
 
+    func testDelayedRegistration200SupersedesRetiredEpoch() async throws {
+        let fileURL = temporaryStoreURL()
+        defer { removeTemporaryStore(fileURL) }
+        let store = makeStore(fileURL: fileURL)
+        try store.transaction(expectedOwner: owner) { $0 = makeBaseState() }
+        let transport = DeliveryTestTransport()
+        transport.results = [(try encoded(EpochRegistrationResponseDTO(
+            status: .registered,
+            epochID: epochID,
+            meteringProtocolVersion: 2,
+            snapshot: makeSnapshot(counted: true, warning: nil),
+            epochStatus: .active
+        )), HTTPURLResponse(url: baseURL, statusCode: 200, httpVersion: nil, headerFields: nil)!)]
+        transport.onRequest = { _ in
+            try? store.transaction(expectedOwner: self.owner) { state in
+                state.epochs[self.epochID]?.status = .retired
+                state.epochs[self.epochID]?.retiredAt = self.start
+            }
+        }
+        let delivery = MeteringEpochDelivery(baseURL: baseURL, store: store, transport: transport, clock: DeliveryTestClock(now: start))
+
+        try delivery.enqueueRegistration(makeValidRegistrationRequest(), owner: owner, epochID: epochID, routeID: routeID)
+        await delivery.drain(owner: owner)
+
+        let final = try store.read()
+        XCTAssertEqual(final.registrationWork.values.first?.retry.terminal, .superseded)
+        XCTAssertEqual(final.registrationWork.values.first?.retry.lastErrorCode, "route_superseded")
+        XCTAssertNil(final.registrationWork.values.first?.claim)
+        XCTAssertNil(final.epochs[epochID]?.registeredAt)
+        XCTAssertNil(final.ratchets[owner]?.registeredV2At)
+    }
+
     func testRegistration200AcceptsExactPreparingHandoffCandidateWhilePriorRouteIsActive() async throws {
         let fileURL = temporaryStoreURL()
         defer { removeTemporaryStore(fileURL) }
@@ -1251,8 +1283,9 @@ final class MeteringEpochDeliveryTests: XCTestCase {
 
         let final = try conflictStore.read()
         XCTAssertEqual(conflictTransport.requests.count, 1)
-        XCTAssertEqual(final.registrationWork.values.first?.retry.terminal, .pending)
-        XCTAssertNotNil(final.registrationWork.values.first?.claim)
+        XCTAssertEqual(final.registrationWork.values.first?.retry.terminal, .rejected)
+        XCTAssertEqual(final.registrationWork.values.first?.retry.lastErrorCode, "authoritative_base_conflict")
+        XCTAssertNil(final.registrationWork.values.first?.claim)
         XCTAssertEqual(final.epochs[epochID]?.authoritativeBaseConflict, conflict)
         XCTAssertNil(final.ratchets[owner]?.registeredV2At)
     }

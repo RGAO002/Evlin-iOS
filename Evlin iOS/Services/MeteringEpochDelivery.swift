@@ -266,7 +266,12 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
             switch item.kind {
             case .registration:
                 guard let registration = state.registrationWork.values.first(where: { $0.workID == item.workID }),
-                      !isSuppressedCandidate(registration.epochID, state: state)
+                      !isSuppressedCandidate(registration.epochID, state: state),
+                      state.hasCurrentRegistrationProvenance(
+                          owner: owner,
+                          epochID: registration.epochID,
+                          routeID: registration.routeID
+                      )
                 else { return false }
                 return true
             case .sample:
@@ -481,7 +486,7 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
                   work.ownerChildDeviceID == owner,
                   work.claim?.token == claim.token
             else { return }
-            if supersedeStaleRegistrationWork(&state, key: key, work: &work, owner: owner, claim: claim) {
+            if settleInvalidRegistrationClaim(&state, key: key, work: &work, owner: owner, claim: claim) {
                 return
             }
             guard state.hasCurrentRegistrationProvenance(owner: owner, epochID: work.epochID, routeID: work.routeID),
@@ -533,7 +538,7 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
                   work.ownerChildDeviceID == owner,
                   work.claim?.token == claim.token
             else { return }
-            if supersedeStaleRegistrationWork(&state, key: key, work: &work, owner: owner, claim: claim) {
+            if settleInvalidRegistrationClaim(&state, key: key, work: &work, owner: owner, claim: claim) {
                 return
             }
             guard state.hasCurrentRegistrationProvenance(owner: owner, epochID: work.epochID, routeID: work.routeID),
@@ -565,7 +570,7 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
                   work.ownerChildDeviceID == owner,
                   work.claim?.token == claim.token
             else { return }
-            if supersedeStaleRegistrationWork(&state, key: key, work: &work, owner: owner, claim: claim) {
+            if settleInvalidRegistrationClaim(&state, key: key, work: &work, owner: owner, claim: claim) {
                 return
             }
             guard state.hasCurrentRegistrationProvenance(owner: owner, epochID: work.epochID, routeID: work.routeID),
@@ -598,7 +603,7 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
                   work.ownerChildDeviceID == owner,
                   work.claim?.token == claim.token
             else { return }
-            if supersedeStaleRegistrationWork(&state, key: key, work: &work, owner: owner, claim: claim) {
+            if settleInvalidRegistrationClaim(&state, key: key, work: &work, owner: owner, claim: claim) {
                 return
             }
             guard state.hasCurrentRegistrationProvenance(owner: owner, epochID: work.epochID, routeID: work.routeID),
@@ -633,6 +638,38 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
         work.claim = nil
         state.registrationWork[key] = work
         return true
+    }
+
+    func settleInvalidRegistrationClaim(
+        _ state: inout DeviceEpochStoreState,
+        key: UUID,
+        work: inout EpochRegistrationWork,
+        owner: UUID,
+        claim: MeteringNetworkClaim
+    ) -> Bool {
+        guard work.ownerChildDeviceID == owner,
+              work.claim?.token == claim.token
+        else { return false }
+        if supersedeStaleRegistrationWork(&state, key: key, work: &work, owner: owner, claim: claim) {
+            return true
+        }
+        guard let route = state.routes[work.routeID],
+              let epoch = state.epochs[work.epochID],
+              work.request.usageDate == route.usageDate,
+              work.request.usageDate == epoch.usageDate
+        else {
+            work.retry = completedRetry(from: work.retry, code: "registration_invalidated", terminal: .rejected)
+            work.claim = nil
+            state.registrationWork[key] = work
+            return true
+        }
+        guard epoch.authoritativeBaseConflict == nil else {
+            work.retry = completedRetry(from: work.retry, code: "authoritative_base_conflict", terminal: .rejected)
+            work.claim = nil
+            state.registrationWork[key] = work
+            return true
+        }
+        return false
     }
 
     private func terminalizeActivation(

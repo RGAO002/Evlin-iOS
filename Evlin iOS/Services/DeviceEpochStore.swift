@@ -481,6 +481,10 @@ nonisolated struct DeviceEpochStoreState: Codable, Equatable, Sendable {
 }
 
 extension DeviceEpochStoreState {
+    // DeviceEpochStore also compiles in Push, which intentionally excludes
+    // MeteringDatedSchedule.swift. This mirrors MeteringHorizonPlanner.dateCount.
+    private static let currentHorizonDateCount = 8
+
     func dueWork(now: Date) -> [MeteringDueWork] {
         var work: [MeteringDueWork] = []
 
@@ -750,12 +754,22 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
             work.retry.lastErrorCode = code
             state.installWork[key] = work
             if installLimited {
+                let horizonUsageDates = state.currentHorizonUsageDates(
+                    owner: owner,
+                    generationID: failedRoute.generationID
+                )
                 let routes = state.routes.values.filter {
                     $0.ownerChildDeviceID == owner
                         && $0.generationID == failedRoute.generationID
-                        && ($0.lifecycle == .planned || $0.lifecycle == .active)
+                        && horizonUsageDates.contains($0.usageDate)
+                        && state.hasEligibleRouteEpochGeneration(
+                            owner: owner,
+                            route: $0,
+                            epoch: state.epochs[$0.epochID],
+                            generation: state.generations[$0.generationID]
+                        )
                 }
-                guard let first = routes.first, let last = routes.last else { return true }
+                guard let first = horizonUsageDates.first, let last = horizonUsageDates.last else { return true }
                 let functioningRouteIDs = Set(state.installWork.values.compactMap { work -> UUID? in
                     switch work.phase {
                     case .verified, .dualActive, .active:
@@ -766,8 +780,8 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                 })
                 var coverage = MonitorCoverageState(
                     ownerChildDeviceID: owner,
-                    requiredFromUsageDate: routes.map(\.usageDate).min() ?? first.usageDate,
-                    requiredThroughUsageDate: routes.map(\.usageDate).max() ?? last.usageDate,
+                    requiredFromUsageDate: first,
+                    requiredThroughUsageDate: last,
                     readyThroughUsageDate: nil,
                     status: .installLimited,
                     refreshedAt: now,
@@ -1398,20 +1412,8 @@ extension DeviceEpochStoreState {
               let route = routes[routeID],
               let epoch = epochs[epochID],
               let generation = generations[route.generationID],
-              route.ownerChildDeviceID == owner,
-              route.routeID == routeID,
-              route.epochID == epochID,
-              epoch.childDeviceID == owner,
-              epoch.epochID == epochID,
-              generation.childDeviceID == owner,
-              generation.generationID == route.generationID,
-              generation.retiredAt == nil,
-              route.lifecycle == .planned || route.lifecycle == .active,
-              generation.protocolVersion == epoch.protocolVersion,
-              generation.canonicalTimezone == epoch.canonicalTimezone,
-              generation.policyRevision == epoch.policyRevision,
-              generation.measurementSelectionDigest == epoch.measurementSelectionDigest,
-              generation.enforcementSetID == epoch.enforcementSetID
+              hasEligibleRouteEpochGeneration(owner: owner, route: route, epoch: epoch, generation: generation),
+              currentHorizonUsageDates(owner: owner, generationID: route.generationID).contains(route.usageDate)
         else { return false }
 
         if activeGenerationID == route.generationID {
@@ -1431,13 +1433,98 @@ extension DeviceEpochStoreState {
               fromRoute.routeID == handoff.fromRouteID,
               fromRoute.epochID == handoff.fromEpochID,
               fromRoute.generationID == handoff.fromGenerationID,
+              fromRoute.lifecycle == .active,
               fromEpoch.childDeviceID == owner,
               fromEpoch.epochID == handoff.fromEpochID,
+              fromEpoch.status == .active,
+              fromEpoch.retiredAt == nil,
               fromGeneration.childDeviceID == owner,
               fromGeneration.generationID == handoff.fromGenerationID,
-              fromGeneration.retiredAt == nil
+              fromGeneration.retiredAt == nil,
+              activeRouteID == handoff.fromRouteID,
+              activeEpochID == handoff.fromEpochID,
+              activeGenerationID == handoff.fromGenerationID,
+              hasEligibleRouteEpochGeneration(owner: owner, route: fromRoute, epoch: fromEpoch, generation: fromGeneration),
+              currentHorizonUsageDates(owner: owner, generationID: handoff.fromGenerationID).contains(fromRoute.usageDate)
         else { return false }
         return true
+    }
+
+    func currentHorizonUsageDates(owner: UUID, generationID: UUID) -> [String] {
+        guard let generation = generations[generationID],
+              generation.childDeviceID == owner,
+              generation.retiredAt == nil
+        else { return [] }
+        let dates = Set(routes.values.compactMap { route -> String? in
+            guard route.generationID == generationID,
+                  hasCurrentHorizonRouteDate(
+                      owner: owner,
+                      route: route,
+                      epoch: epochs[route.epochID],
+                      generation: generation
+                  ),
+                  isValidUsageDate(route.usageDate, timeZoneIdentifier: generation.canonicalTimezone)
+            else { return nil }
+            return route.usageDate
+        })
+        return dates.sorted(by: >).prefix(Self.currentHorizonDateCount).sorted()
+    }
+
+    func hasEligibleRouteEpochGeneration(
+        owner: UUID,
+        route: MeteringCallbackRoute,
+        epoch: DeviceDailyEpoch?,
+        generation: MeteringPolicyGeneration?
+    ) -> Bool {
+        guard route.ownerChildDeviceID == owner,
+              route.lifecycle == .planned || route.lifecycle == .active,
+              hasCurrentHorizonRouteDate(
+                  owner: owner,
+                  route: route,
+                  epoch: epoch,
+                  generation: generation
+              )
+        else { return false }
+        return true
+    }
+
+    private func hasCurrentHorizonRouteDate(
+        owner: UUID,
+        route: MeteringCallbackRoute,
+        epoch: DeviceDailyEpoch?,
+        generation: MeteringPolicyGeneration?
+    ) -> Bool {
+        guard route.ownerChildDeviceID == owner,
+              let epoch,
+              epoch.childDeviceID == owner,
+              epoch.epochID == route.epochID,
+              epoch.status == .active,
+              epoch.retiredAt == nil,
+              route.usageDate == epoch.usageDate,
+              let generation,
+              generation.childDeviceID == owner,
+              generation.generationID == route.generationID,
+              generation.retiredAt == nil,
+              generation.protocolVersion == epoch.protocolVersion,
+              generation.canonicalTimezone == epoch.canonicalTimezone,
+              generation.policyRevision == epoch.policyRevision,
+              generation.measurementSelectionDigest == epoch.measurementSelectionDigest,
+              generation.enforcementSetID == epoch.enforcementSetID
+        else { return false }
+        return true
+    }
+
+    private func isValidUsageDate(_ usageDate: String, timeZoneIdentifier: String) -> Bool {
+        guard let timeZone = TimeZone(identifier: timeZoneIdentifier) else { return false }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = timeZone
+        formatter.dateFormat = "yyyy-MM-dd"
+        guard let date = formatter.date(from: usageDate) else { return false }
+        return formatter.string(from: date) == usageDate
     }
 
     func retryState(for workID: UUID, kind: MeteringWorkKind) -> MeteringRetryState? {
