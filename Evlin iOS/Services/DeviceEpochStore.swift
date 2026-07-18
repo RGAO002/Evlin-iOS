@@ -2056,7 +2056,11 @@ extension DeviceEpochStoreState {
               rejectedEpoch.authoritativeBaseConflict == nil,
               conflict.authoritativeSnapshot.childDeviceID == owner,
               conflict.authoritativeSnapshot.usageDate == rejectedEpoch.usageDate,
-              conflict.authoritativeSnapshot.usageDate == rejectedRoute.usageDate
+              conflict.authoritativeSnapshot.usageDate == rejectedRoute.usageDate,
+              let rejectedCanonicalDayEnd = canonicalDayEnd(
+                  usageDate: rejectedRoute.usageDate,
+                  timeZoneIdentifier: rejectedEpoch.canonicalTimezone
+              )
         else { return false }
 
         let correctionAvailable = rejectedEpoch.baseCorrectionState == .available
@@ -2064,6 +2068,7 @@ extension DeviceEpochStoreState {
             epochID: rejectedEpochID,
             routeID: rejectedRouteID,
             conflict: conflict,
+            canonicalDayEnd: rejectedCanonicalDayEnd,
             now: now
         )
 
@@ -2203,6 +2208,7 @@ extension DeviceEpochStoreState {
         epochID: UUID,
         routeID: UUID,
         conflict: EpochRegistrationConflictDTO,
+        canonicalDayEnd: Date,
         now: Date
     ) {
         guard var epoch = epochs[epochID], var route = routes[routeID] else { return }
@@ -2230,7 +2236,7 @@ extension DeviceEpochStoreState {
             usageDate: route.usageDate,
             epochID: epochID,
             generationID: route.generationID,
-            canonicalDayEnd: now,
+            canonicalDayEnd: canonicalDayEnd,
             stopAcknowledgedAt: nil,
             referencedWorkIDs: relatedWorkIDs,
             retainedUntil: nil
@@ -2256,6 +2262,39 @@ extension DeviceEpochStoreState {
             work.retry = terminalRetry(work.retry, code: "authoritative_base_mismatch")
             installWork[key] = work
         }
+    }
+
+    func canonicalDayEnd(
+        usageDate: String,
+        timeZoneIdentifier: String
+    ) -> Date? {
+        let parts = usageDate.split(separator: "-", omittingEmptySubsequences: false)
+        guard parts.count == 3,
+              let year = Int(parts[0]),
+              let month = Int(parts[1]),
+              let day = Int(parts[2]),
+              let timeZone = TimeZone(identifier: timeZoneIdentifier)
+        else { return nil }
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.locale = Locale(identifier: "en_US_POSIX")
+        calendar.timeZone = timeZone
+        var components = DateComponents()
+        components.calendar = calendar
+        components.timeZone = timeZone
+        components.year = year
+        components.month = month
+        components.day = day
+        components.hour = 0
+        components.minute = 0
+        components.second = 0
+        guard let start = calendar.date(from: components) else { return nil }
+        let roundTrip = calendar.dateComponents([.year, .month, .day], from: start)
+        guard roundTrip.year == year,
+              roundTrip.month == month,
+              roundTrip.day == day
+        else { return nil }
+        return calendar.date(byAdding: .day, value: 1, to: start)
     }
 
     private func terminalRetry(_ retry: MeteringRetryState, code: String) -> MeteringRetryState {

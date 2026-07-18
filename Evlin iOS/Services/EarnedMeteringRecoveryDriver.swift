@@ -232,7 +232,11 @@ final class EarnedMeteringRecoveryDriver {
                   let candidateInstallKey = uniqueInstallKey(for: candidate.routeID, in: state),
                   state.installWork[candidateInstallKey]?.phase == .dualActive,
                   let priorInstallKey = uniqueInstallKey(for: prior.routeID, in: state),
-                  state.installWork[priorInstallKey]?.phase == .active
+                  state.installWork[priorInstallKey]?.phase == .active,
+                  let priorCanonicalDayEnd = state.canonicalDayEnd(
+                      usageDate: prior.usageDate,
+                      timeZoneIdentifier: priorEpoch.canonicalTimezone
+                  )
             else { return }
 
             state.activeGenerationID = candidate.generationID
@@ -255,7 +259,7 @@ final class EarnedMeteringRecoveryDriver {
                 usageDate: prior.usageDate,
                 epochID: prior.epochID,
                 generationID: prior.generationID,
-                canonicalDayEnd: clock.now,
+                canonicalDayEnd: priorCanonicalDayEnd,
                 stopAcknowledgedAt: nil,
                 referencedWorkIDs: Set(state.sampleWork.values.filter { $0.routeID == prior.routeID }.map(\.workID)),
                 retainedUntil: nil

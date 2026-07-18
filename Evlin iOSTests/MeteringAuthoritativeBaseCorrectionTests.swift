@@ -36,7 +36,11 @@ final class MeteringAuthoritativeBaseCorrectionTests: XCTestCase {
         XCTAssertEqual(correctedEpoch.baseCorrectionState, .used)
         XCTAssertEqual(correctedRoute.generationKey, fixture.rejectedGenerationKey)
         XCTAssertEqual(state.routes[fixture.rejectedRouteID]?.lifecycle, .tombstoned)
-        XCTAssertNotNil(state.tombstones[fixture.rejectedRouteID])
+        let rejectedTombstone = try XCTUnwrap(state.tombstones[fixture.rejectedRouteID])
+        XCTAssertEqual(
+            rejectedTombstone.canonicalDayEnd,
+            ISO8601DateFormatter().date(from: "2026-07-19T04:00:00Z")
+        )
         XCTAssertEqual(rejectedEpoch.status, .retired)
         XCTAssertEqual(rejectedEpoch.retireReason, .authoritativeBaseMismatch)
         XCTAssertEqual(rejectedEpoch.baseCorrectionState, .used)
@@ -325,6 +329,10 @@ final class MeteringAuthoritativeBaseCorrectionTests: XCTestCase {
         XCTAssertEqual(state.activeRouteID, ids.routeID)
         XCTAssertEqual(state.v2RouteHandoff?.phase, .committed)
         XCTAssertEqual(state.routes[fixture.priorRouteID]?.lifecycle, .tombstoned)
+        XCTAssertEqual(
+            state.tombstones[fixture.priorRouteID]?.canonicalDayEnd,
+            ISO8601DateFormatter().date(from: "2026-07-19T04:00:00Z")
+        )
         XCTAssertEqual(state.installWork[fixture.priorInstallID]?.phase, .pendingStop)
         XCTAssertNil(state.v2RouteHandoff?.priorStopAcknowledgedAt)
 
