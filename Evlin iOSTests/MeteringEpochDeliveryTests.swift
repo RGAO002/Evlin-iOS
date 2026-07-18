@@ -739,6 +739,90 @@ final class MeteringEpochDeliveryTests: XCTestCase {
         }
     }
 
+    func testDrainSettlesUnclaimedStaleRegistrationHeadThenDispatchesLaterNetworkWork() async throws {
+        let fileURL = temporaryStoreURL()
+        defer { removeTemporaryStore(fileURL) }
+        let store = makeStore(fileURL: fileURL)
+        let staleID = UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!
+        let sampleID = UUID(uuidString: "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB")!
+        try store.transaction(expectedOwner: owner) { state in
+            state = makeBaseState()
+            state.routes[routeID]?.lifecycle = .retired
+            state.activeRouteID = nil
+            state.registrationWork[staleID] = makeRegistrationWork(workID: staleID, createdAt: start)
+            var sample = makeSampleWork(workID: sampleID, createdAt: start.addingTimeInterval(1))
+            sample.retry.nextAttemptAt = start
+            state.sampleWork[sampleID] = sample
+            XCTAssertEqual(state.dueWork(now: start).first?.workID, staleID)
+        }
+        let response = HTTPURLResponse(url: baseURL, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        let transport = DeliveryTestTransport()
+        transport.results = [(try encoded(makeSnapshot(counted: true, warning: nil)), response)]
+        let delivery = MeteringEpochDelivery(
+            baseURL: baseURL,
+            store: store,
+            transport: transport,
+            clock: DeliveryTestClock(now: start)
+        )
+
+        await delivery.drain(owner: owner)
+
+        let final = try store.read()
+        XCTAssertEqual(transport.requests.count, 1)
+        XCTAssertEqual(transport.requests.first?.url?.path, "/child/earned-time/sample")
+        XCTAssertEqual(final.registrationWork[staleID]?.retry.terminal, .superseded)
+        XCTAssertEqual(final.registrationWork[staleID]?.retry.lastErrorCode, "route_superseded")
+        XCTAssertNil(final.registrationWork[staleID]?.claim)
+        XCTAssertEqual(final.sampleWork[sampleID]?.retry.terminal, .succeeded)
+        XCTAssertNil(final.sampleWork[sampleID]?.claim)
+        XCTAssertNil(final.epochs[epochID]?.registeredAt)
+        XCTAssertNil(final.ratchets[owner]?.registeredV2At)
+    }
+
+    func testDrainDoesNotSettleStaleRegistrationWithLiveForeignClaimButSettlesItAfterExpiry() async throws {
+        let fileURL = temporaryStoreURL()
+        defer { removeTemporaryStore(fileURL) }
+        let store = makeStore(fileURL: fileURL)
+        let staleID = UUID(uuidString: "CCCCCCCC-CCCC-CCCC-CCCC-CCCCCCCCCCCC")!
+        let sampleID = UUID(uuidString: "DDDDDDDD-DDDD-DDDD-DDDD-DDDDDDDDDDDD")!
+        let foreignClaim = MeteringNetworkClaim(
+            token: UUID(),
+            claimedAt: start,
+            expiresAt: start.addingTimeInterval(MeteringNetworkClaim.leaseDuration)
+        )
+        try store.transaction(expectedOwner: owner) { state in
+            state = makeBaseState()
+            state.routes[routeID]?.lifecycle = .retired
+            state.activeRouteID = nil
+            var stale = makeRegistrationWork(workID: staleID, createdAt: start)
+            stale.claim = foreignClaim
+            state.registrationWork[staleID] = stale
+            var sample = makeSampleWork(workID: sampleID, createdAt: start.addingTimeInterval(1))
+            sample.retry.nextAttemptAt = start
+            state.sampleWork[sampleID] = sample
+        }
+        let transport = DeliveryTestTransport()
+        let clock = DeliveryTestClock(now: start)
+        let delivery = MeteringEpochDelivery(baseURL: baseURL, store: store, transport: transport, clock: clock)
+
+        await delivery.drain(owner: owner)
+
+        XCTAssertTrue(transport.requests.isEmpty)
+        XCTAssertEqual(try store.read().registrationWork[staleID]?.retry.terminal, .pending)
+        XCTAssertEqual(try store.read().registrationWork[staleID]?.claim, foreignClaim)
+
+        clock.now = foreignClaim.expiresAt
+        let response = HTTPURLResponse(url: baseURL, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        transport.results = [(try encoded(makeSnapshot(counted: true, warning: nil)), response)]
+        await delivery.drain(owner: owner)
+
+        let final = try store.read()
+        XCTAssertEqual(transport.requests.count, 1)
+        XCTAssertEqual(final.registrationWork[staleID]?.retry.terminal, .superseded)
+        XCTAssertNil(final.registrationWork[staleID]?.claim)
+        XCTAssertEqual(final.sampleWork[sampleID]?.retry.terminal, .succeeded)
+    }
+
     func testConcurrentDrainsAtomicallyClaimOneNetworkDispatch() async throws {
         let fileURL = temporaryStoreURL()
         defer { removeTemporaryStore(fileURL) }

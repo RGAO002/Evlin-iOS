@@ -170,7 +170,11 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
             return
         }
 
-        while let claimed = claimFirstDispatchable(owner: owner) {
+        while true {
+            if settleLeadingInvalidRegistration(owner: owner) {
+                continue
+            }
+            guard let claimed = claimFirstDispatchable(owner: owner) else { return }
             switch claimed {
             case let .registration(work, claim):
                 await deliverRegistration(work: work, owner: owner, claim: claim)
@@ -309,6 +313,19 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
                 return false
             }
         }
+    }
+
+    private func settleLeadingInvalidRegistration(owner: UUID) -> Bool {
+        guard store.isCurrentOwner(owner) else { return false }
+        return (try? store.transaction(expectedOwner: owner) { state in
+            guard let due = state.dueWork(now: clock.now).first,
+                  due.kind == .registration,
+                  let key = state.registrationWork.first(where: { $0.value.workID == due.workID })?.key,
+                  var work = state.registrationWork[key],
+                  work.claim.map({ $0.expiresAt <= clock.now }) ?? true
+            else { return false }
+            return settleInvalidRegistration(&state, key: key, work: &work, owner: owner)
+        }) ?? false
     }
 
     private func importLegacyWork(owner: UUID) async -> Bool {
@@ -650,7 +667,20 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
         guard work.ownerChildDeviceID == owner,
               work.claim?.token == claim.token
         else { return false }
-        if supersedeStaleRegistrationWork(&state, key: key, work: &work, owner: owner, claim: claim) {
+        return settleInvalidRegistration(&state, key: key, work: &work, owner: owner)
+    }
+
+    private func settleInvalidRegistration(
+        _ state: inout DeviceEpochStoreState,
+        key: UUID,
+        work: inout EpochRegistrationWork,
+        owner: UUID
+    ) -> Bool {
+        guard work.ownerChildDeviceID == owner else { return false }
+        guard state.hasCurrentRegistrationProvenance(owner: owner, epochID: work.epochID, routeID: work.routeID) else {
+            work.retry = completedRetry(from: work.retry, code: "route_superseded", terminal: .superseded)
+            work.claim = nil
+            state.registrationWork[key] = work
             return true
         }
         guard let route = state.routes[work.routeID],
