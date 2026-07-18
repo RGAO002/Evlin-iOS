@@ -281,6 +281,26 @@ nonisolated struct EarnedShieldReference: Codable, Equatable, Sendable {
     let createdAt: Date
 }
 
+extension EarnedShieldReference {
+    func matches(
+        operationID: UUID,
+        ownerChildDeviceID: UUID,
+        generationID: UUID,
+        epochID: UUID,
+        routeID: UUID,
+        recordKey: String,
+        expectedRecordBytes: Data
+    ) -> Bool {
+        self.operationID == operationID
+            && self.ownerChildDeviceID == ownerChildDeviceID
+            && self.generationID == generationID
+            && self.epochID == epochID
+            && self.routeID == routeID
+            && self.recordKey == recordKey
+            && self.expectedRecordBytes == expectedRecordBytes
+    }
+}
+
 nonisolated struct IdentityCleanupWork: Codable, Equatable, Sendable {
     let workID: UUID
     let oldOwnerChildDeviceID: UUID
@@ -615,6 +635,106 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
 
     func isCurrentOwner(_ owner: UUID) -> Bool {
         ownerProvider() == owner
+    }
+
+    /// Preflight only. The effect store calls this before it durably records a
+    /// prepared envelope so failed authorization cannot leave orphaned effect
+    /// state behind.
+    func canPrepareEarnedShieldReference(_ reference: EarnedShieldReference) throws -> Bool {
+        guard isCurrentOwner(reference.ownerChildDeviceID) else { return false }
+        let state = try read()
+        return canApplyEarnedShieldReference(reference, in: state)
+    }
+
+    /// Atomically creates one exact operation reference, or verifies the
+    /// existing operation is byte-for-byte the same. This is intentionally the
+    /// only DeviceEpochStore mutation Task 14 needs for shield effects.
+    func createOrVerifyEarnedShieldReference(_ reference: EarnedShieldReference) throws -> Bool {
+        try transaction(expectedOwner: reference.ownerChildDeviceID) { state in
+            if let existing = state.shieldReferences[reference.operationID] {
+                return existing.matches(
+                    operationID: reference.operationID,
+                    ownerChildDeviceID: reference.ownerChildDeviceID,
+                    generationID: reference.generationID,
+                    epochID: reference.epochID,
+                    routeID: reference.routeID,
+                    recordKey: reference.recordKey,
+                    expectedRecordBytes: reference.expectedRecordBytes
+                )
+            }
+            guard canApplyEarnedShieldReference(reference, in: state) else { return false }
+            state.shieldReferences[reference.operationID] = reference
+            return true
+        }
+    }
+
+    /// Release is never a generic source removal. The operation must still be
+    /// referenced by this owner and the originating epoch must have entered one
+    /// of the narrow terminal paths that is allowed to unwind earned shielding.
+    func canReleaseEarnedShieldReference(_ expected: EarnedShieldReference) throws -> Bool {
+        try transaction(expectedOwner: expected.ownerChildDeviceID) { state in
+            guard let reference = state.shieldReferences[expected.operationID],
+                  reference.matches(
+                    operationID: expected.operationID,
+                    ownerChildDeviceID: expected.ownerChildDeviceID,
+                    generationID: expected.generationID,
+                    epochID: expected.epochID,
+                    routeID: expected.routeID,
+                    recordKey: expected.recordKey,
+                    expectedRecordBytes: expected.expectedRecordBytes
+                  ),
+                  reference.ownerChildDeviceID == expected.ownerChildDeviceID,
+                  let epoch = state.epochs[reference.epochID],
+                  let route = state.routes[reference.routeID],
+                  epoch.childDeviceID == expected.ownerChildDeviceID,
+                  route.ownerChildDeviceID == expected.ownerChildDeviceID,
+                  route.generationID == reference.generationID,
+                  route.epochID == reference.epochID
+            else { return false }
+
+            let correctionOrRetirement = epoch.status == .retired
+                || epoch.retiredAt != nil
+                || epoch.authoritativeBaseConflict != nil
+                || route.lifecycle == .retired
+                || route.lifecycle == .tombstoned
+            let rollover = state.rolloverEffectsWork.map {
+                $0.ownerChildDeviceID == expected.ownerChildDeviceID
+                    && $0.oldEpochID == reference.epochID
+                    && $0.oldRouteID == reference.routeID
+            } ?? false
+            let identityCleanup = state.identityCleanupWork.map {
+                $0.oldOwnerChildDeviceID == expected.ownerChildDeviceID
+                    && $0.oldShieldOperationIDs.contains(expected.operationID)
+            } ?? false
+            return correctionOrRetirement || rollover || identityCleanup
+        }
+    }
+
+    private func canApplyEarnedShieldReference(
+        _ reference: EarnedShieldReference,
+        in state: DeviceEpochStoreState
+    ) -> Bool {
+        guard state.ownerChildDeviceID == reference.ownerChildDeviceID,
+              state.activeGenerationID == reference.generationID,
+              state.activeEpochID == reference.epochID,
+              state.activeRouteID == reference.routeID,
+              let generation = state.generations[reference.generationID],
+              generation.childDeviceID == reference.ownerChildDeviceID,
+              generation.retiredAt == nil,
+              let epoch = state.epochs[reference.epochID],
+              epoch.childDeviceID == reference.ownerChildDeviceID,
+              epoch.status == .active,
+              epoch.retiredAt == nil,
+              epoch.exhaustedAt == nil,
+              let route = state.routes[reference.routeID],
+              route.ownerChildDeviceID == reference.ownerChildDeviceID,
+              route.generationID == reference.generationID,
+              route.epochID == reference.epochID,
+              route.lifecycle == .active,
+              !reference.recordKey.isEmpty,
+              !reference.expectedRecordBytes.isEmpty
+        else { return false }
+        return true
     }
 
     /// The callback boundary is deliberately the sole local producer of v2

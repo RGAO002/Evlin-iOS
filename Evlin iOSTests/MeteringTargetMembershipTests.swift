@@ -96,6 +96,20 @@ final class MeteringTargetMembershipTests: XCTestCase {
         }
     }
 
+    func testActiveLockStoreStaysOutOfMonitorTarget() throws {
+        let project = try projectSource()
+        let appOnlyPaths = [
+            "Services/ActiveLockStore.swift",
+            "Services/ActiveLockStoreTypes.swift",
+        ]
+
+        for path in appOnlyPaths {
+            XCTAssertTrue(isMember(path, of: .app, in: project), path)
+            XCTAssertFalse(isMember(path, of: .deviceActivityMonitor, in: project), path)
+            XCTAssertTrue(isMember(path, of: .push, in: project), path)
+        }
+    }
+
     private func projectSource() throws -> String {
         let projectURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()

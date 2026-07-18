@@ -33,11 +33,12 @@ actor ActiveLockStore {
     private var shieldRecords: [String: ShieldRecord] = [:]
     private var blockRecords: [String: BlockRecord] = [:]
     private let store = ManagedSettingsStore()
-    private let defaults = UserDefaults(suiteName: "group.com.evlin.ios")
+    private let defaults: UserDefaults?
     private let shieldsKey = "evlin.shieldRecords"
     private let blocksKey = "evlin.blockRecords"
 
-    init() {
+    init(defaults: UserDefaults? = UserDefaults(suiteName: "group.com.evlin.ios")) {
+        self.defaults = defaults
         _ = ActiveLockPersistenceLock.shared.withLock {
             restore()
         }
@@ -53,7 +54,7 @@ actor ActiveLockStore {
     @discardableResult
     func addShield(_ new: ShieldRecord, force: Bool = false) -> AddShieldResult {
         ActiveLockPersistenceLock.shared.withLock {
-            reconcileLimitShieldsFromDisk()
+            guard reloadDurableState() else { return .noOpShorterThanExisting }
             let new = normalizeShieldRecord(new).record
             if let existing = shieldRecords[new.recordKey], !force {
                 return mergeShield(existing: existing, new: new)
@@ -123,7 +124,7 @@ actor ActiveLockStore {
     @discardableResult
     func removeShield(recordKey: String) -> RemovedShield? {
         ActiveLockPersistenceLock.shared.withLock {
-            reconcileLimitShieldsFromDisk()
+            guard reloadDurableState() else { return nil }
             guard let record = shieldRecords.removeValue(forKey: recordKey) else { return nil }
             persist()
             recomputeAndApply()
@@ -136,7 +137,7 @@ actor ActiveLockStore {
     @discardableResult
     func unshieldAll() -> [ShieldRecord] {
         ActiveLockPersistenceLock.shared.withLock {
-            reconcileLimitShieldsFromDisk()
+            guard reloadDurableState() else { return [] }
             let removed = Array(shieldRecords.values)
             shieldRecords.removeAll()
             persist()
@@ -160,7 +161,7 @@ actor ActiveLockStore {
     @discardableResult
     func removeCategoryShieldsByDisplayName(_ hint: String) -> [ShieldRecord] {
         ActiveLockPersistenceLock.shared.withLock {
-            reconcileLimitShieldsFromDisk()
+            guard reloadDurableState() else { return [] }
             let needle = hint.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !needle.isEmpty else { return [] }
             let toRemove = shieldRecords.values.filter {
@@ -187,7 +188,7 @@ actor ActiveLockStore {
     /// unlock→relock dance. No-ops (no persist/recompute) when nothing matches.
     func dropTokenFromSavedListShields(app token: ApplicationToken) {
         _ = ActiveLockPersistenceLock.shared.withLock {
-            reconcileLimitShieldsFromDisk()
+            guard reloadDurableState() else { return }
             applyDropFromSavedListShields { record in
                 guard record.appTokens.contains(token) else { return nil }
                 var updated = record
@@ -202,7 +203,7 @@ actor ActiveLockStore {
     /// removed from the picker unshields immediately while the Locked set is held.
     func dropTokenFromSavedListShields(category token: ActivityCategoryToken) {
         _ = ActiveLockPersistenceLock.shared.withLock {
-            reconcileLimitShieldsFromDisk()
+            guard reloadDurableState() else { return }
             applyDropFromSavedListShields { record in
                 guard record.categoryTokens.contains(token) else { return nil }
                 var updated = record
@@ -244,12 +245,7 @@ actor ActiveLockStore {
     @discardableResult
     func removeLimitShields(appTokens: Set<ApplicationToken>, bundleID: String?) -> [ShieldRecord] {
         ActiveLockPersistenceLock.shared.withLock {
-            // Reconcile FIRST so we target the extension's CURRENT `.limit` set (a
-            // threshold may have fired since init). Then compute + remove targets,
-            // then persist (writes disk WITHOUT the targets), then recompute. Because
-            // persist writes the removal to disk before recompute's reconcile re-reads
-            // it, the removed records are NOT resurrected.
-            reconcileLimitShieldsFromDisk()
+            guard reloadDurableState() else { return [] }
             let bidKey = bundleID?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             let toRemove = shieldRecords.values.filter { record in
                 guard record.sources.contains(.limit) else { return false }
@@ -272,7 +268,7 @@ actor ActiveLockStore {
     @discardableResult
     func addBlock(_ new: BlockRecord) -> AddBlockResult {
         ActiveLockPersistenceLock.shared.withLock {
-            reconcileLimitShieldsFromDisk()
+            guard reloadDurableState() else { return .alreadyBlocked }
             if blockRecords[new.bundleID] != nil { return .alreadyBlocked }
             blockRecords[new.bundleID] = new
             persist()
@@ -335,7 +331,7 @@ actor ActiveLockStore {
     @discardableResult
     func removeBlock(bundleID: String, categoryHint: String? = nil) -> RemovedBlock? {
         ActiveLockPersistenceLock.shared.withLock {
-            reconcileLimitShieldsFromDisk()
+            guard reloadDurableState() else { return nil }
             guard let record = blockRecords.removeValue(forKey: bundleID) else { return nil }
             persist()
             recomputeAndApply()
@@ -353,7 +349,7 @@ actor ActiveLockStore {
     @discardableResult
     func unblockAll() -> [BlockRecord] {
         ActiveLockPersistenceLock.shared.withLock {
-            reconcileLimitShieldsFromDisk()
+            guard reloadDurableState() else { return [] }
             let removed = Array(blockRecords.values)
             blockRecords.removeAll()
             persist()
@@ -370,7 +366,7 @@ actor ActiveLockStore {
 
     func reapplyCurrentRestrictions() {
         _ = ActiveLockPersistenceLock.shared.withLock {
-            reconcileLimitShieldsFromDisk()
+            guard reloadDurableState() else { return }
             recomputeAndApply()
         }
     }
@@ -409,7 +405,7 @@ actor ActiveLockStore {
     @discardableResult
     func sweepExpired(now: Date = Date()) -> [ShieldRecord] {
         ActiveLockPersistenceLock.shared.withLock {
-            reconcileLimitShieldsFromDisk()
+            guard reloadDurableState() else { return [] }
             let expired = purgeExpiredRecords(now: now)
             guard !expired.shields.isEmpty || !expired.blocks.isEmpty else { return [] }
             persist()
@@ -565,7 +561,7 @@ actor ActiveLockStore {
     /// silently if `recordKey` is not found.
     func removeSource(_ source: ShieldSource, fromRecordKey key: String) {
         _ = ActiveLockPersistenceLock.shared.withLock {
-            reconcileLimitShieldsFromDisk()
+            guard reloadDurableState() else { return }
             shieldRecords = ShieldSourceLogic.removingSource(source, fromRecordKey: key, in: shieldRecords)
             persist()
             recomputeAndApply()
@@ -618,12 +614,6 @@ actor ActiveLockStore {
     // MARK: - Private: recompute + persistence
 
     private func recomputeAndApply() {
-        // Covers the read-only reapply path and guarantees the union we push to
-        // the ManagedSettingsStore includes the extension's current `.limit`
-        // records. Safe for `removeLimitShields`: that path persists the removal
-        // to disk BEFORE calling here, so this reconcile re-reads disk without
-        // the removed records and cannot resurrect them.
-        reconcileLimitShieldsFromDisk()
         let expired = purgeExpiredRecords()
         if !expired.shields.isEmpty || !expired.blocks.isEmpty {
             persist()
@@ -680,75 +670,6 @@ actor ActiveLockStore {
         let line = "\(ts) branch=\(branch) shields=\(shieldRecords.count) blocks=\(blockRecords.count)"
             + " apps=\(appTokens) cats=\(catTokens) webs=\(webTokens)"
         defaults?.set(line, forKey: "evlin.lastRecompute")
-    }
-
-    // MARK: - Private: cross-process limit-shield reconciliation
-
-    /// Read + decode the App Group `shieldsKey` dict using the SAME `.iso8601`
-    /// decoder (with the legacy `PropertyListDecoder` fallback) that `restore()`
-    /// uses. Returns `nil` on missing data OR decode failure — the caller MUST
-    /// distinguish "couldn't read" (do nothing) from "read an empty dict"
-    /// (`[:]`, which legitimately means the extension cleared every limit shield).
-    private func diskShieldRecords() -> [String: ShieldRecord]? {
-        guard let data = defaults?.data(forKey: shieldsKey) else { return nil }
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        if let decoded = try? decoder.decode([String: ShieldRecord].self, from: data) {
-            return decoded
-        }
-        if let decoded = try? PropertyListDecoder().decode([String: ShieldRecord].self, from: data) {
-            return decoded
-        }
-        return nil
-    }
-
-    /// Reconcile the in-memory `source == .limit` subset with the on-disk
-    /// `source == .limit` subset. `.limit` records are OWNED by the
-    /// DeviceActivity extension (it writes them on a usage-threshold fire and
-    /// removes them at the daily reset, directly into the same App Group dict).
-    /// The main app never re-reads that dict after init, so without this its
-    /// stale in-memory copy would erase the extension's writes on the next
-    /// `persist()`/`recomputeAndApply()`. Call this at the START of every
-    /// mutating method, BEFORE it mutates/persists.
-    ///
-    /// `source == .manual` records remain main-app-authoritative and are NEVER
-    /// touched here.
-    ///
-    /// Fail-safe: if disk can't be read/decoded (`diskShieldRecords() == nil`),
-    /// this is a NO-OP — a transient read failure must never wipe in-memory
-    /// shields.
-    private func reconcileLimitShieldsFromDisk() {
-        guard let disk = diskShieldRecords() else { return }
-
-        let diskLimit = disk.filter { $0.value.sources.contains(.limit) }
-
-        // (a) Drop the `.limit` SOURCE from any in-memory record that is no
-        // longer listed as a `.limit` record on disk (picks up the extension's
-        // daily-reset clears).
-        //
-        // B1 carry fix: the prior implementation called `removeValue(forKey:)` on
-        // any in-memory record with `.limit` that was absent from `diskLimit`.
-        // For mixed-source records like `{.limit, .earnedTime}` or `{.limit, .manual}`
-        // this wiped the WHOLE record — stripping non-limit sources that were still
-        // legitimately active. The fix delegates to `ShieldSourceLogic.removing` to
-        // strip ONLY the `.limit` source and delete the record only when empty.
-        for (key, record) in shieldRecords where record.sources.contains(.limit) {
-            if diskLimit[key] == nil {
-                // Remove only the .limit source; keep the record if other sources remain.
-                if let trimmed = ShieldSourceLogic.removing(.limit, from: record) {
-                    shieldRecords[key] = trimmed
-                } else {
-                    shieldRecords.removeValue(forKey: key)
-                }
-            }
-        }
-
-        // (b) Insert/update every disk `.limit` record (picks up the
-        // extension's threshold writes). Normalize for schema parity, exactly
-        // like `restore()` does.
-        for (key, record) in diskLimit {
-            shieldRecords[key] = normalizeShieldRecord(record).record
-        }
     }
 
     private func persist() {

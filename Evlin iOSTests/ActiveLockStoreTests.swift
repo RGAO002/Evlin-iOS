@@ -7,8 +7,10 @@ import XCTest
 final class ActiveLockStoreTests: XCTestCase {
     override func setUp() async throws {
         // Clear shared App Group state so tests don't pollute each other.
-        UserDefaults(suiteName: "group.com.evlin.ios")?.removeObject(forKey: "evlin.shieldRecords")
-        UserDefaults(suiteName: "group.com.evlin.ios")?.removeObject(forKey: "evlin.blockRecords")
+        let defaults = UserDefaults(suiteName: "group.com.evlin.ios")
+        defaults?.removeObject(forKey: "evlin.shieldRecords")
+        defaults?.removeObject(forKey: "evlin.blockRecords")
+        defaults?.removeObject(forKey: EarnedShieldEffectStore.envelopeKey)
     }
 
     func test_durable_lock_serializes_extension_write_after_cas_persist() throws {
@@ -96,7 +98,11 @@ final class ActiveLockStoreTests: XCTestCase {
         let result = await store.addShield(r2)
 
         if case .upgradedToPermanent(let prev) = result {
-            XCTAssertEqual(prev, r1.expiresAt)
+            XCTAssertEqual(
+                prev.timeIntervalSince1970,
+                r1.expiresAt?.timeIntervalSince1970 ?? 0,
+                accuracy: 1
+            )
         } else {
             XCTFail("Expected .upgradedToPermanent, got \(result)")
         }
@@ -349,6 +355,133 @@ final class ActiveLockStoreTests: XCTestCase {
         XCTAssertEqual(remaining[0].recordKey, "all")               // parent all-lock survives
     }
 
+    @MainActor
+    func test_liveActorMutationAfterEarnedEffectPreservesEveryDurableSourceAndBlock() async throws {
+        let owner = UUID(uuidString: "82000000-0000-4000-8000-000000000001")!
+        let epochFixture = try Self.makeActiveEpochFixture(owner: owner)
+        defer { try? FileManager.default.removeItem(at: epochFixture.url) }
+        let suiteName = "ActiveLockStoreEarnedRace.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let activeStore = ActiveLockStore(defaults: defaults)
+
+        var manual = Self.makeAllRecord(recordKey: "all", minutes: nil)
+        manual.targetChildID = owner
+        manual.sources = [.manual]
+        var taskPause = Self.makePermanentShield(
+            displayName: "Task pause",
+            tier: .category,
+            targetKey: "task-pause",
+            recordKey: "category:task-pause"
+        )
+        taskPause.targetChildID = owner
+        taskPause.sources = [.taskPause]
+        var deviceLimit = Self.makePermanentShield(
+            displayName: "Device limit",
+            tier: .allApps,
+            targetKey: "device-limit",
+            recordKey: "allApps:device-limit"
+        )
+        deviceLimit.targetChildID = owner
+        deviceLimit.appliesToAll = true
+        deviceLimit.sources = [.limit]
+        var perAppLimit = Self.makePermanentShield(
+            displayName: "Per-app limit",
+            tier: .exactApp,
+            targetKey: "per-app",
+            recordKey: "exactApp:per-app"
+        )
+        perAppLimit.targetChildID = owner
+        perAppLimit.sources = [.limit]
+        var futureSource = Self.makePermanentShield(
+            displayName: "Future source",
+            tier: .savedList,
+            targetKey: "future-source",
+            recordKey: "savedList:future-source"
+        )
+        futureSource.targetChildID = owner
+        futureSource.sources = [ShieldSource(rawValue: "future-source")]
+        let block = BlockRecord(
+            bundleID: "com.evlin.blocked",
+            displayName: "Blocked",
+            blockedAt: Date(),
+            lastCommandID: UUID(),
+            originalRequest: "test",
+            targetChildID: owner
+        )
+
+        _ = await activeStore.addShield(manual)
+        _ = await activeStore.addShield(taskPause)
+        _ = await activeStore.addShield(deviceLimit)
+        _ = await activeStore.addShield(perAppLimit)
+        _ = await activeStore.addShield(futureSource)
+        _ = await activeStore.addBlock(block)
+
+        let earned = ShieldRecord(
+            recordKey: "allApps:earned",
+            tier: .allApps,
+            targetKey: "earned",
+            displayName: "Earned time",
+            lastCommandID: UUID(),
+            appTokens: [],
+            categoryTokens: [],
+            webDomainTokens: [],
+            appliesToAll: true,
+            issuedAt: Date(),
+            expiresAt: nil,
+            originalRequest: "earned",
+            targetChildID: owner,
+            sources: [.earnedTime]
+        )
+        let operationID = UUID()
+        let envelope = EarnedShieldEffectEnvelope(
+            operationID: operationID,
+            ownerChildDeviceID: owner,
+            generationID: epochFixture.generationID,
+            epochID: epochFixture.epochID,
+            routeID: epochFixture.routeID,
+            recordKey: earned.recordKey,
+            beforeRecord: nil,
+            intendedAfterRecord: earned,
+            phase: .prepared,
+            retry: MeteringRetryState(attemptCount: 0, nextAttemptAt: Date(), lastErrorCode: nil, terminal: .pending),
+            createdAt: Date()
+        )
+        try EarnedShieldEffectStore(defaults: defaults, epochStore: epochFixture.store).apply(envelope)
+
+        var postEffectManual = Self.makePermanentShield(
+            displayName: "Post-effect manual",
+            tier: .category,
+            targetKey: "post-effect",
+            recordKey: "category:post-effect"
+        )
+        postEffectManual.targetChildID = owner
+        postEffectManual.sources = [.manual]
+        _ = await activeStore.addShield(postEffectManual)
+
+        let current = await activeStore.allCurrent()
+        XCTAssertEqual(Set(current.shields.map(\.recordKey)), Set([
+            manual.recordKey,
+            taskPause.recordKey,
+            deviceLimit.recordKey,
+            perAppLimit.recordKey,
+            futureSource.recordKey,
+            earned.recordKey,
+            postEffectManual.recordKey,
+        ]))
+        XCTAssertEqual(current.shields.first(where: { $0.recordKey == manual.recordKey })?.sources, [.manual])
+        XCTAssertEqual(current.shields.first(where: { $0.recordKey == taskPause.recordKey })?.sources, [.taskPause])
+        XCTAssertEqual(current.shields.first(where: { $0.recordKey == deviceLimit.recordKey })?.sources, [.limit])
+        XCTAssertEqual(current.shields.first(where: { $0.recordKey == perAppLimit.recordKey })?.sources, [.limit])
+        XCTAssertEqual(current.shields.first(where: { $0.recordKey == earned.recordKey })?.sources, [.earnedTime])
+        XCTAssertEqual(
+            current.shields.first(where: { $0.recordKey == futureSource.recordKey })?.sources,
+            [ShieldSource(rawValue: "future-source")]
+        )
+        XCTAssertEqual(current.blocks.map(\.bundleID), [block.bundleID])
+        XCTAssertEqual(try Self.loadShields(defaults: defaults)[earned.recordKey]?.sources, [.earnedTime])
+    }
+
     // MARK: - Helpers
 
     private static func makeAllRecord(
@@ -440,4 +573,61 @@ final class ActiveLockStoreTests: XCTestCase {
         let data = try XCTUnwrap(defaults.data(forKey: "evlin.shieldRecords"))
         return try decoder.decode([String: ShieldRecord].self, from: data)
     }
+
+    private static func makeActiveEpochFixture(owner: UUID) throws -> ActiveEpochFixture {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("active-lock-effect-\(UUID().uuidString).json")
+        let store = DeviceEpochStore(fileURL: url, ownerProvider: { owner })
+        let selection = Data([0x41, 0x42, 0x43])
+        let generationKey = MeteringGenerationKey(
+            protocolVersion: 2,
+            childDeviceID: owner,
+            canonicalTimezone: "America/New_York",
+            policyRevision: "active-lock-effect",
+            measurementSelectionDigest: MeteringEpochContract.selectionDigest(persistedBytes: selection),
+            enforcementSetID: UUID()
+        )
+        let horizon = try store.reconcileMeteringHorizon(MeteringHorizonRequest(
+            ownerChildDeviceID: owner,
+            today: "2026-07-18",
+            generationKey: generationKey,
+            persistedSelectionBytes: selection,
+            poolMinutes: 120,
+            deviceCapMinutes: 120,
+            authoritativeBaseAcceptedMinutes: 0,
+            now: Date(timeIntervalSince1970: 1_784_419_200)
+        ))
+        let routeID = try XCTUnwrap(horizon.routeIDsByUsageDate["2026-07-18"])
+        try store.transaction(expectedOwner: owner) { state in
+            guard var route = state.routes[routeID] else { throw ActiveEpochFixtureError.missingRoute }
+            route.lifecycle = .active
+            route.installedSchedule = route.plannedSchedule
+            route.installedEvents = route.plannedEvents
+            state.routes[routeID] = route
+            state.activeGenerationID = route.generationID
+            state.activeEpochID = route.epochID
+            state.activeRouteID = routeID
+            state.epochs[route.epochID]?.status = .active
+        }
+        let state = try store.read()
+        return ActiveEpochFixture(
+            url: url,
+            store: store,
+            generationID: try XCTUnwrap(state.activeGenerationID),
+            epochID: try XCTUnwrap(state.activeEpochID),
+            routeID: try XCTUnwrap(state.activeRouteID)
+        )
+    }
+}
+
+private struct ActiveEpochFixture {
+    let url: URL
+    let store: DeviceEpochStore
+    let generationID: UUID
+    let epochID: UUID
+    let routeID: UUID
+}
+
+private enum ActiveEpochFixtureError: Error {
+    case missingRoute
 }

@@ -162,19 +162,23 @@ final class ActiveLockStoreLimitReconcileTests: XCTestCase {
         XCTAssertEqual(shields.count, 0)
     }
 
-    /// A manual shield in memory must NOT be dropped just because disk doesn't
-    /// list it as a `.limit` record (reconcile must never touch `.manual`).
-    func test_manual_shield_survives_when_disk_has_unrelated_limit_record() async throws {
+    /// The extension performs a full-dictionary read/modify/write under
+    /// `ActiveLockPersistenceLock`. Reloading that durable result must preserve
+    /// the existing manual record and import the new limit record.
+    func test_manual_shield_survives_extension_full_dictionary_write() async throws {
         let store = ActiveLockStore()
 
         let manual = Self.makeManualTimedShield(displayName: "Instagram", minutes: 30,
                                                  targetKey: "com.burbn.instagram")
         _ = await store.addShield(manual)
 
-        // Extension writes a DIFFERENT limit record to disk (without the manual).
+        // Mirror DeviceActivityMonitorExtension.applyLimitShield: load the full
+        // durable dictionary, merge one limit record, then write the full result.
         let limitRecord = Self.makeLimitShield(bundleID: "com.roblox.robloxmobile",
                                                 displayName: "Roblox")
-        try Self.writeDiskShields([limitRecord.recordKey: limitRecord], suiteName: suiteName)
+        var extensionWrite = try XCTUnwrap(Self.readDiskShields(suiteName: suiteName))
+        extensionWrite[limitRecord.recordKey] = limitRecord
+        try Self.writeDiskShields(extensionWrite, suiteName: suiteName)
 
         _ = await store.sweepExpired()
 
@@ -183,6 +187,24 @@ final class ActiveLockStoreLimitReconcileTests: XCTestCase {
                       "manual shield was incorrectly dropped by reconcile")
         XCTAssertTrue(shields.contains(where: { $0.recordKey == limitRecord.recordKey }),
                       "extension limit shield missing after reconcile")
+    }
+
+    /// Durable state is authoritative across processes. If another authorized
+    /// writer removes a manual record, a stale actor snapshot must not resurrect
+    /// it during its next mutation.
+    func test_full_reload_does_not_resurrect_manual_shield_removed_on_disk() async throws {
+        let store = ActiveLockStore()
+
+        let manual = Self.makeManualTimedShield(displayName: "Instagram", minutes: 30,
+                                                 targetKey: "com.burbn.instagram")
+        _ = await store.addShield(manual)
+
+        try Self.writeDiskShields([:], suiteName: suiteName)
+        _ = await store.sweepExpired()
+
+        let shields = await store.allCurrent().shields
+        XCTAssertFalse(shields.contains(where: { $0.recordKey == manual.recordKey }),
+                       "stale actor resurrected a record removed from durable state")
     }
 
     // MARK: - Fail-safe (undecodable disk = no-op, no wipe)
