@@ -2280,6 +2280,8 @@ git commit -m 'feat: persist earned shield effects across processes'
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS/Services/EarnedMeteringRecoveryDriver.swift`
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS/Services/EarnedBudgetArming.swift`
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS/Services/EarnedTimeStore.swift`
+- Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS/Services/EarnedSampleReporter.swift`
+- Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS/Services/BigKidStatePoller.swift`
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS/Services/Auth/AuthService.swift`
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS/Services/FamilyGoneDetector.swift`
 - Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS/Views/Child/BigKid/BigKidRootView.swift`
@@ -2308,7 +2310,7 @@ extension DeviceEpochStore {
 }
 ```
 
-It acquires the same lock, requires the root's exact cleanup work ID, and rechecks that ID before write/readback; it does not trust the mutable owner mirror. Identity entry points first create the envelope with exact old epoch/route/activity IDs, category-specific registration/activation/sample/install IDs, fallback keys, shield operation IDs, and usage dates, then retire/tombstone old authority in one transaction. Only then may they change the mirror. Recovery records each category-specific acknowledgement while terminally marking old work, purging fallback files, releasing only expected earnedTime effects by CAS, stopping/verifying every old route and legacy activity, and clearing old-day metering state; it marks cleanup succeeded only when every captured item appears in its corresponding acknowledgement set. Delayed old callbacks encounter tombstones and have zero effects.
+It acquires the same lock, requires the root's exact cleanup work ID, and rechecks that ID before write/readback; it does not trust the mutable owner mirror. Identity entry points, including live re-pair in `BigKidStatePoller`, first create the envelope with exact old epoch/route/activity IDs, category-specific registration/activation/sample/install IDs, owner-scoped fallback keys, shield operation IDs, and usage dates, then retire/tombstone old authority in one transaction. Only then may they change the mirror. `EarnedSampleReporter` must purge only the captured old-owner fallback/retry keys; its existing global queue clear is not an acceptable identity-cleanup primitive because it can erase new-owner work. Recovery records each category-specific acknowledgement while terminally marking old work, purging those captured fallback files, releasing only expected earnedTime effects by CAS, stopping/verifying every old route and legacy activity, and clearing old-day metering state; it marks cleanup succeeded only when every captured item appears in its corresponding acknowledgement set. Delayed old callbacks encounter tombstones and have zero effects.
 
 **GREEN:**
 
@@ -2332,7 +2334,7 @@ Expected full GREEN: every test present at this commit passes.
 
 ```bash
 cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS
-git add 'Evlin iOS/Services/DeviceEpochStore.swift' 'Evlin iOS/Services/EarnedMeteringRecoveryDriver.swift' 'Evlin iOS/Services/EarnedBudgetArming.swift' 'Evlin iOS/Services/EarnedTimeStore.swift' 'Evlin iOS/Services/Auth/AuthService.swift' 'Evlin iOS/Services/FamilyGoneDetector.swift' 'Evlin iOS/Views/Child/BigKid/BigKidRootView.swift' 'Evlin iOSTests/MeteringIdentityCleanupTests.swift' 'Evlin iOSTests/EarnedBudgetArmingTests.swift' 'Evlin iOSTests/AuthServiceTests.swift'
+git add 'Evlin iOS/Services/DeviceEpochStore.swift' 'Evlin iOS/Services/EarnedMeteringRecoveryDriver.swift' 'Evlin iOS/Services/EarnedBudgetArming.swift' 'Evlin iOS/Services/EarnedTimeStore.swift' 'Evlin iOS/Services/EarnedSampleReporter.swift' 'Evlin iOS/Services/BigKidStatePoller.swift' 'Evlin iOS/Services/Auth/AuthService.swift' 'Evlin iOS/Services/FamilyGoneDetector.swift' 'Evlin iOS/Views/Child/BigKid/BigKidRootView.swift' 'Evlin iOSTests/MeteringIdentityCleanupTests.swift' 'Evlin iOSTests/EarnedBudgetArmingTests.swift' 'Evlin iOSTests/AuthServiceTests.swift'
 git diff --cached --check && git diff --cached --stat && git diff --cached && git diff --cached --name-only
 git commit -m 'feat: retire metering identity atomically'
 ```
