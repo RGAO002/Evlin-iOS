@@ -89,7 +89,9 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
 #endif
 
         if raw.hasPrefix(MeteringRouteNamespace.prefix) {
-            recoverV2Metering()
+            Task { @MainActor in
+                await DAMMeteringEntry.shared.recoverIfConfigured()
+            }
             return
         }
 
@@ -269,38 +271,18 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         event: DeviceActivityEvent.Name,
         activity: DeviceActivityName
     ) {
-        guard let ownerRaw = defaults?.string(forKey: MeteringProductionComposition.ownerKey),
-              let owner = UUID(uuidString: ownerRaw)
-        else { return }
-
         do {
-            let outcome = try MeteringProductionComposition.makeCallback().handle(
-                MeteringAppleCallback(
-                    activityName: activity.rawValue,
-                    eventName: event.rawValue,
-                    observedAt: Date()
-                ),
-                expectedOwnerChildDeviceID: owner
+            let outcome = try DAMMeteringEntry.shared.handle(
+                activityName: activity.rawValue,
+                eventName: event.rawValue,
+                observedAt: Date()
             )
             NSLog("[Evlin/Ext] v2 metering callback %@", String(describing: outcome))
-            recoverV2Metering()
+            Task { @MainActor in
+                await DAMMeteringEntry.shared.recoverIfConfigured()
+            }
         } catch {
             NSLog("[Evlin/Ext] v2 metering callback failed: %@", String(describing: error))
-        }
-    }
-
-    private func recoverV2Metering() {
-        guard defaults?.string(forKey: MeteringProductionComposition.baseURLKey) != nil,
-              defaults?.string(forKey: MeteringProductionComposition.ownerKey) != nil
-        else { return }
-        Task { @MainActor in
-            do {
-                try await MeteringProductionComposition.recoverFromSharedConfiguration(
-                    role: .deviceActivityMonitor
-                )
-            } catch {
-                NSLog("[Evlin/Ext] v2 metering recovery failed: %@", String(describing: error))
-            }
         }
     }
 

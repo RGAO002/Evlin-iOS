@@ -163,6 +163,7 @@ struct BigKidRootView: View {
             // fetch happens. Calling refreshNow here is idempotent and
             // costs one /child/state request per appearance.
             Task { await poller.refreshNow() }
+            Task { await AppMeteringEntry.shared.recoverIfConfigured() }
             ensureCommandPollerRunning()
         }
         .onDisappear { poller.stop() }

@@ -87,6 +87,14 @@ final class MeteringTargetMembershipTests: XCTestCase {
         XCTAssertFalse(isMember("Services/MeteringProductionComposition.swift", of: .push, in: project))
     }
 
+    func testProcessEntriesBelongToAppAndMonitorButNotPushTargets() throws {
+        let project = try projectSource()
+
+        XCTAssertTrue(isMember("Services/MeteringProcessEntries.swift", of: .app, in: project))
+        XCTAssertTrue(isMember("Services/MeteringProcessEntries.swift", of: .deviceActivityMonitor, in: project))
+        XCTAssertFalse(isMember("Services/MeteringProcessEntries.swift", of: .push, in: project))
+    }
+
     func testV30EncoderStaysAppOnly() throws {
         let project = try projectSource()
 

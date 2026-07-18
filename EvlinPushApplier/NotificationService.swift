@@ -3,10 +3,6 @@ import FamilyControls
 import ManagedSettings
 import Foundation
 
-#if DEBUG
-import DeviceActivity
-#endif
-
 /// Production Notification Service Extension (target: EvlinPushApplier).
 ///
 /// The force-quit-resilient lock applier. iOS launches this extension for any
@@ -49,13 +45,6 @@ final class NotificationService: UNNotificationServiceExtension {
 
         let evlin = request.content.userInfo["evlin"] as? [String: Any]
         let kind = evlin?["kind"] as? String
-#if DEBUG
-        if kind == "metering_monitor_probe" {
-            runMeteringMonitorCapabilityProbe(evlin)
-            finish()
-            return
-        }
-#endif
         guard kind == "lock_command_alert",
               let cidString = evlin?["command_id"] as? String,
               let commandID = UUID(uuidString: cidString) else {
@@ -84,138 +73,6 @@ final class NotificationService: UNNotificationServiceExtension {
         contentHandler = nil
         handler(content)
     }
-
-#if DEBUG
-    private func runMeteringMonitorCapabilityProbe(_ evlin: [String: Any]?) {
-        let defaults = UserDefaults(suiteName: "group.com.evlin.ios")
-        guard let sequence = evlin?["seq"] as? Int,
-              sequence >= 0,
-              let rawTimezone = evlin?["canonical_timezone"] as? String else {
-            MeteringMonitorCapabilityProbe.append(
-                "origin=nse operation=validate result=error invalid_seq_or_timezone",
-                defaults: defaults
-            )
-            return
-        }
-
-        let canonicalTimezone = rawTimezone.trimmingCharacters(in: .whitespacesAndNewlines)
-        let now = Date()
-        guard !canonicalTimezone.isEmpty,
-              let plan = MeteringMonitorCapabilityProbe.schedulePlan(
-                origin: "nse",
-                sequence: sequence,
-                now: now,
-                canonicalTimezone: canonicalTimezone
-              ),
-              let stoppedStart = plan.dateComponents(for: plan.stoppedStart),
-              let supersededActiveStart = plan.dateComponents(
-                for: plan.supersededActiveStart
-              ),
-              let replacementActiveStart = plan.dateComponents(
-                for: plan.replacementActiveStart
-              ),
-              let end = plan.dateComponents(for: plan.end) else {
-            MeteringMonitorCapabilityProbe.append(
-                "origin=nse sequence=\(sequence) operation=validate result=error invalid_timezone=\(canonicalTimezone)",
-                defaults: defaults
-            )
-            return
-        }
-
-        let formatter = ISO8601DateFormatter()
-        let center = DeviceActivityCenter()
-        let stoppedName = DeviceActivityName(plan.stoppedActivityName)
-        let activeName = DeviceActivityName(plan.activeActivityName)
-
-        func append(
-            role: String,
-            operation: String,
-            result: String,
-            expectedCallback: String
-        ) {
-            MeteringMonitorCapabilityProbe.append(
-                "origin=nse sequence=\(sequence) role=\(role) operation=\(operation) result=\(result) expected_callback=\(expectedCallback)",
-                defaults: defaults
-            )
-        }
-
-        let stoppedSchedule = DeviceActivitySchedule(
-            intervalStart: stoppedStart,
-            intervalEnd: end,
-            repeats: false
-        )
-        let stoppedExpected = formatter.string(from: plan.stoppedStart)
-        do {
-            try center.startMonitoring(stoppedName, during: stoppedSchedule)
-            append(
-                role: "stopped",
-                operation: "start",
-                result: "ok",
-                expectedCallback: stoppedExpected
-            )
-        } catch {
-            append(
-                role: "stopped",
-                operation: "start",
-                result: "error=\(error.localizedDescription)",
-                expectedCallback: stoppedExpected
-            )
-        }
-        center.stopMonitoring([stoppedName])
-        append(
-            role: "stopped",
-            operation: "stop",
-            result: "called",
-            expectedCallback: "suppressed@\(stoppedExpected)"
-        )
-
-        let supersededSchedule = DeviceActivitySchedule(
-            intervalStart: supersededActiveStart,
-            intervalEnd: end,
-            repeats: false
-        )
-        let supersededExpected = formatter.string(from: plan.supersededActiveStart)
-        do {
-            try center.startMonitoring(activeName, during: supersededSchedule)
-            append(
-                role: "active",
-                operation: "start",
-                result: "ok",
-                expectedCallback: supersededExpected
-            )
-        } catch {
-            append(
-                role: "active",
-                operation: "start",
-                result: "error=\(error.localizedDescription)",
-                expectedCallback: supersededExpected
-            )
-        }
-
-        let replacementSchedule = DeviceActivitySchedule(
-            intervalStart: replacementActiveStart,
-            intervalEnd: end,
-            repeats: false
-        )
-        let replacementExpected = formatter.string(from: plan.replacementActiveStart)
-        do {
-            try center.startMonitoring(activeName, during: replacementSchedule)
-            append(
-                role: "active",
-                operation: "replace_same_name",
-                result: "ok",
-                expectedCallback: replacementExpected
-            )
-        } catch {
-            append(
-                role: "active",
-                operation: "replace_same_name",
-                result: "error=\(error.localizedDescription)",
-                expectedCallback: replacementExpected
-            )
-        }
-    }
-#endif
 
     // MARK: - Apply pipeline
 

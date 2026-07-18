@@ -202,13 +202,7 @@ struct Evlin_iOSApp: App {
     private func recoverMeteringEpochIfReady() {
         guard appMode == "child" else { return }
         Task { @MainActor in
-            do {
-                try await MeteringProductionComposition.recoverFromSharedConfiguration(
-                    role: .app
-                )
-            } catch {
-                print("[Evlin_iOSApp] metering recovery failed: \(error)")
-            }
+            await AppMeteringEntry.shared.recoverIfConfigured()
         }
     }
 

@@ -148,7 +148,7 @@ nonisolated enum MeteringProductionComposition {
         return (defaults, baseURL, owner)
     }
 
-    private static func instanceID(for role: MeteringProcessRole) -> UUID {
+    static func instanceID(for role: MeteringProcessRole) -> UUID {
         switch role {
         case .app: appInstanceID
         case .deviceActivityMonitor: monitorInstanceID
