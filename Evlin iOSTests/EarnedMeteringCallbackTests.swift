@@ -338,6 +338,81 @@ final class EarnedMeteringCallbackTests: XCTestCase {
         XCTAssertEqual(try fixture.store.read().epochs[fixture.epochID]?.lastRawThresholdMinutes, 5)
     }
 
+    func testPolicyReplacementMakesDelayedPriorRouteCallbackByteIdentical() throws {
+        let fixture = try CallbackFixture.dualV2(phase: .cutoverReady)
+        defer { fixture.cleanup() }
+        let activationWorkID = UUID()
+        try fixture.mutate { state in
+            state.activeGenerationID = fixture.candidateGenerationID
+            state.activeEpochID = fixture.candidateEpochID
+            state.activeRouteID = fixture.candidateRouteID
+            state.routes[fixture.candidateRouteID]?.lifecycle = .active
+            state.epochs[fixture.candidateEpochID]?.registeredAt = fixture.start
+            state.installWork[fixture.candidateInstallID]?.authorization = .registered
+            state.installWork[fixture.candidateInstallID]?.phase = .active
+            if let priorInstallID = state.installWork.first(where: { $0.value.routeID == fixture.routeID })?.key {
+                state.installWork[priorInstallID]?.phase = .pendingStop
+            }
+            state.routes[fixture.routeID]?.lifecycle = .tombstoned
+            state.epochs[fixture.epochID]?.status = .retired
+            state.epochs[fixture.epochID]?.retiredAt = fixture.start
+            state.epochs[fixture.epochID]?.retireReason = .policyChange
+            state.generations[fixture.generationID]?.retiredAt = fixture.start
+            state.tombstones[fixture.routeID] = MeteringRouteTombstone(
+                routeID: fixture.routeID,
+                activityName: MeteringRouteNamespace.activityName(routeID: fixture.routeID),
+                eventNames: [MeteringRouteNamespace.eventName(routeID: fixture.routeID, thresholdMinutes: 5)],
+                ownerChildDeviceID: fixture.owner,
+                usageDate: "2026-07-18",
+                epochID: fixture.epochID,
+                generationID: fixture.generationID,
+                canonicalDayEnd: fixture.start.addingTimeInterval(86_400),
+                stopAcknowledgedAt: nil,
+                referencedWorkIDs: [],
+                retainedUntil: nil
+            )
+            state.activationWork[activationWorkID] = EpochActivationWork(
+                workID: activationWorkID,
+                ownerChildDeviceID: fixture.owner,
+                epochID: fixture.candidateEpochID,
+                routeID: fixture.candidateRouteID,
+                request: EpochActivationRequestDTO(
+                    protocolVersion: 2,
+                    deviceID: fixture.owner,
+                    routeID: fixture.candidateRouteID,
+                    verifiedAt: fixture.start
+                ),
+                claim: nil,
+                retry: MeteringRetryState(
+                    attemptCount: 1,
+                    nextAttemptAt: fixture.start,
+                    lastErrorCode: nil,
+                    terminal: .succeeded
+                ),
+                createdAt: fixture.start
+            )
+            state.v2RouteHandoff?.phase = .committed
+            state.v2RouteHandoff?.priorRouteInputClosedAt = fixture.start
+            state.v2RouteHandoff?.registrationAcknowledgedAt = fixture.start
+            state.v2RouteHandoff?.activationAcknowledgedAt = fixture.start
+        }
+        let replaced = try fixture.store.read()
+        XCTAssertNotEqual(
+            replaced.generations[fixture.generationID]?.policyRevision,
+            replaced.generations[fixture.candidateGenerationID]?.policyRevision
+        )
+        let before = try Data(contentsOf: fixture.storeURL)
+
+        let outcome = try fixture.callbackHandler().handle(
+            fixture.callback(threshold: 5, observedAt: fixture.start.addingTimeInterval(86_400 + 300)),
+            expectedOwnerChildDeviceID: fixture.owner
+        )
+
+        XCTAssertEqual(outcome, .discarded(reason: "tombstoned_route"))
+        XCTAssertEqual(try Data(contentsOf: fixture.storeURL), before)
+        XCTAssertTrue(try fixture.store.read().sampleWork.isEmpty)
+    }
+
     func testPausedCallbackOnlyAdvancesRegisteredPausedMetadata() throws {
         let fixture = try CallbackFixture.active()
         defer { fixture.cleanup() }
