@@ -176,6 +176,66 @@ final class AppLimitEpochStoreTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: quarantined), corrupt)
     }
 
+    func testBoundInvariantInvalidRootRejectsNilOwnerWithoutQuarantine() throws {
+        let owner = UUID(uuidString: "20000000-0000-0000-0000-000000000093")!
+        let invalidBytes = try boundInvariantInvalidBytes(owner: owner)
+        try invalidBytes.write(to: fileURL)
+        let fileIO = RecordingDurableFileIO()
+
+        XCTAssertThrowsError(
+            try makeStore(fileIO: fileIO, owner: owner).transaction(
+                source: .poll,
+                expectedOwner: nil
+            ) { _ in
+                XCTFail("unauthorized mutation must not run")
+            }
+        ) { error in
+            XCTAssertEqual(error as? AppLimitEpochStoreError, .ownerMismatch)
+        }
+
+        XCTAssertEqual(try Data(contentsOf: fileURL), invalidBytes)
+        XCTAssertTrue(fileIO.removedURLs.isEmpty)
+        XCTAssertTrue(try quarantineURLs().isEmpty)
+    }
+
+    func testBoundInvariantInvalidRootRejectsWrongOwnerWithoutQuarantine() throws {
+        let owner = UUID(uuidString: "20000000-0000-0000-0000-000000000093")!
+        let wrongOwner = UUID(uuidString: "20000000-0000-0000-0000-000000000092")!
+        let invalidBytes = try boundInvariantInvalidBytes(owner: owner)
+        try invalidBytes.write(to: fileURL)
+        let fileIO = RecordingDurableFileIO()
+
+        XCTAssertThrowsError(
+            try makeStore(fileIO: fileIO, owner: wrongOwner).transaction(
+                source: .poll,
+                expectedOwner: wrongOwner
+            ) { _ in
+                XCTFail("unauthorized mutation must not run")
+            }
+        ) { error in
+            XCTAssertEqual(error as? AppLimitEpochStoreError, .ownerMismatch)
+        }
+
+        XCTAssertEqual(try Data(contentsOf: fileURL), invalidBytes)
+        XCTAssertTrue(fileIO.removedURLs.isEmpty)
+        XCTAssertTrue(try quarantineURLs().isEmpty)
+    }
+
+    func testBoundInvariantInvalidRootQuarantinesForCurrentOwner() throws {
+        let owner = UUID(uuidString: "20000000-0000-0000-0000-000000000093")!
+        let invalidBytes = try boundInvariantInvalidBytes(owner: owner)
+        try invalidBytes.write(to: fileURL)
+        let fileIO = RecordingDurableFileIO()
+
+        let state = try makeStore(fileIO: fileIO, owner: owner).read()
+
+        XCTAssertEqual(state, AppLimitEpochStoreState())
+        XCTAssertEqual(fileIO.removedURLs, [fileURL])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fileURL.path))
+        let quarantined = try XCTUnwrap(quarantineURLs().first)
+        XCTAssertEqual(try Data(contentsOf: quarantined), invalidBytes)
+    }
+
     func testUnsupportedFutureSchemaIsNotQuarantined() throws {
         let future = AppLimitEpochStoreState(
             schemaVersion: AppLimitEpochStoreState.currentSchemaVersion + 1,
@@ -259,6 +319,30 @@ final class AppLimitEpochStoreTests: XCTestCase {
 
         try fileIO.remove(at: fileURL)
         XCTAssertEqual(syncRecorder.urls, [directoryURL])
+    }
+
+    func testDirectorySyncFailureDuringFirstWriteReportsRestorationFailure() throws {
+        let ruleID = UUID(uuidString: "10000000-0000-0000-0000-000000000091")!
+        let syncFailure = FailingDirectorySync()
+        let fileIO = DurableAppLimitEpochFileIO(
+            syncDirectory: { try syncFailure.sync($0) }
+        )
+
+        XCTAssertThrowsError(
+            try makeStore(fileIO: fileIO).transaction(
+                source: .poll,
+                expectedOwner: nil
+            ) { state in
+                state.replaceSlotIfNewer(
+                    makeSetSlot(ruleID: ruleID, token: 1, source: .poll)
+                )
+            }
+        ) { error in
+            XCTAssertEqual(error as? AppLimitEpochStoreError, .restorationFailed)
+        }
+
+        XCTAssertEqual(syncFailure.urls, [directoryURL, directoryURL])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fileURL.path))
     }
 
     func testConcurrentAppAndNSEWritersDoNotLoseEitherSlot() throws {
@@ -368,6 +452,15 @@ final class AppLimitEpochStoreTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: fileURL.path))
         try fileIO.remove(at: fileURL)
         XCTAssertFalse(FileManager.default.fileExists(atPath: fileURL.path))
+    }
+
+    func testIdentityTeardownRequiresOwnerForLastMutationSourceOnlyRoot() throws {
+        let state = AppLimitEpochStoreState(lastMutationSource: .poll)
+        let bytes = try stateEncoder().encode(state)
+        try bytes.write(to: fileURL)
+
+        XCTAssertTrue(try makeStore().requiresOwnerForIdentityTeardown())
+        XCTAssertEqual(try Data(contentsOf: fileURL), bytes)
     }
 
     func testCanonicalBytesAreIndependentOfDictionaryInsertionOrder() throws {
@@ -535,6 +628,34 @@ final class AppLimitEpochStoreTests: XCTestCase {
         return encoder
     }
 
+    private func boundInvariantInvalidBytes(owner: UUID) throws -> Data {
+        let ruleID = UUID(uuidString: "10000000-0000-0000-0000-000000000093")!
+        let state = AppLimitEpochStoreState(
+            storeRevision: 4,
+            ownerChildDeviceID: owner,
+            slots: [
+                ruleID: AppLimitVersionSlot(
+                    ruleID: ruleID,
+                    latestOrderingToken: 3,
+                    latestKind: .set,
+                    latestPayloadDigest: "invalid-set",
+                    activeRule: nil,
+                    clearTombstone: nil,
+                    pendingOwnerWork: nil,
+                    appliedReceipt: nil
+                ),
+            ]
+        )
+        return try stateEncoder().encode(state)
+    }
+
+    private func quarantineURLs() throws -> [URL] {
+        try FileManager.default.contentsOfDirectory(
+            at: directoryURL,
+            includingPropertiesForKeys: nil
+        ).filter { $0.lastPathComponent.contains(".corrupt-") }
+    }
+
     private func sha256(_ data: Data) -> String {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
@@ -640,6 +761,25 @@ private final class DirectorySyncRecorder: @unchecked Sendable {
     }
 }
 
+private final class FailingDirectorySync: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [URL] = []
+
+    var urls: [URL] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+
+    func sync(_ url: URL) throws {
+        lock.lock()
+        storage.append(url)
+        lock.unlock()
+        throw TestFileIOError.directorySyncFailed
+    }
+}
+
 private enum TestFileIOError: Error {
+    case directorySyncFailed
     case interruptedAfterReplacement
 }

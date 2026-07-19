@@ -14,16 +14,42 @@ import ManagedSettings
 /// fields plus an empty token set; the token (de)serialization path reuses the
 /// proven `LocalAliasStore` JSON token encoding, covered by its own tests.
 final class AppLimitRuleStoreTests: XCTestCase {
+    private var directoryURL: URL!
+    private var fileURL: URL!
+    private var epochLock: RuleStoreTestLock!
 
-    private func freshStore() -> AppLimitRuleStore {
-        let store = AppLimitRuleStore.shared
-        store.removeAll()
-        return store
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        directoryURL = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "app-limit-rule-store-tests-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: directoryURL,
+            withIntermediateDirectories: true
+        )
+        fileURL = directoryURL.appendingPathComponent("app-limit-epoch.json")
+        epochLock = RuleStoreTestLock()
     }
 
-    override func tearDown() {
-        AppLimitRuleStore.shared.removeAll()
-        super.tearDown()
+    override func tearDownWithError() throws {
+        if let directoryURL {
+            try? FileManager.default.removeItem(at: directoryURL)
+        }
+        try super.tearDownWithError()
+    }
+
+    private func makeStore() -> AppLimitRuleStore {
+        let epochStore = AppLimitEpochStore(
+            fileURL: fileURL,
+            lock: epochLock,
+            ownerProvider: { nil },
+            legacyDefaults: nil
+        )
+        return AppLimitRuleStore(
+            epochStore: epochStore,
+            expectedOwnerProvider: { nil }
+        )
     }
 
     private func makeRule(
@@ -49,7 +75,7 @@ final class AppLimitRuleStoreTests: XCTestCase {
     }
 
     func test_upsertThenReadBack_preservesAllFields() throws {
-        let store = freshStore()
+        let store = makeStore()
         let id = UUID()
         let rule = makeRule(id: id, bundleID: "com.toyopagroup.picaboo", budgetMinutes: 30)
 
@@ -70,7 +96,7 @@ final class AppLimitRuleStoreTests: XCTestCase {
     }
 
     func test_upsert_replacesExistingRuleWithSameID() {
-        let store = freshStore()
+        let store = makeStore()
         let id = UUID()
         store.upsert(makeRule(id: id, budgetMinutes: 45))
         store.upsert(makeRule(id: id, budgetMinutes: 15))
@@ -80,7 +106,7 @@ final class AppLimitRuleStoreTests: XCTestCase {
     }
 
     func test_all_returnsEveryUpsertedRule() {
-        let store = freshStore()
+        let store = makeStore()
         let a = makeRule(bundleID: "com.a")
         let b = makeRule(bundleID: "com.b")
         store.upsert(a)
@@ -91,7 +117,7 @@ final class AppLimitRuleStoreTests: XCTestCase {
     }
 
     func test_remove_dropsOnlyTheNamedRule() {
-        let store = freshStore()
+        let store = makeStore()
         let a = makeRule(bundleID: "com.a")
         let b = makeRule(bundleID: "com.b")
         store.upsert(a)
@@ -108,16 +134,16 @@ final class AppLimitRuleStoreTests: XCTestCase {
     /// must see what a prior instance wrote (proves the on-disk JSON survives,
     /// which is the whole reason the extension can read it later).
     func test_persistsAcrossStoreInstances() throws {
-        let store = freshStore()
+        let store = makeStore()
         let id = UUID()
         store.upsert(makeRule(id: id, budgetMinutes: 20))
 
-        let reloaded = AppLimitRuleStore()
+        let reloaded = makeStore()
         XCTAssertEqual(reloaded.rule(forID: id)?.budgetMinutes, 20)
     }
 
     func test_nilExpiresAt_roundTrips() throws {
-        let store = freshStore()
+        let store = makeStore()
         let id = UUID()
         var rule = makeRule(id: id)
         rule = AppLimitRule(
@@ -134,5 +160,15 @@ final class AppLimitRuleStoreTests: XCTestCase {
 
         let read = try XCTUnwrap(store.rule(forID: id))
         XCTAssertNil(read.expiresAt)
+    }
+}
+
+private final class RuleStoreTestLock: DeviceEpochStoreLocking, @unchecked Sendable {
+    private let lock = NSLock()
+
+    func withLock<T>(_ body: () -> T) -> T? {
+        lock.lock()
+        defer { lock.unlock() }
+        return body()
     }
 }

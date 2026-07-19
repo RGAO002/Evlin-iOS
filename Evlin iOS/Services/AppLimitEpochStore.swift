@@ -216,6 +216,7 @@ nonisolated final class AppLimitEpochStore: @unchecked Sendable {
                 || !state.slots.isEmpty
                 || state.storeRevision != 0
                 || state.legacyMigration != nil
+                || state.lastMutationSource != nil
                 || legacyDefaults?.data(forKey: Self.legacyRulesKey) != nil
         }
     }
@@ -265,6 +266,7 @@ nonisolated final class AppLimitEpochStore: @unchecked Sendable {
         guard state.schemaVersion <= AppLimitEpochStoreState.currentSchemaVersion else {
             throw AppLimitEpochStoreError.unsupportedSchema(state.schemaVersion)
         }
+        try checkOwner(expectedOwnerForMigration, state: state)
         do {
             try validate(state)
         } catch AppLimitEpochStoreError.invalidState {

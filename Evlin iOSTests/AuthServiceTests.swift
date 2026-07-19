@@ -288,6 +288,37 @@ final class AuthServiceTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: appLimitURL), rootBytes)
     }
 
+    func testFamilyScopedCleanupFailsClosedWhenOwnerMirrorIsMissingAndOnlyMutationSourceRemains() throws {
+        let suiteName = "AuthServiceTests.\(UUID().uuidString)"
+        let appGroup = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { appGroup.removePersistentDomain(forName: suiteName) }
+        let appLimitURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("auth-app-limit-mutation-source-only-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: appLimitURL) }
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .secondsSince1970
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        let rootBytes = try encoder.encode(
+            AppLimitEpochStoreState(lastMutationSource: .poll)
+        )
+        try rootBytes.write(to: appLimitURL)
+        let appLimitStore = AppLimitEpochStore(
+            fileURL: appLimitURL,
+            ownerProvider: { nil },
+            legacyDefaults: nil
+        )
+        var earnedTeardownCalled = false
+
+        AuthService.clearFamilyScopedLocalState(
+            appGroupDefaults: appGroup,
+            appLimitStore: appLimitStore,
+            teardownEarned: { earnedTeardownCalled = true }
+        )
+
+        XCTAssertFalse(earnedTeardownCalled)
+        XCTAssertEqual(try Data(contentsOf: appLimitURL), rootBytes)
+    }
+
     func testTerminalSessionNotificationSynchronouslyPersistsFailClosedBeforePostReturns() async throws {
         let suiteName = "AuthServiceTests.\(UUID().uuidString)"
         let appGroup = try XCTUnwrap(UserDefaults(suiteName: suiteName))
