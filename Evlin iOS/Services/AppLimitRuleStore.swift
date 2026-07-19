@@ -58,6 +58,8 @@ final class AppLimitRuleStore: @unchecked Sendable {
 
     init() {}
 
+    nonisolated deinit {}
+
     // MARK: - CRUD
 
     /// Insert or replace the rule keyed by its `id`.

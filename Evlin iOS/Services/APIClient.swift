@@ -124,6 +124,8 @@ class APIClient: ObservableObject {
         Self.currentBaseURL = self.baseURL
     }
 
+    nonisolated deinit {}
+
     // MARK: - Parent Chat
 
     struct ChatRequest: Codable {

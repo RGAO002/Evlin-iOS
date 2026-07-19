@@ -102,6 +102,8 @@ final class ParentReflectionFixtureStore {
         self.summariesByChildId = Self.initialSummariesByChildId()
     }
 
+    nonisolated deinit {}
+
     func summary(for child: ChildProfile) -> ParentReflectionSummary? {
         summary(childId: child.id)
     }

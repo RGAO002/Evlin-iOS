@@ -29,6 +29,8 @@ final class BigKidState {
         self.screenTimeFinishedAcknowledged = snapshot.screenTimeFinishedAcknowledged
     }
 
+    nonisolated deinit {}
+
     /// Refresh from a new server snapshot. Preserves local-only UI nav fields.
     func apply(_ snapshot: ChildStateResponse) {
         childName = snapshot.childName

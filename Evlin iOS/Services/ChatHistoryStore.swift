@@ -160,6 +160,8 @@ final class ChatHistoryStore: ObservableObject {
         self.defaults = defaults
     }
 
+    nonisolated deinit {}
+
     // MARK: - Account lifecycle
 
     /// Call after sign-in. Switches the active account and reloads the index.

@@ -14,6 +14,8 @@ final class BigKidAPIClient: ObservableObject {
         self.session = session
     }
 
+    nonisolated deinit {}
+
     // MARK: - State
 
     func fetchState() async throws -> ChildStateResponse {

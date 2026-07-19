@@ -316,6 +316,8 @@ class ChatViewModel: ObservableObject {
         resumePendingAckPolls()
     }
 
+    nonisolated deinit {}
+
     func setChildName(_ name: String) {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, trimmed != childName else { return }
