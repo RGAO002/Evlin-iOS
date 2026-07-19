@@ -6,9 +6,6 @@
     "test_identifier": "MeteringAuthoritativeBaseCorrectionTests/testEveryCorrectionBoundaryReopensWithStableIDsAndConverges()"
   },
   "debt_tasks": {
-    "task_2633a95f": {
-      "title": "Eliminate the historical MainActor deinit crash family"
-    },
     "task_phase3_legacy_test_debt_20260719": {
       "title": "Retire pre-existing iOS fixture and auth test debt"
     }
@@ -16,81 +13,6 @@
   "destinations": {
     "ipad_m5": {
       "failures": [
-        {
-          "category": "deinit_family",
-          "owner": "task_2633a95f",
-          "test_identifier": "AppLimitRuleStoreTests/test_persistsAcrossStoreInstances()"
-        },
-        {
-          "category": "deinit_family",
-          "owner": "task_2633a95f",
-          "test_identifier": "BigKidAPIClientTests/testGetStateBuildsCorrectRequest()"
-        },
-        {
-          "category": "deinit_family",
-          "owner": "task_2633a95f",
-          "test_identifier": "BigKidModelsTests/testAllTasksDoneWithApprovedBypass()"
-        },
-        {
-          "category": "deinit_family",
-          "owner": "task_2633a95f",
-          "test_identifier": "BigKidRouterTests/testApprovedBypassCountsTowardAllDone()"
-        },
-        {
-          "category": "deinit_family",
-          "owner": "task_2633a95f",
-          "test_identifier": "BigKidRouterTests/testCompleteWhenApprovedNotAcked()"
-        },
-        {
-          "category": "deinit_family",
-          "owner": "task_2633a95f",
-          "test_identifier": "BigKidRouterTests/testDailyCompleteWhenAllTasksDoneNotAcked()"
-        },
-        {
-          "category": "deinit_family",
-          "owner": "task_2633a95f",
-          "test_identifier": "BigKidRouterTests/testHomeOnceDailyCompleteAcked()"
-        },
-        {
-          "category": "deinit_family",
-          "owner": "task_2633a95f",
-          "test_identifier": "BigKidRouterTests/testHomeOnceScreenTimeFinishedAcked()"
-        },
-        {
-          "category": "deinit_family",
-          "owner": "task_2633a95f",
-          "test_identifier": "BigKidRouterTests/testHomeReflectionAWhileInProgress()"
-        },
-        {
-          "category": "deinit_family",
-          "owner": "task_2633a95f",
-          "test_identifier": "BigKidRouterTests/testHomeReflectionBWhenAllStepsDone()"
-        },
-        {
-          "category": "deinit_family",
-          "owner": "task_2633a95f",
-          "test_identifier": "BigKidRouterTests/testHomeWhenNothingActive()"
-        },
-        {
-          "category": "deinit_family",
-          "owner": "task_2633a95f",
-          "test_identifier": "BigKidRouterTests/testReflectionApprovedTakesPriorityOverDailyComplete()"
-        },
-        {
-          "category": "deinit_family",
-          "owner": "task_2633a95f",
-          "test_identifier": "BigKidRouterTests/testScreenTimeFinishedWhenZeroMinutes()"
-        },
-        {
-          "category": "deinit_family",
-          "owner": "task_2633a95f",
-          "test_identifier": "CalendarEventDTOTests/test_calendarEventsWindowPathIsRelativeNoBaseURL()"
-        },
-        {
-          "category": "deinit_family",
-          "owner": "task_2633a95f",
-          "test_identifier": "CalendarEventDTOTests/test_calendarEventsWindowURLEncodesISOStartEnd()"
-        },
         {
           "category": "old_fixture",
           "owner": "task_phase3_legacy_test_debt_20260719",
@@ -102,24 +24,9 @@
           "test_identifier": "CatalogBindStateTests/test_makeUploadCategoryCarriesBroadCoverageTokenFields()"
         },
         {
-          "category": "deinit_family",
-          "owner": "task_2633a95f",
-          "test_identifier": "ChatSeedAndPairingTests/testFreshInstallSeedsNoFakeLockReceipt()"
-        },
-        {
-          "category": "deinit_family",
-          "owner": "task_2633a95f",
-          "test_identifier": "ChatSeedAndPairingTests/testFreshInstallSeedsNoFakeStrategyCard()"
-        },
-        {
-          "category": "deinit_family",
-          "owner": "task_2633a95f",
+          "category": "old_fixture",
+          "owner": "task_phase3_legacy_test_debt_20260719",
           "test_identifier": "ChatSeedAndPairingTests/testFreshInstallSeedsSingleNeutralWelcome()"
-        },
-        {
-          "category": "deinit_family",
-          "owner": "task_2633a95f",
-          "test_identifier": "ChatSeedAndPairingTests/testUnpairedSendMessageBlocksDispatchAndShowsCTA()"
         },
         {
           "category": "old_fixture",
@@ -150,36 +57,6 @@
           "category": "old_fixture",
           "owner": "task_phase3_legacy_test_debt_20260719",
           "test_identifier": "ChatViewModelPlanArchLifecycleTests/testEventSourceSetsErrorMessageAndClearsCard()"
-        },
-        {
-          "category": "deinit_family",
-          "owner": "task_2633a95f",
-          "test_identifier": "ChatViewModelPlanArchLifecycleTests/testMakePlanArchHandlersReturnsCancelClosure()"
-        },
-        {
-          "category": "deinit_family",
-          "owner": "task_2633a95f",
-          "test_identifier": "ChatViewModelPlanArchLifecycleTests/testPlanSourceCancelClearsCardImmediately()"
-        },
-        {
-          "category": "deinit_family",
-          "owner": "task_2633a95f",
-          "test_identifier": "ParentReflectionModelsTests/testCompletedFixtureHasExactlyThreeStandardSteps()"
-        },
-        {
-          "category": "deinit_family",
-          "owner": "task_2633a95f",
-          "test_identifier": "ParentReflectionModelsTests/testSimulateAssignmentCreatesLiamPendingSummary()"
-        },
-        {
-          "category": "deinit_family",
-          "owner": "task_2633a95f",
-          "test_identifier": "ParentReflectionModelsTests/testSimulateCompletionFlipsLiamToCompletedReady()"
-        },
-        {
-          "category": "deinit_family",
-          "owner": "task_2633a95f",
-          "test_identifier": "ParentReflectionModelsTests/testStoreStartsWithoutReflectionSummary()"
         },
         {
           "category": "old_fixture",
@@ -196,81 +73,6 @@
     "iphone17pro": {
       "failures": [
         {
-          "category": "deinit_family",
-          "owner": "task_2633a95f",
-          "test_identifier": "AppLimitRuleStoreTests/test_persistsAcrossStoreInstances()"
-        },
-        {
-          "category": "deinit_family",
-          "owner": "task_2633a95f",
-          "test_identifier": "BigKidAPIClientTests/testGetStateBuildsCorrectRequest()"
-        },
-        {
-          "category": "deinit_family",
-          "owner": "task_2633a95f",
-          "test_identifier": "BigKidModelsTests/testAllTasksDoneWithApprovedBypass()"
-        },
-        {
-          "category": "deinit_family",
-          "owner": "task_2633a95f",
-          "test_identifier": "BigKidRouterTests/testApprovedBypassCountsTowardAllDone()"
-        },
-        {
-          "category": "deinit_family",
-          "owner": "task_2633a95f",
-          "test_identifier": "BigKidRouterTests/testCompleteWhenApprovedNotAcked()"
-        },
-        {
-          "category": "deinit_family",
-          "owner": "task_2633a95f",
-          "test_identifier": "BigKidRouterTests/testDailyCompleteWhenAllTasksDoneNotAcked()"
-        },
-        {
-          "category": "deinit_family",
-          "owner": "task_2633a95f",
-          "test_identifier": "BigKidRouterTests/testHomeOnceDailyCompleteAcked()"
-        },
-        {
-          "category": "deinit_family",
-          "owner": "task_2633a95f",
-          "test_identifier": "BigKidRouterTests/testHomeOnceScreenTimeFinishedAcked()"
-        },
-        {
-          "category": "deinit_family",
-          "owner": "task_2633a95f",
-          "test_identifier": "BigKidRouterTests/testHomeReflectionAWhileInProgress()"
-        },
-        {
-          "category": "deinit_family",
-          "owner": "task_2633a95f",
-          "test_identifier": "BigKidRouterTests/testHomeReflectionBWhenAllStepsDone()"
-        },
-        {
-          "category": "deinit_family",
-          "owner": "task_2633a95f",
-          "test_identifier": "BigKidRouterTests/testHomeWhenNothingActive()"
-        },
-        {
-          "category": "deinit_family",
-          "owner": "task_2633a95f",
-          "test_identifier": "BigKidRouterTests/testReflectionApprovedTakesPriorityOverDailyComplete()"
-        },
-        {
-          "category": "deinit_family",
-          "owner": "task_2633a95f",
-          "test_identifier": "BigKidRouterTests/testScreenTimeFinishedWhenZeroMinutes()"
-        },
-        {
-          "category": "deinit_family",
-          "owner": "task_2633a95f",
-          "test_identifier": "CalendarEventDTOTests/test_calendarEventsWindowPathIsRelativeNoBaseURL()"
-        },
-        {
-          "category": "deinit_family",
-          "owner": "task_2633a95f",
-          "test_identifier": "CalendarEventDTOTests/test_calendarEventsWindowURLEncodesISOStartEnd()"
-        },
-        {
           "category": "old_fixture",
           "owner": "task_phase3_legacy_test_debt_20260719",
           "test_identifier": "CatalogBindStateTests/test_makeUploadAppFromConfirmedRowCarriesCatalogFields()"
@@ -281,24 +83,9 @@
           "test_identifier": "CatalogBindStateTests/test_makeUploadCategoryCarriesBroadCoverageTokenFields()"
         },
         {
-          "category": "deinit_family",
-          "owner": "task_2633a95f",
-          "test_identifier": "ChatSeedAndPairingTests/testFreshInstallSeedsNoFakeLockReceipt()"
-        },
-        {
-          "category": "deinit_family",
-          "owner": "task_2633a95f",
-          "test_identifier": "ChatSeedAndPairingTests/testFreshInstallSeedsNoFakeStrategyCard()"
-        },
-        {
           "category": "old_fixture",
           "owner": "task_phase3_legacy_test_debt_20260719",
           "test_identifier": "ChatSeedAndPairingTests/testFreshInstallSeedsSingleNeutralWelcome()"
-        },
-        {
-          "category": "deinit_family",
-          "owner": "task_2633a95f",
-          "test_identifier": "ChatSeedAndPairingTests/testUnpairedSendMessageBlocksDispatchAndShowsCTA()"
         },
         {
           "category": "old_fixture",
@@ -329,36 +116,6 @@
           "category": "old_fixture",
           "owner": "task_phase3_legacy_test_debt_20260719",
           "test_identifier": "ChatViewModelPlanArchLifecycleTests/testEventSourceSetsErrorMessageAndClearsCard()"
-        },
-        {
-          "category": "deinit_family",
-          "owner": "task_2633a95f",
-          "test_identifier": "ChatViewModelPlanArchLifecycleTests/testMakePlanArchHandlersReturnsCancelClosure()"
-        },
-        {
-          "category": "deinit_family",
-          "owner": "task_2633a95f",
-          "test_identifier": "ChatViewModelPlanArchLifecycleTests/testPlanSourceCancelClearsCardImmediately()"
-        },
-        {
-          "category": "deinit_family",
-          "owner": "task_2633a95f",
-          "test_identifier": "ParentReflectionModelsTests/testCompletedFixtureHasExactlyThreeStandardSteps()"
-        },
-        {
-          "category": "deinit_family",
-          "owner": "task_2633a95f",
-          "test_identifier": "ParentReflectionModelsTests/testSimulateAssignmentCreatesLiamPendingSummary()"
-        },
-        {
-          "category": "deinit_family",
-          "owner": "task_2633a95f",
-          "test_identifier": "ParentReflectionModelsTests/testSimulateCompletionFlipsLiamToCompletedReady()"
-        },
-        {
-          "category": "deinit_family",
-          "owner": "task_2633a95f",
-          "test_identifier": "ParentReflectionModelsTests/testStoreStartsWithoutReflectionSummary()"
         },
         {
           "category": "old_fixture",
