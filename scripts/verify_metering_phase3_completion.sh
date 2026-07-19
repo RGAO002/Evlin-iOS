@@ -65,17 +65,18 @@ PLAN_COUNTS = {
     "modify": 165,
     "declarations": 217,
     "unique_paths": 96,
-    "xcodebuild": 94,
+    "xcodebuild": 95,
 }
 
-PRODUCTS = (
+RELEASE_PRODUCTS = (
     "Release-iphoneos/Evlin iOS.app/Evlin iOS",
     "Release-iphoneos/Evlin iOS.app/PlugIns/EvlinDeviceActivityMonitor.appex/EvlinDeviceActivityMonitor",
     "Release-iphoneos/Evlin iOS.app/Extensions/EvlinDeviceActivityReport.appex/EvlinDeviceActivityReport",
     "Release-iphoneos/Evlin iOS.app/PlugIns/EvlinShieldConfig.appex/EvlinShieldConfig",
     "Release-iphoneos/Evlin iOS.app/PlugIns/EvlinPushApplier.appex/EvlinPushApplier",
-    "Release-iphoneos/Evlin iOS.app/PlugIns/Evlin iOSTests.xctest/Evlin iOSTests",
 )
+DEBUG_XCTEST_PRODUCT = "Debug-iphoneos/Evlin iOS.app/PlugIns/Evlin iOSTests.xctest/Evlin iOSTests"
+VOLATILE_TRACKED_TOKENS = ("xcuserdata/", ".xcuserstate", "xcschememanagement.plist")
 
 GATES = (
     "backend-vector-contract",
@@ -84,7 +85,8 @@ GATES = (
     "cross-stack-v30",
     "ios-iphone17pro",
     "ios-ipad-m5",
-    "release-build",
+    "release-production-build",
+    "debug-xctest-build",
     "release-source-check",
     "r16-structured-map",
     "authoritative-correction-disposition",
@@ -343,13 +345,72 @@ manifest_path.write_text(
 )
 
 
-def dirty_hash(repo: Path) -> str:
-    result = subprocess.run(
-        ["git", "-C", str(repo), "diff", "--binary"],
-        stdout=subprocess.PIPE,
-        check=True,
+def tracked_semantic_paths(repo: Path) -> list[str]:
+    paths: set[str] = set()
+    for args in (("diff", "--name-only", "-z"), ("diff", "--cached", "--name-only", "-z")):
+        raw = subprocess.check_output(["git", "-C", str(repo), *args])
+        paths.update(os.fsdecode(item) for item in raw.split(b"\0") if item)
+    return sorted(
+        path for path in paths if not any(token in path for token in VOLATILE_TRACKED_TOKENS)
     )
-    return sha256_bytes(result.stdout)
+
+
+def verify_tracked_blob_baseline(repo_name: str, repo: Path, baseline: Path) -> None:
+    try:
+        payload = json.loads(baseline.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        fail(f"invalid {repo_name} tracked WIP blob baseline: {exc}")
+    if payload.get("format_version") != 1:
+        fail(f"unsupported {repo_name} tracked WIP blob baseline format")
+    if tuple(payload.get("volatile_exclusions", ())) != VOLATILE_TRACKED_TOKENS:
+        fail(f"{repo_name} tracked WIP volatile exclusions changed")
+    rows = payload.get("files")
+    if not isinstance(rows, list):
+        fail(f"invalid {repo_name} tracked WIP file rows")
+    expected: dict[str, str] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            fail(f"invalid {repo_name} tracked WIP row")
+        path = row.get("path")
+        blob = row.get("blob_sha")
+        reason = row.get("reason")
+        if (
+            not isinstance(path, str)
+            or not path
+            or Path(path).is_absolute()
+            or ".." in Path(path).parts
+            or any(token in path for token in VOLATILE_TRACKED_TOKENS)
+            or not isinstance(blob, str)
+            or not re.fullmatch(r"[0-9a-f]{40}", blob)
+            or not isinstance(reason, str)
+            or not reason.strip()
+            or path in expected
+        ):
+            fail(f"invalid {repo_name} tracked WIP row: {row}")
+        expected[path] = blob
+    current_paths = tracked_semantic_paths(repo)
+    if current_paths != sorted(expected):
+        fail(f"{repo_name} tracked semantic WIP path set differs from immutable baseline")
+    for path, expected_blob in expected.items():
+        actual_blob = run_git(repo, "hash-object", "--", path)
+        if actual_blob != expected_blob:
+            fail(f"{repo_name} tracked semantic WIP content differs from immutable baseline: {path}")
+    snapshot = payload.get("snapshot_commit")
+    if expected:
+        if not isinstance(snapshot, str) or not re.fullmatch(r"[0-9a-f]{40}", snapshot):
+            fail(f"{repo_name} tracked WIP recovery snapshot is missing or malformed")
+        if subprocess.run(
+            ["git", "-C", str(repo), "cat-file", "-e", f"{snapshot}^{{commit}}"],
+            check=False,
+        ).returncode:
+            fail(f"{repo_name} tracked WIP recovery snapshot is unavailable")
+        for path, expected_blob in expected.items():
+            tree_row = run_git(repo, "ls-tree", snapshot, "--", path)
+            parts = tree_row.split()
+            if len(parts) < 3 or parts[2] != expected_blob:
+                fail(f"{repo_name} recovery snapshot does not contain baseline blob: {path}")
+    elif snapshot is not None:
+        fail(f"{repo_name} clean tracked WIP baseline must not name a recovery snapshot")
 
 
 def untracked_manifest(repo: Path) -> bytes:
@@ -388,15 +449,13 @@ def untracked_manifest(repo: Path) -> bytes:
 
 
 for repo_name, repo in (("ios", ios), ("backend", backend)):
-    dirty_before = access(evidence / f"{repo_name}-dirty-diff-before.sha256")
+    blob_before = access(evidence / f"{repo_name}-worktree-blob-baseline.json")
     untracked_before = access(evidence / f"{repo_name}-untracked-before.manifest")
     untracked_hash_before = access(evidence / f"{repo_name}-untracked-before.manifest.sha256")
-    for path in (dirty_before, untracked_before, untracked_hash_before):
+    for path in (blob_before, untracked_before, untracked_hash_before):
         if not path.is_file():
             fail(f"missing immutable workspace baseline: {path}")
-    expected_dirty = dirty_before.read_text().split()[0]
-    if dirty_hash(repo) != expected_dirty:
-        fail(f"{repo_name} tracked dirty WIP differs from immutable baseline")
+    verify_tracked_blob_baseline(repo_name, repo, blob_before)
     current_untracked = untracked_manifest(repo)
     if current_untracked != untracked_before.read_bytes():
         fail(f"{repo_name} untracked WIP content/type/mode differs from immutable baseline")
@@ -413,7 +472,8 @@ def gate_command(gate: str) -> tuple[Path, list[str] | str]:
         "cross-stack-v30": (backend, "bash scripts/run_metering_v30_cross_stack.sh"),
         "ios-iphone17pro": (ios, "SENTRY_SKIP_DSYM_UPLOAD=1 xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3.1' IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' test"),
         "ios-ipad-m5": (ios, "SENTRY_SKIP_DSYM_UPLOAD=1 xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5),OS=26.3.1' IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' -skip-testing:'Evlin iOSTests/ProfileSnapshotTests' test"),
-        "release-build": (ios, "DERIVED=\"$PWD/.superpowers/evidence/metering-phase3/DerivedData-Release\"; rm -rf \"$DERIVED\"; SENTRY_SKIP_DSYM_UPLOAD=1 xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -configuration Release -destination 'generic/platform=iOS' -derivedDataPath \"$DERIVED\" CODE_SIGNING_ALLOWED=NO IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' build-for-testing"),
+        "release-production-build": (ios, "DERIVED=\"$PWD/.superpowers/evidence/metering-phase3/DerivedData-Release\"; rm -rf \"$DERIVED\"; SENTRY_SKIP_DSYM_UPLOAD=1 xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -configuration Release -destination 'generic/platform=iOS' -derivedDataPath \"$DERIVED\" CODE_SIGNING_ALLOWED=NO IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' build"),
+        "debug-xctest-build": (ios, "DERIVED=\"$PWD/.superpowers/evidence/metering-phase3/DerivedData-DebugTests\"; rm -rf \"$DERIVED\"; SENTRY_SKIP_DSYM_UPLOAD=1 xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -configuration Debug -destination 'generic/platform=iOS' -derivedDataPath \"$DERIVED\" CODE_SIGNING_ALLOWED=NO IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' build-for-testing"),
         "release-source-check": (ios, "OUT='$PWD/.superpowers/evidence/metering-phase3/release-source.sil'; DEBUG_OUT='$PWD/.superpowers/evidence/metering-phase3/debug-source-control.sil'; SDK=$(xcrun --sdk iphonesimulator --show-sdk-path); xcrun swiftc -emit-sil -parse-as-library -sdk \"$SDK\" -target arm64-apple-ios17.6-simulator 'Evlin iOS/Services/MeteringEpochContract.swift' 'Evlin iOS/Services/MeteringRuntimeInfrastructure.swift' >/dev/null 2>\"$OUT\"; test -s \"$OUT\"; if rg -q 'DebugAppGroupMeteringClock|evlin\\.metering\\.debugClockNow' \"$OUT\"; then exit 1; fi; xcrun swiftc -D DEBUG -emit-sil -parse-as-library -sdk \"$SDK\" -target arm64-apple-ios17.6-simulator 'Evlin iOS/Services/MeteringEpochContract.swift' 'Evlin iOS/Services/MeteringRuntimeInfrastructure.swift' >/dev/null 2>\"$DEBUG_OUT\"; rg -q 'DebugAppGroupMeteringClock' \"$DEBUG_OUT\"; rg -q 'evlin\\.metering\\.debugClockNow' \"$DEBUG_OUT\"; echo release-source-compile-passed"),
         "r16-structured-map": (ios, "python3 scripts/verify_metering_phase3_r16.py"),
         "authoritative-correction-disposition": (ios, "printf '%s\\n' 'baseline_failure_archived' 'test_method=MeteringAuthoritativeBaseCorrectionTests.testEveryCorrectionBoundaryReopensWithStableIDsAndConverges' 'baseline_commit=e46ffe1' 'task24_known_failure_ordinal=27'"),
@@ -458,10 +518,10 @@ for required in (
         fail(f"authoritative-correction disposition omitted {required}")
 
 derived_products = evidence / "DerivedData-Release/Build/Products"
-product_paths = [access(derived_products / relative) for relative in PRODUCTS]
-if len(product_paths) != 6 or len({str(path) for path in product_paths}) != 6:
-    fail("Release product manifest must contain exactly six unique products")
-for path in product_paths:
+release_product_paths = [access(derived_products / relative) for relative in RELEASE_PRODUCTS]
+if len(release_product_paths) != 5 or len({str(path) for path in release_product_paths}) != 5:
+    fail("Release product manifest must contain exactly five unique production products")
+for path in release_product_paths:
     if not path.is_file() or not path.stat().st_size:
         fail(f"missing or empty Release product: {path}")
     data = path.read_bytes()
@@ -474,6 +534,19 @@ for path in product_paths:
             fail(f"Release product is not Mach-O: {path}: {output.strip()}")
     if b"DebugAppGroupMeteringClock" in data or b"evlin.metering.debugClockNow" in data:
         fail(f"DEBUG metering token present in Release product: {path}")
+
+debug_xctest_path = access(
+    evidence / "DerivedData-DebugTests/Build/Products" / DEBUG_XCTEST_PRODUCT
+)
+if not debug_xctest_path.is_file() or not debug_xctest_path.stat().st_size:
+    fail(f"missing or empty Debug XCTest product: {debug_xctest_path}")
+if test_mode:
+    if not debug_xctest_path.read_bytes().startswith(b"MACHO"):
+        fail(f"fixture Debug XCTest product is not marked Mach-O: {debug_xctest_path}")
+else:
+    output = subprocess.check_output(["file", str(debug_xctest_path)], text=True)
+    if "Mach-O" not in output:
+        fail(f"Debug XCTest product is not Mach-O: {debug_xctest_path}: {output.strip()}")
 
 fixture_paths = (
     ios / "Evlin iOSTests/Fixtures/metering_epoch_phase3_vectors.json",
@@ -497,7 +570,10 @@ target_manifest_path.write_text(
     json.dumps(
         {
             "project_sha256": project_hash,
-            "release_products": list(PRODUCTS),
+            "release_products": list(RELEASE_PRODUCTS),
+            "debug_xctest_product": DEBUG_XCTEST_PRODUCT,
+            "test_build": "Debug build-for-testing",
+            "release_verification": "five production Release binaries scanned; no test seams",
             "push_forbidden_sources": [
                 "MeteringProductionComposition.swift",
                 "MeteringV30ScenarioEncoder.swift",
@@ -525,10 +601,24 @@ for path in sorted(logs.glob("*.log")):
 
 product_manifest = [
     {"path": relative, "sha256": sha256_file(path), "bytes": path.stat().st_size}
-    for relative, path in zip(PRODUCTS, product_paths)
+    for relative, path in zip(RELEASE_PRODUCTS, release_product_paths)
 ]
 (evidence / "release-product-manifest.json").write_text(
     json.dumps(product_manifest, indent=2, sort_keys=True) + "\n"
+)
+(evidence / "debug-test-product-manifest.json").write_text(
+    json.dumps(
+        {
+            "path": DEBUG_XCTEST_PRODUCT,
+            "sha256": sha256_file(debug_xctest_path),
+            "bytes": debug_xctest_path.stat().st_size,
+            "configuration": "Debug",
+            "action": "build-for-testing",
+        },
+        indent=2,
+        sort_keys=True,
+    )
+    + "\n"
 )
 
 status_path = evidence / "automated-status.json"
@@ -544,6 +634,10 @@ status = {
         "baseline_commit": "e46ffe1",
         "task24_known_failure_ordinal": 27,
         "test_method": "MeteringAuthoritativeBaseCorrectionTests.testEveryCorrectionBoundaryReopensWithStableIDsAndConverges",
+    },
+    "build_evidence": {
+        "test_build": "Debug build-for-testing",
+        "release_verification": "five production Release binaries scanned; no test seams",
     },
 }
 status_path.write_text(json.dumps(status, indent=2, sort_keys=True) + "\n")
@@ -585,6 +679,7 @@ hash_targets = [
     r16_after_path,
     evidence / "raw-log-sha256.txt",
     evidence / "release-product-manifest.json",
+    evidence / "debug-test-product-manifest.json",
     *fixture_paths,
 ]
 for repo_name in ("ios", "backend"):
@@ -592,7 +687,7 @@ for repo_name in ("ios", "backend"):
         [
             evidence / f"{repo_name}-base-sha.txt",
             evidence / f"{repo_name}-status-before.txt",
-            evidence / f"{repo_name}-dirty-diff-before.sha256",
+            evidence / f"{repo_name}-worktree-blob-baseline.json",
             evidence / f"{repo_name}-untracked-before.manifest",
             evidence / f"{repo_name}-untracked-before.manifest.sha256",
         ]

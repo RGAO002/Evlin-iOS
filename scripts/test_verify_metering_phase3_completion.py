@@ -49,14 +49,15 @@ TASKS = (
 
 DEPENDENCIES = {"03": "02", "04": "03", "07": "06", "08": "07", "19": "18", "20": "19"}
 
-PRODUCTS = (
+RELEASE_PRODUCTS = (
     "Release-iphoneos/Evlin iOS.app/Evlin iOS",
     "Release-iphoneos/Evlin iOS.app/PlugIns/EvlinDeviceActivityMonitor.appex/EvlinDeviceActivityMonitor",
     "Release-iphoneos/Evlin iOS.app/Extensions/EvlinDeviceActivityReport.appex/EvlinDeviceActivityReport",
     "Release-iphoneos/Evlin iOS.app/PlugIns/EvlinShieldConfig.appex/EvlinShieldConfig",
     "Release-iphoneos/Evlin iOS.app/PlugIns/EvlinPushApplier.appex/EvlinPushApplier",
-    "Release-iphoneos/Evlin iOS.app/PlugIns/Evlin iOSTests.xctest/Evlin iOSTests",
 )
+DEBUG_XCTEST_PRODUCT = "Debug-iphoneos/Evlin iOS.app/PlugIns/Evlin iOSTests.xctest/Evlin iOSTests"
+VOLATILE_TRACKED_TOKENS = ("xcuserdata/", ".xcuserstate", "xcschememanagement.plist")
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -86,7 +87,7 @@ def _plan_text() -> str:
         lines = [f"## Task {label}: Fixture", ""]
         if index == 0:
             lines += declarations
-            lines += ["xcodebuild fixture" for _ in range(94)]
+            lines += ["xcodebuild fixture" for _ in range(95)]
         lines += ["", f"git commit -m '{subject}'", ""]
         sections.append("\n".join(lines))
     return "\n".join(sections)
@@ -121,9 +122,35 @@ def _write_baselines(root: Path, ios: Path, backend: Path, bases: dict[str, str]
     for name, repo in (("ios", ios), ("backend", backend)):
         (evidence / f"{name}-base-sha.txt").write_text(bases[name] + "\n")
         (evidence / f"{name}-status-before.txt").write_text("fixture status\n")
-        dirty = subprocess.check_output(["git", "-C", str(repo), "diff", "--binary"])
-        (evidence / f"{name}-dirty-diff-before.sha256").write_text(
-            hashlib.sha256(dirty).hexdigest() + "  -\n"
+        raw_paths = subprocess.check_output(
+            ["git", "-C", str(repo), "diff", "--name-only", "-z"]
+        )
+        paths = sorted(
+            os.fsdecode(raw)
+            for raw in raw_paths.split(b"\0")
+            if raw and not any(token in os.fsdecode(raw) for token in VOLATILE_TRACKED_TOKENS)
+        )
+        snapshot = _git(repo, "stash", "create") or None
+        files = [
+            {
+                "blob_sha": _git(repo, "hash-object", "--", path),
+                "path": path,
+                "reason": "fixture approved WIP",
+            }
+            for path in paths
+        ]
+        (evidence / f"{name}-worktree-blob-baseline.json").write_text(
+            json.dumps(
+                {
+                    "files": files,
+                    "format_version": 1,
+                    "snapshot_commit": snapshot,
+                    "volatile_exclusions": list(VOLATILE_TRACKED_TOKENS),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
         )
         manifest = _untracked_manifest(repo)
         manifest_path = evidence / f"{name}-untracked-before.manifest"
@@ -154,17 +181,14 @@ if gate == 'authoritative-correction-disposition':
         lines = ['gate=authoritative-correction-disposition', 'passed']
 log.parent.mkdir(parents=True, exist_ok=True)
 log.write_text('\\n'.join(lines) + '\\n')
-if gate == 'release-build' and mode != 'zero-products':
+if gate == 'release-production-build' and mode != 'zero-products':
     products = (
         'Release-iphoneos/Evlin iOS.app/Evlin iOS',
         'Release-iphoneos/Evlin iOS.app/PlugIns/EvlinDeviceActivityMonitor.appex/EvlinDeviceActivityMonitor',
         'Release-iphoneos/Evlin iOS.app/Extensions/EvlinDeviceActivityReport.appex/EvlinDeviceActivityReport',
         'Release-iphoneos/Evlin iOS.app/PlugIns/EvlinShieldConfig.appex/EvlinShieldConfig',
         'Release-iphoneos/Evlin iOS.app/PlugIns/EvlinPushApplier.appex/EvlinPushApplier',
-        'Release-iphoneos/Evlin iOS.app/PlugIns/Evlin iOSTests.xctest/Evlin iOSTests',
     )
-    if mode == 'missing-xctest':
-        products = products[:-1]
     for relative in products:
         path = Path(evidence_name) / 'DerivedData-Release/Build/Products' / relative
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -172,6 +196,10 @@ if gate == 'release-build' and mode != 'zero-products':
         if mode == 'debug-token' and relative == products[0]:
             data += b'DebugAppGroupMeteringClock\\n'
         path.write_bytes(data)
+if gate == 'debug-xctest-build' and mode != 'missing-debug-xctest':
+    path = Path(evidence_name) / 'DerivedData-DebugTests/Build/Products/Debug-iphoneos/Evlin iOS.app/PlugIns/Evlin iOSTests.xctest/Evlin iOSTests'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b'MACHO\\nDEBUG TEST PRODUCT\\n')
 """,
         encoding="utf-8",
     )
@@ -205,6 +233,9 @@ def make_fixture(
     (ios / "Evlin iOSTests/Fixtures/metering_epoch_phase3_vectors.json").write_text("{}\n")
     (backend / "tests/fixtures").mkdir(parents=True)
     (backend / "tests/fixtures/metering_epoch_vectors.json").write_text("{}\n")
+    volatile = ios / "Evlin iOS.xcodeproj/xcuserdata/fred.xcuserdatad/UserInterfaceState.xcuserstate"
+    volatile.parent.mkdir(parents=True)
+    volatile.write_text("committed fixture state\n")
     bases = {"ios": _commit(ios, "fixture ios base"), "backend": _commit(backend, "fixture backend base")}
 
     ordered = list(TASKS[:-1] if not include_task30 else TASKS)
@@ -231,6 +262,7 @@ def make_fixture(
     (ios / "tracked-wip.txt").write_text("before\n")
     _commit(ios, "fixture post-task anchor")
     (ios / "tracked-wip.txt").write_text("dirty\n")
+    volatile.write_text("volatile fixture state\n")
     (ios / "untracked-wip/inside.txt").parent.mkdir()
     (ios / "untracked-wip/inside.txt").write_text("preserve me\n")
     (backend / "untracked-backend.txt").write_text("preserve me\n")
@@ -276,6 +308,10 @@ def test_pre_report_fixture_passes_without_touching_real_paths(tmp_path: Path) -
             "disposition": "baseline_failure_archived",
             "task24_known_failure_ordinal": 27,
             "test_method": "MeteringAuthoritativeBaseCorrectionTests.testEveryCorrectionBoundaryReopensWithStableIDsAndConverges",
+        },
+        "build_evidence": {
+            "release_verification": "five production Release binaries scanned; no test seams",
+            "test_build": "Debug build-for-testing",
         },
         "display_status": "AUTOMATED PASSED; PHYSICAL PENDING; NOT RELEASABLE",
         "phase_complete": False,
@@ -326,7 +362,7 @@ def test_non_ancestor_base_is_rejected(tmp_path: Path) -> None:
     [
         ("empty:backend-vector-contract", "empty raw log"),
         ("zero-products", "missing or empty Release product"),
-        ("missing-xctest", "Evlin iOSTests.xctest"),
+        ("missing-debug-xctest", "Evlin iOSTests.xctest"),
         ("debug-token", "DEBUG metering token"),
         ("omit-authoritative", "authoritative-correction disposition"),
     ],
@@ -341,6 +377,29 @@ def test_untracked_content_change_beneath_same_path_is_rejected(tmp_path: Path) 
     root, values = make_fixture(tmp_path)
     (root / "ios/untracked-wip/inside.txt").write_text("changed without renaming\n")
     assert_failed(run_verifier(root, values["shim"]), "untracked WIP content")
+
+
+def test_tracked_worktree_blob_change_is_rejected(tmp_path: Path) -> None:
+    root, values = make_fixture(tmp_path)
+    (root / "ios/tracked-wip.txt").write_text("content drift\n")
+    assert_failed(run_verifier(root, values["shim"]), "tracked semantic WIP")
+
+
+def test_volatile_xcode_user_state_is_not_semantic_wip(tmp_path: Path) -> None:
+    root, values = make_fixture(tmp_path)
+    volatile = root / "ios/Evlin iOS.xcodeproj/xcuserdata/fred.xcuserdatad/UserInterfaceState.xcuserstate"
+    volatile.write_text("Xcode changed this again\n")
+    result = run_verifier(root, values["shim"])
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_invalid_tracked_wip_snapshot_is_rejected(tmp_path: Path) -> None:
+    root, values = make_fixture(tmp_path)
+    baseline = root / "evidence/ios-worktree-blob-baseline.json"
+    payload = json.loads(baseline.read_text())
+    payload["snapshot_commit"] = "0" * 40
+    baseline.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    assert_failed(run_verifier(root, values["shim"]), "recovery snapshot")
 
 
 def test_wrong_baseline_manifest_hash_is_rejected(tmp_path: Path) -> None:
