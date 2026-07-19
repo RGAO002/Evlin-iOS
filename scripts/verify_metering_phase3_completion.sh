@@ -939,7 +939,8 @@ r16_after_path = evidence / "r16-after.sha256"
 r16_after_path.write_text(f"{sha256_file(rulebook)}  {rulebook}\n")
 
 raw_hash_lines = []
-for path in sorted(logs.glob("*.log")):
+for gate in GATES:
+    path = logs / f"{gate}.log"
     if not path.stat().st_size:
         fail(f"empty raw log: {path}")
     raw_hash_lines.append(f"{sha256_file(path)}  {path.name}")

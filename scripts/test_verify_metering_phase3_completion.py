@@ -497,6 +497,17 @@ def test_real_gate_shells_are_fail_closed_and_expand_source_paths() -> None:
     assert 'python3 scripts/verify_metering_phase3_r16.py && echo r16-structured-map-passed' in source
 
 
+def test_pre_report_ignores_noncanonical_manual_log_artifacts(tmp_path: Path) -> None:
+    root, values = make_fixture(tmp_path)
+    manual_log = root / "evidence/logs/r16-structured-map.manual.log"
+    manual_log.parent.mkdir(parents=True, exist_ok=True)
+    manual_log.write_bytes(b"")
+    result = run_verifier(root, values["shim"])
+    assert result.returncode == 0, result.stdout + result.stderr
+    hashes = (root / "evidence/raw-log-sha256.txt").read_text()
+    assert "r16-structured-map.manual.log" not in hashes
+
+
 def test_dependency_trailer_accepts_reviewed_descendant_of_task_subject(tmp_path: Path) -> None:
     root, values = make_fixture(tmp_path, reviewed_dependency_head="07")
     result = run_verifier(root, values["shim"])
