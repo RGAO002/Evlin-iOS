@@ -140,6 +140,37 @@ nonisolated struct AppLimitVersionSlot: Codable, Equatable, Sendable {
     var appliedReceipt: AppLimitApplyReceipt?
 }
 
+nonisolated extension AppLimitVersionSlot {
+    init(accepting command: AppLimitCommandEnvelope) {
+        let ownerWork = AppLimitOwnerWork(
+            workID: command.commandID,
+            commandID: command.commandID,
+            ruleID: command.ruleID,
+            orderingToken: command.orderingToken,
+            commandKind: command.kind,
+            payloadDigest: command.payloadDigest,
+            source: command.source,
+            createdAt: command.receivedAt
+        )
+        self.init(
+            ruleID: command.ruleID,
+            latestOrderingToken: command.orderingToken,
+            latestKind: command.kind,
+            latestPayloadDigest: command.payloadDigest,
+            activeRule: command.kind == .set ? command.rule : nil,
+            clearTombstone: command.kind == .clear ? AppLimitClearTombstone(
+                ruleID: command.ruleID,
+                orderingToken: command.orderingToken,
+                payloadDigest: command.payloadDigest,
+                source: command.source,
+                clearedAt: command.receivedAt
+            ) : nil,
+            pendingOwnerWork: ownerWork,
+            appliedReceipt: nil
+        )
+    }
+}
+
 nonisolated struct AppLimitLegacyMigrationAudit: Codable, Equatable, Sendable {
     let sourceKey: String
     let sourceFormat: String

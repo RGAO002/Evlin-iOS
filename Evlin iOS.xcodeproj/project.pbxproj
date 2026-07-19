@@ -120,6 +120,7 @@
 				Services/ActiveLockStoreTypes.swift,
 				Services/AppLimitEpochStore.swift,
 				Services/AppLimitEpochTypes.swift,
+				Services/AppLimitCommandCoordinator.swift,
 				Services/DefaultLockGroup.swift,
 				Services/DefaultLockGroupStore.swift,
 				Services/DeviceEpochStore.swift,
