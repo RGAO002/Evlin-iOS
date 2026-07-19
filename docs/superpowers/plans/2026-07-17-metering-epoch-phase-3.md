@@ -3499,7 +3499,7 @@ Task 20 iOS depends on Task 19 backend
 The same stdlib parser used by the fixture test mechanically pins this plan to
 31 task headings, 31 commit commands/unique subjects, 52 `Create` declarations,
 165 `Modify` declarations, 217 total declarations, 96 unique declared paths,
-97 literal `xcodebuild` commands. The Release scheme build is one dependency-
+94 literal `xcodebuild` commands. The Release scheme build is one dependency-
 graph invocation rather than an invalid per-target loop. It rejects a changed count unless the plan,
 fixture expectation, and review map are revised together; prose-only arithmetic
 does not satisfy this gate.
