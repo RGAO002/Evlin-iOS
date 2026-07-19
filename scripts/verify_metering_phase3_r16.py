@@ -167,6 +167,12 @@ EXPECTED_PHASE3: tuple[tuple[str, ...], ...] = (
         "V15,V16,P3V01,P3V02,V36",
     ),
     (
+        "`EarnedShieldReference` / epoch `shieldReferences`",
+        "minimal D#6 authorization reference for the T4 replacement envelope; not an independent veto",
+        "exact release, identity cleanup, or reference retention terminally acknowledged",
+        "P3V01,P3V02 + T4 demolition vectors",
+    ),
+    (
         "`IdentityCleanupWork`",
         "replaces T8 detached teardown",
         "every captured acknowledgement durable",
