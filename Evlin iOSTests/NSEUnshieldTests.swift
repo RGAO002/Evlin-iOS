@@ -211,12 +211,27 @@ final class NSEUnshieldTests: XCTestCase {
             )
             let nseCommand = try NSECommandWireDecoder.decode(data)
 
-            XCTAssertEqual(nseCommand.id, pollCommand.id)
-            XCTAssertEqual(nseCommand.action, pollCommand.action)
-            XCTAssertEqual(nseCommand.tier, pollCommand.tier)
-            XCTAssertEqual(nseCommand.issuedAt, pollCommand.issuedAt)
-            XCTAssertEqual(nseCommand.limit, pollCommand.limit)
-            XCTAssertEqual(nseCommand.clear, pollCommand.clear)
+            assertMatchingCommandEnvelope(nseCommand, pollCommand)
+        }
+    }
+
+    func test_nseAndPollUseDeterministicIssuedAtFallback() throws {
+        let fallback = Date(timeIntervalSince1970: 0)
+
+        for commandKey in ["set_limit", "clear_limit"] {
+            let data = try appLimitFixtureCommand(
+                commandKey,
+                orderingToken: 9_007_199_254_740_993,
+                issuedAt: "not-an-iso8601-timestamp"
+            )
+            let pollCommand = CommandPoller.lockCommand(
+                from: try JSONDecoder().decode(PollCommandDTO.self, from: data)
+            )
+            let nseCommand = try NSECommandWireDecoder.decode(data)
+
+            XCTAssertEqual(pollCommand.issuedAt, fallback)
+            XCTAssertEqual(nseCommand.issuedAt, fallback)
+            assertMatchingCommandEnvelope(nseCommand, pollCommand)
         }
     }
 
@@ -653,7 +668,8 @@ final class NSEUnshieldTests: XCTestCase {
 
     private func appLimitFixtureCommand(
         _ commandKey: String,
-        orderingToken: Any?
+        orderingToken: Any?,
+        issuedAt: String? = nil
     ) throws -> Data {
         let fixtureURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -668,8 +684,27 @@ final class NSEUnshieldTests: XCTestCase {
         } else {
             payload.removeValue(forKey: "ordering_token")
         }
+        if let issuedAt {
+            command["issued_at"] = issuedAt
+        }
         command[payloadKey] = payload
         return try JSONSerialization.data(withJSONObject: command)
+    }
+
+    private func assertMatchingCommandEnvelope(
+        _ nseCommand: LockCommand,
+        _ pollCommand: LockCommand,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        XCTAssertEqual(
+            try? encoder.encode(nseCommand),
+            try? encoder.encode(pollCommand),
+            file: file,
+            line: line
+        )
     }
 }
 

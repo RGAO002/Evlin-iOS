@@ -48,7 +48,7 @@ nonisolated struct NSEWireCommand: Decodable {
             earnedOverrideUsageDate: poll.target.earned_override_usage_date
         )
         let action = CommandAction(rawValue: poll.action) ?? .shield
-        let issued = ISO8601DateFormatter().date(from: poll.issued_at) ?? Date()
+        let issued = CommandTimestampDecoding.issuedAt(from: poll.issued_at)
         return LockCommand(
             id: poll.command_id,
             action: action,
@@ -61,19 +61,12 @@ nonisolated struct NSEWireCommand: Decodable {
         )
     }
 
-    private static let isoFractionalFormatter: ISO8601DateFormatter = {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return formatter
-    }()
-    private static let isoPlainFormatter = ISO8601DateFormatter()
-
     private static func limitRule(from dto: NSEWireLimit?) -> LimitRule? {
         guard let dto,
               let startMinute = minutesSinceMidnight(dto.schedule.starts_at),
               let endMinute = minutesSinceMidnight(dto.schedule.ends_at),
-              let effectiveFrom = parseISO8601(dto.effective_from),
-              let updatedAt = parseISO8601(dto.updated_at)
+              let effectiveFrom = CommandTimestampDecoding.parse(dto.effective_from),
+              let updatedAt = CommandTimestampDecoding.parse(dto.updated_at)
         else { return nil }
         return LimitRule(
             ruleId: dto.rule_id,
@@ -84,14 +77,14 @@ nonisolated struct NSEWireCommand: Decodable {
             endMinute: endMinute,
             timezone: dto.schedule.timezone,
             effectiveFrom: effectiveFrom,
-            expiresAt: dto.expires_at.flatMap(parseISO8601),
+            expiresAt: dto.expires_at.flatMap(CommandTimestampDecoding.parse),
             updatedAt: updatedAt,
             usedTodayMinutes: dto.used_today_minutes
         )
     }
 
     private static func clearLimit(from dto: NSEWireClear?) -> ClearLimit? {
-        guard let dto, let updatedAt = parseISO8601(dto.updated_at) else { return nil }
+        guard let dto, let updatedAt = CommandTimestampDecoding.parse(dto.updated_at) else { return nil }
         return ClearLimit(
             ruleId: dto.rule_id,
             orderingToken: dto.orderingToken,
@@ -111,9 +104,6 @@ nonisolated struct NSEWireCommand: Decodable {
         return hours * 60 + minutes
     }
 
-    private static func parseISO8601(_ value: String) -> Date? {
-        isoFractionalFormatter.date(from: value) ?? isoPlainFormatter.date(from: value)
-    }
 }
 
 nonisolated struct NSEWireLimit: Decodable {

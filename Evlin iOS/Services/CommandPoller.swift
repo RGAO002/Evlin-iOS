@@ -352,23 +352,6 @@ final class CommandPoller {
         )
     }
 
-    /// Tolerant ISO8601 parser for command timestamps. The backend serializes
-    /// command timestamps via Python `datetime.now(timezone.utc).isoformat()` and
-    /// Postgres `func.now()`, which emit microseconds (e.g.
-    /// `2026-06-19T21:00:00.123456+00:00`). A bare `ISO8601DateFormatter` is
-    /// strict and rejects fractional seconds → every real payload would parse to
-    /// nil. Try the fractional-seconds variant first, fall back to plain. Matches
-    /// the pattern used in `U1ExpiryParser`, `NotificationFeedClient`, etc.
-    private static let isoFractionalFormatter: ISO8601DateFormatter = {
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return f
-    }()
-    private static let isoPlainFormatter = ISO8601DateFormatter()
-    private static func parseISO8601(_ s: String) -> Date? {
-        isoFractionalFormatter.date(from: s) ?? isoPlainFormatter.date(from: s)
-    }
-
     static func lockCommand(from poll: PollCommandDTO) -> LockCommand {
         // tier maps to new ShieldTier set; backend emits "exactApp"|"savedList"|"category"|"all"
         let tier = poll.tier.flatMap(ShieldTier.init(rawValue:))
@@ -401,7 +384,7 @@ final class CommandPoller {
         )
         let action: CommandAction = CommandAction(rawValue: poll.action) ?? .shield
 
-        let issued = parseISO8601(poll.issued_at) ?? Date()
+        let issued = CommandTimestampDecoding.issuedAt(from: poll.issued_at)
         return LockCommand(
             id: poll.command_id,
             action: action,
@@ -443,10 +426,10 @@ final class CommandPoller {
         guard
             let startMinute = minutesSinceMidnight(dto.schedule.starts_at),
             let endMinute = minutesSinceMidnight(dto.schedule.ends_at),
-            let effectiveFrom = parseISO8601(dto.effective_from),
-            let updatedAt = parseISO8601(dto.updated_at)
+            let effectiveFrom = CommandTimestampDecoding.parse(dto.effective_from),
+            let updatedAt = CommandTimestampDecoding.parse(dto.updated_at)
         else { return nil }
-        let expiresAt = dto.expires_at.flatMap { parseISO8601($0) }
+        let expiresAt = dto.expires_at.flatMap(CommandTimestampDecoding.parse)
         return LimitRule(
             ruleId: dto.rule_id,
             orderingToken: dto.orderingToken,
@@ -465,7 +448,7 @@ final class CommandPoller {
     /// Map a decoded `clear_limit.clear` DTO into the internal `ClearLimit` (P3).
     private static func clearLimit(from dto: PollClearDTO?) -> ClearLimit? {
         guard let dto else { return nil }
-        guard let updatedAt = parseISO8601(dto.updated_at) else { return nil }
+        guard let updatedAt = CommandTimestampDecoding.parse(dto.updated_at) else { return nil }
         return ClearLimit(
             ruleId: dto.rule_id,
             orderingToken: dto.orderingToken,

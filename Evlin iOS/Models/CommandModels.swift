@@ -34,6 +34,23 @@ enum OrderingTokenDecoding {
     }
 }
 
+enum CommandTimestampDecoding {
+    private static let isoFractionalFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+    private static let isoPlainFormatter = ISO8601DateFormatter()
+
+    static func parse(_ value: String) -> Date? {
+        isoFractionalFormatter.date(from: value) ?? isoPlainFormatter.date(from: value)
+    }
+
+    static func issuedAt(from value: String) -> Date {
+        parse(value) ?? Date(timeIntervalSince1970: 0)
+    }
+}
+
 /// Per-app daily time limit rule decoded from a `set_limit` command (P3 wire
 /// decode only — enforcement/planning/execution land in later tasks).
 /// `startMinute`/`endMinute` are the schedule window parsed from "HH:mm" strings
