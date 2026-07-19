@@ -369,11 +369,6 @@
           "category": "old_fixture",
           "owner": "task_phase3_legacy_test_debt_20260719",
           "test_identifier": "PlanArchCardAdapterPhoneTests/testAllPhoneKindsAdapt()"
-        },
-        {
-          "category": "deinit_family",
-          "owner": "task_2633a95f",
-          "test_identifier": "RecordKeyMigrationTests/test_defaultLockGroup_id_fallsBackToLocalUUID_whenNoBackendID()"
         }
       ]
     }
