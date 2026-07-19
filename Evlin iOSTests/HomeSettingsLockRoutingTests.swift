@@ -102,6 +102,17 @@ final class HomeSettingsLockRoutingTests: XCTestCase {
                        "Home unlock/reset must route through ActiveLockStore records")
     }
 
+    /// C-3 Task 3: the dead direct-write shield APIs must not return.
+    /// Needles are concatenated so the repo-wide `rg` dead-API gate does not
+    /// match this test file itself.
+    func test_screen_time_manager_has_no_dead_direct_writers() throws {
+        let source = try Self.sourceText("Evlin iOS/Services/ScreenTimeManager.swift")
+        XCTAssertFalse(source.contains("func shieldAllApps" + "("),
+                       "shieldAllApps was a zero-caller direct ManagedSettings writer")
+        XCTAssertFalse(source.contains("func unshieldApps" + "("),
+                       "unshieldApps-forMinutes was a zero-caller direct ManagedSettings writer")
+    }
+
     // MARK: - Helpers
 
     /// Resolve repository paths from `#filePath` (never the process cwd).

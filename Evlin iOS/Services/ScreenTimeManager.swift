@@ -42,7 +42,6 @@ class ScreenTimeManager: ObservableObject {
     // MARK: - Private
 
     private let store = ManagedSettingsStore()
-    private let activityCenter = DeviceActivityCenter()
 
     /// Shared UserDefaults for communicating with the DeviceActivityMonitor extension.
     private let sharedDefaults = UserDefaults(suiteName: "group.com.evlin.ios")
@@ -184,28 +183,10 @@ class ScreenTimeManager: ObservableObject {
         NotificationCenter.default.post(name: .evlinLockStateChanged, object: true)
     }
 
-    /// Shield ALL apps (full device lock).
-    func shieldAllApps() {
-        print("[ScreenTime] shieldAllApps called, isAuthorized=\(isAuthorized)")
-        store.shield.applicationCategories = .all()
-        store.shield.webDomainCategories = .all()
-        // Also shield individually selected apps if any
-        let appTokens = selectedApps.applicationTokens
-        if !appTokens.isEmpty {
-            store.shield.applications = appTokens
-        }
-        isUnlocked = false
-        NotificationCenter.default.post(name: .evlinLockStateChanged, object: true)
-        print("[ScreenTime] shield applied: categories=.all(), apps=\(appTokens.count)")
-    }
-
-    /// Unshield (unlock) apps for the given duration.
-    func unshieldApps(forMinutes minutes: Int) {
-        clearLockRestrictions()
-        isUnlocked = true
-        NotificationCenter.default.post(name: .evlinLockStateChanged, object: false)
-        scheduleRelock(afterMinutes: minutes)
-    }
+    // C-3: the shield-all / unshield-for-minutes methods (plus their private
+    // relock timer) were zero-caller direct ManagedSettings writers and have
+    // been REMOVED. All shield/block writes go through `ActiveLockStore`
+    // records.
 
     /// Remove all shields.
     func clearAllShields() {
@@ -278,30 +259,6 @@ class ScreenTimeManager: ObservableObject {
             sharedDefaults?.set(data, forKey: "selectedApps")
         }
         objectWillChange.send()
-    }
-
-    // MARK: - Auto-Relock via DeviceActivity
-
-    private func scheduleRelock(afterMinutes minutes: Int) {
-        let calendar = Calendar.current
-        let now = Date()
-        guard let endDate = calendar.date(byAdding: .minute, value: minutes, to: now) else { return }
-
-        let startComponents = calendar.dateComponents([.hour, .minute, .second], from: now)
-        let endComponents = calendar.dateComponents([.hour, .minute, .second], from: endDate)
-
-        let schedule = DeviceActivitySchedule(
-            intervalStart: startComponents,
-            intervalEnd: endComponents,
-            repeats: false
-        )
-
-        let activityName = DeviceActivityName("evlin.ios.unlock")
-        do {
-            try activityCenter.startMonitoring(activityName, during: schedule)
-        } catch {
-            print("[ScreenTime] Failed to schedule relock: \(error)")
-        }
     }
 
     @MainActor
