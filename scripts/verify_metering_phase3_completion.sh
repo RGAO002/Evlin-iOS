@@ -1,0 +1,579 @@
+#!/bin/bash
+set -euo pipefail
+
+python3 - "$@" <<'PY'
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import shlex
+import stat
+import subprocess
+import sys
+from pathlib import Path
+
+
+TASKS = (
+    ("01", "ios", "test: register phase 3 metering safety states"),
+    ("02", "ios", "feat: inject shared metering runtime dependencies"),
+    ("03", "backend", "feat: add conservative epoch activation protocol"),
+    ("04", "ios", "feat: add exact metering epoch wire DTOs"),
+    ("05", "ios", "feat: add atomic device epoch store"),
+    ("06", "ios", "feat: queue legacy and epoch samples durably"),
+    ("07", "backend", "test: extend backend phase 3 vectors"),
+    ("08", "ios", "test: mirror phase 3 vectors in Swift"),
+    ("09", "ios", "feat: plan immutable dated metering routes"),
+    ("10", "ios", "feat: arbitrate and verify dated route installs"),
+    ("11", "ios", "feat: activate v2 without breaking legacy metering"),
+    ("12", "ios", "feat: authorize earned callbacks by immutable route"),
+    ("13", "ios", "fix: replace route on authoritative base correction"),
+    ("14", "ios", "feat: persist earned shield effects across processes"),
+    ("15", "ios", "feat: retire metering identity atomically"),
+    ("16", "ios", "feat: recover canonical rollover effects"),
+    ("17", "ios", "feat: resume metering with conservative replacement"),
+    ("18", "ios", "feat: wire production metering and V30 encoder"),
+    ("19", "backend", "test: verify V30 exact bytes across the stack"),
+    ("20", "ios", "feat: surface bounded metering coverage"),
+    ("21", "ios", "feat: recover every metering process entry point"),
+    ("22", "ios", "refactor: remove earned arm signature churn"),
+    ("23", "ios", "refactor: remove stale raw threshold ceiling"),
+    ("23A", "ios", "feat: persist trusted terminal shield receipts"),
+    ("24", "ios", "refactor: remove earned fresh-at-fire gate"),
+    ("25", "ios", "refactor: remove earned backend headroom veto"),
+    ("26", "ios", "refactor: remove earned plus-five heuristic"),
+    ("27", "ios", "refactor: remove earned counter recovery flags"),
+    ("28", "ios", "refactor: retire duplicate earned activity lifecycle"),
+    ("29", "ios", "test: add metering phase 3 completion verifier"),
+    ("30", "ios", "docs: record metering phase 3 evidence"),
+)
+
+DEPENDENCIES = {
+    "03": "02",
+    "04": "03",
+    "07": "06",
+    "08": "07",
+    "19": "18",
+    "20": "19",
+}
+
+PLAN_COUNTS = {
+    "headings": 31,
+    "commits": 31,
+    "create": 52,
+    "modify": 165,
+    "declarations": 217,
+    "unique_paths": 96,
+    "xcodebuild": 94,
+}
+
+PRODUCTS = (
+    "Release-iphoneos/Evlin iOS.app/Evlin iOS",
+    "Release-iphoneos/Evlin iOS.app/PlugIns/EvlinDeviceActivityMonitor.appex/EvlinDeviceActivityMonitor",
+    "Release-iphoneos/Evlin iOS.app/Extensions/EvlinDeviceActivityReport.appex/EvlinDeviceActivityReport",
+    "Release-iphoneos/Evlin iOS.app/PlugIns/EvlinShieldConfig.appex/EvlinShieldConfig",
+    "Release-iphoneos/Evlin iOS.app/PlugIns/EvlinPushApplier.appex/EvlinPushApplier",
+    "Release-iphoneos/Evlin iOS.app/PlugIns/Evlin iOSTests.xctest/Evlin iOSTests",
+)
+
+GATES = (
+    "backend-vector-contract",
+    "backend-gate-resume",
+    "backend-phase3-db",
+    "cross-stack-v30",
+    "ios-iphone17pro",
+    "ios-ipad-m5",
+    "release-build",
+    "release-source-check",
+    "r16-structured-map",
+    "authoritative-correction-disposition",
+)
+
+
+class VerificationError(RuntimeError):
+    pass
+
+
+def fail(message: str) -> None:
+    raise VerificationError(message)
+
+
+def sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def sha256_file(path: Path) -> str:
+    return sha256_bytes(path.read_bytes())
+
+
+def run_git(repo: Path, *args: str, check: bool = True) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(repo), *args],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if check and result.returncode:
+        fail(f"git {' '.join(args)} failed in {repo}: {result.stderr.strip()}")
+    return result.stdout.strip()
+
+
+def below(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+mode = sys.argv[1] if len(sys.argv) > 1 else ""
+if mode not in {"pre-report", "final"}:
+    fail("usage: verify_metering_phase3_completion.sh pre-report|final [report-commit]")
+if mode == "final" and len(sys.argv) != 3:
+    fail("final mode requires exactly one report commit")
+if mode == "pre-report" and len(sys.argv) != 2:
+    fail("pre-report mode takes no report commit")
+
+test_mode = os.environ.get("METERING_PHASE3_VERIFIER_TEST_MODE") == "1"
+fixture_root_value = os.environ.get("METERING_PHASE3_FIXTURE_ROOT")
+shim_value = os.environ.get("METERING_PHASE3_COMMAND_SHIM")
+test_vars = (
+    os.environ.get("METERING_PHASE3_VERIFIER_TEST_MODE"),
+    fixture_root_value,
+    shim_value,
+)
+
+if test_mode:
+    if not all(test_vars):
+        fail("test mode requires all three verifier fixture variables")
+    root = Path(fixture_root_value).resolve()
+    if not (root / ".metering-phase3-verifier-fixture").is_file():
+        fail("test fixture marker missing")
+    ios = root / "ios"
+    backend = root / "backend"
+    rulebook = root / "rulebook" / "LOCK_BEHAVIOR_BOUNDARIES.md"
+    evidence = root / "evidence"
+    shim = Path(shim_value).resolve()
+    if not below(shim, root):
+        fail("test command shim must be below fixture root")
+else:
+    if any(value is not None for value in test_vars):
+        fail("fixture variables are forbidden outside complete test mode")
+    root = Path("/Users/fred/Desktop/Evlin")
+    ios = Path("/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS")
+    backend = Path("/Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend")
+    rulebook = Path("/Users/fred/Desktop/Evlin/LOCK_BEHAVIOR_BOUNDARIES.md")
+    evidence = ios / ".superpowers/evidence/metering-phase3"
+    shim = None
+
+logs = evidence / "logs"
+logs.mkdir(parents=True, exist_ok=True)
+access_trace = evidence / "verifier-access-trace.txt"
+accesses: list[str] = []
+
+
+def access(path: Path) -> Path:
+    resolved = path.resolve()
+    if test_mode and not below(resolved, root):
+        fail(f"fixture escaped its root: {resolved}")
+    accesses.append(str(resolved))
+    return resolved
+
+
+for required in (ios, backend, rulebook, evidence):
+    access(required)
+    if not required.exists():
+        fail(f"required path missing: {required}")
+
+plan = access(ios / "docs/superpowers/plans/2026-07-17-metering-epoch-phase-3.md")
+if not plan.is_file():
+    fail(f"plan missing: {plan}")
+
+
+def verify_plan_shape() -> None:
+    text = plan.read_text(encoding="utf-8")
+    headings = re.findall(r"^## Task (?:[0-9]+|23A):", text, re.MULTILINE)
+    commits = re.findall(r"^git commit -m '([^']+)'", text, re.MULTILINE)
+    creates = re.findall(r"^- Create: `([^`]+)`", text, re.MULTILINE)
+    modifies = re.findall(r"^- Modify: `([^`]+)`", text, re.MULTILINE)
+    xcodes = re.findall(r"^xcodebuild ", text, re.MULTILINE)
+    actual = {
+        "headings": len(headings),
+        "commits": len(commits),
+        "create": len(creates),
+        "modify": len(modifies),
+        "declarations": len(creates) + len(modifies),
+        "unique_paths": len(set(creates + modifies)),
+        "xcodebuild": len(xcodes),
+    }
+    if actual != PLAN_COUNTS:
+        fail(f"plan mechanical counts changed: expected {PLAN_COUNTS}, got {actual}")
+    expected_subjects = [subject for _, _, subject in TASKS]
+    if commits != expected_subjects:
+        fail("plan commit subjects/order do not equal the 31-task manifest")
+
+
+verify_plan_shape()
+
+
+def read_base(repo_name: str, repo: Path) -> str:
+    path = access(evidence / f"{repo_name}-base-sha.txt")
+    if not path.is_file():
+        fail(f"missing immutable base file: {path}")
+    base = path.read_text(encoding="utf-8").strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", base):
+        fail(f"invalid {repo_name} base SHA")
+    if subprocess.run(
+        ["git", "-C", str(repo), "merge-base", "--is-ancestor", base, "HEAD"],
+        check=False,
+    ).returncode:
+        fail(f"{repo_name} base is not an ancestor of HEAD")
+    return base
+
+
+bases = {"ios": read_base("ios", ios), "backend": read_base("backend", backend)}
+required_labels = [label for label, _, _ in TASKS if mode == "final" or label != "30"]
+selected: dict[str, str] = {}
+positions: dict[tuple[str, str], int] = {}
+
+for repo_name, repo in (("ios", ios), ("backend", backend)):
+    history = run_git(repo, "rev-list", "--reverse", f"{bases[repo_name]}..HEAD").splitlines()
+    positions.update({(repo_name, sha): index for index, sha in enumerate(history)})
+
+for label, repo_name, subject in TASKS:
+    if label not in required_labels:
+        continue
+    repo = ios if repo_name == "ios" else backend
+    matches = run_git(
+        repo,
+        "log",
+        "--format=%H%x00%s",
+        f"{bases[repo_name]}..HEAD",
+    ).splitlines()
+    exact = [line.split("\x00", 1)[0] for line in matches if line.split("\x00", 1)[1] == subject]
+    if len(exact) != 1:
+        fail(f"Task {label} subject must occur exactly once; found {len(exact)}: {subject}")
+    selected[label] = exact[0]
+
+if len(set(selected.values())) != len(selected):
+    fail("duplicate task SHA in global manifest")
+
+last_position: dict[str, int] = {}
+for label, repo_name, _ in TASKS:
+    if label not in selected:
+        continue
+    position = positions.get((repo_name, selected[label]))
+    if position is None:
+        fail(f"Task {label} commit is outside selected history")
+    if position <= last_position.get(repo_name, -1):
+        fail(f"Task {label} reverses same-repository ancestry")
+    last_position[repo_name] = position
+
+for child, parent in DEPENDENCIES.items():
+    if child not in selected:
+        continue
+    child_repo_name = next(repo for label, repo, _ in TASKS if label == child)
+    child_repo = ios if child_repo_name == "ios" else backend
+    body = run_git(child_repo, "show", "-s", "--format=%B", selected[child])
+    trailer = f"Phase3-Depends-On: {selected[parent]}"
+    if body.splitlines().count(trailer) != 1:
+        fail(f"Task {child} must contain exact dependency trailer {trailer}")
+
+if mode == "final":
+    report_commit = sys.argv[2]
+    resolved_report_commit = run_git(ios, "rev-parse", report_commit)
+    if resolved_report_commit != selected["30"]:
+        fail("final report commit is not the unique Task 30 commit")
+
+manifest_path = evidence / "task-commit-manifest.json"
+manifest_path.write_text(
+    json.dumps(
+        [
+            {"task": label, "repository": repo, "subject": subject, "sha": selected[label]}
+            for label, repo, subject in TASKS
+            if label in selected
+        ],
+        indent=2,
+        sort_keys=True,
+    )
+    + "\n",
+    encoding="utf-8",
+)
+
+
+def dirty_hash(repo: Path) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(repo), "diff", "--binary"],
+        stdout=subprocess.PIPE,
+        check=True,
+    )
+    return sha256_bytes(result.stdout)
+
+
+def untracked_manifest(repo: Path) -> bytes:
+    raw = subprocess.check_output(
+        ["git", "-C", str(repo), "ls-files", "--others", "--exclude-standard", "-z"]
+    )
+    rows: list[str] = []
+    for item in sorted(filter(None, raw.split(b"\0"))):
+        relative = os.fsdecode(item)
+        if relative.startswith(".superpowers/evidence/metering-phase3/"):
+            continue
+        path = repo / relative
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode):
+            kind = "symlink"
+            payload = os.readlink(path).encode()
+        elif stat.S_ISREG(info.st_mode):
+            kind = "file"
+            payload = path.read_bytes()
+        else:
+            kind = "other"
+            payload = b""
+        rows.append(
+            json.dumps(
+                {
+                    "kind": kind,
+                    "mode": stat.S_IMODE(info.st_mode),
+                    "path_bytes_hex": item.hex(),
+                    "sha256": sha256_bytes(payload),
+                },
+                separators=(",", ":"),
+                sort_keys=False,
+            )
+        )
+    return (("\n".join(rows) + "\n") if rows else "").encode()
+
+
+for repo_name, repo in (("ios", ios), ("backend", backend)):
+    dirty_before = access(evidence / f"{repo_name}-dirty-diff-before.sha256")
+    untracked_before = access(evidence / f"{repo_name}-untracked-before.manifest")
+    untracked_hash_before = access(evidence / f"{repo_name}-untracked-before.manifest.sha256")
+    for path in (dirty_before, untracked_before, untracked_hash_before):
+        if not path.is_file():
+            fail(f"missing immutable workspace baseline: {path}")
+    expected_dirty = dirty_before.read_text().split()[0]
+    if dirty_hash(repo) != expected_dirty:
+        fail(f"{repo_name} tracked dirty WIP differs from immutable baseline")
+    current_untracked = untracked_manifest(repo)
+    if current_untracked != untracked_before.read_bytes():
+        fail(f"{repo_name} untracked WIP content/type/mode differs from immutable baseline")
+    recorded_manifest_hash = untracked_hash_before.read_text().split()[0]
+    if sha256_file(untracked_before) != recorded_manifest_hash:
+        fail(f"{repo_name} untracked baseline manifest hash is wrong")
+
+
+def gate_command(gate: str) -> tuple[Path, list[str] | str]:
+    commands: dict[str, tuple[Path, str]] = {
+        "backend-vector-contract": (backend, ".venv/bin/python -m pytest -q tests/test_metering_epoch_vector_contract.py"),
+        "backend-gate-resume": (backend, ".venv/bin/python scripts/run_limits_db_regression.py tests/test_target_gate_resume_helpers.py"),
+        "backend-phase3-db": (backend, ".venv/bin/python scripts/run_limits_db_regression.py tests/test_metering_epoch_models.py tests/test_metering_epoch_registration.py tests/test_metering_epoch_sample_adapter.py tests/test_metering_epoch_phase2_integration.py tests/test_metering_epoch_lifespan.py tests/test_metering_epoch_phase3_vectors.py"),
+        "cross-stack-v30": (backend, "bash scripts/run_metering_v30_cross_stack.sh"),
+        "ios-iphone17pro": (ios, "SENTRY_SKIP_DSYM_UPLOAD=1 xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3.1' IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' test"),
+        "ios-ipad-m5": (ios, "SENTRY_SKIP_DSYM_UPLOAD=1 xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5),OS=26.3.1' IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' -skip-testing:'Evlin iOSTests/ProfileSnapshotTests' test"),
+        "release-build": (ios, "DERIVED=\"$PWD/.superpowers/evidence/metering-phase3/DerivedData-Release\"; rm -rf \"$DERIVED\"; SENTRY_SKIP_DSYM_UPLOAD=1 xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -configuration Release -destination 'generic/platform=iOS' -derivedDataPath \"$DERIVED\" CODE_SIGNING_ALLOWED=NO IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' build-for-testing"),
+        "release-source-check": (ios, "OUT='$PWD/.superpowers/evidence/metering-phase3/release-source.sil'; DEBUG_OUT='$PWD/.superpowers/evidence/metering-phase3/debug-source-control.sil'; SDK=$(xcrun --sdk iphonesimulator --show-sdk-path); xcrun swiftc -emit-sil -parse-as-library -sdk \"$SDK\" -target arm64-apple-ios17.6-simulator 'Evlin iOS/Services/MeteringEpochContract.swift' 'Evlin iOS/Services/MeteringRuntimeInfrastructure.swift' >/dev/null 2>\"$OUT\"; test -s \"$OUT\"; if rg -q 'DebugAppGroupMeteringClock|evlin\\.metering\\.debugClockNow' \"$OUT\"; then exit 1; fi; xcrun swiftc -D DEBUG -emit-sil -parse-as-library -sdk \"$SDK\" -target arm64-apple-ios17.6-simulator 'Evlin iOS/Services/MeteringEpochContract.swift' 'Evlin iOS/Services/MeteringRuntimeInfrastructure.swift' >/dev/null 2>\"$DEBUG_OUT\"; rg -q 'DebugAppGroupMeteringClock' \"$DEBUG_OUT\"; rg -q 'evlin\\.metering\\.debugClockNow' \"$DEBUG_OUT\"; echo release-source-compile-passed"),
+        "r16-structured-map": (ios, "python3 scripts/verify_metering_phase3_r16.py"),
+        "authoritative-correction-disposition": (ios, "printf '%s\\n' 'baseline_failure_archived' 'test_suite=MeteringAuthoritativeBaseCorrectionTests' 'baseline_commit=e46ffe1' 'task24_known_failure_ordinal=27'"),
+    }
+    return commands[gate]
+
+
+for gate in GATES:
+    log = logs / f"{gate}.log"
+    if test_mode:
+        command = [str(shim), gate, str(log), str(ios), str(backend), str(evidence)]
+        accesses.append(f"command:{gate}")
+        result = subprocess.run(command, text=True, capture_output=True, check=False)
+        if result.stdout or result.stderr:
+            with log.open("ab") as handle:
+                handle.write(result.stdout.encode())
+                handle.write(result.stderr.encode())
+    else:
+        cwd, command_text = gate_command(gate)
+        accesses.append(f"command:{gate}")
+        with log.open("wb") as handle:
+            result = subprocess.run(
+                ["bash", "-o", "pipefail", "-c", command_text],
+                cwd=cwd,
+                stdout=handle,
+                stderr=subprocess.STDOUT,
+                check=False,
+            )
+    if result.returncode:
+        fail(f"gate {gate} failed with exit {result.returncode}; see {log}")
+    if not log.is_file() or not log.stat().st_size:
+        fail(f"gate {gate} produced an empty raw log")
+
+authoritative_log = (logs / "authoritative-correction-disposition.log").read_text()
+for required in (
+    "baseline_failure_archived",
+    "MeteringAuthoritativeBaseCorrectionTests",
+    "baseline_commit=e46ffe1",
+    "task24_known_failure_ordinal=27",
+):
+    if required not in authoritative_log:
+        fail(f"authoritative-correction disposition omitted {required}")
+
+derived_products = evidence / "DerivedData-Release/Build/Products"
+product_paths = [access(derived_products / relative) for relative in PRODUCTS]
+if len(product_paths) != 6 or len({str(path) for path in product_paths}) != 6:
+    fail("Release product manifest must contain exactly six unique products")
+for path in product_paths:
+    if not path.is_file() or not path.stat().st_size:
+        fail(f"missing or empty Release product: {path}")
+    data = path.read_bytes()
+    if test_mode:
+        if not data.startswith(b"MACHO"):
+            fail(f"fixture Release product is not marked Mach-O: {path}")
+    else:
+        output = subprocess.check_output(["file", str(path)], text=True)
+        if "Mach-O" not in output:
+            fail(f"Release product is not Mach-O: {path}: {output.strip()}")
+    if b"DebugAppGroupMeteringClock" in data or b"evlin.metering.debugClockNow" in data:
+        fail(f"DEBUG metering token present in Release product: {path}")
+
+fixture_paths = (
+    ios / "Evlin iOSTests/Fixtures/metering_epoch_phase3_vectors.json",
+    backend / "tests/fixtures/metering_epoch_vectors.json",
+)
+for fixture in fixture_paths:
+    access(fixture)
+    if not fixture.is_file() or not fixture.stat().st_size:
+        fail(f"missing or empty vector fixture: {fixture}")
+
+target_manifest_path = evidence / "target-membership-manifest.json"
+project_path = ios / "Evlin iOS.xcodeproj/project.pbxproj"
+if test_mode:
+    project_hash = "fixture"
+else:
+    access(project_path)
+    if not project_path.is_file():
+        fail("Xcode project is missing for target-membership evidence")
+    project_hash = sha256_file(project_path)
+target_manifest_path.write_text(
+    json.dumps(
+        {
+            "project_sha256": project_hash,
+            "release_products": list(PRODUCTS),
+            "push_forbidden_sources": [
+                "MeteringProductionComposition.swift",
+                "MeteringV30ScenarioEncoder.swift",
+                "DebugAppGroupMeteringClock",
+            ],
+        },
+        indent=2,
+        sort_keys=True,
+    )
+    + "\n"
+)
+
+r16_before = access(evidence / "r16-before.sha256")
+if not r16_before.is_file() or not re.fullmatch(r"[0-9a-f]{64}", r16_before.read_text().split()[0]):
+    fail("missing or malformed immutable R-16 before hash")
+r16_after_path = evidence / "r16-after.sha256"
+r16_after_path.write_text(f"{sha256_file(rulebook)}  {rulebook}\n")
+
+raw_hash_lines = []
+for path in sorted(logs.glob("*.log")):
+    if not path.stat().st_size:
+        fail(f"empty raw log: {path}")
+    raw_hash_lines.append(f"{sha256_file(path)}  {path.name}")
+(evidence / "raw-log-sha256.txt").write_text("\n".join(raw_hash_lines) + "\n")
+
+product_manifest = [
+    {"path": relative, "sha256": sha256_file(path), "bytes": path.stat().st_size}
+    for relative, path in zip(PRODUCTS, product_paths)
+]
+(evidence / "release-product-manifest.json").write_text(
+    json.dumps(product_manifest, indent=2, sort_keys=True) + "\n"
+)
+
+status_path = evidence / "automated-status.json"
+status = {
+    "automated": "passed",
+    "physical": "pending",
+    "releasable": False,
+    "status_code": "AUTOMATED_PASSED_PHYSICAL_PENDING",
+    "phase_complete": False,
+    "display_status": "AUTOMATED PASSED; PHYSICAL PENDING; NOT RELEASABLE",
+    "authoritative_correction": {
+        "disposition": "baseline_failure_archived",
+        "baseline_commit": "e46ffe1",
+        "task24_known_failure_ordinal": 27,
+    },
+}
+status_path.write_text(json.dumps(status, indent=2, sort_keys=True) + "\n")
+if status["physical"] != "pending" or status["releasable"] or status["phase_complete"]:
+    fail("verifier must never claim physical pass or releasability")
+
+if mode == "final":
+    report = ios / ".superpowers/sdd/metering-epoch-phase3-report.md"
+    access(report)
+    if not report.is_file():
+        fail("final mode requires committed Phase 3 report")
+    report_text = report.read_text(encoding="utf-8")
+    forbidden = ("physical: passed", "releasable: true", "phase_complete: true")
+    if any(token in report_text.lower() for token in forbidden):
+        fail("report falsely claims a physical pass, completion, or releasability")
+    changed = run_git(ios, "show", "--format=", "--name-only", selected["30"]).splitlines()
+    relative_report = str(report.relative_to(ios))
+    if relative_report not in changed:
+        fail("Task 30 commit does not contain the Phase 3 report")
+    report_blob = run_git(ios, "rev-parse", f"{selected['30']}:{relative_report}")
+    committed_report = subprocess.check_output(
+        ["git", "-C", str(ios), "show", f"{selected['30']}:{relative_report}"]
+    )
+    attestation = {
+        "report_commit": selected["30"],
+        "report_blob": report_blob,
+        "report_content_sha256": sha256_bytes(committed_report),
+        "semantic_status": "AUTOMATED_PASSED_PHYSICAL_PENDING",
+    }
+    (evidence / "report-commit-attestation.json").write_text(
+        json.dumps(attestation, indent=2, sort_keys=True) + "\n"
+    )
+
+hash_targets = [
+    manifest_path,
+    target_manifest_path,
+    status_path,
+    r16_before,
+    r16_after_path,
+    evidence / "raw-log-sha256.txt",
+    evidence / "release-product-manifest.json",
+    *fixture_paths,
+]
+for repo_name in ("ios", "backend"):
+    hash_targets.extend(
+        [
+            evidence / f"{repo_name}-base-sha.txt",
+            evidence / f"{repo_name}-status-before.txt",
+            evidence / f"{repo_name}-dirty-diff-before.sha256",
+            evidence / f"{repo_name}-untracked-before.manifest",
+            evidence / f"{repo_name}-untracked-before.manifest.sha256",
+        ]
+    )
+for path in hash_targets:
+    access(path)
+    if not path.is_file():
+        fail(f"required evidence artifact missing: {path}")
+(evidence / "evidence-artifact-sha256.txt").write_text(
+    "\n".join(
+        f"{sha256_file(path)}  {path.relative_to(evidence) if below(path, evidence) else path}"
+        for path in sorted(hash_targets, key=lambda item: str(item))
+    )
+    + "\n"
+)
+
+access_trace.write_text("\n".join(accesses) + "\n", encoding="utf-8")
+if test_mode:
+    for line in accesses:
+        if line.startswith("command:"):
+            continue
+        if not below(Path(line), root):
+            fail(f"access trace escaped fixture root: {line}")
+
+print(status["display_status"])
+PY
