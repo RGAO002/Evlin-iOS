@@ -276,9 +276,50 @@ for child, parent in DEPENDENCIES.items():
     child_repo_name = next(repo for label, repo, _ in TASKS if label == child)
     child_repo = ios if child_repo_name == "ios" else backend
     body = run_git(child_repo, "show", "-s", "--format=%B", selected[child])
-    trailer = f"Phase3-Depends-On: {selected[parent]}"
-    if body.splitlines().count(trailer) != 1:
-        fail(f"Task {child} must contain exact dependency trailer {trailer}")
+    trailer_shas = [
+        line.split(":", 1)[1].strip()
+        for line in body.splitlines()
+        if line.startswith("Phase3-Depends-On:")
+    ]
+    parent_repo_name = next(repo for label, repo, _ in TASKS if label == parent)
+    parent_repo = ios if parent_repo_name == "ios" else backend
+    later_parent_tasks = [
+        label
+        for label, repo_name, _ in TASKS
+        if repo_name == parent_repo_name
+        and label in selected
+        and positions[(parent_repo_name, selected[label])]
+        > positions[(parent_repo_name, selected[parent])]
+    ]
+    next_parent_sha = selected[later_parent_tasks[0]] if later_parent_tasks else None
+    valid_trailers: list[str] = []
+    for trailer_sha in trailer_shas:
+        if not re.fullmatch(r"[0-9a-f]{40}", trailer_sha):
+            continue
+        if subprocess.run(
+            ["git", "-C", str(parent_repo), "cat-file", "-e", f"{trailer_sha}^{{commit}}"],
+            check=False,
+        ).returncode:
+            continue
+        if subprocess.run(
+            ["git", "-C", str(parent_repo), "merge-base", "--is-ancestor", selected[parent], trailer_sha],
+            check=False,
+        ).returncode:
+            continue
+        if next_parent_sha and (
+            trailer_sha == next_parent_sha
+            or subprocess.run(
+                ["git", "-C", str(parent_repo), "merge-base", "--is-ancestor", trailer_sha, next_parent_sha],
+                check=False,
+            ).returncode
+        ):
+            continue
+        valid_trailers.append(trailer_sha)
+    if not valid_trailers:
+        fail(
+            f"Task {child} requires a Phase3-Depends-On trailer naming Task {parent} "
+            "or a reviewed descendant before the next task in that repository"
+        )
 
 if mode == "final":
     report_commit = sys.argv[2]

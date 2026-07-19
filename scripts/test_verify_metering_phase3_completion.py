@@ -186,6 +186,7 @@ def make_fixture(
     subject_override: dict[str, str] | None = None,
     reverse_27_28: bool = False,
     omit_trailer: str | None = None,
+    reviewed_dependency_head: str | None = None,
     report_text: str = "physical: pending\nphase_complete: false\nreleasable: false\n",
 ) -> tuple[Path, dict[str, str]]:
     root = tmp_path / "fixture"
@@ -211,6 +212,7 @@ def make_fixture(
         indexes = {label: index for index, (label, _, _) in enumerate(ordered)}
         ordered[indexes["27"]], ordered[indexes["28"]] = ordered[indexes["28"]], ordered[indexes["27"]]
     shas: dict[str, str] = {}
+    dependency_heads: dict[str, str] = {}
     for label, repo_name, subject in ordered:
         repo = ios if repo_name == "ios" else backend
         if label == "30":
@@ -220,9 +222,11 @@ def make_fixture(
         body = ""
         parent = DEPENDENCIES.get(label)
         if parent and label != omit_trailer:
-            body = f"Phase3-Depends-On: {shas[parent]}"
+            body = f"Phase3-Depends-On: {dependency_heads.get(parent, shas[parent])}"
         actual_subject = (subject_override or {}).get(label, subject)
         shas[label] = _commit(repo, actual_subject, body)
+        if label == reviewed_dependency_head:
+            dependency_heads[label] = _commit(repo, f"fix: close Task {label} review findings")
 
     (ios / "tracked-wip.txt").write_text("before\n")
     _commit(ios, "fixture post-task anchor")
@@ -280,12 +284,18 @@ def test_pre_report_fixture_passes_without_touching_real_paths(tmp_path: Path) -
     }
 
 
+def test_dependency_trailer_accepts_reviewed_descendant_of_task_subject(tmp_path: Path) -> None:
+    root, values = make_fixture(tmp_path, reviewed_dependency_head="07")
+    result = run_verifier(root, values["shim"])
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 @pytest.mark.parametrize(
     ("fixture_kwargs", "phrase"),
     [
         ({"subject_override": {"28": "wrong subject"}}, "Task 28 subject"),
         ({"reverse_27_28": True}, "reverses same-repository ancestry"),
-        ({"omit_trailer": "19"}, "dependency trailer"),
+        ({"omit_trailer": "19"}, "Phase3-Depends-On trailer"),
     ],
 )
 def test_history_failures_are_rejected(tmp_path: Path, fixture_kwargs: dict[str, object], phrase: str) -> None:
