@@ -526,6 +526,7 @@ struct PollCommandDTO: Decodable {
 /// parsed to `Date` at the LockCommand mapping layer.
 struct PollLimitDTO: Decodable {
     let rule_id: UUID
+    let orderingToken: Int64
     let daily_budget_minutes: Int
     let reset_policy: String
     let schedule: PollLimitScheduleDTO
@@ -535,6 +536,31 @@ struct PollLimitDTO: Decodable {
     /// Minutes already used today (backend-authoritative). Optional for forward/
     /// backward wire-skew safety — absent on older backends → nil.
     let used_today_minutes: Int?
+
+    private enum CodingKeys: String, CodingKey {
+        case rule_id
+        case orderingToken = "ordering_token"
+        case daily_budget_minutes
+        case reset_policy
+        case schedule
+        case effective_from
+        case expires_at
+        case updated_at
+        case used_today_minutes
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        rule_id = try container.decode(UUID.self, forKey: .rule_id)
+        orderingToken = try OrderingTokenDecoding.decode(from: container, forKey: .orderingToken)
+        daily_budget_minutes = try container.decode(Int.self, forKey: .daily_budget_minutes)
+        reset_policy = try container.decode(String.self, forKey: .reset_policy)
+        schedule = try container.decode(PollLimitScheduleDTO.self, forKey: .schedule)
+        effective_from = try container.decode(String.self, forKey: .effective_from)
+        expires_at = try container.decodeIfPresent(String.self, forKey: .expires_at)
+        updated_at = try container.decode(String.self, forKey: .updated_at)
+        used_today_minutes = try container.decodeIfPresent(Int.self, forKey: .used_today_minutes)
+    }
 }
 
 /// `set_limit.limit.schedule` wire payload. `starts_at`/`ends_at` stay as
@@ -548,8 +574,24 @@ struct PollLimitScheduleDTO: Decodable {
 /// `clear_limit.clear` wire payload (P3 decode only).
 struct PollClearDTO: Decodable {
     let rule_id: UUID
+    let orderingToken: Int64
     let reason: String?
     let updated_at: String
+
+    private enum CodingKeys: String, CodingKey {
+        case rule_id
+        case orderingToken = "ordering_token"
+        case reason
+        case updated_at
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        rule_id = try container.decode(UUID.self, forKey: .rule_id)
+        orderingToken = try OrderingTokenDecoding.decode(from: container, forKey: .orderingToken)
+        reason = try container.decodeIfPresent(String.self, forKey: .reason)
+        updated_at = try container.decode(String.self, forKey: .updated_at)
+    }
 }
 
 /// A4: `earned_time_config` top-level payload (same-day pool/cap sync from

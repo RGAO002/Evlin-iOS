@@ -11,6 +11,8 @@ nonisolated struct NSEWireCommand: Decodable {
     let target: NSEWireTarget
     let duration_minutes: Int?
     let issued_at: String
+    let limit: NSEWireLimit?
+    let clear: NSEWireClear?
     let lock_source: String?
     let unlock_sources: [String]?
 
@@ -53,11 +55,131 @@ nonisolated struct NSEWireCommand: Decodable {
             tier: tier,
             target: target,
             durationMinutes: poll.duration_minutes,
-            issuedAt: issued
+            issuedAt: issued,
+            limit: limitRule(from: poll.limit),
+            clear: clearLimit(from: poll.clear)
         )
+    }
+
+    private static let isoFractionalFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+    private static let isoPlainFormatter = ISO8601DateFormatter()
+
+    private static func limitRule(from dto: NSEWireLimit?) -> LimitRule? {
+        guard let dto,
+              let startMinute = minutesSinceMidnight(dto.schedule.starts_at),
+              let endMinute = minutesSinceMidnight(dto.schedule.ends_at),
+              let effectiveFrom = parseISO8601(dto.effective_from),
+              let updatedAt = parseISO8601(dto.updated_at)
+        else { return nil }
+        return LimitRule(
+            ruleId: dto.rule_id,
+            orderingToken: dto.orderingToken,
+            dailyBudgetMinutes: dto.daily_budget_minutes,
+            resetPolicy: dto.reset_policy,
+            startMinute: startMinute,
+            endMinute: endMinute,
+            timezone: dto.schedule.timezone,
+            effectiveFrom: effectiveFrom,
+            expiresAt: dto.expires_at.flatMap(parseISO8601),
+            updatedAt: updatedAt,
+            usedTodayMinutes: dto.used_today_minutes
+        )
+    }
+
+    private static func clearLimit(from dto: NSEWireClear?) -> ClearLimit? {
+        guard let dto, let updatedAt = parseISO8601(dto.updated_at) else { return nil }
+        return ClearLimit(
+            ruleId: dto.rule_id,
+            orderingToken: dto.orderingToken,
+            reason: dto.reason,
+            updatedAt: updatedAt
+        )
+    }
+
+    private static func minutesSinceMidnight(_ value: String) -> Int? {
+        let parts = value.split(separator: ":", omittingEmptySubsequences: false)
+        guard parts.count == 2,
+              let hours = Int(parts[0]),
+              let minutes = Int(parts[1]),
+              (0...23).contains(hours),
+              (0...59).contains(minutes)
+        else { return nil }
+        return hours * 60 + minutes
+    }
+
+    private static func parseISO8601(_ value: String) -> Date? {
+        isoFractionalFormatter.date(from: value) ?? isoPlainFormatter.date(from: value)
     }
 }
 
+nonisolated struct NSEWireLimit: Decodable {
+    let rule_id: UUID
+    let orderingToken: Int64
+    let daily_budget_minutes: Int
+    let reset_policy: String
+    let schedule: NSEWireLimitSchedule
+    let effective_from: String
+    let expires_at: String?
+    let updated_at: String
+    let used_today_minutes: Int?
+
+    private enum CodingKeys: String, CodingKey {
+        case rule_id
+        case orderingToken = "ordering_token"
+        case daily_budget_minutes
+        case reset_policy
+        case schedule
+        case effective_from
+        case expires_at
+        case updated_at
+        case used_today_minutes
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        rule_id = try container.decode(UUID.self, forKey: .rule_id)
+        orderingToken = try OrderingTokenDecoding.decode(from: container, forKey: .orderingToken)
+        daily_budget_minutes = try container.decode(Int.self, forKey: .daily_budget_minutes)
+        reset_policy = try container.decode(String.self, forKey: .reset_policy)
+        schedule = try container.decode(NSEWireLimitSchedule.self, forKey: .schedule)
+        effective_from = try container.decode(String.self, forKey: .effective_from)
+        expires_at = try container.decodeIfPresent(String.self, forKey: .expires_at)
+        updated_at = try container.decode(String.self, forKey: .updated_at)
+        used_today_minutes = try container.decodeIfPresent(Int.self, forKey: .used_today_minutes)
+    }
+}
+
+nonisolated struct NSEWireLimitSchedule: Decodable {
+    let starts_at: String
+    let ends_at: String
+    let timezone: String?
+}
+
+nonisolated struct NSEWireClear: Decodable {
+    let rule_id: UUID
+    let orderingToken: Int64
+    let reason: String?
+    let updated_at: String
+
+    private enum CodingKeys: String, CodingKey {
+        case rule_id
+        case orderingToken = "ordering_token"
+        case reason
+        case updated_at
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        rule_id = try container.decode(UUID.self, forKey: .rule_id)
+        orderingToken = try OrderingTokenDecoding.decode(from: container, forKey: .orderingToken)
+        reason = try container.decodeIfPresent(String.self, forKey: .reason)
+        updated_at = try container.decode(String.self, forKey: .updated_at)
+    }
+}
 nonisolated struct NSEWireTarget: Decodable {
     let bundle_id: String?
     let list_name: String?

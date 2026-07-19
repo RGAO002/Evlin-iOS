@@ -17,12 +17,30 @@ enum CommandAction: String, Codable, Sendable {
     case earnedTimeConfig = "earned_time_config"
 }
 
+enum OrderingTokenDecoding {
+    static func decode<Key: CodingKey>(
+        from container: KeyedDecodingContainer<Key>,
+        forKey key: Key
+    ) throws -> Int64 {
+        let token = try container.decode(Int64.self, forKey: key)
+        guard token > 0 else {
+            throw DecodingError.dataCorruptedError(
+                forKey: key,
+                in: container,
+                debugDescription: "ordering_token must be a positive Int64"
+            )
+        }
+        return token
+    }
+}
+
 /// Per-app daily time limit rule decoded from a `set_limit` command (P3 wire
 /// decode only — enforcement/planning/execution land in later tasks).
 /// `startMinute`/`endMinute` are the schedule window parsed from "HH:mm" strings
 /// into minutes-since-midnight (0...1439).
 struct LimitRule: Codable, Sendable, Equatable {
     let ruleId: UUID
+    let orderingToken: Int64
     let dailyBudgetMinutes: Int
     let resetPolicy: String
     let startMinute: Int
@@ -35,6 +53,7 @@ struct LimitRule: Codable, Sendable, Equatable {
 
     init(
         ruleId: UUID,
+        orderingToken: Int64 = 1,
         dailyBudgetMinutes: Int,
         resetPolicy: String,
         startMinute: Int,
@@ -46,6 +65,7 @@ struct LimitRule: Codable, Sendable, Equatable {
         usedTodayMinutes: Int? = nil
     ) {
         self.ruleId = ruleId
+        self.orderingToken = orderingToken
         self.dailyBudgetMinutes = dailyBudgetMinutes
         self.resetPolicy = resetPolicy
         self.startMinute = startMinute
@@ -56,13 +76,70 @@ struct LimitRule: Codable, Sendable, Equatable {
         self.updatedAt = updatedAt
         self.usedTodayMinutes = usedTodayMinutes
     }
+
+    private enum CodingKeys: String, CodingKey {
+        case ruleId
+        case orderingToken = "ordering_token"
+        case dailyBudgetMinutes
+        case resetPolicy
+        case startMinute
+        case endMinute
+        case timezone
+        case effectiveFrom
+        case expiresAt
+        case updatedAt
+        case usedTodayMinutes
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        ruleId = try container.decode(UUID.self, forKey: .ruleId)
+        orderingToken = try OrderingTokenDecoding.decode(from: container, forKey: .orderingToken)
+        dailyBudgetMinutes = try container.decode(Int.self, forKey: .dailyBudgetMinutes)
+        resetPolicy = try container.decode(String.self, forKey: .resetPolicy)
+        startMinute = try container.decode(Int.self, forKey: .startMinute)
+        endMinute = try container.decode(Int.self, forKey: .endMinute)
+        timezone = try container.decodeIfPresent(String.self, forKey: .timezone)
+        effectiveFrom = try container.decode(Date.self, forKey: .effectiveFrom)
+        expiresAt = try container.decodeIfPresent(Date.self, forKey: .expiresAt)
+        updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+        usedTodayMinutes = try container.decodeIfPresent(Int.self, forKey: .usedTodayMinutes)
+    }
 }
 
 /// Payload decoded from a `clear_limit` command (P3 wire decode only).
 struct ClearLimit: Codable, Sendable, Equatable {
     let ruleId: UUID
+    let orderingToken: Int64
     let reason: String?
     let updatedAt: Date
+
+    init(
+        ruleId: UUID,
+        orderingToken: Int64 = 1,
+        reason: String?,
+        updatedAt: Date
+    ) {
+        self.ruleId = ruleId
+        self.orderingToken = orderingToken
+        self.reason = reason
+        self.updatedAt = updatedAt
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case ruleId
+        case orderingToken = "ordering_token"
+        case reason
+        case updatedAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        ruleId = try container.decode(UUID.self, forKey: .ruleId)
+        orderingToken = try OrderingTokenDecoding.decode(from: container, forKey: .orderingToken)
+        reason = try container.decodeIfPresent(String.self, forKey: .reason)
+        updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+    }
 }
 
 struct CommandTarget: Codable, Sendable {

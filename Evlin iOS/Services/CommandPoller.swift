@@ -449,6 +449,7 @@ final class CommandPoller {
         let expiresAt = dto.expires_at.flatMap { parseISO8601($0) }
         return LimitRule(
             ruleId: dto.rule_id,
+            orderingToken: dto.orderingToken,
             dailyBudgetMinutes: dto.daily_budget_minutes,
             resetPolicy: dto.reset_policy,
             startMinute: startMinute,
@@ -465,7 +466,12 @@ final class CommandPoller {
     private static func clearLimit(from dto: PollClearDTO?) -> ClearLimit? {
         guard let dto else { return nil }
         guard let updatedAt = parseISO8601(dto.updated_at) else { return nil }
-        return ClearLimit(ruleId: dto.rule_id, reason: dto.reason, updatedAt: updatedAt)
+        return ClearLimit(
+            ruleId: dto.rule_id,
+            orderingToken: dto.orderingToken,
+            reason: dto.reason,
+            updatedAt: updatedAt
+        )
     }
 
     /// Parse a "HH:mm" 24h clock string into minutes-since-midnight (0...1439).

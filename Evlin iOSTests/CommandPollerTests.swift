@@ -63,6 +63,38 @@ final class CommandPollerTests: XCTestCase {
         return try JSONDecoder().decode(PollCommandDTO.self, from: Data(json.utf8))
     }
 
+    func testPollLimitCommandsRejectMissingAndInvalidOrderingTokens() throws {
+        let invalidTokens: [Any?] = [nil, 0, -1, 1.5, NSDecimalNumber(string: "9223372036854775808")]
+
+        for commandKey in ["set_limit", "clear_limit"] {
+            for token in invalidTokens {
+                let data = try appLimitFixtureCommand(commandKey, orderingToken: token)
+                XCTAssertThrowsError(try JSONDecoder().decode(PollCommandDTO.self, from: data))
+            }
+        }
+    }
+
+    private func appLimitFixtureCommand(
+        _ commandKey: String,
+        orderingToken: Any?
+    ) throws -> Data {
+        let fixtureURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("Fixtures/app_limit_wire.json")
+        let fixture = try Data(contentsOf: fixtureURL)
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: fixture) as? [String: Any])
+        var command = try XCTUnwrap(root[commandKey] as? [String: Any])
+        let payloadKey = commandKey == "set_limit" ? "limit" : "clear"
+        var payload = try XCTUnwrap(command[payloadKey] as? [String: Any])
+        if let orderingToken {
+            payload["ordering_token"] = orderingToken
+        } else {
+            payload.removeValue(forKey: "ordering_token")
+        }
+        command[payloadKey] = payload
+        return try JSONSerialization.data(withJSONObject: command)
+    }
+
     /// With a paired child device id present, the one-shot poll routes that
     /// exact id into the poll path (the same path the foreground timer drives).
     func testPollOnceForCurrentDeviceRoutesStoredDeviceIDIntoPollPath() async {

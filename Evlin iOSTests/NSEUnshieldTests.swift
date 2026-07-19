@@ -203,6 +203,34 @@ final class NSEUnshieldTests: XCTestCase {
         earnedStore.removeAll()
     }
 
+    func test_nseLimitCommandsMatchPollCommandEnvelopes() throws {
+        for commandKey in ["set_limit", "clear_limit"] {
+            let data = try appLimitFixtureCommand(commandKey, orderingToken: 9_007_199_254_740_993)
+            let pollCommand = CommandPoller.lockCommand(
+                from: try JSONDecoder().decode(PollCommandDTO.self, from: data)
+            )
+            let nseCommand = try NSECommandWireDecoder.decode(data)
+
+            XCTAssertEqual(nseCommand.id, pollCommand.id)
+            XCTAssertEqual(nseCommand.action, pollCommand.action)
+            XCTAssertEqual(nseCommand.tier, pollCommand.tier)
+            XCTAssertEqual(nseCommand.issuedAt, pollCommand.issuedAt)
+            XCTAssertEqual(nseCommand.limit, pollCommand.limit)
+            XCTAssertEqual(nseCommand.clear, pollCommand.clear)
+        }
+    }
+
+    func test_nseLimitCommandsRejectMissingAndInvalidOrderingTokens() throws {
+        let invalidTokens: [Any?] = [nil, 0, -1, 1.5, NSDecimalNumber(string: "9223372036854775808")]
+
+        for commandKey in ["set_limit", "clear_limit"] {
+            for token in invalidTokens {
+                let data = try appLimitFixtureCommand(commandKey, orderingToken: token)
+                XCTAssertThrowsError(try NSECommandWireDecoder.decode(data))
+            }
+        }
+    }
+
     func test_nseInvalidOverrideDate_failsBeforeRemovingSource() async throws {
         let command = try NSECommandWireDecoder.decode(overrideCommandJSON(
             usageDate: "not-a-date"
@@ -621,6 +649,27 @@ final class NSEUnshieldTests: XCTestCase {
           }
         }
         """.utf8)
+    }
+
+    private func appLimitFixtureCommand(
+        _ commandKey: String,
+        orderingToken: Any?
+    ) throws -> Data {
+        let fixtureURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("Fixtures/app_limit_wire.json")
+        let fixture = try Data(contentsOf: fixtureURL)
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: fixture) as? [String: Any])
+        var command = try XCTUnwrap(root[commandKey] as? [String: Any])
+        let payloadKey = commandKey == "set_limit" ? "limit" : "clear"
+        var payload = try XCTUnwrap(command[payloadKey] as? [String: Any])
+        if let orderingToken {
+            payload["ordering_token"] = orderingToken
+        } else {
+            payload.removeValue(forKey: "ordering_token")
+        }
+        command[payloadKey] = payload
+        return try JSONSerialization.data(withJSONObject: command)
     }
 }
 

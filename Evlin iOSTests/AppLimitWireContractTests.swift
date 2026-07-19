@@ -113,6 +113,7 @@ final class AppLimitWireContractTests: XCTestCase {
             limit.ruleId,
             UUID(uuidString: "11111111-1111-1111-1111-111111111111")
         )
+        XCTAssertEqual(limit.orderingToken, 9_007_199_254_740_993)
         // Timestamps parse (effective_from / updated_at are required; nil ⇒ the
         // whole limit would have decoded to nil, which XCTUnwrap above caught).
         XCTAssertEqual(limit.effectiveFrom.timeIntervalSince1970,
@@ -188,6 +189,7 @@ final class AppLimitWireContractTests: XCTestCase {
 
         let clear = try XCTUnwrap(cmd.clear, "clear_limit must decode a non-nil ClearLimit")
         XCTAssertEqual(clear.ruleId, UUID(uuidString: "11111111-1111-1111-1111-111111111111"))
+        XCTAssertEqual(clear.orderingToken, 9_007_199_254_740_993)
         XCTAssertEqual(clear.reason, "parent_clear", "clear.reason")
     }
 

@@ -96,6 +96,35 @@ final class AppLimitRuleDTOTests: XCTestCase {
         XCTAssertNil(dto.display_name)
     }
 
+    func test_limitRuleAndClearLimitRejectNonPositiveOrderingTokens() throws {
+        let limitData = """
+        {
+          "ruleId": "11111111-1111-1111-1111-111111111111",
+          "ordering_token": 0,
+          "dailyBudgetMinutes": 60,
+          "resetPolicy": "daily",
+          "startMinute": 0,
+          "endMinute": 1439,
+          "timezone": null,
+          "effectiveFrom": 0,
+          "expiresAt": null,
+          "updatedAt": 0,
+          "usedTodayMinutes": null
+        }
+        """.data(using: .utf8)!
+        let clearData = """
+        {
+          "ruleId": "11111111-1111-1111-1111-111111111111",
+          "ordering_token": -1,
+          "reason": "parent_clear",
+          "updatedAt": 0
+        }
+        """.data(using: .utf8)!
+
+        XCTAssertThrowsError(try JSONDecoder().decode(LimitRule.self, from: limitData))
+        XCTAssertThrowsError(try JSONDecoder().decode(ClearLimit.self, from: clearData))
+    }
+
     // MARK: - App ↔ rule merge
 
     private func catalogApp(id: String, bundle: String?) -> DeviceAppItem {

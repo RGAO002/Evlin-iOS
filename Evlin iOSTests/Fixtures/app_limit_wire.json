@@ -15,7 +15,7 @@
     "issued_at": "2026-06-19T00:00:00+00:00",
     "limit": {
       "rule_id": "11111111-1111-1111-1111-111111111111",
-      "ordering_token": 2,
+      "ordering_token": 9007199254740993,
       "daily_budget_minutes": 60,
       "reset_policy": "daily",
       "schedule": {
@@ -42,7 +42,7 @@
     "issued_at": "2026-06-19T00:00:00+00:00",
     "clear": {
       "rule_id": "11111111-1111-1111-1111-111111111111",
-      "ordering_token": 3,
+      "ordering_token": 9007199254740993,
       "reason": "parent_clear",
       "updated_at": "2026-06-19T00:00:00+00:00"
     }
