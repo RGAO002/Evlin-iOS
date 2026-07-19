@@ -109,6 +109,7 @@ final class AuthService {
             suiteName: EarnedTimeStore.appGroupSuiteName
         ),
         epochStore: DeviceEpochStore = .shared,
+        appLimitStore: AppLimitEpochStore = .shared,
         usageStore: EarnedTimeStore = .shared,
         now: Date = Date()
     ) {
@@ -118,6 +119,14 @@ final class AuthService {
 
         let oldOwner = appGroupDefaults.string(forKey: "evlin.childId")
             .flatMap(UUID.init(uuidString:))
+        appGroupDefaults.set(false, forKey: "evlin.usageCountingAllowed")
+        guard teardownAppLimitIdentity(
+            appGroupDefaults: appGroupDefaults,
+            appLimitStore: appLimitStore
+        ) else {
+            appGroupDefaults.synchronize()
+            return
+        }
         let cleanupWorkID = oldOwner.flatMap { owner in
             try? epochStore.prepareIdentityCleanup(
                 oldOwner: owner,
@@ -127,7 +136,6 @@ final class AuthService {
             )
         }
 
-        appGroupDefaults.set(false, forKey: "evlin.usageCountingAllowed")
         if oldOwner != nil && cleanupWorkID == nil {
             // Keep the old owner mirror as the recovery authority. The main
             // actor teardown will retry instead of exposing a new identity to
@@ -226,8 +234,13 @@ final class AuthService {
             suiteName: EarnedTimeStore.appGroupSuiteName
         ),
         clearOnboardingShell: Bool = true,
+        appLimitStore: AppLimitEpochStore = .shared,
         teardownEarned: (() -> Void)? = nil
     ) {
+        guard teardownAppLimitIdentity(
+            appGroupDefaults: appGroupDefaults,
+            appLimitStore: appLimitStore
+        ) else { return }
         if let teardownEarned {
             teardownEarned()
         } else {
@@ -263,9 +276,38 @@ final class AuthService {
             defaults.removeObject(forKey: key)
         }
         LocalAliasStore.shared.removeAllAliases()
-        AppLimitRuleStore.shared.removeAll()
         EarnedTimeStore.shared.removeAll()
         APIClient.resetClientInstallID()
+    }
+
+    nonisolated private static func teardownAppLimitIdentity(
+        appGroupDefaults: UserDefaults?,
+        appLimitStore: AppLimitEpochStore
+    ) -> Bool {
+        let ownerRaw = appGroupDefaults?.string(forKey: MeteringOwnerMirror.ownerKey)
+        if let owner = ownerRaw.flatMap(UUID.init(uuidString:)) {
+            do {
+                try appLimitStore.resetForIdentityTeardown(expectedOwner: owner)
+                return true
+            } catch {
+                print("[AuthService] app-limit identity teardown blocked: \(error)")
+                return false
+            }
+        }
+
+        do {
+            if try appLimitStore.requiresOwnerForIdentityTeardown() {
+                print(
+                    "[AuthService] app-limit identity teardown blocked: "
+                        + "missing owner mirror for nonempty or bound root"
+                )
+                return false
+            }
+            return true
+        } catch {
+            print("[AuthService] app-limit identity teardown inspection failed: \(error)")
+            return false
+        }
     }
 
     /// POST /auth/email {email, password, full_name?}. The backend create-or-

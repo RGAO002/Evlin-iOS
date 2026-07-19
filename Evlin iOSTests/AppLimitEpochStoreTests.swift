@@ -71,13 +71,64 @@ final class AppLimitEpochStoreTests: XCTestCase {
         XCTAssertEqual(try makeStore(owner: owner).read().ownerChildDeviceID, owner)
     }
 
+    func testBoundRootRejectsNilExpectedOwnerWithoutChangingBytes() throws {
+        let ruleID = UUID(uuidString: "10000000-0000-0000-0000-000000000098")!
+        let owner = UUID(uuidString: "20000000-0000-0000-0000-000000000098")!
+        let store = makeStore(owner: owner)
+        _ = try store.transaction(source: .poll, expectedOwner: owner) { state in
+            state.replaceSlotIfNewer(makeSetSlot(ruleID: ruleID, token: 1, source: .poll))
+        }
+        let boundBytes = try Data(contentsOf: fileURL)
+
+        XCTAssertThrowsError(
+            try store.transaction(source: .wakeRecovery, expectedOwner: nil) { state in
+                state.replaceSlotIfNewer(
+                    makeSetSlot(ruleID: ruleID, token: 2, source: .wakeRecovery)
+                )
+            }
+        ) { error in
+            XCTAssertEqual(error as? AppLimitEpochStoreError, .ownerMismatch)
+        }
+        XCTAssertEqual(try Data(contentsOf: fileURL), boundBytes)
+    }
+
+    func testBoundRootRejectsLegacyMigrationWithoutCurrentOwner() throws {
+        let owner = UUID(uuidString: "20000000-0000-0000-0000-000000000097")!
+        let existingRuleID = UUID(uuidString: "10000000-0000-0000-0000-000000000097")!
+        _ = try makeStore(owner: owner).transaction(source: .poll, expectedOwner: owner) { state in
+            state.replaceSlotIfNewer(
+                makeSetSlot(ruleID: existingRuleID, token: 4, source: .poll)
+            )
+        }
+        let boundBytes = try Data(contentsOf: fileURL)
+        let suiteName = "app-limit-epoch-bound-legacy-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let legacyRule = makeRule(
+            id: UUID(uuidString: "10000000-0000-0000-0000-000000000096")!
+        )
+        defaults.set(
+            try legacyEncoder().encode([legacyRule.id.uuidString: legacyRule]),
+            forKey: AppLimitRuleStore.legacyRulesKey
+        )
+
+        XCTAssertThrowsError(try makeStore(legacyDefaults: defaults).read()) { error in
+            XCTAssertEqual(error as? AppLimitEpochStoreError, .ownerMismatch)
+        }
+        XCTAssertEqual(try Data(contentsOf: fileURL), boundBytes)
+        XCTAssertNotNil(defaults.data(forKey: AppLimitRuleStore.legacyRulesKey))
+    }
+
     func testCorruptRootIsQuarantinedBeforeReturningEmptyState() throws {
         let corrupt = Data("not-json\n".utf8)
         try corrupt.write(to: fileURL)
+        let fileIO = RecordingDurableFileIO()
 
-        let state = try makeStore().read()
+        let state = try makeStore(fileIO: fileIO).read()
 
         XCTAssertTrue(state.slots.isEmpty)
+        XCTAssertEqual(fileIO.removedURLs, [fileURL])
         XCTAssertFalse(FileManager.default.fileExists(atPath: fileURL.path))
         let entries = try FileManager.default.contentsOfDirectory(
             at: directoryURL,
@@ -86,6 +137,68 @@ final class AppLimitEpochStoreTests: XCTestCase {
         let digest = SHA256.hash(data: corrupt).map { String(format: "%02x", $0) }.joined()
         let quarantined = try XCTUnwrap(entries.first { $0.lastPathComponent.contains(".corrupt-\(digest).") })
         XCTAssertEqual(try Data(contentsOf: quarantined), corrupt)
+    }
+
+    func testInvariantInvalidRootIsQuarantinedBeforeReturningEmptyState() throws {
+        let ruleID = UUID(uuidString: "10000000-0000-0000-0000-000000000095")!
+        let invalid = AppLimitEpochStoreState(
+            storeRevision: 4,
+            slots: [
+                ruleID: AppLimitVersionSlot(
+                    ruleID: ruleID,
+                    latestOrderingToken: 3,
+                    latestKind: .set,
+                    latestPayloadDigest: "invalid-set",
+                    activeRule: nil,
+                    clearTombstone: nil,
+                    pendingOwnerWork: nil,
+                    appliedReceipt: nil
+                ),
+            ]
+        )
+        let corrupt = try stateEncoder().encode(invalid)
+        try corrupt.write(to: fileURL)
+        let fileIO = RecordingDurableFileIO()
+
+        let state = try makeStore(fileIO: fileIO).read()
+
+        XCTAssertTrue(state.slots.isEmpty)
+        XCTAssertEqual(fileIO.removedURLs, [fileURL])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fileURL.path))
+        let digest = sha256(corrupt)
+        let entries = try FileManager.default.contentsOfDirectory(
+            at: directoryURL,
+            includingPropertiesForKeys: nil
+        )
+        let quarantined = try XCTUnwrap(
+            entries.first { $0.lastPathComponent.contains(".corrupt-\(digest).") }
+        )
+        XCTAssertEqual(try Data(contentsOf: quarantined), corrupt)
+    }
+
+    func testUnsupportedFutureSchemaIsNotQuarantined() throws {
+        let future = AppLimitEpochStoreState(
+            schemaVersion: AppLimitEpochStoreState.currentSchemaVersion + 1,
+            storeRevision: 7
+        )
+        let futureBytes = try stateEncoder().encode(future)
+        try futureBytes.write(to: fileURL)
+        let fileIO = RecordingDurableFileIO()
+
+        XCTAssertThrowsError(try makeStore(fileIO: fileIO).read()) { error in
+            XCTAssertEqual(
+                error as? AppLimitEpochStoreError,
+                .unsupportedSchema(AppLimitEpochStoreState.currentSchemaVersion + 1)
+            )
+        }
+
+        XCTAssertEqual(try Data(contentsOf: fileURL), futureBytes)
+        XCTAssertTrue(fileIO.removedURLs.isEmpty)
+        let entries = try FileManager.default.contentsOfDirectory(
+            at: directoryURL,
+            includingPropertiesForKeys: nil
+        )
+        XCTAssertFalse(entries.contains { $0.lastPathComponent.contains(".corrupt-") })
     }
 
     func testInterruptedReplacementRestoresPriorCanonicalBytes() throws {
@@ -112,6 +225,40 @@ final class AppLimitEpochStoreTests: XCTestCase {
         )
         XCTAssertEqual(try Data(contentsOf: fileURL), priorBytes)
         XCTAssertEqual(try makeStore().read().slots[ruleID]?.latestOrderingToken, 1)
+    }
+
+    func testInterruptedFirstWriteUsesDurableDeletionAndLeavesNoRoot() throws {
+        let ruleID = UUID(uuidString: "10000000-0000-0000-0000-000000000094")!
+        let fileIO = FailAfterReplacingDurableFileIO()
+        fileIO.failNextWrite = true
+        let store = makeStore(fileIO: fileIO)
+
+        XCTAssertThrowsError(
+            try store.transaction(source: .poll, expectedOwner: nil) { state in
+                state.replaceSlotIfNewer(
+                    makeSetSlot(ruleID: ruleID, token: 1, source: .poll)
+                )
+            }
+        )
+
+        XCTAssertEqual(fileIO.removedURLs, [fileURL])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fileURL.path))
+    }
+
+    func testDurableRemoveUnlinksAndSynchronizesParentDirectory() throws {
+        try Data("root".utf8).write(to: fileURL)
+        let syncRecorder = DirectorySyncRecorder()
+        let fileIO = DurableAppLimitEpochFileIO(
+            syncDirectory: { syncRecorder.record($0) }
+        )
+
+        try fileIO.remove(at: fileURL)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fileURL.path))
+        XCTAssertEqual(syncRecorder.urls, [directoryURL])
+
+        try fileIO.remove(at: fileURL)
+        XCTAssertEqual(syncRecorder.urls, [directoryURL])
     }
 
     func testConcurrentAppAndNSEWritersDoNotLoseEitherSlot() throws {
@@ -169,6 +316,58 @@ final class AppLimitEpochStoreTests: XCTestCase {
         XCTAssertEqual(state.slots[ruleID]?.latestKind, .clear)
         XCTAssertNil(state.slots[ruleID]?.activeRule)
         XCTAssertEqual(state.slots[ruleID]?.clearTombstone?.orderingToken, 3)
+    }
+
+    func testCompatibilityRemoveAllPreservesVersionedSlotsAndTombstones() throws {
+        let legacyID = UUID(uuidString: "10000000-0000-0000-0000-000000000040")!
+        let versionedID = UUID(uuidString: "10000000-0000-0000-0000-000000000041")!
+        let clearedID = UUID(uuidString: "10000000-0000-0000-0000-000000000042")!
+        let store = makeStore()
+        _ = try store.transaction(source: .poll, expectedOwner: nil) { state in
+            state.slots[legacyID] = makeSetSlot(ruleID: legacyID, token: 0, source: .poll)
+            state.slots[versionedID] = makeSetSlot(
+                ruleID: versionedID,
+                token: 8,
+                source: .poll
+            )
+            state.slots[clearedID] = makeClearSlot(ruleID: clearedID, token: 9)
+        }
+        let facade = AppLimitRuleStore(
+            epochStore: store,
+            expectedOwnerProvider: { nil }
+        )
+
+        facade.removeAll()
+
+        let state = try store.read()
+        XCTAssertEqual(state.storeRevision, 2)
+        XCTAssertNil(state.slots[legacyID])
+        XCTAssertEqual(state.slots[versionedID]?.latestOrderingToken, 8)
+        XCTAssertNotNil(state.slots[versionedID]?.activeRule)
+        XCTAssertEqual(state.slots[clearedID]?.latestOrderingToken, 9)
+        XCTAssertNotNil(state.slots[clearedID]?.clearTombstone)
+    }
+
+    func testIdentityTeardownResetRequiresOwnerAndUsesDurableRemoval() throws {
+        let owner = UUID(uuidString: "20000000-0000-0000-0000-000000000040")!
+        let wrongOwner = UUID(uuidString: "20000000-0000-0000-0000-000000000041")!
+        let fileIO = RecordingDurableFileIO()
+        let store = makeStore(fileIO: fileIO, owner: owner)
+        _ = try store.transaction(source: .poll, expectedOwner: owner) { _ in }
+        let boundBytes = try Data(contentsOf: fileURL)
+
+        XCTAssertThrowsError(try store.resetForIdentityTeardown(expectedOwner: wrongOwner)) { error in
+            XCTAssertEqual(error as? AppLimitEpochStoreError, .ownerMismatch)
+        }
+        XCTAssertEqual(try Data(contentsOf: fileURL), boundBytes)
+        XCTAssertTrue(fileIO.removedURLs.isEmpty)
+
+        try store.resetForIdentityTeardown(expectedOwner: owner)
+
+        XCTAssertEqual(fileIO.removedURLs, [fileURL])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fileURL.path))
+        try fileIO.remove(at: fileURL)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fileURL.path))
     }
 
     func testCanonicalBytesAreIndependentOfDictionaryInsertionOrder() throws {
@@ -329,6 +528,13 @@ final class AppLimitEpochStoreTests: XCTestCase {
         return encoder
     }
 
+    private func stateEncoder() -> JSONEncoder {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .secondsSince1970
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        return encoder
+    }
+
     private func sha256(_ data: Data) -> String {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
@@ -372,6 +578,64 @@ private final class LockedErrors: @unchecked Sendable {
     func append(_ error: Error) {
         lock.lock()
         storage.append(error)
+        lock.unlock()
+    }
+}
+
+private final class RecordingDurableFileIO: DeviceEpochFileIO, @unchecked Sendable {
+    private let backing = DurableAppLimitEpochFileIO()
+    private(set) var removedURLs: [URL] = []
+
+    func read(from url: URL) throws -> Data? {
+        try backing.read(from: url)
+    }
+
+    func writeAtomically(_ data: Data, to url: URL) throws {
+        try backing.writeAtomically(data, to: url)
+    }
+
+    func remove(at url: URL) throws {
+        removedURLs.append(url)
+        try backing.remove(at: url)
+    }
+}
+
+private final class FailAfterReplacingDurableFileIO: DeviceEpochFileIO, @unchecked Sendable {
+    private let backing = DurableAppLimitEpochFileIO()
+    private(set) var removedURLs: [URL] = []
+    var failNextWrite = false
+
+    func read(from url: URL) throws -> Data? {
+        try backing.read(from: url)
+    }
+
+    func writeAtomically(_ data: Data, to url: URL) throws {
+        try backing.writeAtomically(data, to: url)
+        if failNextWrite {
+            failNextWrite = false
+            throw TestFileIOError.interruptedAfterReplacement
+        }
+    }
+
+    func remove(at url: URL) throws {
+        removedURLs.append(url)
+        try backing.remove(at: url)
+    }
+}
+
+private final class DirectorySyncRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [URL] = []
+
+    var urls: [URL] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+
+    func record(_ url: URL) {
+        lock.lock()
+        storage.append(url)
         lock.unlock()
     }
 }

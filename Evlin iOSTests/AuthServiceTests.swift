@@ -127,20 +127,165 @@ final class AuthServiceTests: XCTestCase {
         let suiteName = "AuthServiceTests.\(UUID().uuidString)"
         let appGroup = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defer { appGroup.removePersistentDomain(forName: suiteName) }
-        appGroup.set(UUID().uuidString, forKey: "evlin.childId")
+        let owner = UUID()
+        appGroup.set(owner.uuidString, forKey: "evlin.childId")
+        let appLimitURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("auth-app-limit-ordering-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: appLimitURL) }
+        let appLimitStore = AppLimitEpochStore(
+            fileURL: appLimitURL,
+            ownerProvider: {
+                appGroup.string(forKey: "evlin.childId").flatMap(UUID.init(uuidString:))
+            },
+            legacyDefaults: nil
+        )
+        _ = try appLimitStore.transaction(source: .poll, expectedOwner: owner) { _ in }
         var events: [String] = []
 
         AuthService.clearFamilyScopedLocalState(
             appGroupDefaults: appGroup,
+            appLimitStore: appLimitStore,
             teardownEarned: {
                 events.append("stop")
                 XCTAssertNotNil(appGroup.string(forKey: "evlin.childId"))
+                XCTAssertFalse(FileManager.default.fileExists(atPath: appLimitURL.path))
             }
         )
         events.append("cleared")
 
         XCTAssertEqual(events, ["stop", "cleared"])
         XCTAssertNil(appGroup.string(forKey: "evlin.childId"))
+    }
+
+    func testFamilyScopedCleanupFailsClosedWhenAppLimitTeardownIsUnauthorized() throws {
+        let suiteName = "AuthServiceTests.\(UUID().uuidString)"
+        let appGroup = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { appGroup.removePersistentDomain(forName: suiteName) }
+        let owner = UUID()
+        appGroup.set(owner.uuidString, forKey: "evlin.childId")
+        let appLimitURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("auth-app-limit-fail-closed-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: appLimitURL) }
+        let bindingStore = AppLimitEpochStore(
+            fileURL: appLimitURL,
+            ownerProvider: { owner },
+            legacyDefaults: nil
+        )
+        _ = try bindingStore.transaction(source: .poll, expectedOwner: owner) { _ in }
+        let boundBytes = try Data(contentsOf: appLimitURL)
+        let unauthorizedStore = AppLimitEpochStore(
+            fileURL: appLimitURL,
+            ownerProvider: { UUID() },
+            legacyDefaults: nil
+        )
+        var earnedTeardownCalled = false
+
+        AuthService.clearFamilyScopedLocalState(
+            appGroupDefaults: appGroup,
+            appLimitStore: unauthorizedStore,
+            teardownEarned: { earnedTeardownCalled = true }
+        )
+
+        XCTAssertFalse(earnedTeardownCalled)
+        XCTAssertEqual(appGroup.string(forKey: "evlin.childId"), owner.uuidString)
+        XCTAssertEqual(try Data(contentsOf: appLimitURL), boundBytes)
+    }
+
+    func testFamilyScopedCleanupFailsClosedWhenOwnerMirrorIsMissingButRootIsBound() throws {
+        let suiteName = "AuthServiceTests.\(UUID().uuidString)"
+        let appGroup = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { appGroup.removePersistentDomain(forName: suiteName) }
+        let owner = UUID()
+        let appLimitURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("auth-app-limit-missing-owner-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: appLimitURL) }
+        let appLimitStore = AppLimitEpochStore(
+            fileURL: appLimitURL,
+            ownerProvider: { owner },
+            legacyDefaults: nil
+        )
+        _ = try appLimitStore.transaction(source: .poll, expectedOwner: owner) { _ in }
+        let boundBytes = try Data(contentsOf: appLimitURL)
+        var earnedTeardownCalled = false
+
+        AuthService.clearFamilyScopedLocalState(
+            appGroupDefaults: appGroup,
+            appLimitStore: appLimitStore,
+            teardownEarned: { earnedTeardownCalled = true }
+        )
+
+        XCTAssertFalse(earnedTeardownCalled)
+        XCTAssertEqual(try Data(contentsOf: appLimitURL), boundBytes)
+    }
+
+    func testFamilyScopedCleanupAllowsInvalidMirrorWhenAppLimitRootIsUnbound() throws {
+        let suiteName = "AuthServiceTests.\(UUID().uuidString)"
+        let appGroup = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { appGroup.removePersistentDomain(forName: suiteName) }
+        appGroup.set("not-a-uuid", forKey: "evlin.childId")
+        let appLimitURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("auth-app-limit-unbound-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: appLimitURL) }
+        let appLimitStore = AppLimitEpochStore(
+            fileURL: appLimitURL,
+            ownerProvider: { nil },
+            legacyDefaults: nil
+        )
+        var earnedTeardownCalled = false
+
+        AuthService.clearFamilyScopedLocalState(
+            appGroupDefaults: appGroup,
+            appLimitStore: appLimitStore,
+            teardownEarned: { earnedTeardownCalled = true }
+        )
+
+        XCTAssertTrue(earnedTeardownCalled)
+        XCTAssertNil(appGroup.string(forKey: "evlin.childId"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: appLimitURL.path))
+    }
+
+    func testFamilyScopedCleanupFailsClosedWhenOwnerMirrorIsMissingAndRootIsNonempty() throws {
+        let suiteName = "AuthServiceTests.\(UUID().uuidString)"
+        let appGroup = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { appGroup.removePersistentDomain(forName: suiteName) }
+        let appLimitURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("auth-app-limit-unbound-nonempty-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: appLimitURL) }
+        let appLimitStore = AppLimitEpochStore(
+            fileURL: appLimitURL,
+            ownerProvider: { nil },
+            legacyDefaults: nil
+        )
+        let ruleID = UUID()
+        _ = try appLimitStore.transaction(source: .poll, expectedOwner: nil) { state in
+            state.slots[ruleID] = AppLimitVersionSlot(
+                ruleID: ruleID,
+                latestOrderingToken: 1,
+                latestKind: .clear,
+                latestPayloadDigest: "clear-1",
+                activeRule: nil,
+                clearTombstone: AppLimitClearTombstone(
+                    ruleID: ruleID,
+                    orderingToken: 1,
+                    payloadDigest: "clear-1",
+                    source: .poll,
+                    clearedAt: Date(timeIntervalSince1970: 1_700_000_000)
+                ),
+                pendingOwnerWork: nil,
+                appliedReceipt: nil
+            )
+        }
+        let rootBytes = try Data(contentsOf: appLimitURL)
+        var earnedTeardownCalled = false
+
+        AuthService.clearFamilyScopedLocalState(
+            appGroupDefaults: appGroup,
+            appLimitStore: appLimitStore,
+            teardownEarned: { earnedTeardownCalled = true }
+        )
+
+        XCTAssertFalse(earnedTeardownCalled)
+        XCTAssertEqual(try Data(contentsOf: appLimitURL), rootBytes)
     }
 
     func testTerminalSessionNotificationSynchronouslyPersistsFailClosedBeforePostReturns() async throws {
@@ -165,6 +310,17 @@ final class AuthServiceTests: XCTestCase {
                 appGroup.string(forKey: "evlin.childId").flatMap(UUID.init(uuidString:))
             }
         )
+        let appLimitURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("auth-terminal-app-limit-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: appLimitURL) }
+        let appLimitStore = AppLimitEpochStore(
+            fileURL: appLimitURL,
+            ownerProvider: {
+                appGroup.string(forKey: "evlin.childId").flatMap(UUID.init(uuidString:))
+            },
+            legacyDefaults: nil
+        )
+        _ = try appLimitStore.transaction(source: .poll, expectedOwner: deviceID) { _ in }
         try epochStore.transaction(expectedOwner: deviceID) { state in
             state.legacy = LegacyCompatibilityMonitorState(
                 ownerChildDeviceID: deviceID,
@@ -186,6 +342,7 @@ final class AuthServiceTests: XCTestCase {
                 AuthService.persistTerminalFailClosed(
                     appGroupDefaults: appGroup,
                     epochStore: epochStore,
+                    appLimitStore: appLimitStore,
                     usageStore: usageStore
                 )
             },
@@ -197,6 +354,7 @@ final class AuthServiceTests: XCTestCase {
         DispatchQueue.global().async {
             NotificationCenter.default.post(name: .evlinSessionSignedOut, object: nil)
             XCTAssertNil(appGroup.string(forKey: "evlin.childId"))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: appLimitURL.path))
             let state = try? epochStore.read()
             XCTAssertTrue(
                 state?.identityCleanupWork?.oldActivityNames.contains(generation.activityName) == true

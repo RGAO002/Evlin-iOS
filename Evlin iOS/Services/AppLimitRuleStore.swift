@@ -85,6 +85,11 @@ nonisolated final class AppLimitRuleStore: @unchecked Sendable {
     }
 
     func removeAll() {
-        try? epochStore.reset()
+        try? epochStore.transaction(
+            source: source,
+            expectedOwner: expectedOwnerProvider()
+        ) { state in
+            state.slots = state.slots.filter { $0.value.latestOrderingToken > 0 }
+        }
     }
 }

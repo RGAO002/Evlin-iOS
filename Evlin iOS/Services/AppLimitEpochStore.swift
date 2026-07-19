@@ -3,6 +3,14 @@ import Darwin
 import Foundation
 
 nonisolated struct DurableAppLimitEpochFileIO: DeviceEpochFileIO {
+    private let syncDirectory: @Sendable (URL) throws -> Void
+
+    init(
+        syncDirectory: @escaping @Sendable (URL) throws -> Void = Self.fsyncDirectory
+    ) {
+        self.syncDirectory = syncDirectory
+    }
+
     func read(from url: URL) throws -> Data? {
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
         return try Data(contentsOf: url)
@@ -57,15 +65,22 @@ nonisolated struct DurableAppLimitEpochFileIO: DeviceEpochFileIO {
         }
         renamed = true
 
-        let directoryDescriptor = Darwin.open(directory.path, O_RDONLY | O_CLOEXEC)
-        guard directoryDescriptor >= 0 else { throw Self.posixError() }
-        defer { Darwin.close(directoryDescriptor) }
-        guard Darwin.fsync(directoryDescriptor) == 0 else { throw Self.posixError() }
+        try syncDirectory(directory)
     }
 
     func remove(at url: URL) throws {
-        guard FileManager.default.fileExists(atPath: url.path) else { return }
-        try FileManager.default.removeItem(at: url)
+        guard Darwin.unlink(url.path) == 0 else {
+            if errno == ENOENT { return }
+            throw Self.posixError()
+        }
+        try syncDirectory(url.deletingLastPathComponent())
+    }
+
+    private static func fsyncDirectory(_ directory: URL) throws {
+        let descriptor = Darwin.open(directory.path, O_RDONLY | O_CLOEXEC)
+        guard descriptor >= 0 else { throw Self.posixError() }
+        defer { Darwin.close(descriptor) }
+        guard Darwin.fsync(descriptor) == 0 else { throw Self.posixError() }
     }
 
     private static func posixError() -> POSIXError {
@@ -113,7 +128,10 @@ nonisolated final class AppLimitEpochStore: @unchecked Sendable {
     func read() throws -> AppLimitEpochStoreState {
         try withLock {
             let url = try resolvedFileURL()
-            return try loadPersistedState(at: url).state
+            return try loadPersistedState(
+                at: url,
+                expectedOwnerForMigration: ownerProvider()
+            ).state
         }
     }
 
@@ -125,7 +143,10 @@ nonisolated final class AppLimitEpochStore: @unchecked Sendable {
     ) throws -> Value {
         try withLock {
             let url = try resolvedFileURL()
-            let loaded = try loadPersistedState(at: url)
+            let loaded = try loadPersistedState(
+                at: url,
+                expectedOwnerForMigration: expectedOwner
+            )
             let priorData = loaded.persistedData
             let priorState = loaded.state
             try checkOwner(expectedOwner, state: priorState)
@@ -159,11 +180,43 @@ nonisolated final class AppLimitEpochStore: @unchecked Sendable {
         }
     }
 
-    func reset() throws {
+    func resetForIdentityTeardown(expectedOwner: UUID) throws {
         try withLock {
             let url = try resolvedFileURL()
+            let loaded: AppLimitEpochStoreState
+            if try fileIO.read(from: url) == nil {
+                loaded = AppLimitEpochStoreState()
+            } else {
+                loaded = try loadPersistedState(
+                    at: url,
+                    expectedOwnerForMigration: expectedOwner
+                ).state
+            }
+            try checkOwner(expectedOwner, state: loaded)
             try fileIO.remove(at: url)
+            guard try fileIO.read(from: url) == nil else {
+                throw AppLimitEpochStoreError.readbackMismatch
+            }
             legacyDefaults?.removeObject(forKey: Self.legacyRulesKey)
+        }
+    }
+
+    func requiresOwnerForIdentityTeardown() throws -> Bool {
+        try withLock {
+            let url = try resolvedFileURL()
+            guard let data = try fileIO.read(from: url) else {
+                return legacyDefaults?.data(forKey: Self.legacyRulesKey) != nil
+            }
+            let state = try Self.decoder.decode(AppLimitEpochStoreState.self, from: data)
+            guard state.schemaVersion <= AppLimitEpochStoreState.currentSchemaVersion else {
+                throw AppLimitEpochStoreError.unsupportedSchema(state.schemaVersion)
+            }
+            try validate(state)
+            return state.ownerChildDeviceID != nil
+                || !state.slots.isEmpty
+                || state.storeRevision != 0
+                || state.legacyMigration != nil
+                || legacyDefaults?.data(forKey: Self.legacyRulesKey) != nil
         }
     }
 
@@ -190,10 +243,16 @@ nonisolated final class AppLimitEpochStore: @unchecked Sendable {
     }
 
     private func loadPersistedState(
-        at url: URL
+        at url: URL,
+        expectedOwnerForMigration: UUID?
     ) throws -> (state: AppLimitEpochStoreState, persistedData: Data?) {
         guard let data = try fileIO.read(from: url) else {
-            return try migrateLegacyIfPresent(base: AppLimitEpochStoreState(), priorData: nil, at: url)
+            return try migrateLegacyIfPresent(
+                base: AppLimitEpochStoreState(),
+                priorData: nil,
+                expectedOwner: expectedOwnerForMigration,
+                at: url
+            )
         }
 
         let state: AppLimitEpochStoreState
@@ -206,22 +265,37 @@ nonisolated final class AppLimitEpochStore: @unchecked Sendable {
         guard state.schemaVersion <= AppLimitEpochStoreState.currentSchemaVersion else {
             throw AppLimitEpochStoreError.unsupportedSchema(state.schemaVersion)
         }
-        try validate(state)
+        do {
+            try validate(state)
+        } catch AppLimitEpochStoreError.invalidState {
+            try quarantine(data, at: url)
+            return (AppLimitEpochStoreState(), nil)
+        }
         if state.legacyMigration != nil {
-            legacyDefaults?.removeObject(forKey: Self.legacyRulesKey)
+            if legacyDefaults?.data(forKey: Self.legacyRulesKey) != nil {
+                try checkOwner(expectedOwnerForMigration, state: state)
+                legacyDefaults?.removeObject(forKey: Self.legacyRulesKey)
+            }
             return (state, data)
         }
-        return try migrateLegacyIfPresent(base: state, priorData: data, at: url)
+        return try migrateLegacyIfPresent(
+            base: state,
+            priorData: data,
+            expectedOwner: expectedOwnerForMigration,
+            at: url
+        )
     }
 
     private func migrateLegacyIfPresent(
         base: AppLimitEpochStoreState,
         priorData: Data?,
+        expectedOwner: UUID?,
         at url: URL
     ) throws -> (state: AppLimitEpochStoreState, persistedData: Data?) {
         guard let legacyData = legacyDefaults?.data(forKey: Self.legacyRulesKey) else {
             return (base, priorData)
         }
+        try checkOwner(expectedOwner, state: base)
         let decoded: [String: AppLimitRule]
         let format: String
         if let json = try? Self.legacyDecoder.decode([String: AppLimitRule].self, from: legacyData) {
@@ -241,6 +315,7 @@ nonisolated final class AppLimitEpochStore: @unchecked Sendable {
             throw AppLimitEpochStoreError.revisionOverflow
         }
         var migrated = base
+        migrated.ownerChildDeviceID = base.ownerChildDeviceID ?? expectedOwner
         var migratedRuleCount = 0
         for rule in decoded.values.sorted(by: { $0.id.uuidString < $1.id.uuidString }) {
             guard migrated.slots[rule.id] == nil else { continue }
@@ -267,7 +342,12 @@ nonisolated final class AppLimitEpochStore: @unchecked Sendable {
             migratedAtStoreRevision: migrated.storeRevision
         )
         try validate(migrated)
-        try persist(migrated, replacing: priorData, expectedOwner: nil, at: url)
+        try persist(
+            migrated,
+            replacing: priorData,
+            expectedOwner: expectedOwner,
+            at: url
+        )
         legacyDefaults?.removeObject(forKey: Self.legacyRulesKey)
         return (migrated, try fileIO.read(from: url))
     }
@@ -330,10 +410,16 @@ nonisolated final class AppLimitEpochStore: @unchecked Sendable {
         _ expectedOwner: UUID?,
         state: AppLimitEpochStoreState
     ) throws {
+        if let boundOwner = state.ownerChildDeviceID {
+            guard expectedOwner == boundOwner, ownerProvider() == boundOwner else {
+                throw AppLimitEpochStoreError.ownerMismatch
+            }
+            return
+        }
         guard let expectedOwner else { return }
-        guard ownerProvider() == expectedOwner,
-              state.ownerChildDeviceID == nil || state.ownerChildDeviceID == expectedOwner
-        else { throw AppLimitEpochStoreError.ownerMismatch }
+        guard ownerProvider() == expectedOwner else {
+            throw AppLimitEpochStoreError.ownerMismatch
+        }
     }
 
     private func validate(_ state: AppLimitEpochStoreState) throws {
