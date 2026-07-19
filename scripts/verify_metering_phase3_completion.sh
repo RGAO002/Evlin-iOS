@@ -75,7 +75,7 @@ RELEASE_PRODUCTS = (
     "Release-iphoneos/Evlin iOS.app/PlugIns/EvlinShieldConfig.appex/EvlinShieldConfig",
     "Release-iphoneos/Evlin iOS.app/PlugIns/EvlinPushApplier.appex/EvlinPushApplier",
 )
-DEBUG_XCTEST_PRODUCT = "Debug-iphoneos/Evlin iOS.app/PlugIns/Evlin iOSTests.xctest/Evlin iOSTests"
+DEBUG_XCTEST_PRODUCT = "Debug-iphonesimulator/Evlin iOS.app/PlugIns/Evlin iOSTests.xctest/Evlin iOSTests"
 VOLATILE_TRACKED_TOKENS = ("xcuserdata/", ".xcuserstate", "xcschememanagement.plist")
 AUTHORITATIVE_CORRECTION_TEST = (
     "MeteringAuthoritativeBaseCorrectionTests/"
@@ -97,12 +97,12 @@ GATES = (
     "backend-gate-resume",
     "backend-phase3-db",
     "cross-stack-v30",
+    "debug-xctest-build",
     "ios-metering-protected-iphone17pro",
     "ios-metering-protected-ipad-m5",
     "ios-legacy-iphone17pro",
     "ios-legacy-ipad-m5",
     "release-production-build",
-    "debug-xctest-build",
     "release-source-check",
     "r16-structured-map",
     "authoritative-correction-disposition",
@@ -635,7 +635,7 @@ def gate_command(gate: str) -> tuple[Path, list[str] | str]:
         "backend-phase3-db": (backend, ".venv/bin/python scripts/run_limits_db_regression.py tests/test_metering_epoch_models.py tests/test_metering_epoch_registration.py tests/test_metering_epoch_sample_adapter.py tests/test_metering_epoch_phase2_integration.py tests/test_metering_epoch_lifespan.py tests/test_metering_epoch_phase3_vectors.py"),
         "cross-stack-v30": (backend, "bash scripts/run_metering_v30_cross_stack.sh"),
         "release-production-build": (ios, "DERIVED=\"$PWD/.superpowers/evidence/metering-phase3/DerivedData-Release\"; if [ -e \"$DERIVED\" ]; then mv \"$DERIVED\" \"$DERIVED.previous-$(date +%s)-$$\"; fi; SENTRY_SKIP_DSYM_UPLOAD=1 xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -configuration Release -destination 'generic/platform=iOS' -derivedDataPath \"$DERIVED\" CODE_SIGNING_ALLOWED=NO IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' build"),
-        "debug-xctest-build": (ios, "DERIVED=\"$PWD/.superpowers/evidence/metering-phase3/DerivedData-DebugTests\"; if [ -e \"$DERIVED\" ]; then mv \"$DERIVED\" \"$DERIVED.previous-$(date +%s)-$$\"; fi; SENTRY_SKIP_DSYM_UPLOAD=1 xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -configuration Debug -destination 'generic/platform=iOS' -derivedDataPath \"$DERIVED\" CODE_SIGNING_ALLOWED=NO IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' build-for-testing"),
+        "debug-xctest-build": (ios, "DERIVED=\"$PWD/.superpowers/evidence/metering-phase3/DerivedData-DebugTests\"; if [ -e \"$DERIVED\" ]; then mv \"$DERIVED\" \"$DERIVED.previous-$(date +%s)-$$\"; fi; SENTRY_SKIP_DSYM_UPLOAD=1 xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -configuration Debug -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3.1' -derivedDataPath \"$DERIVED\" IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' build-for-testing"),
         "release-source-check": (ios, "OUT=\"$PWD/.superpowers/evidence/metering-phase3/release-source.sil\"; DEBUG_OUT=\"$PWD/.superpowers/evidence/metering-phase3/debug-source-control.sil\"; SDK=$(xcrun --sdk iphonesimulator --show-sdk-path); xcrun swiftc -emit-sil -parse-as-library -sdk \"$SDK\" -target arm64-apple-ios17.6-simulator 'Evlin iOS/Services/MeteringEpochContract.swift' 'Evlin iOS/Services/MeteringRuntimeInfrastructure.swift' >\"$OUT\" 2>&1; test -s \"$OUT\"; if rg -q 'DebugAppGroupMeteringClock|evlin\\.metering\\.debugClockNow' \"$OUT\"; then exit 1; fi; xcrun swiftc -D DEBUG -emit-sil -parse-as-library -sdk \"$SDK\" -target arm64-apple-ios17.6-simulator 'Evlin iOS/Services/MeteringEpochContract.swift' 'Evlin iOS/Services/MeteringRuntimeInfrastructure.swift' >\"$DEBUG_OUT\" 2>&1; rg -q 'DebugAppGroupMeteringClock' \"$DEBUG_OUT\"; rg -q 'evlin\\.metering\\.debugClockNow' \"$DEBUG_OUT\"; echo release-source-compile-passed"),
         "r16-structured-map": (ios, "python3 scripts/verify_metering_phase3_r16.py && echo r16-structured-map-passed"),
         "authoritative-correction-disposition": (ios, "printf '%s\\n' 'baseline_failure_archived' 'test_method=MeteringAuthoritativeBaseCorrectionTests.testEveryCorrectionBoundaryReopensWithStableIDsAndConverges' 'baseline_commit=e46ffe1' 'task24_known_failure_ordinal=27'"),
@@ -677,6 +677,8 @@ def run_ios_named_gate(gate: str, log: Path) -> subprocess.CompletedProcess[str]
         "Evlin iOS",
         "-destination",
         destination,
+        "-derivedDataPath",
+        str(evidence / "DerivedData-DebugTests"),
         "IPHONEOS_DEPLOYMENT_TARGET=17.6",
         "TARGETED_DEVICE_FAMILY=1,2",
         "-parallel-testing-enabled",
@@ -695,7 +697,7 @@ def run_ios_named_gate(gate: str, log: Path) -> subprocess.CompletedProcess[str]
         )
     if not protected and not iphone:
         command.append("-skip-testing:Evlin iOSTests/ProfileSnapshotTests")
-    command.append("test")
+    command.append("test-without-building")
     environment = os.environ.copy()
     environment["SENTRY_SKIP_DSYM_UPLOAD"] = "1"
     with log.open("wb") as handle:

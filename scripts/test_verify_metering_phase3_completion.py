@@ -56,7 +56,7 @@ RELEASE_PRODUCTS = (
     "Release-iphoneos/Evlin iOS.app/PlugIns/EvlinShieldConfig.appex/EvlinShieldConfig",
     "Release-iphoneos/Evlin iOS.app/PlugIns/EvlinPushApplier.appex/EvlinPushApplier",
 )
-DEBUG_XCTEST_PRODUCT = "Debug-iphoneos/Evlin iOS.app/PlugIns/Evlin iOSTests.xctest/Evlin iOSTests"
+DEBUG_XCTEST_PRODUCT = "Debug-iphonesimulator/Evlin iOS.app/PlugIns/Evlin iOSTests.xctest/Evlin iOSTests"
 VOLATILE_TRACKED_TOKENS = ("xcuserdata/", ".xcuserstate", "xcschememanagement.plist")
 AUTHORITATIVE_CORRECTION_TEST = (
     "MeteringAuthoritativeBaseCorrectionTests/"
@@ -322,7 +322,7 @@ if gate == 'release-production-build' and mode != 'zero-products':
             data += b'DebugAppGroupMeteringClock\\n'
         path.write_bytes(data)
 if gate == 'debug-xctest-build' and mode != 'missing-debug-xctest':
-    path = Path(evidence_name) / 'DerivedData-DebugTests/Build/Products/Debug-iphoneos/Evlin iOS.app/PlugIns/Evlin iOSTests.xctest/Evlin iOSTests'
+    path = Path(evidence_name) / 'DerivedData-DebugTests/Build/Products/Debug-iphonesimulator/Evlin iOS.app/PlugIns/Evlin iOSTests.xctest/Evlin iOSTests'
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(b'MACHO\\nDEBUG TEST PRODUCT\\n')
 """,
@@ -495,6 +495,25 @@ def test_real_gate_shells_are_fail_closed_and_expand_source_paths() -> None:
     assert 'OUT=\\"$PWD/.superpowers/evidence/metering-phase3/release-source.sil\\"' in source
     assert 'DEBUG_OUT=\\"$PWD/.superpowers/evidence/metering-phase3/debug-source-control.sil\\"' in source
     assert 'python3 scripts/verify_metering_phase3_r16.py && echo r16-structured-map-passed' in source
+
+
+def test_named_ios_gates_use_the_fresh_dedicated_debug_test_product() -> None:
+    source = VERIFIER.read_text()
+    gates_text = source[source.index("GATES = (") : source.index("\n\n\nclass VerificationError")]
+    assert gates_text.index('"debug-xctest-build"') < gates_text.index(
+        '"ios-metering-protected-iphone17pro"'
+    )
+    named_gate_text = source[
+        source.index("def run_ios_named_gate") : source.index("\n\nfor gate in GATES:")
+    ]
+    assert '"-derivedDataPath"' in named_gate_text
+    assert 'str(evidence / "DerivedData-DebugTests")' in named_gate_text
+    assert 'command.append("test-without-building")' in named_gate_text
+    assert 'command.append("test")' not in named_gate_text
+    debug_command = source[
+        source.index('"debug-xctest-build":') : source.index('\n        "release-source-check":')
+    ]
+    assert "CODE_SIGNING_ALLOWED=NO" not in debug_command
 
 
 def test_pre_report_ignores_noncanonical_manual_log_artifacts(tmp_path: Path) -> None:
