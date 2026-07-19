@@ -14,11 +14,14 @@ final class MeteringEpochVectorCoverageTests: XCTestCase {
 
     private enum FixtureLoadError: LocalizedError {
         case missing(String)
+        case invalid(String)
 
         var errorDescription: String? {
             switch self {
             case let .missing(path):
                 return "canonical fixture missing at \(path)"
+            case let .invalid(message):
+                return "canonical fixture invalid: \(message)"
             }
         }
     }
@@ -133,6 +136,12 @@ final class MeteringEpochVectorCoverageTests: XCTestCase {
         "permutation_canonical_store_bytes", "permutation_receipts", "receipt", "effects"
     ]
 
+    private static let phase4EmptyReceiptKeys: Set<String> = ["present"]
+    private static let phase4FullReceiptKeys: Set<String> = [
+        "present", "rule_id", "ordering_token", "arm_id", "source"
+    ]
+    private static let phase4FullReceiptIDs: Set<String> = ["P4V09", "P4V18"]
+
     private static let observationKeys: Set<String> = [
         "kind", "child_device_id", "source", "credential_kind", "credential_id"
     ]
@@ -190,6 +199,7 @@ final class MeteringEpochVectorCoverageTests: XCTestCase {
 
         let root = try XCTUnwrap(JSONSerialization.jsonObject(with: sourceData) as? JSONObject)
         XCTAssertEqual(Set(root.keys), Self.rootKeys, "fixture root keys")
+        try validatePhase4ReceiptSchemas(in: root)
         for (group, expectedIDs) in Self.expectedGroupIDs {
             let cases = try XCTUnwrap(root[group] as? [JSONObject], "missing \(group)")
             XCTAssertEqual(cases.map { $0["id"] as? String }, expectedIDs, "\(group) IDs")
@@ -227,6 +237,86 @@ final class MeteringEpochVectorCoverageTests: XCTestCase {
             let derived = try observationsDerivedSolelyFromTypedInput(vector, vectorID: id)
             XCTAssertEqual(actual.count, derived.count, "\(id) attributed observation count")
             XCTAssertEqual(actual, derived, "\(id) attributed observation membership")
+        }
+    }
+
+    func testPhase4ReceiptSchemasRejectMissingPresent() throws {
+        let sourceData = try sourceFixtureData()
+        let canonicalRoot = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: sourceData) as? JSONObject
+        )
+
+        for mutation in ["expected", "permutation"] {
+            var root = canonicalRoot
+            var cases = try XCTUnwrap(root["phase4_cases"] as? [JSONObject])
+            let vectorID = mutation == "expected" ? "P4V01" : "P4V09"
+            let index = try XCTUnwrap(cases.firstIndex { $0["id"] as? String == vectorID })
+            var vector = cases[index]
+            var expected = try XCTUnwrap(vector["expected"] as? JSONObject)
+
+            if mutation == "expected" {
+                var receipt = try XCTUnwrap(expected["receipt"] as? JSONObject)
+                receipt.removeValue(forKey: "present")
+                expected["receipt"] = receipt
+            } else {
+                var receipts = try XCTUnwrap(expected["permutation_receipts"] as? [JSONObject])
+                receipts[0].removeValue(forKey: "present")
+                expected["permutation_receipts"] = receipts
+            }
+
+            vector["expected"] = expected
+            cases[index] = vector
+            root["phase4_cases"] = cases
+            XCTAssertThrowsError(
+                try validatePhase4ReceiptSchemas(in: root),
+                "missing \(mutation) receipt.present must fail Phase 4 schema validation"
+            )
+        }
+    }
+
+    private func validatePhase4ReceiptSchemas(in root: JSONObject) throws {
+        guard let cases = root["phase4_cases"] as? [JSONObject] else {
+            throw FixtureLoadError.invalid("missing phase4_cases")
+        }
+
+        for vector in cases {
+            guard let id = vector["id"] as? String,
+                  let expected = vector["expected"] as? JSONObject,
+                  let receipt = expected["receipt"] as? JSONObject,
+                  let permutationReceipts = expected["permutation_receipts"] as? [JSONObject] else {
+                throw FixtureLoadError.invalid("Phase 4 receipt structure is missing")
+            }
+
+            let hasFullReceipt = Self.phase4FullReceiptIDs.contains(id)
+            let expectedReceiptKeys = hasFullReceipt
+                ? Self.phase4FullReceiptKeys
+                : Self.phase4EmptyReceiptKeys
+            guard Set(receipt.keys) == expectedReceiptKeys else {
+                throw FixtureLoadError.invalid("\(id) expected.receipt keys")
+            }
+            guard receipt["present"] as? Bool == hasFullReceipt else {
+                throw FixtureLoadError.invalid("\(id) expected.receipt.present")
+            }
+
+            if id == "P4V09" {
+                guard permutationReceipts.count == 3 else {
+                    throw FixtureLoadError.invalid("P4V09 permutation_receipts count")
+                }
+                for (index, permutationReceipt) in permutationReceipts.enumerated() {
+                    guard Set(permutationReceipt.keys) == Self.phase4FullReceiptKeys else {
+                        throw FixtureLoadError.invalid(
+                            "P4V09 permutation_receipts[\(index)] keys"
+                        )
+                    }
+                    guard permutationReceipt["present"] as? Bool == true else {
+                        throw FixtureLoadError.invalid(
+                            "P4V09 permutation_receipts[\(index)].present"
+                        )
+                    }
+                }
+            } else if !permutationReceipts.isEmpty {
+                throw FixtureLoadError.invalid("\(id) permutation_receipts must be empty")
+            }
         }
     }
 
