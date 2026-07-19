@@ -73,6 +73,16 @@ final class ReflectionLockApplierTests: XCTestCase {
 
     // MARK: - apply
 
+    /// C-3 Task 1: the reflection record must REQUEST web access at the record
+    /// level (`webOpen == true`) instead of any view nil-ing shield fields.
+    func test_reflection_factory_requests_web_open() {
+        let record = ReflectionLockRecordFactory.make(
+            rid: UUID(), expiresAt: Date(timeIntervalSince1970: 2_000), childID: UUID()
+        )
+        XCTAssertTrue(record.webOpen)
+        XCTAssertEqual(record.tier, .allApps)
+    }
+
     func test_reflection_record_locks_apps_without_web_domain_category() {
         let record = ReflectionLockRecordFactory.make(
             rid: UUID(),

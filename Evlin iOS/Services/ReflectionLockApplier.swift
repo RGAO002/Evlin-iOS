@@ -8,7 +8,10 @@ enum ReflectionLockRecordFactory {
             displayName: "Reflection lock", lastCommandID: UUID(),
             appTokens: [], categoryTokens: [], webDomainTokens: [],
             appliesToAll: true, issuedAt: Date(), expiresAt: expiresAt,
-            originalRequest: "reflection lockdown", targetChildID: childID)
+            originalRequest: "reflection lockdown", targetChildID: childID,
+            // C-3: request web access at the record level so the embedded
+            // reflection video loads; honored by ActiveShieldProjection.
+            webOpen: true)
     }
 }
 

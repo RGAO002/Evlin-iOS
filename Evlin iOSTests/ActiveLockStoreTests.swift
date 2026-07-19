@@ -276,6 +276,59 @@ final class ActiveLockStoreTests: XCTestCase {
         XCTAssertEqual(after[0].bundleID, live.bundleID)
     }
 
+    // MARK: - webOpen full-union projection (C-3 Task 1)
+
+    /// A broad record that requests web access (reflection) must open the WEB
+    /// projection even while a parent full lock keeps the APP projection at
+    /// `.all`. webOpen wins only for the web fields.
+    func test_webOpen_broad_record_wins_only_for_web_projection() {
+        let parentAll = Self.makeAllRecord(recordKey: "all", minutes: nil)
+        let reflectionWebOpen = ReflectionLockRecordFactory.make(
+            rid: UUID(), expiresAt: Date(timeIntervalSince1970: 2_000), childID: UUID()
+        )
+
+        let projection = ActiveShieldProjection.make(records: [parentAll, reflectionWebOpen])
+
+        XCTAssertEqual(projection.applications, .all)
+        XCTAssertEqual(projection.webDomains, .open)
+    }
+
+    func test_projection_without_webOpen_keeps_parent_full_web_shield() {
+        let parentAll = Self.makeAllRecord(recordKey: "all", minutes: nil)
+
+        let projection = ActiveShieldProjection.make(records: [parentAll])
+
+        XCTAssertEqual(projection.applications, .all)
+        XCTAssertEqual(projection.webDomains, .all)
+    }
+
+    func test_projection_union_of_web_tokens_with_no_broad_records_is_specific_or_open() {
+        let exact = Self.makeTimedShield(displayName: "IG", minutes: 30)
+
+        let projection = ActiveShieldProjection.make(records: [exact])
+
+        XCTAssertEqual(projection.webDomains, .open)
+        XCTAssertNotEqual(projection.applications, .all)
+    }
+
+    func test_reflection_web_open_coexisting_with_parent_all_keeps_web_available() async {
+        let store = ActiveLockStore()
+        let parentAll = Self.makeAllRecord(recordKey: "all", minutes: nil)
+        let reflection = ReflectionLockRecordFactory.make(
+            rid: UUID(), expiresAt: Date().addingTimeInterval(600), childID: UUID()
+        )
+
+        _ = await store.addShield(parentAll)
+        _ = await store.addShield(reflection, force: true)
+
+        let diag = UserDefaults(suiteName: "group.com.evlin.ios")?
+            .string(forKey: "evlin.lastRecompute")
+        XCTAssertTrue(
+            diag?.contains("branch=all_apps_only") == true,
+            "webOpen reflection must keep web available (got \(diag ?? "missing diag"))"
+        )
+    }
+
     // MARK: - Reflection lock coexistence (dedicated-key design)
 
     func test_app_only_all_record_does_not_apply_all_web_domain_category() async throws {

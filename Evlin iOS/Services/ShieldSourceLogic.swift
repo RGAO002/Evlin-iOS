@@ -132,7 +132,8 @@ enum ScreenTimeRecordKeySweep {
                     expiresAt: record.expiresAt,
                     originalRequest: record.originalRequest,
                     targetChildID: record.targetChildID,
-                    sources: record.sources
+                    sources: record.sources,
+                    webOpen: record.webOpen
                 )
             }
         }

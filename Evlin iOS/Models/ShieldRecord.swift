@@ -84,6 +84,14 @@ struct ShieldRecord: Codable, Sendable, Equatable {
     /// keys) keeps its original parent/reflection-lock meaning.
     var sources: Set<ShieldSource> = [.manual]
 
+    /// C-3/D-2: record-level request to leave WEB domains open while this
+    /// record's app shielding applies. Set by `ReflectionLockRecordFactory`
+    /// so the embedded reflection video can load inside an all-apps lock;
+    /// `ActiveShieldProjection` honors it for the web fields ONLY (apps stay
+    /// fully shielded). Legacy persisted payloads have no `webOpen` key and
+    /// decode as `false`, preserving their original meaning.
+    var webOpen: Bool = false
+
     // MARK: - Helpers
 
     /// Derive recordKey for a tier/targetKey pair. See spec §3.2.
@@ -150,7 +158,8 @@ struct ShieldRecord: Codable, Sendable, Equatable {
                 expiresAt: expiresAt,
                 originalRequest: originalRequest,
                 targetChildID: targetChildID,
-                sources: sources
+                sources: sources,
+                webOpen: webOpen
             ),
             true
         )
@@ -179,6 +188,8 @@ extension ShieldRecord {
         case sources
         // Legacy scalar key (P4 era, pre-B1). Decoded read-only; we encode `sources`.
         case source
+        // New key written by C-3; missing key decodes as `false`.
+        case webOpen
     }
 
     init(from decoder: Decoder) throws {
@@ -213,7 +224,8 @@ extension ShieldRecord {
             expiresAt: try c.decodeIfPresent(Date.self, forKey: .expiresAt),
             originalRequest: try c.decode(String.self, forKey: .originalRequest),
             targetChildID: try c.decode(UUID.self, forKey: .targetChildID),
-            sources: resolvedSources
+            sources: resolvedSources,
+            webOpen: try c.decodeIfPresent(Bool.self, forKey: .webOpen) ?? false
         )
     }
 
@@ -234,6 +246,7 @@ extension ShieldRecord {
         try c.encode(targetChildID, forKey: .targetChildID)
         // Write the new `sources` array; legacy `source` key is intentionally omitted.
         try c.encode(sources, forKey: .sources)
+        try c.encode(webOpen, forKey: .webOpen)
     }
 }
 
