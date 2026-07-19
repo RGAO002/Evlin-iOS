@@ -86,7 +86,9 @@ final class DatedRouteInstallerTests: XCTestCase {
 
     func testDeferredInstallCASRefusesExpiredClaimAndInstallerReportsClaimLost() throws {
         let fixture = try makeFixture()
-        let work = try XCTUnwrap(try fixture.firstStore.read().installWork.values.first { $0.phase == .pendingStart })
+        let work = try XCTUnwrap(
+            try fixture.firstStore.dueInstallWork(owner: owner, now: start).first
+        )
         let center = DatedCenter()
         center.startError = DeviceActivityCenter.MonitoringError.excessiveActivities
         center.onStart = { fixture.clock.date = self.start.addingTimeInterval(DatedRouteInstaller.claimLeaseSeconds) }
@@ -107,7 +109,9 @@ final class DatedRouteInstallerTests: XCTestCase {
 
     func testExcessiveActivitiesStopsFillingWhenLeaseExpiresBeforeDeferCAS() throws {
         let fixture = try makeFixture(leaveAllPending: true, registeredAll: true)
-        let work = try XCTUnwrap(try fixture.firstStore.read().installWork.values.first { $0.phase == .pendingStart })
+        let work = try XCTUnwrap(
+            try fixture.firstStore.dueInstallWork(owner: owner, now: start).first
+        )
         let center = DatedCenter()
         center.startError = DeviceActivityCenter.MonitoringError.excessiveActivities
         center.onStart = { fixture.clock.date = self.start.addingTimeInterval(DatedRouteInstaller.claimLeaseSeconds) }

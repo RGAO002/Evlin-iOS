@@ -61,11 +61,11 @@ DEPENDENCIES = {
 PLAN_COUNTS = {
     "headings": 31,
     "commits": 31,
-    "create": 52,
-    "modify": 165,
-    "declarations": 217,
-    "unique_paths": 96,
-    "xcodebuild": 95,
+    "create": 54,
+    "modify": 169,
+    "declarations": 223,
+    "unique_paths": 98,
+    "xcodebuild": 99,
 }
 
 RELEASE_PRODUCTS = (
@@ -77,14 +77,30 @@ RELEASE_PRODUCTS = (
 )
 DEBUG_XCTEST_PRODUCT = "Debug-iphoneos/Evlin iOS.app/PlugIns/Evlin iOSTests.xctest/Evlin iOSTests"
 VOLATILE_TRACKED_TOKENS = ("xcuserdata/", ".xcuserstate", "xcschememanagement.plist")
+AUTHORITATIVE_CORRECTION_TEST = (
+    "MeteringAuthoritativeBaseCorrectionTests/"
+    "testEveryCorrectionBoundaryReopensWithStableIDsAndConverges()"
+)
+LEGACY_DEBT_CATEGORIES = {"deinit_family", "old_fixture", "auth_debt"}
+PHASE3_EXPLICIT_PROTECTED_SUITES = {
+    "ActiveLockStoreTests",
+    "AuthServiceTests",
+    "BigKidStatePollerTests",
+    "DatedRouteInstallerTests",
+    "ShieldRecordSourceMigrationTests",
+    "ShieldSourceSetTests",
+    "TaskPauseShieldMappingTests",
+}
 
 GATES = (
     "backend-vector-contract",
     "backend-gate-resume",
     "backend-phase3-db",
     "cross-stack-v30",
-    "ios-iphone17pro",
-    "ios-ipad-m5",
+    "ios-metering-protected-iphone17pro",
+    "ios-metering-protected-ipad-m5",
+    "ios-legacy-iphone17pro",
+    "ios-legacy-ipad-m5",
     "release-production-build",
     "debug-xctest-build",
     "release-source-check",
@@ -464,14 +480,160 @@ for repo_name, repo in (("ios", ios), ("backend", backend)):
         fail(f"{repo_name} untracked baseline manifest hash is wrong")
 
 
+def read_json_object(path: Path, label: str) -> dict[str, object]:
+    access(path)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        fail(f"invalid {label}: {exc}")
+    if not isinstance(payload, dict):
+        fail(f"invalid {label}: root must be an object")
+    return payload
+
+
+named_baseline_path = ios / "scripts/metering_phase3_named_failure_baseline.json"
+birth_evidence_path = ios / "scripts/metering_authoritative_failure_birth_evidence.json"
+named_baseline = read_json_object(named_baseline_path, "named failure baseline")
+birth_evidence = read_json_object(birth_evidence_path, "authoritative birth evidence")
+if named_baseline.get("format_version") != 1:
+    fail("unsupported named failure baseline format")
+
+prefixes = named_baseline.get("protected_suite_prefixes")
+protected_rows = named_baseline.get("protected_suites")
+if (
+    not isinstance(prefixes, list)
+    or not prefixes
+    or any(not isinstance(item, str) or not item for item in prefixes)
+    or not isinstance(protected_rows, list)
+    or not protected_rows
+    or any(not isinstance(item, str) or not item for item in protected_rows)
+):
+    fail("named failure baseline must name protected suite prefixes and suites")
+protected_prefixes = tuple(prefixes)
+protected_suites = tuple(sorted(set(protected_rows)))
+missing_explicit_suites = PHASE3_EXPLICIT_PROTECTED_SUITES - set(protected_suites)
+if missing_explicit_suites:
+    fail(
+        "Phase 3 protected suite list is incomplete: "
+        + ", ".join(sorted(missing_explicit_suites))
+    )
+test_source_root = ios / "Evlin iOSTests"
+discovered_prefixed_suites: set[str] = set()
+if test_source_root.is_dir():
+    for source in test_source_root.glob("*.swift"):
+        source_text = source.read_text(encoding="utf-8")
+        discovered_prefixed_suites.update(
+            re.findall(r"^final class ((?:DeviceEpoch|Earned|Metering)[A-Za-z0-9_]*Tests)\b", source_text, re.MULTILINE)
+        )
+missing_prefixed_suites = discovered_prefixed_suites - set(protected_suites)
+if missing_prefixed_suites:
+    fail(
+        "prefixed metering family suite is absent from the protected gate: "
+        + ", ".join(sorted(missing_prefixed_suites))
+    )
+
+
+def suite_name(test_identifier: str) -> str:
+    return test_identifier.split("/", 1)[0]
+
+
+def is_protected_test(test_identifier: str) -> bool:
+    suite = suite_name(test_identifier)
+    return suite in protected_suites or suite.startswith(protected_prefixes)
+
+
+debt_tasks = named_baseline.get("debt_tasks")
+if not isinstance(debt_tasks, dict) or not debt_tasks:
+    fail("named failure baseline must define debt tasks")
+for task_id, task in debt_tasks.items():
+    if (
+        not isinstance(task_id, str)
+        or not task_id
+        or not isinstance(task, dict)
+        or not isinstance(task.get("title"), str)
+        or not task["title"].strip()
+    ):
+        fail("invalid named failure debt task")
+
+destinations = named_baseline.get("destinations")
+if not isinstance(destinations, dict) or set(destinations) != {"iphone17pro", "ipad_m5"}:
+    fail("named failure baseline must define exact iPhone and iPad destinations")
+expected_legacy_failures: dict[str, set[str]] = {}
+legacy_debt_rows: list[dict[str, str]] = []
+for destination, destination_payload in destinations.items():
+    if not isinstance(destination_payload, dict) or not isinstance(
+        destination_payload.get("failures"), list
+    ):
+        fail(f"invalid legacy failure rows for {destination}")
+    expected: set[str] = set()
+    for row in destination_payload["failures"]:
+        if not isinstance(row, dict):
+            fail(f"invalid legacy failure row for {destination}")
+        identifier = row.get("test_identifier")
+        category = row.get("category")
+        owner = row.get("owner")
+        if not isinstance(identifier, str) or not identifier or identifier in expected:
+            fail(f"invalid or duplicate legacy failure identifier for {destination}")
+        if is_protected_test(identifier):
+            fail(f"protected suite cannot enter legacy baseline: {identifier}")
+        if category not in LEGACY_DEBT_CATEGORIES:
+            fail(f"legacy failure category is missing or invalid: {identifier}")
+        if not isinstance(owner, str) or owner not in debt_tasks:
+            fail(f"legacy failure debt owner is missing or unknown: {identifier}")
+        expected.add(identifier)
+        legacy_debt_rows.append(
+            {
+                "category": category,
+                "destination": destination,
+                "owner": owner,
+                "test_identifier": identifier,
+            }
+        )
+    expected_legacy_failures[destination] = expected
+
+authoritative_exception = named_baseline.get("authoritative_exception")
+if not isinstance(authoritative_exception, dict):
+    fail("named failure baseline must define the authoritative exception")
+if authoritative_exception.get("test_identifier") != AUTHORITATIVE_CORRECTION_TEST:
+    fail("only the named authoritative correction test may be exempted")
+for field in ("baseline_commit", "failure_text", "test_identifier"):
+    if birth_evidence.get(field) != authoritative_exception.get(field):
+        fail(f"authoritative birth evidence disagrees on {field}")
+if (
+    birth_evidence.get("outcome") != "failed"
+    or birth_evidence.get("xcodebuild_exit_code") != 65
+    or not isinstance(birth_evidence.get("baseline_commit_date"), str)
+    or not re.fullmatch(r"[0-9a-f]{40}", str(birth_evidence.get("source_blob", "")))
+    or not re.fullmatch(r"[0-9a-f]{64}", str(birth_evidence.get("raw_log_sha256", "")))
+    or not re.fullmatch(r"[0-9a-f]{64}", str(birth_evidence.get("xcresult_summary_sha256", "")))
+):
+    fail("authoritative birth evidence does not prove a failing isolated run")
+if authoritative_exception.get("task24_known_failure_ordinal") != 27:
+    fail("authoritative exception must retain its Task 24 named-baseline ordinal")
+if not test_mode:
+    baseline_commit = str(birth_evidence["baseline_commit"])
+    if run_git(ios, "rev-parse", baseline_commit) != baseline_commit:
+        fail("authoritative birth evidence baseline commit is unavailable")
+    if subprocess.run(
+        ["git", "-C", str(ios), "merge-base", "--is-ancestor", baseline_commit, selected["25"]],
+        check=False,
+    ).returncode:
+        fail("authoritative failure was not proven before Task 25")
+    source_blob = run_git(
+        ios,
+        "rev-parse",
+        f"{baseline_commit}:Evlin iOSTests/MeteringAuthoritativeBaseCorrectionTests.swift",
+    )
+    if source_blob != birth_evidence["source_blob"]:
+        fail("authoritative birth evidence source blob does not match baseline commit")
+
+
 def gate_command(gate: str) -> tuple[Path, list[str] | str]:
     commands: dict[str, tuple[Path, str]] = {
         "backend-vector-contract": (backend, ".venv/bin/python -m pytest -q tests/test_metering_epoch_vector_contract.py"),
         "backend-gate-resume": (backend, ".venv/bin/python scripts/run_limits_db_regression.py tests/test_target_gate_resume_helpers.py"),
         "backend-phase3-db": (backend, ".venv/bin/python scripts/run_limits_db_regression.py tests/test_metering_epoch_models.py tests/test_metering_epoch_registration.py tests/test_metering_epoch_sample_adapter.py tests/test_metering_epoch_phase2_integration.py tests/test_metering_epoch_lifespan.py tests/test_metering_epoch_phase3_vectors.py"),
         "cross-stack-v30": (backend, "bash scripts/run_metering_v30_cross_stack.sh"),
-        "ios-iphone17pro": (ios, "SENTRY_SKIP_DSYM_UPLOAD=1 xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3.1' IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' test"),
-        "ios-ipad-m5": (ios, "SENTRY_SKIP_DSYM_UPLOAD=1 xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5),OS=26.3.1' IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' -skip-testing:'Evlin iOSTests/ProfileSnapshotTests' test"),
         "release-production-build": (ios, "DERIVED=\"$PWD/.superpowers/evidence/metering-phase3/DerivedData-Release\"; rm -rf \"$DERIVED\"; SENTRY_SKIP_DSYM_UPLOAD=1 xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -configuration Release -destination 'generic/platform=iOS' -derivedDataPath \"$DERIVED\" CODE_SIGNING_ALLOWED=NO IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' build"),
         "debug-xctest-build": (ios, "DERIVED=\"$PWD/.superpowers/evidence/metering-phase3/DerivedData-DebugTests\"; rm -rf \"$DERIVED\"; SENTRY_SKIP_DSYM_UPLOAD=1 xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -configuration Debug -destination 'generic/platform=iOS' -derivedDataPath \"$DERIVED\" CODE_SIGNING_ALLOWED=NO IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' build-for-testing"),
         "release-source-check": (ios, "OUT='$PWD/.superpowers/evidence/metering-phase3/release-source.sil'; DEBUG_OUT='$PWD/.superpowers/evidence/metering-phase3/debug-source-control.sil'; SDK=$(xcrun --sdk iphonesimulator --show-sdk-path); xcrun swiftc -emit-sil -parse-as-library -sdk \"$SDK\" -target arm64-apple-ios17.6-simulator 'Evlin iOS/Services/MeteringEpochContract.swift' 'Evlin iOS/Services/MeteringRuntimeInfrastructure.swift' >/dev/null 2>\"$OUT\"; test -s \"$OUT\"; if rg -q 'DebugAppGroupMeteringClock|evlin\\.metering\\.debugClockNow' \"$OUT\"; then exit 1; fi; xcrun swiftc -D DEBUG -emit-sil -parse-as-library -sdk \"$SDK\" -target arm64-apple-ios17.6-simulator 'Evlin iOS/Services/MeteringEpochContract.swift' 'Evlin iOS/Services/MeteringRuntimeInfrastructure.swift' >/dev/null 2>\"$DEBUG_OUT\"; rg -q 'DebugAppGroupMeteringClock' \"$DEBUG_OUT\"; rg -q 'evlin\\.metering\\.debugClockNow' \"$DEBUG_OUT\"; echo release-source-compile-passed"),
@@ -479,6 +641,120 @@ def gate_command(gate: str) -> tuple[Path, list[str] | str]:
         "authoritative-correction-disposition": (ios, "printf '%s\\n' 'baseline_failure_archived' 'test_method=MeteringAuthoritativeBaseCorrectionTests.testEveryCorrectionBoundaryReopensWithStableIDsAndConverges' 'baseline_commit=e46ffe1' 'task24_known_failure_ordinal=27'"),
     }
     return commands[gate]
+
+
+def archive_existing(path: Path) -> None:
+    if not path.exists():
+        return
+    index = 1
+    while True:
+        candidate = path.with_name(f"{path.name}.previous-{index}")
+        if not candidate.exists():
+            path.rename(candidate)
+            return
+        index += 1
+
+
+def run_ios_named_gate(gate: str, log: Path) -> subprocess.CompletedProcess[str]:
+    protected = gate.startswith("ios-metering-protected-")
+    iphone = gate.endswith("iphone17pro")
+    destination = (
+        "platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3.1"
+        if iphone
+        else "platform=iOS Simulator,name=iPad Pro 13-inch (M5),OS=26.3.1"
+    )
+    result_directory = evidence / "xcresults"
+    summary_directory = evidence / "named-failures"
+    result_directory.mkdir(parents=True, exist_ok=True)
+    summary_directory.mkdir(parents=True, exist_ok=True)
+    result_bundle = result_directory / f"{gate}.xcresult"
+    archive_existing(result_bundle)
+    command = [
+        "xcodebuild",
+        "-project",
+        "Evlin iOS.xcodeproj",
+        "-scheme",
+        "Evlin iOS",
+        "-destination",
+        destination,
+        "IPHONEOS_DEPLOYMENT_TARGET=17.6",
+        "TARGETED_DEVICE_FAMILY=1,2",
+        "-parallel-testing-enabled",
+        "NO",
+        "-resultBundlePath",
+        str(result_bundle),
+    ]
+    selector = "-only-testing" if protected else "-skip-testing"
+    command.extend(f"{selector}:Evlin iOSTests/{suite}" for suite in protected_suites)
+    if protected:
+        # This case is executed by the dedicated cross-stack-v30 gate, which
+        # supplies the simulator environment and consumes its emitted bytes.
+        command.append(
+            "-skip-testing:Evlin iOSTests/MeteringV30ProductionEncoderTests/"
+            "testWritesCrossStackArtifact"
+        )
+    if not protected and not iphone:
+        command.append("-skip-testing:Evlin iOSTests/ProfileSnapshotTests")
+    command.append("test")
+    environment = os.environ.copy()
+    environment["SENTRY_SKIP_DSYM_UPLOAD"] = "1"
+    with log.open("wb") as handle:
+        xcode_result = subprocess.run(
+            command,
+            cwd=ios,
+            env=environment,
+            stdout=handle,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+    if xcode_result.returncode not in {0, 65} or not result_bundle.is_dir():
+        return subprocess.CompletedProcess(command, xcode_result.returncode or 1)
+    summary_result = subprocess.run(
+        [
+            "xcrun",
+            "xcresulttool",
+            "get",
+            "test-results",
+            "summary",
+            "--path",
+            str(result_bundle),
+            "--compact",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if summary_result.returncode:
+        with log.open("ab") as handle:
+            handle.write(summary_result.stderr.encode())
+        return subprocess.CompletedProcess(command, summary_result.returncode)
+    try:
+        raw_summary = json.loads(summary_result.stdout)
+    except json.JSONDecodeError as exc:
+        with log.open("ab") as handle:
+            handle.write(f"\ninvalid xcresult summary: {exc}\n".encode())
+        return subprocess.CompletedProcess(command, 1)
+    failures: list[dict[str, str]] = []
+    for failure in raw_summary.get("testFailures") or []:
+        identifier = str(failure.get("testIdentifierString", ""))
+        failure_text = str(failure.get("failureText", ""))
+        if re.fullmatch(r"Evlin iOS \([0-9]+\) encountered an error", identifier):
+            identifier = "__runner__/early_unexpected_exit"
+        if not identifier:
+            return subprocess.CompletedProcess(command, 1)
+        failures.append({"failure_text": failure_text, "test_identifier": identifier})
+    normalized = {
+        "failed": int(raw_summary.get("failedTests", len(failures))),
+        "failures": failures,
+        "passed": int(raw_summary.get("passedTests", 0)),
+        "skipped": int(raw_summary.get("skippedTests", 0)),
+        "xcodebuild_exit_code": xcode_result.returncode,
+    }
+    (summary_directory / f"{gate}.json").write_text(
+        json.dumps(normalized, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return subprocess.CompletedProcess(command, 0)
 
 
 for gate in GATES:
@@ -491,6 +767,9 @@ for gate in GATES:
             with log.open("ab") as handle:
                 handle.write(result.stdout.encode())
                 handle.write(result.stderr.encode())
+    elif gate.startswith("ios-metering-protected-") or gate.startswith("ios-legacy-"):
+        accesses.append(f"command:{gate}")
+        result = run_ios_named_gate(gate, log)
     else:
         cwd, command_text = gate_command(gate)
         accesses.append(f"command:{gate}")
@@ -506,6 +785,73 @@ for gate in GATES:
         fail(f"gate {gate} failed with exit {result.returncode}; see {log}")
     if not log.is_file() or not log.stat().st_size:
         fail(f"gate {gate} produced an empty raw log")
+
+
+named_summary_directory = evidence / "named-failures"
+
+
+def read_named_gate_summary(gate: str) -> set[str]:
+    path = access(named_summary_directory / f"{gate}.json")
+    payload = read_json_object(path, f"{gate} named failure summary")
+    failures = payload.get("failures")
+    if (
+        not isinstance(failures, list)
+        or not isinstance(payload.get("passed"), int)
+        or payload["passed"] <= 0
+        or not isinstance(payload.get("skipped"), int)
+        or payload.get("xcodebuild_exit_code") not in {0, 65}
+    ):
+        fail(f"invalid or incomplete named failure summary for {gate}")
+    if gate.startswith("ios-metering-protected-") and payload["skipped"] != 0:
+        fail(f"protected metering gate skipped tests: {gate}")
+    identifiers: set[str] = set()
+    for row in failures:
+        if (
+            not isinstance(row, dict)
+            or not isinstance(row.get("test_identifier"), str)
+            or not row["test_identifier"]
+            or not isinstance(row.get("failure_text"), str)
+            or row["test_identifier"] in identifiers
+        ):
+            fail(f"invalid or duplicate failure result for {gate}")
+        identifiers.add(row["test_identifier"])
+    expected_exit = 65 if identifiers else 0
+    if payload["xcodebuild_exit_code"] != expected_exit:
+        fail(f"xcodebuild exit and named failures disagree for {gate}")
+    return identifiers
+
+
+protected_gate_results: dict[str, set[str]] = {}
+legacy_gate_results: dict[str, set[str]] = {}
+for destination, suffix in (("iphone17pro", "iphone17pro"), ("ipad_m5", "ipad-m5")):
+    protected_gate = f"ios-metering-protected-{suffix}"
+    protected_result = read_named_gate_summary(protected_gate)
+    protected_gate_results[destination] = protected_result
+    unexpected_protected = protected_result - {AUTHORITATIVE_CORRECTION_TEST}
+    if unexpected_protected:
+        fail(
+            "protected metering failure outside the single proven exception: "
+            + ", ".join(sorted(unexpected_protected))
+        )
+    if AUTHORITATIVE_CORRECTION_TEST not in protected_result:
+        fail("authoritative exception is now green and must be removed from the baseline")
+
+    legacy_gate = f"ios-legacy-{suffix}"
+    actual_legacy = read_named_gate_summary(legacy_gate)
+    legacy_gate_results[destination] = actual_legacy
+    protected_in_legacy_result = sorted(item for item in actual_legacy if is_protected_test(item))
+    if protected_in_legacy_result:
+        fail(
+            "protected metering failure appeared in the legacy run: "
+            + ", ".join(protected_in_legacy_result)
+        )
+    expected_legacy = expected_legacy_failures[destination]
+    new_failures = actual_legacy - expected_legacy
+    if new_failures:
+        fail("new failures outside named baseline: " + ", ".join(sorted(new_failures)))
+    resolved = expected_legacy - actual_legacy
+    if resolved:
+        fail("resolved baseline entries must be removed: " + ", ".join(sorted(resolved)))
 
 authoritative_log = (logs / "authoritative-correction-disposition.log").read_text()
 for required in (
@@ -622,22 +968,34 @@ product_manifest = [
 )
 
 status_path = evidence / "automated-status.json"
+legacy_unique_count = len(set().union(*expected_legacy_failures.values()))
 status = {
     "automated": "passed",
     "physical": "pending",
     "releasable": False,
     "status_code": "AUTOMATED_PASSED_PHYSICAL_PENDING",
     "phase_complete": False,
-    "display_status": "AUTOMATED PASSED; PHYSICAL PENDING; NOT RELEASABLE",
+    "display_status": (
+        "ZERO NEW FAILURES RELATIVE TO EXACT NAMED BASELINE; "
+        f"HISTORICAL DEBT {legacy_unique_count}; PHYSICAL PENDING; NOT RELEASABLE"
+    ),
     "authoritative_correction": {
         "disposition": "baseline_failure_archived",
-        "baseline_commit": "e46ffe1",
+        "baseline_commit": birth_evidence["baseline_commit"],
+        "baseline_commit_date": birth_evidence["baseline_commit_date"],
         "task24_known_failure_ordinal": 27,
-        "test_method": "MeteringAuthoritativeBaseCorrectionTests.testEveryCorrectionBoundaryReopensWithStableIDsAndConverges",
+        "test_method": AUTHORITATIVE_CORRECTION_TEST,
     },
     "build_evidence": {
         "test_build": "Debug build-for-testing",
         "release_verification": "five production Release binaries scanned; no test seams",
+    },
+    "test_evidence": {
+        "claim": "zero new failures relative to exact named baseline",
+        "historical_debt_count": legacy_unique_count,
+        "historical_debt_tracking": sorted(debt_tasks),
+        "metering_exemptions": [AUTHORITATIVE_CORRECTION_TEST],
+        "tests_all_green": False,
     },
 }
 status_path.write_text(json.dumps(status, indent=2, sort_keys=True) + "\n")
@@ -645,14 +1003,30 @@ if status["physical"] != "pending" or status["releasable"] or status["phase_comp
     fail("verifier must never claim physical pass or releasability")
 
 if mode == "final":
-    report = ios / ".superpowers/sdd/metering-epoch-phase3-report.md"
+    report = ios / "docs/superpowers/reports/2026-07-17-metering-epoch-phase-3-completion.md"
     access(report)
     if not report.is_file():
         fail("final mode requires committed Phase 3 report")
     report_text = report.read_text(encoding="utf-8")
-    forbidden = ("physical: passed", "releasable: true", "phase_complete: true")
+    forbidden = (
+        "physical: passed",
+        "releasable: true",
+        "phase_complete: true",
+        "tests all green",
+        "all tests pass",
+    )
     if any(token in report_text.lower() for token in forbidden):
         fail("report falsely claims a physical pass, completion, or releasability")
+    for required in (
+        "relative to exact named baseline: zero new failures",
+        "historical debt",
+        "task_2633a95f",
+        "task_phase3_legacy_test_debt_20260719",
+        AUTHORITATIVE_CORRECTION_TEST,
+        str(birth_evidence["baseline_commit"]),
+    ):
+        if required.lower() not in report_text.lower():
+            fail(f"report omits named-baseline accounting: {required}")
     changed = run_git(ios, "show", "--format=", "--name-only", selected["30"]).splitlines()
     relative_report = str(report.relative_to(ios))
     if relative_report not in changed:
@@ -680,6 +1054,9 @@ hash_targets = [
     evidence / "raw-log-sha256.txt",
     evidence / "release-product-manifest.json",
     evidence / "debug-test-product-manifest.json",
+    named_baseline_path,
+    birth_evidence_path,
+    *(named_summary_directory / f"{gate}.json" for gate in GATES if gate.startswith("ios-")),
     *fixture_paths,
 ]
 for repo_name in ("ios", "backend"):

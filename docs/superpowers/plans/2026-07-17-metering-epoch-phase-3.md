@@ -3467,6 +3467,12 @@ status. It cannot mark physical gates passed.
 
 - Create: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/scripts/verify_metering_phase3_completion.sh`
 - Create: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/scripts/test_verify_metering_phase3_completion.py`
+- Create: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/scripts/metering_phase3_named_failure_baseline.json`
+- Create: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/scripts/metering_authoritative_failure_birth_evidence.json`
+- Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS/Services/DatedRouteInstaller.swift`
+- Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/DatedRouteInstallerTests.swift`
+- Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/DeviceEpochStoreTests.swift`
+- Modify: `/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOSTests/EarnedSampleReporterTests.swift`
 
 **TDD RED:** Run a real host-side subprocess test before the script exists. The
 test invokes the actual shell verifier against temporary fixture repositories;
@@ -3532,9 +3538,9 @@ Task 20 iOS depends on Task 19 backend
 ```
 
 The same stdlib parser used by the fixture test mechanically pins this plan to
-31 task headings, 31 commit commands/unique subjects, 52 `Create` declarations,
-165 `Modify` declarations, 217 total declarations, 96 unique declared paths,
-95 literal `xcodebuild` commands. The Release production build and Debug
+31 task headings, 31 commit commands/unique subjects, 54 `Create` declarations,
+169 `Modify` declarations, 223 total declarations, 98 unique declared paths,
+99 literal `xcodebuild` commands. The Release production build and Debug
 `build-for-testing` are separate dependency-graph invocations. The Release build is one dependency-
 graph invocation rather than an invalid per-target loop. It rejects a changed count unless the plan,
 fixture expectation, and review map are revised together; prose-only arithmetic
@@ -3560,14 +3566,31 @@ cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend
 bash scripts/run_metering_v30_cross_stack.sh
 
 cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS
-xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3.1' IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' test
-xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5),OS=26.3.1' IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' -skip-testing:'Evlin iOSTests/ProfileSnapshotTests' test
+PROTECTED_ARGS=(); while IFS= read -r suite; do PROTECTED_ARGS+=("-only-testing:Evlin iOSTests/$suite"); done < <(jq -r '.protected_suites[]' scripts/metering_phase3_named_failure_baseline.json)
+LEGACY_ARGS=(); while IFS= read -r suite; do LEGACY_ARGS+=("-skip-testing:Evlin iOSTests/$suite"); done < <(jq -r '.protected_suites[]' scripts/metering_phase3_named_failure_baseline.json)
+xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3.1' IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' -parallel-testing-enabled NO "${PROTECTED_ARGS[@]}" -skip-testing:'Evlin iOSTests/MeteringV30ProductionEncoderTests/testWritesCrossStackArtifact' test
+xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3.1' IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' -parallel-testing-enabled NO "${LEGACY_ARGS[@]}" test
+xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5),OS=26.3.1' IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' -parallel-testing-enabled NO "${PROTECTED_ARGS[@]}" -skip-testing:'Evlin iOSTests/MeteringV30ProductionEncoderTests/testWritesCrossStackArtifact' test
+xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5),OS=26.3.1' IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' -parallel-testing-enabled NO "${LEGACY_ARGS[@]}" -skip-testing:'Evlin iOSTests/ProfileSnapshotTests' test
 ```
 
-The iPad run excludes only `ProfileSnapshotTests`, whose checked-in baselines
-are intentionally pinned to iPhone 17 Pro and iPad (A16). The iPhone run still
-executes that suite; this exception is recorded in raw evidence and cannot be
-used to skip a Phase 3 test.
+The protected runs require every `DeviceEpoch*`, `Earned*`, and `Metering*`
+suite plus the explicitly named lock/gate suites. They allow no skipped tests
+and no failures except the single authoritative-correction test whose failure
+is proved at full baseline commit `e46ffe15b45825b20ca1a5b687815cbb340b2f24`
+from an isolated clone. The V30 artifact case is not waived: it is excluded only
+from the ordinary protected run and is executed by the dedicated
+`cross-stack-v30` orchestrator above with its required simulator environment.
+
+The legacy runs exclude the protected suites and compare failures by exact test
+identifier against a separate iPhone/iPad named baseline. The comparison is
+set equality, never a numeric allowance: a new failure fails, a formerly failing
+test becoming green also fails until its row is removed, and one fixed failure
+cannot be exchanged for one regression. Every row is classified as
+`deinit_family`, `old_fixture`, or `auth_debt` and assigned to
+`task_2633a95f` or `task_phase3_legacy_test_debt_20260719`. The iPad legacy run
+also excludes `ProfileSnapshotTests`, whose checked-in baselines are pinned to
+other device models; the iPhone legacy run still executes it.
 
 Build the five production products in Release before any binary scan, then
 build XCTest separately in Debug. Each uses a fresh derived directory:
@@ -3647,17 +3670,28 @@ cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend
 .venv/bin/python scripts/run_limits_db_regression.py
 bash scripts/run_metering_v30_cross_stack.sh
 cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS
-xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3.1' IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' test
-xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5),OS=26.3.1' IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' -skip-testing:'Evlin iOSTests/ProfileSnapshotTests' test
+PROTECTED_ARGS=(); while IFS= read -r suite; do PROTECTED_ARGS+=("-only-testing:Evlin iOSTests/$suite"); done < <(jq -r '.protected_suites[]' scripts/metering_phase3_named_failure_baseline.json)
+LEGACY_ARGS=(); while IFS= read -r suite; do LEGACY_ARGS+=("-skip-testing:Evlin iOSTests/$suite"); done < <(jq -r '.protected_suites[]' scripts/metering_phase3_named_failure_baseline.json)
+xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3.1' IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' -parallel-testing-enabled NO "${PROTECTED_ARGS[@]}" -skip-testing:'Evlin iOSTests/MeteringV30ProductionEncoderTests/testWritesCrossStackArtifact' test
+xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3.1' IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' -parallel-testing-enabled NO "${LEGACY_ARGS[@]}" test
+xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5),OS=26.3.1' IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' -parallel-testing-enabled NO "${PROTECTED_ARGS[@]}" -skip-testing:'Evlin iOSTests/MeteringV30ProductionEncoderTests/testWritesCrossStackArtifact' test
+xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5),OS=26.3.1' IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' -parallel-testing-enabled NO "${LEGACY_ARGS[@]}" -skip-testing:'Evlin iOSTests/ProfileSnapshotTests' test
 ```
 
-Expected full GREEN: all backend tests execute without skips, the V30 harness consumes nonempty Swift artifacts, and both simulator schemes pass. Task 29 post-commit `pre-report` still remains mandatory because commit ancestry cannot be proved before this task's commit exists.
+Expected full GREEN: all backend tests execute without skips; the V30 harness
+consumes nonempty Swift artifacts; protected iPhone/iPad tests have zero skips
+and only the proved authoritative exception; and legacy failures equal their
+exact named destination baselines with zero additions or substitutions. This is
+reported as "relative to exact named baseline: zero new failures; historical
+debt N items tracked separately", never as "tests all green". Task 29
+post-commit `pre-report` remains mandatory because commit ancestry cannot be
+proved before this task's commit exists.
 
 **Review and commit:**
 
 ```bash
 cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS
-git add scripts/verify_metering_phase3_completion.sh scripts/test_verify_metering_phase3_completion.py
+git add scripts/verify_metering_phase3_completion.sh scripts/test_verify_metering_phase3_completion.py scripts/metering_phase3_named_failure_baseline.json scripts/metering_authoritative_failure_birth_evidence.json 'Evlin iOS/Services/DatedRouteInstaller.swift' 'Evlin iOSTests/DatedRouteInstallerTests.swift' 'Evlin iOSTests/DeviceEpochStoreTests.swift' 'Evlin iOSTests/EarnedSampleReporterTests.swift'
 git diff --cached --check && git diff --cached --stat && git diff --cached && git diff --cached --name-only
 git commit -m 'test: add metering phase 3 completion verifier'
 bash scripts/verify_metering_phase3_completion.sh pre-report
@@ -3710,6 +3744,12 @@ The report must state that neither its own commit SHA nor its own Git blob/SHA-2
 The build evidence wording is also fixed: tests executed with Debug
 `build-for-testing`; five production Release binaries were scanned and contained
 no test seams. The report must not say or imply that Release tests passed.
+The test evidence wording is equally fixed: "relative to exact named baseline:
+zero new failures; historical debt N items tracked separately." Include the
+exact iPhone and iPad debt counts, classification/owner summary, both debt task
+IDs, and the authoritative-correction test plus full baseline commit. Never say
+"tests all green" or "all tests pass". The named baseline is a debt ledger: a
+resolved row must be removed, and no new or substituted failure is accepted.
 
 **Full GREEN before staging:** Re-run Task 29 pre-report mode against committed Tasks 01-29 and the populated uncommitted report:
 
@@ -3744,7 +3784,7 @@ remains `phase_complete: false`, physical pending, and not releasable.
 The implementation may report **AUTOMATED PASSED** only when Task 29 final mode exits zero and all of the following are recorded with raw-log hashes:
 
 1. Backend pure tests and disposable-DB suites pass without skips; V30 consumes Swift production bytes through real routes and rows.
-2. Full iPhone 17 Pro and iPad Pro simulator schemes pass at deployment target 17.6 on installed runtime 26.3.1; only the unrelated device-pinned `ProfileSnapshotTests` suite is excluded from the M5 iPad run and remains executed on its supported iPhone destination.
+2. iPhone 17 Pro and iPad Pro simulator protected suites pass at deployment target 17.6 on installed runtime 26.3.1 with zero skips and only the isolated-clone-proved authoritative exception; destination-specific legacy failures exactly equal their named debt baselines with zero additions, removals, or substitutions. The V30 environment-dependent case passes through its dedicated cross-stack gate. Only the unrelated device-pinned `ProfileSnapshotTests` suite is excluded from the M5 iPad legacy run and remains executed on its supported iPhone destination.
 3. App, DAM, Report, Shield Config, and Push are built in Release, exactly five nonempty production Mach-O paths are scanned with DEBUG clock tokens absent; XCTest is built separately using Debug `build-for-testing` and is not described as a Release test.
 4. V01-V39 and P3V01/P3V02 reach their required production effects; rejected routes have zero effects; corrected/resumed/rolled epochs always have fresh route IDs.
 5. Every persisted work item has owner, retry schedule, terminal condition, R-16 row, and a tested app/DAM/Push-appropriate recovery trigger.

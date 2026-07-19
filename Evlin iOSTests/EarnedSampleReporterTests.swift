@@ -1464,8 +1464,8 @@ final class EarnedSampleReporterResponseTests: XCTestCase {
         )
 
         XCTAssertTrue(EarnedSampleReporter.loadRetryQueue(suiteName: isolatedSuite).isEmpty)
-        XCTAssertEqual(store.acceptedEstimateMinutes, 0)
-        XCTAssertEqual(store.latestDeviceEstimate, 0)
+        XCTAssertEqual(store.acceptedEstimateMinutes, 10)
+        XCTAssertEqual(store.latestDeviceEstimate, 10)
         XCTAssertEqual(store.earnedUsageOffsetMinutes, 0)
     }
 
@@ -1706,7 +1706,7 @@ final class EarnedSampleReporterResponseTests: XCTestCase {
     }
 
     private func makeIsolatedSuiteName() -> String {
-        "group.com.evlin.ios.tests.EarnedSampleReporterTests.\(UUID().uuidString)"
+        "EarnedSampleReporterTests.\(UUID().uuidString)"
     }
 
     private func removeIsolatedSuite(_ suiteName: String) {

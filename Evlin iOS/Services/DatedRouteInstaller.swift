@@ -10,8 +10,10 @@ nonisolated enum DatedRouteInstallResult: Equatable, Sendable {
     case deferred(workID: UUID, code: String)
 }
 
-@MainActor
-final class DatedRouteInstaller {
+/// Process-local coordinator whose operations remain MainActor-isolated, while
+/// destruction avoids the MainActor back-deployment deinit shim. Short-lived
+/// test and recovery instances otherwise double-free in that shim.
+nonisolated final class DatedRouteInstaller: @unchecked Sendable {
     static let claimLeaseSeconds: TimeInterval = 60
 
     private struct ClaimedReconcileOutcome {
@@ -24,6 +26,7 @@ final class DatedRouteInstaller {
     private let processIdentity: MeteringProcessIdentity
     private let clock: any MeteringClock
 
+    @MainActor
     init(store: DeviceEpochStore = .shared, center: any MeteringDeviceActivityCenter, processIdentity: MeteringProcessIdentity, clock: any MeteringClock = MeteringRuntimeClock.live()) {
         self.store = store
         self.center = center
@@ -31,6 +34,7 @@ final class DatedRouteInstaller {
         self.clock = clock
     }
 
+    @MainActor
     func reconcile(ownerChildDeviceID: UUID) throws -> [DatedRouteInstallResult] {
         var results: [DatedRouteInstallResult] = []
         for due in try store.dueInstallWork(owner: ownerChildDeviceID, now: clock.now) {
@@ -55,6 +59,7 @@ final class DatedRouteInstaller {
     /// Screen Time client or the daemon may have removed a route after Evlin
     /// last wrote its state.
     @discardableResult
+    @MainActor
     func refreshCoverage(ownerChildDeviceID owner: UUID) throws -> MonitorCoverageState? {
         let state = try store.read()
         guard state.ownerChildDeviceID == owner else { return nil }
@@ -155,6 +160,7 @@ final class DatedRouteInstaller {
         return coverage
     }
 
+    @MainActor
     private func reconcileClaimed(_ claimed: (work: ActivityInstallWork, priorPhase: ActivityInstallPhase, claim: ActivityInstallClaim), owner: UUID) throws -> ClaimedReconcileOutcome {
         let state: DeviceEpochStoreState
         do {
@@ -235,6 +241,7 @@ final class DatedRouteInstaller {
         }
     }
 
+    @MainActor
     private func deferClaimedWork(
         _ claimed: (work: ActivityInstallWork, priorPhase: ActivityInstallPhase, claim: ActivityInstallClaim),
         owner: UUID,
@@ -254,6 +261,7 @@ final class DatedRouteInstaller {
         return .deferred(workID: claimed.work.workID, code: code)
     }
 
+    @MainActor
     private func expectedConfiguration(for route: MeteringCallbackRoute, state: DeviceEpochStoreState) throws -> (schedule: DeviceActivitySchedule, events: [DeviceActivityEvent.Name: DeviceActivityEvent]) {
         guard let timeZone = TimeZone(identifier: route.plannedSchedule.timezoneIdentifier), let generation = state.generations[route.generationID] else {
             throw MeteringDatedScheduleError.invalidUsageDate(route.usageDate)
@@ -279,6 +287,7 @@ final class DatedRouteInstaller {
         return (try MeteringDatedSchedule.datedSchedule(usageDate: route.usageDate, timeZone: timeZone), events)
     }
 
+    @MainActor
     private func daemonMatches(activity: DeviceActivityName, expected: (schedule: DeviceActivitySchedule, events: [DeviceActivityEvent.Name: DeviceActivityEvent])) -> Bool {
         guard center.activities.contains(activity), let schedule = center.schedule(for: activity), exactSchedule(schedule, expected.schedule) else { return false }
         let events = center.events(for: activity)
@@ -293,6 +302,7 @@ final class DatedRouteInstaller {
         }
     }
 
+    @MainActor
     private func exactSchedule(_ lhs: DeviceActivitySchedule, _ rhs: DeviceActivitySchedule) -> Bool {
         lhs.intervalStart == rhs.intervalStart
             && lhs.intervalEnd == rhs.intervalEnd

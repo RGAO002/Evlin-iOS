@@ -1,0 +1,11 @@
+{
+  "baseline_commit": "e46ffe15b45825b20ca1a5b687815cbb340b2f24",
+  "baseline_commit_date": "2026-07-18T18:01:53-04:00",
+  "failure_text": "failed - locally active corrected route must remain countable",
+  "outcome": "failed",
+  "raw_log_sha256": "337a4a2e64d157bf34838f5e61d7c4732b6b8e6706b8532ac1b5f01220d4fb31",
+  "source_blob": "d179a6cadcc58ebb6fa1913c8ac5c4feb66ac7dc",
+  "test_identifier": "MeteringAuthoritativeBaseCorrectionTests/testEveryCorrectionBoundaryReopensWithStableIDsAndConverges()",
+  "xcodebuild_exit_code": 65,
+  "xcresult_summary_sha256": "f7a4b0f82b30f96690f46ea8e6e0b0ad988fcf9016a64ab5d453a47c0252b255"
+}

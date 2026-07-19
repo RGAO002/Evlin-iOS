@@ -84,7 +84,14 @@ final class DeviceEpochStoreTests: XCTestCase {
         io.failWriteAfterMutationCount = 1
 
         XCTAssertThrowsError(try store.transaction(expectedOwner: owner) { state in
-            state.ownerChildDeviceID = owner
+            state.ratchets[owner] = MeteringOwnerRatchet(
+                ownerChildDeviceID: owner,
+                advertisedVersion: 1,
+                localSelection: .v1,
+                registeredV2At: nil,
+                dualActiveAt: nil,
+                activatedV2At: nil
+            )
         })
 
         XCTAssertNil(io.data)

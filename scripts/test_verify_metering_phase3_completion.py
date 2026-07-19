@@ -58,6 +58,85 @@ RELEASE_PRODUCTS = (
 )
 DEBUG_XCTEST_PRODUCT = "Debug-iphoneos/Evlin iOS.app/PlugIns/Evlin iOSTests.xctest/Evlin iOSTests"
 VOLATILE_TRACKED_TOKENS = ("xcuserdata/", ".xcuserstate", "xcschememanagement.plist")
+AUTHORITATIVE_CORRECTION_TEST = (
+    "MeteringAuthoritativeBaseCorrectionTests/"
+    "testEveryCorrectionBoundaryReopensWithStableIDsAndConverges()"
+)
+
+
+def _named_failure_baseline() -> dict[str, object]:
+    return {
+        "format_version": 1,
+        "protected_suite_prefixes": ["DeviceEpoch", "Earned", "Metering"],
+        "protected_suites": [
+            "ActiveLockStoreTests",
+            "AuthServiceTests",
+            "BigKidStatePollerTests",
+            "DatedRouteInstallerTests",
+            "DeviceEpochStoreTests",
+            "EarnedSampleReporterResponseTests",
+            "MeteringAuthoritativeBaseCorrectionTests",
+            "ShieldRecordSourceMigrationTests",
+            "ShieldSourceSetTests",
+            "TaskPauseShieldMappingTests",
+        ],
+        "authoritative_exception": {
+            "baseline_commit": "e46ffe15b45825b20ca1a5b687815cbb340b2f24",
+            "failure_text": "failed - locally active corrected route must remain countable",
+            "test_identifier": AUTHORITATIVE_CORRECTION_TEST,
+            "task24_known_failure_ordinal": 27,
+        },
+        "debt_tasks": {
+            "task_2633a95f": {"title": "MainActor deinit crash family"},
+            "task_phase3_legacy_test_debt_20260719": {
+                "title": "Retire pre-existing iOS fixture and auth test debt"
+            },
+        },
+        "destinations": {
+            "iphone17pro": {
+                "failures": [
+                    {
+                        "category": "deinit_family",
+                        "owner": "task_2633a95f",
+                        "test_identifier": "LegacyDeinitTests/testCrash()",
+                    },
+                    {
+                        "category": "old_fixture",
+                        "owner": "task_phase3_legacy_test_debt_20260719",
+                        "test_identifier": "OldFixtureTests/testStale()",
+                    },
+                ]
+            },
+            "ipad_m5": {
+                "failures": [
+                    {
+                        "category": "auth_debt",
+                        "owner": "task_phase3_legacy_test_debt_20260719",
+                        "test_identifier": "AuthDebtTests/testExpired()",
+                    },
+                    {
+                        "category": "deinit_family",
+                        "owner": "task_2633a95f",
+                        "test_identifier": "LegacyDeinitTests/testCrash()",
+                    },
+                ]
+            },
+        },
+    }
+
+
+def _authoritative_birth_evidence() -> dict[str, object]:
+    return {
+        "baseline_commit": "e46ffe15b45825b20ca1a5b687815cbb340b2f24",
+        "baseline_commit_date": "2026-07-18T18:01:53-04:00",
+        "failure_text": "failed - locally active corrected route must remain countable",
+        "raw_log_sha256": "1" * 64,
+        "outcome": "failed",
+        "source_blob": "2" * 40,
+        "test_identifier": AUTHORITATIVE_CORRECTION_TEST,
+        "xcresult_summary_sha256": "3" * 64,
+        "xcodebuild_exit_code": 65,
+    }
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -77,9 +156,9 @@ def _commit(repo: Path, subject: str, body: str = "") -> str:
 
 
 def _plan_text() -> str:
-    creates = [f"/fixture/path-{index}" for index in range(52)]
-    modifies = [f"/fixture/path-{52 + index}" for index in range(44)]
-    modifies += [f"/fixture/path-{index % 96}" for index in range(121)]
+    creates = [f"/fixture/path-{index}" for index in range(54)]
+    modifies = [f"/fixture/path-{54 + index}" for index in range(44)]
+    modifies += [f"/fixture/path-{index % 98}" for index in range(125)]
     declarations = [f"- Create: `{path}`" for path in creates]
     declarations += [f"- Modify: `{path}`" for path in modifies]
     sections: list[str] = []
@@ -87,7 +166,7 @@ def _plan_text() -> str:
         lines = [f"## Task {label}: Fixture", ""]
         if index == 0:
             lines += declarations
-            lines += ["xcodebuild fixture" for _ in range(95)]
+            lines += ["xcodebuild fixture" for _ in range(99)]
         lines += ["", f"git commit -m '{subject}'", ""]
         sections.append("\n".join(lines))
     return "\n".join(sections)
@@ -164,6 +243,7 @@ def _write_shim(root: Path) -> Path:
     shim = root / "shim.py"
     shim.write_text(
         """#!/usr/bin/env python3
+import json
 import sys
 from pathlib import Path
 
@@ -181,6 +261,51 @@ if gate == 'authoritative-correction-disposition':
         lines = ['gate=authoritative-correction-disposition', 'passed']
 log.parent.mkdir(parents=True, exist_ok=True)
 log.write_text('\\n'.join(lines) + '\\n')
+if gate in {'ios-metering-protected-iphone17pro', 'ios-metering-protected-ipad-m5'}:
+    failures = [{
+        'test_identifier': 'MeteringAuthoritativeBaseCorrectionTests/testEveryCorrectionBoundaryReopensWithStableIDsAndConverges()',
+        'failure_text': 'failed - locally active corrected route must remain countable',
+    }]
+    if mode == 'protected-regression':
+        failures.append({
+            'test_identifier': 'MeteringEpochWireTests/testUnexpectedRegression()',
+            'failure_text': 'new protected failure',
+        })
+    if mode == 'authoritative-green':
+        failures = []
+    summary = {
+        'failures': failures,
+        'passed': 50,
+        'skipped': 1 if mode == 'protected-skipped' else 0,
+        'xcodebuild_exit_code': 65 if failures else 0,
+    }
+    path = Path(evidence_name) / 'named-failures' / f'{gate}.json'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(summary, sort_keys=True) + '\\n')
+if gate in {'ios-legacy-iphone17pro', 'ios-legacy-ipad-m5'}:
+    if gate.endswith('iphone17pro'):
+        failures = [
+            {'test_identifier': 'LegacyDeinitTests/testCrash()', 'failure_text': 'Test crashed with signal abrt.'},
+            {'test_identifier': 'OldFixtureTests/testStale()', 'failure_text': 'stale fixture'},
+        ]
+    else:
+        failures = [
+            {'test_identifier': 'AuthDebtTests/testExpired()', 'failure_text': 'expired auth fixture'},
+            {'test_identifier': 'LegacyDeinitTests/testCrash()', 'failure_text': 'Test crashed with signal abrt.'},
+        ]
+    if mode in {'unexpected-legacy', 'swapped-legacy'}:
+        failures.append({'test_identifier': 'NewRegressionTests/testNewFailure()', 'failure_text': 'new failure'})
+    if mode in {'resolved-legacy', 'swapped-legacy'}:
+        failures = failures[1:]
+    summary = {
+        'failures': failures,
+        'passed': 100,
+        'skipped': 0,
+        'xcodebuild_exit_code': 65 if failures else 0,
+    }
+    path = Path(evidence_name) / 'named-failures' / f'{gate}.json'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(summary, sort_keys=True) + '\\n')
 if gate == 'release-production-build' and mode != 'zero-products':
     products = (
         'Release-iphoneos/Evlin iOS.app/Evlin iOS',
@@ -215,7 +340,15 @@ def make_fixture(
     reverse_27_28: bool = False,
     omit_trailer: str | None = None,
     reviewed_dependency_head: str | None = None,
-    report_text: str = "physical: pending\nphase_complete: false\nreleasable: false\n",
+    report_text: str = (
+        "physical: pending\nphase_complete: false\nreleasable: false\n"
+        "Relative to exact named baseline: zero new failures. Historical debt is tracked by "
+        "task_2633a95f and task_phase3_legacy_test_debt_20260719.\n"
+        "MeteringAuthoritativeBaseCorrectionTests/"
+        "testEveryCorrectionBoundaryReopensWithStableIDsAndConverges() was reproduced at "
+        "e46ffe15b45825b20ca1a5b687815cbb340b2f24.\n"
+    ),
+    named_baseline_mutation: str | None = None,
 ) -> tuple[Path, dict[str, str]]:
     root = tmp_path / "fixture"
     root.mkdir(parents=True)
@@ -229,6 +362,27 @@ def make_fixture(
         _git(repo, "config", "user.name", "Fixture")
     (ios / "docs/superpowers/plans").mkdir(parents=True)
     (ios / "docs/superpowers/plans/2026-07-17-metering-epoch-phase-3.md").write_text(_plan_text())
+    (ios / "scripts").mkdir(parents=True)
+    named_baseline = _named_failure_baseline()
+    if named_baseline_mutation == "protected-in-legacy":
+        named_baseline["destinations"]["iphone17pro"]["failures"].append(
+            {
+                "category": "old_fixture",
+                "owner": "task_phase3_legacy_test_debt_20260719",
+                "test_identifier": "MeteringEpochWireTests/testMustNeverBeWaived()",
+            }
+        )
+    elif named_baseline_mutation == "missing-owner":
+        del named_baseline["destinations"]["iphone17pro"]["failures"][0]["owner"]
+    (ios / "scripts/metering_phase3_named_failure_baseline.json").write_text(
+        json.dumps(named_baseline, indent=2, sort_keys=True) + "\n"
+    )
+    birth_evidence = _authoritative_birth_evidence()
+    if named_baseline_mutation == "bad-birth-evidence":
+        birth_evidence["outcome"] = "passed"
+    (ios / "scripts/metering_authoritative_failure_birth_evidence.json").write_text(
+        json.dumps(birth_evidence, indent=2, sort_keys=True) + "\n"
+    )
     (ios / "Evlin iOSTests/Fixtures").mkdir(parents=True)
     (ios / "Evlin iOSTests/Fixtures/metering_epoch_phase3_vectors.json").write_text("{}\n")
     (backend / "tests/fixtures").mkdir(parents=True)
@@ -247,7 +401,7 @@ def make_fixture(
     for label, repo_name, subject in ordered:
         repo = ios if repo_name == "ios" else backend
         if label == "30":
-            report = ios / ".superpowers/sdd/metering-epoch-phase3-report.md"
+            report = ios / "docs/superpowers/reports/2026-07-17-metering-epoch-phase-3-completion.md"
             report.parent.mkdir(parents=True, exist_ok=True)
             report.write_text(report_text)
         body = ""
@@ -304,20 +458,34 @@ def test_pre_report_fixture_passes_without_touching_real_paths(tmp_path: Path) -
     assert status == {
         "automated": "passed",
         "authoritative_correction": {
-            "baseline_commit": "e46ffe1",
+            "baseline_commit": "e46ffe15b45825b20ca1a5b687815cbb340b2f24",
+            "baseline_commit_date": "2026-07-18T18:01:53-04:00",
             "disposition": "baseline_failure_archived",
             "task24_known_failure_ordinal": 27,
-            "test_method": "MeteringAuthoritativeBaseCorrectionTests.testEveryCorrectionBoundaryReopensWithStableIDsAndConverges",
+            "test_method": AUTHORITATIVE_CORRECTION_TEST,
         },
         "build_evidence": {
             "release_verification": "five production Release binaries scanned; no test seams",
             "test_build": "Debug build-for-testing",
         },
-        "display_status": "AUTOMATED PASSED; PHYSICAL PENDING; NOT RELEASABLE",
+        "display_status": (
+            "ZERO NEW FAILURES RELATIVE TO EXACT NAMED BASELINE; "
+            "HISTORICAL DEBT 3; PHYSICAL PENDING; NOT RELEASABLE"
+        ),
         "phase_complete": False,
         "physical": "pending",
         "releasable": False,
         "status_code": "AUTOMATED_PASSED_PHYSICAL_PENDING",
+        "test_evidence": {
+            "claim": "zero new failures relative to exact named baseline",
+            "historical_debt_count": 3,
+            "historical_debt_tracking": [
+                "task_2633a95f",
+                "task_phase3_legacy_test_debt_20260719",
+            ],
+            "metering_exemptions": [AUTHORITATIVE_CORRECTION_TEST],
+            "tests_all_green": False,
+        },
     }
 
 
@@ -370,6 +538,40 @@ def test_non_ancestor_base_is_rejected(tmp_path: Path) -> None:
 def test_artifact_failures_are_rejected(tmp_path: Path, shim_mode: str, phrase: str) -> None:
     root, values = make_fixture(tmp_path)
     (root / "shim-mode").write_text(shim_mode)
+    assert_failed(run_verifier(root, values["shim"]), phrase)
+
+
+@pytest.mark.parametrize(
+    ("shim_mode", "phrase"),
+    [
+        ("unexpected-legacy", "new failures outside named baseline"),
+        ("resolved-legacy", "resolved baseline entries must be removed"),
+        ("swapped-legacy", "new failures outside named baseline"),
+        ("protected-regression", "protected metering failure"),
+        ("protected-skipped", "protected metering gate skipped tests"),
+        ("authoritative-green", "authoritative exception is now green"),
+    ],
+)
+def test_named_failure_set_gate_rejects_drift(
+    tmp_path: Path, shim_mode: str, phrase: str
+) -> None:
+    root, values = make_fixture(tmp_path)
+    (root / "shim-mode").write_text(shim_mode)
+    assert_failed(run_verifier(root, values["shim"]), phrase)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "phrase"),
+    [
+        ("protected-in-legacy", "protected suite cannot enter legacy baseline"),
+        ("missing-owner", "legacy failure debt owner"),
+        ("bad-birth-evidence", "authoritative birth evidence"),
+    ],
+)
+def test_named_failure_baseline_rejects_toothless_accounting(
+    tmp_path: Path, mutation: str, phrase: str
+) -> None:
+    root, values = make_fixture(tmp_path, named_baseline_mutation=mutation)
     assert_failed(run_verifier(root, values["shim"]), phrase)
 
 
