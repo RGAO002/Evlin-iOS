@@ -149,7 +149,7 @@ if mode == f'empty:{gate}':
     raise SystemExit(0)
 lines = [f'gate={gate}', 'passed']
 if gate == 'authoritative-correction-disposition':
-    lines += ['baseline_failure_archived', 'test_suite=MeteringAuthoritativeBaseCorrectionTests', 'baseline_commit=e46ffe1', 'task24_known_failure_ordinal=27']
+    lines += ['baseline_failure_archived', 'test_method=MeteringAuthoritativeBaseCorrectionTests.testEveryCorrectionBoundaryReopensWithStableIDsAndConverges', 'baseline_commit=e46ffe1', 'task24_known_failure_ordinal=27']
     if mode == 'omit-authoritative':
         lines = ['gate=authoritative-correction-disposition', 'passed']
 log.parent.mkdir(parents=True, exist_ok=True)
@@ -275,6 +275,7 @@ def test_pre_report_fixture_passes_without_touching_real_paths(tmp_path: Path) -
             "baseline_commit": "e46ffe1",
             "disposition": "baseline_failure_archived",
             "task24_known_failure_ordinal": 27,
+            "test_method": "MeteringAuthoritativeBaseCorrectionTests.testEveryCorrectionBoundaryReopensWithStableIDsAndConverges",
         },
         "display_status": "AUTOMATED PASSED; PHYSICAL PENDING; NOT RELEASABLE",
         "phase_complete": False,
