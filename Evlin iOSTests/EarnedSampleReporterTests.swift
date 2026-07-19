@@ -1172,8 +1172,7 @@ final class EarnedSampleReporterResponseTests: XCTestCase {
         let store = EarnedTimeStore(suiteName: isolatedSuite)
         _ = store.reconcileAcceptedUsage(
             usageDate: "2026-07-12",
-            serverEstimatedMinutes: 25,
-            allowSameDayDecrease: false
+            serverEstimatedMinutes: 25
         )
 
         let result = EarnedSampleReporter.processSuccessfulResponse(
@@ -1206,8 +1205,7 @@ final class EarnedSampleReporterResponseTests: XCTestCase {
         let store = EarnedTimeStore(suiteName: isolatedSuite)
         _ = store.reconcileAcceptedUsage(
             usageDate: "2026-07-10",
-            serverEstimatedMinutes: 15,
-            allowSameDayDecrease: false
+            serverEstimatedMinutes: 15
         )
         let data = Data(
             #"{"usage_date":"2026-07-10","estimated_minutes":5,"counted":true}"#.utf8
@@ -1231,8 +1229,7 @@ final class EarnedSampleReporterResponseTests: XCTestCase {
         let store = EarnedTimeStore(suiteName: isolatedSuite)
         _ = store.reconcileAcceptedUsage(
             usageDate: "2026-07-10",
-            serverEstimatedMinutes: 15,
-            allowSameDayDecrease: false
+            serverEstimatedMinutes: 15
         )
         let data = Data(
             #"{"usage_date":"2026-07-10","estimated_minutes":5}"#.utf8
@@ -1250,15 +1247,14 @@ final class EarnedSampleReporterResponseTests: XCTestCase {
         XCTAssertEqual(store.earnedUsageOffsetMinutes, 0)
     }
 
-    func test_uncountedSuccess_reconcilesPhantomWithoutRetry() {
+    func test_uncountedSuccessPausesWithoutLoweringLegacyAcceptedHighWater() {
         let isolatedSuite = makeIsolatedSuiteName()
         defer { removeIsolatedSuite(isolatedSuite) }
         let store = EarnedTimeStore(suiteName: isolatedSuite)
         store.earnedUsageOffsetMinutes = 4
         _ = store.reconcileAcceptedUsage(
             usageDate: "2026-07-10",
-            serverEstimatedMinutes: 10,
-            allowSameDayDecrease: false
+            serverEstimatedMinutes: 10
         )
         let data = Data(
             #"{"usage_date":"2026-07-10","estimated_minutes":0,"counted":false}"#.utf8
@@ -1271,8 +1267,8 @@ final class EarnedSampleReporterResponseTests: XCTestCase {
         )
 
         XCTAssertEqual(result, .paused)
-        XCTAssertEqual(store.acceptedEstimateMinutes, 0)
-        XCTAssertEqual(store.latestDeviceEstimate, 0)
+        XCTAssertEqual(store.acceptedEstimateMinutes, 10)
+        XCTAssertEqual(store.latestDeviceEstimate, 10)
         XCTAssertEqual(store.earnedUsageOffsetMinutes, 4)
         XCTAssertTrue(EarnedSampleReporter.loadRetryQueue(suiteName: isolatedSuite).isEmpty)
         let lastDebugValue = UserDefaults(suiteName: isolatedSuite)?
@@ -1303,61 +1299,13 @@ final class EarnedSampleReporterResponseTests: XCTestCase {
         XCTAssertTrue(lastDebugValue(in: isolatedSuite).contains("reconciliation_deferred"))
     }
 
-    func test_uncountedLockMissPersistsMarkerThatRecreatedStoreConsumesOnRuntime() {
-        let isolatedSuite = makeIsolatedSuiteName()
-        defer { removeIsolatedSuite(isolatedSuite) }
-        let deviceID = UUID()
-        let defaults = UserDefaults(suiteName: isolatedSuite)
-        defaults?.set(deviceID.uuidString, forKey: "evlin.childId")
-        let seeded = EarnedTimeStore(suiteName: isolatedSuite)
-        _ = seeded.reconcileAcceptedUsage(
-            usageDate: "2026-07-12",
-            serverEstimatedMinutes: 25,
-            allowSameDayDecrease: false
-        )
-        let unavailable = EarnedTimeStore(
-            suiteName: isolatedSuite,
-            lockSelection: .unavailable("test_lock_unavailable")
-        )
-
-        let result = EarnedSampleReporter.processSuccessfulResponse(
-            Data(#"{"usage_date":"2026-07-12","estimated_minutes":0,"counted":false}"#.utf8),
-            expectedDeviceID: deviceID,
-            store: unavailable,
-            suiteName: isolatedSuite
-        )
-
-        XCTAssertEqual(result, .deferred)
-        XCTAssertTrue(seeded.hasPendingUncountedReconciliation(
-            deviceID: deviceID,
-            usageDate: "2026-07-12"
-        ))
-
-        let recreated = EarnedTimeStore(suiteName: isolatedSuite)
-        XCTAssertEqual(recreated.reconcileRuntimePolicy(
-            usageDate: "2026-07-12",
-            timezoneIdentifier: "America/New_York",
-            poolMinutes: 60,
-            capMinutes: 60,
-            remainingMinutes: 60,
-            estimatedMinutes: 0
-        ), .reconciled(0))
-        XCTAssertEqual(recreated.acceptedEstimateMinutes, 0)
-        XCTAssertEqual(recreated.latestDeviceEstimate, 0)
-        XCTAssertFalse(recreated.hasPendingUncountedReconciliation(
-            deviceID: deviceID,
-            usageDate: "2026-07-12"
-        ))
-    }
-
     func test_malformedSuccess_isAcceptedWithoutReconciliationOrRetry() {
         let isolatedSuite = makeIsolatedSuiteName()
         defer { removeIsolatedSuite(isolatedSuite) }
         let store = EarnedTimeStore(suiteName: isolatedSuite)
         _ = store.reconcileAcceptedUsage(
             usageDate: "2026-07-10",
-            serverEstimatedMinutes: 12,
-            allowSameDayDecrease: false
+            serverEstimatedMinutes: 12
         )
 
         let result = EarnedSampleReporter.processSuccessfulResponse(
@@ -1379,8 +1327,7 @@ final class EarnedSampleReporterResponseTests: XCTestCase {
         let store = EarnedTimeStore(suiteName: isolatedSuite)
         _ = store.reconcileAcceptedUsage(
             usageDate: "2026-07-11",
-            serverEstimatedMinutes: 8,
-            allowSameDayDecrease: false
+            serverEstimatedMinutes: 8
         )
         let data = Data(
             #"{"usage_date":"2026-07-10","estimated_minutes":0,"counted":false}"#.utf8
@@ -1455,8 +1402,7 @@ final class EarnedSampleReporterResponseTests: XCTestCase {
         let store = EarnedTimeStore(suiteName: isolatedSuite)
         _ = store.reconcileAcceptedUsage(
             usageDate: "2026-07-10",
-            serverEstimatedMinutes: 12,
-            allowSameDayDecrease: false
+            serverEstimatedMinutes: 12
         )
         EarnedSampleReporterURLProtocol.responseData = Data("not-json".utf8)
         EarnedSampleReporterURLProtocol.statusCode = 409
@@ -1489,8 +1435,7 @@ final class EarnedSampleReporterResponseTests: XCTestCase {
         UserDefaults(suiteName: isolatedSuite)?.set(deviceID.uuidString, forKey: "evlin.childId")
         _ = store.reconcileAcceptedUsage(
             usageDate: "2026-07-10",
-            serverEstimatedMinutes: 10,
-            allowSameDayDecrease: false
+            serverEstimatedMinutes: 10
         )
         EarnedSampleReporter.enqueueRetry(
             EarnedSampleReporter.RetryEntry(
@@ -1532,8 +1477,7 @@ final class EarnedSampleReporterResponseTests: XCTestCase {
         UserDefaults(suiteName: isolatedSuite)?.set(deviceID.uuidString, forKey: "evlin.childId")
         _ = store.reconcileAcceptedUsage(
             usageDate: "2026-07-11",
-            serverEstimatedMinutes: 8,
-            allowSameDayDecrease: false
+            serverEstimatedMinutes: 8
         )
         EarnedSampleReporter.enqueueRetry(
             EarnedSampleReporter.RetryEntry(
@@ -1720,8 +1664,7 @@ final class EarnedSampleReporterResponseTests: XCTestCase {
         let store = EarnedTimeStore(suiteName: isolatedSuite)
         _ = store.reconcileAcceptedUsage(
             usageDate: "2026-07-10",
-            serverEstimatedMinutes: 12,
-            allowSameDayDecrease: false
+            serverEstimatedMinutes: 12
         )
 
         let result = EarnedSampleReporter.processSuccessfulResponse(

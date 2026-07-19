@@ -242,7 +242,6 @@ enum EarnedSampleReporter {
         let reconciliation = store.reconcileAcceptedUsageIfNotStale(
             usageDate: snapshot.usageDate,
             serverEstimatedMinutes: snapshot.estimatedMinutes,
-            allowSameDayDecrease: snapshot.counted == false,
             expectedDeviceID: expectedDeviceID,
             beforeCommit: beforeReconciliationCommit
         )
@@ -254,12 +253,6 @@ enum EarnedSampleReporter {
             return .identityMismatch
         }
         if reconciliation == .lockUnavailable {
-            if snapshot.counted == false, let expectedDeviceID {
-                store.markPendingUncountedReconciliation(
-                    deviceID: expectedDeviceID,
-                    usageDate: snapshot.usageDate
-                )
-            }
             recordDebug(
                 "post success reconciliation_deferred lock_unavailable date=\(snapshot.usageDate)",
                 suiteName: suiteName

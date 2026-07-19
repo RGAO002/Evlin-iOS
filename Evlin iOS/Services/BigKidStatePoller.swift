@@ -41,9 +41,6 @@ final class BigKidStatePoller: ObservableObject {
     private let clearAuthoritativeReadiness: () -> Void
     private let ensureEarnedArmed: () -> Void
     private let rearmUsageCounters: () -> Bool
-    private let stopUsageCounters: () -> Void
-    private let isCounterRecoveryRequired: (UUID) -> Bool
-    private let setCounterRecoveryRequired: (UUID, Bool) -> Void
     private let reportEffectiveState: () async -> Void
     private let failOpenFamily: () async -> Void
     private let requestFreshPoll: () -> Void
@@ -51,7 +48,6 @@ final class BigKidStatePoller: ObservableObject {
     private var invalidationObserver: NSObjectProtocol?
     private var isFetchInFlight = false
     private var pendingRefreshAfterCurrent = false
-    private var requiresCounterRecovery = false
     private var requestedRefreshForIdentityMismatch = false
 
     /// Reflection Lockdown glue. Runs after each state apply: reconciles the
@@ -117,13 +113,6 @@ final class BigKidStatePoller: ObservableObject {
         }
         self.ensureEarnedArmed = { EarnedBudgetArming.armIfReady() }
         self.rearmUsageCounters = Self.rearmOtherUsageCountersFromStoredPolicy
-        self.stopUsageCounters = Self.stopUsageCountersForTaskPause
-        self.isCounterRecoveryRequired = {
-            EarnedTimeStore.shared.isCounterRecoveryRequired(deviceID: $0)
-        }
-        self.setCounterRecoveryRequired = {
-            EarnedTimeStore.shared.setCounterRecoveryRequired($1, deviceID: $0)
-        }
         self.reportEffectiveState = {
             guard let snapshot = await CommandPoller.globalEffectiveStateDictionary() else { return }
             do {
@@ -156,11 +145,7 @@ final class BigKidStatePoller: ObservableObject {
         markAuthoritativeReady: @escaping (UUID) -> Void = { _ in },
         clearAuthoritativeReadiness: @escaping () -> Void = {},
         ensureEarnedArmed: @escaping () -> Void = {},
-        rearmUsageCounters: @escaping () -> Void = {},
-        rearmUsageCountersResult: (() -> Bool)? = nil,
-        stopUsageCounters: @escaping () -> Void = {},
-        isCounterRecoveryRequired: @escaping (UUID) -> Bool = { _ in false },
-        setCounterRecoveryRequired: @escaping (UUID, Bool) -> Void = { _, _ in },
+        rearmUsageCounters: @escaping () -> Bool = { true },
         reportEffectiveState: @escaping () async -> Void = {},
         failOpenFamily: @escaping () async -> Void = { await FamilyGoneDetector.failOpen() },
         requestFreshPoll: @escaping () -> Void = {}
@@ -181,13 +166,7 @@ final class BigKidStatePoller: ObservableObject {
         self.markAuthoritativeReady = markAuthoritativeReady
         self.clearAuthoritativeReadiness = clearAuthoritativeReadiness
         self.ensureEarnedArmed = ensureEarnedArmed
-        self.rearmUsageCounters = rearmUsageCountersResult ?? {
-            rearmUsageCounters()
-            return true
-        }
-        self.stopUsageCounters = stopUsageCounters
-        self.isCounterRecoveryRequired = isCounterRecoveryRequired
-        self.setCounterRecoveryRequired = setCounterRecoveryRequired
+        self.rearmUsageCounters = rearmUsageCounters
         self.reportEffectiveState = reportEffectiveState
         self.failOpenFamily = failOpenFamily
         self.requestFreshPoll = requestFreshPoll
@@ -295,12 +274,7 @@ final class BigKidStatePoller: ObservableObject {
             } else if case .reconciled = runtimeReconciliation {
                 runtimeIsAuthoritative = true
             } else {
-                requiresCounterRecovery = true
-                if let expectedChildID {
-                    setCounterRecoveryRequired(expectedChildID, true)
-                }
                 clearAuthoritativeReadiness()
-                stopUsageCounters()
                 lastError = "Screen time sync deferred"
                 print("[BigKidStatePoller] earned runtime reconciliation deferred: \(runtimeReconciliation)")
                 return
@@ -320,25 +294,12 @@ final class BigKidStatePoller: ObservableObject {
                 // A closed task/reflection gate pauses accounting, not Apple's
                 // monitors. Keeping the dated routes installed preserves raw
                 // high-water so resume can replace the epoch conservatively.
-                requiresCounterRecovery = false
-                if let expectedChildID {
-                    setCounterRecoveryRequired(expectedChildID, false)
-                }
             } else {
                 if runtimeIsAuthoritative {
                     ensureEarnedArmed()
                 }
-                let hasDurableRecovery = expectedChildID.map(isCounterRecoveryRequired) ?? false
-                if !wasCountingAllowed || shouldRecoverSkippedUsage
-                    || requiresCounterRecovery || hasDurableRecovery {
-                    if let expectedChildID {
-                        setCounterRecoveryRequired(expectedChildID, true)
-                    }
+                if !wasCountingAllowed || shouldRecoverSkippedUsage {
                     let recovered = rearmUsageCounters()
-                    requiresCounterRecovery = !recovered
-                    if let expectedChildID, recovered {
-                        setCounterRecoveryRequired(expectedChildID, false)
-                    }
                     if shouldRecoverSkippedUsage && recovered {
                         CommandDeliveryDiagnostics.remove(CommandDeliveryDiagnostics.keyUsageCountingLastSkipped)
                     }
@@ -440,24 +401,6 @@ final class BigKidStatePoller: ObservableObject {
             .contains("unfinished_tasks=true")
     }
 
-    private static func stopUsageCountersForTaskPause() {
-        stopUsageCounters(
-            stopEarned: { EarnedBudgetArming.stopLegacyMonitoring() },
-            stopDeviceTotal: { BigKidActivityScheduler.shared.stop() },
-            stopPerApp: { _ = AppLimitPlanner().arm(rules: []) }
-        )
-    }
-
-    static func stopUsageCounters(
-        stopEarned: () -> Void,
-        stopDeviceTotal: () -> Void,
-        stopPerApp: () -> Void
-    ) {
-        stopEarned()
-        stopDeviceTotal()
-        stopPerApp()
-    }
-
     // Pure seam (Fix 4 test 6): the real pool/cap/offset the re-arm uses.
     nonisolated static func earnedRearmInputs(store: EarnedTimeStore) -> (poolMinutes: Int, capMinutes: Int, offset: Int) {
         let offset = EarnedBudgetArming.replacementOffset(
@@ -510,13 +453,13 @@ final class BigKidStatePoller: ObservableObject {
             )
         }
         let perAppResult = AppLimitPlanner().arm(rules: adjustedRules)
-        return counterRearmSucceeded(
+        return usageCounterRearmSucceeded(
             deviceTotalArmed: deviceTotalArmed,
             perAppResult: perAppResult
         )
     }
 
-    nonisolated static func counterRearmSucceeded(
+    nonisolated static func usageCounterRearmSucceeded(
         deviceTotalArmed: Bool,
         perAppResult: AppLimitPlanResult
     ) -> Bool {

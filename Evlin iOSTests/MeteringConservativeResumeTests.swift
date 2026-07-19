@@ -139,7 +139,10 @@ final class MeteringConservativeResumeTests: XCTestCase {
             ),
             .discarded(reason: "resume_boundary")
         )
-        XCTAssertTrue(try fixture.store.read().sampleWork.isEmpty)
+        state = try fixture.store.read()
+        XCTAssertFalse(try XCTUnwrap(state.epochs[candidate.epochID]).resumeBoundaryPending)
+        XCTAssertEqual(state.epochs[candidate.epochID]?.excludedWhilePausedMinutes, events[0].thresholdMinutes)
+        XCTAssertTrue(state.sampleWork.isEmpty)
 
         guard case .queued(let sampleID) = try activeCallback.handle(
             MeteringAppleCallback(
@@ -152,6 +155,47 @@ final class MeteringConservativeResumeTests: XCTestCase {
         let sample = try XCTUnwrap(try fixture.store.read().sampleWork[sampleID])
         XCTAssertEqual(sample.request.estimatedMinutes, 17 + events[1].thresholdMinutes - events[0].thresholdMinutes)
         XCTAssertEqual(sample.request.usageDate, "2026-07-17")
+        XCTAssertEqual(sample.authorization, .v2Deliverable)
+
+        let pausedSnapshot = DeviceDaySnapshotDTO(
+            childDeviceID: owner,
+            usageDate: "2026-07-17",
+            estimatedMinutes: sample.request.estimatedMinutes,
+            capMinutes: 60,
+            childDayState: "paused",
+            usedMinutes: 17,
+            remainingMinutes: 43,
+            counted: false,
+            warning: "accounting_paused"
+        )
+        fixture.transport.results = [
+            (try JSONEncoder().encode(pausedSnapshot), httpResponse())
+        ]
+        let deliveryClock = ResumeClock(now: start.addingTimeInterval(7_501))
+        // Future horizon installs precede network samples globally. This focused
+        // response test retires only unrelated pending fixture work after the
+        // conservative replacement itself has been fully activated.
+        try fixture.store.transaction(expectedOwner: owner) { state in
+            for (key, var work) in state.installWork where work.retry.terminal == .pending {
+                work.retry.terminal = .superseded
+                work.retry.lastErrorCode = "test_fixture_horizon_pruned"
+                state.installWork[key] = work
+            }
+        }
+        XCTAssertEqual(try fixture.store.read().dueWork(now: deliveryClock.now).first?.kind, .sample)
+        let delivery = MeteringEpochDelivery(
+            baseURL: baseURL,
+            store: fixture.store,
+            transport: fixture.transport,
+            clock: deliveryClock
+        )
+        await delivery.drain(owner: owner, importLegacyWork: false)
+
+        state = try fixture.store.read()
+        let terminal = try XCTUnwrap(state.sampleWork[sampleID])
+        XCTAssertEqual(terminal.retry.terminal, .rejected)
+        XCTAssertEqual(terminal.retry.lastErrorCode, "accounting_paused")
+        XCTAssertFalse(state.sampleWork.values.contains { $0.retry.terminal == .pending })
     }
 
     func testRegistrationObservesClosedGateAndPreservesPriorRouteForFreshResume() async throws {

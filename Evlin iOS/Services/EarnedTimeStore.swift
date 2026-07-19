@@ -714,9 +714,6 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
     private let earnedUsageOffsetKey = "earned.usageCountingOffset"
     private let appLimitUsageOffsetPrefix = "evlin.appLimitUsageOffset."
     private let appLimitReportedPrefix = "evlin.appLimitReported."
-    private let pendingUncountedPrefix = "earned.pendingUncountedReconciliation."
-    private let counterRecoveryPrefix = "earned.counterRecoveryRequired."
-
     private func overrideKey(for usageDate: String) -> String {
         "earned.overridden.\(usageDate)"
     }
@@ -1139,14 +1136,12 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
     @discardableResult
     func reconcileAcceptedUsage(
         usageDate: String,
-        serverEstimatedMinutes: Int,
-        allowSameDayDecrease: Bool
+        serverEstimatedMinutes: Int
     ) -> Int {
         withReconciliationTransaction(rollbackKeys: acceptedUsageRollbackKeys) {
             reconcileAcceptedUsageLocked(
                 usageDate: usageDate,
-                serverEstimatedMinutes: serverEstimatedMinutes,
-                allowSameDayDecrease: allowSameDayDecrease
+                serverEstimatedMinutes: serverEstimatedMinutes
             )
         } ?? (acceptedEstimateMinutes ?? 0)
     }
@@ -1154,7 +1149,6 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
     func reconcileAcceptedUsageIfNotStale(
         usageDate: String,
         serverEstimatedMinutes: Int,
-        allowSameDayDecrease: Bool,
         expectedDeviceID: UUID? = nil,
         beforeCommit: () -> Void = {}
     ) -> AcceptedUsageReconciliation {
@@ -1171,8 +1165,7 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
             }
             return .reconciled(reconcileAcceptedUsageLocked(
                 usageDate: usageDate,
-                serverEstimatedMinutes: serverEstimatedMinutes,
-                allowSameDayDecrease: allowSameDayDecrease
+                serverEstimatedMinutes: serverEstimatedMinutes
             ))
         } ?? .lockUnavailable
     }
@@ -1202,18 +1195,6 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
                 return .stale(acceptedUsageDate: currentDate)
             }
 
-            let mirroredDeviceID = EarnedActivityGeneration.canonicalDeviceID(
-                defaults?.string(forKey: "evlin.childId")
-            )
-            let pendingKey = mirroredDeviceID.map {
-                pendingUncountedPrefix + $0
-            }
-            let pendingDate = pendingKey.flatMap { defaults?.string(forKey: $0) }
-            let allowPendingDecrease = pendingDate == usageDate
-            if let pendingDate, pendingDate < usageDate, let pendingKey {
-                defaults?.removeObject(forKey: pendingKey)
-            }
-
             self.poolMinutes = poolMinutes
             self.capMinutes = capMinutes
             defaults?.set(timezoneIdentifier, forKey: runtimeTimezoneKey)
@@ -1226,48 +1207,10 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
             lastBackendSyncAt = syncedAt
             let accepted = reconcileAcceptedUsageLocked(
                 usageDate: usageDate,
-                serverEstimatedMinutes: estimatedMinutes,
-                allowSameDayDecrease: allowPendingDecrease
+                serverEstimatedMinutes: estimatedMinutes
             )
-            if allowPendingDecrease, let pendingKey {
-                defaults?.removeObject(forKey: pendingKey)
-            }
             return .reconciled(accepted)
         } ?? .lockUnavailable
-    }
-
-    func markPendingUncountedReconciliation(deviceID: UUID, usageDate: String) {
-        guard Self.isCanonicalUsageDate(usageDate) else { return }
-        defaults?.set(
-            usageDate,
-            forKey: pendingUncountedPrefix + deviceID.uuidString.lowercased()
-        )
-        defaults?.synchronize()
-    }
-
-    func hasPendingUncountedReconciliation(
-        deviceID: UUID,
-        usageDate: String
-    ) -> Bool {
-        defaults?.string(
-            forKey: pendingUncountedPrefix + deviceID.uuidString.lowercased()
-        ) == usageDate
-    }
-
-    func setCounterRecoveryRequired(_ required: Bool, deviceID: UUID) {
-        let key = counterRecoveryPrefix + deviceID.uuidString.lowercased()
-        if required {
-            defaults?.set(true, forKey: key)
-        } else {
-            defaults?.removeObject(forKey: key)
-        }
-        defaults?.synchronize()
-    }
-
-    func isCounterRecoveryRequired(deviceID: UUID) -> Bool {
-        defaults?.bool(
-            forKey: counterRecoveryPrefix + deviceID.uuidString.lowercased()
-        ) ?? false
     }
 
     private var acceptedUsageRollbackKeys: [String] {
@@ -1275,17 +1218,11 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
     }
 
     private var runtimePolicyRollbackKeys: [String] {
-        var keys = [
+        [
             poolKey, capKey, runtimeTimezoneKey, runtimePolicyRevisionKey,
             backendKey, lastBackendSyncAtKey,
             acceptedUsageDateKey, acceptedEstimateKey, estimateKey,
         ]
-        if let mirrored = EarnedActivityGeneration.canonicalDeviceID(
-            defaults?.string(forKey: "evlin.childId")
-        ) {
-            keys.append(pendingUncountedPrefix + mirrored)
-        }
-        return keys
     }
 
     @discardableResult
@@ -1442,21 +1379,14 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
 
     private func reconcileAcceptedUsageLocked(
         usageDate: String,
-        serverEstimatedMinutes: Int,
-        allowSameDayDecrease: Bool
+        serverEstimatedMinutes: Int
     ) -> Int {
         let server = max(0, serverEstimatedMinutes)
         let sameDay = acceptedUsageDate == usageDate
-        let accepted: Int
-        if !sameDay || allowSameDayDecrease {
-            accepted = server
-        } else {
-            accepted = max(acceptedEstimateMinutes ?? 0, server)
-        }
+        let accepted = sameDay ? max(acceptedEstimateMinutes ?? 0, server) : server
         acceptedUsageDate = usageDate
         acceptedEstimateMinutes = accepted
-        if !sameDay || allowSameDayDecrease {
-            // New-day and paused responses remove raw usage the backend did not accept.
+        if !sameDay {
             latestDeviceEstimate = accepted
         } else {
             latestDeviceEstimate = max(latestDeviceEstimate ?? 0, accepted)
@@ -1611,8 +1541,6 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
                     $0.hasPrefix(prefix)
                     || $0.hasPrefix(appLimitUsageOffsetPrefix)
                     || $0.hasPrefix(appLimitReportedPrefix)
-                    || $0.hasPrefix(pendingUncountedPrefix)
-                    || $0.hasPrefix(counterRecoveryPrefix)
                 }
                 .forEach { suite.removeObject(forKey: $0) }
         }

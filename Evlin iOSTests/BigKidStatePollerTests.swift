@@ -95,18 +95,15 @@ final class BigKidStatePollerTests: XCTestCase {
             .fixture(status: .submitted, phase: .submitted),
         ])
         let state = BigKidState(snapshot: initial)
-        var stopCount = 0
         let poller = BigKidStatePoller(
             state: state,
             fetchState: { pending },
-            reconcileReflectionLock: { _ in },
-            stopUsageCounters: { stopCount += 1 }
+            reconcileReflectionLock: { _ in }
         )
 
         await poller.refreshNow()
 
         XCTAssertFalse(EarnedTimeStore.shared.usageCountingAllowed)
-        XCTAssertEqual(stopCount, 0)
     }
 
     func test_refresh_enablesUsageCountingWhenTasksAreDoneOrBypassed() async {
@@ -122,7 +119,7 @@ final class BigKidStatePollerTests: XCTestCase {
             state: state,
             fetchState: { complete },
             reconcileReflectionLock: { _ in },
-            rearmUsageCounters: { rearmCount += 1 }
+            rearmUsageCounters: { rearmCount += 1; return true }
         )
 
         await poller.refreshNow()
@@ -146,7 +143,7 @@ final class BigKidStatePollerTests: XCTestCase {
             state: state,
             fetchState: { complete },
             reconcileReflectionLock: { _ in },
-            rearmUsageCounters: { rearmCount += 1 }
+            rearmUsageCounters: { rearmCount += 1; return true }
         )
 
         await poller.refreshNow()
@@ -292,13 +289,12 @@ final class BigKidStatePollerTests: XCTestCase {
             setUsageCountingAllowed: { _ in events.append("gate"); return true },
             clearAuthoritativeReadiness: { events.append("clear-ready") },
             ensureEarnedArmed: { events.append("arm") },
-            stopUsageCounters: { events.append("stop") },
             reportEffectiveState: { events.append("heartbeat") }
         )
 
         await poller.refreshNow()
 
-        XCTAssertEqual(events, ["mirror", "apply", "runtime", "clear-ready", "stop"])
+        XCTAssertEqual(events, ["mirror", "apply", "runtime", "clear-ready"])
         XCTAssertEqual(poller.lastError, "Screen time sync deferred")
     }
 
@@ -319,16 +315,15 @@ final class BigKidStatePollerTests: XCTestCase {
             setUsageCountingAllowed: { _ in events.append("gate"); return true },
             markAuthoritativeReady: { _ in events.append("ready") },
             clearAuthoritativeReadiness: { events.append("clear-ready") },
-            ensureEarnedArmed: { events.append("arm") },
-            stopUsageCounters: { events.append("stop") }
+            ensureEarnedArmed: { events.append("arm") }
         )
 
         await poller.refreshNow()
 
-        XCTAssertEqual(events, ["mirror", "apply", "runtime", "clear-ready", "stop"])
+        XCTAssertEqual(events, ["mirror", "apply", "runtime", "clear-ready"])
     }
 
-    func test_refresh_successAfterTransientLockFailureRecoversAllCountersEvenWhenGateStayedTrue() async {
+    func test_refresh_successAfterTransientLockFailureKeepsInstalledCountersAndRetriesRuntime() async {
         EarnedTimeStore.shared.usageCountingAllowed = true
         let response = snapshot(usageCountingAllowed: true)
         let state = BigKidState(snapshot: response)
@@ -348,14 +343,13 @@ final class BigKidStatePollerTests: XCTestCase {
                 return previous
             },
             ensureEarnedArmed: { events.append("earned-arm") },
-            rearmUsageCounters: { events.append("other-arm") },
-            stopUsageCounters: { events.append("stop-all") }
+            rearmUsageCounters: { events.append("other-arm"); return true }
         )
 
         await poller.refreshNow()
         await poller.refreshNow()
 
-        XCTAssertEqual(events, ["stop-all", "earned-arm", "other-arm"])
+        XCTAssertEqual(events, ["earned-arm"])
         XCTAssertTrue(EarnedTimeStore.shared.usageCountingAllowed)
     }
 
@@ -453,8 +447,7 @@ final class BigKidStatePollerTests: XCTestCase {
             setUsageCountingAllowed: { _ in events.append("gate"); return true },
             markAuthoritativeReady: { _ in events.append("ready") },
             clearAuthoritativeReadiness: { events.append("clear") },
-            ensureEarnedArmed: { events.append("arm") },
-            stopUsageCounters: { events.append("stop") }
+            ensureEarnedArmed: { events.append("arm") }
         )
 
         await poller.refreshNow()
@@ -463,12 +456,12 @@ final class BigKidStatePollerTests: XCTestCase {
         XCTAssertNil(poller.lastError)
     }
 
-    func test_counterRecoverySurvivesPollerRecreationUntilRearmSucceeds() async {
-        let suiteName = "BigKidStatePollerTests.\(UUID().uuidString)"
-        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
-        let recoveryStore = EarnedTimeStore(suiteName: suiteName)
+    func test_skippedDiagnosticSurvivesPollerRecreationUntilRearmSucceeds() async {
+        CommandDeliveryDiagnostics.record(
+            CommandDeliveryDiagnostics.keyUsageCountingLastSkipped,
+            "skipped usage event=evlin.earned.t10 unfinished_tasks=true"
+        )
         let deviceID = UUID()
-        recoveryStore.setCounterRecoveryRequired(true, deviceID: deviceID)
         let response = snapshot(usageCountingAllowed: true)
         let state = BigKidState(snapshot: response)
         var attempts: [Bool] = []
@@ -482,42 +475,42 @@ final class BigKidStatePollerTests: XCTestCase {
                 reconcileReflectionLock: { _ in },
                 syncEarnedRuntime: { _ in .reconciled(0) },
                 setUsageCountingAllowed: { _ in true },
-                rearmUsageCountersResult: {
+                rearmUsageCounters: {
                     attempts.append(result)
                     return result
-                },
-                isCounterRecoveryRequired: {
-                    recoveryStore.isCounterRecoveryRequired(deviceID: $0)
-                },
-                setCounterRecoveryRequired: {
-                    recoveryStore.setCounterRecoveryRequired($1, deviceID: $0)
                 }
             )
         }
 
         await makePoller(result: false).refreshNow()
-        XCTAssertTrue(recoveryStore.isCounterRecoveryRequired(deviceID: deviceID))
+        XCTAssertTrue(
+            CommandDeliveryDiagnostics.read(CommandDeliveryDiagnostics.keyUsageCountingLastSkipped)
+                .contains("unfinished_tasks=true")
+        )
 
         await makePoller(result: true).refreshNow()
-        XCTAssertFalse(recoveryStore.isCounterRecoveryRequired(deviceID: deviceID))
+        XCTAssertEqual(
+            CommandDeliveryDiagnostics.read(CommandDeliveryDiagnostics.keyUsageCountingLastSkipped),
+            "(none)"
+        )
         XCTAssertEqual(attempts, [false, true])
     }
 
-    func test_counterRecoveryRequiresDeviceTotalAndPerAppSuccess() {
+    func test_usageCounterRearmRequiresDeviceTotalAndPerAppSuccess() {
         XCTAssertFalse(
-            BigKidStatePoller.counterRearmSucceeded(
+            BigKidStatePoller.usageCounterRearmSucceeded(
                 deviceTotalArmed: false,
                 perAppResult: .armed(activityCount: 1, eventCount: 2)
             )
         )
         XCTAssertFalse(
-            BigKidStatePoller.counterRearmSucceeded(
+            BigKidStatePoller.usageCounterRearmSucceeded(
                 deviceTotalArmed: true,
                 perAppResult: .partiallyArmed(armed: 1, failed: 1)
             )
         )
         XCTAssertTrue(
-            BigKidStatePoller.counterRearmSucceeded(
+            BigKidStatePoller.usageCounterRearmSucceeded(
                 deviceTotalArmed: true,
                 perAppResult: .armed(activityCount: 1, eventCount: 2)
             )
@@ -577,8 +570,7 @@ final class BigKidStatePollerTests: XCTestCase {
         store.removeAll()
         _ = store.reconcileAcceptedUsage(
             usageDate: "2026-07-11",
-            serverEstimatedMinutes: 20,
-            allowSameDayDecrease: false
+            serverEstimatedMinutes: 20
         )
         let runtime = EarnedTimeRuntime(
             usageDate: "2026-07-11",
@@ -677,7 +669,7 @@ final class BigKidStatePollerTests: XCTestCase {
             fetchState: { response },
             reconcileReflectionLock: { _ in },
             ensureEarnedArmed: { earnedArmCount += 1 },
-            rearmUsageCounters: { otherRearmCount += 1 }
+            rearmUsageCounters: { otherRearmCount += 1; return true }
         )
 
         await poller.refreshNow()
@@ -701,7 +693,7 @@ final class BigKidStatePollerTests: XCTestCase {
             fetchState: { response },
             reconcileReflectionLock: { _ in },
             ensureEarnedArmed: { earnedArmCount += 1 },
-            rearmUsageCounters: { otherRearmCount += 1 }
+            rearmUsageCounters: { otherRearmCount += 1; return true }
         )
 
         await poller.refreshNow()
@@ -740,29 +732,14 @@ final class BigKidStatePollerTests: XCTestCase {
         EarnedTimeStore.shared.usageCountingAllowed = false
         let response = snapshot(usageCountingAllowed: false)
         let state = BigKidState(snapshot: response)
-        var stopCount = 0
         let poller = BigKidStatePoller(
             state: state,
             fetchState: { response },
-            reconcileReflectionLock: { _ in },
-            stopUsageCounters: { stopCount += 1 }
+            reconcileReflectionLock: { _ in }
         )
 
         await poller.refreshNow()
         await poller.refreshNow()
 
-        XCTAssertEqual(stopCount, 0)
-    }
-
-    func test_stopUsageCountersForTaskPause_stopsAllThreeCounterSystems() {
-        var stoppedSystems: [String] = []
-
-        BigKidStatePoller.stopUsageCounters(
-            stopEarned: { stoppedSystems.append("earned") },
-            stopDeviceTotal: { stoppedSystems.append("deviceTotal") },
-            stopPerApp: { stoppedSystems.append("perApp") }
-        )
-
-        XCTAssertEqual(stoppedSystems, ["earned", "deviceTotal", "perApp"])
     }
 }

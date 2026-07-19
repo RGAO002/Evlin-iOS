@@ -100,8 +100,7 @@ final class EarnedTimeStoreTests: XCTestCase {
         DispatchQueue.concurrentPerform(iterations: 200) { index in
             _ = (index.isMultiple(of: 2) ? first : second).reconcileAcceptedUsage(
                 usageDate: "2026-07-11",
-                serverEstimatedMinutes: index.isMultiple(of: 3) ? 100 : 5,
-                allowSameDayDecrease: false
+                serverEstimatedMinutes: index.isMultiple(of: 3) ? 100 : 5
             )
         }
         XCTAssertEqual(first.acceptedEstimateMinutes, 100)
@@ -119,8 +118,7 @@ final class EarnedTimeStoreTests: XCTestCase {
             let store = index.isMultiple(of: 2) ? first : second
             _ = store.reconcileAcceptedUsage(
                 usageDate: "2026-07-11",
-                serverEstimatedMinutes: index.isMultiple(of: 3) ? 100 : 5,
-                allowSameDayDecrease: false
+                serverEstimatedMinutes: index.isMultiple(of: 3) ? 100 : 5
             )
         }
 
@@ -150,13 +148,11 @@ final class EarnedTimeStoreTests: XCTestCase {
 
         XCTAssertEqual(failing.reconcileAcceptedUsage(
             usageDate: "2026-07-11",
-            serverEstimatedMinutes: 0,
-            allowSameDayDecrease: true
+            serverEstimatedMinutes: 0
         ), 20)
         XCTAssertEqual(failing.reconcileAcceptedUsageIfNotStale(
             usageDate: "2026-07-11",
-            serverEstimatedMinutes: 0,
-            allowSameDayDecrease: true
+            serverEstimatedMinutes: 0
         ), .lockUnavailable)
         XCTAssertEqual(failing.reconcileRuntimePolicy(
             usageDate: "2026-07-11",
@@ -220,10 +216,9 @@ final class EarnedTimeStoreTests: XCTestCase {
             UserDefaults.standard.removePersistentDomain(forName: suiteName)
             UserDefaults.standard.removePersistentDomain(forName: staleSuite)
         }
-        let deviceID = UUID()
         let oldSync = Date(timeIntervalSince1970: 100)
         let defaults = UserDefaults(suiteName: suiteName)
-        defaults?.set(deviceID.uuidString.lowercased(), forKey: "evlin.childId")
+        defaults?.set(UUID().uuidString.lowercased(), forKey: "evlin.childId")
         let seeded = EarnedTimeStore(suiteName: suiteName)
         XCTAssertEqual(seeded.reconcileRuntimePolicy(
             usageDate: "2026-07-13",
@@ -234,10 +229,6 @@ final class EarnedTimeStoreTests: XCTestCase {
             estimatedMinutes: 20,
             syncedAt: oldSync
         ), .reconciled(20))
-        seeded.markPendingUncountedReconciliation(
-            deviceID: deviceID,
-            usageDate: "2026-07-13"
-        )
         let failing = EarnedTimeStore(
             suiteName: suiteName,
             verificationDefaultsFactory: { _ in UserDefaults(suiteName: staleSuite) },
@@ -261,10 +252,6 @@ final class EarnedTimeStoreTests: XCTestCase {
         XCTAssertEqual(seeded.acceptedUsageDate, "2026-07-13")
         XCTAssertEqual(seeded.acceptedEstimateMinutes, 20)
         XCTAssertEqual(seeded.latestDeviceEstimate, 20)
-        XCTAssertTrue(seeded.hasPendingUncountedReconciliation(
-            deviceID: deviceID,
-            usageDate: "2026-07-13"
-        ))
     }
 
     func test_falsePostWriteSynchronizeCommitsAcceptedUsageAfterReadBack() {
@@ -278,8 +265,7 @@ final class EarnedTimeStoreTests: XCTestCase {
 
         let result = store.reconcileAcceptedUsageIfNotStale(
             usageDate: "2026-07-12",
-            serverEstimatedMinutes: 10,
-            allowSameDayDecrease: false
+            serverEstimatedMinutes: 10
         )
 
         XCTAssertEqual(result, .reconciled(10))
@@ -730,68 +716,6 @@ final class EarnedTimeStoreTests: XCTestCase {
         }
     }
 
-    func test_counterRecoveryMarkerPersistsPerDeviceAndClearsOnIdentityReset() {
-        withIsolatedStore { store in
-            let deviceID = UUID()
-            let otherID = UUID()
-
-            store.setCounterRecoveryRequired(true, deviceID: deviceID)
-
-            XCTAssertTrue(store.isCounterRecoveryRequired(deviceID: deviceID))
-            XCTAssertFalse(store.isCounterRecoveryRequired(deviceID: otherID))
-            store.clearUsageStateForIdentityChange()
-            XCTAssertFalse(store.isCounterRecoveryRequired(deviceID: deviceID))
-        }
-    }
-
-    func test_pendingUncountedMarkerNeverAppliesAcrossIdentityOrDate() throws {
-        let suiteName = "EarnedTimeStoreTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        let oldID = UUID()
-        let newID = UUID()
-        let store = EarnedTimeStore(suiteName: suiteName)
-        defaults.set(oldID.uuidString, forKey: "evlin.childId")
-        _ = store.reconcileAcceptedUsage(
-            usageDate: "2026-07-12",
-            serverEstimatedMinutes: 25,
-            allowSameDayDecrease: false
-        )
-        store.markPendingUncountedReconciliation(
-            deviceID: oldID,
-            usageDate: "2026-07-12"
-        )
-
-        defaults.set(newID.uuidString, forKey: "evlin.childId")
-        XCTAssertEqual(store.reconcileRuntimePolicy(
-            usageDate: "2026-07-12",
-            timezoneIdentifier: "America/New_York",
-            poolMinutes: 60,
-            capMinutes: 60,
-            remainingMinutes: 60,
-            estimatedMinutes: 0
-        ), .reconciled(25))
-        XCTAssertEqual(store.acceptedEstimateMinutes, 25)
-        XCTAssertTrue(store.hasPendingUncountedReconciliation(
-            deviceID: oldID,
-            usageDate: "2026-07-12"
-        ))
-
-        defaults.set(oldID.uuidString, forKey: "evlin.childId")
-        XCTAssertEqual(store.reconcileRuntimePolicy(
-            usageDate: "2026-07-13",
-            timezoneIdentifier: "America/New_York",
-            poolMinutes: 60,
-            capMinutes: 60,
-            remainingMinutes: 60,
-            estimatedMinutes: 0
-        ), .reconciled(0))
-        XCTAssertFalse(store.hasPendingUncountedReconciliation(
-            deviceID: oldID,
-            usageDate: "2026-07-12"
-        ))
-    }
-
     // MARK: - isEarnedTimeReady
 
     func test_isEarnedTimeReady_falseWhenNeitherPresent() {
@@ -1014,12 +938,10 @@ final class EarnedTimeStoreTests: XCTestCase {
         withIsolatedStore { store in
             store.earnedUsageOffsetMinutes = 3
             XCTAssertEqual(store.reconcileAcceptedUsage(
-                usageDate: "2026-07-10", serverEstimatedMinutes: 15,
-                allowSameDayDecrease: false
+                usageDate: "2026-07-10", serverEstimatedMinutes: 15
             ), 15)
             XCTAssertEqual(store.reconcileAcceptedUsage(
-                usageDate: "2026-07-10", serverEstimatedMinutes: 5,
-                allowSameDayDecrease: false
+                usageDate: "2026-07-10", serverEstimatedMinutes: 5
             ), 15)
             XCTAssertEqual(store.acceptedEstimateMinutes, 15)
             XCTAssertEqual(store.earnedUsageOffsetMinutes, 3)
@@ -1030,30 +952,26 @@ final class EarnedTimeStoreTests: XCTestCase {
         withIsolatedStore { store in
             store.earnedUsageOffsetMinutes = 12
             _ = store.reconcileAcceptedUsage(
-                usageDate: "2026-07-10", serverEstimatedMinutes: 40,
-                allowSameDayDecrease: false
+                usageDate: "2026-07-10", serverEstimatedMinutes: 40
             )
             XCTAssertEqual(store.reconcileAcceptedUsage(
-                usageDate: "2026-07-11", serverEstimatedMinutes: 0,
-                allowSameDayDecrease: false
+                usageDate: "2026-07-11", serverEstimatedMinutes: 0
             ), 0)
             XCTAssertEqual(store.latestDeviceEstimate, 0)
             XCTAssertEqual(store.earnedUsageOffsetMinutes, 12)
         }
     }
 
-    func test_reconcileAcceptedUsage_pausedResponseMayLowerSameDate() {
+    func test_reconcileAcceptedUsage_sameDayResponseCannotLowerAcceptedHighWater() {
         withIsolatedStore { store in
             store.earnedUsageOffsetMinutes = 4
             _ = store.reconcileAcceptedUsage(
-                usageDate: "2026-07-10", serverEstimatedMinutes: 10,
-                allowSameDayDecrease: false
+                usageDate: "2026-07-10", serverEstimatedMinutes: 10
             )
             XCTAssertEqual(store.reconcileAcceptedUsage(
-                usageDate: "2026-07-10", serverEstimatedMinutes: 0,
-                allowSameDayDecrease: true
-            ), 0)
-            XCTAssertEqual(store.latestDeviceEstimate, 0)
+                usageDate: "2026-07-10", serverEstimatedMinutes: 0
+            ), 10)
+            XCTAssertEqual(store.latestDeviceEstimate, 10)
             XCTAssertEqual(store.earnedUsageOffsetMinutes, 4)
         }
     }
@@ -1064,8 +982,7 @@ final class EarnedTimeStoreTests: XCTestCase {
 
             _ = store.reconcileAcceptedUsage(
                 usageDate: "2026-07-10",
-                serverEstimatedMinutes: 5,
-                allowSameDayDecrease: false
+                serverEstimatedMinutes: 5
             )
 
             XCTAssertEqual(store.acceptedEstimateMinutes, 5)
@@ -1085,14 +1002,12 @@ final class EarnedTimeStoreTests: XCTestCase {
             store.earnedUsageOffsetMinutes = 3
             _ = store.reconcileAcceptedUsage(
                 usageDate: "2026-07-11",
-                serverEstimatedMinutes: 8,
-                allowSameDayDecrease: false
+                serverEstimatedMinutes: 8
             )
 
             let result = store.reconcileAcceptedUsageIfNotStale(
                 usageDate: "2026-07-10",
-                serverEstimatedMinutes: 100,
-                allowSameDayDecrease: true
+                serverEstimatedMinutes: 100
             )
 
             XCTAssertEqual(result, .stale(acceptedUsageDate: "2026-07-11"))
@@ -1110,8 +1025,7 @@ final class EarnedTimeStoreTests: XCTestCase {
             store.earnedUsageOffsetMinutes = 5
             _ = store.reconcileAcceptedUsage(
                 usageDate: "2026-07-11",
-                serverEstimatedMinutes: 20,
-                allowSameDayDecrease: false
+                serverEstimatedMinutes: 20
             )
             let syncedAt = Date(timeIntervalSince1970: 1_700_000_000)
 
