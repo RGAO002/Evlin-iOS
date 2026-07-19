@@ -909,6 +909,7 @@ nonisolated struct AppLimitVectorProvenance: Codable, Equatable, Sendable {
     let activityName: String?
     let eventName: String?
     let usageDate: String?
+    let orderingToken: Int64?
     let ruleRevision: Int64?
     let armID: UUID?
 
@@ -917,6 +918,7 @@ nonisolated struct AppLimitVectorProvenance: Codable, Equatable, Sendable {
         case activityName = "activityName"
         case eventName = "eventName"
         case usageDate = "usageDate"
+        case orderingToken = "orderingToken"
         case ruleRevision = "ruleRevision"
         case armID = "armId"
     }
@@ -1052,6 +1054,181 @@ nonisolated struct AppLimitVectorInput: Codable, Equatable, Sendable {
         workIDs = try container.decodeIfPresent([UUID].self, forKey: .workIDs) ?? []
         ruleIDs = try container.decodeIfPresent([UUID].self, forKey: .ruleIDs) ?? []
         permutations = try container.decodeIfPresent([AppLimitVectorPermutation].self, forKey: .permutations) ?? []
+
+        switch kind {
+        case .newerSet, .newerClear:
+            _ = try container.decode(AppLimitVectorCommand.self, forKey: .command)
+        case .olderSet:
+            _ = try container.decode(AppLimitVectorCommand.self, forKey: .command)
+            try Self.requireSlotFields(
+                [.latestOrderingToken, .latestKind, .latestPayloadDigest, .activeRulePresent],
+                from: container
+            )
+        case .oldSetAfterClear:
+            _ = try container.decode(AppLimitVectorCommand.self, forKey: .command)
+            try Self.requireSlotFields(
+                [.latestOrderingToken, .latestKind, .latestPayloadDigest, .clearTombstonePresent],
+                from: container
+            )
+        case .equalAppliedSet, .equalAppliedClear:
+            _ = try container.decode(AppLimitVectorCommand.self, forKey: .command)
+            try Self.requireSlotFields(
+                [.latestOrderingToken, .latestKind, .latestPayloadDigest, .appliedReceiptPresent],
+                from: container
+            )
+        case .equalNSEPending, .equalTokenConflict:
+            _ = try container.decode(AppLimitVectorCommand.self, forKey: .command)
+            try Self.requireSlotFields(
+                [.latestOrderingToken, .latestPayloadDigest],
+                from: container
+            )
+        case .convergentIngest:
+            _ = try container.decode(AppLimitVectorCommand.self, forKey: .command)
+            _ = try container.decode([UUID].self, forKey: .ruleIDs)
+            _ = try container.decode([UUID].self, forKey: .workIDs)
+            let requiredPermutations = try container.decode(
+                [AppLimitVectorPermutation].self,
+                forKey: .permutations
+            )
+            guard requiredPermutations.map(\.source) == [
+                .poll,
+                .notificationServiceExtension,
+                .wakeRecovery
+            ] else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .permutations,
+                    in: container,
+                    debugDescription: "convergent_ingest requires exactly poll/NSE/wake permutations"
+                )
+            }
+        case .impossibleCallback, .delayedCallback, .lateCallback:
+            try Self.requirePhysicalTimeFields(
+                [.rawThresholdMinutes, .startedAt, .observedAt],
+                from: container
+            )
+        case .pausedCallback:
+            try Self.requirePhysicalTimeFields(
+                [.rawThresholdMinutes, .ignoredWhilePausedMinutes, .paused],
+                from: container
+            )
+        case .conservativeResume, .restartPreservesIgnored:
+            try Self.requirePhysicalTimeFields(
+                [.ignoredWhilePausedMinutes],
+                from: container
+            )
+        case .readbackCurrent:
+            _ = try container.decode(AppLimitVectorCommand.self, forKey: .command)
+            try Self.requireSlotFields(
+                [
+                    .latestOrderingToken,
+                    .latestKind,
+                    .latestPayloadDigest,
+                    .activeRulePresent,
+                    .appliedReceiptPresent
+                ],
+                from: container
+            )
+            try Self.requireProvenanceFields([.ruleRevision, .armID], from: container)
+            try Self.requireReceiptFields(
+                [.ruleID, .orderingToken, .armID, .source],
+                from: container
+            )
+        case .wrongProvenance:
+            _ = try container.decode(AppLimitVectorCommand.self, forKey: .command)
+            try Self.requireProvenanceFields(
+                [.ruleID, .activityName, .eventName, .usageDate, .orderingToken],
+                from: container
+            )
+        case .perAppExhaustion:
+            _ = try container.decode([UUID].self, forKey: .ruleIDs)
+        case .progressStable, .noPastActivity:
+            break
+        }
+    }
+
+    private static func requireSlotFields(
+        _ fields: [AppLimitVectorSlot.CodingKeys],
+        from container: KeyedDecodingContainer<CodingKeys>
+    ) throws {
+        let slot = try container.nestedContainer(
+            keyedBy: AppLimitVectorSlot.CodingKeys.self,
+            forKey: .slot
+        )
+        for field in fields {
+            switch field {
+            case .latestOrderingToken:
+                _ = try slot.decode(Int64.self, forKey: field)
+            case .latestKind:
+                _ = try slot.decode(AppLimitVectorCommandKind.self, forKey: field)
+            case .latestPayloadDigest:
+                _ = try slot.decode(String.self, forKey: field)
+            case .activeRulePresent, .clearTombstonePresent, .appliedReceiptPresent:
+                _ = try slot.decode(Bool.self, forKey: field)
+            case .pendingOwnerWorkCount:
+                _ = try slot.decode(Int.self, forKey: field)
+            }
+        }
+    }
+
+    private static func requirePhysicalTimeFields(
+        _ fields: [AppLimitVectorPhysicalTime.CodingKeys],
+        from container: KeyedDecodingContainer<CodingKeys>
+    ) throws {
+        let physicalTime = try container.nestedContainer(
+            keyedBy: AppLimitVectorPhysicalTime.CodingKeys.self,
+            forKey: .physicalTime
+        )
+        for field in fields {
+            switch field {
+            case .paused:
+                _ = try physicalTime.decode(Bool.self, forKey: field)
+            case .rawThresholdMinutes, .baseAcceptedMinutes, .ignoredWhilePausedMinutes,
+                 .startedAt, .observedAt, .pausedSecondsWithinArm:
+                _ = try physicalTime.decode(Int.self, forKey: field)
+            }
+        }
+    }
+
+    private static func requireProvenanceFields(
+        _ fields: [AppLimitVectorProvenance.CodingKeys],
+        from container: KeyedDecodingContainer<CodingKeys>
+    ) throws {
+        let provenance = try container.nestedContainer(
+            keyedBy: AppLimitVectorProvenance.CodingKeys.self,
+            forKey: .provenance
+        )
+        for field in fields {
+            switch field {
+            case .ruleID, .armID:
+                _ = try provenance.decode(UUID.self, forKey: field)
+            case .activityName, .eventName, .usageDate:
+                _ = try provenance.decode(String.self, forKey: field)
+            case .orderingToken, .ruleRevision:
+                _ = try provenance.decode(Int64.self, forKey: field)
+            }
+        }
+    }
+
+    private static func requireReceiptFields(
+        _ fields: [AppLimitReceiptObservation.CodingKeys],
+        from container: KeyedDecodingContainer<CodingKeys>
+    ) throws {
+        let receipt = try container.nestedContainer(
+            keyedBy: AppLimitReceiptObservation.CodingKeys.self,
+            forKey: .receipt
+        )
+        for field in fields {
+            switch field {
+            case .present:
+                _ = try receipt.decode(Bool.self, forKey: field)
+            case .ruleID, .armID:
+                _ = try receipt.decode(UUID.self, forKey: field)
+            case .orderingToken:
+                _ = try receipt.decode(Int64.self, forKey: field)
+            case .source:
+                _ = try receipt.decode(String.self, forKey: field)
+            }
+        }
     }
 }
 
@@ -2121,13 +2298,10 @@ nonisolated enum MeteringReferenceRules {
         case .wrongProvenance:
             activeRulePresent = true
             physicalTimeDecision = "reject_provenance"
-            let provenance = input.provenance
-            let valid = provenance?.ruleID == input.ruleID
-                && provenance?.activityName == "evlin.limit.\(input.ruleID.uuidString.lowercased())"
-                && provenance?.eventName == "evlin.limit.t5"
-                && provenance?.usageDate == "2026-07-17"
-                && provenance?.ruleRevision == command?.orderingToken
-            precondition(!valid, "wrong provenance vector requires a mismatched field")
+            precondition(
+                !isAppLimitProvenanceValid(input),
+                "wrong provenance vector requires a mismatched field"
+            )
         case .perAppExhaustion:
             activeRulePresent = true
             unaffectedRuleIDs = input.ruleIDs.sorted {
@@ -2168,6 +2342,17 @@ nonisolated enum MeteringReferenceRules {
             receipt: receipt,
             effects: effects
         )
+    }
+
+    static func isAppLimitProvenanceValid(_ input: AppLimitVectorInput) -> Bool {
+        guard let command = input.command, let provenance = input.provenance else {
+            return false
+        }
+        return provenance.ruleID == input.ruleID
+            && provenance.activityName == "evlin.limit.\(input.ruleID.uuidString.lowercased())"
+            && provenance.eventName == "evlin.limit.t5"
+            && provenance.usageDate == "2026-07-17"
+            && provenance.orderingToken == command.orderingToken
     }
 
     private static func canonicalAppLimitStoreBytes(

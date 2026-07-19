@@ -54,6 +54,8 @@ struct MeteringGoldenVectorSuite: Decodable {
 }
 
 final class MeteringEpochGoldenVectorTests: XCTestCase {
+    private typealias JSONObject = [String: Any]
+
     private static let manualRuleID = UUID(uuidString: "dddddddd-0000-0000-0000-000000000018")!
     private static let manualGenerationID = UUID(uuidString: "99999999-0000-0000-0000-000000000018")!
     private static let manualEpochID = UUID(uuidString: "eeeeeeee-0000-0000-0000-000000000018")!
@@ -99,6 +101,104 @@ final class MeteringEpochGoldenVectorTests: XCTestCase {
 
     func testPhase4Vectors() throws {
         _ = evaluatePhase4Cases(try loadSuite())
+    }
+
+    func testPhase4TypedInputsRejectMissingRequiredFields() throws {
+        let mutations: [(String, [String])] = [
+            ("P4V01", ["command"]),
+            ("P4V02", ["command"]),
+            ("P4V02", ["slot"]),
+            ("P4V02", ["slot", "latest_ordering_token"]),
+            ("P4V02", ["slot", "latest_kind"]),
+            ("P4V02", ["slot", "latest_payload_digest"]),
+            ("P4V02", ["slot", "active_rule_present"]),
+            ("P4V03", ["command"]),
+            ("P4V04", ["slot", "clear_tombstone_present"]),
+            ("P4V05", ["slot", "applied_receipt_present"]),
+            ("P4V06", ["slot", "latest_kind"]),
+            ("P4V07", ["slot", "latest_ordering_token"]),
+            ("P4V07", ["slot", "latest_payload_digest"]),
+            ("P4V08", ["slot"]),
+            ("P4V09", ["command"]),
+            ("P4V09", ["permutations"]),
+            ("P4V09", ["rule_ids"]),
+            ("P4V09", ["work_ids"]),
+            ("P4V12", ["physical_time"]),
+            ("P4V12", ["physical_time", "raw_threshold_minutes"]),
+            ("P4V13", ["physical_time", "started_at"]),
+            ("P4V14", ["physical_time", "observed_at"]),
+            ("P4V15", ["physical_time", "ignored_while_paused_minutes"]),
+            ("P4V15", ["physical_time", "paused"]),
+            ("P4V16", ["physical_time"]),
+            ("P4V16", ["physical_time", "ignored_while_paused_minutes"]),
+            ("P4V17", ["physical_time"]),
+            ("P4V18", ["command"]),
+            ("P4V18", ["slot"]),
+            ("P4V18", ["slot", "latest_ordering_token"]),
+            ("P4V18", ["slot", "latest_kind"]),
+            ("P4V18", ["slot", "latest_payload_digest"]),
+            ("P4V18", ["slot", "active_rule_present"]),
+            ("P4V18", ["slot", "applied_receipt_present"]),
+            ("P4V18", ["provenance"]),
+            ("P4V18", ["provenance", "rule_revision"]),
+            ("P4V18", ["provenance", "arm_id"]),
+            ("P4V18", ["receipt"]),
+            ("P4V18", ["receipt", "rule_id"]),
+            ("P4V18", ["receipt", "ordering_token"]),
+            ("P4V18", ["receipt", "arm_id"]),
+            ("P4V18", ["receipt", "source"]),
+            ("P4V19", ["command"]),
+            ("P4V19", ["provenance"]),
+            ("P4V19", ["provenance", "rule_id"]),
+            ("P4V19", ["provenance", "activity_name"]),
+            ("P4V19", ["provenance", "event_name"]),
+            ("P4V19", ["provenance", "usage_date"]),
+            ("P4V19", ["provenance", "ordering_token"]),
+            ("P4V20", ["rule_ids"])
+        ]
+
+        for (vectorID, path) in mutations {
+            let data = try fixtureDataRemovingPhase4InputValue(vectorID: vectorID, path: path)
+            XCTAssertThrowsError(
+                try decodeFixtureData(data) as MeteringGoldenVectorSuite,
+                "\(vectorID) must require input.\(path.joined(separator: "."))"
+            )
+        }
+    }
+
+    func testPhase4WrongProvenanceSeparatesEventAndOrderingTokenValidity() throws {
+        let canonicalJSON = try phase4InputJSONObject(vectorID: "P4V19")
+        let canonical: AppLimitVectorInput = try decodeFixtureJSONObject(canonicalJSON)
+
+        XCTAssertEqual(canonical.provenance?.orderingToken, 19)
+        XCTAssertFalse(MeteringReferenceRules.isAppLimitProvenanceValid(canonical))
+
+        var correctedEventJSON = canonicalJSON
+        var correctedProvenance = try XCTUnwrap(correctedEventJSON["provenance"] as? JSONObject)
+        correctedProvenance["event_name"] = "evlin.limit.t5"
+        correctedEventJSON["provenance"] = correctedProvenance
+        let correctedEvent: AppLimitVectorInput = try decodeFixtureJSONObject(correctedEventJSON)
+        XCTAssertTrue(MeteringReferenceRules.isAppLimitProvenanceValid(correctedEvent))
+
+        correctedProvenance["ordering_token"] = 20
+        correctedEventJSON["provenance"] = correctedProvenance
+        let changedToken: AppLimitVectorInput = try decodeFixtureJSONObject(correctedEventJSON)
+        XCTAssertFalse(MeteringReferenceRules.isAppLimitProvenanceValid(changedToken))
+
+        correctedProvenance.removeValue(forKey: "ordering_token")
+        correctedEventJSON["provenance"] = correctedProvenance
+        XCTAssertThrowsError(try decodeFixtureJSONObject(correctedEventJSON) as AppLimitVectorInput)
+    }
+
+    func testPhase4ConvergentIngestRequiresCanonicalPermutationSources() throws {
+        var inputJSON = try phase4InputJSONObject(vectorID: "P4V09")
+        inputJSON["permutations"] = [
+            ["source": "poll"],
+            ["source": "wake_recovery"],
+            ["source": "notification_service_extension"]
+        ]
+
+        XCTAssertThrowsError(try decodeFixtureJSONObject(inputJSON) as AppLimitVectorInput)
     }
 
     func testAllCanonicalVectorIDsExecute() throws {
@@ -546,6 +646,65 @@ final class MeteringEpochGoldenVectorTests: XCTestCase {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         return try decoder.decode(Value.self, from: Data(json.utf8))
+    }
+
+    private func decodeFixtureData<Value: Decodable>(_ data: Data) throws -> Value {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try decoder.decode(Value.self, from: data)
+    }
+
+    private func decodeFixtureJSONObject<Value: Decodable>(_ object: JSONObject) throws -> Value {
+        try decodeFixtureData(JSONSerialization.data(withJSONObject: object))
+    }
+
+    private func phase4InputJSONObject(vectorID: String) throws -> JSONObject {
+        let root = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: fixtureData()) as? JSONObject
+        )
+        let cases = try XCTUnwrap(root["phase4_cases"] as? [JSONObject])
+        let vector = try XCTUnwrap(cases.first { $0["id"] as? String == vectorID })
+        return try XCTUnwrap(vector["input"] as? JSONObject)
+    }
+
+    private func fixtureDataRemovingPhase4InputValue(
+        vectorID: String,
+        path: [String]
+    ) throws -> Data {
+        var root = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: fixtureData()) as? JSONObject
+        )
+        var cases = try XCTUnwrap(root["phase4_cases"] as? [JSONObject])
+        let index = try XCTUnwrap(cases.firstIndex { $0["id"] as? String == vectorID })
+        var vector = cases[index]
+        let input = try XCTUnwrap(vector["input"] as? JSONObject)
+        vector["input"] = removingValue(at: path, from: input)
+        cases[index] = vector
+        root["phase4_cases"] = cases
+        return try JSONSerialization.data(withJSONObject: root)
+    }
+
+    private func removingValue(at path: [String], from object: JSONObject) -> JSONObject {
+        precondition(!path.isEmpty)
+        var result = object
+        if path.count == 1 {
+            result.removeValue(forKey: path[0])
+            return result
+        }
+
+        guard var nested = result[path[0]] as? JSONObject else {
+            preconditionFailure("missing nested object at \(path[0])")
+        }
+        nested = removingValue(at: Array(path.dropFirst()), from: nested)
+        result[path[0]] = nested
+        return result
+    }
+
+    private func fixtureData() throws -> Data {
+        let fixtureURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("Fixtures/metering_epoch_vectors.json")
+        return try Data(contentsOf: fixtureURL)
     }
 
     private func acceptedUsage(earnedMinutes: Int) -> MeteringAcceptedUsageInput {

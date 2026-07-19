@@ -124,6 +124,15 @@ final class MeteringEpochVectorCoverageTests: XCTestCase {
         "tombstone_mutations", "applied_receipt_mutations"
     ]
 
+    private static let phase4ExpectedKeys: Set<String> = [
+        "disposition", "active_rule_present", "clear_tombstone_present",
+        "pending_owner_work_count", "receipt_reused", "replacement_identity_changed",
+        "includes_past_activity", "physical_time_decision", "adjusted_estimate_minutes",
+        "ignored_while_paused_minutes", "readback_current", "unaffected_rule_ids",
+        "sorted_rule_ids", "sorted_work_ids", "canonical_store_bytes",
+        "permutation_canonical_store_bytes", "permutation_receipts", "receipt", "effects"
+    ]
+
     private static let observationKeys: Set<String> = [
         "kind", "child_device_id", "source", "credential_kind", "credential_id"
     ]
@@ -190,6 +199,9 @@ final class MeteringEpochVectorCoverageTests: XCTestCase {
                 let input = try XCTUnwrap(vector["input"] as? JSONObject, "\(id) input")
                 XCTAssertEqual(input["kind"] as? String, Self.expectedInputKinds[id], "\(id) input.kind")
                 let expected = try XCTUnwrap(vector["expected"] as? JSONObject, "\(id) expected")
+                if group == "phase4_cases" {
+                    XCTAssertEqual(Set(expected.keys), Self.phase4ExpectedKeys, "\(id) expected keys")
+                }
                 let effects = try XCTUnwrap(expected["effects"] as? JSONObject, "\(id) effects")
                 XCTAssertEqual(
                     Set(effects.keys),
