@@ -795,6 +795,327 @@ nonisolated struct PerAppOrderingObservation: Codable, Equatable, Sendable {
     }
 }
 
+nonisolated enum AppLimitVectorKind: String, Codable, Equatable, Sendable {
+    case newerSet = "newer_set"
+    case olderSet = "older_set"
+    case newerClear = "newer_clear"
+    case oldSetAfterClear = "old_set_after_clear"
+    case equalAppliedSet = "equal_applied_set"
+    case equalAppliedClear = "equal_applied_clear"
+    case equalNSEPending = "equal_nse_pending"
+    case equalTokenConflict = "equal_token_conflict"
+    case convergentIngest = "convergent_ingest"
+    case progressStable = "progress_stable"
+    case noPastActivity = "no_past_activity"
+    case impossibleCallback = "impossible_callback"
+    case delayedCallback = "delayed_callback"
+    case lateCallback = "late_callback"
+    case pausedCallback = "paused_callback"
+    case conservativeResume = "conservative_resume"
+    case restartPreservesIgnored = "restart_preserves_ignored"
+    case readbackCurrent = "readback_current"
+    case wrongProvenance = "wrong_provenance"
+    case perAppExhaustion = "per_app_exhaustion"
+}
+
+nonisolated enum AppLimitVectorCommandKind: String, Codable, Equatable, Sendable {
+    case set
+    case clear
+}
+
+nonisolated enum AppLimitVectorCommandSource: String, Codable, Equatable, Sendable {
+    case poll
+    case notificationServiceExtension = "notification_service_extension"
+    case wakeRecovery = "wake_recovery"
+}
+
+nonisolated enum AppLimitVectorDisposition: String, Codable, Equatable, Sendable {
+    case acceptedNeedsOwner = "accepted_needs_owner"
+    case duplicatePending = "duplicate_pending"
+    case duplicateApplied = "duplicate_applied"
+    case superseded
+    case equalTokenConflict = "equal_token_conflict"
+}
+
+nonisolated struct AppLimitVectorCommand: Codable, Equatable, Sendable {
+    let commandID: UUID
+    let orderingToken: Int64
+    let kind: AppLimitVectorCommandKind
+    let payloadDigest: String
+    let source: AppLimitVectorCommandSource
+
+    enum CodingKeys: String, CodingKey {
+        case commandID = "commandId"
+        case orderingToken = "orderingToken"
+        case kind
+        case payloadDigest = "payloadDigest"
+        case source
+    }
+}
+
+nonisolated struct AppLimitVectorSlot: Codable, Equatable, Sendable {
+    let latestOrderingToken: Int64?
+    let latestKind: AppLimitVectorCommandKind?
+    let latestPayloadDigest: String?
+    let activeRulePresent: Bool
+    let clearTombstonePresent: Bool
+    let pendingOwnerWorkCount: Int
+    let appliedReceiptPresent: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case latestOrderingToken = "latestOrderingToken"
+        case latestKind = "latestKind"
+        case latestPayloadDigest = "latestPayloadDigest"
+        case activeRulePresent = "activeRulePresent"
+        case clearTombstonePresent = "clearTombstonePresent"
+        case pendingOwnerWorkCount = "pendingOwnerWorkCount"
+        case appliedReceiptPresent = "appliedReceiptPresent"
+    }
+
+    init(
+        latestOrderingToken: Int64? = nil,
+        latestKind: AppLimitVectorCommandKind? = nil,
+        latestPayloadDigest: String? = nil,
+        activeRulePresent: Bool = false,
+        clearTombstonePresent: Bool = false,
+        pendingOwnerWorkCount: Int = 0,
+        appliedReceiptPresent: Bool = false
+    ) {
+        self.latestOrderingToken = latestOrderingToken
+        self.latestKind = latestKind
+        self.latestPayloadDigest = latestPayloadDigest
+        self.activeRulePresent = activeRulePresent
+        self.clearTombstonePresent = clearTombstonePresent
+        self.pendingOwnerWorkCount = pendingOwnerWorkCount
+        self.appliedReceiptPresent = appliedReceiptPresent
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            latestOrderingToken: try container.decodeIfPresent(Int64.self, forKey: .latestOrderingToken),
+            latestKind: try container.decodeIfPresent(AppLimitVectorCommandKind.self, forKey: .latestKind),
+            latestPayloadDigest: try container.decodeIfPresent(String.self, forKey: .latestPayloadDigest),
+            activeRulePresent: try container.decodeIfPresent(Bool.self, forKey: .activeRulePresent) ?? false,
+            clearTombstonePresent: try container.decodeIfPresent(Bool.self, forKey: .clearTombstonePresent) ?? false,
+            pendingOwnerWorkCount: try container.decodeIfPresent(Int.self, forKey: .pendingOwnerWorkCount) ?? 0,
+            appliedReceiptPresent: try container.decodeIfPresent(Bool.self, forKey: .appliedReceiptPresent) ?? false
+        )
+    }
+}
+
+nonisolated struct AppLimitVectorProvenance: Codable, Equatable, Sendable {
+    let ruleID: UUID?
+    let activityName: String?
+    let eventName: String?
+    let usageDate: String?
+    let ruleRevision: Int64?
+    let armID: UUID?
+
+    enum CodingKeys: String, CodingKey {
+        case ruleID = "ruleId"
+        case activityName = "activityName"
+        case eventName = "eventName"
+        case usageDate = "usageDate"
+        case ruleRevision = "ruleRevision"
+        case armID = "armId"
+    }
+}
+
+nonisolated struct AppLimitVectorPhysicalTime: Codable, Equatable, Sendable {
+    let rawThresholdMinutes: Int
+    let baseAcceptedMinutes: Int
+    let ignoredWhilePausedMinutes: Int
+    let startedAt: Int
+    let observedAt: Int
+    let pausedSecondsWithinArm: Int
+    let paused: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case rawThresholdMinutes = "rawThresholdMinutes"
+        case baseAcceptedMinutes = "baseAcceptedMinutes"
+        case ignoredWhilePausedMinutes = "ignoredWhilePausedMinutes"
+        case startedAt = "startedAt"
+        case observedAt = "observedAt"
+        case pausedSecondsWithinArm = "pausedSecondsWithinArm"
+        case paused
+    }
+
+    init(
+        rawThresholdMinutes: Int = 0,
+        baseAcceptedMinutes: Int = 0,
+        ignoredWhilePausedMinutes: Int = 0,
+        startedAt: Int = 0,
+        observedAt: Int = 0,
+        pausedSecondsWithinArm: Int = 0,
+        paused: Bool = false
+    ) {
+        self.rawThresholdMinutes = rawThresholdMinutes
+        self.baseAcceptedMinutes = baseAcceptedMinutes
+        self.ignoredWhilePausedMinutes = ignoredWhilePausedMinutes
+        self.startedAt = startedAt
+        self.observedAt = observedAt
+        self.pausedSecondsWithinArm = pausedSecondsWithinArm
+        self.paused = paused
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            rawThresholdMinutes: try container.decodeIfPresent(Int.self, forKey: .rawThresholdMinutes) ?? 0,
+            baseAcceptedMinutes: try container.decodeIfPresent(Int.self, forKey: .baseAcceptedMinutes) ?? 0,
+            ignoredWhilePausedMinutes: try container.decodeIfPresent(Int.self, forKey: .ignoredWhilePausedMinutes) ?? 0,
+            startedAt: try container.decodeIfPresent(Int.self, forKey: .startedAt) ?? 0,
+            observedAt: try container.decodeIfPresent(Int.self, forKey: .observedAt) ?? 0,
+            pausedSecondsWithinArm: try container.decodeIfPresent(Int.self, forKey: .pausedSecondsWithinArm) ?? 0,
+            paused: try container.decodeIfPresent(Bool.self, forKey: .paused) ?? false
+        )
+    }
+}
+
+nonisolated struct AppLimitReceiptObservation: Codable, Equatable, Sendable {
+    let present: Bool
+    let ruleID: UUID?
+    let orderingToken: Int64?
+    let armID: UUID?
+    let source: String?
+
+    enum CodingKeys: String, CodingKey {
+        case present
+        case ruleID = "ruleId"
+        case orderingToken = "orderingToken"
+        case armID = "armId"
+        case source
+    }
+
+    init(
+        present: Bool = false,
+        ruleID: UUID? = nil,
+        orderingToken: Int64? = nil,
+        armID: UUID? = nil,
+        source: String? = nil
+    ) {
+        self.present = present
+        self.ruleID = ruleID
+        self.orderingToken = orderingToken
+        self.armID = armID
+        self.source = source
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            present: try container.decodeIfPresent(Bool.self, forKey: .present) ?? false,
+            ruleID: try container.decodeIfPresent(UUID.self, forKey: .ruleID),
+            orderingToken: try container.decodeIfPresent(Int64.self, forKey: .orderingToken),
+            armID: try container.decodeIfPresent(UUID.self, forKey: .armID),
+            source: try container.decodeIfPresent(String.self, forKey: .source)
+        )
+    }
+}
+
+nonisolated struct AppLimitVectorPermutation: Codable, Equatable, Sendable {
+    let source: AppLimitVectorCommandSource
+}
+
+nonisolated struct AppLimitVectorInput: Codable, Equatable, Sendable {
+    let kind: AppLimitVectorKind
+    let ruleID: UUID
+    let command: AppLimitVectorCommand?
+    let slot: AppLimitVectorSlot
+    let provenance: AppLimitVectorProvenance?
+    let physicalTime: AppLimitVectorPhysicalTime?
+    let receipt: AppLimitReceiptObservation?
+    let workIDs: [UUID]
+    let ruleIDs: [UUID]
+    let permutations: [AppLimitVectorPermutation]
+
+    enum CodingKeys: String, CodingKey {
+        case kind
+        case ruleID = "ruleId"
+        case command, slot, provenance, receipt
+        case physicalTime = "physicalTime"
+        case workIDs = "workIds"
+        case ruleIDs = "ruleIds"
+        case permutations
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        kind = try container.decode(AppLimitVectorKind.self, forKey: .kind)
+        ruleID = try container.decode(UUID.self, forKey: .ruleID)
+        command = try container.decodeIfPresent(AppLimitVectorCommand.self, forKey: .command)
+        slot = try container.decodeIfPresent(AppLimitVectorSlot.self, forKey: .slot) ?? AppLimitVectorSlot()
+        provenance = try container.decodeIfPresent(AppLimitVectorProvenance.self, forKey: .provenance)
+        physicalTime = try container.decodeIfPresent(AppLimitVectorPhysicalTime.self, forKey: .physicalTime)
+        receipt = try container.decodeIfPresent(AppLimitReceiptObservation.self, forKey: .receipt)
+        workIDs = try container.decodeIfPresent([UUID].self, forKey: .workIDs) ?? []
+        ruleIDs = try container.decodeIfPresent([UUID].self, forKey: .ruleIDs) ?? []
+        permutations = try container.decodeIfPresent([AppLimitVectorPermutation].self, forKey: .permutations) ?? []
+    }
+}
+
+nonisolated struct AppLimitEffects: Codable, Equatable, Sendable {
+    var localAcceptedEstimateMutations = 0
+    var retryQueueMutations = 0
+    var networkRequests = 0
+    var backendSampleRows = 0
+    var backendLedgerMutations = 0
+    var perAppLedgerMutations = 0
+    var deviceTotalLedgerMutations = 0
+    var sharedPoolLedgerMutations = 0
+    var notifications = 0
+    var shieldSourceMutations = 0
+    var scheduleArms = 0
+    var scheduleStops = 0
+    var commandWorkMutations = 0
+    var tombstoneMutations = 0
+    var appliedReceiptMutations = 0
+}
+
+nonisolated struct AppLimitVectorObservation: Codable, Equatable, Sendable {
+    let disposition: AppLimitVectorDisposition
+    let activeRulePresent: Bool
+    let clearTombstonePresent: Bool
+    let pendingOwnerWorkCount: Int
+    let receiptReused: Bool
+    let replacementIdentityChanged: Bool
+    let includesPastActivity: Bool
+    let physicalTimeDecision: String
+    let adjustedEstimateMinutes: Int
+    let ignoredWhilePausedMinutes: Int
+    let readbackCurrent: Bool
+    let unaffectedRuleIDs: [UUID]
+    let sortedRuleIDs: [UUID]
+    let sortedWorkIDs: [UUID]
+    let canonicalStoreBytes: String
+    let permutationCanonicalStoreBytes: [String]
+    let permutationReceipts: [AppLimitReceiptObservation]
+    let receipt: AppLimitReceiptObservation
+    let effects: AppLimitEffects
+
+    enum CodingKeys: String, CodingKey {
+        case disposition
+        case activeRulePresent = "activeRulePresent"
+        case clearTombstonePresent = "clearTombstonePresent"
+        case pendingOwnerWorkCount = "pendingOwnerWorkCount"
+        case receiptReused = "receiptReused"
+        case replacementIdentityChanged = "replacementIdentityChanged"
+        case includesPastActivity = "includesPastActivity"
+        case physicalTimeDecision = "physicalTimeDecision"
+        case adjustedEstimateMinutes = "adjustedEstimateMinutes"
+        case ignoredWhilePausedMinutes = "ignoredWhilePausedMinutes"
+        case readbackCurrent = "readbackCurrent"
+        case unaffectedRuleIDs = "unaffectedRuleIds"
+        case sortedRuleIDs = "sortedRuleIds"
+        case sortedWorkIDs = "sortedWorkIds"
+        case canonicalStoreBytes = "canonicalStoreBytes"
+        case permutationCanonicalStoreBytes = "permutationCanonicalStoreBytes"
+        case permutationReceipts = "permutationReceipts"
+        case receipt, effects
+    }
+}
+
 nonisolated struct MeteringEpochRuntime: Equatable, Sendable {
     let epochID: UUID
     let key: MeteringEpochKey
@@ -1639,6 +1960,232 @@ nonisolated enum MeteringReferenceRules {
                 effects: MeteringEffects()
             )
         }
+    }
+
+    static func evaluateAppLimitVector(
+        _ input: AppLimitVectorInput
+    ) -> AppLimitVectorObservation {
+        let command = input.command
+        let slot = input.slot
+        let sortedRuleIDs = Array(Set([input.ruleID] + input.ruleIDs)).sorted {
+            $0.uuidString.lowercased() < $1.uuidString.lowercased()
+        }
+        let sortedWorkIDs = Array(Set(input.workIDs)).sorted {
+            $0.uuidString.lowercased() < $1.uuidString.lowercased()
+        }
+        var disposition: AppLimitVectorDisposition = .acceptedNeedsOwner
+        var activeRulePresent = slot.activeRulePresent
+        var clearTombstonePresent = slot.clearTombstonePresent
+        var pendingOwnerWorkCount = slot.pendingOwnerWorkCount
+        var receiptReused = false
+        var replacementIdentityChanged = false
+        let includesPastActivity = false
+        var physicalTimeDecision = "not_evaluated"
+        var adjustedEstimateMinutes = 0
+        var ignoredWhilePausedMinutes = 0
+        var readbackCurrent = false
+        var receipt = AppLimitReceiptObservation()
+        var permutationCanonicalStoreBytes: [String] = []
+        var permutationReceipts: [AppLimitReceiptObservation] = []
+        var unaffectedRuleIDs: [UUID] = []
+        var effects = AppLimitEffects()
+
+        if let command {
+            precondition(command.orderingToken > 0, "ordering_token must be a positive Int64")
+            if let latestOrderingToken = slot.latestOrderingToken {
+                if command.orderingToken < latestOrderingToken {
+                    disposition = .superseded
+                } else if command.orderingToken == latestOrderingToken {
+                    if command.payloadDigest != slot.latestPayloadDigest {
+                        disposition = .equalTokenConflict
+                    } else if slot.appliedReceiptPresent {
+                        disposition = .duplicateApplied
+                        receiptReused = true
+                    } else {
+                        disposition = .duplicatePending
+                    }
+                }
+            }
+        }
+
+        switch input.kind {
+        case .olderSet, .oldSetAfterClear:
+            disposition = .superseded
+            activeRulePresent = false
+            clearTombstonePresent = input.kind == .oldSetAfterClear
+        case .equalTokenConflict:
+            disposition = .equalTokenConflict
+        case .equalAppliedSet, .equalAppliedClear:
+            disposition = .duplicateApplied
+            receiptReused = true
+            activeRulePresent = input.kind == .equalAppliedSet
+            clearTombstonePresent = input.kind == .equalAppliedClear
+        case .equalNSEPending:
+            disposition = .duplicatePending
+            pendingOwnerWorkCount = 1
+        case .newerSet:
+            activeRulePresent = true
+            pendingOwnerWorkCount = 1
+            effects = AppLimitEffects(scheduleArms: 1, commandWorkMutations: 1)
+        case .newerClear:
+            activeRulePresent = false
+            clearTombstonePresent = true
+            pendingOwnerWorkCount = 1
+            effects = AppLimitEffects(scheduleStops: 1, commandWorkMutations: 1, tombstoneMutations: 1)
+        case .convergentIngest:
+            precondition(
+                input.permutations.map(\.source) == [.poll, .notificationServiceExtension, .wakeRecovery],
+                "convergent ingest requires poll/NSE/wake order"
+            )
+            guard let command else { preconditionFailure("convergent ingest requires a command") }
+            precondition(slot.latestOrderingToken == nil, "convergent ingest requires an initial empty slot")
+            activeRulePresent = true
+            pendingOwnerWorkCount = 0
+            readbackCurrent = true
+            receipt = AppLimitReceiptObservation(
+                present: true,
+                ruleID: input.ruleID,
+                orderingToken: command.orderingToken,
+                armID: UUID(uuidString: "eeeeeeee-0000-0000-0000-000000000009"),
+                source: "app_owner"
+            )
+            let storeBytes = canonicalAppLimitStoreBytes(
+                activeRulePresent: true,
+                clearTombstonePresent: false,
+                pendingOwnerWorkCount: 0,
+                ruleIDs: sortedRuleIDs,
+                workIDs: sortedWorkIDs
+            )
+            permutationCanonicalStoreBytes = input.permutations.map { _ in storeBytes }
+            permutationReceipts = input.permutations.map { _ in receipt }
+            effects = AppLimitEffects(appliedReceiptMutations: 1)
+        case .progressStable, .noPastActivity:
+            activeRulePresent = true
+        case .impossibleCallback, .delayedCallback, .lateCallback, .pausedCallback:
+            activeRulePresent = true
+            guard let physicalTime = input.physicalTime else {
+                preconditionFailure("callback vector requires physical_time")
+            }
+            adjustedEstimateMinutes = physicalTime.baseAcceptedMinutes + max(
+                0,
+                physicalTime.rawThresholdMinutes - physicalTime.ignoredWhilePausedMinutes
+            )
+            ignoredWhilePausedMinutes = physicalTime.ignoredWhilePausedMinutes
+            if physicalTime.paused {
+                physicalTimeDecision = "paused"
+                ignoredWhilePausedMinutes = max(
+                    physicalTime.ignoredWhilePausedMinutes,
+                    physicalTime.rawThresholdMinutes
+                )
+            } else {
+                let activeElapsedSeconds = physicalTime.observedAt - physicalTime.startedAt
+                    - physicalTime.pausedSecondsWithinArm
+                let delta = adjustedEstimateMinutes - physicalTime.baseAcceptedMinutes
+                let trusted = delta >= 0
+                    && delta * 60 <= activeElapsedSeconds + MeteringEpochContract.defaultJitterSeconds
+                physicalTimeDecision = trusted ? "accept" : "reject"
+                if trusted {
+                    effects = AppLimitEffects(
+                        localAcceptedEstimateMutations: 1,
+                        retryQueueMutations: 1,
+                        networkRequests: 1,
+                        backendSampleRows: 1,
+                        backendLedgerMutations: 1
+                    )
+                }
+            }
+        case .conservativeResume, .restartPreservesIgnored:
+            activeRulePresent = true
+            replacementIdentityChanged = true
+            ignoredWhilePausedMinutes = input.physicalTime?.ignoredWhilePausedMinutes ?? 0
+            effects = AppLimitEffects(scheduleArms: 1, scheduleStops: 1)
+        case .readbackCurrent:
+            activeRulePresent = true
+            let provenance = input.provenance
+            readbackCurrent = command != nil
+                && provenance?.ruleRevision == command?.orderingToken
+                && input.receipt?.ruleID == input.ruleID
+                && input.receipt?.orderingToken == command?.orderingToken
+                && slot.latestOrderingToken == input.receipt?.orderingToken
+                && input.receipt?.armID == provenance?.armID
+                && input.receipt?.source == "app_owner"
+            if let inputReceipt = input.receipt {
+                receipt = AppLimitReceiptObservation(
+                    present: true,
+                    ruleID: inputReceipt.ruleID,
+                    orderingToken: inputReceipt.orderingToken,
+                    armID: inputReceipt.armID,
+                    source: inputReceipt.source
+                )
+            }
+        case .wrongProvenance:
+            activeRulePresent = true
+            physicalTimeDecision = "reject_provenance"
+            let provenance = input.provenance
+            let valid = provenance?.ruleID == input.ruleID
+                && provenance?.activityName == "evlin.limit.\(input.ruleID.uuidString.lowercased())"
+                && provenance?.eventName == "evlin.limit.t5"
+                && provenance?.usageDate == "2026-07-17"
+                && provenance?.ruleRevision == command?.orderingToken
+            precondition(!valid, "wrong provenance vector requires a mismatched field")
+        case .perAppExhaustion:
+            activeRulePresent = true
+            unaffectedRuleIDs = input.ruleIDs.sorted {
+                $0.uuidString.lowercased() < $1.uuidString.lowercased()
+            }
+            effects = AppLimitEffects(
+                backendLedgerMutations: 1,
+                perAppLedgerMutations: 1,
+                notifications: 1,
+                shieldSourceMutations: 1
+            )
+        }
+
+        return AppLimitVectorObservation(
+            disposition: disposition,
+            activeRulePresent: activeRulePresent,
+            clearTombstonePresent: clearTombstonePresent,
+            pendingOwnerWorkCount: pendingOwnerWorkCount,
+            receiptReused: receiptReused,
+            replacementIdentityChanged: replacementIdentityChanged,
+            includesPastActivity: includesPastActivity,
+            physicalTimeDecision: physicalTimeDecision,
+            adjustedEstimateMinutes: adjustedEstimateMinutes,
+            ignoredWhilePausedMinutes: ignoredWhilePausedMinutes,
+            readbackCurrent: readbackCurrent,
+            unaffectedRuleIDs: unaffectedRuleIDs,
+            sortedRuleIDs: sortedRuleIDs,
+            sortedWorkIDs: sortedWorkIDs,
+            canonicalStoreBytes: canonicalAppLimitStoreBytes(
+                activeRulePresent: activeRulePresent,
+                clearTombstonePresent: clearTombstonePresent,
+                pendingOwnerWorkCount: pendingOwnerWorkCount,
+                ruleIDs: sortedRuleIDs,
+                workIDs: sortedWorkIDs
+            ),
+            permutationCanonicalStoreBytes: permutationCanonicalStoreBytes,
+            permutationReceipts: permutationReceipts,
+            receipt: receipt,
+            effects: effects
+        )
+    }
+
+    private static func canonicalAppLimitStoreBytes(
+        activeRulePresent: Bool,
+        clearTombstonePresent: Bool,
+        pendingOwnerWorkCount: Int,
+        ruleIDs: [UUID],
+        workIDs: [UUID]
+    ) -> String {
+        let value: [String: Any] = [
+            "active_rule_present": activeRulePresent,
+            "clear_tombstone_present": clearTombstonePresent,
+            "pending_owner_work_count": pendingOwnerWorkCount,
+            "rule_ids": ruleIDs.map { $0.uuidString.lowercased() },
+            "work_ids": workIDs.map { $0.uuidString.lowercased() }
+        ]
+        return try! JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
+            .base64EncodedString()
     }
 
     /// Pure reference-model observations shared with the backend fixture.

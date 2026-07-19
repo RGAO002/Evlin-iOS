@@ -41,6 +41,7 @@ struct MeteringGoldenVectorSuite: Decodable {
     let protocolCases: [MeteringGoldenVectorCase<ProtocolInput, ProtocolObservation>]
     let perAppOrderingCases: [MeteringGoldenVectorCase<PerAppOrderingInput, PerAppOrderingObservation>]
     let phase3Cases: [MeteringGoldenVectorCase<MeteringPhase3Input, MeteringPhase3Observation>]
+    let phase4Cases: [MeteringGoldenVectorCase<AppLimitVectorInput, AppLimitVectorObservation>]
 
     static func load() throws -> MeteringGoldenVectorSuite {
         let fixtureURL = URL(fileURLWithPath: #filePath)
@@ -96,6 +97,10 @@ final class MeteringEpochGoldenVectorTests: XCTestCase {
         _ = evaluatePerAppOrderingCases(try loadSuite())
     }
 
+    func testPhase4Vectors() throws {
+        _ = evaluatePhase4Cases(try loadSuite())
+    }
+
     func testAllCanonicalVectorIDsExecute() throws {
         let suite = try loadSuite()
         var executedIDs: [String] = []
@@ -106,6 +111,7 @@ final class MeteringEpochGoldenVectorTests: XCTestCase {
         executedIDs += try evaluateManualCases(suite)
         executedIDs += evaluateProtocolCases(suite)
         executedIDs += evaluatePerAppOrderingCases(suite)
+        executedIDs += evaluatePhase4Cases(suite)
         executedIDs += suite.phase3Cases.map { vector in
             XCTAssertEqual(MeteringReferenceRules.evaluatePhase3(vector.input), vector.expected, vector.id)
             return vector.id
@@ -114,7 +120,8 @@ final class MeteringEpochGoldenVectorTests: XCTestCase {
         XCTAssertEqual(suite.schemaVersion, 1)
         XCTAssertEqual(
             executedIDs.sorted(),
-            (1...39).map { String(format: "V%02d", $0) }
+            ((1...39).map { String(format: "V%02d", $0) }
+                + (1...20).map { String(format: "P4V%02d", $0) }).sorted()
         )
     }
 
@@ -127,6 +134,7 @@ final class MeteringEpochGoldenVectorTests: XCTestCase {
         let _: (ProtocolInput) -> ProtocolObservation = MeteringReferenceRules.evaluateProtocol
         let _: (PerAppOrderingInput) -> PerAppOrderingObservation = MeteringReferenceRules.evaluatePerAppOrdering
         let _: (MeteringPhase3Input) -> MeteringPhase3Observation = MeteringReferenceRules.evaluatePhase3
+        let _: (AppLimitVectorInput) -> AppLimitVectorObservation = MeteringReferenceRules.evaluateAppLimitVector
 
         let sourceURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -521,6 +529,17 @@ final class MeteringEpochGoldenVectorTests: XCTestCase {
             XCTAssertEqual(actual.tombstoneOrderingToken, 3, testCase.id)
         }
         return suite.perAppOrderingCases.map(\.id)
+    }
+
+    private func evaluatePhase4Cases(_ suite: MeteringGoldenVectorSuite) -> [String] {
+        for testCase in suite.phase4Cases {
+            XCTAssertEqual(
+                MeteringReferenceRules.evaluateAppLimitVector(testCase.input),
+                testCase.expected,
+                testCase.id
+            )
+        }
+        return suite.phase4Cases.map(\.id)
     }
 
     private func decodeFixtureJSON<Value: Decodable>(_ json: String) throws -> Value {

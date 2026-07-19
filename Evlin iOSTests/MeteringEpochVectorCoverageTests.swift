@@ -37,6 +37,7 @@ final class MeteringEpochVectorCoverageTests: XCTestCase {
         let protocolCases: [VectorCase]
         let perAppOrderingCases: [VectorCase]
         let phase3Cases: [VectorCase]
+        let phase4Cases: [VectorCase]
 
         enum CodingKeys: String, CodingKey {
             case schemaVersion = "schema_version"
@@ -48,12 +49,14 @@ final class MeteringEpochVectorCoverageTests: XCTestCase {
             case protocolCases = "protocol_cases"
             case perAppOrderingCases = "per_app_ordering_cases"
             case phase3Cases = "phase3_cases"
+            case phase4Cases = "phase4_cases"
         }
 
         var allCases: [VectorCase] {
             generationCases + callbackCases + gateCases + ledgerCases + manualCases
                 + protocolCases + perAppOrderingCases
                 + phase3Cases
+                + phase4Cases
         }
     }
 
@@ -65,7 +68,8 @@ final class MeteringEpochVectorCoverageTests: XCTestCase {
         ("manual_cases", ["V18"]),
         ("protocol_cases", ["V19", "V20"]),
         ("per_app_ordering_cases", ["V23"]),
-        ("phase3_cases", (24...39).map { String(format: "V%02d", $0) })
+        ("phase3_cases", (24...39).map { String(format: "V%02d", $0) }),
+        ("phase4_cases", (1...20).map { String(format: "P4V%02d", $0) })
     ]
 
     private static let expectedInputKinds = [
@@ -88,7 +92,17 @@ final class MeteringEpochVectorCoverageTests: XCTestCase {
         "V32": "phase3_authoritative_base_correction", "V33": "phase3_install_lease",
         "V34": "phase3_retry_schedule", "V35": "phase3_tombstone_retention",
         "V36": "phase3_all_source_merge", "V37": "phase3_gate_resume_conservative",
-        "V38": "phase3_legacy_migration", "V39": "phase3_v30_artifact_contract"
+        "V38": "phase3_legacy_migration", "V39": "phase3_v30_artifact_contract",
+        "P4V01": "newer_set", "P4V02": "older_set", "P4V03": "newer_clear",
+        "P4V04": "old_set_after_clear", "P4V05": "equal_applied_set",
+        "P4V06": "equal_applied_clear", "P4V07": "equal_nse_pending",
+        "P4V08": "equal_token_conflict", "P4V09": "convergent_ingest",
+        "P4V10": "progress_stable", "P4V11": "no_past_activity",
+        "P4V12": "impossible_callback", "P4V13": "delayed_callback",
+        "P4V14": "late_callback", "P4V15": "paused_callback",
+        "P4V16": "conservative_resume", "P4V17": "restart_preserves_ignored",
+        "P4V18": "readback_current", "P4V19": "wrong_provenance",
+        "P4V20": "per_app_exhaustion"
     ]
 
     private static let effectKeys: Set<String> = [
@@ -102,13 +116,22 @@ final class MeteringEpochVectorCoverageTests: XCTestCase {
         "bank_mutations", "lock_ledger_mutations", "retry_order_mutations"
     ])
 
+    private static let phase4EffectKeys: Set<String> = [
+        "local_accepted_estimate_mutations", "retry_queue_mutations", "network_requests",
+        "backend_sample_rows", "backend_ledger_mutations", "per_app_ledger_mutations",
+        "device_total_ledger_mutations", "shared_pool_ledger_mutations", "notifications",
+        "shield_source_mutations", "schedule_arms", "schedule_stops", "command_work_mutations",
+        "tombstone_mutations", "applied_receipt_mutations"
+    ]
+
     private static let observationKeys: Set<String> = [
         "kind", "child_device_id", "source", "credential_kind", "credential_id"
     ]
 
     private static let rootKeys: Set<String> = [
         "schema_version", "generation_cases", "callback_cases", "gate_cases",
-        "ledger_cases", "manual_cases", "protocol_cases", "per_app_ordering_cases", "phase3_cases"
+        "ledger_cases", "manual_cases", "protocol_cases", "per_app_ordering_cases", "phase3_cases",
+        "phase4_cases"
     ]
 
     private static let caseKeys: Set<String> = ["id", "description", "input", "expected"]
@@ -149,8 +172,12 @@ final class MeteringEpochVectorCoverageTests: XCTestCase {
         let allIDs = suite.allCases.map(\.id).sorted()
 
         XCTAssertEqual(suite.schemaVersion, 1)
-        XCTAssertEqual(allIDs, (1...39).map { String(format: "V%02d", $0) })
-        XCTAssertEqual(Set(allIDs).count, 39)
+        XCTAssertEqual(
+            allIDs,
+            ((1...39).map { String(format: "V%02d", $0) }
+                + (1...20).map { String(format: "P4V%02d", $0) }).sorted()
+        )
+        XCTAssertEqual(Set(allIDs).count, 59)
 
         let root = try XCTUnwrap(JSONSerialization.jsonObject(with: sourceData) as? JSONObject)
         XCTAssertEqual(Set(root.keys), Self.rootKeys, "fixture root keys")
@@ -166,7 +193,8 @@ final class MeteringEpochVectorCoverageTests: XCTestCase {
                 let effects = try XCTUnwrap(expected["effects"] as? JSONObject, "\(id) effects")
                 XCTAssertEqual(
                     Set(effects.keys),
-                    group == "phase3_cases" ? Self.phase3EffectKeys : Self.effectKeys,
+                    group == "phase3_cases" ? Self.phase3EffectKeys
+                        : group == "phase4_cases" ? Self.phase4EffectKeys : Self.effectKeys,
                     "\(id) effects keys"
                 )
             }
