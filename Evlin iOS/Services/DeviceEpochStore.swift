@@ -260,7 +260,7 @@ nonisolated struct LegacyGenerationProvenance: Codable, Equatable, Sendable {
         usageDate: String,
         timezoneIdentifier: String,
         generationKey: MeteringGenerationKey? = nil,
-        armedAt: Date?
+        armedAt: Date? = nil
     ) {
         self.activityName = activityName
         self.deviceID = deviceID
@@ -283,6 +283,326 @@ nonisolated struct LegacyCompatibilityMonitorState: Codable, Equatable, Sendable
     var isStopped: Bool
     var phase: LegacyCompatibilityPhase
     var stopAcknowledgedAt: Date?
+}
+
+nonisolated enum LegacyMeteringActivity {
+    static let legacyActivityName = "evlin.earned.budget"
+    static let generatedActivityPrefix = "evlin.earned.budget."
+
+    static func canonicalDeviceID(_ raw: String?) -> String? {
+        guard let raw,
+              let id = UUID(uuidString: raw.trimmingCharacters(in: .whitespacesAndNewlines))
+        else { return nil }
+        return id.uuidString.lowercased()
+    }
+
+    static func generatedActivityName(id: UUID) -> String {
+        generatedActivityPrefix + id.uuidString.lowercased()
+    }
+
+    static func isEarnedActivityName(_ raw: String) -> Bool {
+        raw == legacyActivityName || raw.hasPrefix(generatedActivityPrefix)
+    }
+
+    static func isValid(_ generation: LegacyGenerationProvenance) -> Bool {
+        isEarnedActivityName(generation.activityName)
+            && canonicalDeviceID(generation.deviceID) != nil
+            && generation.offsetMinutes >= 0
+            && EarnedTimeStore.isCanonicalUsageDate(generation.usageDate)
+            && TimeZone(identifier: generation.timezoneIdentifier) != nil
+    }
+
+    static func authorizedCallback(
+        activityName: String,
+        currentDeviceID: String?,
+        state: LegacyCompatibilityMonitorState?
+    ) -> LegacyGenerationProvenance? {
+        guard let state,
+              state.phase == .activeV1 || state.phase == .dualLanePreparingV2,
+              canonicalDeviceID(currentDeviceID)
+                == state.ownerChildDeviceID.uuidString.lowercased(),
+              let active = state.active,
+              active.activityName == activityName,
+              isValid(active)
+        else { return nil }
+        return active
+    }
+
+    static func isAuthorized(
+        generation: LegacyGenerationProvenance,
+        store: DeviceEpochStore
+    ) -> Bool {
+        guard let state = try? store.read() else { return false }
+        return authorizedCallback(
+            activityName: generation.activityName,
+            currentDeviceID: state.ownerChildDeviceID?.uuidString,
+            state: state.legacy
+        ) == generation
+    }
+
+    @discardableResult
+    static func performIfAuthorized(
+        generation: LegacyGenerationProvenance,
+        store: DeviceEpochStore,
+        defaults: UserDefaults?,
+        mutationKeys: [String] = [],
+        beforeFinalAuthorizationCheck: () -> Void = {},
+        rollbackExternalState: () -> Void = {},
+        _ operation: () -> Void
+    ) -> Bool {
+        guard isAuthorized(generation: generation, store: store) else { return false }
+        let before = snapshot(defaults: defaults, keys: mutationKeys)
+        operation()
+        let written = snapshot(defaults: defaults, keys: mutationKeys)
+        beforeFinalAuthorizationCheck()
+        guard isAuthorized(generation: generation, store: store) else {
+            restore(defaults: defaults, prior: before, whereCurrentMatches: written)
+            defaults?.synchronize()
+            rollbackExternalState()
+            return false
+        }
+        return true
+    }
+
+    static func stopTargets(_ legacy: LegacyCompatibilityMonitorState?) -> [String] {
+        uniqueTargets(
+            [legacy?.pending?.activityName]
+                + (legacy?.retiringActivityNames.map(Optional.some) ?? [])
+                + (legacy?.breadcrumbActivityNames.map(Optional.some) ?? [])
+                + [legacy?.active?.activityName, legacy?.scalarActiveActivityName, legacyActivityName]
+        )
+    }
+
+    static func recoverInterruptedTransition(
+        store: DeviceEpochStore,
+        owner: UUID,
+        stopMonitoring: ([String]) -> Void,
+        now: Date = Date()
+    ) {
+        guard let snapshot = try? store.read().legacy,
+              snapshot.ownerChildDeviceID == owner
+        else { return }
+        let hasInterruptedReplacement = snapshot.pending != nil
+            || !snapshot.retiringActivityNames.isEmpty
+        guard hasInterruptedReplacement || snapshot.phase == .retiringV1 else { return }
+        let targets = stopTargets(snapshot).filter { $0 != snapshot.active?.activityName }
+        if !targets.isEmpty { stopMonitoring(targets) }
+        try? store.transaction(expectedOwner: owner) { state in
+            guard var current = state.legacy,
+                  current.ownerChildDeviceID == owner
+            else { return }
+            if current.phase == .retiringV1 {
+                current.active = nil
+                current.pending = nil
+                current.retiringActivityNames = []
+                current.breadcrumbActivityNames = []
+                current.scalarActiveActivityName = nil
+                current.phase = .stoppedV1
+                current.stopAcknowledgedAt = now
+            } else {
+                current.pending = nil
+                current.retiringActivityNames = []
+                current.breadcrumbActivityNames = []
+                current.phase = current.active == nil ? .stoppedV1 : .activeV1
+                current.stopAcknowledgedAt = current.active == nil ? now : nil
+            }
+            state.legacy = current
+        }
+    }
+
+    @discardableResult
+    static func installReplacement(
+        _ next: LegacyGenerationProvenance,
+        store: DeviceEpochStore,
+        owner: UUID,
+        startMonitoring: (String) throws -> Void,
+        stopMonitoring: ([String]) -> Void,
+        now: Date = Date()
+    ) -> Bool {
+        guard isValid(next),
+              canonicalDeviceID(next.deviceID) == owner.uuidString.lowercased(),
+              next.activityName.hasPrefix(generatedActivityPrefix)
+        else { return false }
+
+        recoverInterruptedTransition(
+            store: store,
+            owner: owner,
+            stopMonitoring: stopMonitoring,
+            now: now
+        )
+        let previous = try? store.read().legacy
+        do {
+            try store.transaction(expectedOwner: owner) { state in
+                guard state.ratchets[owner].map({ $0.localSelection == .v1 }) ?? true else {
+                    throw DeviceEpochStoreError.ownerMismatch
+                }
+                var legacy = state.legacy ?? LegacyCompatibilityMonitorState(
+                    ownerChildDeviceID: owner,
+                    lifecycleVersion: 2,
+                    active: nil,
+                    pending: nil,
+                    retiringActivityNames: [],
+                    breadcrumbActivityNames: [],
+                    scalarActiveActivityName: nil,
+                    isStopped: false,
+                    phase: .activeV1,
+                    stopAcknowledgedAt: nil
+                )
+                guard legacy.ownerChildDeviceID == owner else {
+                    throw DeviceEpochStoreError.ownerMismatch
+                }
+                legacy.pending = next
+                legacy.phase = .activeV1
+                legacy.stopAcknowledgedAt = nil
+                state.legacy = legacy
+            }
+            try startMonitoring(next.activityName)
+        } catch {
+            try? store.transaction(expectedOwner: owner) { state in
+                state.legacy = previous
+            }
+            stopMonitoring([next.activityName])
+            return false
+        }
+
+        var targets: [String] = []
+        do {
+            try store.transaction(expectedOwner: owner) { state in
+                guard var legacy = state.legacy,
+                      legacy.ownerChildDeviceID == owner,
+                      legacy.pending == next
+                else { throw DeviceEpochStoreError.readbackMismatch }
+                targets = stopTargets(legacy).filter { $0 != next.activityName }
+                legacy.active = next
+                legacy.pending = nil
+                legacy.retiringActivityNames = targets
+                legacy.breadcrumbActivityNames = targets
+                legacy.scalarActiveActivityName = next.activityName
+                legacy.phase = .activeV1
+                legacy.stopAcknowledgedAt = nil
+                state.legacy = legacy
+            }
+        } catch {
+            stopMonitoring([next.activityName])
+            try? store.transaction(expectedOwner: owner) { state in
+                state.legacy = previous
+            }
+            return false
+        }
+
+        if !targets.isEmpty { stopMonitoring(targets) }
+        try? store.transaction(expectedOwner: owner) { state in
+            guard var legacy = state.legacy,
+                  legacy.ownerChildDeviceID == owner,
+                  legacy.active == next
+            else { return }
+            legacy.retiringActivityNames = []
+            legacy.breadcrumbActivityNames = []
+            state.legacy = legacy
+        }
+        return true
+    }
+
+    @discardableResult
+    static func stopPersisted(
+        store: DeviceEpochStore,
+        owner: UUID,
+        stopMonitoring: ([String]) -> Void,
+        now: Date = Date()
+    ) -> Bool {
+        let snapshot = try? store.read().legacy
+        let targets = stopTargets(snapshot)
+        do {
+            try store.transaction(expectedOwner: owner) { state in
+                var legacy = state.legacy ?? LegacyCompatibilityMonitorState(
+                    ownerChildDeviceID: owner,
+                    lifecycleVersion: 2,
+                    active: nil,
+                    pending: nil,
+                    retiringActivityNames: [],
+                    breadcrumbActivityNames: [],
+                    scalarActiveActivityName: nil,
+                    isStopped: false,
+                    phase: .activeV1,
+                    stopAcknowledgedAt: nil
+                )
+                guard legacy.ownerChildDeviceID == owner else {
+                    throw DeviceEpochStoreError.ownerMismatch
+                }
+                legacy.retiringActivityNames = targets
+                legacy.phase = .retiringV1
+                legacy.stopAcknowledgedAt = nil
+                state.legacy = legacy
+            }
+        } catch {
+            return false
+        }
+        if !targets.isEmpty { stopMonitoring(targets) }
+        do {
+            try store.transaction(expectedOwner: owner) { state in
+                guard var legacy = state.legacy,
+                      legacy.ownerChildDeviceID == owner,
+                      legacy.phase == .retiringV1
+                else { return }
+                legacy.active = nil
+                legacy.pending = nil
+                legacy.retiringActivityNames = []
+                legacy.breadcrumbActivityNames = []
+                legacy.scalarActiveActivityName = nil
+                legacy.phase = .stoppedV1
+                legacy.stopAcknowledgedAt = now
+                state.legacy = legacy
+            }
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private struct DefaultsValue {
+        let key: String
+        let value: Any?
+    }
+
+    private static func snapshot(defaults: UserDefaults?, keys: [String]) -> [DefaultsValue] {
+        keys.map { DefaultsValue(key: $0, value: defaults?.object(forKey: $0)) }
+    }
+
+    private static func restore(
+        defaults: UserDefaults?,
+        prior: [DefaultsValue],
+        whereCurrentMatches written: [DefaultsValue]
+    ) {
+        guard let defaults else { return }
+        for priorValue in prior {
+            let writtenValue = written.first { $0.key == priorValue.key }?.value
+            guard defaultsValuesEqual(defaults.object(forKey: priorValue.key), writtenValue) else {
+                continue
+            }
+            if let value = priorValue.value {
+                defaults.set(value, forKey: priorValue.key)
+            } else {
+                defaults.removeObject(forKey: priorValue.key)
+            }
+        }
+    }
+
+    private static func defaultsValuesEqual(_ lhs: Any?, _ rhs: Any?) -> Bool {
+        switch (lhs, rhs) {
+        case (nil, nil): return true
+        case (nil, _), (_, nil): return false
+        case (let left?, let right?): return (left as AnyObject).isEqual(right)
+        }
+    }
+
+    fileprivate static func uniqueTargets(_ names: [String?]) -> [String] {
+        var result: [String] = []
+        for name in names.compactMap({ $0 })
+            where isEarnedActivityName(name) && !result.contains(name) {
+            result.append(name)
+        }
+        return result
+    }
 }
 
 nonisolated enum MonitorCoverageStatus: String, Codable, Sendable {
@@ -638,6 +958,47 @@ private enum DeviceEpochStoreInvariantError: Error {
     case invalidState(String)
 }
 
+private struct LegacyActivityLifecyclePayload: Decodable {
+    let version: Int
+    let active: LegacyGenerationProvenance?
+    let pending: LegacyGenerationProvenance?
+    let retiringActivityNames: [String]
+    let isStopped: Bool
+
+    private enum CodingKeys: String, CodingKey {
+        case version, active, pending, retiringActivityNames, isStopped
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        version = try values.decodeIfPresent(Int.self, forKey: .version) ?? 1
+        guard (1...2).contains(version) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .version,
+                in: values,
+                debugDescription: "unsupported legacy metering lifecycle version"
+            )
+        }
+        active = try values.decodeIfPresent(LegacyGenerationProvenance.self, forKey: .active)
+        pending = try values.decodeIfPresent(LegacyGenerationProvenance.self, forKey: .pending)
+        retiringActivityNames = try values.decodeIfPresent(
+            [String].self,
+            forKey: .retiringActivityNames
+        ) ?? []
+        isStopped = try values.decodeIfPresent(Bool.self, forKey: .isStopped) ?? false
+    }
+
+    var isValid: Bool {
+        let reserved = Set([active?.activityName, pending?.activityName].compactMap { $0 })
+        return active.map(LegacyMeteringActivity.isValid) != false
+            && pending.map(LegacyMeteringActivity.isValid) != false
+            && (active == nil || pending == nil || active?.activityName != pending?.activityName)
+            && retiringActivityNames.allSatisfy(LegacyMeteringActivity.isEarnedActivityName)
+            && retiringActivityNames.allSatisfy { !reserved.contains($0) }
+            && (!isStopped || (active == nil && pending == nil))
+    }
+}
+
 nonisolated final class DeviceEpochStore: @unchecked Sendable {
     static let shared = DeviceEpochStore()
     static let fileName = "metering-device-epoch-store-v4.json"
@@ -646,6 +1007,14 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
     private let lock: any DeviceEpochStoreLocking
     private let fileIO: any DeviceEpochFileIO
     private let ownerProvider: @Sendable () -> UUID?
+    private let legacyDefaults: UserDefaults?
+
+    private static let legacyLifecycleKey = ["evlin", "earned", "activityLifecycle"]
+        .joined(separator: ".")
+    private static let legacyBreadcrumbsKey = ["evlin", "earned", "activityBreadcrumbs"]
+        .joined(separator: ".")
+    private static let legacyActiveNameKey = ["evlin", "earned", "activeActivityName"]
+        .joined(separator: ".")
 
     private static func uuidLess(_ lhs: UUID, _ rhs: UUID) -> Bool {
         lhs.uuidString.lowercased() < rhs.uuidString.lowercased()
@@ -655,12 +1024,14 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         fileURL: URL? = nil,
         lock: any DeviceEpochStoreLocking = ActiveLockPersistenceLock.shared,
         fileIO: any DeviceEpochFileIO = SystemDeviceEpochFileIO(),
-        ownerProvider: @escaping @Sendable () -> UUID? = MeteringOwnerMirror.current
+        ownerProvider: @escaping @Sendable () -> UUID? = MeteringOwnerMirror.current,
+        legacyDefaults: UserDefaults? = UserDefaults(suiteName: MeteringOwnerMirror.suiteName)
     ) {
         self.fileURL = fileURL
         self.lock = lock
         self.fileIO = fileIO
         self.ownerProvider = ownerProvider
+        self.legacyDefaults = legacyDefaults
     }
 
     func read() throws -> DeviceEpochStoreState {
@@ -1870,8 +2241,14 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
     ) throws -> Value {
         try withLock {
             let url = try resolvedFileURL()
-            let priorData = try fileIO.read(from: url)
-            var state = try decodeState(priorData)
+            let initialData = try fileIO.read(from: url)
+            let loaded = try loadPersistedState(
+                at: url,
+                initialData: initialData,
+                didReadInitialData: true
+            )
+            let priorData = loaded.persistedData
+            var state = loaded.state
             try validateStatic(state, expectedOwner: nil, requireOwnerMatch: false)
             try checkOwner(expectedOwner: expectedOwner, state: state)
 
@@ -1931,8 +2308,14 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
     ) throws -> Value {
         try withLock {
             let url = try resolvedFileURL()
-            let priorData = try fileIO.read(from: url)
-            let state = try decodeState(priorData)
+            let initialData = try fileIO.read(from: url)
+            let loaded = try loadPersistedState(
+                at: url,
+                initialData: initialData,
+                didReadInitialData: true
+            )
+            let priorData = loaded.persistedData
+            let state = loaded.state
             guard let oldOwner = state.ownerChildDeviceID,
                   var cleanup = state.identityCleanupWork,
                   cleanup.workID == workID
@@ -2013,8 +2396,14 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
     func finalizeIdentityCleanup(workID: UUID) throws -> Bool {
         try withLock {
             let url = try resolvedFileURL()
-            let priorData = try fileIO.read(from: url)
-            let state = try decodeState(priorData)
+            let initialData = try fileIO.read(from: url)
+            let loaded = try loadPersistedState(
+                at: url,
+                initialData: initialData,
+                didReadInitialData: true
+            )
+            let priorData = loaded.persistedData
+            let state = loaded.state
             guard let oldOwner = state.ownerChildDeviceID,
                   let cleanup = state.identityCleanupWork,
                   cleanup.workID == workID
@@ -2090,6 +2479,8 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         return decoder
     }()
 
+    private static let legacyDecoder = JSONDecoder()
+
     private func withLock<T>(_ work: () throws -> T) throws -> T {
         guard let result = lock.withLock({ () -> Result<T, Error> in
             do {
@@ -2115,48 +2506,75 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
 
     private func loadState() throws -> DeviceEpochStoreState {
         let url = try resolvedFileURL()
-        let state = try decodeState(try fileIO.read(from: url))
+        let state = try loadPersistedState(at: url).state
         try validateStatic(state, expectedOwner: nil, requireOwnerMatch: false)
         return state
     }
 
     private func decodeState(_ data: Data?) throws -> DeviceEpochStoreState {
-        guard let data else { return migrateLegacyIfNeeded(DeviceEpochStoreState()) }
+        guard let data else { return DeviceEpochStoreState() }
         let state = try Self.decoder.decode(DeviceEpochStoreState.self, from: data)
         guard (1...DeviceEpochStoreState.currentSchemaVersion).contains(state.schemaVersion) else {
             throw DeviceEpochStoreError.unsupportedSchema(state.schemaVersion)
         }
         var migrated = state
         migrated.schemaVersion = DeviceEpochStoreState.currentSchemaVersion
-        return migrateLegacyIfNeeded(migrated)
+        return migrated
     }
 
-    private func migrateLegacyIfNeeded(_ input: DeviceEpochStoreState) -> DeviceEpochStoreState {
-        guard input.legacy == nil else { return input }
-        let defaults = UserDefaults(suiteName: MeteringOwnerMirror.suiteName)
-        guard let lifecycle = EarnedActivityGeneration.loadLifecycle(defaults: defaults) else {
-            return input
+    private func loadPersistedState(
+        at url: URL,
+        initialData: Data? = nil,
+        didReadInitialData: Bool = false
+    ) throws -> (state: DeviceEpochStoreState, persistedData: Data?) {
+        let data = didReadInitialData ? initialData : try fileIO.read(from: url)
+        if let data {
+            let state = try decodeState(data)
+            try validateStatic(state, expectedOwner: nil, requireOwnerMatch: false)
+            try removeLegacyDefaultsAfterVerifiedRoot()
+            return (state, data)
+        }
+        guard let migrated = try decodeLegacyState() else {
+            return (DeviceEpochStoreState(), nil)
         }
 
-        let owner = input.ownerChildDeviceID
-            ?? lifecycle.active.flatMap { UUID(uuidString: $0.deviceID) }
+        try validateStatic(migrated, expectedOwner: nil, requireOwnerMatch: false)
+        let encoded = try Self.encoder.encode(migrated)
+        do {
+            try fileIO.writeAtomically(encoded, to: url)
+            guard let readback = try fileIO.read(from: url), readback == encoded else {
+                throw DeviceEpochStoreError.readbackMismatch
+            }
+            let verified = try decodeState(readback)
+            try validateStatic(verified, expectedOwner: nil, requireOwnerMatch: false)
+            try removeLegacyDefaultsAfterVerifiedRoot()
+            return (verified, readback)
+        } catch {
+            do {
+                try restore(nil, at: url)
+            } catch {
+                throw DeviceEpochStoreError.restorationFailed
+            }
+            throw error
+        }
+    }
+
+    private func decodeLegacyState() throws -> DeviceEpochStoreState? {
+        guard let defaults = legacyDefaults,
+              let lifecycleData = defaults.data(forKey: Self.legacyLifecycleKey)
+        else { return nil }
+        let lifecycle = try Self.legacyDecoder.decode(
+            LegacyActivityLifecyclePayload.self,
+            from: lifecycleData
+        )
+        guard lifecycle.isValid else {
+            throw DeviceEpochStoreError.readbackMismatch
+        }
+
+        let owner = lifecycle.active.flatMap { UUID(uuidString: $0.deviceID) }
             ?? lifecycle.pending.flatMap { UUID(uuidString: $0.deviceID) }
             ?? ownerProvider()
-        guard let owner else { return input }
-
-        func provenance(_ generation: EarnedActivityGeneration.Generation?) -> LegacyGenerationProvenance? {
-            guard let generation else { return nil }
-            return LegacyGenerationProvenance(
-                activityName: generation.activityName,
-                deviceID: generation.deviceID,
-                offsetMinutes: generation.offsetMinutes,
-                usageDate: generation.usageDate,
-                timezoneIdentifier: generation.timezoneIdentifier,
-                generationKey: generation.generationKey,
-                armedAt: generation.armedAt
-            )
-        }
-
+        guard let owner else { return nil }
         let phase: LegacyCompatibilityPhase
         if lifecycle.isStopped {
             phase = .stoppedV1
@@ -2167,22 +2585,44 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         } else {
             phase = .activeV1
         }
-
-        var migrated = input
-        migrated.ownerChildDeviceID = owner
-        migrated.legacy = LegacyCompatibilityMonitorState(
-            ownerChildDeviceID: owner,
-            lifecycleVersion: lifecycle.version,
-            active: provenance(lifecycle.active),
-            pending: provenance(lifecycle.pending),
-            retiringActivityNames: lifecycle.retiringActivityNames,
-            breadcrumbActivityNames: EarnedActivityGeneration.loadBreadcrumbs(defaults: defaults),
-            scalarActiveActivityName: defaults?.string(forKey: EarnedActivityGeneration.activeActivityNameKey),
-            isStopped: lifecycle.isStopped,
-            phase: phase,
-            stopAcknowledgedAt: nil
+        let retiring = LegacyMeteringActivity.uniqueTargets(
+            lifecycle.retiringActivityNames.map(Optional.some)
         )
-        return migrated
+        let breadcrumbs = LegacyMeteringActivity.uniqueTargets(
+            (defaults.stringArray(forKey: Self.legacyBreadcrumbsKey) ?? []).map(Optional.some)
+        )
+        return DeviceEpochStoreState(
+            ownerChildDeviceID: owner,
+            legacy: LegacyCompatibilityMonitorState(
+                ownerChildDeviceID: owner,
+                lifecycleVersion: lifecycle.version,
+                active: lifecycle.active,
+                pending: lifecycle.pending,
+                retiringActivityNames: retiring,
+                breadcrumbActivityNames: breadcrumbs,
+                scalarActiveActivityName: defaults.string(forKey: Self.legacyActiveNameKey),
+                isStopped: lifecycle.isStopped,
+                phase: phase,
+                stopAcknowledgedAt: nil
+            )
+        )
+    }
+
+    private func removeLegacyDefaultsAfterVerifiedRoot() throws {
+        guard let legacyDefaults else { return }
+        let keys = [
+            Self.legacyLifecycleKey,
+            Self.legacyBreadcrumbsKey,
+            Self.legacyActiveNameKey,
+        ]
+        guard keys.contains(where: { legacyDefaults.object(forKey: $0) != nil }) else {
+            return
+        }
+        keys.forEach(legacyDefaults.removeObject(forKey:))
+        legacyDefaults.synchronize()
+        guard keys.allSatisfy({ legacyDefaults.object(forKey: $0) == nil }) else {
+            throw DeviceEpochStoreError.readbackMismatch
+        }
     }
 
     private func checkOwner(expectedOwner: UUID?, state: DeviceEpochStoreState) throws {
@@ -3163,7 +3603,6 @@ extension DeviceEpochStoreState {
             && ratchets[owner]?.advertisedVersion == 2
             && ratchets[owner]?.activatedV2At != nil
             && legacy?.phase == .stoppedV1
-            && legacy?.isStopped == true
             && fromRoute.usageDate == toRoute.usageDate
             && isValidUsageDate(
                 fromRoute.usageDate,

@@ -846,16 +846,14 @@ final class EarnedMeteringRecoveryDriver {
             return
         }
 
-        guard var legacy = state.legacy,
-              legacy.phase == .retiringV1,
-              !legacy.isStopped
+        guard let legacy = state.legacy,
+              legacy.phase == .retiringV1
         else { return }
         let names = legacyActivityNames(legacy).map { DeviceActivityName($0) }
         center.stopMonitoring(names)
         guard names.allSatisfy({ !center.activities.contains($0) }) else { return }
         try store.transaction(expectedOwner: owner) { state in
             guard var current = state.legacy, current.phase == .retiringV1 else { return }
-            current.isStopped = true
             current.phase = .stoppedV1
             current.stopAcknowledgedAt = clock.now
             state.legacy = current
@@ -1105,6 +1103,7 @@ final class EarnedMeteringRecoveryDriver {
                 .compactMap { $0 }
                 + legacy.retiringActivityNames
                 + legacy.breadcrumbActivityNames
+                + [LegacyMeteringActivity.legacyActivityName]
         )).sorted()
     }
 }

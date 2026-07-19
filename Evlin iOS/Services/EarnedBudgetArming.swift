@@ -44,7 +44,7 @@ enum EarnedBudgetArming {
     }
 
     nonisolated static func requiresGenerationReplacement(
-        _ activeGeneration: EarnedActivityGeneration.Generation?
+        _ activeGeneration: LegacyGenerationProvenance?
     ) -> Bool {
         activeGeneration?.armedAt == nil
     }
@@ -69,7 +69,7 @@ enum EarnedBudgetArming {
     }
 
     nonisolated static func shouldReplaceLegacyGeneration(
-        _ active: EarnedActivityGeneration.Generation?,
+        _ active: LegacyGenerationProvenance?,
         with nextKey: MeteringGenerationKey,
         usageDate: String,
         force: Bool
@@ -80,7 +80,7 @@ enum EarnedBudgetArming {
               active.generationKey == nextKey,
               active.usageDate == usageDate,
               active.timezoneIdentifier == nextKey.canonicalTimezone,
-              EarnedActivityGeneration.canonicalDeviceID(active.deviceID)
+              canonicalDeviceIdentity(active.deviceID)
                 == nextKey.childDeviceID.uuidString.lowercased()
         else { return true }
         return false
@@ -106,13 +106,19 @@ enum EarnedBudgetArming {
 
     static func stopLegacyMonitoring(
         defaults: UserDefaults? = UserDefaults(suiteName: "group.com.evlin.ios"),
+        epochStore: DeviceEpochStore = .shared,
         stopMonitoring: (() -> Void)? = nil
     ) {
-        if let stopMonitoring {
-            _ = EarnedActivityGeneration.stopPersisted(
-                defaults: defaults,
+        if let owner = defaults?.string(forKey: "evlin.childId").flatMap(UUID.init(uuidString:)),
+           let stopMonitoring {
+            let stoppedPersisted = LegacyMeteringActivity.stopPersisted(
+                store: epochStore,
+                owner: owner,
                 stopMonitoring: { _ in stopMonitoring() }
             )
+            if !stoppedPersisted {
+                stopMonitoring()
+            }
         } else {
             EarnedBudgetScheduler.shared.stop()
         }
@@ -194,24 +200,21 @@ enum EarnedBudgetArming {
         now: Date = Date()
     ) {
         let next = childID.uuidString.lowercased()
-        let current = EarnedActivityGeneration.canonicalDeviceID(
+        let current = canonicalDeviceIdentity(
             appGroupDefaults?.string(forKey: "evlin.childId")
         )
-        let lifecycle = EarnedActivityGeneration.loadLifecycle(defaults: appGroupDefaults)
+        let lifecycle = try? (epochStore ?? .shared).read().legacy
         let boundDeviceMismatch = [
             lifecycle?.active?.deviceID,
             lifecycle?.pending?.deviceID,
         ]
-        .compactMap(EarnedActivityGeneration.canonicalDeviceID)
+        .compactMap(canonicalDeviceIdentity)
         .contains { $0 != next }
         let inferredGenerationState = lifecycle?.active != nil
             || lifecycle?.pending != nil
             || lifecycle?.retiringActivityNames.isEmpty == false
-            || appGroupDefaults?.data(forKey: EarnedActivityGeneration.lifecycleKey) != nil
-            || !EarnedActivityGeneration.loadBreadcrumbs(defaults: appGroupDefaults).isEmpty
-            || appGroupDefaults?.string(
-                forKey: EarnedActivityGeneration.activeActivityNameKey
-            ) != nil
+            || lifecycle?.breadcrumbActivityNames.isEmpty == false
+            || lifecycle?.scalarActiveActivityName != nil
         if current != next,
            let epochStore,
            let oldOwner = current.flatMap(UUID.init(uuidString:)) {
@@ -227,6 +230,7 @@ enum EarnedBudgetArming {
                 readinessStore.clearAuthoritativeStateReadiness()
                 stopLegacyMonitoring(
                     defaults: appGroupDefaults,
+                    epochStore: epochStore,
                     stopMonitoring: stopMonitoring
                 )
                 return
@@ -234,6 +238,7 @@ enum EarnedBudgetArming {
             readinessStore.clearAuthoritativeStateReadiness()
             stopLegacyMonitoring(
                 defaults: appGroupDefaults,
+                epochStore: epochStore,
                 stopMonitoring: stopMonitoring
             )
             readinessStore.clearUsageStateForIdentityChange()
@@ -255,6 +260,7 @@ enum EarnedBudgetArming {
             if hasGenerationState ?? inferredGenerationState {
                 stopLegacyMonitoring(
                     defaults: appGroupDefaults,
+                    epochStore: epochStore ?? .shared,
                     stopMonitoring: stopMonitoring
                 )
             }
@@ -310,7 +316,7 @@ enum EarnedBudgetArming {
                 epochStore: epochStore
             )
         } else {
-            stopLegacyMonitoring(defaults: suite)
+            stopLegacyMonitoring(defaults: suite, epochStore: epochStore ?? .shared)
             suite?.removeObject(forKey: "evlin.childId")
             suite?.synchronize()
             EarnedTimeStore.shared.clearUsageStateForIdentityChange()
@@ -381,7 +387,7 @@ enum EarnedBudgetArming {
 
         let store = EarnedTimeStore.shared
         let defaults = UserDefaults(suiteName: EarnedTimeStore.appGroupSuiteName)
-        guard EarnedActivityGeneration.canonicalDeviceID(
+        guard canonicalDeviceIdentity(
             defaults?.string(forKey: "evlin.childId")
         ) == current,
         canArmAuthoritativeState(deviceID: currentDeviceID, store: store) else {
@@ -446,42 +452,11 @@ enum EarnedBudgetArming {
             selectionBytes: selectionBytes,
             enforcementSetID: enforcementSetID
         )
-        if EarnedActivityGeneration.loadLifecycle(defaults: defaults) == nil,
-           defaults?.data(forKey: EarnedActivityGeneration.lifecycleKey) == nil {
-            let persistedName = defaults?.string(
-                forKey: EarnedActivityGeneration.activeActivityNameKey
-            )
-            let migrationName: String? = {
-                if let persistedName,
-                   persistedName.hasPrefix(EarnedActivityGeneration.generatedActivityPrefix) {
-                    return persistedName
-                }
-                return nil
-            }()
-            if let migrationName {
-                EarnedActivityGeneration.migrateActiveIfNeeded(
-                    .init(
-                        activityName: migrationName,
-                        deviceID: current,
-                        offsetMinutes: scalarOffset,
-                        usageDate: usageDate,
-                        timezoneIdentifier: timezoneIdentifier,
-                        generationKey: nextGenerationKey
-                    ),
-                    defaults: defaults
-                )
-            }
-        }
-        let lifecycle = EarnedActivityGeneration.loadLifecycle(defaults: defaults)
+        let lifecycle = try? DeviceEpochStore.shared.read().legacy
         let activeGeneration = lifecycle?.active
         let runningOffset = activeGeneration?.offsetMinutes ?? scalarOffset
         if let activeGeneration {
             store.earnedUsageOffsetMinutes = activeGeneration.offsetMinutes
-            defaults?.set(
-                activeGeneration.activityName,
-                forKey: EarnedActivityGeneration.activeActivityNameKey
-            )
-            defaults?.synchronize()
         }
         guard shouldReplaceLegacyGeneration(
             activeGeneration,
@@ -512,8 +487,8 @@ enum EarnedBudgetArming {
             )
             return
         }
-        let replacementGeneration = EarnedActivityGeneration.Generation(
-            activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
+        let replacementGeneration = LegacyGenerationProvenance(
+            activityName: LegacyMeteringActivity.generatedActivityName(id: UUID()),
             deviceID: current,
             offsetMinutes: replacementOffset,
             usageDate: usageDate,

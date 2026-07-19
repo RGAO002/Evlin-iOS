@@ -90,8 +90,8 @@ final class MeteringT11DemolitionTests: XCTestCase {
 
     private func legacyOutcome(after seconds: TimeInterval)
         -> EarnedThresholdProductionCoordinator.Outcome {
-        let generation = EarnedActivityGeneration.Generation(
-            activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
+        let generation = LegacyGenerationProvenance(
+            activityName: LegacyMeteringActivity.generatedActivityName(id: UUID()),
             deviceID: owner.uuidString,
             offsetMinutes: 50,
             usageDate: "2026-07-18",

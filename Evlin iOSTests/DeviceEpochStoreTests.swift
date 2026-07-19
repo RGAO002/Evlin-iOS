@@ -715,9 +715,9 @@ final class DeviceEpochStoreTests: XCTestCase {
     private func clearLegacyDefaults() {
         let defaults = UserDefaults(suiteName: MeteringOwnerMirror.suiteName)
         [
-            EarnedActivityGeneration.lifecycleKey,
-            EarnedActivityGeneration.lifecycleBreadcrumbsKey,
-            EarnedActivityGeneration.activeActivityNameKey,
+            ["evlin", "earned", "activityLifecycle"].joined(separator: "."),
+            ["evlin", "earned", "activityBreadcrumbs"].joined(separator: "."),
+            ["evlin", "earned", "activeActivityName"].joined(separator: "."),
         ].forEach { defaults?.removeObject(forKey: $0) }
     }
 

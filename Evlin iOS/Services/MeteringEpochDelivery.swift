@@ -1025,8 +1025,7 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
            state.activeEpochID == work.epochID,
            let legacy = state.legacy,
            legacy.ownerChildDeviceID == owner,
-           legacy.phase == .activeV1,
-           !legacy.isStopped {
+           (legacy.phase == .activeV1 || legacy.phase == .dualLanePreparingV2) {
             let exactRoutes = state.routes.values.filter {
                 $0.ownerChildDeviceID == owner
                     && $0.generationID == route.generationID

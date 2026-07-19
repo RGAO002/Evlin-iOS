@@ -513,8 +513,8 @@ final class EarnedSampleReporterTests: XCTestCase {
     func test_implausibleThresholdCoordinatorRecordsOnlyDiagnostic() {
         let spy = EarnedThresholdProductionPathSpy()
         let armedAt = Date(timeIntervalSince1970: 1_784_003_200)
-        let generation = EarnedActivityGeneration.Generation(
-            activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
+        let generation = LegacyGenerationProvenance(
+            activityName: LegacyMeteringActivity.generatedActivityName(id: UUID()),
             deviceID: UUID().uuidString,
             offsetMinutes: 50,
             usageDate: "2026-07-13",
@@ -545,8 +545,8 @@ final class EarnedSampleReporterTests: XCTestCase {
     func test_strictThresholdCoordinatorReachesAcceptedProductionPathAtBoundary() {
         let spy = EarnedThresholdProductionPathSpy()
         let armedAt = Date(timeIntervalSince1970: 1_784_003_200)
-        let generation = EarnedActivityGeneration.Generation(
-            activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
+        let generation = LegacyGenerationProvenance(
+            activityName: LegacyMeteringActivity.generatedActivityName(id: UUID()),
             deviceID: UUID().uuidString,
             offsetMinutes: 50,
             usageDate: "2026-07-13",
@@ -575,8 +575,8 @@ final class EarnedSampleReporterTests: XCTestCase {
         let armedAt = try XCTUnwrap(
             ISO8601DateFormatter().date(from: "2026-07-13T16:00:00Z")
         )
-        let generation = EarnedActivityGeneration.Generation(
-            activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
+        let generation = LegacyGenerationProvenance(
+            activityName: LegacyMeteringActivity.generatedActivityName(id: UUID()),
             deviceID: UUID().uuidString,
             offsetMinutes: 50,
             usageDate: "2026-07-13",
@@ -1192,7 +1192,7 @@ final class EarnedSampleReporterResponseTests: XCTestCase {
         XCTAssertNil(store.acceptedEstimateMinutes)
         XCTAssertNil(store.latestDeviceEstimate)
         XCTAssertEqual(
-            EarnedActivityGeneration.canonicalDeviceID(
+            LegacyMeteringActivity.canonicalDeviceID(
                 defaults?.string(forKey: "evlin.childId")
             ),
             newID.uuidString.lowercased()

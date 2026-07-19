@@ -366,25 +366,25 @@ final class EarnedTimeStoreTests: XCTestCase {
     }
 
     func test_generationDecodesLegacyJSONWithoutArmedAt() throws {
-        let activityName = EarnedActivityGeneration.generatedActivityName(id: UUID())
+        let activityName = LegacyMeteringActivity.generatedActivityName(id: UUID())
         let json = """
         {"activityName":"\(activityName)","deviceID":"b21411cb-63a5-4489-bc68-bf8ac26ee15b","offsetMinutes":5,"armSignature":"legacy-signature","usageDate":"2026-07-13","timezoneIdentifier":"America/New_York"}
         """
 
         let generation = try JSONDecoder().decode(
-            EarnedActivityGeneration.Generation.self,
+            LegacyGenerationProvenance.self,
             from: Data(json.utf8)
         )
 
         XCTAssertNil(generation.armedAt)
         XCTAssertNil(generation.generationKey)
-        XCTAssertTrue(generation.isValid)
+        XCTAssertTrue(LegacyMeteringActivity.isValid(generation))
     }
 
     func test_generationRoundTripsArmedAtTimestamp() throws {
         let armedAt = Date(timeIntervalSince1970: 1_784_003_200)
-        let generation = EarnedActivityGeneration.Generation(
-            activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
+        let generation = LegacyGenerationProvenance(
+            activityName: LegacyMeteringActivity.generatedActivityName(id: UUID()),
             deviceID: UUID().uuidString,
             offsetMinutes: 5,
             usageDate: "2026-07-13",
@@ -393,7 +393,7 @@ final class EarnedTimeStoreTests: XCTestCase {
         )
 
         let decoded = try JSONDecoder().decode(
-            EarnedActivityGeneration.Generation.self,
+            LegacyGenerationProvenance.self,
             from: JSONEncoder().encode(generation)
         )
 
@@ -459,176 +459,6 @@ final class EarnedTimeStoreTests: XCTestCase {
         XCTAssertEqual(store.acceptedUsageDate, "2026-07-18")
     }
 
-    func test_futureLifecycleVersionIsCorruptAndCannotAuthorizeCallback() throws {
-        let suiteName = "EarnedTimeStoreTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        let generation = EarnedActivityGeneration.Generation(
-            activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
-            deviceID: UUID().uuidString,
-            offsetMinutes: 0,
-            usageDate: "2026-07-12",
-            timezoneIdentifier: "America/New_York"
-        )
-        let future = EarnedActivityGeneration.Lifecycle(
-            version: EarnedActivityGeneration.currentLifecycleVersion + 1,
-            active: generation,
-            pending: nil
-        )
-        let futureData = try JSONEncoder().encode(future)
-        defaults.set(futureData, forKey: EarnedActivityGeneration.lifecycleKey)
-        defaults.set([generation.activityName], forKey: EarnedActivityGeneration.lifecycleBreadcrumbsKey)
-        var stopped: [String] = []
-
-        XCTAssertThrowsError(try JSONDecoder().decode(
-            EarnedActivityGeneration.Lifecycle.self,
-            from: futureData
-        ))
-        XCTAssertNil(EarnedActivityGeneration.loadLifecycle(defaults: defaults))
-        XCTAssertNil(EarnedActivityGeneration.authorizedCallback(
-            activityName: generation.activityName,
-            currentDeviceID: generation.deviceID,
-            lifecycle: future
-        ))
-        EarnedActivityGeneration.recoverPending(
-            defaults: defaults,
-            stopMonitoring: { stopped = $0 }
-        )
-
-        XCTAssertTrue(stopped.contains(generation.activityName))
-        XCTAssertEqual(EarnedActivityGeneration.loadLifecycle(defaults: defaults)?.isStopped, true)
-    }
-
-    func test_promotionPersistenceFailureStopsNewGenerationAndRestoresPriorState() throws {
-        let suiteName = "EarnedTimeStoreTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        let prior = EarnedActivityGeneration.Generation(
-            activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
-            deviceID: UUID().uuidString,
-            offsetMinutes: 10,
-            usageDate: "2026-07-12",
-            timezoneIdentifier: "America/New_York"
-        )
-        let priorLifecycle = EarnedActivityGeneration.Lifecycle(active: prior, pending: nil)
-        XCTAssertTrue(EarnedActivityGeneration.persistLifecycle(priorLifecycle, defaults: defaults))
-        defaults.set(prior.activityName, forKey: EarnedActivityGeneration.activeActivityNameKey)
-        let next = EarnedActivityGeneration.Generation(
-            activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
-            deviceID: prior.deviceID,
-            offsetMinutes: 20,
-            usageDate: "2026-07-12",
-            timezoneIdentifier: "America/New_York"
-        )
-        var persistAttempt = 0
-        var stopped: [[String]] = []
-
-        let installed = EarnedActivityGeneration.installReplacement(
-            next,
-            defaults: defaults,
-            startMonitoring: { _ in },
-            stopMonitoring: { stopped.append($0) },
-            persistLifecycle: { lifecycle, defaults in
-                persistAttempt += 1
-                if persistAttempt == 2 {
-                    defaults?.removeObject(forKey: EarnedActivityGeneration.lifecycleKey)
-                    defaults?.removeObject(forKey: EarnedActivityGeneration.lifecycleBreadcrumbsKey)
-                    defaults?.removeObject(forKey: EarnedActivityGeneration.activeActivityNameKey)
-                    return false
-                }
-                return EarnedActivityGeneration.persistLifecycle(lifecycle, defaults: defaults)
-            }
-        )
-
-        XCTAssertFalse(installed)
-        XCTAssertEqual(stopped, [[next.activityName]])
-        XCTAssertEqual(EarnedActivityGeneration.loadLifecycle(defaults: defaults), priorLifecycle)
-        XCTAssertEqual(
-            defaults.stringArray(forKey: EarnedActivityGeneration.lifecycleBreadcrumbsKey),
-            EarnedActivityGeneration.stopTargets(lifecycle: priorLifecycle)
-        )
-        XCTAssertEqual(
-            defaults.string(forKey: EarnedActivityGeneration.activeActivityNameKey),
-            prior.activityName
-        )
-    }
-
-    func test_falseSynchronizePersistsLifecycleWhenExactReadBackMatches() throws {
-        let suiteName = "EarnedTimeStoreTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        let generation = EarnedActivityGeneration.Generation(
-            activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
-            deviceID: UUID().uuidString,
-            offsetMinutes: 0,
-            usageDate: "2026-07-13",
-            timezoneIdentifier: "America/New_York"
-        )
-        let lifecycle = EarnedActivityGeneration.Lifecycle(
-            active: generation,
-            pending: nil
-        )
-
-        XCTAssertTrue(EarnedActivityGeneration.persistLifecycle(
-            lifecycle,
-            defaults: defaults,
-            synchronizeDefaults: { _ in false }
-        ))
-        XCTAssertEqual(
-            EarnedActivityGeneration.loadLifecycle(defaults: defaults),
-            lifecycle
-        )
-        XCTAssertEqual(
-            defaults.stringArray(forKey: EarnedActivityGeneration.lifecycleBreadcrumbsKey),
-            EarnedActivityGeneration.stopTargets(lifecycle: lifecycle)
-        )
-    }
-
-    func test_lifecycleReadBackMismatchRemainsHardFailure() throws {
-        let suiteName = "EarnedTimeStoreTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        let generation = EarnedActivityGeneration.Generation(
-            activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
-            deviceID: UUID().uuidString,
-            offsetMinutes: 0,
-            usageDate: "2026-07-13",
-            timezoneIdentifier: "America/New_York"
-        )
-        let lifecycle = EarnedActivityGeneration.Lifecycle(
-            active: generation,
-            pending: nil
-        )
-
-        XCTAssertFalse(EarnedActivityGeneration.persistLifecycle(
-            lifecycle,
-            defaults: defaults,
-            synchronizeDefaults: { _ in false },
-            readBackObject: { defaults, key in
-                if key == EarnedActivityGeneration.lifecycleKey { return Data() }
-                return defaults.object(forKey: key)
-            }
-        ))
-    }
-
-    func test_falseSynchronizeClearsLifecycleWhenReadBackIsEmpty() throws {
-        let suiteName = "EarnedTimeStoreTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        defaults.set(Data([0x01]), forKey: EarnedActivityGeneration.lifecycleKey)
-        defaults.set(
-            [EarnedActivityGeneration.legacyActivityName],
-            forKey: EarnedActivityGeneration.lifecycleBreadcrumbsKey
-        )
-
-        XCTAssertTrue(EarnedActivityGeneration.persistLifecycle(
-            .init(active: nil, pending: nil),
-            defaults: defaults,
-            synchronizeDefaults: { _ in false }
-        ))
-        XCTAssertNil(defaults.object(forKey: EarnedActivityGeneration.lifecycleKey))
-        XCTAssertNil(defaults.object(forKey: EarnedActivityGeneration.lifecycleBreadcrumbsKey))
-    }
 
     func test_runtimeTimezonePersistsAndDrivesUsageDateWhenDeviceTimezoneDiffers() {
         withIsolatedStore { store in

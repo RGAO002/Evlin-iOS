@@ -4,15 +4,15 @@ import XCTest
 @MainActor
 final class EarnedBudgetArmingTests: XCTestCase {
     func test_legacyActiveGenerationRequiresReplacement() {
-        let legacy = EarnedActivityGeneration.Generation(
-            activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
+        let legacy = LegacyGenerationProvenance(
+            activityName: LegacyMeteringActivity.generatedActivityName(id: UUID()),
             deviceID: UUID().uuidString,
             offsetMinutes: 5,
             usageDate: "2026-07-13",
             timezoneIdentifier: "America/New_York"
         )
-        let timestamped = EarnedActivityGeneration.Generation(
-            activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
+        let timestamped = LegacyGenerationProvenance(
+            activityName: LegacyMeteringActivity.generatedActivityName(id: UUID()),
             deviceID: UUID().uuidString,
             offsetMinutes: 5,
             usageDate: "2026-07-13",
@@ -41,86 +41,6 @@ final class EarnedBudgetArmingTests: XCTestCase {
         )
     }
 
-    func test_failedReplacementPreservesOffsetAndGeneration() {
-        let suiteName = "EarnedBudgetArmingTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        let store = EarnedTimeStore(suiteName: suiteName)
-        let priorGeneration = EarnedActivityGeneration.generatedActivityName(id: UUID())
-        store.earnedUsageOffsetMinutes = 5
-        defaults.set(priorGeneration, forKey: EarnedActivityGeneration.activeActivityNameKey)
-
-        let installed = EarnedBudgetArming.installReplacement(
-            replacementOffset: 15,
-            store: store,
-            startMonitoring: { false }
-        )
-
-        XCTAssertFalse(installed)
-        XCTAssertEqual(store.earnedUsageOffsetMinutes, 5)
-        XCTAssertEqual(
-            defaults.string(forKey: EarnedActivityGeneration.activeActivityNameKey),
-            priorGeneration
-        )
-    }
-
-    func test_stopPersistsStoppedLifecycle() {
-        let suiteName = "EarnedBudgetArmingTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        EarnedActivityGeneration.persistLifecycle(
-            .init(
-                active: .init(
-                    activityName: EarnedActivityGeneration.legacyActivityName,
-                    deviceID: "b21411cb-63a5-4489-bc68-bf8ac26ee15b",
-                    offsetMinutes: 5,
-                    usageDate: "2026-07-11",
-                    timezoneIdentifier: "America/New_York"
-                ),
-                pending: nil
-            ),
-            defaults: defaults
-        )
-        var stopCount = 0
-
-        EarnedBudgetArming.stopLegacyMonitoring(
-            defaults: defaults,
-            stopMonitoring: { stopCount += 1 }
-        )
-
-        XCTAssertEqual(stopCount, 1)
-        let stoppedLifecycle = EarnedActivityGeneration.loadLifecycle(defaults: defaults)
-        XCTAssertEqual(stoppedLifecycle?.isStopped, true)
-    }
-
-    func test_interruptedStopTombstonePreventsLegacyMigrationAndForcesInstall() {
-        let suiteName = "EarnedBudgetArmingTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        var stopped: [String] = []
-
-        EarnedActivityGeneration.stopPersisted(
-            defaults: defaults,
-            stopMonitoring: { stopped = $0 }
-        )
-        let stoppedLifecycle = EarnedActivityGeneration.loadLifecycle(defaults: defaults)
-        let legacy = EarnedActivityGeneration.Generation(
-            activityName: EarnedActivityGeneration.legacyActivityName,
-            deviceID: "b21411cb-63a5-4489-bc68-bf8ac26ee15b",
-            offsetMinutes: 5,
-            usageDate: "2026-07-11",
-            timezoneIdentifier: "America/New_York"
-        )
-        EarnedActivityGeneration.migrateActiveIfNeeded(legacy, defaults: defaults)
-
-        XCTAssertTrue(stopped.contains(EarnedActivityGeneration.legacyActivityName))
-        XCTAssertEqual(stoppedLifecycle?.isStopped, true)
-        XCTAssertNil(EarnedActivityGeneration.authorizedCallback(
-            activityName: EarnedActivityGeneration.legacyActivityName,
-            currentDeviceID: legacy.deviceID,
-            lifecycle: EarnedActivityGeneration.loadLifecycle(defaults: defaults)
-        ))
-    }
 
     func test_identityMirrorStopsOldGenerationBeforeWritingNewChildID() {
         let suiteName = "EarnedBudgetArmingTests.\(UUID().uuidString)"
@@ -168,46 +88,6 @@ final class EarnedBudgetArmingTests: XCTestCase {
         XCTAssertEqual(defaults.string(forKey: "evlin.childId"), newID.uuidString.lowercased())
     }
 
-    func test_identityTeardownStopsAndRemovesMirrorBeforeClearingUsage() {
-        let suiteName = "EarnedBudgetArmingTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        let store = EarnedTimeStore(suiteName: suiteName)
-        let oldID = UUID()
-        let generation = EarnedActivityGeneration.Generation(
-            activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
-            deviceID: oldID.uuidString,
-            offsetMinutes: 10,
-            usageDate: "2026-07-12",
-            timezoneIdentifier: "America/New_York"
-        )
-        defaults.set(oldID.uuidString, forKey: "evlin.childId")
-        XCTAssertTrue(EarnedActivityGeneration.persistLifecycle(
-            .init(active: generation, pending: nil),
-            defaults: defaults
-        ))
-        store.latestDeviceEstimate = 45
-
-        EarnedBudgetArming.teardownFamilyIdentity(
-            appGroupDefaults: defaults,
-            store: store,
-            stopMonitoring: {},
-            beforeUsageClear: {
-                XCTAssertNil(defaults.string(forKey: "evlin.childId"))
-                XCTAssertEqual(
-                    EarnedActivityGeneration.loadLifecycle(defaults: defaults)?.isStopped,
-                    true
-                )
-                XCTAssertNil(EarnedActivityGeneration.authorizedCallback(
-                    activityName: generation.activityName,
-                    currentDeviceID: defaults.string(forKey: "evlin.childId"),
-                    lifecycle: EarnedActivityGeneration.loadLifecycle(defaults: defaults)
-                ))
-            }
-        )
-
-        XCTAssertNil(store.latestDeviceEstimate)
-    }
 
     func test_epochIdentityTeardownPreparesAndClearsUsageBeforeRemovingMirror() throws {
         let suiteName = "EarnedBudgetArmingTests.epochIdentity.\(UUID().uuidString)"
@@ -313,142 +193,6 @@ final class EarnedBudgetArmingTests: XCTestCase {
         ))
     }
 
-    func test_callbackAuthorizedBeforeTeardownCannotMutateAfterContinuationResumes() async {
-        let suiteName = "EarnedBudgetArmingTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        let store = EarnedTimeStore(suiteName: suiteName)
-        let oldID = UUID()
-        let generation = EarnedActivityGeneration.Generation(
-            activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
-            deviceID: oldID.uuidString,
-            offsetMinutes: 0,
-            usageDate: "2026-07-12",
-            timezoneIdentifier: "America/New_York"
-        )
-        defaults.set(oldID.uuidString, forKey: "evlin.childId")
-        XCTAssertTrue(EarnedActivityGeneration.persistLifecycle(
-            .init(active: generation, pending: nil),
-            defaults: defaults
-        ))
-        var resumeCallback: CheckedContinuation<Void, Never>?
-        var didMutate = false
-
-        let callback = Task {
-            XCTAssertEqual(EarnedActivityGeneration.authorizedCallback(
-                activityName: generation.activityName,
-                currentDeviceID: defaults.string(forKey: "evlin.childId"),
-                lifecycle: EarnedActivityGeneration.loadLifecycle(defaults: defaults)
-            ), generation)
-            await withCheckedContinuation { resumeCallback = $0 }
-            return EarnedActivityGeneration.performIfAuthorized(
-                generation: generation,
-                defaults: defaults
-            ) {
-                didMutate = true
-            }
-        }
-        while resumeCallback == nil { await Task.yield() }
-        EarnedBudgetArming.teardownFamilyIdentity(
-            appGroupDefaults: defaults,
-            store: store,
-            stopMonitoring: {}
-        )
-        resumeCallback?.resume()
-
-        let callbackAuthorized = await callback.value
-        XCTAssertFalse(callbackAuthorized)
-        XCTAssertFalse(didMutate)
-    }
-
-    func test_generationMutationRollsBackItsWriteWhenAuthorizationChangesAfterOperation() {
-        let suiteName = "EarnedBudgetArmingTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        let oldID = UUID()
-        let generation = EarnedActivityGeneration.Generation(
-            activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
-            deviceID: oldID.uuidString,
-            offsetMinutes: 0,
-            usageDate: "2026-07-12",
-            timezoneIdentifier: "America/New_York"
-        )
-        let mutationKey = "test.earned.old-generation-write"
-        defaults.set("prior", forKey: mutationKey)
-        defaults.set(oldID.uuidString, forKey: "evlin.childId")
-        XCTAssertTrue(EarnedActivityGeneration.persistLifecycle(
-            .init(active: generation, pending: nil),
-            defaults: defaults
-        ))
-
-        let authorized = EarnedActivityGeneration.performIfAuthorized(
-            generation: generation,
-            defaults: defaults,
-            mutationKeys: [mutationKey],
-            beforeFinalAuthorizationCheck: {
-                defaults.removeObject(forKey: "evlin.childId")
-                XCTAssertTrue(EarnedActivityGeneration.persistLifecycle(
-                    .init(active: nil, pending: nil, isStopped: true),
-                    defaults: defaults
-                ))
-            }
-        ) {
-            defaults.set("old-write", forKey: mutationKey)
-        }
-
-        XCTAssertFalse(authorized)
-        XCTAssertEqual(defaults.string(forKey: mutationKey), "prior")
-    }
-
-    func test_generationRollbackDoesNotOverwriteNewerIdentityWrite() {
-        let suiteName = "EarnedBudgetArmingTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        let oldID = UUID()
-        let newID = UUID()
-        let oldGeneration = EarnedActivityGeneration.Generation(
-            activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
-            deviceID: oldID.uuidString,
-            offsetMinutes: 0,
-            usageDate: "2026-07-12",
-            timezoneIdentifier: "America/New_York"
-        )
-        let newGeneration = EarnedActivityGeneration.Generation(
-            activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
-            deviceID: newID.uuidString,
-            offsetMinutes: 0,
-            usageDate: "2026-07-12",
-            timezoneIdentifier: "America/New_York"
-        )
-        let mutationKey = "test.earned.new-generation-write"
-        defaults.set("prior", forKey: mutationKey)
-        defaults.set(oldID.uuidString, forKey: "evlin.childId")
-        XCTAssertTrue(EarnedActivityGeneration.persistLifecycle(
-            .init(active: oldGeneration, pending: nil),
-            defaults: defaults
-        ))
-
-        let authorized = EarnedActivityGeneration.performIfAuthorized(
-            generation: oldGeneration,
-            defaults: defaults,
-            mutationKeys: [mutationKey],
-            beforeFinalAuthorizationCheck: {
-                defaults.set(newID.uuidString, forKey: "evlin.childId")
-                XCTAssertTrue(EarnedActivityGeneration.persistLifecycle(
-                    .init(active: newGeneration, pending: nil),
-                    defaults: defaults
-                ))
-                defaults.set("new-write", forKey: mutationKey)
-                defaults.synchronize()
-            }
-        ) {
-            defaults.set("old-write", forKey: mutationKey)
-        }
-
-        XCTAssertFalse(authorized)
-        XCTAssertEqual(defaults.string(forKey: mutationKey), "new-write")
-        XCTAssertEqual(EarnedActivityGeneration.loadLifecycle(defaults: defaults)?.active, newGeneration)
-    }
 
     func test_authoritativeReadinessGateRejectsMissingAndMismatchedDeviceMarkers() {
         let suiteName = "EarnedBudgetArmingTests.\(UUID().uuidString)"
@@ -489,8 +233,8 @@ final class EarnedBudgetArmingTests: XCTestCase {
             selectionBytes: Data("persisted-selection-a".utf8),
             enforcementSetID: enforcementSetID
         )
-        let active = EarnedActivityGeneration.Generation(
-            activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
+        let active = LegacyGenerationProvenance(
+            activityName: LegacyMeteringActivity.generatedActivityName(id: UUID()),
             deviceID: deviceID.uuidString,
             offsetMinutes: 5,
             usageDate: "2026-07-18",
@@ -498,7 +242,7 @@ final class EarnedBudgetArmingTests: XCTestCase {
             generationKey: baseKey,
             armedAt: Date()
         )
-        let sameIdentityWithAdvancedOffset = EarnedActivityGeneration.Generation(
+        let sameIdentityWithAdvancedOffset = LegacyGenerationProvenance(
             activityName: active.activityName,
             deviceID: active.deviceID,
             offsetMinutes: 25,

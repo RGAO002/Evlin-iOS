@@ -30,7 +30,10 @@ final class MeteringV2ActivationTests: XCTestCase {
         XCTAssertEqual(state.activeRouteID, fixture.candidateRouteID)
         XCTAssertEqual(state.installWork[fixture.candidateInstallID]?.phase, .active)
         XCTAssertEqual(state.legacy?.phase, .stoppedV1)
-        XCTAssertEqual(fixture.center.stopCalls, [[DeviceActivityName("evlin.earned.legacy")]])
+        XCTAssertEqual(fixture.center.stopCalls, [[
+            DeviceActivityName(LegacyMeteringActivity.legacyActivityName),
+            DeviceActivityName("evlin.earned.legacy"),
+        ]])
     }
 
     func testActivationFailureDoesNotRatchetOrStopLegacyLane() async throws {

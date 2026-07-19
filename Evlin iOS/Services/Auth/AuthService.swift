@@ -127,20 +127,6 @@ final class AuthService {
             )
         }
 
-        let lifecycle = EarnedActivityGeneration.loadLifecycle(defaults: appGroupDefaults)
-        let targets = EarnedActivityGeneration.stopTargets(lifecycle: lifecycle)
-        _ = EarnedActivityGeneration.persistLifecycle(
-            .init(
-                active: nil,
-                pending: nil,
-                retiringActivityNames: targets,
-                isStopped: true
-            ),
-            defaults: appGroupDefaults
-        )
-        appGroupDefaults.removeObject(
-            forKey: EarnedActivityGeneration.activeActivityNameKey
-        )
         appGroupDefaults.set(false, forKey: "evlin.usageCountingAllowed")
         if oldOwner != nil && cleanupWorkID == nil {
             // Keep the old owner mirror as the recovery authority. The main

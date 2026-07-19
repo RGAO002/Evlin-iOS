@@ -148,17 +148,13 @@ final class AuthServiceTests: XCTestCase {
         let appGroup = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defer { appGroup.removePersistentDomain(forName: suiteName) }
         let deviceID = UUID()
-        let generation = EarnedActivityGeneration.Generation(
-            activityName: EarnedActivityGeneration.generatedActivityName(id: UUID()),
+        let generation = LegacyGenerationProvenance(
+            activityName: LegacyMeteringActivity.generatedActivityName(id: UUID()),
             deviceID: deviceID.uuidString,
             offsetMinutes: 0,
             usageDate: "2026-07-12",
             timezoneIdentifier: "America/New_York"
         )
-        XCTAssertTrue(EarnedActivityGeneration.persistLifecycle(
-            .init(active: generation, pending: nil),
-            defaults: appGroup
-        ))
         appGroup.set(deviceID.uuidString, forKey: "evlin.childId")
         let epochURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("auth-terminal-identity-\(UUID().uuidString).json")
@@ -169,6 +165,20 @@ final class AuthServiceTests: XCTestCase {
                 appGroup.string(forKey: "evlin.childId").flatMap(UUID.init(uuidString:))
             }
         )
+        try epochStore.transaction(expectedOwner: deviceID) { state in
+            state.legacy = LegacyCompatibilityMonitorState(
+                ownerChildDeviceID: deviceID,
+                lifecycleVersion: 2,
+                active: generation,
+                pending: nil,
+                retiringActivityNames: [],
+                breadcrumbActivityNames: [],
+                scalarActiveActivityName: generation.activityName,
+                isStopped: false,
+                phase: .activeV1,
+                stopAcknowledgedAt: nil
+            )
+        }
         let usageStore = EarnedTimeStore(suiteName: suiteName)
         let teardown = expectation(description: "main teardown")
         let auth = makeAuth(
@@ -187,10 +197,15 @@ final class AuthServiceTests: XCTestCase {
         DispatchQueue.global().async {
             NotificationCenter.default.post(name: .evlinSessionSignedOut, object: nil)
             XCTAssertNil(appGroup.string(forKey: "evlin.childId"))
-            let lifecycle = EarnedActivityGeneration.loadLifecycle(defaults: appGroup)
-            XCTAssertEqual(lifecycle?.isStopped, true)
-            XCTAssertNil(lifecycle?.active)
-            XCTAssertTrue(lifecycle?.retiringActivityNames.contains(generation.activityName) == true)
+            let state = try? epochStore.read()
+            XCTAssertTrue(
+                state?.identityCleanupWork?.oldActivityNames.contains(generation.activityName) == true
+            )
+            XCTAssertNil(LegacyMeteringActivity.authorizedCallback(
+                activityName: generation.activityName,
+                currentDeviceID: appGroup.string(forKey: "evlin.childId"),
+                state: state?.legacy
+            ))
             postReturned.fulfill()
         }
 

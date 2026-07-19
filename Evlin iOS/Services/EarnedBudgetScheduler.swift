@@ -155,7 +155,7 @@ final class EarnedBudgetScheduler {
         poolMinutes: Int,
         capMinutes: Int,
         selection: FamilyActivitySelection,
-        generation: EarnedActivityGeneration.Generation,
+        generation: LegacyGenerationProvenance,
         schedule: DeviceActivitySchedule? = nil,
         policyTimeZone: TimeZone = .current
     ) -> Bool {
@@ -193,9 +193,11 @@ final class EarnedBudgetScheduler {
             )
         }
 
-        let installed = EarnedActivityGeneration.installReplacement(
+        guard let owner = UUID(uuidString: generation.deviceID) else { return false }
+        let installed = LegacyMeteringActivity.installReplacement(
             generation,
-            defaults: defaults,
+            store: .shared,
+            owner: owner,
             startMonitoring: { rawName in
                 try center.startMonitoring(
                     DeviceActivityName(rawName),
@@ -227,7 +229,7 @@ final class EarnedBudgetScheduler {
         poolMinutes: Int,
         capMinutes: Int,
         selection: FamilyActivitySelection,
-        generation: EarnedActivityGeneration.Generation,
+        generation: LegacyGenerationProvenance,
         now: Date = Date(),
         timeZone: TimeZone = .current,
         calendar: Calendar = Calendar(identifier: .gregorian)
@@ -247,8 +249,11 @@ final class EarnedBudgetScheduler {
     }
 
     func recoverInterruptedTransition() {
-        EarnedActivityGeneration.recoverPending(
-            defaults: defaults,
+        guard let owner = defaults?.string(forKey: "evlin.childId")
+            .flatMap(UUID.init(uuidString:)) else { return }
+        LegacyMeteringActivity.recoverInterruptedTransition(
+            store: .shared,
+            owner: owner,
             stopMonitoring: { rawNames in
                 center.stopMonitoring(rawNames.map { DeviceActivityName($0) })
             }
@@ -257,8 +262,14 @@ final class EarnedBudgetScheduler {
 
     /// Stop monitoring the earned-budget activity (e.g. at end of day / reset).
     func stop() {
-        EarnedActivityGeneration.stopPersisted(
-            defaults: defaults,
+        guard let owner = defaults?.string(forKey: "evlin.childId")
+            .flatMap(UUID.init(uuidString:)) else {
+            center.stopMonitoring([DeviceActivityName(LegacyMeteringActivity.legacyActivityName)])
+            return
+        }
+        LegacyMeteringActivity.stopPersisted(
+            store: .shared,
+            owner: owner,
             stopMonitoring: { rawNames in
                 center.stopMonitoring(rawNames.map { DeviceActivityName($0) })
             }

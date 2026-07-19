@@ -10,7 +10,7 @@ nonisolated enum EarnedThresholdProductionCoordinator {
 
     @discardableResult
     static func process(
-        generation: EarnedActivityGeneration.Generation,
+        generation: LegacyGenerationProvenance,
         eventName: String,
         rawThresholdMinutes: Int,
         adjustedEstimateMinutes: Int,
@@ -82,14 +82,14 @@ nonisolated enum EarnedThresholdProductionCoordinator {
 
     private static func legacyEpochID(for activityName: String) -> UUID {
         let suffix = String(
-            activityName.dropFirst(EarnedActivityGeneration.generatedActivityPrefix.count)
+            activityName.dropFirst(LegacyMeteringActivity.generatedActivityPrefix.count)
         )
         return UUID(uuidString: suffix) ?? UUID(uuidString: "00000000-0000-0000-0000-000000000000")!
     }
 
     private static func recordRejection(
         verdict: MeteringCallbackVerdict,
-        generation: EarnedActivityGeneration.Generation,
+        generation: LegacyGenerationProvenance,
         eventName: String,
         rawThresholdMinutes: Int,
         adjustedEstimateMinutes: Int,
@@ -228,7 +228,7 @@ enum EarnedSampleReporter {
             return .acceptedWithoutReconciliation
         }
         if let expectedDeviceID {
-            let mirrored = EarnedActivityGeneration.canonicalDeviceID(
+            let mirrored = LegacyMeteringActivity.canonicalDeviceID(
                 UserDefaults(suiteName: suiteName)?.string(forKey: "evlin.childId")
             )
             guard mirrored == expectedDeviceID.uuidString.lowercased() else {
@@ -399,7 +399,7 @@ enum EarnedSampleReporter {
         if let epochStore {
             deliveryStore = epochStore
         } else if suiteName == sharedSuiteName,
-                  let mirrored = EarnedActivityGeneration.canonicalDeviceID(
+                  let mirrored = LegacyMeteringActivity.canonicalDeviceID(
                       UserDefaults(suiteName: suiteName)?.string(forKey: "evlin.childId")
                   ),
                   mirrored == deviceID.uuidString.lowercased() {
@@ -494,7 +494,7 @@ enum EarnedSampleReporter {
     ) async {
         if suiteName == sharedSuiteName,
            let deviceID = onlyDeviceID ?? UUID(uuidString: UserDefaults(suiteName: suiteName)?.string(forKey: "evlin.childId") ?? ""),
-           EarnedActivityGeneration.canonicalDeviceID(
+           LegacyMeteringActivity.canonicalDeviceID(
                UserDefaults(suiteName: suiteName)?.string(forKey: "evlin.childId")
            ) == deviceID.uuidString.lowercased() {
             let transport = ClosureMeteringTransport(handler: requestData)
@@ -806,7 +806,7 @@ enum EarnedSampleReporter {
 
     private static func persistEpochSampleIfCurrentOwner(_ entry: RetryEntry, suiteName: String) {
         guard suiteName == sharedSuiteName,
-              let mirrored = EarnedActivityGeneration.canonicalDeviceID(
+              let mirrored = LegacyMeteringActivity.canonicalDeviceID(
                   UserDefaults(suiteName: suiteName)?.string(forKey: "evlin.childId")
               ),
               mirrored == entry.deviceID.uuidString.lowercased()

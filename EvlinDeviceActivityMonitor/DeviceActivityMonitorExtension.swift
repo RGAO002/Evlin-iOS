@@ -22,33 +22,34 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
 
     private func authorizedEarnedGeneration(
         activityName: String
-    ) -> EarnedActivityGeneration.Generation? {
+    ) -> LegacyGenerationProvenance? {
         defaults?.synchronize()
-        return EarnedActivityGeneration.authorizedCallback(
+        return LegacyMeteringActivity.authorizedCallback(
             activityName: activityName,
             currentDeviceID: defaults?.string(forKey: "evlin.childId"),
-            lifecycle: EarnedActivityGeneration.loadLifecycle(defaults: defaults)
+            state: (try? DeviceEpochStore.shared.read())?.legacy
         )
     }
 
     private func earnedGenerationIsActive(
-        _ generation: EarnedActivityGeneration.Generation
+        _ generation: LegacyGenerationProvenance
     ) -> Bool {
-        EarnedActivityGeneration.isAuthorized(
+        LegacyMeteringActivity.isAuthorized(
             generation: generation,
-            defaults: defaults
+            store: .shared
         )
     }
 
     @discardableResult
     private func performIfEarnedGenerationActive(
-        _ generation: EarnedActivityGeneration.Generation,
+        _ generation: LegacyGenerationProvenance,
         mutationKeys: [String] = [],
         rollbackExternalState: () -> Void = {},
         _ operation: () -> Void
     ) -> Bool {
-        EarnedActivityGeneration.performIfAuthorized(
+        LegacyMeteringActivity.performIfAuthorized(
             generation: generation,
+            store: .shared,
             defaults: defaults,
             mutationKeys: mutationKeys,
             rollbackExternalState: rollbackExternalState,
@@ -118,7 +119,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         // `.earnedTime` source from all selected-set records — do NOT delete whole
         // records (a record with {.manual, .earnedTime} must survive with {.manual}).
         // This mirrors the limit daily-reset path above but is source-specific.
-        if EarnedActivityGeneration.isEarnedActivityName(raw) {
+        if LegacyMeteringActivity.isEarnedActivityName(raw) {
             guard let generation = authorizedEarnedGeneration(activityName: raw) else { return }
             _ = ActiveLockPersistenceLock.shared.withLock {
                 _ = performIfEarnedGenerationActive(
@@ -255,7 +256,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         //   2. If N ≥ effective cap/tripwire AND no override flag → apply `.earnedTime`
         //      shield over the Locked-set tokens (pure App Group path, no actor).
         if event.rawValue.hasPrefix("evlin.earned.t"),
-           EarnedActivityGeneration.isEarnedActivityName(activity.rawValue) {
+           LegacyMeteringActivity.isEarnedActivityName(activity.rawValue) {
             guard let generation = authorizedEarnedGeneration(
                 activityName: activity.rawValue
             ) else { return }
@@ -298,7 +299,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
 
     private func usageCountingAllowed(
         eventName: String,
-        earnedGeneration: EarnedActivityGeneration.Generation? = nil
+        earnedGeneration: LegacyGenerationProvenance? = nil
     ) -> Bool {
         guard EarnedTimeStore.shared.usageCountingAllowed else {
             let recordSkip = {
@@ -469,7 +470,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
     private func handleEarnedThreshold(
         eventName: String,
         activity: DeviceActivityName,
-        generation: EarnedActivityGeneration.Generation
+        generation: LegacyGenerationProvenance
     ) {
         let suffix = String(eventName.dropFirst("evlin.earned.t".count))
         guard let n = Int(suffix) else {
@@ -524,7 +525,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
     private func handleAcceptedEarnedThreshold(
         eventName: String,
         activity: DeviceActivityName,
-        generation: EarnedActivityGeneration.Generation,
+        generation: LegacyGenerationProvenance,
         generationDeviceID: UUID,
         rawThresholdMinutes: Int,
         adjustedEstimateMinutes adjustedN: Int,
@@ -570,9 +571,9 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         if let baseURL = ExtensionConfig.baseURL, sampleQueued {
             Task {
                 let authorizationIsCurrent = {
-                    EarnedActivityGeneration.isAuthorized(
+                    LegacyMeteringActivity.isAuthorized(
                         generation: generation,
-                        defaults: UserDefaults(suiteName: EarnedTimeStore.appGroupSuiteName)
+                        store: .shared
                     )
                 }
                 guard authorizationIsCurrent() else { return }
