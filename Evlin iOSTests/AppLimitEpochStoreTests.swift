@@ -1,0 +1,381 @@
+import CryptoKit
+import FamilyControls
+import Foundation
+import ManagedSettings
+import XCTest
+@testable import Evlin_iOS
+
+final class AppLimitEpochStoreTests: XCTestCase {
+    private var directoryURL: URL!
+    private var fileURL: URL!
+
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        directoryURL = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "app-limit-epoch-tests-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: directoryURL,
+            withIntermediateDirectories: true
+        )
+        fileURL = directoryURL.appendingPathComponent("app-limit-epoch.json")
+    }
+
+    override func tearDownWithError() throws {
+        if let directoryURL {
+            try? FileManager.default.removeItem(at: directoryURL)
+        }
+        try super.tearDownWithError()
+    }
+
+    func testEmptyStoreHasCurrentSchemaAndDoesNotCreateAFile() throws {
+        let state = try makeStore().read()
+
+        XCTAssertEqual(state.schemaVersion, AppLimitEpochStoreState.currentSchemaVersion)
+        XCTAssertEqual(state.storeRevision, 0)
+        XCTAssertNil(state.ownerChildDeviceID)
+        XCTAssertTrue(state.slots.isEmpty)
+        XCTAssertNil(state.legacyMigration)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fileURL.path))
+    }
+
+    func testTransactionSurvivesRestartAndIncrementsRevision() throws {
+        let ruleID = UUID(uuidString: "10000000-0000-0000-0000-000000000001")!
+        let owner = UUID(uuidString: "20000000-0000-0000-0000-000000000001")!
+        let store = makeStore(owner: owner)
+
+        let accepted = try store.transaction(source: .poll, expectedOwner: owner) { state in
+            state.replaceSlotIfNewer(makeSetSlot(ruleID: ruleID, token: 7, source: .poll))
+        }
+
+        XCTAssertTrue(accepted)
+        let restarted = try makeStore(owner: owner).read()
+        XCTAssertEqual(restarted.storeRevision, 1)
+        XCTAssertEqual(restarted.ownerChildDeviceID, owner)
+        XCTAssertEqual(restarted.slots[ruleID]?.latestOrderingToken, 7)
+        XCTAssertEqual(restarted.slots[ruleID]?.activeRule?.bundleID, "com.example.focus")
+        XCTAssertEqual(restarted.lastMutationSource, .poll)
+    }
+
+    func testTransactionCannotClearBoundOwner() throws {
+        let ruleID = UUID(uuidString: "10000000-0000-0000-0000-000000000099")!
+        let owner = UUID(uuidString: "20000000-0000-0000-0000-000000000099")!
+        let store = makeStore(owner: owner)
+
+        _ = try store.transaction(source: .poll, expectedOwner: owner) { state in
+            state.ownerChildDeviceID = nil
+            state.slots[ruleID] = makeSetSlot(ruleID: ruleID, token: 1, source: .poll)
+        }
+
+        XCTAssertEqual(try makeStore(owner: owner).read().ownerChildDeviceID, owner)
+    }
+
+    func testCorruptRootIsQuarantinedBeforeReturningEmptyState() throws {
+        let corrupt = Data("not-json\n".utf8)
+        try corrupt.write(to: fileURL)
+
+        let state = try makeStore().read()
+
+        XCTAssertTrue(state.slots.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fileURL.path))
+        let entries = try FileManager.default.contentsOfDirectory(
+            at: directoryURL,
+            includingPropertiesForKeys: nil
+        )
+        let digest = SHA256.hash(data: corrupt).map { String(format: "%02x", $0) }.joined()
+        let quarantined = try XCTUnwrap(entries.first { $0.lastPathComponent.contains(".corrupt-\(digest).") })
+        XCTAssertEqual(try Data(contentsOf: quarantined), corrupt)
+    }
+
+    func testInterruptedReplacementRestoresPriorCanonicalBytes() throws {
+        let ruleID = UUID(uuidString: "10000000-0000-0000-0000-000000000002")!
+        let store = makeStore()
+        _ = try store.transaction(source: .poll, expectedOwner: nil) { state in
+            state.replaceSlotIfNewer(makeSetSlot(ruleID: ruleID, token: 1, source: .poll))
+        }
+        let priorBytes = try Data(contentsOf: fileURL)
+        let failingIO = FailAfterReplacingFileIO()
+        failingIO.failNextWrite = true
+        let interrupted = makeStore(fileIO: failingIO)
+
+        XCTAssertThrowsError(
+            try interrupted.transaction(source: .notificationServiceExtension, expectedOwner: nil) { state in
+                state.replaceSlotIfNewer(
+                    makeSetSlot(
+                        ruleID: ruleID,
+                        token: 2,
+                        source: .notificationServiceExtension
+                    )
+                )
+            }
+        )
+        XCTAssertEqual(try Data(contentsOf: fileURL), priorBytes)
+        XCTAssertEqual(try makeStore().read().slots[ruleID]?.latestOrderingToken, 1)
+    }
+
+    func testConcurrentAppAndNSEWritersDoNotLoseEitherSlot() throws {
+        let appRuleID = UUID(uuidString: "10000000-0000-0000-0000-000000000003")!
+        let nseRuleID = UUID(uuidString: "10000000-0000-0000-0000-000000000004")!
+        let group = DispatchGroup()
+        let queue = DispatchQueue(label: "app-limit-epoch-writers", attributes: .concurrent)
+        let errors = LockedErrors()
+
+        for (ruleID, source) in [
+            (appRuleID, AppLimitCommandSource.poll),
+            (nseRuleID, AppLimitCommandSource.notificationServiceExtension),
+        ] {
+            group.enter()
+            queue.async {
+                defer { group.leave() }
+                do {
+                    _ = try self.makeStore().transaction(source: source, expectedOwner: nil) { state in
+                        state.replaceSlotIfNewer(self.makeSetSlot(ruleID: ruleID, token: 1, source: source))
+                    }
+                } catch {
+                    errors.append(error)
+                }
+            }
+        }
+
+        XCTAssertEqual(group.wait(timeout: .now() + 5), .success)
+        XCTAssertTrue(errors.values.isEmpty, "unexpected transaction errors: \(errors.values)")
+        let state = try makeStore().read()
+        XCTAssertEqual(state.storeRevision, 2)
+        XCTAssertEqual(Set(state.slots.keys), [appRuleID, nseRuleID])
+    }
+
+    func testClearTombstoneSurvivesRestartAndRejectsLowerToken() throws {
+        let ruleID = UUID(uuidString: "10000000-0000-0000-0000-000000000005")!
+        let store = makeStore()
+        _ = try store.transaction(source: .poll, expectedOwner: nil) { state in
+            state.replaceSlotIfNewer(makeSetSlot(ruleID: ruleID, token: 2, source: .poll))
+        }
+        _ = try store.transaction(source: .notificationServiceExtension, expectedOwner: nil) { state in
+            state.replaceSlotIfNewer(makeClearSlot(ruleID: ruleID, token: 3))
+        }
+
+        let restarted = makeStore()
+        let beforeStaleWrite = try Data(contentsOf: fileURL)
+        let accepted = try restarted.transaction(source: .wakeRecovery, expectedOwner: nil) { state in
+            state.replaceSlotIfNewer(makeSetSlot(ruleID: ruleID, token: 2, source: .wakeRecovery))
+        }
+        let state = try restarted.read()
+
+        XCTAssertFalse(accepted)
+        XCTAssertEqual(try Data(contentsOf: fileURL), beforeStaleWrite)
+        XCTAssertEqual(state.storeRevision, 2)
+        XCTAssertEqual(state.slots[ruleID]?.latestOrderingToken, 3)
+        XCTAssertEqual(state.slots[ruleID]?.latestKind, .clear)
+        XCTAssertNil(state.slots[ruleID]?.activeRule)
+        XCTAssertEqual(state.slots[ruleID]?.clearTombstone?.orderingToken, 3)
+    }
+
+    func testCanonicalBytesAreIndependentOfDictionaryInsertionOrder() throws {
+        let firstID = UUID(uuidString: "10000000-0000-0000-0000-000000000010")!
+        let secondID = UUID(uuidString: "10000000-0000-0000-0000-000000000020")!
+        let firstURL = directoryURL.appendingPathComponent("first.json")
+        let secondURL = directoryURL.appendingPathComponent("second.json")
+        let firstStore = makeStore(fileURL: firstURL)
+        let secondStore = makeStore(fileURL: secondURL)
+
+        _ = try firstStore.transaction(source: .poll, expectedOwner: nil) { state in
+            state.slots[firstID] = makeSetSlot(ruleID: firstID, token: 1, source: .poll)
+            state.slots[secondID] = makeSetSlot(ruleID: secondID, token: 2, source: .poll)
+        }
+        _ = try secondStore.transaction(source: .poll, expectedOwner: nil) { state in
+            state.slots[secondID] = makeSetSlot(ruleID: secondID, token: 2, source: .poll)
+            state.slots[firstID] = makeSetSlot(ruleID: firstID, token: 1, source: .poll)
+        }
+
+        XCTAssertEqual(try Data(contentsOf: firstURL), try Data(contentsOf: secondURL))
+    }
+
+    func testLegacyUserDefaultsMigratesExactlyOnceWithDigestAudit() throws {
+        let suiteName = "app-limit-epoch-legacy-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let originalRule = makeRule(
+            id: UUID(uuidString: "10000000-0000-0000-0000-000000000030")!,
+            bundleID: "com.example.legacy"
+        )
+        let legacyBytes = try legacyEncoder().encode([originalRule.id.uuidString: originalRule])
+        defaults.set(legacyBytes, forKey: AppLimitRuleStore.legacyRulesKey)
+        let store = makeStore(legacyDefaults: defaults)
+
+        let migrated = try store.read()
+
+        XCTAssertEqual(migrated.storeRevision, 1)
+        XCTAssertEqual(migrated.slots[originalRule.id]?.activeRule, originalRule)
+        XCTAssertEqual(migrated.slots[originalRule.id]?.latestOrderingToken, 0)
+        XCTAssertEqual(migrated.legacyMigration?.payloadSHA256, sha256(legacyBytes))
+        XCTAssertEqual(migrated.legacyMigration?.payloadByteCount, legacyBytes.count)
+        XCTAssertEqual(migrated.legacyMigration?.migratedRuleCount, 1)
+        XCTAssertNil(defaults.data(forKey: AppLimitRuleStore.legacyRulesKey))
+
+        let replayRule = makeRule(
+            id: UUID(uuidString: "10000000-0000-0000-0000-000000000031")!,
+            bundleID: "com.example.replay"
+        )
+        defaults.set(
+            try legacyEncoder().encode([replayRule.id.uuidString: replayRule]),
+            forKey: AppLimitRuleStore.legacyRulesKey
+        )
+
+        let restarted = try makeStore(legacyDefaults: defaults).read()
+        XCTAssertEqual(restarted.storeRevision, 1)
+        XCTAssertNotNil(restarted.slots[originalRule.id])
+        XCTAssertNil(restarted.slots[replayRule.id])
+        XCTAssertEqual(restarted.legacyMigration, migrated.legacyMigration)
+        XCTAssertNil(defaults.data(forKey: AppLimitRuleStore.legacyRulesKey))
+    }
+
+    private func makeStore(
+        fileURL: URL? = nil,
+        fileIO: any DeviceEpochFileIO = DurableAppLimitEpochFileIO(),
+        owner: UUID? = nil,
+        legacyDefaults: UserDefaults? = nil
+    ) -> AppLimitEpochStore {
+        AppLimitEpochStore(
+            fileURL: fileURL ?? self.fileURL,
+            lock: ActiveLockPersistenceLock.shared,
+            fileIO: fileIO,
+            ownerProvider: { owner },
+            legacyDefaults: legacyDefaults
+        )
+    }
+
+    private func makeSetSlot(
+        ruleID: UUID,
+        token: Int64,
+        source: AppLimitCommandSource
+    ) -> AppLimitVersionSlot {
+        let commandID = UUID(uuidString: "30000000-0000-0000-0000-000000000001")!
+        return AppLimitVersionSlot(
+            ruleID: ruleID,
+            latestOrderingToken: token,
+            latestKind: .set,
+            latestPayloadDigest: "set-\(token)",
+            activeRule: makeRule(id: ruleID),
+            clearTombstone: nil,
+            pendingOwnerWork: AppLimitOwnerWork(
+                workID: UUID(uuidString: "40000000-0000-0000-0000-000000000001")!,
+                commandID: commandID,
+                ruleID: ruleID,
+                orderingToken: token,
+                commandKind: .set,
+                payloadDigest: "set-\(token)",
+                source: source,
+                createdAt: Date(timeIntervalSince1970: 1_700_000_000)
+            ),
+            appliedReceipt: nil
+        )
+    }
+
+    private func makeClearSlot(ruleID: UUID, token: Int64) -> AppLimitVersionSlot {
+        AppLimitVersionSlot(
+            ruleID: ruleID,
+            latestOrderingToken: token,
+            latestKind: .clear,
+            latestPayloadDigest: "clear-\(token)",
+            activeRule: nil,
+            clearTombstone: AppLimitClearTombstone(
+                ruleID: ruleID,
+                orderingToken: token,
+                payloadDigest: "clear-\(token)",
+                source: .notificationServiceExtension,
+                clearedAt: Date(timeIntervalSince1970: 1_700_000_100)
+            ),
+            pendingOwnerWork: AppLimitOwnerWork(
+                workID: UUID(uuidString: "40000000-0000-0000-0000-000000000002")!,
+                commandID: UUID(uuidString: "30000000-0000-0000-0000-000000000002")!,
+                ruleID: ruleID,
+                orderingToken: token,
+                commandKind: .clear,
+                payloadDigest: "clear-\(token)",
+                source: .notificationServiceExtension,
+                createdAt: Date(timeIntervalSince1970: 1_700_000_100)
+            ),
+            appliedReceipt: nil
+        )
+    }
+
+    private func makeRule(
+        id: UUID,
+        bundleID: String = "com.example.focus"
+    ) -> AppLimitRule {
+        AppLimitRule(
+            id: id,
+            appTokens: [],
+            bundleID: bundleID,
+            displayName: "Focus",
+            budgetMinutes: 30,
+            window: AppLimitWindow(
+                startMinute: 0,
+                endMinute: 1439,
+                repeats: true,
+                timezone: "America/New_York"
+            ),
+            effectiveFrom: Date(timeIntervalSince1970: 1_700_000_000),
+            expiresAt: nil
+        )
+    }
+
+    private func legacyEncoder() -> JSONEncoder {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys]
+        return encoder
+    }
+
+    private func sha256(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+private final class FailAfterReplacingFileIO: DeviceEpochFileIO, @unchecked Sendable {
+    private let backing = SystemDeviceEpochFileIO()
+    private let lock = NSLock()
+    var failNextWrite = false
+
+    func read(from url: URL) throws -> Data? {
+        try backing.read(from: url)
+    }
+
+    func writeAtomically(_ data: Data, to url: URL) throws {
+        try backing.writeAtomically(data, to: url)
+        lock.lock()
+        let shouldFail = failNextWrite
+        failNextWrite = false
+        lock.unlock()
+        if shouldFail {
+            throw TestFileIOError.interruptedAfterReplacement
+        }
+    }
+
+    func remove(at url: URL) throws {
+        try backing.remove(at: url)
+    }
+}
+
+private final class LockedErrors: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [Error] = []
+
+    var values: [Error] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+
+    func append(_ error: Error) {
+        lock.lock()
+        storage.append(error)
+        lock.unlock()
+    }
+}
+
+private enum TestFileIOError: Error {
+    case interruptedAfterReplacement
+}
