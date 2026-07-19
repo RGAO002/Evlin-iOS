@@ -489,6 +489,14 @@ def test_pre_report_fixture_passes_without_touching_real_paths(tmp_path: Path) -
     }
 
 
+def test_real_gate_shells_are_fail_closed_and_expand_source_paths() -> None:
+    source = VERIFIER.read_text()
+    assert '["bash", "-euo", "pipefail", "-c", command_text]' in source
+    assert 'OUT=\\"$PWD/.superpowers/evidence/metering-phase3/release-source.sil\\"' in source
+    assert 'DEBUG_OUT=\\"$PWD/.superpowers/evidence/metering-phase3/debug-source-control.sil\\"' in source
+    assert 'python3 scripts/verify_metering_phase3_r16.py && echo r16-structured-map-passed' in source
+
+
 def test_dependency_trailer_accepts_reviewed_descendant_of_task_subject(tmp_path: Path) -> None:
     root, values = make_fixture(tmp_path, reviewed_dependency_head="07")
     result = run_verifier(root, values["shim"])

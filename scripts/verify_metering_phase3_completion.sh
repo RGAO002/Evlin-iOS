@@ -636,8 +636,8 @@ def gate_command(gate: str) -> tuple[Path, list[str] | str]:
         "cross-stack-v30": (backend, "bash scripts/run_metering_v30_cross_stack.sh"),
         "release-production-build": (ios, "DERIVED=\"$PWD/.superpowers/evidence/metering-phase3/DerivedData-Release\"; if [ -e \"$DERIVED\" ]; then mv \"$DERIVED\" \"$DERIVED.previous-$(date +%s)-$$\"; fi; SENTRY_SKIP_DSYM_UPLOAD=1 xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -configuration Release -destination 'generic/platform=iOS' -derivedDataPath \"$DERIVED\" CODE_SIGNING_ALLOWED=NO IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' build"),
         "debug-xctest-build": (ios, "DERIVED=\"$PWD/.superpowers/evidence/metering-phase3/DerivedData-DebugTests\"; if [ -e \"$DERIVED\" ]; then mv \"$DERIVED\" \"$DERIVED.previous-$(date +%s)-$$\"; fi; SENTRY_SKIP_DSYM_UPLOAD=1 xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -configuration Debug -destination 'generic/platform=iOS' -derivedDataPath \"$DERIVED\" CODE_SIGNING_ALLOWED=NO IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' build-for-testing"),
-        "release-source-check": (ios, "OUT='$PWD/.superpowers/evidence/metering-phase3/release-source.sil'; DEBUG_OUT='$PWD/.superpowers/evidence/metering-phase3/debug-source-control.sil'; SDK=$(xcrun --sdk iphonesimulator --show-sdk-path); xcrun swiftc -emit-sil -parse-as-library -sdk \"$SDK\" -target arm64-apple-ios17.6-simulator 'Evlin iOS/Services/MeteringEpochContract.swift' 'Evlin iOS/Services/MeteringRuntimeInfrastructure.swift' >/dev/null 2>\"$OUT\"; test -s \"$OUT\"; if rg -q 'DebugAppGroupMeteringClock|evlin\\.metering\\.debugClockNow' \"$OUT\"; then exit 1; fi; xcrun swiftc -D DEBUG -emit-sil -parse-as-library -sdk \"$SDK\" -target arm64-apple-ios17.6-simulator 'Evlin iOS/Services/MeteringEpochContract.swift' 'Evlin iOS/Services/MeteringRuntimeInfrastructure.swift' >/dev/null 2>\"$DEBUG_OUT\"; rg -q 'DebugAppGroupMeteringClock' \"$DEBUG_OUT\"; rg -q 'evlin\\.metering\\.debugClockNow' \"$DEBUG_OUT\"; echo release-source-compile-passed"),
-        "r16-structured-map": (ios, "python3 scripts/verify_metering_phase3_r16.py"),
+        "release-source-check": (ios, "OUT=\"$PWD/.superpowers/evidence/metering-phase3/release-source.sil\"; DEBUG_OUT=\"$PWD/.superpowers/evidence/metering-phase3/debug-source-control.sil\"; SDK=$(xcrun --sdk iphonesimulator --show-sdk-path); xcrun swiftc -emit-sil -parse-as-library -sdk \"$SDK\" -target arm64-apple-ios17.6-simulator 'Evlin iOS/Services/MeteringEpochContract.swift' 'Evlin iOS/Services/MeteringRuntimeInfrastructure.swift' >\"$OUT\" 2>&1; test -s \"$OUT\"; if rg -q 'DebugAppGroupMeteringClock|evlin\\.metering\\.debugClockNow' \"$OUT\"; then exit 1; fi; xcrun swiftc -D DEBUG -emit-sil -parse-as-library -sdk \"$SDK\" -target arm64-apple-ios17.6-simulator 'Evlin iOS/Services/MeteringEpochContract.swift' 'Evlin iOS/Services/MeteringRuntimeInfrastructure.swift' >\"$DEBUG_OUT\" 2>&1; rg -q 'DebugAppGroupMeteringClock' \"$DEBUG_OUT\"; rg -q 'evlin\\.metering\\.debugClockNow' \"$DEBUG_OUT\"; echo release-source-compile-passed"),
+        "r16-structured-map": (ios, "python3 scripts/verify_metering_phase3_r16.py && echo r16-structured-map-passed"),
         "authoritative-correction-disposition": (ios, "printf '%s\\n' 'baseline_failure_archived' 'test_method=MeteringAuthoritativeBaseCorrectionTests.testEveryCorrectionBoundaryReopensWithStableIDsAndConverges' 'baseline_commit=e46ffe1' 'task24_known_failure_ordinal=27'"),
     }
     return commands[gate]
@@ -775,7 +775,7 @@ for gate in GATES:
         accesses.append(f"command:{gate}")
         with log.open("wb") as handle:
             result = subprocess.run(
-                ["bash", "-o", "pipefail", "-c", command_text],
+                ["bash", "-euo", "pipefail", "-c", command_text],
                 cwd=cwd,
                 stdout=handle,
                 stderr=subprocess.STDOUT,
