@@ -3598,10 +3598,10 @@ build XCTest separately in Debug. Each uses a fresh derived directory:
 ```bash
 cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS
 DERIVED="$PWD/.superpowers/evidence/metering-phase3/DerivedData-Release"
-rm -rf "$DERIVED"
+if [ -e "$DERIVED" ]; then mv "$DERIVED" "$DERIVED.previous-$(date +%s)-$$"; fi
 xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -configuration Release -destination 'generic/platform=iOS' -derivedDataPath "$DERIVED" CODE_SIGNING_ALLOWED=NO IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' build
 DEBUG_DERIVED="$PWD/.superpowers/evidence/metering-phase3/DerivedData-DebugTests"
-rm -rf "$DEBUG_DERIVED"
+if [ -e "$DEBUG_DERIVED" ]; then mv "$DEBUG_DERIVED" "$DEBUG_DERIVED.previous-$(date +%s)-$$"; fi
 xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -configuration Debug -destination 'generic/platform=iOS' -derivedDataPath "$DEBUG_DERIVED" CODE_SIGNING_ALLOWED=NO IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' build-for-testing
 ```
 
