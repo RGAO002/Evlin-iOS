@@ -51,6 +51,8 @@ final class FamilyStore {
     private let api: APIClient
     init(api: APIClient) { self.api = api }
 
+    nonisolated deinit {}
+
     /// Load the full aggregate via `GET /me/profile`. Keeps the last successful
     /// snapshot on failure (spec §9: "fall back to last cached family — don't
     /// blank"). Flips `state` to `.loading` first so the UI can show a spinner.

@@ -35,6 +35,8 @@ final class ReflectionLockApplier {
         self.afterLocalMutation = afterLocalMutation
     }
 
+    nonisolated deinit {}
+
     func reconcile(snapshot: ChildStateResponse, childID: UUID, now: Date = Date()) async {
         guard identityIsCurrent(childID) else { return }
         let sticky = loadSticky()

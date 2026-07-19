@@ -45,7 +45,7 @@ final class BigKidStatePoller: ObservableObject {
     private let failOpenFamily: () async -> Void
     private let requestFreshPoll: () -> Void
     private var task: Task<Void, Never>?
-    private var invalidationObserver: NSObjectProtocol?
+    nonisolated(unsafe) private var invalidationObserver: NSObjectProtocol?
     private var isFetchInFlight = false
     private var pendingRefreshAfterCurrent = false
     private var requestedRefreshForIdentityMismatch = false
@@ -172,7 +172,7 @@ final class BigKidStatePoller: ObservableObject {
         self.requestFreshPoll = requestFreshPoll
     }
 
-    deinit {
+    nonisolated deinit {
         if let obs = invalidationObserver {
             NotificationCenter.default.removeObserver(obs)
         }
