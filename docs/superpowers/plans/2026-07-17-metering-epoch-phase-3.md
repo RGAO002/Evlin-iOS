@@ -39,8 +39,34 @@ git -C "$IOS" status --short --branch | tee "$EVIDENCE/ios-status-before.txt"
 git -C "$BACKEND" status --short --branch | tee "$EVIDENCE/backend-status-before.txt"
 git -C "$IOS" rev-parse HEAD | tee "$EVIDENCE/ios-base-sha.txt"
 git -C "$BACKEND" rev-parse HEAD | tee "$EVIDENCE/backend-base-sha.txt"
-git -C "$IOS" diff --binary | shasum -a 256 | tee "$EVIDENCE/ios-dirty-diff-before.sha256"
-git -C "$BACKEND" diff --binary | shasum -a 256 | tee "$EVIDENCE/backend-dirty-diff-before.sha256"
+write_tracked_blob_baseline() {
+  local root="$1"
+  local output="$2"
+  local snapshot
+  snapshot="$(git -C "$root" stash create || true)"
+  ROOT="$root" SNAPSHOT="$snapshot" python3 -c '
+import json, os, subprocess
+root = os.environ["ROOT"]
+volatile = ("xcuserdata/", ".xcuserstate", "xcschememanagement.plist")
+raw = subprocess.check_output(["git", "-C", root, "diff", "--name-only", "-z"])
+paths = sorted(os.fsdecode(path) for path in raw.split(b"\0") if path)
+semantic = [path for path in paths if not any(token in path for token in volatile)]
+files = []
+for path in semantic:
+    blob = subprocess.check_output(
+        ["git", "-C", root, "hash-object", "--", path], text=True
+    ).strip()
+    files.append({"path": path, "blob_sha": blob, "reason": "approved pre-existing WIP"})
+print(json.dumps({
+    "format_version": 1,
+    "snapshot_commit": os.environ["SNAPSHOT"] or None,
+    "volatile_exclusions": list(volatile),
+    "files": files,
+}, indent=2, sort_keys=True))
+' > "$output"
+}
+write_tracked_blob_baseline "$IOS" "$EVIDENCE/ios-worktree-blob-baseline.json"
+write_tracked_blob_baseline "$BACKEND" "$EVIDENCE/backend-worktree-blob-baseline.json"
 write_untracked_manifest() {
   local root="$1"
   local output="$2"
@@ -82,6 +108,14 @@ write_untracked_manifest "$IOS" "$EVIDENCE/ios-untracked-before.manifest"
 write_untracked_manifest "$BACKEND" "$EVIDENCE/backend-untracked-before.manifest"
 shasum -a 256 /Users/fred/Desktop/Evlin/LOCK_BEHAVIOR_BOUNDARIES.md | tee "$EVIDENCE/r16-before.sha256"
 ```
+
+The tracked-WIP baseline hashes working-tree file blobs, not `git diff` text, so
+legitimate commits that move hunk context cannot create a false drift alarm.
+`xcuserdata`, `.xcuserstate`, and `xcschememanagement.plist` are volatile Xcode
+state and are excluded from semantic hashing. A nonempty `stash create` SHA is a
+non-mutating recovery snapshot; the verifier checks that its tree carries the
+recorded blobs. Any later approved edit to a shared WIP file must update that
+file's blob and reason together.
 
 For every task: write RED first, run the exact RED command and confirm its named failure, implement the minimum code shown, run focused and full GREEN, stage only declared files, inspect `git diff --cached --check`, `--stat`, full diff, and `--name-only`, then commit with the exact subject. For a pre-dirty declared file use `git add -p` and verify unrelated hunks remain unstaged.
 
@@ -3424,7 +3458,8 @@ git commit -m 'refactor: retire duplicate earned activity lifecycle'
 
 **Interfaces:** Consumes immutable baseline files, exact 31-subject manifest
 (Tasks 01-30 plus inserted Task 23A), both Git histories, all automated suites,
-real V30 harness, all six Release products, and R-16 hash. Produces raw logs,
+real V30 harness, five production Release products, one Debug XCTest product,
+and R-16 hash. Produces raw logs,
 hashes, commit/order proof, product manifest, and machine-readable automated
 status. It cannot mark physical gates passed.
 
@@ -3439,8 +3474,8 @@ it is not an app-hosted XCTest and does not copy verifier logic. Fixtures must
 cover missing subject, duplicate subject, duplicate SHA, reversed same-repo
 ancestry, absent/wrong cross-repo dependency trailer, base not ancestor, empty
 log, a content change beneath an existing untracked path with unchanged name,
-zero Release products, missing exact XCTest executable, DEBUG token in
-Release, wrong fixture hash, and a report that claims a physical pass. Also
+zero Release products, missing exact Debug XCTest executable, DEBUG token in a
+Release product, wrong fixture hash, and a report that claims a physical pass. Also
 assert Task 29 pre-report mode expects Tasks 01-29 plus Task 23A exactly once and
 final mode expects Tasks 01-30 plus Task 23A exactly once.
 
@@ -3499,7 +3534,8 @@ Task 20 iOS depends on Task 19 backend
 The same stdlib parser used by the fixture test mechanically pins this plan to
 31 task headings, 31 commit commands/unique subjects, 52 `Create` declarations,
 165 `Modify` declarations, 217 total declarations, 96 unique declared paths,
-94 literal `xcodebuild` commands. The Release scheme build is one dependency-
+95 literal `xcodebuild` commands. The Release production build and Debug
+`build-for-testing` are separate dependency-graph invocations. The Release build is one dependency-
 graph invocation rather than an invalid per-target loop. It rejects a changed count unless the plan,
 fixture expectation, and review map are revised together; prose-only arithmetic
 does not satisfy this gate.
@@ -3533,20 +3569,25 @@ are intentionally pinned to iPhone 17 Pro and iPad (A16). The iPhone run still
 executes that suite; this exception is recorded in raw evidence and cannot be
 used to skip a Phase 3 test.
 
-Build Release before any binary scan using a fresh derived directory:
+Build the five production products in Release before any binary scan, then
+build XCTest separately in Debug. Each uses a fresh derived directory:
 
 ```bash
 cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS
 DERIVED="$PWD/.superpowers/evidence/metering-phase3/DerivedData-Release"
 rm -rf "$DERIVED"
-xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -configuration Release -destination 'generic/platform=iOS' -derivedDataPath "$DERIVED" CODE_SIGNING_ALLOWED=NO IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' build-for-testing
+xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -configuration Release -destination 'generic/platform=iOS' -derivedDataPath "$DERIVED" CODE_SIGNING_ALLOWED=NO IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' build
+DEBUG_DERIVED="$PWD/.superpowers/evidence/metering-phase3/DerivedData-DebugTests"
+rm -rf "$DEBUG_DERIVED"
+xcodebuild -project 'Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -configuration Debug -destination 'generic/platform=iOS' -derivedDataPath "$DEBUG_DERIVED" CODE_SIGNING_ALLOWED=NO IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' build-for-testing
 ```
 
-The shared `Evlin iOS` scheme's `build-for-testing` dependency graph must emit
-all six products below into this one DerivedData tree. No `-target` command may
-combine with `-derivedDataPath`; absence of any product fails before scanning.
+The shared `Evlin iOS` scheme's Release `build` must emit the five production
+products below. Debug `build-for-testing` must emit the exact XCTest executable
+in its separate tree. No `-target` command may combine with `-derivedDataPath`;
+absence of any required product fails before scanning.
 
-Assert these exact six nonempty Mach-O products, including the corrected test executable path:
+Assert these exact five nonempty production Release Mach-O products:
 
 ```text
 Release-iphoneos/Evlin iOS.app/Evlin iOS
@@ -3554,10 +3595,33 @@ Release-iphoneos/Evlin iOS.app/PlugIns/EvlinDeviceActivityMonitor.appex/EvlinDev
 Release-iphoneos/Evlin iOS.app/Extensions/EvlinDeviceActivityReport.appex/EvlinDeviceActivityReport
 Release-iphoneos/Evlin iOS.app/PlugIns/EvlinShieldConfig.appex/EvlinShieldConfig
 Release-iphoneos/Evlin iOS.app/PlugIns/EvlinPushApplier.appex/EvlinPushApplier
-Release-iphoneos/Evlin iOS.app/PlugIns/Evlin iOSTests.xctest/Evlin iOSTests
 ```
 
-Require product count exactly six, each `test -s`, and each `file` output contains `Mach-O`. The verifier fixture pins these same six literal paths, including `Extensions/EvlinDeviceActivityReport.appex` while the other app extensions remain under `PlugIns`; wrong-directory fixtures fail. Run `strings` on all six and fail if any contains `DebugAppGroupMeteringClock` or `evlin.metering.debugClockNow`. Separately preprocess/compile the Release source and require the DEBUG provider symbol absent, so the binary scan cannot pass vacuously through a missing product. Hash the six products, both vector fixtures, every raw log, commit manifest, target-membership manifest, status-before files, dirty-diff-before hashes, path-plus-type/mode/content untracked manifests and their hashes, and R-16 before/after hashes. Final mode regenerates the untracked manifests with the same evidence-directory exclusion and requires byte identity, so edits beneath an existing untracked WIP path cannot hide behind an unchanged filename list.
+Separately assert this nonempty Debug XCTest Mach-O product:
+
+```text
+Debug-iphoneos/Evlin iOS.app/PlugIns/Evlin iOSTests.xctest/Evlin iOSTests
+```
+
+Require the Release product count exactly five, each `test -s`, and each `file`
+output contains `Mach-O`. Require the one Debug XCTest path separately, but do
+not describe it as a Release test or include it in the Release token scan. The
+verifier fixture pins the same paths, including
+`Extensions/EvlinDeviceActivityReport.appex` while the other production app
+extensions remain under `PlugIns`; wrong-directory fixtures fail. Run `strings`
+on all five Release products and fail if any contains
+`DebugAppGroupMeteringClock` or `evlin.metering.debugClockNow`. Separately
+preprocess/compile the Release source and require the DEBUG provider symbol
+absent, so the binary scan cannot pass vacuously through a missing product. Hash
+the five Release products, Debug XCTest product, both vector fixtures, every raw
+log, commit manifest, target-membership manifest, status-before files,
+worktree-blob baselines and recovery snapshot SHAs, path-plus-type/mode/content
+untracked manifests and their hashes, and R-16 before/after hashes. Final mode
+regenerates the semantic blob and untracked manifests with the same exclusions
+and requires byte identity, so edits beneath an existing WIP path cannot hide.
+The report must say exactly that tests ran using Debug `build-for-testing` and
+five production Release binaries were scanned with no test seams; it must never
+claim that Release tests passed.
 
 The verifier parses the rulebook registration table and Task 30 demolition table
 as structured Markdown and compares every row's exact required vector set to
@@ -3643,6 +3707,9 @@ Expected RED: Task 30 commit is absent and supplied report SHA does not exist.
 ```
 
 The report must state that neither its own commit SHA nor its own Git blob/SHA-256 can be embedded recursively. It contains no self-hash field. It does contain the exact anchored structured fields `status_code: AUTOMATED_PASSED_PHYSICAL_PENDING`, `phase_complete: false`, and `releasable: false`, plus display status `AUTOMATED PASSED; PHYSICAL PENDING; NOT RELEASABLE`. After the report-only commit, Task 29 final mode computes the committed report blob, content SHA-256, and exact commit SHA and writes all three to `.superpowers/evidence/metering-phase3/report-commit-attestation.json`. Final mode must be idempotent: rerunning it against the same report commit reproduces or validates the same semantic attestation, and downstream phases rerun it before trusting the external file. List all physical gates as `PENDING`.
+The build evidence wording is also fixed: tests executed with Debug
+`build-for-testing`; five production Release binaries were scanned and contained
+no test seams. The report must not say or imply that Release tests passed.
 
 **Full GREEN before staging:** Re-run Task 29 pre-report mode against committed Tasks 01-29 and the populated uncommitted report:
 
@@ -3678,11 +3745,11 @@ The implementation may report **AUTOMATED PASSED** only when Task 29 final mode 
 
 1. Backend pure tests and disposable-DB suites pass without skips; V30 consumes Swift production bytes through real routes and rows.
 2. Full iPhone 17 Pro and iPad Pro simulator schemes pass at deployment target 17.6 on installed runtime 26.3.1; only the unrelated device-pinned `ProfileSnapshotTests` suite is excluded from the M5 iPad run and remains executed on its supported iPhone destination.
-3. App, DAM, Report, Shield Config, Push, and XCTest Release products are built first, exactly six nonempty Mach-O paths are found, and DEBUG clock tokens are absent.
+3. App, DAM, Report, Shield Config, and Push are built in Release, exactly five nonempty production Mach-O paths are scanned with DEBUG clock tokens absent; XCTest is built separately using Debug `build-for-testing` and is not described as a Release test.
 4. V01-V39 and P3V01/P3V02 reach their required production effects; rejected routes have zero effects; corrected/resumed/rolled epochs always have fresh route IDs.
 5. Every persisted work item has owner, retry schedule, terminal condition, R-16 row, and a tested app/DAM/Push-appropriate recovery trigger.
 6. Every task subject occurs exactly once; SHAs are unique; same-repo ancestry and six cross-repo dependency trailers prove order from immutable bases.
-7. Pre-existing tracked dirty diffs and path-plus-type/mode/content untracked manifests match the baseline after excluding declared task files and evidence; `APIClient.swift`, onboarding/beta WIP, Phase 2 files, Profile semantics, and production infrastructure remain untouched.
+7. Pre-existing tracked semantic worktree blobs and path-plus-type/mode/content untracked manifests match the baseline; volatile Xcode user state is excluded, and `APIClient.swift`, onboarding/beta WIP, Phase 2 files, Profile semantics, and production infrastructure remain untouched.
 
 Automated passing does not mean Phase 3 complete or releasable.
 
