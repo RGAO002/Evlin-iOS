@@ -67,4 +67,30 @@ final class MeteringPhase6DemolitionLedgerTests: XCTestCase {
             XCTAssertTrue(source.contains(marker), marker)
         }
     }
+
+    func testT1Attestation() throws {
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: ledgerURL)) as? [String: Any]
+        )
+        let rows = try XCTUnwrap(object["demolitions"] as? [[String: Any]])
+        let row = try XCTUnwrap(rows.first { $0["id"] as? String == "T1" })
+
+        XCTAssertEqual(row["status"] as? String, "REMOVED")
+        XCTAssertEqual(
+            Set(try XCTUnwrap(row["vectors"] as? [String])),
+            Set(["V01", "V02", "V03", "V06", "V07", "V24", "P3T1-121"])
+        )
+        let demolition = try XCTUnwrap(row["demolition_commit"] as? [String: String])
+        XCTAssertEqual(demolition["repository"], "ios")
+        XCTAssertEqual(demolition["sha"]?.count, 40)
+        XCTAssertEqual(
+            Set(try XCTUnwrap(row["forbidden_symbols"] as? [String])),
+            Set([
+                ["arm", "Signature"].joined(),
+                ["make", "Arm", "Signature"].joined(),
+                ["should", "Start", "Monitoring"].joined(),
+                ["selection", "Fingerprint"].joined(),
+            ])
+        )
+    }
 }

@@ -3,16 +3,24 @@
   "demolitions": [
     {
       "id": "T1",
-      "status": "UNATTESTED",
+      "status": "REMOVED",
       "legacy_mechanism": "scalar arm signature churn",
       "replacement": ["MeteringGenerationKey", "immutable dated routes"],
       "deletion_criterion": "replacement vectors and source-absence test pass",
-      "replacement_commits": [],
-      "vectors": [],
-      "evidence": [],
-      "demolition_commit": null,
-      "revert_command": null,
-      "forbidden_symbols": [],
+      "replacement_commits": [
+        {"repository": "ios", "sha": "7001cf92f14a6809ddaa367f6577c0291773c30d"},
+        {"repository": "ios", "sha": "549de24f541e128b388042d66cadee2c2899aa1e"}
+      ],
+      "vectors": ["V01", "V02", "V03", "V06", "V07", "V24", "P3T1-121"],
+      "evidence": [
+        {
+          "path": "/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/.superpowers/evidence/metering-phase6/T1-focused.log",
+          "sha256": "c6e027b4ecfe642bf013bbb340a9286bfe3d298853dbec7097be829bb738b569"
+        }
+      ],
+      "demolition_commit": {"repository": "ios", "sha": "d33218e7ab24e339906b6e786d31ce8b2857b4ae"},
+      "revert_command": "git -C /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS revert d33218e7ab24e339906b6e786d31ce8b2857b4ae",
+      "forbidden_symbols": ["armSignature", "makeArmSignature", "shouldStartMonitoring", "selectionFingerprint"],
       "release_observation": null,
       "fred_approval": null
     },
