@@ -589,7 +589,8 @@ final class CommandPoller {
             durationMinutes: poll.duration_minutes,
             issuedAt: issued,
             limit: limitRule(from: poll.limit),
-            clear: clearLimit(from: poll.clear)
+            clear: clearLimit(from: poll.clear),
+            earnedTimeConfig: poll.earned_time_config
         )
     }
 

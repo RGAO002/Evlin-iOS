@@ -597,31 +597,10 @@ struct PollClearDTO: Decodable {
 /// A4: `earned_time_config` top-level payload (same-day pool/cap sync from
 /// backend). Literal snake_case stored property names — this codebase does NOT
 /// use `convertFromSnakeCase`. Synthesized `Decodable` handles all optionals.
-struct PollEarnedTimeConfigDTO: Decodable {
-    let child_profile_id: String?
-    let child_device_id: String?
-    let effective_date: String?
-    let usage_date: String?
-    let timezone: String?
-    let daily_pool_minutes: Int
-    let device_cap_minutes: Int
-    let earned_bucket_minutes: Int?
-    /// Wave-2 Task 1 veto-staleness fix: server-authoritative remaining minutes
-    /// for today (pool − used), computed backend-side at sync time. Optional so
-    /// old backends that omit this field still decode. When present, this is
-    /// preferred over the on-device derived estimate for
-    /// `EarnedTimeStore.backendRemainingAtLastSync`.
-    let remaining_minutes: Int?
-    let selected_set: PollEarnedConfigSelectedSetDTO?
-}
+typealias PollEarnedTimeConfigDTO = EarnedTimeConfigCommand
 
 /// A4: `earned_time_config.selected_set` nested payload.
-struct PollEarnedConfigSelectedSetDTO: Decodable {
-    let list_id: String?
-    let recordKey: String?
-    let targetKey: String?
-    let has_tokens: Bool?
-}
+typealias PollEarnedConfigSelectedSetDTO = EarnedTimeConfigSelectedSet
 
 // MARK: - v2 ack-status decode
 

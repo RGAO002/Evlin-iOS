@@ -51,6 +51,72 @@ enum CommandTimestampDecoding {
     }
 }
 
+struct EarnedTimeConfigSelectedSet: Codable, Sendable, Equatable {
+    let list_id: String?
+    let recordKey: String?
+    let targetKey: String?
+    let has_tokens: Bool?
+}
+
+/// Shared wire model for `earned_time_config`. Both foreground polling and the
+/// push extension decode this exact type so policy authority cannot drift.
+struct EarnedTimeConfigCommand: Codable, Sendable, Equatable {
+    let child_profile_id: String?
+    let child_device_id: String?
+    let effective_date: String?
+    let usage_date: String?
+    let timezone: String?
+    let policy_revision: String?
+    let orderingToken: Int64?
+    let daily_pool_minutes: Int
+    let device_cap_minutes: Int
+    let earned_bucket_minutes: Int?
+    let remaining_minutes: Int?
+    let selected_set: EarnedTimeConfigSelectedSet?
+
+    private enum CodingKeys: String, CodingKey {
+        case child_profile_id
+        case child_device_id
+        case effective_date
+        case usage_date
+        case timezone
+        case policy_revision
+        case orderingToken = "ordering_token"
+        case daily_pool_minutes
+        case device_cap_minutes
+        case earned_bucket_minutes
+        case remaining_minutes
+        case selected_set
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        child_profile_id = try container.decodeIfPresent(String.self, forKey: .child_profile_id)
+        child_device_id = try container.decodeIfPresent(String.self, forKey: .child_device_id)
+        effective_date = try container.decodeIfPresent(String.self, forKey: .effective_date)
+        usage_date = try container.decodeIfPresent(String.self, forKey: .usage_date)
+        timezone = try container.decodeIfPresent(String.self, forKey: .timezone)
+        policy_revision = try container.decodeIfPresent(String.self, forKey: .policy_revision)
+        if container.contains(.orderingToken),
+           try !container.decodeNil(forKey: .orderingToken) {
+            orderingToken = try OrderingTokenDecoding.decode(
+                from: container,
+                forKey: .orderingToken
+            )
+        } else {
+            orderingToken = nil
+        }
+        daily_pool_minutes = try container.decode(Int.self, forKey: .daily_pool_minutes)
+        device_cap_minutes = try container.decode(Int.self, forKey: .device_cap_minutes)
+        earned_bucket_minutes = try container.decodeIfPresent(Int.self, forKey: .earned_bucket_minutes)
+        remaining_minutes = try container.decodeIfPresent(Int.self, forKey: .remaining_minutes)
+        selected_set = try container.decodeIfPresent(
+            EarnedTimeConfigSelectedSet.self,
+            forKey: .selected_set
+        )
+    }
+}
+
 /// Per-app daily time limit rule decoded from a `set_limit` command (P3 wire
 /// decode only — enforcement/planning/execution land in later tasks).
 /// `startMinute`/`endMinute` are the schedule window parsed from "HH:mm" strings
@@ -215,6 +281,7 @@ struct LockCommand: Codable, Sendable, Identifiable {
     // intentionally does NOT flow through durationMinutes/expiresAt.
     var limit: LimitRule? = nil
     var clear: ClearLimit? = nil
+    var earnedTimeConfig: EarnedTimeConfigCommand? = nil
     // B2: provenance carried from CommandTarget for convenience access.
     var lockSource: String? { target.lockSource }
     var unlockSources: [String]? { target.unlockSources }
