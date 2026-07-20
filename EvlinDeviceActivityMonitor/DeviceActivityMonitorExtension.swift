@@ -773,16 +773,19 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
 
         let broadRecords = shields.values.filter(\.appliesToAll)
         if !broadRecords.isEmpty {
-            let includesFullWebShield = broadRecords.contains(where: \.isFullWebBroadShield)
             let allWeb = Set(shields.values.flatMap(\.webDomainTokens))
             store.shield.applicationCategories = .all()
             store.shield.applications = nil
-            if includesFullWebShield {
+            switch ShieldWebProjectionDecision.resolve(records: shields.values) {
+            case .all:
                 store.shield.webDomainCategories = .all()
                 store.shield.webDomains = nil
-            } else {
+            case .specific:
                 store.shield.webDomainCategories = nil
-                store.shield.webDomains = allWeb.isEmpty ? nil : allWeb
+                store.shield.webDomains = allWeb
+            case .open:
+                store.shield.webDomainCategories = nil
+                store.shield.webDomains = nil
             }
         } else {
             let allApp = Set(shields.values.flatMap(\.appTokens))
@@ -791,8 +794,18 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
 
             store.shield.applications = allApp.isEmpty ? nil : allApp
             store.shield.applicationCategories = allCat.isEmpty ? nil : .specific(allCat)
-            store.shield.webDomains = allWeb.isEmpty ? nil : allWeb
-            store.shield.webDomainCategories = nil
+            switch ShieldWebProjectionDecision.resolve(records: shields.values) {
+            case .specific:
+                store.shield.webDomains = allWeb
+                store.shield.webDomainCategories = nil
+            case .open:
+                store.shield.webDomains = nil
+                store.shield.webDomainCategories = nil
+            case .all:
+                assertionFailure("Broad full-web records must enter the broad branch")
+                store.shield.webDomains = nil
+                store.shield.webDomainCategories = .all()
+            }
         }
 
         let broad = shields.values.contains(where: \.appliesToAll)

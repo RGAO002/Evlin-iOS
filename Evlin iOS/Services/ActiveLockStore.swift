@@ -43,13 +43,14 @@ struct ActiveShieldProjection: Equatable {
         }
 
         let webDomains: WebMode
-        if broad.contains(where: \.webOpen) {
+        switch ShieldWebProjectionDecision.resolve(records: records) {
+        case .open:
             webDomains = .open
-        } else if broad.contains(where: { $0.tier == .all }) {
+        case .all:
             webDomains = .all
-        } else {
+        case .specific:
             let webs = Set(records.flatMap(\.webDomainTokens))
-            webDomains = webs.isEmpty ? .open : .specific(webs)
+            webDomains = .specific(webs)
         }
 
         return ActiveShieldProjection(applications: applications, webDomains: webDomains)

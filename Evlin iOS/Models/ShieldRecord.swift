@@ -166,6 +166,27 @@ struct ShieldRecord: Codable, Sendable, Equatable {
     }
 }
 
+/// Shared by the main app and DeviceActivity extension so either process
+/// projects the same durable record set onto the web shield fields.
+enum ShieldWebProjectionDecision: Equatable, Sendable {
+    case all
+    case specific
+    case open
+
+    static func resolve<S: Sequence>(records: S) -> ShieldWebProjectionDecision
+    where S.Element == ShieldRecord {
+        let records = Array(records)
+        let broad = records.filter(\.appliesToAll)
+        if broad.contains(where: \.webOpen) {
+            return .open
+        }
+        if broad.contains(where: { $0.tier == .all }) {
+            return .all
+        }
+        return records.contains(where: { !$0.webDomainTokens.isEmpty }) ? .specific : .open
+    }
+}
+
 // MARK: - Codable (backward-compatible `source` migration)
 
 /// Custom Codable lives in an EXTENSION on purpose: declaring `init(from:)` in

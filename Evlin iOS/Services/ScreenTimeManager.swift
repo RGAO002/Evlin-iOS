@@ -164,45 +164,6 @@ class ScreenTimeManager: ObservableObject {
         }
     }
 
-    // MARK: - App Shielding
-
-    /// Shield (lock) the selected apps.
-    func shieldApps() {
-        let appTokens = selectedApps.applicationTokens
-        let categoryTokens = selectedApps.categoryTokens
-
-        if !appTokens.isEmpty {
-            store.shield.applications = appTokens
-        }
-        if !categoryTokens.isEmpty {
-            store.shield.applicationCategories = .specific(categoryTokens)
-        }
-
-        isUnlocked = false
-        saveSelection()
-        NotificationCenter.default.post(name: .evlinLockStateChanged, object: true)
-    }
-
-    // C-3: the shield-all / unshield-for-minutes methods (plus their private
-    // relock timer) were zero-caller direct ManagedSettings writers and have
-    // been REMOVED. All shield/block writes go through `ActiveLockStore`
-    // records.
-
-    /// Remove all shields.
-    func clearAllShields() {
-        clearLockRestrictions()
-        isUnlocked = true
-        syncDeletionProtectionToManagedSettings()
-        Task {
-            // Clear both shield + block records (spec §3 — two independent stores).
-            _ = await ActiveLockStore.shared.unshieldAll()
-            _ = await ActiveLockStore.shared.unblockAll()
-            await MainActor.run {
-                NotificationCenter.default.post(name: .evlinLockStateChanged, object: false)
-            }
-        }
-    }
-
     /// User preference for `ManagedSettingsStore.application.denyAppRemoval`. Default ON.
     func setDeletionProtectionEnabled(_ enabled: Bool) {
         guard deletionProtectionEnabled != enabled else {
@@ -239,15 +200,6 @@ class ScreenTimeManager: ObservableObject {
                 await ActiveLockStore.shared.reapplyCurrentRestrictions()
             }
         }
-    }
-
-    /// Clear only lock-related settings. Do not call `clearAllSettings()` here:
-    /// it also clears `application.denyAppRemoval`, making Evlin deletable.
-    private func clearLockRestrictions() {
-        store.application.blockedApplications = nil
-        store.shield.applications = nil
-        store.shield.applicationCategories = nil
-        store.shield.webDomainCategories = nil
     }
 
     /// Save the selected apps to shared UserDefaults so the Monitor extension can read them.

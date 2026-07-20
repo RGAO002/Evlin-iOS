@@ -107,10 +107,54 @@ final class HomeSettingsLockRoutingTests: XCTestCase {
     /// match this test file itself.
     func test_screen_time_manager_has_no_dead_direct_writers() throws {
         let source = try Self.sourceText("Evlin iOS/Services/ScreenTimeManager.swift")
+        XCTAssertFalse(source.contains("func shieldApps" + "("),
+                       "ScreenTimeManager must not expose a second shield writer")
+        XCTAssertFalse(source.contains("func clearAllShields" + "("),
+                       "ScreenTimeManager must not expose a second unshield writer")
         XCTAssertFalse(source.contains("func shieldAllApps" + "("),
                        "shieldAllApps was a zero-caller direct ManagedSettings writer")
         XCTAssertFalse(source.contains("func unshieldApps" + "("),
                        "unshieldApps-forMinutes was a zero-caller direct ManagedSettings writer")
+    }
+
+    func test_active_lock_store_is_the_only_main_app_shield_block_field_writer() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Evlin iOS")
+        let directWriteNeedles = [
+            ".shield." + "applications =",
+            ".shield." + "applicationCategories =",
+            ".shield." + "webDomains =",
+            ".shield." + "webDomainCategories =",
+            ".application." + "blockedApplications =",
+        ]
+        let enumerator = try XCTUnwrap(
+            FileManager.default.enumerator(
+                at: root,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            )
+        )
+        var offenders: [String] = []
+
+        for case let fileURL as URL in enumerator where fileURL.pathExtension == "swift" {
+            guard fileURL.lastPathComponent != "ActiveLockStore.swift" else { continue }
+            // Explicit diagnostic probes exercise ManagedSettings directly and
+            // are not production lock routing. They live under a Debug folder;
+            // every non-debug main-app path remains covered by this guard.
+            guard !fileURL.pathComponents.contains("Debug") else { continue }
+            let source = try String(contentsOf: fileURL, encoding: .utf8)
+            if directWriteNeedles.contains(where: source.contains) {
+                offenders.append(fileURL.path.replacingOccurrences(of: root.path + "/", with: ""))
+            }
+        }
+
+        XCTAssertEqual(
+            offenders,
+            [],
+            "All main-app shield/block field writes must be projected by ActiveLockStore"
+        )
     }
 
     // MARK: - Helpers
