@@ -103,6 +103,21 @@ final class MeteringTargetMembershipTests: XCTestCase {
         XCTAssertFalse(isMember("Services/MeteringProcessEntries.swift", of: .push, in: project))
     }
 
+    func testPhase5OwnerExecutionStaysOutOfPushTarget() throws {
+        let project = try projectSource()
+        let ownerOnly = [
+            "Services/MeteringProcessEntries.swift",
+            "Services/MeteringPolicyOwnerReadbackClient.swift",
+            "Services/AppLimitOwnerReadbackClient.swift",
+        ]
+        for path in ownerOnly {
+            XCTAssertTrue(isMember(path, of: .app, in: project), path)
+            XCTAssertFalse(isMember(path, of: .push, in: project), path)
+        }
+        XCTAssertTrue(isMember("Services/AppLimitProductionComposition.swift", of: .push, in: project))
+        XCTAssertTrue(isMember("Services/MeteringEpochWire.swift", of: .push, in: project))
+    }
+
     func testV30EncoderStaysAppOnly() throws {
         let project = try projectSource()
 

@@ -176,6 +176,27 @@ final class MeteringEpochVectorCoverageTests: XCTestCase {
             .appendingPathComponent("Evlin-Backend/tests/fixtures/metering_epoch_vectors.json")
     }
 
+    func testPhase5FixtureIsByteIdenticalAndComplete() throws {
+        let sourceURL = Self.sourceFixtureURL()
+            .deletingLastPathComponent()
+            .appendingPathComponent("metering_epoch_phase5_vectors.json")
+        let backendURL = sourceURL
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Evlin-Backend/tests/fixtures/metering_epoch_phase5_vectors.json")
+        let source = try Data(contentsOf: sourceURL)
+        let backend = try Data(contentsOf: backendURL)
+        XCTAssertEqual(source, backend)
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: source) as? JSONObject)
+        XCTAssertEqual(root["schema_version"] as? Int, 1)
+        let cases = try XCTUnwrap(root["cases"] as? [JSONObject])
+        XCTAssertEqual(cases.compactMap { $0["id"] as? String },
+                       (1...12).map { String(format: "P5V%02d", $0) })
+        XCTAssertEqual(Set(cases.compactMap { $0["id"] as? String }).count, 12)
+    }
+
     private func sourceFixtureData() throws -> Data {
         let sourceURL = Self.sourceFixtureURL()
         guard FileManager.default.fileExists(atPath: sourceURL.path) else {

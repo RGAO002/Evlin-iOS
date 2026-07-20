@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "P5V01",
+      "description": "A newer per-app set becomes desired and waits for the app owner.",
+      "input": {"channel": "app_limit", "commands": [{"kind": "set", "ordering_token": 1, "payload_digest": "set-1", "source": "notification_service_extension"}]},
+      "expected": {"disposition": "accepted_needs_owner", "desired_token": 1, "desired_kind": "set", "applied_token": null, "ack_status": "pending", "application_state": "persisted_waiting_for_owner", "monitor_calls": 0, "shield_mutations": 0, "applied_ack_count": 0}
+    },
+    {
+      "id": "P5V02",
+      "description": "An exact duplicate set reuses desired state without owner side effects.",
+      "input": {"channel": "app_limit", "commands": [{"kind": "set", "ordering_token": 2, "payload_digest": "set-2", "source": "poll"}, {"kind": "set", "ordering_token": 2, "payload_digest": "set-2", "source": "notification_service_extension"}]},
+      "expected": {"disposition": "duplicate_pending", "desired_token": 2, "desired_kind": "set", "applied_token": null, "ack_status": "pending", "application_state": "persisted_waiting_for_owner", "monitor_calls": 0, "shield_mutations": 0, "applied_ack_count": 0}
+    },
+    {
+      "id": "P5V03",
+      "description": "A newer clear supersedes a pending set.",
+      "input": {"channel": "app_limit", "commands": [{"kind": "set", "ordering_token": 3, "payload_digest": "set-3", "source": "poll"}, {"kind": "clear", "ordering_token": 4, "payload_digest": "clear-4", "source": "notification_service_extension"}]},
+      "expected": {"disposition": "accepted_needs_owner", "desired_token": 4, "desired_kind": "clear", "applied_token": null, "ack_status": "confirmed", "application_state": "superseded", "monitor_calls": 0, "shield_mutations": 0, "applied_ack_count": 0}
+    },
+    {
+      "id": "P5V04",
+      "description": "The app owner applies the newest set and returns exact readback.",
+      "input": {"channel": "app_limit", "commands": [{"kind": "set", "ordering_token": 5, "payload_digest": "set-5", "source": "poll"}], "owner": "app", "readback_verified": true},
+      "expected": {"disposition": "applied", "desired_token": 5, "desired_kind": "set", "applied_token": 5, "ack_status": "confirmed", "application_state": "applied", "monitor_calls": 1, "shield_mutations": 0, "applied_ack_count": 1}
+    },
+    {
+      "id": "P5V05",
+      "description": "The app owner applies the newest clear tombstone and returns exact readback.",
+      "input": {"channel": "app_limit", "commands": [{"kind": "clear", "ordering_token": 6, "payload_digest": "clear-6", "source": "poll"}], "owner": "app", "readback_verified": true},
+      "expected": {"disposition": "cleared", "desired_token": 6, "desired_kind": "clear", "applied_token": 6, "ack_status": "confirmed", "application_state": "cleared", "monitor_calls": 1, "shield_mutations": 1, "applied_ack_count": 1}
+    },
+    {
+      "id": "P5V06",
+      "description": "A newer earned policy becomes desired without Push owning monitoring.",
+      "input": {"channel": "earned_policy", "commands": [{"kind": "set", "ordering_token": 7, "payload_digest": "earned-7", "source": "notification_service_extension"}]},
+      "expected": {"disposition": "accepted_needs_owner", "desired_token": 7, "desired_kind": "set", "applied_token": null, "ack_status": "pending", "application_state": "persisted_waiting_for_owner", "monitor_calls": 0, "shield_mutations": 0, "applied_ack_count": 0}
+    },
+    {
+      "id": "P5V07",
+      "description": "The app owner installs the newest earned policy generation and confirms exact route readback.",
+      "input": {"channel": "earned_policy", "commands": [{"kind": "set", "ordering_token": 8, "payload_digest": "earned-8", "source": "poll"}], "owner": "app", "readback_verified": true},
+      "expected": {"disposition": "applied", "desired_token": 8, "desired_kind": "set", "applied_token": 8, "ack_status": "confirmed", "application_state": "applied", "monitor_calls": 1, "shield_mutations": 0, "applied_ack_count": 1}
+    },
+    {
+      "id": "P5V08",
+      "description": "Device A cap exhaustion creates only A's earned source and receipt.",
+      "input": {"channel": "earned_terminal", "trigger": "device_cap_exhausted", "reporting_device": "A"},
+      "expected": {"affected_devices": ["A"], "unchanged_devices": ["B"], "sources": ["earnedTime"], "receipt_count": 1, "distinct_command_count": 1}
+    },
+    {
+      "id": "P5V09",
+      "description": "Shared pool exhaustion fans out distinct durable receipts to A and B.",
+      "input": {"channel": "earned_terminal", "trigger": "shared_pool_exhausted", "reporting_device": "B"},
+      "expected": {"affected_devices": ["A", "B"], "unchanged_devices": [], "sources": ["earnedTime"], "receipt_count": 2, "distinct_command_count": 2}
+    },
+    {
+      "id": "P5V10",
+      "description": "A partial shared-pool fanout preserves A and retries only missing B.",
+      "input": {"channel": "earned_reconcile", "trigger": "shared_pool_exhausted", "initially_executable_devices": ["A"]},
+      "expected": {"first_affected_devices": ["A"], "retry_affected_devices": ["B"], "final_affected_devices": ["A", "B"], "duplicate_command_devices": [], "sources": ["earnedTime"]}
+    },
+    {
+      "id": "P5V11",
+      "description": "Each sample changes the shared child ledger and only the reporting device ledger.",
+      "input": {"channel": "earned_sample", "sequence": [{"device": "A", "minutes": 5}, {"device": "B", "minutes": 5}]},
+      "expected": {"after_A": {"child_used": 5, "A_used": 5, "B_used": 0}, "after_A_cap": {"child_used": 10, "A_used": 10, "B_used": 0}, "after_B": {"child_used": 15, "A_used": 10, "B_used": 5}}
+    },
+    {
+      "id": "P5V12",
+      "description": "Owner mismatch or unverified persistence cannot create an applied acknowledgement.",
+      "input": {"channel": "earned_policy", "commands": [{"kind": "set", "ordering_token": 12, "payload_digest": "earned-12", "source": "notification_service_extension"}], "owner": "notification_service_extension", "readback_verified": false},
+      "expected": {"disposition": "accepted_needs_owner", "desired_token": 12, "desired_kind": "set", "applied_token": null, "ack_status": "pending", "application_state": "persisted_waiting_for_owner", "monitor_calls": 0, "shield_mutations": 0, "applied_ack_count": 0}
+    }
+  ]
+}
