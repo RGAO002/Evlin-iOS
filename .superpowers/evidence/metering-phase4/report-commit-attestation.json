@@ -1,0 +1,23 @@
+{
+  "report_commit_sha": "35a4d966f652cfee98d8ab87fac957b72f83b89b",
+  "report_path": "docs/superpowers/reports/2026-07-17-metering-epoch-phase-4-completion.md",
+  "report_blob_sha": "2e75b1597e4cb0d1a116ff3478f6304cba0722fa",
+  "report_sha256": "9aa6588c5302946b18c08fdbe25464611af70c8bda614dcdc8eec0ad81ddfb8f",
+  "verifier_path": "scripts/verify_metering_phase4.sh",
+  "verifier_blob_sha": "9b4c54c79919f7475dd90399e7553c16f1d86775",
+  "verifier_sha256": "90c60d5fe1d6bb2fac2dcdbbeed010435eac2b0424001a96153feedf1325ffe3",
+  "release_product_script_path": "scripts/build_verify_six_release_iphoneos.sh",
+  "release_product_script_blob_sha": "b532f8af8332d6dfd87d3fe977ccb30b71226b6e",
+  "release_product_script_sha256": "038bc17885671d5193c435003a70c96f7fcb793df6e5fc55b2fccec1df59a177",
+  "final_command": [
+    "/bin/bash",
+    "scripts/verify_metering_phase4.sh",
+    "final",
+    "35a4d966f652cfee98d8ab87fac957b72f83b89b"
+  ],
+  "final_exit_code": 0,
+  "final_stdout": "final_report_commit=35a4d966f652cfee98d8ab87fac957b72f83b89b\nphysical_status=PENDING\n",
+  "physical_status": "PENDING",
+  "phase_complete": false,
+  "releasable": false
+}
