@@ -47,12 +47,12 @@ final class DeviceEpochStoreTests: XCTestCase {
 
     func testFutureSchemaIsRefusedWithoutWriting() throws {
         let io = TestFileIO()
-        io.data = Data(#"{"schemaVersion":5}"#.utf8)
+        io.data = Data(#"{"schemaVersion":6}"#.utf8)
         let store = makeStore(io: io)
         let original = io.data
 
         XCTAssertThrowsError(try store.read()) { error in
-            XCTAssertEqual(error as? DeviceEpochStoreError, .unsupportedSchema(5))
+            XCTAssertEqual(error as? DeviceEpochStoreError, .unsupportedSchema(6))
         }
         XCTAssertEqual(io.data, original)
         XCTAssertEqual(io.writeCount, 0)

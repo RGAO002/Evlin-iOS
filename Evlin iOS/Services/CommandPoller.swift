@@ -274,6 +274,8 @@ final class CommandPoller {
     var appLimitOwnerExecuteOverride: ((LockCommand, AppLimitCommandEnvelope, UUID) async -> AppLimitOwnerExecutionResult)?
     var appLimitReceiptReadbackOverride: ((UUID) throws -> AppLimitApplyReceipt?)?
     var ackCommandOverride: ((UUID, String, [String: Any]?) async throws -> Void)?
+    var earnedPolicyIngressOverride: ((LockCommand, UUID) throws -> MeteringPolicyIngressDisposition)?
+    var earnedPolicyRecoveryOverride: (() async throws -> Void)?
 
     // MARK: - Earned-time config seams (test-only hooks; production uses the defaults)
 
@@ -664,6 +666,7 @@ final class CommandPoller {
         if poll.action == CommandAction.earnedTimeConfig.rawValue {
             await handleEarnedTimeConfig(
                 poll: poll,
+                command: Self.lockCommand(from: poll),
                 expectedDeviceID: expectedDeviceID,
                 api: api
             )
@@ -1151,19 +1154,12 @@ final class CommandPoller {
 
     // MARK: - A4: earned_time_config inline handler
 
-    /// Handle a `earned_time_config` command inline, without going through
-    /// `ActionExecutor`.
-    ///
-    /// 1. Persists `selected_set.list_id` via EarnedTimeStore (+ re-keys any
-    ///    existing savedList shield record via ActiveLockStore.reKeyShieldRecord).
-    /// 2. Persists policy, then asks the sole earned arming entry point to
-    ///    install a generation-safe DeviceActivity ladder when ready.
-    /// 3. Acks the command as "confirmed" regardless of missing optional fields.
-    ///
-    /// Guard: if the device has no measurement selection (earned-time capture
-    /// never ran), arm() is skipped but the command is still acked confirmed.
+    /// Persists newest desired policy through the same Device Epoch inbox used
+    /// by the NSE. Only the main-app recovery owner may install monitoring and
+    /// send an applied acknowledgement.
     private func handleEarnedTimeConfig(
         poll: PollCommandDTO,
+        command: LockCommand,
         expectedDeviceID: UUID,
         api: APIClient
     ) async {
@@ -1171,139 +1167,67 @@ final class CommandPoller {
             coalescePollForCurrentIdentity(expectedDeviceID: expectedDeviceID)
             return
         }
-        let cfg = poll.earned_time_config
-        let commandID = poll.command_id
-
-        // Step 1: Persist locked-set list_id + re-key any existing shield record.
-        if let listID = cfg?.selected_set?.list_id, !listID.isEmpty {
-            let existing = EarnedTimeStore.shared.lockedSetID ?? ""
-            // Task 3 (paper-lock fix): would also persist
-            // EarnedTimeStore.shared.saveLockedSetAllSelected(...) here, but
-            // `PollEarnedConfigSelectedSetDTO` (this handler's only response
-            // shape for `earned_time_config.selected_set`) does not carry an
-            // `all_selected` field on the wire — Task 1 only threaded
-            // `all_selected` onto the lock-command `target` payload consumed
-            // by ActionExecutor.buildShieldRecord, not onto this same-day
-            // pool/cap sync payload. Not guessing a nonexistent wire field;
-            // if this payload later gains `all_selected`, wire it the same way.
-            // Re-key any shield record stored under an old/provisional id.
-            if existing != listID {
-                let mutation = await ActiveLockStore.shared.reKeyShieldRecord(
-                    fromLocalID: existing,
-                    toBackendID: listID
+        do {
+            let disposition = try earnedPolicyIngressOverride?(command, expectedDeviceID)
+                ?? MeteringPolicyIngress.persist(
+                    command: command,
+                    fetchedDeviceID: expectedDeviceID
                 )
-                await afterRekeyShieldRecord?(existing, listID)
-                guard isExpectedDeviceCurrent(expectedDeviceID) else {
-                    if let mutation {
-                        await ActiveLockStore.shared.rollbackRekey(mutation)
-                    }
-                    coalescePollForCurrentIdentity(expectedDeviceID: expectedDeviceID)
-                    return
-                }
+            let status: String
+            var detail: [String: Any] = ["owner": "device_epoch_store"]
+            switch disposition {
+            case .acceptedNeedsOwner, .duplicatePending, .duplicateApplied:
+                status = "persisted_waiting_for_owner"
+                detail["application_state"] = "pending"
+                detail["reason"] = "persisted_waiting_for_owner"
+            case let .superseded(latestOrderingToken):
+                status = "confirmed"
+                detail["application_state"] = "superseded"
+                detail["reason"] = "superseded"
+                detail["latest_ordering_token"] = latestOrderingToken
+            case .equalTokenConflict:
+                status = "failed"
+                detail["reason"] = "ordering_token_conflict"
             }
-            guard isExpectedDeviceCurrent(expectedDeviceID) else {
-                coalescePollForCurrentIdentity(expectedDeviceID: expectedDeviceID)
-                return
+            if let token = command.earnedTimeConfig?.orderingToken {
+                detail["ordering_token"] = token
             }
-            if let override = saveLockedSetIDOverride {
-                override(listID, nil)
-            } else {
-                EarnedTimeStore.shared.saveLockedSetID(listID, tokenData: nil)
-            }
-        }
-
-        // Step 2: Re-arm the DeviceActivity budget ladder if measurement selection
-        // is present (captured during the one-time setup flow).
-        let poolMinutes = cfg?.daily_pool_minutes ?? 0
-        let capMinutes  = cfg?.device_cap_minutes  ?? 0
-
-        if poolMinutes > 0, capMinutes > 0 {
-            EarnedTimeStore.shared.poolMinutes = poolMinutes
-            EarnedTimeStore.shared.capMinutes = capMinutes
-            let replacementOffset = EarnedBudgetArming.replacementOffset(
-                acceptedEstimateMinutes: EarnedTimeStore.shared.acceptedEstimateMinutes,
-                runningOffsetMinutes: EarnedTimeStore.shared.earnedUsageOffsetMinutes
+            try await ackEarnedPolicyTransport(
+                commandID: poll.command_id,
+                status: status,
+                detail: detail,
+                expectedDeviceID: expectedDeviceID,
+                api: api
             )
-            // Wave-2 Task 1 veto-staleness fix: prefer the server-authoritative
-            // `remaining_minutes` carried on the wire (pool − used, computed
-            // backend-side). Falling back to a device-derived estimate here is
-            // what caused the original bug — remaining never refreshed as usage
-            // grew within the freshness window, so it could wrongly suppress a
-            // legitimate at-budget local self-lock. Only fall back to the old
-            // derived formula for backends that omit the new field.
-            if let wireRemaining = cfg?.remaining_minutes {
-                EarnedTimeStore.shared.backendRemainingAtLastSync = max(0, wireRemaining)
+            guard status == "persisted_waiting_for_owner" else { return }
+            if let recovery = earnedPolicyRecoveryOverride {
+                try await recovery()
             } else {
-                EarnedTimeStore.shared.backendRemainingAtLastSync = max(
-                    0,
-                    min(poolMinutes, capMinutes) - replacementOffset
-                )
+                try await MeteringProductionComposition.recoverFromSharedConfiguration(role: .app)
             }
-            EarnedTimeStore.shared.lastBackendSyncAt = Date()
-            guard EarnedTimeStore.shared.usageCountingAllowed else {
-                if let stopEarnedBudgetOverride {
-                    stopEarnedBudgetOverride()
-                } else {
-                    EarnedBudgetArming.stopLegacyMonitoring()
-                }
-                return await ackEarnedTimeConfig(
-                    commandID: commandID,
-                    expectedDeviceID: expectedDeviceID,
-                    api: api
-                )
-            }
-            guard isExpectedDeviceCurrent(expectedDeviceID),
-                  EarnedTimeStore.shared.isAuthoritativeStateReady(deviceID: expectedDeviceID)
-            else {
-                CommandDeliveryDiagnostics.record(
-                    CommandDeliveryDiagnostics.keyEarnedArmAttempt,
-                    "skipped config-authoritative-state-not-ready"
-                )
-                return await ackEarnedTimeConfig(
-                    commandID: commandID,
-                    expectedDeviceID: expectedDeviceID,
-                    api: api
-                )
-            }
-            if let armOverride = armBudgetOverride {
-                let hasMeasurableSelection = hasMeasurableSelectionOverride?()
-                    ?? EarnedTimeStore.shared.hasMeasurableSelection
-                if hasMeasurableSelection,
-                   let selection = EarnedTimeStore.shared.measurementSelection,
-                   let remainingPolicy = EarnedBudgetScheduler.remainingPolicy(
-                       poolMinutes: poolMinutes,
-                       capMinutes: capMinutes,
-                       offsetMinutes: replacementOffset
-                   ) {
-                    CommandDeliveryDiagnostics.record(
-                        CommandDeliveryDiagnostics.keyEarnedArmAttempt,
-                        "test-policy-capture pool=\(remainingPolicy.poolMinutes) cap=\(remainingPolicy.capMinutes) offset=\(replacementOffset) \(EarnedBudgetScheduler.selectionSummary(selection))"
-                    )
-                    armOverride(remainingPolicy.poolMinutes, remainingPolicy.capMinutes, selection)
-                }
-            } else {
-                EarnedBudgetArming.armIfReady()
-                Task { @MainActor in
-                    do {
-                        try await MeteringProductionComposition.recoverFromSharedConfiguration(
-                            role: .app
-                        )
-                    } catch {
-                        CommandDeliveryDiagnostics.record(
-                            CommandDeliveryDiagnostics.keyEarnedArmAttempt,
-                            "metering-recovery-failed error=\(error)"
-                        )
-                    }
-                }
-            }
+        } catch {
+            CommandDeliveryDiagnostics.record(
+                CommandDeliveryDiagnostics.keyCommandAck,
+                "earned-policy-ingress-failed command=\(poll.command_id) error=\(error)"
+            )
         }
+    }
 
-        // Step 3: Ack as confirmed.
-        await ackEarnedTimeConfig(
-            commandID: commandID,
-            expectedDeviceID: expectedDeviceID,
-            api: api
-        )
+    private func ackEarnedPolicyTransport(
+        commandID: UUID,
+        status: String,
+        detail: [String: Any],
+        expectedDeviceID: UUID,
+        api: APIClient
+    ) async throws {
+        guard isExpectedDeviceCurrent(expectedDeviceID) else {
+            throw MeteringPolicyIngressError.ownerMismatch
+        }
+        if let override = ackCommandOverride {
+            try await override(commandID, status, detail)
+        } else {
+            try await api.ack(commandID: commandID, status: status, detail: detail)
+        }
     }
 
     private func ackMalformedPoll(
@@ -1334,29 +1258,4 @@ final class CommandPoller {
         }
     }
 
-    private func ackEarnedTimeConfig(
-        commandID: UUID,
-        expectedDeviceID: UUID,
-        api: APIClient
-    ) async {
-        guard isExpectedDeviceCurrent(expectedDeviceID) else { return }
-        if let ackEarnedTimeConfigOverride {
-            await ackEarnedTimeConfigOverride(commandID, api)
-            return
-        }
-        do {
-            try await api.ack(commandID: commandID, status: "confirmed", detail: nil)
-            CommandDeliveryDiagnostics.record(
-                CommandDeliveryDiagnostics.keyCommandAck,
-                "ok command=\(commandID.uuidString) status=confirmed (earned_time_config)"
-            )
-        } catch {
-            CommandDeliveryDiagnostics.record(
-                CommandDeliveryDiagnostics.keyCommandAck,
-                "failed command=\(commandID.uuidString) status=confirmed " +
-                "error=\(error.localizedDescription)"
-            )
-            print("[CommandPoller] ack failed for earned_time_config \(commandID): \(error)")
-        }
-    }
 }

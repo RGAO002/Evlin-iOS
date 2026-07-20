@@ -58,7 +58,8 @@ nonisolated enum MeteringProductionComposition {
         runtime: EarnedTimeRuntime? = nil,
         usageCountingAllowed: Bool? = nil,
         store: DeviceEpochStore = .shared,
-        clock: any MeteringClock = MeteringRuntimeClock.live()
+        clock: any MeteringClock = MeteringRuntimeClock.live(),
+        transport: any MeteringHTTPTransport = URLSession.shared
     ) async throws {
         guard let configuration = sharedConfiguration() else { return }
         let driver = makeRecoveryDriver(
@@ -66,7 +67,15 @@ nonisolated enum MeteringProductionComposition {
             role: role,
             instanceID: instanceID(for: role),
             store: store,
+            transport: transport,
             clock: clock
+        )
+
+        try planDesiredPolicyIfPresent(
+            owner: configuration.owner,
+            store: store,
+            defaults: configuration.defaults,
+            now: clock.now
         )
 
         if let runtime, let usageCountingAllowed {
@@ -84,6 +93,160 @@ nonisolated enum MeteringProductionComposition {
             )
         }
         try await driver.recover(ownerChildDeviceID: configuration.owner)
+        if role == .app {
+            try await finalizeDesiredPolicyIfApplied(
+                owner: configuration.owner,
+                baseURL: configuration.baseURL,
+                store: store,
+                transport: transport,
+                now: clock.now
+            )
+        }
+    }
+
+    private static func planDesiredPolicyIfPresent(
+        owner: UUID,
+        store: DeviceEpochStore,
+        defaults: UserDefaults,
+        now: Date
+    ) throws {
+        let state = try store.read()
+        guard let desired = state.desiredPolicy,
+              desired.ownerChildDeviceID == owner,
+              desired.ackedAt == nil,
+              let selectionBytes = defaults.data(forKey: selectionKey),
+              let selection = try? JSONDecoder().decode(
+                  FamilyActivitySelection.self,
+                  from: selectionBytes
+              ),
+              !selection.applicationTokens.isEmpty
+                || !selection.categoryTokens.isEmpty
+                || !selection.webDomainTokens.isEmpty,
+              let enforcementSetID = desired.enforcementSetID
+                ?? defaults.string(forKey: lockedSetIDKey).flatMap(UUID.init(uuidString:))
+        else { return }
+
+        let accepted: Int
+        if let epochID = state.activeEpochID,
+           let epoch = state.epochs[epochID],
+           epoch.childDeviceID == owner,
+           epoch.usageDate == desired.usageDate {
+            accepted = max(
+                0,
+                epoch.baseAcceptedMinutes
+                    + epoch.lastRawThresholdMinutes
+                    - epoch.excludedWhilePausedMinutes
+            )
+        } else {
+            accepted = 0
+        }
+        let boundedAccepted = min(
+            accepted,
+            max(0, min(desired.dailyPoolMinutes, desired.deviceCapMinutes) - 1)
+        )
+        let generationKey = MeteringGenerationKey(
+            protocolVersion: 2,
+            childDeviceID: owner,
+            canonicalTimezone: desired.canonicalTimezone,
+            policyRevision: desired.policyRevision,
+            measurementSelectionDigest: MeteringEpochContract.selectionDigest(
+                persistedBytes: selectionBytes
+            ),
+            enforcementSetID: enforcementSetID
+        )
+        _ = try store.reconcileMeteringHorizon(MeteringHorizonRequest(
+            ownerChildDeviceID: owner,
+            today: desired.usageDate,
+            generationKey: generationKey,
+            persistedSelectionBytes: selectionBytes,
+            poolMinutes: desired.dailyPoolMinutes,
+            deviceCapMinutes: desired.deviceCapMinutes,
+            authoritativeBaseAcceptedMinutes: boundedAccepted,
+            now: now
+        ))
+    }
+
+    static func desiredPolicyMatchesActiveReadback(
+        _ desired: MeteringDesiredPolicy,
+        state: DeviceEpochStoreState
+    ) -> Bool {
+        guard state.ownerChildDeviceID == desired.ownerChildDeviceID,
+              let generationID = state.activeGenerationID,
+              let generation = state.generations[generationID],
+              generation.childDeviceID == desired.ownerChildDeviceID,
+              generation.policyRevision == desired.policyRevision,
+              generation.canonicalTimezone == desired.canonicalTimezone,
+              generation.configuredPoolMinutes == desired.dailyPoolMinutes,
+              generation.configuredDeviceCapMinutes == desired.deviceCapMinutes,
+              desired.enforcementSetID == nil || generation.enforcementSetID == desired.enforcementSetID,
+              let epochID = state.activeEpochID,
+              let epoch = state.epochs[epochID],
+              epoch.childDeviceID == desired.ownerChildDeviceID,
+              epoch.usageDate == desired.usageDate,
+              epoch.policyRevision == desired.policyRevision,
+              epoch.status == .active,
+              let routeID = state.activeRouteID,
+              let route = state.routes[routeID],
+              route.ownerChildDeviceID == desired.ownerChildDeviceID,
+              route.generationID == generationID,
+              route.epochID == epochID,
+              route.lifecycle == .active,
+              route.installedSchedule == route.plannedSchedule,
+              route.installedEvents == route.plannedEvents,
+              let coverage = state.coverage,
+              coverage.ownerChildDeviceID == desired.ownerChildDeviceID,
+              coverage.status != .coverageExhausted,
+              (coverage.readyThroughUsageDate ?? "") >= desired.usageDate
+        else { return false }
+
+        let expected = MeteringDatedSchedule.remainingPolicy(
+            poolMinutes: desired.dailyPoolMinutes,
+            capMinutes: desired.deviceCapMinutes,
+            offsetMinutes: epoch.baseAcceptedMinutes
+        ).map {
+            Set(MeteringDatedSchedule.thresholds(
+                poolMinutes: $0.poolMinutes,
+                capMinutes: $0.capMinutes
+            ))
+        } ?? []
+        return Set(route.plannedEvents.map(\.thresholdMinutes)) == expected
+    }
+
+    static func finalizeDesiredPolicyIfApplied(
+        owner: UUID,
+        baseURL: URL,
+        store: DeviceEpochStore,
+        transport: any MeteringHTTPTransport,
+        now: Date
+    ) async throws {
+        var state = try store.read()
+        guard var desired = state.desiredPolicy,
+              desired.ownerChildDeviceID == owner,
+              desired.ackedAt == nil,
+              desiredPolicyMatchesActiveReadback(desired, state: state)
+        else { return }
+
+        if desired.appliedAt == nil {
+            try store.markDesiredPolicyApplied(
+                commandID: desired.commandID,
+                orderingToken: desired.orderingToken,
+                policyRevision: desired.policyRevision,
+                appliedAt: now
+            )
+            state = try store.read()
+            guard let refreshed = state.desiredPolicy else { return }
+            desired = refreshed
+        }
+        try await MeteringPolicyOwnerReadbackClient(
+            baseURL: baseURL,
+            transport: transport
+        ).confirm(desired)
+        try store.markDesiredPolicyAcknowledged(
+            commandID: desired.commandID,
+            orderingToken: desired.orderingToken,
+            policyRevision: desired.policyRevision,
+            ackedAt: now
+        )
     }
 
     private static func planAuthoritativeRuntime(

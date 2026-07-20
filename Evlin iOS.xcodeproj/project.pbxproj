@@ -184,6 +184,7 @@
 				Services/MeteringEpochDelivery.swift,
 				Services/MeteringEpochWire.swift,
 				Services/MeteringMonitorCapabilityProbe.swift,
+				Services/MeteringPolicyOwnerReadbackClient.swift,
 				Services/MeteringProcessEntries.swift,
 				Services/MeteringProductionComposition.swift,
 				Services/MeteringRuntimeInfrastructure.swift,

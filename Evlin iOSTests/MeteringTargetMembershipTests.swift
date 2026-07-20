@@ -87,6 +87,14 @@ final class MeteringTargetMembershipTests: XCTestCase {
         XCTAssertFalse(isMember("Services/MeteringProductionComposition.swift", of: .push, in: project))
     }
 
+    func testPolicyOwnerReadbackCompilesWithAppRecoveryButNotPush() throws {
+        let project = try projectSource()
+
+        XCTAssertTrue(isMember("Services/MeteringPolicyOwnerReadbackClient.swift", of: .app, in: project))
+        XCTAssertTrue(isMember("Services/MeteringPolicyOwnerReadbackClient.swift", of: .deviceActivityMonitor, in: project))
+        XCTAssertFalse(isMember("Services/MeteringPolicyOwnerReadbackClient.swift", of: .push, in: project))
+    }
+
     func testProcessEntriesBelongToAppAndMonitorButNotPushTargets() throws {
         let project = try projectSource()
 

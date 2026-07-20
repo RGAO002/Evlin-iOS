@@ -39,6 +39,32 @@ nonisolated struct MeteringPolicyGeneration: Codable, Equatable, Sendable {
     let measurementSelectionBytes: Data
     let createdAt: Date
     var retiredAt: Date?
+    var configuredPoolMinutes: Int? = nil
+    var configuredDeviceCapMinutes: Int? = nil
+}
+
+nonisolated struct MeteringDesiredPolicy: Codable, Equatable, Sendable {
+    let commandID: UUID
+    let ownerChildDeviceID: UUID
+    let orderingToken: Int64
+    let policyRevision: String
+    let usageDate: String
+    let canonicalTimezone: String
+    let dailyPoolMinutes: Int
+    let deviceCapMinutes: Int
+    let remainingMinutes: Int?
+    let enforcementSetID: UUID?
+    let receivedAt: Date
+    var appliedAt: Date?
+    var ackedAt: Date?
+}
+
+nonisolated enum MeteringPolicyIngressDisposition: Equatable, Sendable {
+    case acceptedNeedsOwner
+    case duplicatePending
+    case duplicateApplied
+    case superseded(latestOrderingToken: Int64)
+    case equalTokenConflict
 }
 
 nonisolated enum DeviceDailyEpochStatus: String, Codable, Sendable {
@@ -766,7 +792,7 @@ nonisolated struct MeteringOwnerRatchet: Codable, Equatable, Sendable {
 }
 
 nonisolated struct DeviceEpochStoreState: Codable, Equatable, Sendable {
-    static let currentSchemaVersion = 4
+    static let currentSchemaVersion = 5
 
     var schemaVersion: Int
     var ownerChildDeviceID: UUID?
@@ -788,6 +814,7 @@ nonisolated struct DeviceEpochStoreState: Codable, Equatable, Sendable {
     var rolloverEffectsWork: RolloverEffectsWork?
     var coverage: MonitorCoverageState?
     var ratchets: [UUID: MeteringOwnerRatchet]
+    var desiredPolicy: MeteringDesiredPolicy?
 
     init(
         schemaVersion: Int = Self.currentSchemaVersion,
@@ -809,7 +836,8 @@ nonisolated struct DeviceEpochStoreState: Codable, Equatable, Sendable {
         identityCleanupWork: IdentityCleanupWork? = nil,
         rolloverEffectsWork: RolloverEffectsWork? = nil,
         coverage: MonitorCoverageState? = nil,
-        ratchets: [UUID: MeteringOwnerRatchet] = [:]
+        ratchets: [UUID: MeteringOwnerRatchet] = [:],
+        desiredPolicy: MeteringDesiredPolicy? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.ownerChildDeviceID = ownerChildDeviceID
@@ -831,6 +859,7 @@ nonisolated struct DeviceEpochStoreState: Codable, Equatable, Sendable {
         self.rolloverEffectsWork = rolloverEffectsWork
         self.coverage = coverage
         self.ratchets = ratchets
+        self.desiredPolicy = desiredPolicy
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -838,7 +867,7 @@ nonisolated struct DeviceEpochStoreState: Codable, Equatable, Sendable {
         case epochs, activeEpochID, routes, activeRouteID, tombstones
         case v2RouteHandoff, legacy, registrationWork, activationWork, sampleWork
         case installWork, shieldReferences, identityCleanupWork, rolloverEffectsWork
-        case coverage, ratchets
+        case coverage, ratchets, desiredPolicy
     }
 
     init(from decoder: Decoder) throws {
@@ -863,6 +892,7 @@ nonisolated struct DeviceEpochStoreState: Codable, Equatable, Sendable {
         rolloverEffectsWork = try values.decodeIfPresent(RolloverEffectsWork.self, forKey: .rolloverEffectsWork)
         coverage = try values.decodeIfPresent(MonitorCoverageState.self, forKey: .coverage)
         ratchets = try values.decodeIfPresent([UUID: MeteringOwnerRatchet].self, forKey: .ratchets) ?? [:]
+        desiredPolicy = try values.decodeIfPresent(MeteringDesiredPolicy.self, forKey: .desiredPolicy)
     }
 }
 
@@ -1036,6 +1066,103 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
 
     func read() throws -> DeviceEpochStoreState {
         try withLock { try loadState() }
+    }
+
+    func ingestDesiredPolicy(
+        _ policy: MeteringDesiredPolicy
+    ) throws -> MeteringPolicyIngressDisposition {
+        guard policy.orderingToken > 0,
+              !policy.policyRevision.isEmpty,
+              !policy.usageDate.isEmpty,
+              !policy.canonicalTimezone.isEmpty,
+              policy.dailyPoolMinutes > 0,
+              policy.deviceCapMinutes > 0,
+              policy.appliedAt == nil,
+              policy.ackedAt == nil,
+              policy.ownerChildDeviceID == ownerProvider()
+        else { throw DeviceEpochStoreError.ownerMismatch }
+
+        return try transaction(expectedOwner: policy.ownerChildDeviceID) { state in
+            guard let current = state.desiredPolicy else {
+                state.desiredPolicy = policy
+                return .acceptedNeedsOwner
+            }
+            if policy.orderingToken < current.orderingToken {
+                return .superseded(latestOrderingToken: current.orderingToken)
+            }
+            if policy.orderingToken > current.orderingToken {
+                state.desiredPolicy = policy
+                return .acceptedNeedsOwner
+            }
+            guard Self.sameDesiredPolicyAuthority(current, policy) else {
+                return .equalTokenConflict
+            }
+            return current.appliedAt == nil ? .duplicatePending : .duplicateApplied
+        }
+    }
+
+    func markDesiredPolicyApplied(
+        commandID: UUID,
+        orderingToken: Int64,
+        policyRevision: String,
+        appliedAt: Date
+    ) throws {
+        let owner = ownerProvider()
+        try transaction(expectedOwner: owner) { state in
+            guard var current = state.desiredPolicy,
+                  current.commandID == commandID,
+                  current.orderingToken == orderingToken,
+                  current.policyRevision == policyRevision,
+                  current.ownerChildDeviceID == owner
+            else { throw DeviceEpochStoreError.readbackMismatch }
+            if let existing = current.appliedAt {
+                guard existing == appliedAt else { throw DeviceEpochStoreError.readbackMismatch }
+                return
+            }
+            current.appliedAt = appliedAt
+            state.desiredPolicy = current
+        }
+    }
+
+    func markDesiredPolicyAcknowledged(
+        commandID: UUID,
+        orderingToken: Int64,
+        policyRevision: String,
+        ackedAt: Date
+    ) throws {
+        let owner = ownerProvider()
+        try transaction(expectedOwner: owner) { state in
+            guard var current = state.desiredPolicy,
+                  current.commandID == commandID,
+                  current.orderingToken == orderingToken,
+                  current.policyRevision == policyRevision,
+                  current.ownerChildDeviceID == owner,
+                  current.appliedAt != nil
+            else { throw DeviceEpochStoreError.readbackMismatch }
+            if let existing = current.ackedAt {
+                guard existing == ackedAt else { throw DeviceEpochStoreError.readbackMismatch }
+                return
+            }
+            current.ackedAt = ackedAt
+            state.desiredPolicy = current
+        }
+    }
+
+    private static func sameDesiredPolicyAuthority(
+        _ lhs: MeteringDesiredPolicy,
+        _ rhs: MeteringDesiredPolicy
+    ) -> Bool {
+        lhs.commandID == rhs.commandID
+            && lhs.ownerChildDeviceID == rhs.ownerChildDeviceID
+            && lhs.orderingToken == rhs.orderingToken
+            && lhs.policyRevision == rhs.policyRevision
+            && lhs.usageDate == rhs.usageDate
+            && lhs.canonicalTimezone == rhs.canonicalTimezone
+            && lhs.dailyPoolMinutes == rhs.dailyPoolMinutes
+            && lhs.deviceCapMinutes == rhs.deviceCapMinutes
+            && lhs.remainingMinutes == rhs.remainingMinutes
+            && lhs.enforcementSetID == rhs.enforcementSetID
+            && lhs.receivedAt == rhs.receivedAt
     }
 
     func isCurrentOwner(_ owner: UUID) -> Bool {
@@ -2662,6 +2789,7 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
             || state.rolloverEffectsWork != nil
             || state.coverage != nil
             || !state.ratchets.isEmpty
+            || state.desiredPolicy != nil
         guard let owner else {
             if hasPersistedObjects {
                 throw DeviceEpochStoreInvariantError.invalidState("persisted objects have no owner")
@@ -2692,6 +2820,10 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         for (generationID, generation) in state.generations {
             guard generationID == generation.generationID,
                   generation.childDeviceID == owner,
+                  (generation.configuredPoolMinutes == nil)
+                    == (generation.configuredDeviceCapMinutes == nil),
+                  generation.configuredPoolMinutes.map { $0 > 0 } ?? true,
+                  generation.configuredDeviceCapMinutes.map { $0 > 0 } ?? true,
                   generation.measurementSelectionDigest == MeteringEpochContract.selectionDigest(
                       persistedBytes: generation.measurementSelectionBytes
                   )
@@ -2835,6 +2967,20 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         for (ratchetID, ratchet) in state.ratchets {
             guard ratchetID == ratchet.ownerChildDeviceID, ratchet.ownerChildDeviceID == owner else {
                 throw DeviceEpochStoreInvariantError.invalidState("ratchet has the wrong owner")
+            }
+        }
+
+        if let desired = state.desiredPolicy {
+            guard desired.ownerChildDeviceID == owner,
+                  desired.orderingToken > 0,
+                  !desired.policyRevision.isEmpty,
+                  !desired.usageDate.isEmpty,
+                  !desired.canonicalTimezone.isEmpty,
+                  desired.dailyPoolMinutes > 0,
+                  desired.deviceCapMinutes > 0,
+                  desired.ackedAt == nil || desired.appliedAt != nil
+            else {
+                throw DeviceEpochStoreInvariantError.invalidState("desired policy is invalid")
             }
         }
 
@@ -3319,7 +3465,9 @@ extension DeviceEpochStoreState {
             enforcementSetID: rejectedGeneration.enforcementSetID,
             measurementSelectionBytes: rejectedGeneration.measurementSelectionBytes,
             createdAt: now,
-            retiredAt: nil
+            retiredAt: nil,
+            configuredPoolMinutes: rejectedGeneration.configuredPoolMinutes,
+            configuredDeviceCapMinutes: rejectedGeneration.configuredDeviceCapMinutes
         )
         let correctedEpoch = DeviceDailyEpoch(
             epochID: correctedEpochID,

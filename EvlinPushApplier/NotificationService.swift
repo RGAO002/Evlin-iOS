@@ -97,6 +97,15 @@ final class NotificationService: UNNotificationServiceExtension {
             )
             return
         }
+        if command.action == .earnedTimeConfig {
+            await persistEarnedPolicy(
+                command,
+                baseURL: baseURL,
+                deviceID: deviceID,
+                commandID: commandID
+            )
+            return
+        }
         guard let outcome = await NSELockApplier.apply(
             command,
             fetchedDeviceID: deviceID
@@ -152,6 +161,60 @@ final class NotificationService: UNNotificationServiceExtension {
         NSEConfig.log(
             "limit persisted cmd=\(commandID) disposition=\(delivery.ack.disposition) ack=\(delivery.ackSucceeded)"
         )
+    }
+
+    private func persistEarnedPolicy(
+        _ command: LockCommand,
+        baseURL: URL,
+        deviceID: UUID,
+        commandID: UUID
+    ) async {
+        do {
+            let disposition = try MeteringPolicyIngress.persist(
+                command: command,
+                fetchedDeviceID: deviceID
+            )
+            let status: String
+            var detail: [String: Any] = ["owner": "device_epoch_store"]
+            switch disposition {
+            case .acceptedNeedsOwner, .duplicatePending:
+                status = "persisted_waiting_for_owner"
+                detail["application_state"] = "pending"
+                detail["reason"] = "persisted_waiting_for_owner"
+            case .duplicateApplied:
+                let desired = try DeviceEpochStore.shared.read().desiredPolicy
+                if desired?.ackedAt != nil {
+                    status = "confirmed"
+                    detail["application_state"] = "applied"
+                    detail["source"] = "device_epoch_owner_readback"
+                } else {
+                    status = "persisted_waiting_for_owner"
+                    detail["application_state"] = "applied_waiting_for_readback"
+                    detail["reason"] = "persisted_waiting_for_owner"
+                }
+            case let .superseded(latestOrderingToken):
+                status = "confirmed"
+                detail["application_state"] = "superseded"
+                detail["reason"] = "superseded"
+                detail["latest_ordering_token"] = latestOrderingToken
+            case .equalTokenConflict:
+                status = "failed"
+                detail["reason"] = "ordering_token_conflict"
+            }
+            if let token = command.earnedTimeConfig?.orderingToken {
+                detail["ordering_token"] = token
+            }
+            try await NSENetwork.ack(
+                baseURL: baseURL,
+                deviceID: deviceID,
+                commandID: commandID,
+                status: status,
+                detail: detail
+            )
+            NSEConfig.log("earned policy persisted cmd=\(commandID) status=\(status)")
+        } catch {
+            NSEConfig.log("earned policy rejected cmd=\(commandID) error=\(error)")
+        }
     }
 }
 

@@ -156,6 +156,8 @@ extension DeviceEpochStore {
                     measurementSelectionDigest: $0.measurementSelectionDigest,
                     enforcementSetID: $0.enforcementSetID
                 ) == request.generationKey
+                    && $0.configuredPoolMinutes == request.poolMinutes
+                    && $0.configuredDeviceCapMinutes == request.deviceCapMinutes
             }
             let activeMatch = state.activeGenerationID
                 .flatMap { state.generations[$0] }
@@ -168,7 +170,7 @@ extension DeviceEpochStore {
                         < $1.generationID.uuidString.lowercased()
                 }
                 .first
-            let generation = activeMatch ?? deterministicMatch ?? MeteringPolicyGeneration(
+            var generation = activeMatch ?? deterministicMatch ?? MeteringPolicyGeneration(
                 generationID: UUID(),
                 protocolVersion: request.generationKey.protocolVersion,
                 childDeviceID: request.generationKey.childDeviceID,
@@ -178,8 +180,12 @@ extension DeviceEpochStore {
                 enforcementSetID: request.generationKey.enforcementSetID,
                 measurementSelectionBytes: request.persistedSelectionBytes,
                 createdAt: request.now,
-                retiredAt: nil
+                retiredAt: nil,
+                configuredPoolMinutes: request.poolMinutes,
+                configuredDeviceCapMinutes: request.deviceCapMinutes
             )
+            generation.configuredPoolMinutes = request.poolMinutes
+            generation.configuredDeviceCapMinutes = request.deviceCapMinutes
             state.generations[generation.generationID] = generation
             if state.activeRouteID == nil {
                 state.activeGenerationID = generation.generationID

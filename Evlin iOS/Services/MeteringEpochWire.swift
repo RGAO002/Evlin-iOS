@@ -40,6 +40,73 @@ nonisolated enum MeteringSampleWireAliases {
     }
 }
 
+nonisolated enum MeteringPolicyIngressError: Error, Equatable {
+    case wrongAction
+    case missingPayload
+    case ownerMismatch
+    case malformedPolicy
+}
+
+nonisolated enum MeteringPolicyIngress {
+    static func desiredPolicy(
+        from command: LockCommand,
+        fetchedDeviceID: UUID
+    ) throws -> MeteringDesiredPolicy {
+        guard command.action == .earnedTimeConfig else {
+            throw MeteringPolicyIngressError.wrongAction
+        }
+        guard let config = command.earnedTimeConfig else {
+            throw MeteringPolicyIngressError.missingPayload
+        }
+        guard let ownerRaw = config.child_device_id,
+              let owner = UUID(uuidString: ownerRaw),
+              owner == fetchedDeviceID
+        else { throw MeteringPolicyIngressError.ownerMismatch }
+        guard let orderingToken = config.orderingToken,
+              orderingToken > 0,
+              let policyRevision = config.policy_revision?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !policyRevision.isEmpty,
+              let usageDate = (config.usage_date ?? config.effective_date)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+              !usageDate.isEmpty,
+              let timezone = config.timezone?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !timezone.isEmpty,
+              config.daily_pool_minutes > 0,
+              config.device_cap_minutes > 0
+        else { throw MeteringPolicyIngressError.malformedPolicy }
+
+        let enforcementSetID = config.selected_set?.list_id.flatMap(UUID.init(uuidString:))
+        if config.selected_set?.list_id != nil, enforcementSetID == nil {
+            throw MeteringPolicyIngressError.malformedPolicy
+        }
+        return MeteringDesiredPolicy(
+            commandID: command.id,
+            ownerChildDeviceID: owner,
+            orderingToken: orderingToken,
+            policyRevision: policyRevision,
+            usageDate: usageDate,
+            canonicalTimezone: timezone,
+            dailyPoolMinutes: config.daily_pool_minutes,
+            deviceCapMinutes: config.device_cap_minutes,
+            remainingMinutes: config.remaining_minutes,
+            enforcementSetID: enforcementSetID,
+            receivedAt: command.issuedAt,
+            appliedAt: nil,
+            ackedAt: nil
+        )
+    }
+
+    static func persist(
+        command: LockCommand,
+        fetchedDeviceID: UUID,
+        store: DeviceEpochStore = .shared
+    ) throws -> MeteringPolicyIngressDisposition {
+        try store.ingestDesiredPolicy(
+            desiredPolicy(from: command, fetchedDeviceID: fetchedDeviceID)
+        )
+    }
+}
+
 nonisolated struct DeviceDaySnapshotDTO: Codable, Equatable, Sendable {
     let childDeviceID: UUID
     let usageDate: String
