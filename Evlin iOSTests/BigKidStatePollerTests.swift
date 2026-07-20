@@ -128,6 +128,42 @@ final class BigKidStatePollerTests: XCTestCase {
         XCTAssertEqual(rearmCount, 1)
     }
 
+    func test_refresh_pausesAppLimitArmsWhenAuthoritativeGateCloses() async {
+        let response = snapshot(usageCountingAllowed: false, runtime: authoritativeRuntime())
+        let state = BigKidState(snapshot: response)
+        var pauses = 0
+        let poller = BigKidStatePoller(
+            state: state,
+            fetchState: { response },
+            reconcileReflectionLock: { _ in },
+            syncEarnedRuntime: { _ in .reconciled(0) },
+            pauseAppLimitArms: { pauses += 1 }
+        )
+
+        await poller.refreshNow()
+
+        XCTAssertEqual(pauses, 1)
+    }
+
+    func test_refresh_rearmsWhenPersistedSuccessorStartIsPendingAfterRestart() async {
+        let response = snapshot(usageCountingAllowed: true, runtime: authoritativeRuntime())
+        let state = BigKidState(snapshot: response)
+        var rearmCount = 0
+        let poller = BigKidStatePoller(
+            state: state,
+            fetchState: { response },
+            reconcileReflectionLock: { _ in },
+            syncEarnedRuntime: { _ in .reconciled(0) },
+            setUsageCountingAllowed: { _ in true },
+            hasPausedAppLimitArms: { true },
+            rearmUsageCounters: { rearmCount += 1; return true }
+        )
+
+        await poller.refreshNow()
+
+        XCTAssertEqual(rearmCount, 1)
+    }
+
     func test_refresh_rearmsUsageCountersWhenDoneAfterSkippedUnfinishedUsageEvenIfGateAlreadyTrue() async {
         EarnedTimeStore.shared.usageCountingAllowed = true
         CommandDeliveryDiagnostics.record(

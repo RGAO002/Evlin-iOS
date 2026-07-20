@@ -40,6 +40,8 @@ final class BigKidStatePoller: ObservableObject {
     private let markAuthoritativeReady: (UUID) -> Void
     private let clearAuthoritativeReadiness: () -> Void
     private let ensureEarnedArmed: () -> Void
+    private let pauseAppLimitArms: () -> Void
+    private let hasPausedAppLimitArms: () -> Bool
     private let rearmUsageCounters: () -> Bool
     private let reportEffectiveState: () async -> Void
     private let failOpenFamily: () async -> Void
@@ -112,6 +114,8 @@ final class BigKidStatePoller: ObservableObject {
             EarnedTimeStore.shared.clearAuthoritativeStateReadiness()
         }
         self.ensureEarnedArmed = { EarnedBudgetArming.armIfReady() }
+        self.pauseAppLimitArms = { _ = AppLimitPlanner().pauseActiveArms() }
+        self.hasPausedAppLimitArms = { AppLimitPlanner().hasPausedArms() }
         self.rearmUsageCounters = Self.rearmOtherUsageCountersFromStoredPolicy
         self.reportEffectiveState = {
             guard let snapshot = await CommandPoller.globalEffectiveStateDictionary() else { return }
@@ -145,6 +149,8 @@ final class BigKidStatePoller: ObservableObject {
         markAuthoritativeReady: @escaping (UUID) -> Void = { _ in },
         clearAuthoritativeReadiness: @escaping () -> Void = {},
         ensureEarnedArmed: @escaping () -> Void = {},
+        pauseAppLimitArms: @escaping () -> Void = {},
+        hasPausedAppLimitArms: @escaping () -> Bool = { false },
         rearmUsageCounters: @escaping () -> Bool = { true },
         reportEffectiveState: @escaping () async -> Void = {},
         failOpenFamily: @escaping () async -> Void = { await FamilyGoneDetector.failOpen() },
@@ -166,6 +172,8 @@ final class BigKidStatePoller: ObservableObject {
         self.markAuthoritativeReady = markAuthoritativeReady
         self.clearAuthoritativeReadiness = clearAuthoritativeReadiness
         self.ensureEarnedArmed = ensureEarnedArmed
+        self.pauseAppLimitArms = pauseAppLimitArms
+        self.hasPausedAppLimitArms = hasPausedAppLimitArms
         self.rearmUsageCounters = rearmUsageCounters
         self.reportEffectiveState = reportEffectiveState
         self.failOpenFamily = failOpenFamily
@@ -294,11 +302,16 @@ final class BigKidStatePoller: ObservableObject {
                 // A closed task/reflection gate pauses accounting, not Apple's
                 // monitors. Keeping the dated routes installed preserves raw
                 // high-water so resume can replace the epoch conservatively.
+                if runtimeIsAuthoritative {
+                    pauseAppLimitArms()
+                }
             } else {
                 if runtimeIsAuthoritative {
                     ensureEarnedArmed()
                 }
-                if !wasCountingAllowed || shouldRecoverSkippedUsage {
+                let hasPausedAppLimits = runtimeIsAuthoritative
+                    && hasPausedAppLimitArms()
+                if !wasCountingAllowed || shouldRecoverSkippedUsage || hasPausedAppLimits {
                     let recovered = rearmUsageCounters()
                     if shouldRecoverSkippedUsage && recovered {
                         CommandDeliveryDiagnostics.remove(CommandDeliveryDiagnostics.keyUsageCountingLastSkipped)
@@ -422,37 +435,9 @@ final class BigKidStatePoller: ObservableObject {
             deviceTotalArmed = false
         }
 
-        let appLimitUsageDate = EarnedTimeStore.appLimitUsageDate()
-        let adjustedRules = AppLimitRuleStore.shared.all().compactMap { rule -> AppLimitRule? in
-            let used = max(
-                store.appLimitUsageOffsetMinutes(
-                    ruleID: rule.id,
-                    usageDate: appLimitUsageDate
-                ),
-                store.appLimitReportedMinutes(
-                    ruleID: rule.id,
-                    usageDate: appLimitUsageDate
-                )
-            )
-            store.setAppLimitUsageOffset(
-                ruleID: rule.id,
-                usageDate: appLimitUsageDate,
-                usedMinutes: used
-            )
-            let remaining = rule.budgetMinutes - used
-            guard remaining > 0 else { return nil }
-            return AppLimitRule(
-                id: rule.id,
-                appTokens: rule.appTokens,
-                bundleID: rule.bundleID,
-                displayName: rule.displayName,
-                budgetMinutes: remaining,
-                window: rule.window,
-                effectiveFrom: rule.effectiveFrom,
-                expiresAt: rule.expiresAt
-            )
-        }
-        let perAppResult = AppLimitPlanner().arm(rules: adjustedRules)
+        let perAppResult = AppLimitPlanner().resumePausedArms(
+            rules: AppLimitRuleStore.shared.all()
+        )
         return usageCounterRearmSucceeded(
             deviceTotalArmed: deviceTotalArmed,
             perAppResult: perAppResult

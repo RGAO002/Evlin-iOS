@@ -94,6 +94,31 @@ final class AppLimitCallbackNoEffectsTests: XCTestCase {
         XCTAssertEqual(persisted?.lastRawThresholdMinutes, 0)
     }
 
+    func testMultiplePausedCallbacksKeepOnlyTheHighestRawWaterAndRunNoEffects() throws {
+        let fixture = try AppLimitCallbackFixture(budgetMinutes: 60)
+        var effects = AppLimitCallbackEffectSpy()
+
+        for threshold in [15, 30, 45] {
+            let decision = try fixture.validator.process(
+                activityName: fixture.provenance.activityName,
+                eventName: fixture.measurementEventName(threshold),
+                canonicalUsageDate: fixture.usageDate,
+                observedAt: fixture.provenance.startedAt,
+                usageCountingAllowed: false
+            ) { callback in
+                effects.record(callback)
+            }
+            guard case .paused = decision else {
+                return XCTFail("paused threshold \(threshold) must not run an effect")
+            }
+        }
+
+        let persisted = try fixture.store.read().slots[fixture.rule.id]?.armProvenance
+        XCTAssertEqual(persisted?.ignoredWhilePausedMinutes, 45)
+        XCTAssertEqual(persisted?.lastRawThresholdMinutes, 0)
+        XCTAssertEqual(effects, AppLimitCallbackEffectSpy())
+    }
+
     func testTwoRuleStoreMutatesOnlyMatchingHighWaterAndEffectIdentity() throws {
         let unrelatedRule = AppLimitCallbackFixture.makeRule(
             id: UUID(uuidString: "10000000-0000-0000-0000-000000000002")!,

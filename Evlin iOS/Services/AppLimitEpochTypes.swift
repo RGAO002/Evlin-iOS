@@ -233,8 +233,18 @@ nonisolated struct AppLimitArmProvenance: Codable, Equatable, Sendable {
     var baseAcceptedMinutes: Int
     var lastRawThresholdMinutes: Int
     var ignoredWhilePausedMinutes: Int
-    let activityName: String
-    let armID: UUID
+    /// Non-nil while the accounting gate is closed. DeviceActivity remains
+    /// armed so callbacks can retain their raw high-water for audit only.
+    var pausedAt: Date? = nil
+    /// A successor was durably selected but DeviceActivity has not yet been
+    /// observed running it. This survives a process death between persistence
+    /// and `startMonitoring`.
+    var monitorStartPending: Bool? = nil
+    /// Audit-only pause provenance from the predecessor arm. It must never be
+    /// subtracted from a successor whose raw threshold starts at zero.
+    var predecessorIgnoredWhilePausedMinutes: Int? = nil
+    var activityName: String
+    var armID: UUID
 
     var replacementKey: AppLimitReplacementKey {
         AppLimitReplacementKey(

@@ -110,6 +110,117 @@ nonisolated final class AppLimitPlanner: @unchecked Sendable {
         self.armIDProvider = armIDProvider
     }
 
+    // MARK: - Gate pause and conservative resume
+
+    /// Marks live v2 arms as paused without touching DeviceActivity. While the
+    /// gate is closed, the extension retains only raw callback high-water; it
+    /// does not emit enforcement or usage effects.
+    @discardableResult
+    func pauseActiveArms() -> Int {
+        guard let owner = ownerProvider() else { return 0 }
+        let pausedAt = now()
+        do {
+            return try epochStore.transaction(
+                source: .poll,
+                expectedOwner: owner
+            ) { state in
+                var count = 0
+                for ruleID in state.slots.keys {
+                    guard var slot = state.slots[ruleID],
+                          slot.latestKind == .set,
+                          var provenance = slot.armProvenance,
+                          provenance.pausedAt == nil
+                    else { continue }
+                    provenance.pausedAt = pausedAt
+                    slot.armProvenance = provenance
+                    state.slots[ruleID] = slot
+                    count += 1
+                }
+                return count
+            }
+        } catch {
+            return 0
+        }
+    }
+
+    func hasPausedArms() -> Bool {
+        guard let owner = ownerProvider() else { return false }
+        do {
+            let state = try epochStore.read()
+            guard state.ownerChildDeviceID == owner else { return false }
+            return state.slots.values.contains {
+                $0.latestKind == .set
+                    && ($0.armProvenance?.pausedAt != nil
+                        || $0.armProvenance?.monitorStartPending == true)
+            }
+        } catch {
+            return false
+        }
+    }
+
+    /// Atomically replaces each paused arm with a successor before touching
+    /// DeviceActivity. The successor starts its raw counter at zero. Only
+    /// callbacks accepted before pause become its base; paused raw high-water
+    /// is retained as audit provenance and is never charged.
+    @discardableResult
+    func resumePausedArms(rules: [AppLimitRule]) -> AppLimitPlanResult {
+        guard let owner = ownerProvider() else { return arm(rules: rules) }
+        let resumedAt = now()
+        do {
+            try epochStore.transaction(
+                source: .poll,
+                expectedOwner: owner
+            ) { state in
+                for ruleID in state.slots.keys {
+                    guard var slot = state.slots[ruleID],
+                          slot.latestKind == .set,
+                          var provenance = slot.armProvenance,
+                          provenance.pausedAt != nil
+                    else { continue }
+
+                    if provenance.usageDate != Self.usageDate(
+                        for: resumedAt,
+                        timezoneID: provenance.timezone
+                    ) {
+                        provenance.predecessorIgnoredWhilePausedMinutes = provenance.ignoredWhilePausedMinutes
+                        provenance.pausedAt = nil
+                        provenance.ignoredWhilePausedMinutes = 0
+                        slot.armProvenance = provenance
+                        state.slots[ruleID] = slot
+                        continue
+                    }
+
+                    let accepted = provenance.baseAcceptedMinutes
+                        + provenance.lastRawThresholdMinutes
+                    guard accepted >= 0, accepted < provenance.budgetMinutes else {
+                        provenance.predecessorIgnoredWhilePausedMinutes = provenance.ignoredWhilePausedMinutes
+                        provenance.pausedAt = nil
+                        provenance.ignoredWhilePausedMinutes = 0
+                        slot.armProvenance = provenance
+                        state.slots[ruleID] = slot
+                        continue
+                    }
+                    let ignored = provenance.ignoredWhilePausedMinutes
+                    let armID = armIDProvider()
+                    provenance.baseAcceptedMinutes = accepted
+                    provenance.lastRawThresholdMinutes = 0
+                    provenance.ignoredWhilePausedMinutes = 0
+                    provenance.predecessorIgnoredWhilePausedMinutes = ignored
+                    provenance.pausedAt = nil
+                    provenance.monitorStartPending = true
+                    provenance.startedAt = resumedAt
+                    provenance.armID = armID
+                    provenance.activityName = Self.v2ActivityName(armID: armID)
+                    slot.armProvenance = provenance
+                    state.slots[ruleID] = slot
+                }
+            }
+        } catch {
+            return .partiallyArmed(armed: 0, failed: rules.count)
+        }
+        return armV2(rules: rules, ownerChildDeviceID: owner)
+    }
+
     // MARK: - Arm
 
     /// Validate then (re)arm DeviceActivity for the given rules. Atomic: if any
@@ -400,6 +511,9 @@ nonisolated final class AppLimitPlanner: @unchecked Sendable {
         }
 
         let missingNames = desiredNames.subtracting(liveNames)
+        for activity in plan where !missingNames.contains(activity.name.rawValue) {
+            try? markMonitorStartObserved(activity.provenance, ownerChildDeviceID: ownerChildDeviceID)
+        }
         var armedCount = 0
         var failedCount = 0
         for activity in plan where missingNames.contains(activity.name.rawValue) {
@@ -414,6 +528,7 @@ nonisolated final class AppLimitPlanner: @unchecked Sendable {
                     during: activity.schedule,
                     events: activity.events
                 )
+                try markMonitorStartObserved(activity.provenance, ownerChildDeviceID: ownerChildDeviceID)
                 armedCount += 1
             } catch {
                 failedCount += 1
@@ -423,6 +538,36 @@ nonisolated final class AppLimitPlanner: @unchecked Sendable {
             return .partiallyArmed(armed: armedCount, failed: failedCount)
         }
         return .armed(activityCount: plan.count, eventCount: active.count)
+    }
+
+    private func markMonitorStartObserved(
+        _ provenance: AppLimitArmProvenance,
+        ownerChildDeviceID: UUID
+    ) throws {
+        try epochStore.transaction(source: .wakeRecovery, expectedOwner: ownerChildDeviceID) { state in
+            guard var slot = state.slots[provenance.ruleID],
+                  var current = slot.armProvenance,
+                  current.armID == provenance.armID,
+                  current.activityName == provenance.activityName,
+                  current.monitorStartPending == true
+            else { return }
+            current.monitorStartPending = false
+            slot.armProvenance = current
+            state.slots[provenance.ruleID] = slot
+        }
+    }
+
+    private static func usageDate(for date: Date, timezoneID: String) -> String {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.locale = Locale(identifier: "en_US_POSIX")
+        calendar.timeZone = TimeZone(identifier: timezoneID) ?? .current
+        let components = calendar.dateComponents([.year, .month, .day], from: date)
+        return String(
+            format: "%04d-%02d-%02d",
+            components.year ?? 0,
+            components.month ?? 0,
+            components.day ?? 0
+        )
     }
 
     // MARK: - Filtering

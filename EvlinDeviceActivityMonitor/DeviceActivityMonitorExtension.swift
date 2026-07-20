@@ -334,7 +334,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             case .rejected(let reason):
                 NSLog("[Evlin/Ext] app limit callback rejected: %@", reason)
             case .paused:
-                break
+                return
             case .accepted:
                 break
             }
