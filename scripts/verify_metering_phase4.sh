@@ -4,7 +4,6 @@ set -euo pipefail
 IOS_ROOT="/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS"
 BACKEND_ROOT="/Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend"
 EVIDENCE="$IOS_ROOT/.superpowers/evidence/metering-phase4"
-LOGS="$EVIDENCE/logs"
 REPORT_REL="docs/superpowers/reports/2026-07-17-metering-epoch-phase-4-completion.md"
 REPORT="$IOS_ROOT/$REPORT_REL"
 PYTHON="$BACKEND_ROOT/.venv/bin/python"
@@ -12,6 +11,27 @@ STATUS_CODE="AUTOMATED_PASSED_PHYSICAL_PENDING"
 
 fail() { echo "phase4_verifier_error: $*" >&2; exit 1; }
 sha() { shasum -a 256 "$1" | awk '{print $1}'; }
+
+begin_run() {
+    local suffix=0 candidate
+    RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$(git -C "$IOS_ROOT" rev-parse --short HEAD)"
+    candidate="$EVIDENCE/runs/$RUN_ID"
+    while [[ -e "$candidate" ]]; do
+        suffix=$((suffix + 1))
+        candidate="$EVIDENCE/runs/$RUN_ID-$suffix"
+    done
+    RUN_DIR="$candidate"
+    RUN_ID="${RUN_DIR##*/}"
+    LOGS="$RUN_DIR/logs"
+    MANIFEST="$RUN_DIR/gates.tsv"
+    mkdir -p "$LOGS"
+    : > "$MANIFEST"
+}
+
+publish_success() {
+    cp "$MANIFEST" "$EVIDENCE/gates.tsv"
+    ln -sfn "runs/$RUN_ID" "$EVIDENCE/latest-successful-run"
+}
 
 validate_report_file() {
     local path="$1"
@@ -33,7 +53,7 @@ run_logged() {
     rc=$?
     set -e
     ended="$(date +%s)"
-    printf '%s\t%s\t%s\t%s\n' "$name" "$rc" "$((ended-started))" "$(sha "$LOGS/$name.log")" >> "$EVIDENCE/gates.tsv"
+    printf '%s\t%s\t%s\t%s\n' "$name" "$rc" "$((ended-started))" "$(sha "$LOGS/$name.log")" >> "$MANIFEST"
     [[ $rc -eq 0 ]] || { tail -80 "$LOGS/$name.log" >&2; fail "$name failed ($rc)"; }
 }
 
@@ -63,6 +83,24 @@ verify_dirty_allowlist() {
 }
 
 case "${1:-}" in
+    --self-test)
+        [[ $# -eq 1 ]] || fail "--self-test takes no arguments"
+        original_evidence="$EVIDENCE"
+        EVIDENCE="$(mktemp -d)"
+        self_test_dir="$EVIDENCE"
+        trap 'rm -rf "$self_test_dir"' EXIT
+        printf 'previous-success\n' > "$EVIDENCE/gates.tsv"
+        begin_run
+        printf 'failed-run\n' > "$MANIFEST"
+        [[ "$(cat "$EVIDENCE/gates.tsv")" == "previous-success" ]] || fail "failed run overwrote successful evidence"
+        printf 'successful-run\n' > "$MANIFEST"
+        publish_success
+        [[ "$(cat "$EVIDENCE/gates.tsv")" == "successful-run" ]] || fail "successful manifest was not published"
+        [[ "$(readlink "$EVIDENCE/latest-successful-run")" == "runs/$RUN_ID" ]] || fail "latest successful link is wrong"
+        [[ -f "$EVIDENCE/latest-successful-run/gates.tsv" ]] || fail "archived manifest is missing"
+        EVIDENCE="$original_evidence"
+        echo "phase4_archive_self_test=PASS"
+        ;;
     final)
         [[ $# -eq 2 && "$2" =~ ^[0-9a-f]{40}$ ]] || fail "final requires one report commit SHA"
         temp="$(mktemp)"; trap 'rm -f "$temp"' EXIT
@@ -79,8 +117,8 @@ case "${1:-}" in
         ;;
     --automated)
         [[ $# -eq 1 ]] || fail "--automated takes no arguments"
-        mkdir -p "$LOGS"
-        : > "$EVIDENCE/gates.tsv"
+        mkdir -p "$EVIDENCE/runs"
+        begin_run
         verify_dirty_allowlist
         run_logged fixture-bytes cmp \
             "$IOS_ROOT/Evlin iOSTests/Fixtures/metering_epoch_vectors.json" \
@@ -125,7 +163,7 @@ case "${1:-}" in
             "if rg -n 'DeviceActivityCenter|MeteringDeviceActivityCenter|ManagedSettingsStore|AppLimitPlanner|AppLimitEffectDriver' '$IOS_ROOT/EvlinPushApplier' | grep -Ev '^[^:]+:[0-9]+:[[:space:]]*//'; then exit 1; fi"
         task16="$(git -C "$IOS_ROOT" log -1 --format=%H --grep='^test: prove app limit reordering convergence$')"
         [[ "$task16" =~ ^[0-9a-f]{40}$ ]] || fail "Task 16 commit missing"
-        manifest_sha="$(sha "$EVIDENCE/gates.tsv")"
+        manifest_sha="$(sha "$MANIFEST")"
         product_sha="$(sha "$EVIDENCE/release-products.sha256")"
         vector_sha="$(sha "$IOS_ROOT/Evlin iOSTests/Fixtures/metering_epoch_vectors.json")"
         cat > "$REPORT" <<EOF
@@ -155,14 +193,15 @@ build-for-testing. This report does not claim that Release tests ran.
 | P4-DEVICE-4 | Two-device attribution | PENDING |
 
 Automated gate details, command exit codes, runtimes, and raw-log hashes are in
-\`.superpowers/evidence/metering-phase4/gates.tsv\`. Physical evidence is not
+\`.superpowers/evidence/metering-phase4/runs/$RUN_ID/gates.tsv\`. Physical evidence is not
 fabricated by this automated run.
 EOF
         validate_report_file "$REPORT"
+        publish_success
         echo "status_code=$STATUS_CODE"
         echo "report=$REPORT"
         ;;
     *)
-        fail "usage: $0 --automated|--release|final <report-commit-sha>"
+        fail "usage: $0 --self-test|--automated|--release|final <report-commit-sha>"
         ;;
 esac

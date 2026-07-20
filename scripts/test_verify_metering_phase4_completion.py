@@ -78,6 +78,17 @@ def test_committed_phase4_handoff_is_immutable_and_pending() -> None:
     validate(load())
 
 
+def test_current_verifier_archives_failed_runs_without_overwriting_success() -> None:
+    result = subprocess.run(
+        ["/bin/bash", str(ROOT / VERIFIER_PATH), "--self-test"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "phase4_archive_self_test=PASS\n"
+
+
 @pytest.mark.parametrize(
     ("field", "replacement"),
     [
