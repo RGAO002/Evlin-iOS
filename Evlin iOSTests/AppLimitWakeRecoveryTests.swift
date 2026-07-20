@@ -135,18 +135,39 @@ final class AppLimitWakeRecoveryTests: XCTestCase {
         let oldRecovery = Task { await driver.recover(ownerChildDeviceID: ownerID) }
         await effects.waitUntilStarted()
         _ = try harness.coordinator.ingest(clearEnvelope(token: 11))
+        await driver.recover(ownerChildDeviceID: ownerID)
         await gate.open()
         await oldRecovery.value
 
-        XCTAssertNil(try harness.store.read().slots[ruleID]?.appliedReceipt)
-        let confirmationCountBeforeClear = await readback.count
-        XCTAssertEqual(confirmationCountBeforeClear, 0)
-        await driver.recover(ownerChildDeviceID: ownerID)
         let appliedTokens = await effects.tokens
         let confirmedCommands = await readback.commandIDs
         XCTAssertEqual(appliedTokens, [10, 11])
         XCTAssertEqual(confirmedCommands, [clearCommandID])
         XCTAssertEqual(try harness.store.read().slots[ruleID]?.appliedReceipt?.orderingToken, 11)
+    }
+
+    func testNewerClearBeforeConfirmPreventsStaleConfirmation() async throws {
+        let harness = makeHarness()
+        _ = try harness.coordinator.ingest(setEnvelope(token: 10))
+        let readback = RecordingReadback(store: harness.store)
+        let effects = RecordingEffects()
+        let driver = AppLimitOwnerRecoveryDriver(
+            store: harness.store,
+            effectPort: effects,
+            readbackPort: readback,
+            beforeConfirm: { _ in
+                _ = try harness.coordinator.ingest(self.clearEnvelope(token: 11))
+            }
+        )
+
+        await driver.recover(ownerChildDeviceID: ownerID)
+
+        let confirmations = await readback.commandIDs
+        XCTAssertEqual(confirmations, [])
+        let slot = try XCTUnwrap(harness.store.read().slots[ruleID])
+        XCTAssertEqual(slot.latestKind, .clear)
+        XCTAssertEqual(slot.latestOrderingToken, 11)
+        XCTAssertNotNil(slot.pendingOwnerWork)
     }
 
     func testAllFourProductionEntrypointsNameTheSharedRecoveryEntry() throws {
@@ -155,8 +176,12 @@ final class AppLimitWakeRecoveryTests: XCTestCase {
         let poller = try String(contentsOf: root.appendingPathComponent("Evlin iOS/Services/CommandPoller.swift"))
         XCTAssertTrue(app.contains("AppLimitRecoveryTrigger.launch"))
         XCTAssertTrue(app.contains("AppLimitRecoveryTrigger.foreground"))
-        XCTAssertTrue(app.contains("AppLimitRecoveryTrigger.silentRemoteNotification"))
+        XCTAssertTrue(app.contains("recoveryReason: .silentRemoteNotification"))
+        XCTAssertTrue(poller.contains("AppLimitRecoveryTrigger.silentRemoteNotification"))
         XCTAssertTrue(poller.contains("AppLimitRecoveryTrigger.pollCompletion"))
+        XCTAssertFalse(app.contains(
+            "pollOnceForCurrentDevice()\n            await AppLimitRecoveryTrigger.silentRemoteNotification"
+        ))
     }
 
     private func makeHarness() -> RecoveryHarness {

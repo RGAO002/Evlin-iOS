@@ -5,6 +5,11 @@ import CryptoKit
 import UIKit
 import Sentry
 
+enum AppLimitRecoveryReason: Sendable {
+    case pollCompletion
+    case silentRemoteNotification
+}
+
 private struct CanonicalAppLimitCommandPayload: Encodable {
     let kind: AppLimitCommandKind
     let ruleID: UUID
@@ -249,7 +254,9 @@ final class CommandPoller {
     }
 
     /// Fetch all pending commands and dispatch. Safe to call manually (e.g. on push wake).
-    func pollOnce() async {
+    func pollOnce(
+        recoveryReason: AppLimitRecoveryReason = .pollCompletion
+    ) async {
         guard currentDeviceID != nil, currentAPIClient != nil else { return }
         if isPolling {
             pendingPollAfterCurrent = true
@@ -326,7 +333,7 @@ final class CommandPoller {
                 SentrySDK.capture(error: error)
             }
         } while pendingPollAfterCurrent
-        await recoverAppLimitsAfterPollCompletion()
+        await recoverAppLimits(after: recoveryReason)
     }
 
     private func isExpectedDeviceCurrent(_ expectedDeviceID: UUID) -> Bool {
@@ -358,7 +365,9 @@ final class CommandPoller {
     /// It reuses the existing `pollOnce()` fetch+apply+ack path; if the
     /// foreground poller is already running with a client, that client is
     /// reused, otherwise a default `APIClient` is constructed.
-    func pollOnceForCurrentDevice() async {
+    func pollOnceForCurrentDevice(
+        recoveryReason: AppLimitRecoveryReason = .pollCompletion
+    ) async {
         guard let deviceID = childDeviceIDProvider() else {
             CommandDeliveryDiagnostics.record(
                 CommandDeliveryDiagnostics.keyOneShotPoll,
@@ -374,7 +383,7 @@ final class CommandPoller {
 
         if let override = oneShotPollOverride {
             await override(deviceID, api)
-            await recoverAppLimitsAfterPollCompletion()
+            await recoverAppLimits(after: recoveryReason)
             CommandDeliveryDiagnostics.record(
                 CommandDeliveryDiagnostics.keyOneShotPoll,
                 "override_completed device=\(deviceID.uuidString)"
@@ -386,18 +395,20 @@ final class CommandPoller {
         // existing one-shot path. We do NOT touch the timer here.
         currentDeviceID = deviceID
         currentAPIClient = api
-        await pollOnce()
+        await pollOnce(recoveryReason: recoveryReason)
         CommandDeliveryDiagnostics.record(
             CommandDeliveryDiagnostics.keyOneShotPoll,
             "completed device=\(deviceID.uuidString)"
         )
     }
 
-    private func recoverAppLimitsAfterPollCompletion() async {
+    private func recoverAppLimits(after reason: AppLimitRecoveryReason) async {
         if let override = appLimitRecoveryOverride {
             await override()
-        } else {
+        } else if reason == .pollCompletion {
             await AppLimitRecoveryTrigger.pollCompletion()
+        } else {
+            await AppLimitRecoveryTrigger.silentRemoteNotification()
         }
     }
 

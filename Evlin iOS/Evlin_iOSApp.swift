@@ -564,8 +564,9 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         )
         Task { @MainActor in
             AppDelegate.invalidateRemoteNotificationDrivenStores()
-            await CommandPoller.shared.pollOnceForCurrentDevice()
-            await AppLimitRecoveryTrigger.silentRemoteNotification()
+            await CommandPoller.shared.pollOnceForCurrentDevice(
+                recoveryReason: .silentRemoteNotification
+            )
             completionHandler(.newData)
         }
     }

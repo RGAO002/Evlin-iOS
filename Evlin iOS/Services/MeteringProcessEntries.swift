@@ -24,45 +24,55 @@ final class AppLimitOwnerRecoveryDriver {
     private let effectPort: any AppLimitOwnerEffectPort
     private let readbackPort: any AppLimitOwnerReadbackPort
     private let afterClaim: (AppLimitOwnerWork) async throws -> Void
+    private let beforeConfirm: (AppLimitOwnerWork) async throws -> Void
     private var isRecovering = false
+    private var recoveryRequested = false
 
     init(
         store: AppLimitEpochStore = .shared,
         effectPort: any AppLimitOwnerEffectPort,
         readbackPort: any AppLimitOwnerReadbackPort,
-        afterClaim: @escaping (AppLimitOwnerWork) async throws -> Void = { _ in }
+        afterClaim: @escaping (AppLimitOwnerWork) async throws -> Void = { _ in },
+        beforeConfirm: @escaping (AppLimitOwnerWork) async throws -> Void = { _ in }
     ) {
         self.store = store
         self.effectPort = effectPort
         self.readbackPort = readbackPort
         self.afterClaim = afterClaim
+        self.beforeConfirm = beforeConfirm
     }
 
     func recover(ownerChildDeviceID: UUID) async {
-        guard !isRecovering else { return }
+        guard !isRecovering else {
+            recoveryRequested = true
+            return
+        }
         isRecovering = true
         defer { isRecovering = false }
 
-        let works: [AppLimitOwnerWork]
-        do {
-            let state = try store.read()
-            guard state.ownerChildDeviceID == ownerChildDeviceID else { return }
-            works = state.slots.values.compactMap { slot in
-                guard let work = slot.pendingOwnerWork,
-                      Self.matches(work, slot: slot)
-                else { return nil }
-                return work
-            }.sorted {
-                if $0.createdAt != $1.createdAt { return $0.createdAt < $1.createdAt }
-                return $0.ruleID.uuidString < $1.ruleID.uuidString
+        repeat {
+            recoveryRequested = false
+            let works: [AppLimitOwnerWork]
+            do {
+                let state = try store.read()
+                guard state.ownerChildDeviceID == ownerChildDeviceID else { return }
+                works = state.slots.values.compactMap { slot in
+                    guard let work = slot.pendingOwnerWork,
+                          Self.matches(work, slot: slot)
+                    else { return nil }
+                    return work
+                }.sorted {
+                    if $0.createdAt != $1.createdAt { return $0.createdAt < $1.createdAt }
+                    return $0.ruleID.uuidString < $1.ruleID.uuidString
+                }
+            } catch {
+                return
             }
-        } catch {
-            return
-        }
 
-        for work in works {
-            await recover(work: work, ownerChildDeviceID: ownerChildDeviceID)
-        }
+            for work in works {
+                await recover(work: work, ownerChildDeviceID: ownerChildDeviceID)
+            }
+        } while recoveryRequested
     }
 
     private func recover(
@@ -107,6 +117,16 @@ final class AppLimitOwnerRecoveryDriver {
             guard persisted == receipt else {
                 throw RecoveryError.receiptReadbackMismatch
             }
+            try await beforeConfirm(work)
+            let current = try store.read()
+            guard current.ownerChildDeviceID == ownerChildDeviceID,
+                  let currentSlot = current.slots[work.ruleID],
+                  currentSlot.pendingOwnerWork == nil,
+                  currentSlot.latestOrderingToken == work.orderingToken,
+                  currentSlot.latestKind == work.commandKind,
+                  currentSlot.latestPayloadDigest == work.payloadDigest,
+                  currentSlot.appliedReceipt == receipt
+            else { throw RecoveryError.staleWork }
             try await readbackPort.confirm(
                 commandID: work.commandID,
                 receipt: receipt
