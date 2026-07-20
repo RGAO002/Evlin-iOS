@@ -49,16 +49,37 @@
     },
     {
       "id": "T3",
-      "status": "UNATTESTED",
+      "status": "REMOVED",
       "legacy_mechanism": "fresh-at-fire gate",
       "replacement": ["strict callback trust", "active epoch gate", "earned shield envelope"],
       "deletion_criterion": "replacement vectors and source-absence test pass",
-      "replacement_commits": [],
-      "vectors": [],
-      "evidence": [],
-      "demolition_commit": null,
-      "revert_command": null,
-      "forbidden_symbols": [],
+      "replacement_commits": [
+        {
+          "repository": "ios",
+          "sha": "2ac2e355e00ae6c8291be2aec16388ea56ec70d3"
+        }
+      ],
+      "vectors": [
+        "V04",
+        "V05",
+        "V10",
+        "V12",
+        "P3V01"
+      ],
+      "evidence": [
+        {
+          "path": "/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/.superpowers/evidence/metering-phase6/T3-focused.log",
+          "sha256": "4187bfb0750e3c3f2d859e1be5ac303013ba85e336173c695b770be43ade0ab4"
+        }
+      ],
+      "demolition_commit": {
+        "repository": "ios",
+        "sha": "e46ffe15b45825b20ca1a5b687815cbb340b2f24"
+      },
+      "revert_command": "git -C /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS revert e46ffe15b45825b20ca1a5b687815cbb340b2f24",
+      "forbidden_symbols": [
+        "shouldApplyEarnedShieldFresh"
+      ],
       "release_observation": null,
       "fred_approval": null
     },
