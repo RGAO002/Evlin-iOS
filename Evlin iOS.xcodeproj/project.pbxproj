@@ -162,6 +162,7 @@
 				Services/ActiveLockPersistenceLock.swift,
 				Services/AppLimitEpochStore.swift,
 				Services/AppLimitEpochTypes.swift,
+				Services/AppLimitProvenance.swift,
 				Services/AppLimitRuleStore.swift,
 				Services/AppLimitUsageReporter.swift,
 				Services/DefaultLockGroup.swift,

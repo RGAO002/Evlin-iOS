@@ -86,6 +86,9 @@ nonisolated final class AppLimitPlanner: @unchecked Sendable {
 
     private let scheduler: DeviceActivityScheduling
     private let now: () -> Date
+    private let epochStore: AppLimitEpochStore
+    private let ownerProvider: @Sendable () -> UUID?
+    private let armIDProvider: @Sendable () -> UUID
 
     /// Window activity names this planner armed on its previous successful pass.
     /// Tracked so the next pass can stop activities for windows that have since
@@ -95,10 +98,16 @@ nonisolated final class AppLimitPlanner: @unchecked Sendable {
 
     init(
         scheduler: DeviceActivityScheduling = DeviceActivityCenterScheduler(),
-        now: @escaping () -> Date = { Date() }
+        now: @escaping () -> Date = { Date() },
+        epochStore: AppLimitEpochStore = .shared,
+        ownerProvider: @escaping @Sendable () -> UUID? = MeteringOwnerMirror.current,
+        armIDProvider: @escaping @Sendable () -> UUID = { UUID() }
     ) {
         self.scheduler = scheduler
         self.now = now
+        self.epochStore = epochStore
+        self.ownerProvider = ownerProvider
+        self.armIDProvider = armIDProvider
     }
 
     // MARK: - Arm
@@ -109,6 +118,10 @@ nonisolated final class AppLimitPlanner: @unchecked Sendable {
     /// and each active window is re-armed.
     @discardableResult
     func arm(rules: [AppLimitRule]) -> AppLimitPlanResult {
+        if let owner = ownerProvider() {
+            return armV2(rules: rules, ownerChildDeviceID: owner)
+        }
+
         let reference = now()
         let active = rules.filter { isActive($0, at: reference) }
 
@@ -268,6 +281,144 @@ nonisolated final class AppLimitPlanner: @unchecked Sendable {
         return .partiallyArmed(armed: armedCount, failed: failures.count)
     }
 
+    private func armV2(
+        rules: [AppLimitRule],
+        ownerChildDeviceID: UUID
+    ) -> AppLimitPlanResult {
+        guard let result = ActiveLockPersistenceLock.shared.withLock({
+            armV2Locked(
+                rules: rules,
+                ownerChildDeviceID: ownerChildDeviceID
+            )
+        }) else {
+            return .partiallyArmed(armed: 0, failed: rules.count)
+        }
+        return result
+    }
+
+    private func armV2Locked(
+        rules: [AppLimitRule],
+        ownerChildDeviceID: UUID
+    ) -> AppLimitPlanResult {
+        let reference = now()
+        let active = rules.filter { isActive($0, at: reference) }
+        guard active.count <= Self.maxActivities else {
+            return .quotaExceeded(
+                windows: active.count,
+                slotsNeeded: active.count,
+                cap: Self.maxActivities
+            )
+        }
+        for rule in active {
+            guard rule.appTokens.count <= Self.maxTokensPerActivity else {
+                return .quotaExceeded(
+                    windows: active.count,
+                    slotsNeeded: rule.appTokens.count,
+                    cap: Self.maxTokensPerActivity
+                )
+            }
+        }
+
+        struct ArmedActivity {
+            let name: DeviceActivityName
+            let schedule: DeviceActivitySchedule
+            let events: [DeviceActivityEvent.Name: DeviceActivityEvent]
+            let provenance: AppLimitArmProvenance
+        }
+        let provenanceStore = AppLimitProvenanceStore(
+            store: epochStore,
+            armIDProvider: armIDProvider
+        )
+        var plan: [ArmedActivity] = []
+        for rule in active.sorted(by: { $0.id.uuidString < $1.id.uuidString }) {
+            let resolution: AppLimitProvenanceStore.Resolution
+            do {
+                resolution = try provenanceStore.resolve(
+                    rule: rule,
+                    ownerChildDeviceID: ownerChildDeviceID,
+                    now: reference
+                )
+            } catch {
+                return .partiallyArmed(armed: 0, failed: active.count)
+            }
+            let provenance = resolution.provenance
+            var events: [DeviceActivityEvent.Name: DeviceActivityEvent] = [
+                DeviceActivityEvent.Name(
+                    Self.v2EnforcementEventName(armID: provenance.armID)
+                ): Self.makeV2Event(
+                    applications: rule.appTokens,
+                    thresholdMinutes: rule.budgetMinutes
+                )
+            ]
+            let allocation = Self.allocateMeasurement(
+                rules: [
+                    (
+                        id: rule.id,
+                        tokenCount: rule.appTokens.count,
+                        budgetMinutes: rule.budgetMinutes
+                    )
+                ],
+                reservedEvents: 1,
+                reservedTokens: rule.appTokens.count
+            )
+            for threshold in allocation.perRule[rule.id] ?? [] {
+                events[DeviceActivityEvent.Name(
+                    Self.v2MeasurementEventName(
+                        armID: provenance.armID,
+                        threshold: threshold
+                    )
+                )] = Self.makeV2Event(
+                    applications: rule.appTokens,
+                    thresholdMinutes: threshold
+                )
+            }
+            plan.append(ArmedActivity(
+                name: DeviceActivityName(provenance.activityName),
+                schedule: Self.schedule(for: rule.window),
+                events: events,
+                provenance: provenance
+            ))
+        }
+
+        let desiredNames = Set(plan.map(\.name.rawValue))
+        let liveNames = Set(
+            scheduler.monitoredActivities()
+                .map(\.rawValue)
+                .filter { $0.hasPrefix(Self.v2ActivityPrefix) }
+        )
+        let staleNames = liveNames.subtracting(desiredNames)
+        if !staleNames.isEmpty {
+            scheduler.stopMonitoring(
+                staleNames.sorted().map { DeviceActivityName($0) }
+            )
+        }
+
+        let missingNames = desiredNames.subtracting(liveNames)
+        var armedCount = 0
+        var failedCount = 0
+        for activity in plan where missingNames.contains(activity.name.rawValue) {
+            do {
+                _ = try provenanceStore.recordStartAttempt(
+                    activity.provenance,
+                    ownerChildDeviceID: ownerChildDeviceID,
+                    startedAt: reference
+                )
+                try scheduler.startMonitoring(
+                    activity.name,
+                    during: activity.schedule,
+                    events: activity.events
+                )
+                armedCount += 1
+            } catch {
+                failedCount += 1
+            }
+        }
+        if failedCount > 0 {
+            return .partiallyArmed(armed: armedCount, failed: failedCount)
+        }
+        return .armed(activityCount: plan.count, eventCount: active.count)
+    }
+
     // MARK: - Filtering
 
     /// `now ∈ [effectiveFrom, expiresAt)`. Nil `expiresAt` = no upper bound.
@@ -284,6 +435,32 @@ nonisolated final class AppLimitPlanner: @unchecked Sendable {
     /// ever stops limit windows — never `evlin.shield.*` / `evlin.block.*` /
     /// heartbeat activities.
     static let windowActivityPrefix = "evlin.limit.window."
+    static let v2ActivityPrefix = "evlin.limit.v2."
+
+    static func v2ActivityName(armID: UUID) -> String {
+        "\(v2ActivityPrefix)\(armID.uuidString.lowercased())"
+    }
+
+    static func v2EnforcementEventName(armID: UUID) -> String {
+        "evlin.limit.v2.\(armID.uuidString.lowercased()).budget"
+    }
+
+    static func v2MeasurementEventName(armID: UUID, threshold: Int) -> String {
+        "evlin.applimit.v2.\(armID.uuidString.lowercased()).t\(threshold)"
+    }
+
+    static func makeV2Event(
+        applications: Set<ApplicationToken>,
+        thresholdMinutes: Int
+    ) -> DeviceActivityEvent {
+        DeviceActivityEvent(
+            applications: applications,
+            categories: [],
+            webDomains: [],
+            threshold: DateComponents(minute: thresholdMinutes),
+            includesPastActivity: false
+        )
+    }
 
     /// Stable per-window activity name. Uses the same sha256-hex-16 approach the
     /// DeviceActivity extension (P7) uses for `evlin.shield.*` / `evlin.block.*`,

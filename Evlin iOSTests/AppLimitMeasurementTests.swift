@@ -41,6 +41,29 @@ final class AppLimitMeasurementTests: XCTestCase {
         XCTAssertTrue(m.hasSuffix(".t15"))
     }
 
+    func test_v2EventFactoriesExplicitlyExcludePastActivity() {
+        let armID = UUID(uuidString: "eeeeeeee-0000-0000-0000-000000000010")!
+        let enforcement = AppLimitPlanner.makeV2Event(
+            applications: [],
+            thresholdMinutes: 60
+        )
+        let measurement = AppLimitPlanner.makeV2Event(
+            applications: [],
+            thresholdMinutes: 15
+        )
+
+        XCTAssertFalse(enforcement.includesPastActivity)
+        XCTAssertFalse(measurement.includesPastActivity)
+        XCTAssertEqual(
+            AppLimitPlanner.v2EnforcementEventName(armID: armID),
+            "evlin.limit.v2.\(armID.uuidString.lowercased()).budget"
+        )
+        XCTAssertEqual(
+            AppLimitPlanner.v2MeasurementEventName(armID: armID, threshold: 15),
+            "evlin.applimit.v2.\(armID.uuidString.lowercased()).t15"
+        )
+    }
+
     // MARK: - Budget packer
 
     func test_allocate_fitsWhenBudgetAllows() {

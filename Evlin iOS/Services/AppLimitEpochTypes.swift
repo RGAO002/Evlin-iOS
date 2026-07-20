@@ -138,6 +138,48 @@ nonisolated struct AppLimitVersionSlot: Codable, Equatable, Sendable {
     var clearTombstone: AppLimitClearTombstone?
     var pendingOwnerWork: AppLimitOwnerWork?
     var appliedReceipt: AppLimitApplyReceipt?
+    var armProvenance: AppLimitArmProvenance? = nil
+}
+
+nonisolated struct AppLimitReplacementKey: Codable, Equatable, Sendable {
+    let ruleID: UUID
+    let ruleRevision: Int64
+    let childDeviceID: UUID
+    let usageDate: String
+    let timezone: String
+    let scheduleWindow: AppLimitWindow
+    let tokenDigest: String
+    let budgetMinutes: Int
+}
+
+nonisolated struct AppLimitArmProvenance: Codable, Equatable, Sendable {
+    let ruleID: UUID
+    let ruleRevision: Int64
+    let childDeviceID: UUID
+    let usageDate: String
+    let timezone: String
+    let scheduleWindow: AppLimitWindow
+    let tokenDigest: String
+    let budgetMinutes: Int
+    var startedAt: Date
+    var baseAcceptedMinutes: Int
+    var lastRawThresholdMinutes: Int
+    var ignoredWhilePausedMinutes: Int
+    let activityName: String
+    let armID: UUID
+
+    var replacementKey: AppLimitReplacementKey {
+        AppLimitReplacementKey(
+            ruleID: ruleID,
+            ruleRevision: ruleRevision,
+            childDeviceID: childDeviceID,
+            usageDate: usageDate,
+            timezone: timezone,
+            scheduleWindow: scheduleWindow,
+            tokenDigest: tokenDigest,
+            budgetMinutes: budgetMinutes
+        )
+    }
 }
 
 nonisolated extension AppLimitVersionSlot {

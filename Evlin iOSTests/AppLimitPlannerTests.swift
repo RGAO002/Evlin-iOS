@@ -40,6 +40,7 @@ final class AppLimitPlannerTests: XCTestCase {
         /// Throws ONLY when the armed activity's name is in this set — lets a
         /// test make a single window fail while the rest succeed.
         var failingActivityNames: Set<String> = []
+        var beforeStartEvents: ((String) -> Void)?
 
         func startMonitoring(_ name: DeviceActivityName, during schedule: DeviceActivitySchedule) throws {
             if let e = errorToThrow { throw e }
@@ -56,6 +57,7 @@ final class AppLimitPlannerTests: XCTestCase {
         ) throws {
             if let e = errorToThrow { throw e }
             if failingActivityNames.contains(activity.rawValue) { throw NSError(domain: "spy", code: 1) }
+            beforeStartEvents?(activity.rawValue)
             armed.append(Armed(name: activity, schedule: schedule, events: events))
             activeActivities.insert(activity)
             calls.append(.startEvents(activity.rawValue))
@@ -81,6 +83,7 @@ final class AppLimitPlannerTests: XCTestCase {
     private let dailyWindow = AppLimitWindow(startMinute: 0, endMinute: 1439, repeats: true, timezone: nil)
 
     private func rule(
+        id: UUID = UUID(),
         budget: Int = 30,
         window: AppLimitWindow? = nil,
         effectiveFrom: Date = Date(timeIntervalSince1970: 0),
@@ -88,7 +91,7 @@ final class AppLimitPlannerTests: XCTestCase {
         bundleID: String = "com.example.app"
     ) -> AppLimitRule {
         AppLimitRule(
-            id: UUID(),
+            id: id,
             appTokens: [],
             bundleID: bundleID,
             displayName: bundleID,
@@ -97,6 +100,336 @@ final class AppLimitPlannerTests: XCTestCase {
             effectiveFrom: effectiveFrom,
             expiresAt: expiresAt
         )
+    }
+
+    // MARK: - Phase 4 stable per-rule provenance
+
+    func testProgressAndRestartPreserveArmProvenanceWithoutCenterCalls() throws {
+        let owner = UUID(uuidString: "cccccccc-0000-0000-0000-000000000001")!
+        let ruleID = UUID(uuidString: "dddddddd-0000-0000-0000-000000000400")!
+        let armID = UUID(uuidString: "eeeeeeee-0000-0000-0000-000000000010")!
+        let now = Date(timeIntervalSince1970: 1_721_174_400)
+        let store = makeEpochStore(owner: owner)
+        let configured = rule(
+            id: ruleID,
+            budget: 30,
+            window: AppLimitWindow(
+                startMinute: 0,
+                endMinute: 1439,
+                repeats: true,
+                timezone: "UTC"
+            )
+        )
+        try seed(configured, token: 7, owner: owner, store: store)
+        let spy = PlannerSchedulerSpy()
+
+        let first = AppLimitPlanner(
+            scheduler: spy,
+            now: { now },
+            epochStore: store,
+            ownerProvider: { owner },
+            armIDProvider: { armID }
+        )
+        XCTAssertEqual(first.arm(rules: [configured]), .armed(activityCount: 1, eventCount: 1))
+        let initialCalls = spy.calls
+        let initial = try XCTUnwrap(store.read().slots[ruleID]?.armProvenance)
+        XCTAssertEqual(initial.ruleID, ruleID)
+        XCTAssertEqual(initial.ruleRevision, 7)
+        XCTAssertEqual(initial.childDeviceID, owner)
+        XCTAssertEqual(initial.usageDate, "2024-07-17")
+        XCTAssertEqual(initial.timezone, "UTC")
+        XCTAssertEqual(initial.scheduleWindow, configured.window)
+        XCTAssertEqual(initial.budgetMinutes, 30)
+        XCTAssertEqual(initial.armID, armID)
+        XCTAssertEqual(initial.activityName, "evlin.limit.v2.\(armID.uuidString.lowercased())")
+
+        try store.transaction(source: .wakeRecovery, expectedOwner: owner) { state in
+            var slot = try XCTUnwrap(state.slots[ruleID])
+            var progress = try XCTUnwrap(slot.armProvenance)
+            progress.lastRawThresholdMinutes = 15
+            progress.baseAcceptedMinutes = 5
+            slot.armProvenance = progress
+            state.slots[ruleID] = slot
+        }
+
+        let restarted = AppLimitPlanner(
+            scheduler: spy,
+            now: { now.addingTimeInterval(600) },
+            epochStore: store,
+            ownerProvider: { owner },
+            armIDProvider: { UUID() }
+        )
+        XCTAssertEqual(restarted.arm(rules: [configured]), .armed(activityCount: 1, eventCount: 1))
+        XCTAssertEqual(spy.calls, initialCalls, "progress/restart must not stop or re-arm")
+        let after = try XCTUnwrap(store.read().slots[ruleID]?.armProvenance)
+        XCTAssertEqual(after.armID, armID)
+        XCTAssertEqual(after.activityName, initial.activityName)
+        XCTAssertEqual(after.lastRawThresholdMinutes, 15)
+        XCTAssertEqual(after.baseAcceptedMinutes, 5)
+    }
+
+    func testReplacementKeyChangeCreatesNewArmAndNames() throws {
+        let owner = UUID(uuidString: "cccccccc-0000-0000-0000-000000000001")!
+        let ruleID = UUID(uuidString: "dddddddd-0000-0000-0000-000000000400")!
+        let firstArm = UUID(uuidString: "eeeeeeee-0000-0000-0000-000000000010")!
+        let secondArm = UUID(uuidString: "eeeeeeee-0000-0000-0000-000000000011")!
+        let now = Date(timeIntervalSince1970: 1_721_174_400)
+        let store = makeEpochStore(owner: owner)
+        let original = rule(id: ruleID, budget: 30)
+        try seed(original, token: 7, owner: owner, store: store)
+        let spy = PlannerSchedulerSpy()
+        _ = AppLimitPlanner(
+            scheduler: spy,
+            now: { now },
+            epochStore: store,
+            ownerProvider: { owner },
+            armIDProvider: { firstArm }
+        ).arm(rules: [original])
+
+        let changed = rule(id: ruleID, budget: 31)
+        try seed(changed, token: 8, owner: owner, store: store)
+        _ = AppLimitPlanner(
+            scheduler: spy,
+            now: { now },
+            epochStore: store,
+            ownerProvider: { owner },
+            armIDProvider: { secondArm }
+        ).arm(rules: [changed])
+
+        let provenance = try XCTUnwrap(store.read().slots[ruleID]?.armProvenance)
+        XCTAssertEqual(provenance.armID, secondArm)
+        XCTAssertEqual(provenance.ruleRevision, 8)
+        XCTAssertEqual(provenance.budgetMinutes, 31)
+        XCTAssertTrue(spy.calls.contains(.stop(["evlin.limit.v2.\(firstArm.uuidString.lowercased())"])))
+        XCTAssertTrue(spy.calls.contains(.startEvents("evlin.limit.v2.\(secondArm.uuidString.lowercased())")))
+    }
+
+    func testV2EnforcementAndMeasurementEventsExcludePastActivity() throws {
+        let owner = UUID(uuidString: "cccccccc-0000-0000-0000-000000000001")!
+        let ruleID = UUID(uuidString: "dddddddd-0000-0000-0000-000000000400")!
+        let armID = UUID(uuidString: "eeeeeeee-0000-0000-0000-000000000010")!
+        let store = makeEpochStore(owner: owner)
+        let configured = rule(id: ruleID, budget: 60)
+        try seed(configured, token: 7, owner: owner, store: store)
+        let spy = PlannerSchedulerSpy()
+
+        _ = AppLimitPlanner(
+            scheduler: spy,
+            now: { Date(timeIntervalSince1970: 1_721_174_400) },
+            epochStore: store,
+            ownerProvider: { owner },
+            armIDProvider: { armID }
+        ).arm(rules: [configured])
+
+        let events = try XCTUnwrap(spy.armed.first?.events)
+        XCTAssertEqual(events.count, 4)
+        XCTAssertTrue(events.values.allSatisfy { !$0.includesPastActivity })
+        XCTAssertNotNil(events[DeviceActivityEvent.Name(
+            "evlin.limit.v2.\(armID.uuidString.lowercased()).budget"
+        )])
+        for threshold in [15, 30, 45] {
+            XCTAssertNotNil(events[DeviceActivityEvent.Name(
+                "evlin.applimit.v2.\(armID.uuidString.lowercased()).t\(threshold)"
+            )])
+        }
+    }
+
+    func testRetryAfterFailedStartRefreshesPhysicalStartWithoutChangingArm() throws {
+        let owner = UUID(uuidString: "cccccccc-0000-0000-0000-000000000001")!
+        let ruleID = UUID(uuidString: "dddddddd-0000-0000-0000-000000000400")!
+        let armID = UUID(uuidString: "eeeeeeee-0000-0000-0000-000000000010")!
+        let firstAttempt = Date(timeIntervalSince1970: 1_721_174_400)
+        let retryAttempt = firstAttempt.addingTimeInterval(3_600)
+        let store = makeEpochStore(owner: owner)
+        let configured = rule(id: ruleID, budget: 30)
+        try seed(configured, token: 7, owner: owner, store: store)
+        let spy = PlannerSchedulerSpy()
+        spy.errorToThrow = NSError(domain: "start", code: 1)
+
+        let failed = AppLimitPlanner(
+            scheduler: spy,
+            now: { firstAttempt },
+            epochStore: store,
+            ownerProvider: { owner },
+            armIDProvider: { armID }
+        )
+        XCTAssertEqual(failed.arm(rules: [configured]), .partiallyArmed(armed: 0, failed: 1))
+        XCTAssertEqual(try store.read().slots[ruleID]?.armProvenance?.startedAt, firstAttempt)
+
+        spy.errorToThrow = nil
+        let retry = AppLimitPlanner(
+            scheduler: spy,
+            now: { retryAttempt },
+            epochStore: store,
+            ownerProvider: { owner },
+            armIDProvider: { UUID() }
+        )
+        XCTAssertEqual(retry.arm(rules: [configured]), .armed(activityCount: 1, eventCount: 1))
+
+        let provenance = try XCTUnwrap(store.read().slots[ruleID]?.armProvenance)
+        XCTAssertEqual(provenance.armID, armID, "retry preserves replacement identity")
+        XCTAssertEqual(
+            provenance.startedAt,
+            retryAttempt,
+            "physical trust must start at the successful retry, not the failed attempt"
+        )
+    }
+
+    func testRemainingBudgetViewUpdatesBaseWithoutReplacingOrRearming() throws {
+        let owner = UUID(uuidString: "cccccccc-0000-0000-0000-000000000001")!
+        let ruleID = UUID(uuidString: "dddddddd-0000-0000-0000-000000000400")!
+        let armID = UUID(uuidString: "eeeeeeee-0000-0000-0000-000000000010")!
+        let now = Date(timeIntervalSince1970: 1_721_174_400)
+        let store = makeEpochStore(owner: owner)
+        let canonical = rule(id: ruleID, budget: 30)
+        try seed(canonical, token: 7, owner: owner, store: store)
+        let spy = PlannerSchedulerSpy()
+
+        let initial = AppLimitPlanner(
+            scheduler: spy,
+            now: { now },
+            epochStore: store,
+            ownerProvider: { owner },
+            armIDProvider: { armID }
+        )
+        XCTAssertEqual(initial.arm(rules: [canonical]), .armed(activityCount: 1, eventCount: 1))
+        let initialCalls = spy.calls
+
+        let remainingView = rule(id: ruleID, budget: 20)
+        let progress = AppLimitPlanner(
+            scheduler: spy,
+            now: { now.addingTimeInterval(600) },
+            epochStore: store,
+            ownerProvider: { owner },
+            armIDProvider: { UUID() }
+        )
+        XCTAssertEqual(progress.arm(rules: [remainingView]), .armed(activityCount: 1, eventCount: 1))
+        XCTAssertEqual(spy.calls, initialCalls, "progress must not stop or re-arm the live activity")
+
+        let provenance = try XCTUnwrap(try store.read().slots[ruleID]?.armProvenance)
+        XCTAssertEqual(provenance.armID, armID)
+        XCTAssertEqual(provenance.budgetMinutes, 30, "replacement identity keeps canonical policy")
+        XCTAssertEqual(provenance.baseAcceptedMinutes, 10, "remaining view advances progress only")
+    }
+
+    func testConcurrentReplacementCannotCommitBetweenArmCheckAndStart() throws {
+        let owner = UUID(uuidString: "cccccccc-0000-0000-0000-000000000001")!
+        let ruleID = UUID(uuidString: "dddddddd-0000-0000-0000-000000000400")!
+        let firstArm = UUID(uuidString: "eeeeeeee-0000-0000-0000-000000000010")!
+        let secondArm = UUID(uuidString: "eeeeeeee-0000-0000-0000-000000000011")!
+        let now = Date(timeIntervalSince1970: 1_721_174_400)
+        let store = makeEpochStore(owner: owner, lock: ActiveLockPersistenceLock.shared)
+        let original = rule(id: ruleID, budget: 30)
+        let replacement = rule(id: ruleID, budget: 31)
+        try seed(original, token: 7, owner: owner, store: store)
+        let spy = PlannerSchedulerSpy()
+        let replacementAttempted = DispatchSemaphore(value: 0)
+        let replacementFinished = DispatchSemaphore(value: 0)
+        var replacementCommittedInsideStart = false
+
+        spy.beforeStartEvents = { name in
+            guard name == AppLimitPlanner.v2ActivityName(armID: firstArm) else { return }
+            DispatchQueue.global(qos: .userInitiated).async {
+                replacementAttempted.signal()
+                let coordinator = AppLimitCommandCoordinator(
+                    store: store,
+                    expectedOwnerProvider: { owner }
+                )
+                let envelope = AppLimitCommandEnvelope(
+                    commandID: UUID(),
+                    ruleID: ruleID,
+                    orderingToken: 8,
+                    kind: .set,
+                    payloadDigest: "set-8",
+                    receivedAt: now.addingTimeInterval(1),
+                    source: .poll,
+                    rule: replacement
+                )
+                _ = try? coordinator.ingest(envelope)
+                replacementFinished.signal()
+            }
+            XCTAssertEqual(replacementAttempted.wait(timeout: .now() + 1), .success)
+            replacementCommittedInsideStart = replacementFinished.wait(timeout: .now() + 1) == .success
+        }
+
+        let first = AppLimitPlanner(
+            scheduler: spy,
+            now: { now },
+            epochStore: store,
+            ownerProvider: { owner },
+            armIDProvider: { firstArm }
+        )
+        XCTAssertEqual(first.arm(rules: [original]), .armed(activityCount: 1, eventCount: 1))
+        XCTAssertFalse(
+            replacementCommittedInsideStart,
+            "a newer token must not commit between the final arm check and startMonitoring"
+        )
+        XCTAssertEqual(replacementFinished.wait(timeout: .now() + 2), .success)
+        XCTAssertEqual(try store.read().slots[ruleID]?.latestOrderingToken, 8)
+
+        spy.beforeStartEvents = nil
+        let second = AppLimitPlanner(
+            scheduler: spy,
+            now: { now.addingTimeInterval(2) },
+            epochStore: store,
+            ownerProvider: { owner },
+            armIDProvider: { secondArm }
+        )
+        XCTAssertEqual(second.arm(rules: [replacement]), .armed(activityCount: 1, eventCount: 1))
+        XCTAssertEqual(
+            Set(spy.monitoredActivities().map(\.rawValue)),
+            [AppLimitPlanner.v2ActivityName(armID: secondArm)]
+        )
+        let starts = spy.calls.compactMap { call -> String? in
+            guard case .startEvents(let name) = call else { return nil }
+            return name
+        }
+        XCTAssertEqual(
+            starts,
+            [
+                AppLimitPlanner.v2ActivityName(armID: firstArm),
+                AppLimitPlanner.v2ActivityName(armID: secondArm),
+            ],
+            "the stale arm may run before replacement, never after it"
+        )
+    }
+
+    private func makeEpochStore(
+        owner: UUID,
+        lock: any DeviceEpochStoreLocking = PlannerEpochLock()
+    ) -> AppLimitEpochStore {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("planner-provenance-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return AppLimitEpochStore(
+            fileURL: directory.appendingPathComponent("epoch.json"),
+            lock: lock,
+            ownerProvider: { owner },
+            legacyDefaults: nil
+        )
+    }
+
+    private func seed(
+        _ rule: AppLimitRule,
+        token: Int64,
+        owner: UUID,
+        store: AppLimitEpochStore
+    ) throws {
+        let envelope = AppLimitCommandEnvelope(
+            commandID: UUID(),
+            ruleID: rule.id,
+            orderingToken: token,
+            kind: .set,
+            payloadDigest: "set-\(token)",
+            receivedAt: Date(timeIntervalSince1970: 1_721_174_400),
+            source: .poll,
+            rule: rule
+        )
+        let coordinator = AppLimitCommandCoordinator(
+            store: store,
+            expectedOwnerProvider: { owner }
+        )
+        XCTAssertEqual(try coordinator.ingest(envelope), .acceptedNeedsOwner)
     }
 
     private func expectedWindowActivityName(_ window: AppLimitWindow) -> String {
@@ -460,5 +793,15 @@ final class AppLimitPlannerTests: XCTestCase {
         }
         XCTAssertEqual(activityCount, 1, "nil tz + invalid-id tz collapse to one window")
         XCTAssertEqual(eventCount, 2)
+    }
+}
+
+private final class PlannerEpochLock: DeviceEpochStoreLocking, @unchecked Sendable {
+    private let lock = NSLock()
+
+    func withLock<T>(_ body: () -> T) -> T? {
+        lock.lock()
+        defer { lock.unlock() }
+        return body()
     }
 }
