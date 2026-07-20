@@ -1,6 +1,207 @@
 import Foundation
 import FamilyControls
 
+nonisolated struct AppLimitOwnerEffectResult: Sendable {
+    let armID: UUID?
+    let source: String
+}
+
+nonisolated protocol AppLimitOwnerEffectPort: Sendable {
+    func apply(
+        work: AppLimitOwnerWork,
+        slot: AppLimitVersionSlot
+    ) async throws -> AppLimitOwnerEffectResult
+}
+
+@MainActor
+final class AppLimitOwnerRecoveryDriver {
+    private enum RecoveryError: Error {
+        case staleWork
+        case receiptReadbackMismatch
+    }
+
+    private let store: AppLimitEpochStore
+    private let effectPort: any AppLimitOwnerEffectPort
+    private let readbackPort: any AppLimitOwnerReadbackPort
+    private let afterClaim: (AppLimitOwnerWork) async throws -> Void
+    private var isRecovering = false
+
+    init(
+        store: AppLimitEpochStore = .shared,
+        effectPort: any AppLimitOwnerEffectPort,
+        readbackPort: any AppLimitOwnerReadbackPort,
+        afterClaim: @escaping (AppLimitOwnerWork) async throws -> Void = { _ in }
+    ) {
+        self.store = store
+        self.effectPort = effectPort
+        self.readbackPort = readbackPort
+        self.afterClaim = afterClaim
+    }
+
+    func recover(ownerChildDeviceID: UUID) async {
+        guard !isRecovering else { return }
+        isRecovering = true
+        defer { isRecovering = false }
+
+        let works: [AppLimitOwnerWork]
+        do {
+            let state = try store.read()
+            guard state.ownerChildDeviceID == ownerChildDeviceID else { return }
+            works = state.slots.values.compactMap { slot in
+                guard let work = slot.pendingOwnerWork,
+                      Self.matches(work, slot: slot)
+                else { return nil }
+                return work
+            }.sorted {
+                if $0.createdAt != $1.createdAt { return $0.createdAt < $1.createdAt }
+                return $0.ruleID.uuidString < $1.ruleID.uuidString
+            }
+        } catch {
+            return
+        }
+
+        for work in works {
+            await recover(work: work, ownerChildDeviceID: ownerChildDeviceID)
+        }
+    }
+
+    private func recover(
+        work: AppLimitOwnerWork,
+        ownerChildDeviceID: UUID
+    ) async {
+        do {
+            try await afterClaim(work)
+            let slot = try currentSlot(
+                for: work,
+                ownerChildDeviceID: ownerChildDeviceID
+            )
+            let effect = try await effectPort.apply(work: work, slot: slot)
+
+            let receipt = try store.transaction(
+                source: .wakeRecovery,
+                expectedOwner: ownerChildDeviceID
+            ) { state -> AppLimitApplyReceipt in
+                guard var current = state.slots[work.ruleID],
+                      Self.matches(work, slot: current),
+                      state.storeRevision < UInt64.max
+                else { throw RecoveryError.staleWork }
+                let appliedAt = Date(
+                    timeIntervalSince1970: floor(Date().timeIntervalSince1970)
+                )
+                let receipt = AppLimitApplyReceipt(
+                    ruleID: work.ruleID,
+                    orderingToken: work.orderingToken,
+                    commandKind: work.commandKind,
+                    armID: effect.armID,
+                    source: effect.source,
+                    appliedAt: appliedAt,
+                    storeRevision: state.storeRevision + 1
+                )
+                current.pendingOwnerWork = nil
+                current.appliedReceipt = receipt
+                state.slots[work.ruleID] = current
+                return receipt
+            }
+
+            let persisted = try store.read().slots[work.ruleID]?.appliedReceipt
+            guard persisted == receipt else {
+                throw RecoveryError.receiptReadbackMismatch
+            }
+            try await readbackPort.confirm(
+                commandID: work.commandID,
+                receipt: receipt
+            )
+        } catch {
+            // Pending work remains durable unless an exact receipt was committed.
+            // A later wake retries it; a newer token supersedes it in the store.
+        }
+    }
+
+    private func currentSlot(
+        for work: AppLimitOwnerWork,
+        ownerChildDeviceID: UUID
+    ) throws -> AppLimitVersionSlot {
+        let state = try store.read()
+        guard state.ownerChildDeviceID == ownerChildDeviceID,
+              let slot = state.slots[work.ruleID],
+              Self.matches(work, slot: slot)
+        else { throw RecoveryError.staleWork }
+        return slot
+    }
+
+    private static func matches(
+        _ work: AppLimitOwnerWork,
+        slot: AppLimitVersionSlot
+    ) -> Bool {
+        slot.pendingOwnerWork == work
+            && slot.latestOrderingToken == work.orderingToken
+            && slot.latestKind == work.commandKind
+            && slot.latestPayloadDigest == work.payloadDigest
+    }
+}
+
+private struct DeferredAppLimitOwnerEffectPort: AppLimitOwnerEffectPort {
+    private enum Deferred: Error { case awaitingDurableEffectJournal }
+
+    func apply(
+        work: AppLimitOwnerWork,
+        slot: AppLimitVersionSlot
+    ) async throws -> AppLimitOwnerEffectResult {
+        throw Deferred.awaitingDurableEffectJournal
+    }
+}
+
+private struct DeferredAppLimitOwnerReadbackPort: AppLimitOwnerReadbackPort {
+    func confirm(commandID: UUID, receipt: AppLimitApplyReceipt) async throws {}
+}
+
+@MainActor
+private final class AppLimitOwnerRecoveryEntry {
+    static let shared = AppLimitOwnerRecoveryEntry()
+
+    private let defaults: UserDefaults?
+    private let driver: AppLimitOwnerRecoveryDriver
+
+    init(
+        defaults: UserDefaults? = UserDefaults(
+            suiteName: MeteringProductionComposition.appGroupSuiteName
+        ),
+        driver: AppLimitOwnerRecoveryDriver? = nil
+    ) {
+        self.defaults = defaults
+        self.driver = driver ?? AppLimitOwnerRecoveryDriver(
+            effectPort: DeferredAppLimitOwnerEffectPort(),
+            readbackPort: DeferredAppLimitOwnerReadbackPort()
+        )
+    }
+
+    func recoverIfConfigured() async {
+        guard let configuration = MeteringProcessConfiguration.load(defaults: defaults) else {
+            return
+        }
+        await driver.recover(ownerChildDeviceID: configuration.owner)
+    }
+}
+
+@MainActor
+enum AppLimitRecoveryTrigger {
+    static func launch() async {
+        await AppLimitOwnerRecoveryEntry.shared.recoverIfConfigured()
+    }
+
+    static func foreground() async {
+        await AppLimitOwnerRecoveryEntry.shared.recoverIfConfigured()
+    }
+
+    static func silentRemoteNotification() async {
+        await AppLimitOwnerRecoveryEntry.shared.recoverIfConfigured()
+    }
+
+    static func pollCompletion() async {
+        await AppLimitOwnerRecoveryEntry.shared.recoverIfConfigured()
+    }
+}
+
 @MainActor
 final class AppMeteringEntry {
     static let shared = AppMeteringEntry()

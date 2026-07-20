@@ -91,6 +91,9 @@ struct Evlin_iOSApp: App {
                     startPollerIfPaired()
                     armEarnedBudgetIfReady()
                     recoverMeteringEpochIfReady()
+                    if appMode == "child" {
+                        Task { await AppLimitRecoveryTrigger.launch() }
+                    }
                     drainEarnedSampleRetryQueueIfNeeded()
                 }
                 .onChange(of: scenePhase) { _, phase in
@@ -100,6 +103,9 @@ struct Evlin_iOSApp: App {
                         startPollerIfPaired()
                         armEarnedBudgetIfReady()
                         recoverMeteringEpochIfReady()
+                        if appMode == "child" {
+                            Task { await AppLimitRecoveryTrigger.foreground() }
+                        }
                         drainEarnedSampleRetryQueueIfNeeded()
                         Task { await ScreenTimeEventUploader.uploadPending() }
                     case .background:
@@ -559,6 +565,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         Task { @MainActor in
             AppDelegate.invalidateRemoteNotificationDrivenStores()
             await CommandPoller.shared.pollOnceForCurrentDevice()
+            await AppLimitRecoveryTrigger.silentRemoteNotification()
             completionHandler(.newData)
         }
     }

@@ -142,6 +142,10 @@ final class CommandPoller {
     /// Nil in production → the real `pollOnce()` runs.
     var oneShotPollOverride: ((UUID, APIClient) async -> Void)?
 
+    /// Test seam for the shared owner-recovery entry invoked after a poll.
+    /// Nil in production routes to `AppLimitRecoveryTrigger.pollCompletion()`.
+    var appLimitRecoveryOverride: (() async -> Void)?
+
     /// Test seam for the real network poll. Nil in production.
     var pollCommandsOverride: ((UUID, APIClient) async throws -> [PollCommandDTO])?
 
@@ -322,6 +326,7 @@ final class CommandPoller {
                 SentrySDK.capture(error: error)
             }
         } while pendingPollAfterCurrent
+        await recoverAppLimitsAfterPollCompletion()
     }
 
     private func isExpectedDeviceCurrent(_ expectedDeviceID: UUID) -> Bool {
@@ -369,6 +374,7 @@ final class CommandPoller {
 
         if let override = oneShotPollOverride {
             await override(deviceID, api)
+            await recoverAppLimitsAfterPollCompletion()
             CommandDeliveryDiagnostics.record(
                 CommandDeliveryDiagnostics.keyOneShotPoll,
                 "override_completed device=\(deviceID.uuidString)"
@@ -385,6 +391,14 @@ final class CommandPoller {
             CommandDeliveryDiagnostics.keyOneShotPoll,
             "completed device=\(deviceID.uuidString)"
         )
+    }
+
+    private func recoverAppLimitsAfterPollCompletion() async {
+        if let override = appLimitRecoveryOverride {
+            await override()
+        } else {
+            await AppLimitRecoveryTrigger.pollCompletion()
+        }
     }
 
     static func lockCommand(from poll: PollCommandDTO) -> LockCommand {
