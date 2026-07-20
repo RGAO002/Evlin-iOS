@@ -82,7 +82,7 @@ def require_commit(repo: Path, value: Any, label: str) -> str:
 def production_files(repo: Path) -> list[Path]:
     result: list[Path] = []
     excluded_parts = {
-        ".git", ".superpowers", "docs", "scripts", "Evlin iOSTests",
+        ".git", ".superpowers", ".worktrees", "docs", "scripts", "Evlin iOSTests",
         "tests", "__pycache__", "DerivedData",
     }
     for root, directories, filenames in os.walk(repo):
@@ -333,6 +333,21 @@ def run_self_test() -> None:
         no_vector = copy.deepcopy(valid)
         no_vector["demolitions"][0]["vectors"] = []
         expect_failure("missing-vector", no_vector, "missing_vector")
+
+        ignored_worktree_file = (
+            ios / ".worktrees" / "stale" / "Evlin iOS" / "Services" / "Forbidden.swift"
+        )
+        ignored_worktree_file.parent.mkdir(parents=True)
+        ignored_worktree_file.write_text("let oldGuard = true\n")
+        ignored_worktree = copy.deepcopy(valid)
+        ignored_worktree["demolitions"][0]["forbidden_symbols"] = ["oldGuard"]
+        validate_ledger(
+            ignored_worktree,
+            ios_root=ios,
+            backend_root=backend,
+            allow_unattested=True,
+            final=False,
+        )
 
         forbidden_file = ios / "Evlin iOS" / "Services" / "Forbidden.swift"
         forbidden_file.parent.mkdir(parents=True)
