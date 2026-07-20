@@ -1,5 +1,43 @@
 import Foundation
 
+/// The Phase 3 physical-time upper bound shared by earned and per-app callbacks.
+/// It deliberately has no lower-bound age check, so delayed valid callbacks stay
+/// eligible while impossible immediate thresholds are rejected.
+nonisolated enum MeteringCallbackPhysicalTime {
+    static let defaultJitterSeconds = MeteringEpochContract.defaultJitterSeconds
+    static let maximumJitterSeconds = MeteringEpochContract.maximumJitterSeconds
+
+    static func allows(
+        adjustedEstimateMinutes: Int,
+        baseAcceptedMinutes: Int,
+        startedAt: Date,
+        observedAt: Date,
+        jitterSeconds: Int = defaultJitterSeconds
+    ) -> Bool {
+        let owner = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+        let epoch = UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
+        return MeteringEpochContract.callbackVerdict(
+            MeteringCallbackInput(
+                activeEpochID: epoch,
+                callbackEpochID: epoch,
+                activeOwnerDeviceID: owner,
+                callbackOwnerDeviceID: owner,
+                activeUsageDate: "physical-time",
+                callbackUsageDate: "physical-time",
+                activePolicyRevision: "physical-time",
+                callbackPolicyRevision: "physical-time",
+                expectedEventNamespace: "physical-time",
+                callbackEventNamespace: "physical-time",
+                adjustedEstimateMinutes: adjustedEstimateMinutes,
+                baseAcceptedMinutes: baseAcceptedMinutes,
+                startedAt: startedAt,
+                callbackAt: observedAt,
+                jitterSeconds: jitterSeconds
+            )
+        ) == .accept
+    }
+}
+
 nonisolated enum EarnedMeteringCallbackOutcome: Equatable, Sendable {
     case queued(sampleWorkID: UUID)
     case discarded(reason: String)
@@ -9,8 +47,8 @@ nonisolated enum EarnedMeteringCallbackOutcome: Equatable, Sendable {
 /// affect durable metering state. Network delivery and shield effects are
 /// intentionally outside this type.
 nonisolated final class EarnedMeteringCallback: @unchecked Sendable {
-    static let defaultJitterSeconds = 30
-    static let maximumJitterSeconds = 60
+    static let defaultJitterSeconds = MeteringCallbackPhysicalTime.defaultJitterSeconds
+    static let maximumJitterSeconds = MeteringCallbackPhysicalTime.maximumJitterSeconds
 
     private let store: DeviceEpochStore
     private let clock: any MeteringClock

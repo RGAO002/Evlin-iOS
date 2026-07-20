@@ -160,6 +160,7 @@
 				Models/ShieldRecord.swift,
 				Models/ShieldTier.swift,
 				Services/ActiveLockPersistenceLock.swift,
+				Services/AppLimitCallbackValidator.swift,
 				Services/AppLimitEpochStore.swift,
 				Services/AppLimitEpochTypes.swift,
 				Services/AppLimitProvenance.swift,

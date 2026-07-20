@@ -13,6 +13,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
     private let blocksKey = "evlin.blockRecords"
     private let defaults = UserDefaults(suiteName: "group.com.evlin.ios")
     private let store = ManagedSettingsStore()
+    private let appLimitCallbackValidator = AppLimitCallbackValidator()
 
     /// Build the canonical day key in the backend policy timezone when known.
     private func currentDayKey() -> String {
@@ -234,20 +235,9 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             handleV2MeteringThreshold(event: event, activity: activity)
             return
         }
-        // Per-app limit: the kid's usage of `<ruleId>`'s app crossed its daily
-        // budget. The event name is `evlin.limit.<ruleId>` (see AppLimitPlanner).
-        // Resolve the rule, write a `source == .limit` ShieldRecord, recompute.
-        if event.rawValue.hasPrefix("evlin.limit.") {
-            guard usageCountingAllowed(eventName: event.rawValue) else { return }
-            applyLimitShield(eventName: event.rawValue)
-        }
-
-        // Per-app usage-bar MEASUREMENT: `evlin.applimit.<ruleId>.t<N>` fired at a
-        // quarter of the budget. Report usage ONLY — the distinct `evlin.applimit.`
-        // prefix routes it here and NEVER to the `evlin.limit.` shield branch above.
-        if event.rawValue.hasPrefix("evlin.applimit.") {
-            guard usageCountingAllowed(eventName: event.rawValue) else { return }
-            reportAppLimitUsage(eventName: event.rawValue)
+        if activity.rawValue.hasPrefix("evlin.limit.v2.") {
+            handleValidatedAppLimitThreshold(event: event, activity: activity)
+            return
         }
 
         // B5 — Earned-time ladder threshold fired. Event name is `evlin.earned.t<N>`
@@ -323,22 +313,40 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         return true
     }
 
-    /// Threshold-reached enforcement (P7). Parse the `ruleId` from the
-    /// `evlin.limit.<ruleId>` event name, look the rule up in the App Group
-    /// (`AppLimitRuleStore`), then insert/merge a `source == .limit` ShieldRecord
-    /// (matchable by `ActiveLockStore.removeLimitShields`) and force a recompute so
-    /// the app is shielded. If the rule isn't found (e.g. just cleared) we do
-    /// nothing — there's nothing to shield.
-    private func applyLimitShield(eventName: String) {
-        let idString = String(eventName.dropFirst("evlin.limit.".count))
-        guard let ruleId = UUID(uuidString: idString),
-              let rule = AppLimitRuleStore.shared.rule(forID: ruleId) else {
-            defaults?.set(
-                "limit_threshold_norule event=\(eventName)",
-                forKey: "evlin.lastLimitShield"
-            )
-            return
+    private func handleValidatedAppLimitThreshold(
+        event: DeviceActivityEvent.Name,
+        activity: DeviceActivityName
+    ) {
+        let context = EarnedTimeStore.shared.currentPolicyDateContext()
+        do {
+            let decision = try appLimitCallbackValidator.process(
+                activityName: activity.rawValue,
+                eventName: event.rawValue,
+                canonicalUsageDate: context.usageDate,
+                observedAt: Date(),
+                usageCountingAllowed: EarnedTimeStore.shared.usageCountingAllowed
+            ) { [self] callback in
+                postAcceptedAppLimitUsageSample(callback)
+                if callback.effectKind == .enforcement {
+                    applyLimitShield(rule: callback.rule)
+                }
+            }
+            switch decision {
+            case .rejected(let reason):
+                NSLog("[Evlin/Ext] app limit callback rejected: %@", reason)
+            case .paused:
+                break
+            case .accepted:
+                break
+            }
+        } catch {
+            NSLog("[Evlin/Ext] app limit callback validation failed: %@", String(describing: error))
         }
+    }
+
+    /// This function is reachable only from an accepted validator decision.
+    private func applyLimitShield(rule: AppLimitRule) {
+        let ruleId = rule.id
 
         // Notify THEN lock: post the local "time's up" notice on the kid's
         // device before applying the shield, so the kid gets a heads-up the
@@ -367,63 +375,26 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
                   reason: "budget_reached",
                   transition: .init(before: "shielded:false", after: "shielded:true"))
 
-        // Drive the parent's usage bar to 100%: post a `:budget` usage sample
-        // (used == budget). This makes the bar read "reached" even for tiny
-        // budgets that have no measurement thresholds. Additive — the shield is
-        // untouched; usage reporting is a separate concern.
-        let usageDate = EarnedTimeStore.shared.currentPolicyDateContext().usageDate
-        postAppLimitUsageSample(
-            ruleID: ruleId,
-            thresholdMinutes: rule.budgetMinutes,
-            estimatedMinutes: rule.budgetMinutes,
-            clientSampleID: "applimit:\(ruleId.uuidString.lowercased()):\(usageDate):budget"
-        )
     }
 
-    /// Per-app usage-bar MEASUREMENT (never shields). Parse the
-    /// `evlin.applimit.<ruleId>.t<N>` event name and POST N minutes used for that
-    /// rule. The distinct `evlin.applimit.` prefix (routed here, NOT to
-    /// `applyLimitShield`) is what keeps measurement from ever locking the app.
-    private func reportAppLimitUsage(eventName: String) {
-        let rest = String(eventName.dropFirst("evlin.applimit.".count))  // "<UUID>.t<N>"
-        guard let sep = rest.range(of: ".t", options: .backwards) else { return }
-        let idString = String(rest[..<sep.lowerBound])
-        let nString = String(rest[sep.upperBound...])
-        guard let ruleId = UUID(uuidString: idString), let n = Int(nString) else { return }
-        postAppLimitUsageSample(
-            ruleID: ruleId, thresholdMinutes: n, estimatedMinutes: n, clientSampleID: nil
-        )
-    }
-
-    /// Drain the retry queue then POST one per-app usage sample via
-    /// `AppLimitUsageReporter`. No shield. Uses the App-Group baseURL/childId the
-    /// app mirrors for the extension (same source the earned-time reporter uses).
-    private func postAppLimitUsageSample(
-        ruleID: UUID, thresholdMinutes: Int, estimatedMinutes: Int, clientSampleID: String?
-    ) {
+    private func postAcceptedAppLimitUsageSample(_ callback: AppLimitValidatedCallback) {
+        AppLimitCallbackLocalLedger.record(callback)
         guard let baseURL = ExtensionConfig.baseURL,
               let deviceID = ExtensionConfig.childId else { return }
-        let context = EarnedTimeStore.shared.currentPolicyDateContext()
-        let usageDate = context.usageDate
-        let tz = context.timezoneIdentifier
-        let offset = EarnedTimeStore.shared.appLimitUsageOffsetMinutes(
-            ruleID: ruleID,
-            usageDate: usageDate
-        )
-        let isBudgetSample = clientSampleID?.hasSuffix(":budget") == true
-        let adjustedThreshold = isBudgetSample ? thresholdMinutes : min(1440, offset + thresholdMinutes)
-        let adjustedEstimate = isBudgetSample ? estimatedMinutes : min(1440, offset + estimatedMinutes)
-        EarnedTimeStore.shared.recordAppLimitUsage(
-            ruleID: ruleID,
-            usageDate: usageDate,
-            usedMinutes: adjustedEstimate
-        )
+        let ruleID = callback.rule.id
+        let usageDate = callback.provenance.usageDate
+        let tz = callback.provenance.timezone
+        let adjustedEstimate = callback.adjustedEstimateMinutes
+        let sampleSuffix = callback.effectKind == .enforcement
+            ? "budget"
+            : "t\(callback.rawThresholdMinutes)"
+        let clientSampleID = "applimit:\(ruleID.uuidString.lowercased()):\(usageDate):\(sampleSuffix)"
         Task {
             await AppLimitUsageReporter.drainRetryQueue(baseURL: baseURL)
             await AppLimitUsageReporter.report(
                 baseURL: baseURL, deviceID: deviceID, ruleID: ruleID,
                 usageDate: usageDate, timezone: tz,
-                thresholdMinutes: adjustedThreshold, estimatedMinutes: adjustedEstimate,
+                thresholdMinutes: adjustedEstimate, estimatedMinutes: adjustedEstimate,
                 clientSampleID: clientSampleID
             )
         }
