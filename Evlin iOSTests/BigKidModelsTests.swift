@@ -2,6 +2,38 @@ import XCTest
 @testable import Evlin_iOS
 
 final class BigKidModelsTests: XCTestCase {
+    func testLegacyDeviceTotalModeDecodingIsRollbackSafe() throws {
+        func decode(modeFragment: String) throws -> ChildStateResponse {
+            let data = Data("""
+            {
+              "child_name": "Giannis",
+              "minutes_left": 120,
+              "minutes_max": 120,
+              "tasks": [],
+              "reflection_request": null,
+              "notify_parent_cooldown_ends_at": null,
+              "daily_complete_acknowledged": false,
+              "screen_time_finished_acknowledged": false,
+              "last_resolved_reflection": null
+              \(modeFragment)
+            }
+            """.utf8)
+            return try JSONDecoder.bigKid.decode(ChildStateResponse.self, from: data)
+        }
+
+        XCTAssertEqual(try decode(modeFragment: "").legacyDeviceTotalMode, .active)
+        XCTAssertEqual(
+            try decode(modeFragment: ", \"legacy_device_total_mode\": \"observe_disabled\"")
+                .legacyDeviceTotalMode,
+            .observeDisabled
+        )
+        XCTAssertEqual(
+            try decode(modeFragment: ", \"legacy_device_total_mode\": \"future_mode\"")
+                .legacyDeviceTotalMode,
+            .active
+        )
+    }
+
     func test_childState_decodesAuthoritativeGateAndRuntime() throws {
         let data = Data(#"{"child_name":"Giannis","minutes_left":0,"minutes_max":0,"tasks":[],"reflection_request":null,"notify_parent_cooldown_ends_at":null,"daily_complete_acknowledged":false,"screen_time_finished_acknowledged":false,"last_resolved_reflection":null,"usage_counting_allowed":false,"earned_time_runtime":{"usage_date":"2026-07-10","timezone":"America/New_York","daily_pool_minutes":120,"device_cap_minutes":90,"remaining_minutes":75,"estimated_minutes":15}}"#.utf8)
         let state = try JSONDecoder.bigKid.decode(ChildStateResponse.self, from: data)

@@ -43,6 +43,8 @@ final class BigKidStatePoller: ObservableObject {
     private let pauseAppLimitArms: () -> Void
     private let hasPausedAppLimitArms: () -> Bool
     private let rearmUsageCounters: () -> Bool
+    private let startLegacyDeviceTotal: () -> Bool
+    private let stopLegacyDeviceTotal: () -> Void
     private let reportEffectiveState: () async -> Void
     private let failOpenFamily: () async -> Void
     private let requestFreshPoll: () -> Void
@@ -117,6 +119,8 @@ final class BigKidStatePoller: ObservableObject {
         self.pauseAppLimitArms = { _ = AppLimitPlanner().pauseActiveArms() }
         self.hasPausedAppLimitArms = { AppLimitPlanner().hasPausedArms() }
         self.rearmUsageCounters = Self.rearmOtherUsageCountersFromStoredPolicy
+        self.startLegacyDeviceTotal = Self.startLegacyDeviceTotalFromStoredPolicy
+        self.stopLegacyDeviceTotal = { BigKidActivityScheduler.shared.stop() }
         self.reportEffectiveState = {
             guard let snapshot = await CommandPoller.globalEffectiveStateDictionary() else { return }
             do {
@@ -152,6 +156,8 @@ final class BigKidStatePoller: ObservableObject {
         pauseAppLimitArms: @escaping () -> Void = {},
         hasPausedAppLimitArms: @escaping () -> Bool = { false },
         rearmUsageCounters: @escaping () -> Bool = { true },
+        startLegacyDeviceTotal: @escaping () -> Bool = { true },
+        stopLegacyDeviceTotal: @escaping () -> Void = {},
         reportEffectiveState: @escaping () async -> Void = {},
         failOpenFamily: @escaping () async -> Void = { await FamilyGoneDetector.failOpen() },
         requestFreshPoll: @escaping () -> Void = {}
@@ -175,6 +181,8 @@ final class BigKidStatePoller: ObservableObject {
         self.pauseAppLimitArms = pauseAppLimitArms
         self.hasPausedAppLimitArms = hasPausedAppLimitArms
         self.rearmUsageCounters = rearmUsageCounters
+        self.startLegacyDeviceTotal = startLegacyDeviceTotal
+        self.stopLegacyDeviceTotal = stopLegacyDeviceTotal
         self.reportEffectiveState = reportEffectiveState
         self.failOpenFamily = failOpenFamily
         self.requestFreshPoll = requestFreshPoll
@@ -274,6 +282,12 @@ final class BigKidStatePoller: ObservableObject {
                 return
             }
             applySnapshot(snapshot, state)
+            switch snapshot.legacyDeviceTotalMode {
+            case .active:
+                _ = startLegacyDeviceTotal()
+            case .observeDisabled:
+                stopLegacyDeviceTotal()
+            }
             let runtimeReconciliation = syncEarnedRuntime(snapshot.earnedTimeRuntime)
             let runtimeIsAuthoritative: Bool
             if runtimeReconciliation == .runtimeUnavailable {
@@ -426,22 +440,21 @@ final class BigKidStatePoller: ObservableObject {
     }
 
     private static func rearmOtherUsageCountersFromStoredPolicy() -> Bool {
-        let store = EarnedTimeStore.shared
-
-        let deviceTotalArmed: Bool
-        if store.hasMeasurableSelection, let selection = store.measurementSelection {
-            deviceTotalArmed = BigKidActivityScheduler.shared.start(appsToMeasure: selection)
-        } else {
-            deviceTotalArmed = false
-        }
-
         let perAppResult = AppLimitPlanner().resumePausedArms(
             rules: AppLimitRuleStore.shared.all()
         )
         return usageCounterRearmSucceeded(
-            deviceTotalArmed: deviceTotalArmed,
+            deviceTotalArmed: true,
             perAppResult: perAppResult
         )
+    }
+
+    private static func startLegacyDeviceTotalFromStoredPolicy() -> Bool {
+        let store = EarnedTimeStore.shared
+        guard store.hasMeasurableSelection, let selection = store.measurementSelection else {
+            return false
+        }
+        return BigKidActivityScheduler.shared.start(appsToMeasure: selection)
     }
 
     nonisolated static func usageCounterRearmSucceeded(

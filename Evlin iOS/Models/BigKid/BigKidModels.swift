@@ -28,6 +28,16 @@ enum BigKidReflectionStep: String, Codable, Equatable, Sendable {
     case video, quiz, writing
 }
 
+enum LegacyDeviceTotalMode: String, Codable, Equatable, Sendable {
+    case active
+    case observeDisabled = "observe_disabled"
+
+    init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer().decode(String.self)
+        self = Self(rawValue: value) ?? .active
+    }
+}
+
 // MARK: - DTOs (snake_case <-> camelCase via JSONDecoder.bigKid)
 
 struct BypassRequest: Codable, Equatable, Sendable, Identifiable {
@@ -214,6 +224,7 @@ struct ReflectionRequest: Codable, Equatable, Sendable, Identifiable {
 
 struct ChildStateResponse: Codable, Equatable, Sendable {
     let meteringProtocolVersion: Int
+    let legacyDeviceTotalMode: LegacyDeviceTotalMode
     let childName: String
     let minutesLeft: Int
     let minutesMax: Int
@@ -238,9 +249,11 @@ struct ChildStateResponse: Codable, Equatable, Sendable {
         lastResolvedReflection: ResolvedReflection?,
         usageCountingAllowed: Bool? = nil,
         earnedTimeRuntime: EarnedTimeRuntime? = nil,
-        meteringProtocolVersion: Int = 1
+        meteringProtocolVersion: Int = 1,
+        legacyDeviceTotalMode: LegacyDeviceTotalMode = .active
     ) {
         self.meteringProtocolVersion = meteringProtocolVersion
+        self.legacyDeviceTotalMode = legacyDeviceTotalMode
         self.childName = childName
         self.minutesLeft = minutesLeft
         self.minutesMax = minutesMax
@@ -255,7 +268,8 @@ struct ChildStateResponse: Codable, Equatable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case meteringProtocolVersion, childName, minutesLeft, minutesMax, tasks
+        case meteringProtocolVersion, legacyDeviceTotalMode
+        case childName, minutesLeft, minutesMax, tasks
         case reflectionRequest, notifyParentCooldownEndsAt
         case dailyCompleteAcknowledged, screenTimeFinishedAcknowledged
         case lastResolvedReflection, usageCountingAllowed, earnedTimeRuntime
@@ -264,6 +278,10 @@ struct ChildStateResponse: Codable, Equatable, Sendable {
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         meteringProtocolVersion = try values.decodeIfPresent(Int.self, forKey: .meteringProtocolVersion) ?? 1
+        legacyDeviceTotalMode = try values.decodeIfPresent(
+            LegacyDeviceTotalMode.self,
+            forKey: .legacyDeviceTotalMode
+        ) ?? .active
         childName = try values.decode(String.self, forKey: .childName)
         minutesLeft = try values.decode(Int.self, forKey: .minutesLeft)
         minutesMax = try values.decode(Int.self, forKey: .minutesMax)
