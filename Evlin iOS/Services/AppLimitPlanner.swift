@@ -342,12 +342,18 @@ nonisolated final class AppLimitPlanner: @unchecked Sendable {
                 return .partiallyArmed(armed: 0, failed: active.count)
             }
             let provenance = resolution.provenance
+            guard provenance.baseAcceptedMinutes >= 0,
+                  provenance.baseAcceptedMinutes < provenance.budgetMinutes else {
+                return .partiallyArmed(armed: 0, failed: active.count)
+            }
+            let remainingBudgetMinutes = provenance.budgetMinutes
+                - provenance.baseAcceptedMinutes
             var events: [DeviceActivityEvent.Name: DeviceActivityEvent] = [
                 DeviceActivityEvent.Name(
                     Self.v2EnforcementEventName(armID: provenance.armID)
                 ): Self.makeV2Event(
                     applications: rule.appTokens,
-                    thresholdMinutes: rule.budgetMinutes
+                    thresholdMinutes: remainingBudgetMinutes
                 )
             ]
             let allocation = Self.allocateMeasurement(
@@ -355,7 +361,7 @@ nonisolated final class AppLimitPlanner: @unchecked Sendable {
                     (
                         id: rule.id,
                         tokenCount: rule.appTokens.count,
-                        budgetMinutes: rule.budgetMinutes
+                        budgetMinutes: remainingBudgetMinutes
                     )
                 ],
                 reservedEvents: 1,

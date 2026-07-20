@@ -76,6 +76,10 @@ final class AppLimitPlannerTests: XCTestCase {
         }
 
         func monitoredActivities() -> [DeviceActivityName] { Array(activeActivities) }
+
+        func simulateMonitorLoss() {
+            activeActivities.removeAll()
+        }
     }
 
     // MARK: - Fixtures
@@ -275,13 +279,13 @@ final class AppLimitPlannerTests: XCTestCase {
         )
     }
 
-    func testRemainingBudgetViewUpdatesBaseWithoutReplacingOrRearming() throws {
+    func testRemainingBudgetViewPreservesLiveArmBaseEventsAndOriginalCallback() throws {
         let owner = UUID(uuidString: "cccccccc-0000-0000-0000-000000000001")!
         let ruleID = UUID(uuidString: "dddddddd-0000-0000-0000-000000000400")!
         let armID = UUID(uuidString: "eeeeeeee-0000-0000-0000-000000000010")!
         let now = Date(timeIntervalSince1970: 1_721_174_400)
         let store = makeEpochStore(owner: owner)
-        let canonical = rule(id: ruleID, budget: 30)
+        let canonical = rule(id: ruleID, budget: 20)
         try seed(canonical, token: 7, owner: owner, store: store)
         let spy = PlannerSchedulerSpy()
 
@@ -294,8 +298,10 @@ final class AppLimitPlannerTests: XCTestCase {
         )
         XCTAssertEqual(initial.arm(rules: [canonical]), .armed(activityCount: 1, eventCount: 1))
         let initialCalls = spy.calls
+        let initialArm = try XCTUnwrap(spy.armed.first)
+        let initialEventNames = Set(initialArm.events.keys.map(\.rawValue))
 
-        let remainingView = rule(id: ruleID, budget: 20)
+        let remainingView = rule(id: ruleID, budget: 15)
         let progress = AppLimitPlanner(
             scheduler: spy,
             now: { now.addingTimeInterval(600) },
@@ -308,8 +314,60 @@ final class AppLimitPlannerTests: XCTestCase {
 
         let provenance = try XCTUnwrap(try store.read().slots[ruleID]?.armProvenance)
         XCTAssertEqual(provenance.armID, armID)
-        XCTAssertEqual(provenance.budgetMinutes, 30, "replacement identity keeps canonical policy")
-        XCTAssertEqual(provenance.baseAcceptedMinutes, 10, "remaining view advances progress only")
+        XCTAssertEqual(provenance.activityName, initialArm.name.rawValue)
+        XCTAssertEqual(provenance.budgetMinutes, 20, "replacement identity keeps canonical policy")
+        XCTAssertEqual(provenance.baseAcceptedMinutes, 0, "one live arm has one immutable base")
+        XCTAssertEqual(spy.armed.count, 1)
+        XCTAssertEqual(Set(spy.armed[0].events.keys.map(\.rawValue)), initialEventNames)
+
+        var accepted: AppLimitValidatedCallback?
+        let decision = try AppLimitCallbackValidator(store: store).process(
+            activityName: provenance.activityName,
+            eventName: AppLimitPlanner.v2MeasurementEventName(armID: armID, threshold: 10),
+            canonicalUsageDate: provenance.usageDate,
+            observedAt: provenance.startedAt.addingTimeInterval(10 * 60),
+            usageCountingAllowed: true
+        ) { callback in
+            accepted = callback
+        }
+        XCTAssertAccepted(decision, kind: .measurement)
+        XCTAssertEqual(accepted?.adjustedEstimateMinutes, 10)
+    }
+
+    func testMissingLiveMonitorReinstallsPersistedArmEventsNotRemainingViewEvents() throws {
+        let owner = UUID(uuidString: "cccccccc-0000-0000-0000-000000000001")!
+        let ruleID = UUID(uuidString: "dddddddd-0000-0000-0000-000000000400")!
+        let armID = UUID(uuidString: "eeeeeeee-0000-0000-0000-000000000010")!
+        let now = Date(timeIntervalSince1970: 1_721_174_400)
+        let store = makeEpochStore(owner: owner)
+        let canonical = rule(id: ruleID, budget: 20)
+        try seed(canonical, token: 7, owner: owner, store: store)
+        let spy = PlannerSchedulerSpy()
+
+        let initial = AppLimitPlanner(
+            scheduler: spy,
+            now: { now },
+            epochStore: store,
+            ownerProvider: { owner },
+            armIDProvider: { armID }
+        )
+        XCTAssertEqual(initial.arm(rules: [canonical]), .armed(activityCount: 1, eventCount: 1))
+        let originalEvents = Set(try XCTUnwrap(spy.armed.first).events.keys.map(\.rawValue))
+
+        spy.simulateMonitorLoss()
+        let remainingView = rule(id: ruleID, budget: 15)
+        let recovery = AppLimitPlanner(
+            scheduler: spy,
+            now: { now.addingTimeInterval(10 * 60) },
+            epochStore: store,
+            ownerProvider: { owner },
+            armIDProvider: { UUID() }
+        )
+        XCTAssertEqual(recovery.arm(rules: [remainingView]), .armed(activityCount: 1, eventCount: 1))
+
+        XCTAssertEqual(spy.armed.count, 2)
+        XCTAssertEqual(spy.armed[1].name.rawValue, AppLimitPlanner.v2ActivityName(armID: armID))
+        XCTAssertEqual(Set(spy.armed[1].events.keys.map(\.rawValue)), originalEvents)
     }
 
     func testConcurrentReplacementCannotCommitBetweenArmCheckAndStart() throws {

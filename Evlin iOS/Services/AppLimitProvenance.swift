@@ -58,13 +58,8 @@ nonisolated final class AppLimitProvenanceStore: @unchecked Sendable {
                 tokenDigest: Self.tokenDigest(rule: canonicalRule),
                 budgetMinutes: canonicalRule.budgetMinutes
             )
-            if var existing = slot.armProvenance,
+            if let existing = slot.armProvenance,
                existing.replacementKey == key {
-                if acceptedBase > existing.baseAcceptedMinutes {
-                    existing.baseAcceptedMinutes = acceptedBase
-                    slot.armProvenance = existing
-                    state.slots[canonicalRule.id] = slot
-                }
                 return Resolution(provenance: existing, replaced: false)
             }
 
