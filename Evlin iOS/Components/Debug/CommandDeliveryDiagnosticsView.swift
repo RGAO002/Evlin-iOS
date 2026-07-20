@@ -43,6 +43,7 @@ struct CommandDeliveryDiagnosticsView: View {
             nseSpikeSection
 #if DEBUG
             meteringMonitorProbeSection
+            AppLimitOneMinuteProbeView()
 #endif
             pickerSeparationSection
         }
