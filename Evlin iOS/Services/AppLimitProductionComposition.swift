@@ -239,7 +239,7 @@ nonisolated enum AppLimitProductionComposition {
                 now: now
             )
         } catch {
-            outcome = AppLimitNSEPersistenceOutcome(
+            let failedOutcome = AppLimitNSEPersistenceOutcome(
                 envelope: envelope,
                 ack: AppLimitNSEAck(
                     status: "failed",
@@ -253,6 +253,13 @@ nonisolated enum AppLimitProductionComposition {
                 ),
                 requestOwnerWake: false,
                 alertBody: "Updating limit"
+            )
+            // Persistence failures are local diagnostics, not terminal wire
+            // receipts. Leaving the command unacked keeps backend delivery
+            // retryable until the durable owner handoff succeeds.
+            return AppLimitNSEDeliveryResult(
+                outcome: failedOutcome,
+                ackSucceeded: false
             )
         }
 

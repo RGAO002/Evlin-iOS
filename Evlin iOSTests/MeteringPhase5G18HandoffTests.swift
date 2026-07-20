@@ -128,7 +128,7 @@ final class MeteringPhase5G18HandoffTests: XCTestCase {
             requestOwnerWake: { XCTFail("owner mismatch must not request a wake") }
         )
         XCTAssertEqual(ownerResult?.ack.status, "failed")
-        XCTAssertFalse(ownerAcks.contains { $0.status == "confirmed" })
+        XCTAssertTrue(ownerAcks.isEmpty, "failed persistence must remain retryable")
         XCTAssertEqual(try Data(contentsOf: harness.fileURL), prior)
 
         let lockedOutStore = AppLimitEpochStore(
@@ -153,7 +153,7 @@ final class MeteringPhase5G18HandoffTests: XCTestCase {
             requestOwnerWake: { XCTFail("lock failure must not request a wake") }
         )
         XCTAssertEqual(lockResult?.ack.status, "failed")
-        XCTAssertFalse(lockAcks.contains { $0.status == "confirmed" })
+        XCTAssertTrue(lockAcks.isEmpty, "failed persistence must remain retryable")
         XCTAssertEqual(try Data(contentsOf: harness.fileURL), prior)
     }
 

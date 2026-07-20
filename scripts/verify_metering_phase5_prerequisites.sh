@@ -138,9 +138,25 @@ def run_self_test() -> None:
     def remove(relative: str):
         return lambda ios: (ios / relative).unlink()
 
+    def remove_json_field(relative: str, field: str):
+        def mutate(ios: Path) -> None:
+            path = ios / relative
+            value = json.loads(path.read_text(encoding="utf-8"))
+            value.pop(field, None)
+            path.write_text(json.dumps(value), encoding="utf-8")
+        return mutate
+
     case("complete")
     case("missing-p3-report", remove("docs/superpowers/reports/2026-07-17-metering-epoch-phase-3-completion.md"), "phase3_completion_report_missing")
     case("missing-p3-attestation", remove(".superpowers/evidence/metering-phase3/report-commit-attestation.json"), "phase3_attestation_missing")
+    case(
+        "missing-p3-semantic-status",
+        remove_json_field(
+            ".superpowers/evidence/metering-phase3/report-commit-attestation.json",
+            "semantic_status",
+        ),
+        "phase3_attestation_invalid",
+    )
     case("missing-p4-report", remove("docs/superpowers/reports/2026-07-17-metering-epoch-phase-4-completion.md"), "phase4_completion_report_missing")
     case("missing-p4-attestation", remove(".superpowers/evidence/metering-phase4/report-commit-attestation.json"), "phase4_attestation_missing")
     case("missing-builder", remove("scripts/build_verify_six_release_iphoneos.sh"), "phase4_release_builder_missing")
@@ -240,7 +256,7 @@ try:
         raise ValueError
     verify_attested_object(p3_att, "report", p3_commit, p3_path, "phase3_attestation_invalid")
     unique_report_commit(p3_path, p3_commit, "docs: record metering phase 3 evidence")
-    if p3_att.get("semantic_status", "AUTOMATED_PASSED_PHYSICAL_PENDING") != "AUTOMATED_PASSED_PHYSICAL_PENDING":
+    if p3_att.get("semantic_status") != "AUTOMATED_PASSED_PHYSICAL_PENDING":
         raise ValueError
 except (json.JSONDecodeError, KeyError, TypeError, ValueError):
     fail("phase3_attestation_invalid")

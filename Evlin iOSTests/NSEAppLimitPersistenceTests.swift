@@ -180,7 +180,7 @@ final class NSEAppLimitPersistenceTests: XCTestCase {
         XCTAssertEqual(try harness.store.read().slots[ruleID]?.pendingOwnerWork?.orderingToken, 10)
     }
 
-    func testOwnerMismatchPostsFailedAckWithoutWakeOrMutation() async throws {
+    func testOwnerMismatchKeepsFailedOutcomeLocalWithoutAckWakeOrMutation() async throws {
         let harness = makeHarness()
         _ = try harness.coordinator.ingest(setEnvelope(token: 9, source: .poll))
         let before = try Data(contentsOf: harness.fileURL)
@@ -202,7 +202,7 @@ final class NSEAppLimitPersistenceTests: XCTestCase {
         XCTAssertEqual(delivery?.ack.status, "failed")
         XCTAssertEqual(delivery?.ack.disposition, "persistence_error")
         XCTAssertEqual(delivery?.ack.reason, "app_limit_epoch_error")
-        XCTAssertEqual(acks, [delivery?.ack].compactMap { $0 })
+        XCTAssertTrue(acks.isEmpty, "owner mismatch must leave the command retryable")
         XCTAssertEqual(wakes, 0)
         XCTAssertEqual(try Data(contentsOf: harness.fileURL), before)
     }
