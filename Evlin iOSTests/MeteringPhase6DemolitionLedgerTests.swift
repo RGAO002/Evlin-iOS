@@ -159,4 +159,37 @@ final class MeteringPhase6DemolitionLedgerTests: XCTestCase {
             [["backend", "Vetoes", "Self", "Lock"].joined()]
         )
     }
+
+    func testT5AndT11Attestation() throws {
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: ledgerURL)) as? [String: Any]
+        )
+        let rows = try XCTUnwrap(object["demolitions"] as? [[String: Any]])
+        let t5 = try XCTUnwrap(rows.first { $0["id"] as? String == "T5" })
+        let t11 = try XCTUnwrap(rows.first { $0["id"] as? String == "T11" })
+
+        let expectedVectors = Set(["V04", "V05", "V19", "V30"])
+        XCTAssertEqual(t5["status"] as? String, "REMOVED")
+        XCTAssertEqual(Set(try XCTUnwrap(t5["vectors"] as? [String])), expectedVectors)
+        let t5Demolition = try XCTUnwrap(t5["demolition_commit"] as? [String: String])
+        XCTAssertEqual(t5Demolition["repository"], "backend")
+        XCTAssertEqual(t5Demolition["sha"], "ff1436de90b7afa9c502bbf64924072d84a85c4c")
+        XCTAssertEqual(
+            try XCTUnwrap(t5["forbidden_symbols"] as? [String]),
+            [["_sample", "_is", "_plausible"].joined()]
+        )
+
+        XCTAssertEqual(t11["status"] as? String, "REMOVED")
+        XCTAssertEqual(Set(try XCTUnwrap(t11["vectors"] as? [String])), expectedVectors)
+        let t11Demolition = try XCTUnwrap(t11["demolition_commit"] as? [String: String])
+        XCTAssertEqual(t11Demolition["repository"], "ios")
+        XCTAssertEqual(t11Demolition["sha"]?.count, 40)
+        XCTAssertEqual(
+            Set(try XCTUnwrap(t11["forbidden_symbols"] as? [String])),
+            Set([
+                ["Earned", "Threshold", "Plausibility"].joined(),
+                ["tolerance", "Minutes"].joined(),
+            ])
+        )
+    }
 }

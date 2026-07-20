@@ -128,16 +128,36 @@
     },
     {
       "id": "T5",
-      "status": "UNATTESTED",
+      "status": "REMOVED",
       "legacy_mechanism": "backend plus-five sample tolerance",
       "replacement": ["strict elapsed plus bounded jitter trust"],
       "deletion_criterion": "backend boundary vectors and source absence pass",
-      "replacement_commits": [],
-      "vectors": [],
-      "evidence": [],
-      "demolition_commit": null,
-      "revert_command": null,
-      "forbidden_symbols": [],
+      "replacement_commits": [
+        {
+          "repository": "backend",
+          "sha": "7566942f6e51c75c6479141faa0d3c96848d127c"
+        }
+      ],
+      "vectors": [
+        "V04",
+        "V05",
+        "V19",
+        "V30"
+      ],
+      "evidence": [
+        {
+          "path": "/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/.superpowers/evidence/metering-phase6/T5-focused.log",
+          "sha256": "343238fd52b6aaf4af99a307d2c7e61bfea1faddaad65e0e320a4472bda03447"
+        }
+      ],
+      "demolition_commit": {
+        "repository": "backend",
+        "sha": "ff1436de90b7afa9c502bbf64924072d84a85c4c"
+      },
+      "revert_command": "git -C /Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend revert ff1436de90b7afa9c502bbf64924072d84a85c4c",
+      "forbidden_symbols": [
+        "_sample_is_plausible"
+      ],
       "release_observation": null,
       "fred_approval": null
     },
@@ -218,16 +238,41 @@
     },
     {
       "id": "T11",
-      "status": "UNATTESTED",
+      "status": "REMOVED",
       "legacy_mechanism": "iOS whole-bucket plus-five tolerance",
       "replacement": ["epoch route identity", "strict elapsed plus jitter trust"],
       "deletion_criterion": "replacement vectors and source-absence test pass",
-      "replacement_commits": [],
-      "vectors": [],
-      "evidence": [],
-      "demolition_commit": null,
-      "revert_command": null,
-      "forbidden_symbols": [],
+      "replacement_commits": [
+        {
+          "repository": "ios",
+          "sha": "7001cf92f14a6809ddaa367f6577c0291773c30d"
+        },
+        {
+          "repository": "backend",
+          "sha": "ff1436de90b7afa9c502bbf64924072d84a85c4c"
+        }
+      ],
+      "vectors": [
+        "V04",
+        "V05",
+        "V19",
+        "V30"
+      ],
+      "evidence": [
+        {
+          "path": "/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/.superpowers/evidence/metering-phase6/T5-focused.log",
+          "sha256": "343238fd52b6aaf4af99a307d2c7e61bfea1faddaad65e0e320a4472bda03447"
+        }
+      ],
+      "demolition_commit": {
+        "repository": "ios",
+        "sha": "bef870fa5e372ef1f317a1c0b49b3078cd05fd67"
+      },
+      "revert_command": "git -C /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS revert bef870fa5e372ef1f317a1c0b49b3078cd05fd67",
+      "forbidden_symbols": [
+        "EarnedThresholdPlausibility",
+        "toleranceMinutes"
+      ],
       "release_observation": null,
       "fred_approval": null
     }
