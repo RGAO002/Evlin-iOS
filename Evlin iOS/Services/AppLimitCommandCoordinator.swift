@@ -42,4 +42,27 @@ nonisolated final class AppLimitCommandCoordinator: @unchecked Sendable {
             return .duplicatePending
         }
     }
+
+    /// Persist an expiry tombstone before the NSE confirms an expired command.
+    /// This uses the same newest-token transaction as live commands so a delayed
+    /// older set cannot revive a policy that has already expired.
+    func recordExpired(_ command: AppLimitCommandEnvelope) throws {
+        guard command.kind == .set else { return }
+        try store.transaction(
+            source: command.source,
+            expectedOwner: expectedOwnerProvider()
+        ) { state in
+            if let current = state.slots[command.ruleID],
+               current.latestOrderingToken > command.orderingToken {
+                return
+            }
+            if let current = state.slots[command.ruleID],
+               current.latestOrderingToken == command.orderingToken,
+               current.latestKind == .clear,
+               current.clearTombstone?.payloadDigest == command.payloadDigest {
+                return
+            }
+            state.slots[command.ruleID] = AppLimitVersionSlot(expiring: command)
+        }
+    }
 }

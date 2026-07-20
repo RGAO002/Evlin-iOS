@@ -150,6 +150,7 @@ nonisolated enum AppLimitProductionComposition {
         if envelope.kind == .set,
            let expiresAt = envelope.rule?.expiresAt,
            expiresAt <= now {
+            try coordinator.recordExpired(envelope)
             return AppLimitNSEPersistenceOutcome(
                 envelope: envelope,
                 ack: AppLimitNSEAck(

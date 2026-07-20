@@ -207,10 +207,9 @@ final class NSEAppLimitPersistenceTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: harness.fileURL), before)
     }
 
-    func testExpiredSetCannotReviveCurrentClearTombstone() async throws {
+    func testExpiredNewerSetReplacesCurrentClearWithNewerExpiryTombstone() async throws {
         let harness = makeHarness()
         _ = try harness.coordinator.ingest(clearEnvelope(token: 12, source: .poll))
-        let before = try Data(contentsOf: harness.fileURL)
         let expired = setEnvelope(
             token: 13,
             source: .notificationServiceExtension,
@@ -229,8 +228,45 @@ final class NSEAppLimitPersistenceTests: XCTestCase {
         XCTAssertEqual(delivery?.ack.status, "confirmed")
         XCTAssertEqual(delivery?.ack.disposition, "expired")
         XCTAssertEqual(wakes, 0)
-        XCTAssertEqual(try Data(contentsOf: harness.fileURL), before)
-        XCTAssertEqual(try harness.store.read().slots[ruleID]?.clearTombstone?.orderingToken, 12)
+        let slot = try XCTUnwrap(harness.store.read().slots[ruleID])
+        XCTAssertEqual(slot.latestOrderingToken, 13)
+        XCTAssertEqual(slot.clearTombstone?.orderingToken, 13)
+        XCTAssertNil(slot.activeRule)
+        XCTAssertNil(slot.pendingOwnerWork)
+    }
+
+    func testExpiredNewerSetPersistsTombstoneBeforeAcknowledgingAndSupersedesDelayedOldSet() async throws {
+        let harness = makeHarness()
+        let expired = setEnvelope(
+            token: 5,
+            source: .notificationServiceExtension,
+            expiresAt: referenceDate.addingTimeInterval(-1)
+        )
+
+        let delivery = await AppLimitProductionComposition.deliverNSE(
+            envelope: expired,
+            coordinator: harness.coordinator,
+            now: referenceDate,
+            postAck: { _ in
+                let slot = try XCTUnwrap(harness.store.read().slots[ruleID])
+                XCTAssertEqual(slot.latestOrderingToken, 5)
+                XCTAssertEqual(slot.clearTombstone?.orderingToken, 5)
+                XCTAssertNil(slot.activeRule)
+                XCTAssertNil(slot.pendingOwnerWork)
+            },
+            requestOwnerWake: {}
+        )
+
+        XCTAssertEqual(delivery?.ack.status, "confirmed")
+        XCTAssertEqual(delivery?.ack.disposition, "expired")
+        XCTAssertEqual(
+            try harness.coordinator.ingest(setEnvelope(token: 3, source: .poll)),
+            .superseded(latestOrderingToken: 5)
+        )
+        let slot = try XCTUnwrap(harness.store.read().slots[ruleID])
+        XCTAssertEqual(slot.latestOrderingToken, 5)
+        XCTAssertNil(slot.activeRule)
+        XCTAssertNil(slot.pendingOwnerWork)
     }
 
     func testPollAndNSEPersistIdenticalStateApartFromSource() throws {

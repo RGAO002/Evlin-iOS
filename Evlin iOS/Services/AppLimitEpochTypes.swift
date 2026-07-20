@@ -289,6 +289,27 @@ nonisolated extension AppLimitVersionSlot {
             appliedReceipt: nil
         )
     }
+
+    /// An expired set still advances the durable ordering frontier. Treating it
+    /// as a clear tombstone prevents a delayed older set from becoming live.
+    init(expiring command: AppLimitCommandEnvelope) {
+        self.init(
+            ruleID: command.ruleID,
+            latestOrderingToken: command.orderingToken,
+            latestKind: .clear,
+            latestPayloadDigest: command.payloadDigest,
+            activeRule: nil,
+            clearTombstone: AppLimitClearTombstone(
+                ruleID: command.ruleID,
+                orderingToken: command.orderingToken,
+                payloadDigest: command.payloadDigest,
+                source: command.source,
+                clearedAt: command.receivedAt
+            ),
+            pendingOwnerWork: nil,
+            appliedReceipt: nil
+        )
+    }
 }
 
 nonisolated struct AppLimitLegacyMigrationAudit: Codable, Equatable, Sendable {
