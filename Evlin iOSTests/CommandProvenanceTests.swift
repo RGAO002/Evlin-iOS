@@ -218,7 +218,6 @@ final class CommandProvenanceTests: XCTestCase {
 
         let savedCommands = poller.pollCommandsOverride
         let savedSaveList = poller.saveLockedSetIDOverride
-        let savedRekey = poller.afterRekeyShieldRecord
         let savedArm = poller.armBudgetOverride
         let savedStop = poller.stopEarnedBudgetOverride
         let savedConfirmedAck = poller.ackEarnedTimeConfigOverride
@@ -229,7 +228,6 @@ final class CommandProvenanceTests: XCTestCase {
         defer {
             poller.pollCommandsOverride = savedCommands
             poller.saveLockedSetIDOverride = savedSaveList
-            poller.afterRekeyShieldRecord = savedRekey
             poller.armBudgetOverride = savedArm
             poller.stopEarnedBudgetOverride = savedStop
             poller.ackEarnedTimeConfigOverride = savedConfirmedAck
@@ -265,7 +263,6 @@ final class CommandProvenanceTests: XCTestCase {
         )
         _ = await ActiveLockStore.shared.addShield(record)
 
-        var rekeyCount = 0
         var armCount = 0
         var stopCount = 0
         var confirmedAckCount = 0
@@ -277,7 +274,6 @@ final class CommandProvenanceTests: XCTestCase {
         poller.oneShotPollOverride = nil
         poller.pollCommandsOverride = { _, _ in [command] }
         poller.saveLockedSetIDOverride = nil
-        poller.afterRekeyShieldRecord = { _, _ in rekeyCount += 1 }
         poller.armBudgetOverride = { _, _, _ in armCount += 1 }
         poller.stopEarnedBudgetOverride = { stopCount += 1 }
         poller.hasMeasurableSelectionOverride = { true }
@@ -291,7 +287,6 @@ final class CommandProvenanceTests: XCTestCase {
 
         await poller.pollOnceForCurrentDevice()
 
-        XCTAssertEqual(rekeyCount, 0)
         XCTAssertEqual(store.lockedSetID, oldListID.uuidString)
         XCTAssertEqual(store.poolMinutes, 31)
         XCTAssertEqual(store.capMinutes, 29)

@@ -284,8 +284,7 @@ final class CommandPoller {
     /// touching real App Group UserDefaults. Nil in production.
     var saveLockedSetIDOverride: ((String, Data?) -> Void)?
 
-    /// Test seams around the suspension and ack points in earned config handling.
-    var afterRekeyShieldRecord: ((String, String) async -> Void)?
+    /// Test seams around the ack points in earned config handling.
     var ackEarnedTimeConfigOverride: ((UUID, APIClient) async -> Void)?
     var stopEarnedBudgetOverride: (() -> Void)?
     var ackMalformedPollOverride: ((UUID, String, [String: Any]?, APIClient) async -> Void)?

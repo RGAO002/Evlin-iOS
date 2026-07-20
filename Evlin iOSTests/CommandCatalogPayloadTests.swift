@@ -336,6 +336,7 @@ final class CommandCatalogPayloadTests: XCTestCase {
           "issued_at": "2026-06-01T08:00:00Z",
           "limit": {
             "rule_id": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+            "ordering_token": 1,
             "daily_budget_minutes": 60,
             "reset_policy": "daily",
             "schedule": {
@@ -403,6 +404,7 @@ final class CommandCatalogPayloadTests: XCTestCase {
           "issued_at": "2026-06-19T21:00:00.123456+00:00",
           "limit": {
             "rule_id": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+            "ordering_token": 1,
             "daily_budget_minutes": 60,
             "reset_policy": "daily",
             "schedule": {
@@ -469,6 +471,7 @@ final class CommandCatalogPayloadTests: XCTestCase {
           "issued_at": "2026-06-19T21:00:00+00:00",
           "limit": {
             "rule_id": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+            "ordering_token": 1,
             "daily_budget_minutes": 1,
             "used_today_minutes": 1,
             "reset_policy": "daily",
@@ -510,6 +513,7 @@ final class CommandCatalogPayloadTests: XCTestCase {
           "issued_at": "2026-06-19T21:00:00.123456+00:00",
           "limit": {
             "rule_id": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+            "ordering_token": 1,
             "daily_budget_minutes": 60,
             "reset_policy": "daily",
             "schedule": {
@@ -565,6 +569,7 @@ final class CommandCatalogPayloadTests: XCTestCase {
           "issued_at": "2026-06-19T21:00:00.123456+00:00",
           "limit": {
             "rule_id": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+            "ordering_token": 1,
             "daily_budget_minutes": 60,
             "reset_policy": "daily",
             "schedule": {
@@ -601,6 +606,7 @@ final class CommandCatalogPayloadTests: XCTestCase {
           "issued_at": "2026-06-02T09:30:00Z",
           "clear": {
             "rule_id": "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
+            "ordering_token": 1,
             "reason": "parent_clear",
             "updated_at": "2026-06-02T09:30:00Z"
           }
