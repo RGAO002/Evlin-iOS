@@ -156,8 +156,6 @@ extension DeviceEpochStore {
                     measurementSelectionDigest: $0.measurementSelectionDigest,
                     enforcementSetID: $0.enforcementSetID
                 ) == request.generationKey
-                    && $0.configuredPoolMinutes == request.poolMinutes
-                    && $0.configuredDeviceCapMinutes == request.deviceCapMinutes
             }
             let activeMatch = state.activeGenerationID
                 .flatMap { state.generations[$0] }
@@ -184,8 +182,12 @@ extension DeviceEpochStore {
                 configuredPoolMinutes: request.poolMinutes,
                 configuredDeviceCapMinutes: request.deviceCapMinutes
             )
-            generation.configuredPoolMinutes = request.poolMinutes
-            generation.configuredDeviceCapMinutes = request.deviceCapMinutes
+            if generation.configuredPoolMinutes == nil {
+                generation.configuredPoolMinutes = request.poolMinutes
+            }
+            if generation.configuredDeviceCapMinutes == nil {
+                generation.configuredDeviceCapMinutes = request.deviceCapMinutes
+            }
             state.generations[generation.generationID] = generation
             if state.activeRouteID == nil {
                 state.activeGenerationID = generation.generationID
