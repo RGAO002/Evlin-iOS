@@ -514,6 +514,7 @@ def test_named_ios_gates_use_the_fresh_dedicated_debug_test_product() -> None:
         source.index('"debug-xctest-build":') : source.index('\n        "release-source-check":')
     ]
     assert "CODE_SIGNING_ALLOWED=NO" not in debug_command
+    assert "COPYFILE_DISABLE=1" in debug_command
 
 
 def test_pre_report_ignores_noncanonical_manual_log_artifacts(tmp_path: Path) -> None:
