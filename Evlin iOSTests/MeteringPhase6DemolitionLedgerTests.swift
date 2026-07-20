@@ -245,4 +245,51 @@ final class MeteringPhase6DemolitionLedgerTests: XCTestCase {
             XCTAssertTrue(observation[key] is NSNull, key)
         }
     }
+
+    func testT7Attestation() throws {
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: ledgerURL)) as? [String: Any]
+        )
+        let rows = try XCTUnwrap(object["demolitions"] as? [[String: Any]])
+        let row = try XCTUnwrap(rows.first { $0["id"] as? String == "T7" })
+
+        XCTAssertEqual(row["status"] as? String, "REMOVED")
+        XCTAssertEqual(
+            Set(try XCTUnwrap(row["vectors"] as? [String])),
+            Set(["V06", "V10", "V11", "V12", "V33", "V34", "V37"])
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(row["replacement_commits"] as? [[String: String]]),
+            [
+                ["repository": "ios", "sha": "04d2beb09feae0a8546963b157c439f71075ba5f"],
+                ["repository": "ios", "sha": "bbf83a7eb096fde2a3a7bbd81507a8f81e2d6084"],
+            ]
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(row["evidence"] as? [[String: String]]),
+            [[
+                "path": "/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/.superpowers/evidence/metering-phase6/T7-focused.log",
+                "sha256": "78a21a0189cf350361e1ba916d477427f7e5726d2d77eb187930dfa05da4972d",
+            ]]
+        )
+        let demolition = try XCTUnwrap(row["demolition_commit"] as? [String: String])
+        XCTAssertEqual(demolition, [
+            "repository": "ios",
+            "sha": "21269f5bb83b5a990decef60402e653fb7d91464",
+        ])
+        XCTAssertEqual(
+            row["revert_command"] as? String,
+            "git -C /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS revert 21269f5bb83b5a990decef60402e653fb7d91464"
+        )
+        XCTAssertEqual(
+            Set(try XCTUnwrap(row["forbidden_symbols"] as? [String])),
+            Set([
+                ["counter", "Recovery", "Required"].joined(),
+                ["pending", "Uncounted", "Reconciliation"].joined(),
+                ["requires", "Counter", "Recovery"].joined(),
+                ["allow", "Same", "Day", "Decrease"].joined(),
+                ["rearm", "Usage", "Counters", "Result"].joined(),
+            ])
+        )
+    }
 }
