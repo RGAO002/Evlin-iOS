@@ -15,10 +15,12 @@ enum ShieldSourceLogic {
     /// Pure: the original record is unchanged; a new value is returned.
     static func unioning(
         _ record: ShieldRecord,
-        intoSources newSources: Set<ShieldSource>
+        intoSources newSources: Set<ShieldSource>,
+        limitRuleIDs newLimitRuleIDs: Set<UUID> = []
     ) -> ShieldRecord {
         var updated = record
         updated.sources = record.sources.union(newSources)
+        updated.limitRuleIDs.formUnion(newLimitRuleIDs)
         return updated
     }
 
@@ -34,6 +36,9 @@ enum ShieldSourceLogic {
         guard !remaining.isEmpty else { return nil }
         var updated = record
         updated.sources = remaining
+        if source == .limit {
+            updated.limitRuleIDs = []
+        }
         return updated
     }
 
@@ -113,7 +118,11 @@ enum ScreenTimeRecordKeySweep {
 
             out.removeValue(forKey: key)
             if let twin = out[loweredKey] {
-                out[loweredKey] = ShieldSourceLogic.unioning(twin, intoSources: record.sources)
+                out[loweredKey] = ShieldSourceLogic.unioning(
+                    twin,
+                    intoSources: record.sources,
+                    limitRuleIDs: record.limitRuleIDs
+                )
             } else {
                 // `recordKey`/`targetKey` are immutable (`let`) — rebuild the
                 // record rather than mutate in place. Every other field is
@@ -132,7 +141,8 @@ enum ScreenTimeRecordKeySweep {
                     expiresAt: record.expiresAt,
                     originalRequest: record.originalRequest,
                     targetChildID: record.targetChildID,
-                    sources: record.sources
+                    sources: record.sources,
+                    limitRuleIDs: record.limitRuleIDs
                 )
             }
         }

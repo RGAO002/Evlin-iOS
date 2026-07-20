@@ -84,6 +84,10 @@ struct ShieldRecord: Codable, Sendable, Equatable {
     /// keys) keeps its original parent/reflection-lock meaning.
     var sources: Set<ShieldSource> = [.manual]
 
+    /// Stable ownership for the `.limit` source. More than one rule may merge
+    /// into the same target record; legacy records decode with no attribution.
+    var limitRuleIDs: Set<UUID> = []
+
     // MARK: - Helpers
 
     /// Derive recordKey for a tier/targetKey pair. See spec §3.2.
@@ -150,7 +154,8 @@ struct ShieldRecord: Codable, Sendable, Equatable {
                 expiresAt: expiresAt,
                 originalRequest: originalRequest,
                 targetChildID: targetChildID,
-                sources: sources
+                sources: sources,
+                limitRuleIDs: limitRuleIDs
             ),
             true
         )
@@ -175,8 +180,8 @@ extension ShieldRecord {
         case recordKey, tier, targetKey, displayName, lastCommandID
         case appTokens, categoryTokens, webDomainTokens, appliesToAll
         case issuedAt, expiresAt, originalRequest, targetChildID
-        // New key written by B1+.
-        case sources
+        // New keys written by B1+ / P4 recovery hardening.
+        case sources, limitRuleIDs
         // Legacy scalar key (P4 era, pre-B1). Decoded read-only; we encode `sources`.
         case source
     }
@@ -213,7 +218,8 @@ extension ShieldRecord {
             expiresAt: try c.decodeIfPresent(Date.self, forKey: .expiresAt),
             originalRequest: try c.decode(String.self, forKey: .originalRequest),
             targetChildID: try c.decode(UUID.self, forKey: .targetChildID),
-            sources: resolvedSources
+            sources: resolvedSources,
+            limitRuleIDs: try c.decodeIfPresent(Set<UUID>.self, forKey: .limitRuleIDs) ?? []
         )
     }
 
@@ -234,6 +240,7 @@ extension ShieldRecord {
         try c.encode(targetChildID, forKey: .targetChildID)
         // Write the new `sources` array; legacy `source` key is intentionally omitted.
         try c.encode(sources, forKey: .sources)
+        try c.encode(limitRuleIDs, forKey: .limitRuleIDs)
     }
 }
 

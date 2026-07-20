@@ -353,7 +353,10 @@ actor ActiveLockStore {
                     .lowercased()
                 let matching = durable.values.filter { record in
                     guard record.sources.contains(.limit) else { return false }
-                    if let ruleID, record.lastCommandID == ruleID { return true }
+                    if let ruleID {
+                        return record.limitRuleIDs.contains(ruleID)
+                            || (record.limitRuleIDs.isEmpty && record.lastCommandID == ruleID)
+                    }
                     if !appTokens.isEmpty,
                        !record.appTokens.isDisjoint(with: appTokens) {
                         return true
@@ -366,11 +369,25 @@ actor ActiveLockStore {
 
                 var updated = durable
                 for record in matching {
-                    updated = ShieldSourceLogic.removingSource(
-                        .limit,
-                        fromRecordKey: record.recordKey,
-                        in: updated
-                    )
+                    if let ruleID, !record.limitRuleIDs.isEmpty {
+                        var remaining = record
+                        remaining.limitRuleIDs.remove(ruleID)
+                        if remaining.limitRuleIDs.isEmpty {
+                            updated = ShieldSourceLogic.removingSource(
+                                .limit,
+                                fromRecordKey: record.recordKey,
+                                in: updated
+                            )
+                        } else {
+                            updated[record.recordKey] = remaining
+                        }
+                    } else {
+                        updated = ShieldSourceLogic.removingSource(
+                            .limit,
+                            fromRecordKey: record.recordKey,
+                            in: updated
+                        )
+                    }
                 }
                 if !matching.isEmpty { try shieldPersistence.persist(updated) }
                 let readback = try shieldPersistence.load()
@@ -378,9 +395,20 @@ actor ActiveLockStore {
                       readback.allSatisfy({ $0.key == $0.value.recordKey }),
                       readback.allSatisfy({ key, record in
                           record.sources == updated[key]?.sources
+                              && record.limitRuleIDs == updated[key]?.limitRuleIDs
                       })
                 else {
                     throw ActiveLockVerifiedPersistenceError.readbackMismatch
+                }
+                if let ruleID {
+                    let unresolved = readback.values.contains { record in
+                        guard record.sources.contains(.limit) else { return false }
+                        return record.limitRuleIDs.contains(ruleID)
+                            || (matching.isEmpty && record.limitRuleIDs.isEmpty)
+                    }
+                    guard !unresolved else {
+                        throw ActiveLockVerifiedPersistenceError.readbackMismatch
+                    }
                 }
                 shieldRecords = readback
                 recomputeAndApply()
@@ -553,8 +581,12 @@ actor ActiveLockStore {
             // Both permanent: no expiry change, but we MUST still union sources.
             // (e.g. earnedTime + manual are both permanent; earned-time and manual
             // both write permanent records to the same recordKey.)
-            let merged = ShieldSourceLogic.unioning(existing, intoSources: new.sources)
-            if merged.sources != existing.sources {
+            let merged = ShieldSourceLogic.unioning(
+                existing,
+                intoSources: new.sources,
+                limitRuleIDs: new.limitRuleIDs
+            )
+            if merged != existing {
                 shieldRecords[existing.recordKey] = merged
                 persist()
                 recomputeAndApply()
@@ -563,8 +595,12 @@ actor ActiveLockStore {
         }
         if existingPermanent && !newPermanent {
             // Existing permanent, new is timed — union sources but keep permanent.
-            let merged = ShieldSourceLogic.unioning(existing, intoSources: new.sources)
-            if merged.sources != existing.sources {
+            let merged = ShieldSourceLogic.unioning(
+                existing,
+                intoSources: new.sources,
+                limitRuleIDs: new.limitRuleIDs
+            )
+            if merged != existing {
                 shieldRecords[existing.recordKey] = merged
                 persist()
                 recomputeAndApply()
@@ -575,7 +611,11 @@ actor ActiveLockStore {
             ))
         }
         if !existingPermanent && newPermanent {
-            var upgraded = ShieldSourceLogic.unioning(existing, intoSources: new.sources)
+            var upgraded = ShieldSourceLogic.unioning(
+                existing,
+                intoSources: new.sources,
+                limitRuleIDs: new.limitRuleIDs
+            )
             let prev = upgraded.expiresAt!
             upgraded.expiresAt = nil
             upgraded.lastCommandID = new.lastCommandID
@@ -586,7 +626,11 @@ actor ActiveLockStore {
             return .upgradedToPermanent(previousExpiry: prev)
         }
         if new.expiresAt! > existing.expiresAt! {
-            var extended = ShieldSourceLogic.unioning(existing, intoSources: new.sources)
+            var extended = ShieldSourceLogic.unioning(
+                existing,
+                intoSources: new.sources,
+                limitRuleIDs: new.limitRuleIDs
+            )
             extended.expiresAt = new.expiresAt
             extended.lastCommandID = new.lastCommandID
             shieldRecords[existing.recordKey] = extended
@@ -595,8 +639,12 @@ actor ActiveLockStore {
             return .extendedTimed(newExpiry: new.expiresAt!)
         }
         // New expiry is shorter than existing: still union sources, no expiry change.
-        let merged = ShieldSourceLogic.unioning(existing, intoSources: new.sources)
-        if merged.sources != existing.sources {
+        let merged = ShieldSourceLogic.unioning(
+            existing,
+            intoSources: new.sources,
+            limitRuleIDs: new.limitRuleIDs
+        )
+        if merged != existing {
             shieldRecords[existing.recordKey] = merged
             persist()
             recomputeAndApply()
@@ -647,7 +695,8 @@ actor ActiveLockStore {
                 expiresAt: old.expiresAt,
                 originalRequest: old.originalRequest,
                 targetChildID: old.targetChildID,
-                sources: old.sources
+                sources: old.sources,
+                limitRuleIDs: old.limitRuleIDs
             )
 
             shieldRecords.removeValue(forKey: oldKey)

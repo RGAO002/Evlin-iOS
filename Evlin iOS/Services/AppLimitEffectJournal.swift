@@ -463,10 +463,12 @@ extension LimitShieldLogic {
                 "arm_id=\(provenance.armID.uuidString.lowercased())",
             ].joined(separator: " "),
             targetChildID: provenance.childDeviceID,
-            sources: [.limit]
+            sources: [.limit],
+            limitRuleIDs: [rule.id]
         )
         if let existing = shields[key] {
             record.sources.formUnion(existing.sources)
+            record.limitRuleIDs.formUnion(existing.limitRuleIDs)
         }
         var updated = shields
         updated[key] = record

@@ -1013,9 +1013,182 @@ final class ActionExecutorLimitTests: XCTestCase {
         XCTAssertTrue(shields.contains { $0.recordKey == manualShield.recordKey })
     }
 
+    func testRecoveryClearRemovesDirectSetLimitFromHistoricalMixedSourceRecord() async throws {
+        let owner = UUID()
+        let ruleID = UUID()
+        let historicalCommandID = UUID()
+        let bundleID = "com.example.direct-set-recovery"
+        let store = AppLimitEpochStore(
+            fileURL: temporaryDirectory.appendingPathComponent("direct-set-recovery.json"),
+            lock: ActiveLockPersistenceLock.shared,
+            ownerProvider: { owner },
+            legacyDefaults: nil
+        )
+        let ruleStore = AppLimitRuleStore(
+            epochStore: store,
+            expectedOwnerProvider: { owner }
+        )
+        let coordinator = AppLimitCommandCoordinator(
+            store: store,
+            expectedOwnerProvider: { owner }
+        )
+        let rule = AppLimitRule(
+            id: ruleID,
+            appTokens: [],
+            bundleID: bundleID,
+            displayName: "Direct set recovery",
+            budgetMinutes: 30,
+            window: AppLimitWindow(
+                startMinute: 0,
+                endMinute: 1439,
+                repeats: true,
+                timezone: "America/New_York"
+            ),
+            effectiveFrom: Date(timeIntervalSince1970: 1_700_000_000),
+            expiresAt: nil
+        )
+        let setEnvelope = AppLimitCommandEnvelope(
+            commandID: UUID(),
+            ruleID: ruleID,
+            orderingToken: 10,
+            kind: .set,
+            payloadDigest: "set-10",
+            receivedAt: Date(timeIntervalSince1970: 1_700_000_100),
+            source: .poll,
+            rule: rule
+        )
+        XCTAssertEqual(try coordinator.ingest(setEnvelope), .acceptedNeedsOwner)
+
+        let recordKey = ShieldRecord.makeRecordKey(tier: .exactApp, targetKey: bundleID)
+        let existing = ShieldRecord(
+            recordKey: recordKey,
+            tier: .exactApp,
+            targetKey: bundleID,
+            displayName: "Historical mixed source",
+            lastCommandID: historicalCommandID,
+            appTokens: [],
+            categoryTokens: [],
+            webDomainTokens: [],
+            appliesToAll: false,
+            issuedAt: Date(timeIntervalSince1970: 1_699_999_000),
+            expiresAt: nil,
+            originalRequest: "historical manual lock",
+            targetChildID: owner,
+            sources: [.manual, .earnedTime, .taskPause]
+        )
+        _ = await ActiveLockStore.shared.addShield(existing)
+
+        let scheduler = LimitSchedulerSpy()
+        let executor = ActionExecutor(
+            activityScheduler: scheduler,
+            authorizationStatusProvider: { .approved },
+            ruleStore: ruleStore,
+            appLimitEpochStore: store,
+            appLimitOwnerProvider: { owner }
+        )
+        let setCommand = LockCommand(
+            id: setEnvelope.commandID,
+            action: .setLimit,
+            tier: .exactApp,
+            target: CommandTarget(
+                bundleID: bundleID,
+                originalRequest: "limit direct set recovery",
+                targetDisplay: rule.displayName,
+                targetChildID: owner
+            ),
+            durationMinutes: nil,
+            issuedAt: setEnvelope.receivedAt,
+            limit: LimitRule(
+                ruleId: ruleID,
+                orderingToken: 10,
+                dailyBudgetMinutes: rule.budgetMinutes,
+                resetPolicy: "daily",
+                startMinute: 0,
+                endMinute: 1439,
+                timezone: "America/New_York",
+                effectiveFrom: rule.effectiveFrom,
+                expiresAt: nil,
+                updatedAt: setEnvelope.receivedAt,
+                usedTodayMinutes: rule.budgetMinutes
+            )
+        )
+
+        let setResult = await executor.executeAppLimitOwnerWork(
+            setCommand,
+            envelope: setEnvelope,
+            expectedChildID: owner,
+            identityIsCurrent: { $0 == owner }
+        )
+
+        guard case .confirmedExact(.setLimit, rule.displayName, _) = setResult.result else {
+            return XCTFail("expected confirmed direct set, got \(setResult.result)")
+        }
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "group.com.evlin.ios"))
+        let persistence = AppLimitShieldPersistence(store: defaults)
+        let afterSet = try XCTUnwrap(try persistence.load()[recordKey])
+        XCTAssertEqual(afterSet.lastCommandID, historicalCommandID)
+        XCTAssertEqual(afterSet.sources, [.manual, .earnedTime, .taskPause, .limit])
+
+        let clearEnvelope = AppLimitCommandEnvelope(
+            commandID: UUID(),
+            ruleID: ruleID,
+            orderingToken: 11,
+            kind: .clear,
+            payloadDigest: "clear-11",
+            receivedAt: Date(timeIntervalSince1970: 1_700_000_200),
+            source: .poll,
+            rule: nil
+        )
+        XCTAssertEqual(try coordinator.ingest(clearEnvelope), .acceptedNeedsOwner)
+        let readback = OwnerClearReadbackRecorder()
+        let driver = AppLimitOwnerRecoveryDriver(
+            store: store,
+            effectPort: OwnerClearExecutorEffectPort(executor: executor, owner: owner),
+            readbackPort: readback
+        )
+
+        await driver.recover(ownerChildDeviceID: owner)
+
+        let afterClear = try XCTUnwrap(try persistence.load()[recordKey])
+        XCTAssertEqual(afterClear.sources, [.manual, .earnedTime, .taskPause])
+        let slot = try XCTUnwrap(store.read().slots[ruleID])
+        XCTAssertNil(slot.pendingOwnerWork)
+        XCTAssertEqual(slot.appliedReceipt?.commandKind, .clear)
+        XCTAssertEqual(slot.appliedReceipt?.orderingToken, 11)
+        let confirmationCount = await readback.count
+        XCTAssertEqual(confirmationCount, 1)
+    }
+
+    func testRecoveryClearDoesNotConfirmUnattributedLimitState() async throws {
+        let harness = try makeClearHarness(
+            failure: nil,
+            recordLastCommandID: UUID()
+        )
+        let readback = OwnerClearReadbackRecorder()
+        let driver = AppLimitOwnerRecoveryDriver(
+            store: harness.epochStore,
+            effectPort: OwnerClearExecutorEffectPort(
+                executor: harness.executor,
+                owner: harness.owner
+            ),
+            readbackPort: readback
+        )
+
+        await driver.recover(ownerChildDeviceID: harness.owner)
+
+        let slot = try XCTUnwrap(harness.epochStore.read().slots[harness.work.ruleID])
+        XCTAssertEqual(slot.pendingOwnerWork, harness.work)
+        XCTAssertNil(slot.appliedReceipt)
+        XCTAssertTrue(try harness.persistenceStore.load().values.contains {
+            $0.sources.contains(.limit)
+        })
+        let confirmationCount = await readback.count
+        XCTAssertEqual(confirmationCount, 0)
+    }
+
     func testAuthorizedClearPersistenceFailuresNeverConfirmOrCommitReceipt() async throws {
         for failure in OwnerClearPersistenceStoreStub.Failure.allCases {
-            let harness = try makeFailingClearHarness(failure: failure)
+            let harness = try makeClearHarness(failure: failure)
 
             let result = await harness.executor.executeAppLimitOwnerWork(
                 harness.command,
@@ -1033,7 +1206,7 @@ final class ActionExecutorLimitTests: XCTestCase {
     }
 
     func testRecoveryClearPersistenceFailureNeverCommitsReceiptOrConfirms() async throws {
-        let harness = try makeFailingClearHarness(failure: .staleReadback)
+        let harness = try makeClearHarness(failure: .staleReadback)
         let readback = OwnerClearReadbackRecorder()
         let driver = AppLimitOwnerRecoveryDriver(
             store: harness.epochStore,
@@ -1053,8 +1226,9 @@ final class ActionExecutorLimitTests: XCTestCase {
         XCTAssertEqual(confirmationCount, 0)
     }
 
-    private func makeFailingClearHarness(
-        failure: OwnerClearPersistenceStoreStub.Failure
+    private func makeClearHarness(
+        failure: OwnerClearPersistenceStoreStub.Failure?,
+        recordLastCommandID: UUID? = nil
     ) throws -> OwnerClearHarness {
         let owner = UUID()
         let ruleID = UUID()
@@ -1107,7 +1281,7 @@ final class ActionExecutorLimitTests: XCTestCase {
             tier: .exactApp,
             targetKey: bundleID,
             displayName: "Persistence failure",
-            lastCommandID: ruleID,
+            lastCommandID: recordLastCommandID ?? ruleID,
             appTokens: [],
             categoryTokens: [],
             webDomainTokens: [],
@@ -1171,7 +1345,8 @@ final class ActionExecutorLimitTests: XCTestCase {
             work: work,
             executor: executor,
             envelope: envelope,
-            command: command
+            command: command,
+            persistenceStore: persistenceStore
         )
     }
 }
@@ -1183,6 +1358,7 @@ private struct OwnerClearHarness {
     let executor: ActionExecutor
     let envelope: AppLimitCommandEnvelope
     let command: LockCommand
+    let persistenceStore: OwnerClearPersistenceStoreStub
 }
 
 private final class OwnerClearPersistenceStoreStub:

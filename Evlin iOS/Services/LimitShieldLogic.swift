@@ -62,7 +62,8 @@ enum LimitShieldLogic {
             expiresAt: nil,
             originalRequest: "app limit reached: \(rule.displayName)",
             targetChildID: UUID(),
-            sources: [.limit]
+            sources: [.limit],
+            limitRuleIDs: [rule.id]
         )
         var out = shields
         out[key] = record
