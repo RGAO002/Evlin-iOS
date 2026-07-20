@@ -26,16 +26,24 @@
     },
     {
       "id": "T2",
-      "status": "UNATTESTED",
+      "status": "REMOVED",
       "legacy_mechanism": "stale raw threshold ceiling",
       "replacement": ["epoch identity", "immutable route provenance", "physical trust"],
       "deletion_criterion": "replacement vectors and source-absence test pass",
-      "replacement_commits": [],
-      "vectors": [],
-      "evidence": [],
-      "demolition_commit": null,
-      "revert_command": null,
-      "forbidden_symbols": [],
+      "replacement_commits": [
+        {"repository": "ios", "sha": "4e7ed415b87cd5b36831ff2afe3fe9bbb850f765"},
+        {"repository": "ios", "sha": "549de24f541e128b388042d66cadee2c2899aa1e"}
+      ],
+      "vectors": ["V04", "V05", "V08", "V13", "V27"],
+      "evidence": [
+        {
+          "path": "/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/.superpowers/evidence/metering-phase6/T2-focused.log",
+          "sha256": "545b2ad48b5c1dbb577e84207b2a8a2b4f69b7d0c0dc5bf8cde8f49bd9c8a0e0"
+        }
+      ],
+      "demolition_commit": {"repository": "ios", "sha": "6194a04816e33116233e6b87d9e935cd4c383065"},
+      "revert_command": "git -C /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS revert 6194a04816e33116233e6b87d9e935cd4c383065",
+      "forbidden_symbols": ["stale_ladder_drop"],
       "release_observation": null,
       "fred_approval": null
     },
