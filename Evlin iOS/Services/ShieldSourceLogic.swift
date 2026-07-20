@@ -142,7 +142,8 @@ enum ScreenTimeRecordKeySweep {
                     originalRequest: record.originalRequest,
                     targetChildID: record.targetChildID,
                     sources: record.sources,
-                    limitRuleIDs: record.limitRuleIDs
+                    limitRuleIDs: record.limitRuleIDs,
+                    webOpen: record.webOpen
                 )
             }
         }

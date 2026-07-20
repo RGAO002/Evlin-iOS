@@ -1,24 +1,12 @@
 import Combine
-import ManagedSettings
 import SwiftUI
 import WebKit
 
+/// Web access for reflection playback is record-driven (C-3): the reflection
+/// `ShieldRecord` carries `webOpen == true` and `ActiveLockStore`'s projection
+/// leaves web domains open while the all-apps reflection lock is held. This
+/// view never writes ManagedSettings fields.
 enum ReflectionVideoWebAccess {
-    static let appGroup = "group.com.evlin.ios"
-    static let diagnosticKey = "evlin.reflectionVideoWebAccessRepair"
-
-    static func allowPlaybackInEmbeddedWebView() {
-        let store = ManagedSettingsStore()
-        store.shield.webDomainCategories = nil
-        store.shield.webDomains = nil
-
-        let ts = ISO8601DateFormatter().string(from: Date())
-        UserDefaults(suiteName: appGroup)?.set(
-            "\(ts) cleared webDomainCategories/webDomains for reflection video",
-            forKey: diagnosticKey
-        )
-    }
-
     static func embedURL(videoId: String, identityURL: URL) -> URL? {
         var components = URLComponents()
         components.scheme = "https"
@@ -105,9 +93,6 @@ struct BigKidVideoView: View {
         .padding(.horizontal, EvlinKidMetrics.Padding.screenH)
         .padding(.bottom, 30)
         .background(EvlinKidColors.surface.ignoresSafeArea())
-        .onAppear {
-            ReflectionVideoWebAccess.allowPlaybackInEmbeddedWebView()
-        }
     }
 
     /// Ships in all builds for investor / TestFlight demos; clearly labeled — not meant for prod kid UX.
@@ -276,7 +261,6 @@ struct VideoEmbedView: UIViewRepresentable {
     }
 
     private func load(into webView: WKWebView) {
-        ReflectionVideoWebAccess.allowPlaybackInEmbeddedWebView()
         let identityURL = clientIdentityURL
         guard let embedURL = ReflectionVideoWebAccess.embedURL(videoId: videoId, identityURL: identityURL) else { return }
         var request = URLRequest(url: embedURL)

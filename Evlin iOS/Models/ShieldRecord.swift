@@ -88,6 +88,14 @@ struct ShieldRecord: Codable, Sendable, Equatable {
     /// into the same target record; legacy records decode with no attribution.
     var limitRuleIDs: Set<UUID> = []
 
+    /// C-3/D-2: record-level request to leave WEB domains open while this
+    /// record's app shielding applies. Set by `ReflectionLockRecordFactory`
+    /// so the embedded reflection video can load inside an all-apps lock;
+    /// `ActiveShieldProjection` honors it for the web fields ONLY (apps stay
+    /// fully shielded). Legacy persisted payloads have no `webOpen` key and
+    /// decode as `false`, preserving their original meaning.
+    var webOpen: Bool = false
+
     // MARK: - Helpers
 
     /// Derive recordKey for a tier/targetKey pair. See spec §3.2.
@@ -155,10 +163,32 @@ struct ShieldRecord: Codable, Sendable, Equatable {
                 originalRequest: originalRequest,
                 targetChildID: targetChildID,
                 sources: sources,
-                limitRuleIDs: limitRuleIDs
+                limitRuleIDs: limitRuleIDs,
+                webOpen: webOpen
             ),
             true
         )
+    }
+}
+
+/// Shared by the main app and DeviceActivity extension so either process
+/// projects the same durable record set onto the web shield fields.
+enum ShieldWebProjectionDecision: Equatable, Sendable {
+    case all
+    case specific
+    case open
+
+    static func resolve<S: Sequence>(records: S) -> ShieldWebProjectionDecision
+    where S.Element == ShieldRecord {
+        let records = Array(records)
+        let broad = records.filter(\.appliesToAll)
+        if broad.contains(where: \.webOpen) {
+            return .open
+        }
+        if broad.contains(where: { $0.tier == .all }) {
+            return .all
+        }
+        return records.contains(where: { !$0.webDomainTokens.isEmpty }) ? .specific : .open
     }
 }
 
@@ -184,6 +214,8 @@ extension ShieldRecord {
         case sources, limitRuleIDs
         // Legacy scalar key (P4 era, pre-B1). Decoded read-only; we encode `sources`.
         case source
+        // New key written by C-3; missing key decodes as `false`.
+        case webOpen
     }
 
     init(from decoder: Decoder) throws {
@@ -219,7 +251,8 @@ extension ShieldRecord {
             originalRequest: try c.decode(String.self, forKey: .originalRequest),
             targetChildID: try c.decode(UUID.self, forKey: .targetChildID),
             sources: resolvedSources,
-            limitRuleIDs: try c.decodeIfPresent(Set<UUID>.self, forKey: .limitRuleIDs) ?? []
+            limitRuleIDs: try c.decodeIfPresent(Set<UUID>.self, forKey: .limitRuleIDs) ?? [],
+            webOpen: try c.decodeIfPresent(Bool.self, forKey: .webOpen) ?? false
         )
     }
 
@@ -241,6 +274,7 @@ extension ShieldRecord {
         // Write the new `sources` array; legacy `source` key is intentionally omitted.
         try c.encode(sources, forKey: .sources)
         try c.encode(limitRuleIDs, forKey: .limitRuleIDs)
+        try c.encode(webOpen, forKey: .webOpen)
     }
 }
 

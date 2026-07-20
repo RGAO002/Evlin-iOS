@@ -1663,6 +1663,7 @@ struct HomeSettingsSheet: View {
             Section("Screen Time Debug") {
                 let appCount = screenTimeManager.selectedApps.applicationTokens.count
                 let catCount = screenTimeManager.selectedApps.categoryTokens.count
+                let webCount = screenTimeManager.selectedApps.webDomainTokens.count
 
                 Button {
                     isPickerPresented = true
@@ -1671,8 +1672,8 @@ struct HomeSettingsSheet: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Managed Apps & Categories")
                                 .foregroundStyle(Color.evOnSurface)
-                            if appCount > 0 || catCount > 0 {
-                                Text("\(appCount) apps, \(catCount) categories")
+                            if appCount > 0 || catCount > 0 || webCount > 0 {
+                                Text("\(appCount) apps, \(catCount) categories, \(webCount) websites")
                                     .font(.caption)
                                     .foregroundStyle(Color.evOutline)
                             } else {
@@ -1690,9 +1691,25 @@ struct HomeSettingsSheet: View {
 
                 ManagedActivitySelectionDiagnostics(selection: screenTimeManager.selectedApps)
 
-                if appCount > 0 || catCount > 0 {
+                if appCount > 0 || catCount > 0 || webCount > 0 {
                     Button {
-                        screenTimeManager.shieldApps()
+                        // C-3/D-2: route through the single stable Home
+                        // settings record — ActiveLockStore is the only
+                        // ManagedSettings shield writer.
+                        let childID = UUID(uuidString: childDeviceID) ?? UUID()
+                        let selection = screenTimeManager.selectedApps
+                        Task {
+                            let locked = await HomeSettingsLockRouting.lock(
+                                selection: selection,
+                                childID: childID
+                            )
+                            if locked {
+                                await MainActor.run {
+                                    NotificationCenter.default.post(
+                                        name: .evlinLockStateChanged, object: true)
+                                }
+                            }
+                        }
                     } label: {
                         Label("Lock Selected Apps", systemImage: "lock.fill")
                             .foregroundStyle(Color.evError)
@@ -1700,9 +1717,18 @@ struct HomeSettingsSheet: View {
                 }
 
                 Button {
-                    screenTimeManager.clearAllShields()
+                    // C-3/D-2: removes ONLY the Home settings manual record.
+                    // Automatic locks (earned/task/reflection/limit) and
+                    // blocks are untouched — hence "Selected", not "All".
+                    Task {
+                        _ = await HomeSettingsLockRouting.unlock()
+                        await MainActor.run {
+                            NotificationCenter.default.post(
+                                name: .evlinLockStateChanged, object: false)
+                        }
+                    }
                 } label: {
-                    Label("Unlock All Apps", systemImage: "lock.open.fill")
+                    Label("Unlock Selected Apps", systemImage: "lock.open.fill")
                         .foregroundStyle(Color.evSecondary)
                 }
 
@@ -1787,7 +1813,18 @@ struct HomeSettingsSheet: View {
                 }
 
                 Button(role: .destructive) {
-                    screenTimeManager.clearAllShields()
+                    // C-3/D-2: full reset clears ALL shield + block records
+                    // through ActiveLockStore (its recompute nils the
+                    // ManagedSettings fields) instead of writing them here.
+                    Task {
+                        _ = await ActiveLockStore.shared.unshieldAll()
+                        _ = await ActiveLockStore.shared.unblockAll()
+                        await MainActor.run {
+                            screenTimeManager.syncDeletionProtectionToManagedSettings()
+                            NotificationCenter.default.post(
+                                name: .evlinLockStateChanged, object: false)
+                        }
+                    }
                     UserDefaults.standard.removeObject(forKey: "onboardingComplete")
                     UserDefaults.standard.removeObject(forKey: "appMode")
                     UserDefaults.standard.removeObject(forKey: "childId")

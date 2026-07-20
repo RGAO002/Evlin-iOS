@@ -68,6 +68,61 @@ nonisolated struct UserDefaultsActiveLockShieldPersistence: ActiveLockShieldPers
     }()
 }
 
+/// Pure full-union projection of the active shield records onto the
+/// ManagedSettings shield fields (C-3/R-2). Consumed by
+/// `ActiveLockStore.recomputeAndApply()` — the ONLY main-app writer.
+///
+/// Precedence:
+/// - applications: any `appliesToAll` record -> `.all`; otherwise the union of
+///   app/category tokens (`.open` when both unions are empty).
+/// - web: any broad record with `webOpen` -> `.open` (reflection playback);
+///   else any broad tier `.all` record -> `.all` (parent full lock);
+///   otherwise the union of web-domain tokens (`.open` when empty).
+struct ActiveShieldProjection: Equatable {
+    enum ApplicationsMode: Equatable {
+        case all
+        case specific(apps: Set<ApplicationToken>, categories: Set<ActivityCategoryToken>)
+        case open
+    }
+
+    enum WebMode: Equatable {
+        case all
+        case specific(Set<WebDomainToken>)
+        case open
+    }
+
+    let applications: ApplicationsMode
+    let webDomains: WebMode
+
+    static func make(records: [ShieldRecord]) -> ActiveShieldProjection {
+        let broad = records.filter(\.appliesToAll)
+
+        let applications: ApplicationsMode
+        if !broad.isEmpty {
+            applications = .all
+        } else {
+            let apps = Set(records.flatMap(\.appTokens))
+            let categories = Set(records.flatMap(\.categoryTokens))
+            applications = (apps.isEmpty && categories.isEmpty)
+                ? .open
+                : .specific(apps: apps, categories: categories)
+        }
+
+        let webDomains: WebMode
+        switch ShieldWebProjectionDecision.resolve(records: records) {
+        case .open:
+            webDomains = .open
+        case .all:
+            webDomains = .all
+        case .specific:
+            let webs = Set(records.flatMap(\.webDomainTokens))
+            webDomains = .specific(webs)
+        }
+
+        return ActiveShieldProjection(applications: applications, webDomains: webDomains)
+    }
+}
+
 /// Single source of truth for active shields + blocks on this device.
 /// See spec §3 for full design.
 ///
@@ -695,7 +750,8 @@ actor ActiveLockStore {
                 originalRequest: old.originalRequest,
                 targetChildID: old.targetChildID,
                 sources: old.sources,
-                limitRuleIDs: old.limitRuleIDs
+                limitRuleIDs: old.limitRuleIDs,
+                webOpen: old.webOpen
             )
 
             shieldRecords.removeValue(forKey: oldKey)
@@ -800,49 +856,61 @@ actor ActiveLockStore {
         let blockedApps = Set(blockRecords.values.map { ManagedSettings.Application(bundleIdentifier: $0.bundleID) })
         store.application.blockedApplications = blockedApps.isEmpty ? nil : blockedApps
 
-        // Check for broad app shields. Parent all-locks still block all web
-        // domains; reflection all-app locks leave web domains available so
-        // embedded YouTube reflection videos can load.
-        let broadRecords = shieldRecords.values.filter(\.appliesToAll)
-        if !broadRecords.isEmpty {
-            let includesFullWebShield = broadRecords.contains(where: { $0.tier == .all })
-            let allWebTokens = Set(shieldRecords.values.flatMap(\.webDomainTokens))
+        // Shields: apply the pure full-union projection. This is the ONLY
+        // main-app write of the ManagedSettings shield fields (C-3/R-2).
+        let projection = ActiveShieldProjection.make(records: Array(shieldRecords.values))
+
+        switch projection.applications {
+        case .all:
             store.shield.applicationCategories = .all()
             store.shield.applications = nil
-            if includesFullWebShield {
-                store.shield.webDomainCategories = .all()
-                store.shield.webDomains = nil
-                writeRecomputeDiag(branch: "all", appTokens: 0, catTokens: 0, webTokens: 0)
-            } else {
-                store.shield.webDomainCategories = nil
-                store.shield.webDomains = allWebTokens.isEmpty ? nil : allWebTokens
-                writeRecomputeDiag(branch: "all_apps_only", appTokens: 0, catTokens: 0, webTokens: allWebTokens.count)
-            }
-            return
+        case .specific(let apps, let categories):
+            store.shield.applications = apps.isEmpty ? nil : apps
+            store.shield.applicationCategories = categories.isEmpty ? nil : .specific(categories)
+        case .open:
+            store.shield.applications = nil
+            store.shield.applicationCategories = nil
         }
 
-        // Otherwise union tokens
-        let allAppTokens = Set(shieldRecords.values.flatMap(\.appTokens))
-        let allCatTokens = Set(shieldRecords.values.flatMap(\.categoryTokens))
-        let allWebTokens = Set(shieldRecords.values.flatMap(\.webDomainTokens))
+        switch projection.webDomains {
+        case .all:
+            store.shield.webDomainCategories = .all()
+            store.shield.webDomains = nil
+        case .specific(let webs):
+            store.shield.webDomainCategories = nil
+            store.shield.webDomains = webs
+        case .open:
+            store.shield.webDomainCategories = nil
+            store.shield.webDomains = nil
+        }
 
-        store.shield.applications = allAppTokens.isEmpty ? nil : allAppTokens
-        store.shield.applicationCategories = allCatTokens.isEmpty ? nil : .specific(allCatTokens)
-        store.shield.webDomains = allWebTokens.isEmpty ? nil : allWebTokens
-        store.shield.webDomainCategories = nil
-        writeRecomputeDiag(
-            branch: "union",
-            appTokens: allAppTokens.count,
-            catTokens: allCatTokens.count,
-            webTokens: allWebTokens.count
-        )
+        writeRecomputeDiag(projection: projection)
     }
 
     /// Records the most recent recomputeAndApply() invocation to the App Group
     /// so HomeSettingsSheet can surface it. This is the only way to verify
     /// that sweepExpired → recomputeAndApply actually executed AND what value
     /// it wrote to `store.shield.applications` (which we can't read back).
-    private func writeRecomputeDiag(branch: String, appTokens: Int, catTokens: Int, webTokens: Int) {
+    /// Branch names ("all" / "all_apps_only" / "union") are stable diagnostics
+    /// vocabulary predating the projection — derived from it, not renamed.
+    private func writeRecomputeDiag(projection: ActiveShieldProjection) {
+        let branch: String
+        var appTokens = 0, catTokens = 0, webTokens = 0
+        switch (projection.applications, projection.webDomains) {
+        case (.all, .all):
+            branch = "all"
+        case (.all, _):
+            branch = "all_apps_only"
+        default:
+            branch = "union"
+        }
+        if case .specific(let apps, let categories) = projection.applications {
+            appTokens = apps.count
+            catTokens = categories.count
+        }
+        if case .specific(let webs) = projection.webDomains {
+            webTokens = webs.count
+        }
         let ts = ISO8601DateFormatter().string(from: Date())
         let line = "\(ts) branch=\(branch) shields=\(shieldRecords.count) blocks=\(blockRecords.count)"
             + " apps=\(appTokens) cats=\(catTokens) webs=\(webTokens)"
