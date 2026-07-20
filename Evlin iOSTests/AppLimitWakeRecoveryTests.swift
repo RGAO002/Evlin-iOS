@@ -7,7 +7,7 @@ final class AppLimitWakeRecoveryTests: XCTestCase {
         let harness = makeHarness()
         _ = try harness.coordinator.ingest(setEnvelope(token: 10))
         let readback = RecordingReadback(store: harness.store)
-        let effects = RecordingEffects(beforeApply: {
+        let effects = RecordingEffects(store: harness.store, beforeApply: {
             let count = await readback.count
             XCTAssertEqual(count, 0)
         })
@@ -21,6 +21,13 @@ final class AppLimitWakeRecoveryTests: XCTestCase {
         XCTAssertEqual(confirmationCount, 1)
         let receipt = try XCTUnwrap(harness.store.read().slots[ruleID]?.appliedReceipt)
         XCTAssertEqual(receipt.orderingToken, 10)
+        XCTAssertEqual(
+            try AppLimitProductionComposition.currentAppliedReceipt(
+                ruleID: ruleID,
+                store: harness.store
+            ),
+            receipt
+        )
         XCTAssertNil(try harness.store.read().slots[ruleID]?.pendingOwnerWork)
     }
 
@@ -28,7 +35,7 @@ final class AppLimitWakeRecoveryTests: XCTestCase {
         let harness = makeHarness()
         _ = try harness.coordinator.ingest(clearEnvelope(token: 11))
         let readback = RecordingReadback(store: harness.store)
-        let effects = RecordingEffects()
+        let effects = RecordingEffects(store: harness.store)
         let driver = makeDriver(harness: harness, effects: effects, readback: readback)
 
         await driver.recover(ownerChildDeviceID: ownerID)
@@ -44,7 +51,7 @@ final class AppLimitWakeRecoveryTests: XCTestCase {
         let harness = makeHarness()
         _ = try harness.coordinator.ingest(setEnvelope(token: 10))
         let readback = RecordingReadback(store: harness.store)
-        let effects = RecordingEffects()
+        let effects = RecordingEffects(store: harness.store)
         let driver = makeDriver(harness: harness, effects: effects, readback: readback)
 
         await driver.recover(ownerChildDeviceID: ownerID)
@@ -82,7 +89,7 @@ final class AppLimitWakeRecoveryTests: XCTestCase {
         _ = try harness.coordinator.ingest(envelope)
         let gate = AsyncGate()
         let readback = RecordingReadback(store: harness.store)
-        let effects = RecordingEffects(beforeApply: { await gate.wait() })
+        let effects = RecordingEffects(store: harness.store, beforeApply: { await gate.wait() })
         let driver = makeDriver(harness: harness, effects: effects, readback: readback)
 
         let first = Task { await driver.recover(ownerChildDeviceID: ownerID) }
@@ -102,7 +109,7 @@ final class AppLimitWakeRecoveryTests: XCTestCase {
         let harness = makeHarness()
         _ = try harness.coordinator.ingest(setEnvelope(token: 10))
         let readback = RecordingReadback(store: harness.store)
-        let effects = RecordingEffects()
+        let effects = RecordingEffects(store: harness.store)
         let crash = CrashOnce()
         let driver = AppLimitOwnerRecoveryDriver(
             store: harness.store,
@@ -127,7 +134,7 @@ final class AppLimitWakeRecoveryTests: XCTestCase {
         _ = try harness.coordinator.ingest(setEnvelope(token: 10))
         let gate = AsyncGate()
         let readback = RecordingReadback(store: harness.store)
-        let effects = RecordingEffects(beforeApply: { work in
+        let effects = RecordingEffects(store: harness.store, beforeApply: { work in
             if work.orderingToken == 10 { await gate.wait() }
         })
         let driver = makeDriver(harness: harness, effects: effects, readback: readback)
@@ -150,7 +157,7 @@ final class AppLimitWakeRecoveryTests: XCTestCase {
         let harness = makeHarness()
         _ = try harness.coordinator.ingest(setEnvelope(token: 10))
         let readback = RecordingReadback(store: harness.store)
-        let effects = RecordingEffects()
+        let effects = RecordingEffects(store: harness.store)
         let driver = AppLimitOwnerRecoveryDriver(
             store: harness.store,
             effectPort: effects,
@@ -182,6 +189,100 @@ final class AppLimitWakeRecoveryTests: XCTestCase {
         XCTAssertFalse(app.contains(
             "pollOnceForCurrentDevice()\n            await AppLimitRecoveryTrigger.silentRemoteNotification"
         ))
+        let entries = try String(contentsOf: root.appendingPathComponent(
+            "Evlin iOS/Services/MeteringProcessEntries.swift"
+        ))
+        XCTAssertFalse(entries.contains("DeferredAppLimitOwnerEffectPort"))
+        XCTAssertFalse(entries.contains("DeferredAppLimitOwnerReadbackPort"))
+        XCTAssertTrue(poller.contains("AppLimitOwnerActionEffectPort"))
+        XCTAssertTrue(poller.contains("AppLimitOwnerAPIReadbackPort"))
+    }
+
+    func testLifecycleEntryRecoversFinalEnforcementAfterProcessExitAndNetworkFailure() async throws {
+        let fixture = try AppLimitCallbackFixture(budgetMinutes: 20)
+        let suiteName = "AppLimitWakeRecoveryTests.effects.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(
+            "https://example.invalid",
+            forKey: MeteringProductionComposition.baseURLKey
+        )
+        defaults.set(
+            fixture.owner.uuidString,
+            forKey: MeteringProductionComposition.ownerKey
+        )
+        let decision = try fixture.validator.validate(
+            activityName: fixture.provenance.activityName,
+            eventName: fixture.enforcementEventName,
+            canonicalUsageDate: fixture.usageDate,
+            observedAt: fixture.observedAt(minutes: 20),
+            usageCountingAllowed: true
+        )
+        guard case .accepted(let callback) = decision else {
+            return XCTFail("expected accepted final enforcement callback")
+        }
+        let firstJournal = AppLimitEffectJournal(
+            defaults: defaults,
+            epochStore: fixture.store
+        )
+        _ = try firstJournal.enqueue(callback, now: referenceDate)
+        let projection = RestrictionProjectionRecorder()
+        let firstEntry = AppLimitEffectRecoveryEntry(
+            defaults: defaults,
+            driver: AppLimitEffectRecoveryDriver(
+                journal: firstJournal,
+                usageStore: EarnedTimeStore(suiteName: suiteName),
+                shieldPersistence: AppLimitShieldPersistence(store: defaults),
+                transport: LifecycleUsageTransport(mode: .networkFailure),
+                workerID: workerID,
+                projectRestrictions: { await projection.record() }
+            ),
+            now: { referenceDate }
+        )
+
+        await firstEntry.recoverIfConfigured()
+
+        let afterFailure = try XCTUnwrap(firstJournal.pendingEffects().first)
+        XCTAssertNotNil(afterFailure.localReceipt)
+        XCTAssertNil(afterFailure.usageReceipt)
+        XCTAssertNil(afterFailure.backendRejection)
+        XCTAssertEqual(
+            try AppLimitShieldPersistence(store: defaults).load()[
+                LimitShieldLogic.recordKey(for: fixture.rule)
+            ]?.sources,
+            [.limit]
+        )
+
+        let reopenedJournal = AppLimitEffectJournal(
+            defaults: defaults,
+            epochStore: fixture.store
+        )
+        let secondEntry = AppLimitEffectRecoveryEntry(
+            defaults: defaults,
+            driver: AppLimitEffectRecoveryDriver(
+                journal: reopenedJournal,
+                usageStore: EarnedTimeStore(suiteName: suiteName),
+                shieldPersistence: AppLimitShieldPersistence(store: defaults),
+                transport: LifecycleUsageTransport(mode: .accepted(
+                    ruleID: fixture.rule.id,
+                    usageDate: fixture.usageDate,
+                    orderingToken: fixture.provenance.ruleRevision,
+                    usedMinutes: 20
+                )),
+                workerID: workerID,
+                projectRestrictions: { await projection.record() }
+            ),
+            now: { referenceDate.addingTimeInterval(61) }
+        )
+
+        await secondEntry.recoverIfConfigured()
+
+        let recovered = try XCTUnwrap(reopenedJournal.pendingEffects().first)
+        XCTAssertNotNil(recovered.localReceipt)
+        XCTAssertEqual(recovered.usageReceipt?.usedMinutes, 20)
+        let projectionCount = await projection.count
+        XCTAssertGreaterThanOrEqual(projectionCount, 1)
     }
 
     private func makeHarness() -> RecoveryHarness {
@@ -280,22 +381,38 @@ private actor RecordingReadback: AppLimitOwnerReadbackPort {
     func confirm(commandID: UUID, receipt: AppLimitApplyReceipt) async throws {
         let persisted = try store.read().slots[receipt.ruleID]?.appliedReceipt
         XCTAssertEqual(persisted, receipt)
+        XCTAssertEqual(
+            try AppLimitProductionComposition.currentAppliedReceipt(
+                ruleID: receipt.ruleID,
+                store: store
+            ),
+            receipt
+        )
         commandIDs.append(commandID)
     }
 }
 
 private actor RecordingEffects: AppLimitOwnerEffectPort {
+    private let store: AppLimitEpochStore
     private let beforeApply: @Sendable (AppLimitOwnerWork) async -> Void
     private(set) var tokens: [Int64] = []
     private(set) var kinds: [AppLimitCommandKind] = []
     private var hasStarted = false
     private var startedContinuations: [CheckedContinuation<Void, Never>] = []
 
-    init(beforeApply: @escaping @Sendable () async -> Void = {}) {
+    init(
+        store: AppLimitEpochStore,
+        beforeApply: @escaping @Sendable () async -> Void = {}
+    ) {
+        self.store = store
         self.beforeApply = { _ in await beforeApply() }
     }
 
-    init(beforeApply: @escaping @Sendable (AppLimitOwnerWork) async -> Void) {
+    init(
+        store: AppLimitEpochStore,
+        beforeApply: @escaping @Sendable (AppLimitOwnerWork) async -> Void
+    ) {
+        self.store = store
         self.beforeApply = beforeApply
     }
 
@@ -310,7 +427,25 @@ private actor RecordingEffects: AppLimitOwnerEffectPort {
         await beforeApply(work)
         tokens.append(work.orderingToken)
         kinds.append(work.commandKind)
-        return AppLimitOwnerEffectResult(armID: nil, source: "app_owner")
+        let armID: UUID?
+        if work.commandKind == .set, let rule = slot.activeRule {
+            armID = try AppLimitProvenanceStore(
+                store: store,
+                armIDProvider: {
+                    UUID(uuidString: "dddddddd-0000-0000-0000-000000000001")!
+                }
+            ).resolve(
+                rule: rule,
+                ownerChildDeviceID: ownerID,
+                now: referenceDate
+            ).provenance.armID
+        } else {
+            armID = nil
+        }
+        return AppLimitOwnerEffectResult(
+            armID: armID,
+            source: "app_owner"
+        )
     }
 
     func waitUntilStarted() async {
@@ -333,6 +468,50 @@ private actor AsyncGate {
     }
 }
 
+private actor RestrictionProjectionRecorder {
+    private(set) var count = 0
+    func record() { count += 1 }
+}
+
+private actor LifecycleUsageTransport: MeteringHTTPTransport {
+    enum Mode {
+        case networkFailure
+        case accepted(
+            ruleID: UUID,
+            usageDate: String,
+            orderingToken: Int64,
+            usedMinutes: Int
+        )
+    }
+
+    let mode: Mode
+
+    init(mode: Mode) { self.mode = mode }
+
+    func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+        switch mode {
+        case .networkFailure:
+            throw RecoveryTestError.simulatedCrash
+        case .accepted(let ruleID, let usageDate, let orderingToken, let usedMinutes):
+            let response = AppLimitUsageServerResponse.accepted(
+                ruleID: ruleID,
+                usageDate: usageDate,
+                usedMinutes: usedMinutes,
+                currentOrderingToken: orderingToken
+            )
+            return (
+                try JSONEncoder().encode(response),
+                HTTPURLResponse(
+                    url: request.url!,
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: nil
+                )!
+            )
+        }
+    }
+}
+
 private final class AppLimitRecoveryTestLock: DeviceEpochStoreLocking, @unchecked Sendable {
     private let lock = NSLock()
     func withLock<T>(_ body: () -> T) -> T? {
@@ -347,3 +526,4 @@ private let ruleID = UUID(uuidString: "dddddddd-0000-0000-0000-000000000400")!
 private let setCommandID = UUID(uuidString: "aaaaaaaa-0000-0000-0000-000000000010")!
 private let clearCommandID = UUID(uuidString: "aaaaaaaa-0000-0000-0000-000000000011")!
 private let referenceDate = Date(timeIntervalSince1970: 1_721_174_400)
+private let workerID = UUID(uuidString: "eeeeeeee-0000-0000-0000-000000000001")!

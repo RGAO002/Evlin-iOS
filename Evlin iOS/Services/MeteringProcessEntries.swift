@@ -95,6 +95,18 @@ final class AppLimitOwnerRecoveryDriver {
                       Self.matches(work, slot: current),
                       state.storeRevision < UInt64.max
                 else { throw RecoveryError.staleWork }
+                let armID: UUID?
+                switch work.commandKind {
+                case .set:
+                    guard let provenance = current.armProvenance,
+                          provenance.ruleRevision == work.orderingToken,
+                          effect.armID == provenance.armID
+                    else { throw RecoveryError.staleWork }
+                    armID = provenance.armID
+                case .clear:
+                    guard effect.armID == nil else { throw RecoveryError.staleWork }
+                    armID = nil
+                }
                 let appliedAt = Date(
                     timeIntervalSince1970: floor(Date().timeIntervalSince1970)
                 )
@@ -102,7 +114,7 @@ final class AppLimitOwnerRecoveryDriver {
                     ruleID: work.ruleID,
                     orderingToken: work.orderingToken,
                     commandKind: work.commandKind,
-                    armID: effect.armID,
+                    armID: armID,
                     source: effect.source,
                     appliedAt: appliedAt,
                     storeRevision: state.storeRevision + 1
@@ -113,7 +125,10 @@ final class AppLimitOwnerRecoveryDriver {
                 return receipt
             }
 
-            let persisted = try store.read().slots[work.ruleID]?.appliedReceipt
+            let persisted = try AppLimitReceiptReadback.currentAppliedReceipt(
+                ruleID: work.ruleID,
+                store: store
+            )
             guard persisted == receipt else {
                 throw RecoveryError.receiptReadbackMismatch
             }
@@ -160,65 +175,69 @@ final class AppLimitOwnerRecoveryDriver {
     }
 }
 
-private struct DeferredAppLimitOwnerEffectPort: AppLimitOwnerEffectPort {
-    private enum Deferred: Error { case awaitingDurableEffectJournal }
-
-    func apply(
-        work: AppLimitOwnerWork,
-        slot: AppLimitVersionSlot
-    ) async throws -> AppLimitOwnerEffectResult {
-        throw Deferred.awaitingDurableEffectJournal
-    }
-}
-
-private struct DeferredAppLimitOwnerReadbackPort: AppLimitOwnerReadbackPort {
-    func confirm(commandID: UUID, receipt: AppLimitApplyReceipt) async throws {}
-}
-
 @MainActor
-private final class AppLimitOwnerRecoveryEntry {
-    static let shared = AppLimitOwnerRecoveryEntry()
-
-    private let defaults: UserDefaults?
-    private let driver: AppLimitOwnerRecoveryDriver
+final class AppLimitEffectRecoveryDriver {
+    private let journal: AppLimitEffectJournal
+    private let usageStore: EarnedTimeStore
+    private let shieldPersistence: AppLimitShieldPersistence
+    private let transport: any MeteringHTTPTransport
+    private let workerID: UUID
+    private let projectRestrictions: @MainActor @Sendable () async -> Void
 
     init(
-        defaults: UserDefaults? = UserDefaults(
-            suiteName: MeteringProductionComposition.appGroupSuiteName
+        journal: AppLimitEffectJournal = AppLimitEffectJournal(),
+        usageStore: EarnedTimeStore = .shared,
+        shieldPersistence: AppLimitShieldPersistence = AppLimitShieldPersistence(
+            store: UserDefaults(suiteName: MeteringProductionComposition.appGroupSuiteName)
         ),
-        driver: AppLimitOwnerRecoveryDriver? = nil
+        transport: any MeteringHTTPTransport = URLSession.shared,
+        workerID: UUID = UUID(),
+        projectRestrictions: @escaping @MainActor @Sendable () async -> Void = {}
     ) {
-        self.defaults = defaults
-        self.driver = driver ?? AppLimitOwnerRecoveryDriver(
-            effectPort: DeferredAppLimitOwnerEffectPort(),
-            readbackPort: DeferredAppLimitOwnerReadbackPort()
-        )
+        self.journal = journal
+        self.usageStore = usageStore
+        self.shieldPersistence = shieldPersistence
+        self.transport = transport
+        self.workerID = workerID
+        self.projectRestrictions = projectRestrictions
     }
 
-    func recoverIfConfigured() async {
-        guard let configuration = MeteringProcessConfiguration.load(defaults: defaults) else {
-            return
+    func recover(
+        baseURL: URL,
+        ownerChildDeviceID: UUID,
+        now: Date
+    ) async {
+        do {
+            while let claim = try journal.claimNext(workerID: workerID, now: now) {
+                let receipt = try journal.applyLocal(
+                    claim,
+                    source: "app_lifecycle_recovery",
+                    appliedAt: now
+                ) { [usageStore, shieldPersistence] callback in
+                    AppLimitCallbackLocalLedger.record(callback, store: usageStore)
+                    guard callback.effectKind == .enforcement else { return }
+                    let updated = LimitShieldLogic.applyingLimit(
+                        to: try shieldPersistence.load(),
+                        callback: callback,
+                        now: now
+                    )
+                    try shieldPersistence.persist(updated)
+                }
+                guard receipt != nil else { continue }
+                if claim.effect.key.effectKind == .enforcement {
+                    await projectRestrictions()
+                }
+                _ = try await journal.submitUsage(
+                    claim,
+                    baseURL: baseURL,
+                    deviceID: ownerChildDeviceID,
+                    transport: transport,
+                    appliedAt: now
+                )
+            }
+        } catch {
+            // The lease and receipts remain durable for a later lifecycle entry.
         }
-        await driver.recover(ownerChildDeviceID: configuration.owner)
-    }
-}
-
-@MainActor
-enum AppLimitRecoveryTrigger {
-    static func launch() async {
-        await AppLimitOwnerRecoveryEntry.shared.recoverIfConfigured()
-    }
-
-    static func foreground() async {
-        await AppLimitOwnerRecoveryEntry.shared.recoverIfConfigured()
-    }
-
-    static func silentRemoteNotification() async {
-        await AppLimitOwnerRecoveryEntry.shared.recoverIfConfigured()
-    }
-
-    static func pollCompletion() async {
-        await AppLimitOwnerRecoveryEntry.shared.recoverIfConfigured()
     }
 }
 
@@ -456,7 +475,7 @@ nonisolated final class DAMMeteringEntry: @unchecked Sendable {
     }
 }
 
-private struct MeteringProcessConfiguration {
+struct MeteringProcessConfiguration {
     let baseURL: URL
     let owner: UUID
 

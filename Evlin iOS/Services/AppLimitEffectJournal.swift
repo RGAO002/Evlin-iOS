@@ -7,6 +7,70 @@ nonisolated enum AppLimitEffectJournalError: Error, Equatable {
     case invalidLease
 }
 
+nonisolated protocol AppLimitShieldPersistenceStore: AnyObject {
+    func data(forKey defaultName: String) -> Data?
+    func set(_ value: Any?, forKey defaultName: String)
+    func synchronize() -> Bool
+}
+
+extension UserDefaults: AppLimitShieldPersistenceStore {}
+
+nonisolated struct AppLimitShieldPersistence {
+    private let store: (any AppLimitShieldPersistenceStore)?
+    private let storageKey: String
+
+    init(
+        store: (any AppLimitShieldPersistenceStore)?,
+        storageKey: String = "evlin.shieldRecords"
+    ) {
+        self.store = store
+        self.storageKey = storageKey
+    }
+
+    func load() throws -> [String: ShieldRecord] {
+        guard let store else { throw AppLimitEffectJournalError.defaultsUnavailable }
+        _ = store.synchronize()
+        guard let data = store.data(forKey: storageKey) else { return [:] }
+        let decoded: [String: ShieldRecord]
+        if let json = try? Self.decoder.decode([String: ShieldRecord].self, from: data) {
+            decoded = json
+        } else if let legacy = try? PropertyListDecoder().decode(
+            [String: ShieldRecord].self,
+            from: data
+        ) {
+            decoded = legacy
+        } else {
+            throw AppLimitEffectJournalError.durableReadbackMismatch
+        }
+        return decoded.mapValues { $0.normalizedForCurrentSchema().record }
+    }
+
+    func persist(_ shields: [String: ShieldRecord]) throws {
+        guard let store else { throw AppLimitEffectJournalError.defaultsUnavailable }
+        let data = try Self.encoder.encode(shields)
+        store.set(data, forKey: storageKey)
+        guard store.synchronize(), store.data(forKey: storageKey) == data else {
+            throw AppLimitEffectJournalError.durableReadbackMismatch
+        }
+        guard try load() == shields else {
+            throw AppLimitEffectJournalError.durableReadbackMismatch
+        }
+    }
+
+    private static let encoder: JSONEncoder = {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys]
+        return encoder
+    }()
+
+    private static let decoder: JSONDecoder = {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return decoder
+    }()
+}
+
 /// Durable callback effects keyed to the exact rule version and arm that the
 /// Task 13 validator accepted. Every commit rechecks the epoch store while the
 /// shared ActiveLock lock is held.
@@ -16,15 +80,18 @@ nonisolated final class AppLimitEffectJournal: @unchecked Sendable {
     private let defaults: UserDefaults?
     private let epochStore: AppLimitEpochStore
     private let lock: ActiveLockPersistenceLock
+    private let afterLocalMutation: () throws -> Void
 
     init(
         defaults: UserDefaults? = UserDefaults(suiteName: "group.com.evlin.ios"),
         epochStore: AppLimitEpochStore = .shared,
-        lock: ActiveLockPersistenceLock = .shared
+        lock: ActiveLockPersistenceLock = .shared,
+        afterLocalMutation: @escaping () throws -> Void = {}
     ) {
         self.defaults = defaults
         self.epochStore = epochStore
         self.lock = lock
+        self.afterLocalMutation = afterLocalMutation
     }
 
     @discardableResult
@@ -87,6 +154,10 @@ nonisolated final class AppLimitEffectJournal: @unchecked Sendable {
                 guard candidate.usageReceipt == nil,
                       candidate.backendRejection == nil
                 else { continue }
+                if let retryNotBefore = candidate.retryNotBefore,
+                   retryNotBefore > now {
+                    continue
+                }
                 if let lease = candidate.lease, lease.expiresAt > now { continue }
                 var claimed = candidate
                 let lease = AppLimitEffectLease(
@@ -96,6 +167,7 @@ nonisolated final class AppLimitEffectJournal: @unchecked Sendable {
                     expiresAt: now.addingTimeInterval(leaseDuration)
                 )
                 claimed.lease = lease
+                claimed.retryNotBefore = nil
                 effects[candidate.key.storageKey] = claimed
                 try persist(effects)
                 return AppLimitEffectClaim(effect: claimed, lease: lease)
@@ -128,6 +200,7 @@ nonisolated final class AppLimitEffectJournal: @unchecked Sendable {
             }
             if let receipt = current.localReceipt { return receipt }
             try mutation(current.callback)
+            try afterLocalMutation()
             let receipt = AppLimitLocalEffectReceipt(
                 key: current.key,
                 source: source,
@@ -184,6 +257,18 @@ nonisolated final class AppLimitEffectJournal: @unchecked Sendable {
             guard current.lease == claim.lease else { return nil }
             if let receipt = current.usageReceipt { return receipt }
 
+            if !response.accepted, response.reason == "future_ordering_token" {
+                let attempt = min((current.retryAttemptCount ?? 0) + 1, 10)
+                current.retryAttemptCount = attempt
+                current.retryNotBefore = appliedAt.addingTimeInterval(
+                    Self.retryDelay(attempt: attempt)
+                )
+                current.lease = nil
+                effects[current.key.storageKey] = current
+                try persist(effects)
+                return nil
+            }
+
             guard response.accepted,
                   response.currentOrderingToken == current.key.orderingToken
             else {
@@ -206,6 +291,8 @@ nonisolated final class AppLimitEffectJournal: @unchecked Sendable {
             )
             current.usageReceipt = receipt
             current.lease = nil
+            current.retryNotBefore = nil
+            current.retryAttemptCount = nil
             effects[current.key.storageKey] = current
             try persist(effects)
             guard try load()[current.key.storageKey]?.usageReceipt == receipt else {
@@ -284,6 +371,11 @@ nonisolated final class AppLimitEffectJournal: @unchecked Sendable {
         }
     }
 
+    private static func retryDelay(attempt: Int) -> TimeInterval {
+        let exponent = min(max(0, attempt - 1), 6)
+        return min(300, 5 * pow(2, Double(exponent)))
+    }
+
     private static let encoder: JSONEncoder = {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .secondsSince1970
@@ -317,12 +409,12 @@ extension LimitShieldLogic {
     static func applyingLimit(
         to shields: [String: ShieldRecord],
         callback: AppLimitValidatedCallback,
-        now: Date = Date()
+        now: Date
     ) -> [String: ShieldRecord] {
         let rule = callback.rule
         let key = recordKey(for: rule)
         let provenance = callback.provenance
-        let record = ShieldRecord(
+        var record = ShieldRecord(
             recordKey: key,
             tier: .exactApp,
             targetKey: targetKey(for: rule),
@@ -343,6 +435,9 @@ extension LimitShieldLogic {
             targetChildID: provenance.childDeviceID,
             sources: [.limit]
         )
+        if let existing = shields[key] {
+            record.sources.formUnion(existing.sources)
+        }
         var updated = shields
         updated[key] = record
         return updated

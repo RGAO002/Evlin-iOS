@@ -355,7 +355,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
                 ) { [self] callback in
                     AppLimitCallbackLocalLedger.record(callback)
                     if callback.effectKind == .enforcement {
-                        applyLimitShield(callback: callback)
+                        try applyLimitShield(callback: callback)
                     }
                 }
                 guard localReceipt != nil,
@@ -385,7 +385,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
 
     /// Called only inside `AppLimitEffectJournal.applyLocal`, with the shared
     /// persistence lock held across final epoch validation and receipt readback.
-    private func applyLimitShield(callback: AppLimitValidatedCallback) {
+    private func applyLimitShield(callback: AppLimitValidatedCallback) throws {
         let rule = callback.rule
         let ruleId = rule.id
 
@@ -396,14 +396,18 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         // no-ops (the extension can't and must not request authorization).
         postLimitReachedNotification(ruleId: ruleId, rule: rule)
 
-        let current = loadShields()
-        let updated = LimitShieldLogic.applyingLimit(to: current, callback: callback)
-        if let data = encodeShields(updated) {
-            defaults?.set(data, forKey: shieldsKey)
-        }
+        let now = Date()
+        let persistence = AppLimitShieldPersistence(store: defaults, storageKey: shieldsKey)
+        let current = try persistence.load()
+        let updated = LimitShieldLogic.applyingLimit(
+            to: current,
+            callback: callback,
+            now: now
+        )
+        try persistence.persist(updated)
         recomputeAndApplyShields(updated)
 
-        let ts = ISO8601DateFormatter().string(from: Date())
+        let ts = ISO8601DateFormatter().string(from: now)
         defaults?.set(
             "limit_shielded_at=\(ts) rule=\(ruleId.uuidString) key=\(LimitShieldLogic.recordKey(for: rule))",
             forKey: "evlin.lastLimitShield"

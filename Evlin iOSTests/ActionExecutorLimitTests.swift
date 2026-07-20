@@ -19,15 +19,38 @@ import XCTest
 /// a rule, mirroring `AppLimitRuleStore`/`AppLimitPlanner` tests).
 @MainActor
 final class ActionExecutorLimitTests: XCTestCase {
+    private var temporaryDirectory: URL!
+    private var epochStore: AppLimitEpochStore!
+    private var ruleStore: AppLimitRuleStore!
 
     override func setUp() async throws {
         await clearActiveLockState()
-        AppLimitRuleStore.shared.removeAll()
+        temporaryDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "ActionExecutorLimitTests.\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: temporaryDirectory,
+            withIntermediateDirectories: true
+        )
+        epochStore = AppLimitEpochStore(
+            fileURL: temporaryDirectory.appendingPathComponent("epoch.json"),
+            lock: ActionLimitEpochTestLock(),
+            ownerProvider: { nil },
+            legacyDefaults: nil
+        )
+        ruleStore = AppLimitRuleStore(
+            epochStore: epochStore,
+            expectedOwnerProvider: { nil }
+        )
     }
 
     override func tearDown() async throws {
         await clearActiveLockState()
-        AppLimitRuleStore.shared.removeAll()
+        ruleStore = nil
+        epochStore = nil
+        try? FileManager.default.removeItem(at: temporaryDirectory)
+        temporaryDirectory = nil
     }
 
     // MARK: - Spy (mirrors ActionExecutorTests / AppLimitPlannerTests)
@@ -70,7 +93,18 @@ final class ActionExecutorLimitTests: XCTestCase {
     private func makeExecutor(spy: LimitSchedulerSpy) -> ActionExecutor {
         ActionExecutor(
             activityScheduler: spy,
-            authorizationStatusProvider: { .approved }
+            authorizationStatusProvider: { .approved },
+            ruleStore: ruleStore,
+            appLimitEpochStore: epochStore,
+            appLimitOwnerProvider: { nil }
+        )
+    }
+
+    private func makePlanner(spy: LimitSchedulerSpy) -> AppLimitPlanner {
+        AppLimitPlanner(
+            scheduler: spy,
+            epochStore: epochStore,
+            ownerProvider: { nil }
         )
     }
 
@@ -159,7 +193,7 @@ final class ActionExecutorLimitTests: XCTestCase {
         guard case .failed = result else {
             return XCTFail("set_limit with nil limit must FAIL, not silently succeed; got \(result)")
         }
-        XCTAssertTrue(AppLimitRuleStore.shared.all().isEmpty, "no rule should persist for a malformed set_limit")
+        XCTAssertTrue(ruleStore.all().isEmpty, "no rule should persist for a malformed set_limit")
         XCTAssertTrue(spy.armed.isEmpty, "nothing should be armed for a malformed set_limit")
     }
 
@@ -178,7 +212,7 @@ final class ActionExecutorLimitTests: XCTestCase {
         guard case .failed(.applicationNotConfigured) = result else {
             return XCTFail("undecodable token must fail application_not_configured; got \(result)")
         }
-        XCTAssertTrue(AppLimitRuleStore.shared.all().isEmpty, "no rule should persist when the token can't decode")
+        XCTAssertTrue(ruleStore.all().isEmpty, "no rule should persist when the token can't decode")
         XCTAssertTrue(spy.armed.isEmpty)
     }
 
@@ -193,7 +227,7 @@ final class ActionExecutorLimitTests: XCTestCase {
         guard case .failed(.applicationNotConfigured) = result else {
             return XCTFail("absent token must fail application_not_configured; got \(result)")
         }
-        XCTAssertTrue(AppLimitRuleStore.shared.all().isEmpty)
+        XCTAssertTrue(ruleStore.all().isEmpty)
     }
 
     // MARK: - set_limit quota trip → .failed(.limitQuotaExceeded) AND rollback
@@ -210,7 +244,7 @@ final class ActionExecutorLimitTests: XCTestCase {
         // Seed the store to the per-activity event cap on the default daily window.
         let dailyWindow = AppLimitWindow(startMinute: 0, endMinute: 1439, repeats: true, timezone: nil)
         for i in 0..<AppLimitPlanner.maxEventsPerActivity {
-            AppLimitRuleStore.shared.upsert(AppLimitRule(
+            ruleStore.upsert(AppLimitRule(
                 id: UUID(),
                 appTokens: [],
                 bundleID: "com.seed.\(i)",
@@ -221,7 +255,7 @@ final class ActionExecutorLimitTests: XCTestCase {
                 expiresAt: nil
             ))
         }
-        XCTAssertEqual(AppLimitRuleStore.shared.all().count, AppLimitPlanner.maxEventsPerActivity)
+        XCTAssertEqual(ruleStore.all().count, AppLimitPlanner.maxEventsPerActivity)
 
         // The new rule lands on the SAME window → cap + 1 events for that activity.
         let newRule = AppLimitRule(
@@ -245,9 +279,9 @@ final class ActionExecutorLimitTests: XCTestCase {
 
         // Rollback: the new rule must NOT remain in the store, and the store must
         // be restored to exactly the seeded set.
-        XCTAssertNil(AppLimitRuleStore.shared.rule(forID: newRule.id),
+        XCTAssertNil(ruleStore.rule(forID: newRule.id),
                      "quota-tripping rule must be rolled back out of the store")
-        XCTAssertEqual(AppLimitRuleStore.shared.all().count, AppLimitPlanner.maxEventsPerActivity,
+        XCTAssertEqual(ruleStore.all().count, AppLimitPlanner.maxEventsPerActivity,
                        "rollback must restore the prior store exactly")
         // Atomicity of the FAILING pass: the over-cap window (cap + 1 events) was
         // never armed — the planner validated and armed NOTHING on quotaExceeded.
@@ -280,12 +314,12 @@ final class ActionExecutorLimitTests: XCTestCase {
             effectiveFrom: Date(timeIntervalSince1970: 0),
             expiresAt: nil
         )
-        AppLimitRuleStore.shared.upsert(priorRule)
+        ruleStore.upsert(priorRule)
 
         // Saturate the DAILY window to the per-activity event cap with OTHER rules.
         let dailyWindow = AppLimitWindow(startMinute: 0, endMinute: 1439, repeats: true, timezone: nil)
         for i in 0..<AppLimitPlanner.maxEventsPerActivity {
-            AppLimitRuleStore.shared.upsert(AppLimitRule(
+            ruleStore.upsert(AppLimitRule(
                 id: UUID(),
                 appTokens: [],
                 bundleID: "com.seed.\(i)",
@@ -317,7 +351,7 @@ final class ActionExecutorLimitTests: XCTestCase {
         }
 
         // The store must still hold the ORIGINAL X — not nil, not the new version.
-        let restored = AppLimitRuleStore.shared.rule(forID: ruleID)
+        let restored = ruleStore.rule(forID: ruleID)
         XCTAssertNotNil(restored, "UPDATE-rollback must restore the prior rule, not delete it")
         XCTAssertEqual(restored, priorRule, "restored rule must be the ORIGINAL X (budget/window unchanged)")
         XCTAssertEqual(restored?.budgetMinutes, 45, "must NOT keep the updated budget")
@@ -347,14 +381,17 @@ final class ActionExecutorLimitTests: XCTestCase {
             effectiveFrom: prior.effectiveFrom,
             expiresAt: nil
         )
-        AppLimitRuleStore.shared.upsert(prior)
+        ruleStore.upsert(prior)
         var identityIsCurrent = true
         let executor = ActionExecutor(
             activityScheduler: spy,
             authorizationStatusProvider: { .approved },
+            ruleStore: ruleStore,
+            appLimitEpochStore: epochStore,
+            appLimitOwnerProvider: { nil },
             afterMutationCheckpoint: { checkpoint in
                 guard checkpoint == .setLimitPersisted else { return }
-                AppLimitRuleStore.shared.removeAll()
+                self.ruleStore.removeAll()
                 identityIsCurrent = false
             }
         )
@@ -366,7 +403,7 @@ final class ActionExecutorLimitTests: XCTestCase {
         )
 
         XCTAssertEqual(result, .failed(.execution("stale_identity")))
-        XCTAssertNil(AppLimitRuleStore.shared.rule(forID: ruleID))
+        XCTAssertNil(ruleStore.rule(forID: ruleID))
         XCTAssertTrue(spy.activeActivities.isEmpty)
     }
 
@@ -422,7 +459,7 @@ final class ActionExecutorLimitTests: XCTestCase {
             return XCTFail("expected .confirmedExact; got \(result)")
         }
 
-        let persisted = AppLimitRuleStore.shared.rule(forID: ruleID)
+        let persisted = ruleStore.rule(forID: ruleID)
         XCTAssertNotNil(persisted, "rule should persist")
         XCTAssertFalse(persisted?.window.repeats ?? true,
                        "reset_policy 'none' (Once) must yield a non-repeating window")
@@ -452,7 +489,7 @@ final class ActionExecutorLimitTests: XCTestCase {
         }
         XCTAssertEqual(verb, .setLimit)
         XCTAssertEqual(display, "Instagram")
-        XCTAssertNotNil(AppLimitRuleStore.shared.rule(forID: rule.id), "rule must persist on success")
+        XCTAssertNotNil(ruleStore.rule(forID: rule.id), "rule must persist on success")
         XCTAssertEqual(spy.armed.count, 1, "the planner armed the one window")
         // ENFORCEMENT events only — measurement (`evlin.applimit.*`) usage-bar
         // events also ride in the dict.
@@ -494,7 +531,7 @@ final class ActionExecutorLimitTests: XCTestCase {
         let executor = makeExecutor(spy: spy)
         let ruleID = UUID()
         // Seed a persisted rule for this id (as set_limit would have).
-        AppLimitRuleStore.shared.upsert(AppLimitRule(
+        ruleStore.upsert(AppLimitRule(
             id: ruleID,
             appTokens: [],
             bundleID: "com.burbn.instagram",
@@ -504,13 +541,13 @@ final class ActionExecutorLimitTests: XCTestCase {
             effectiveFrom: Date(timeIntervalSince1970: 0),
             expiresAt: nil
         ))
-        XCTAssertNotNil(AppLimitRuleStore.shared.rule(forID: ruleID))
+        XCTAssertNotNil(ruleStore.rule(forID: ruleID))
 
         let cmd = makeClearCommand(ruleID: ruleID)
         let result = await executor.execute(cmd)
 
         XCTAssertEqual(result, .failed(.execution("app_limit_owner_work_required")))
-        XCTAssertNotNil(AppLimitRuleStore.shared.rule(forID: ruleID))
+        XCTAssertNotNil(ruleStore.rule(forID: ruleID))
         XCTAssertTrue(spy.armed.isEmpty)
     }
 
@@ -559,7 +596,7 @@ final class ActionExecutorLimitTests: XCTestCase {
         _ = await ActiveLockStore.shared.addShield(limitShield)
         _ = await ActiveLockStore.shared.addShield(manualShield)
 
-        AppLimitRuleStore.shared.upsert(AppLimitRule(
+        ruleStore.upsert(AppLimitRule(
             id: ruleID,
             appTokens: [],
             bundleID: bundleID,
@@ -609,20 +646,23 @@ final class ActionExecutorLimitTests: XCTestCase {
             targetChildID: childID,
             sources: [.limit]
         )
-        AppLimitRuleStore.shared.upsert(rule)
+        ruleStore.upsert(rule)
         _ = await ActiveLockStore.shared.addShield(shield)
-        _ = AppLimitPlanner(scheduler: spy).arm(rules: [rule])
+        _ = makePlanner(spy: spy).arm(rules: [rule])
         var currentID = childID
         var reachedCheckpoint = false
         let executor = ActionExecutor(
             activityScheduler: spy,
             authorizationStatusProvider: { .approved },
+            ruleStore: ruleStore,
+            appLimitEpochStore: epochStore,
+            appLimitOwnerProvider: { nil },
             afterMutationCheckpoint: { checkpoint in
                 guard checkpoint == .clearLimitRearmed else { return }
                 reachedCheckpoint = true
                 currentID = UUID()
-                AppLimitRuleStore.shared.removeAll()
-                _ = AppLimitPlanner(scheduler: spy).arm(rules: [])
+                self.ruleStore.removeAll()
+                _ = self.makePlanner(spy: spy).arm(rules: [])
             }
         )
 
@@ -634,7 +674,7 @@ final class ActionExecutorLimitTests: XCTestCase {
 
         XCTAssertFalse(reachedCheckpoint)
         XCTAssertEqual(result, .failed(.execution("app_limit_owner_work_required")))
-        XCTAssertNotNil(AppLimitRuleStore.shared.rule(forID: ruleID))
+        XCTAssertNotNil(ruleStore.rule(forID: ruleID))
         let shields = await ActiveLockStore.shared.allCurrent().shields
         XCTAssertTrue(shields.contains { $0.recordKey == shield.recordKey })
         XCTAssertFalse(spy.activeActivities.isEmpty)
@@ -697,7 +737,7 @@ final class ActionExecutorLimitTests: XCTestCase {
             return XCTFail("expected application_not_configured, got \(result)")
         }
         XCTAssertTrue(spy.armed.isEmpty)
-        XCTAssertTrue(AppLimitRuleStore.shared.all().isEmpty)
+        XCTAssertTrue(ruleStore.all().isEmpty)
     }
 
     func testAuthorizedSetOwnerWorkArmsAndCommitsDurableReceipt() async throws {
@@ -709,10 +749,9 @@ final class ActionExecutorLimitTests: XCTestCase {
         )
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
-        let lock = ActionLimitEpochTestLock()
         let store = AppLimitEpochStore(
             fileURL: directory.appendingPathComponent("epoch.json"),
-            lock: lock,
+            lock: ActiveLockPersistenceLock.shared,
             ownerProvider: { owner },
             legacyDefaults: nil
         )
@@ -800,10 +839,22 @@ final class ActionExecutorLimitTests: XCTestCase {
         XCTAssertEqual(spy.armed.count, 1)
         let receipt = try XCTUnwrap(result.receipt)
         XCTAssertEqual(receipt.orderingToken, 10)
+        XCTAssertEqual(
+            receipt.armID,
+            try store.read().slots[ruleID]?.armProvenance?.armID
+        )
+        XCTAssertNotNil(receipt.armID)
         XCTAssertGreaterThan(receipt.storeRevision, 0)
         let reread = try XCTUnwrap(store.read().slots[ruleID])
         XCTAssertNil(reread.pendingOwnerWork)
         XCTAssertEqual(reread.appliedReceipt, receipt)
+        XCTAssertEqual(
+            try AppLimitProductionComposition.currentAppliedReceipt(
+                ruleID: ruleID,
+                store: store
+            ),
+            receipt
+        )
     }
 
     func testAuthorizedClearOwnerWorkRemovesOnlyLimitShieldAndCommitsReceipt() async throws {
@@ -818,7 +869,7 @@ final class ActionExecutorLimitTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = AppLimitEpochStore(
             fileURL: directory.appendingPathComponent("epoch.json"),
-            lock: ActionLimitEpochTestLock(),
+            lock: ActiveLockPersistenceLock.shared,
             ownerProvider: { owner },
             legacyDefaults: nil
         )
@@ -941,11 +992,19 @@ final class ActionExecutorLimitTests: XCTestCase {
             return XCTFail("expected confirmed clear owner work, got \(result.result)")
         }
         XCTAssertEqual(result.receipt?.orderingToken, 11)
+        XCTAssertNil(result.receipt?.armID)
         let slot = try XCTUnwrap(store.read().slots[ruleID])
         XCTAssertNil(slot.activeRule)
         XCTAssertEqual(slot.clearTombstone?.orderingToken, 11)
         XCTAssertNil(slot.pendingOwnerWork)
         XCTAssertEqual(slot.appliedReceipt, result.receipt)
+        XCTAssertEqual(
+            try AppLimitProductionComposition.currentAppliedReceipt(
+                ruleID: ruleID,
+                store: store
+            ),
+            result.receipt
+        )
         let shields = await ActiveLockStore.shared.allCurrent().shields
         XCTAssertFalse(shields.contains { $0.recordKey == limitShield.recordKey })
         XCTAssertTrue(shields.contains { $0.recordKey == manualShield.recordKey })

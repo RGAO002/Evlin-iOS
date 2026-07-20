@@ -189,6 +189,58 @@ final class LimitShieldLogicTests: XCTestCase {
         XCTAssertTrue(record.originalRequest.contains("rule_id=\(ruleID.uuidString.lowercased())"))
     }
 
+    func test_applyingValidatedLimitUnionsEveryExistingSameRecordSource() {
+        let rule = makeRule()
+        let callback = makeValidatedCallback(rule: rule)
+        var existing = manualRecord(
+            recordKey: LimitShieldLogic.recordKey(for: rule),
+            targetKey: LimitShieldLogic.targetKey(for: rule)
+        )
+        existing.sources = [.manual, .earnedTime, .taskPause]
+
+        let updated = LimitShieldLogic.applyingLimit(
+            to: [existing.recordKey: existing],
+            callback: callback,
+            now: Date(timeIntervalSince1970: 1_721_174_400)
+        )
+
+        XCTAssertEqual(updated[existing.recordKey]?.sources, [
+            .manual, .earnedTime, .taskPause, .limit,
+        ])
+    }
+
+    func test_strippingValidatedLimitPreservesEveryPriorSameRecordSource() {
+        let rule = makeRule()
+        let callback = makeValidatedCallback(rule: rule)
+        var existing = manualRecord(
+            recordKey: LimitShieldLogic.recordKey(for: rule),
+            targetKey: LimitShieldLogic.targetKey(for: rule)
+        )
+        existing.sources = [.manual, .earnedTime, .taskPause]
+        let limited = LimitShieldLogic.applyingLimit(
+            to: [existing.recordKey: existing],
+            callback: callback,
+            now: Date(timeIntervalSince1970: 1_721_174_400)
+        )
+
+        let stripped = LimitShieldLogic.strippingLimitShields(from: limited)
+
+        XCTAssertEqual(stripped[existing.recordKey]?.sources, existing.sources)
+    }
+
+    func test_validatedLimitTransformRequiresExplicitOperationTime() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Evlin iOS/Services/AppLimitEffectJournal.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+
+        XCTAssertFalse(source.contains("""
+            callback: AppLimitValidatedCallback,
+            now: Date = Date()
+            """))
+    }
+
     // MARK: - strippingLimitShields (daily reset)
 
     func test_strippingLimitShields_removesOnlyLimit_keepsManual() {
@@ -333,5 +385,31 @@ final class LimitShieldLogicTests: XCTestCase {
         XCTAssertEqual(DeviceAppsMockData.limitOptions.first, 15)
         #endif
         XCTAssertEqual(DeviceAppsMockData.formatLimit(1), "1m")
+    }
+
+    private func makeValidatedCallback(rule: AppLimitRule) -> AppLimitValidatedCallback {
+        let armID = UUID(uuidString: "30000000-0000-0000-0000-000000000005")!
+        return AppLimitValidatedCallback(
+            rule: rule,
+            provenance: AppLimitArmProvenance(
+                ruleID: rule.id,
+                ruleRevision: 45,
+                childDeviceID: UUID(uuidString: "20000000-0000-0000-0000-000000000005")!,
+                usageDate: "2026-07-19",
+                timezone: "America/New_York",
+                scheduleWindow: rule.window,
+                tokenDigest: "token-digest",
+                budgetMinutes: rule.budgetMinutes,
+                startedAt: Date(timeIntervalSince1970: 1_700_000_000),
+                baseAcceptedMinutes: 0,
+                lastRawThresholdMinutes: 0,
+                ignoredWhilePausedMinutes: 0,
+                activityName: AppLimitPlanner.v2ActivityName(armID: armID),
+                armID: armID
+            ),
+            effectKind: .enforcement,
+            rawThresholdMinutes: rule.budgetMinutes,
+            adjustedEstimateMinutes: rule.budgetMinutes
+        )
     }
 }

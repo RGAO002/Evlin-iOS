@@ -19,35 +19,42 @@ final class CommandPollerTests: XCTestCase {
     // and we don't bleed an injected provider into other suites.
     private var savedDeviceIDProvider: (() -> UUID?)!
     private var savedPollOverride: ((UUID, APIClient) async -> Void)?
+    private var savedAppLimitRecoveryOverride: (() async -> Void)?
     private var savedPollCommandsOverride: ((UUID, APIClient) async throws -> [PollCommandDTO])?
     private var savedLockedSetIDOverride: ((String, Data?) -> Void)?
     private var savedAfterRekey: ((String, String) async -> Void)?
     private var savedAppLimitEnvelopeOverride: ((PollCommandDTO, LockCommand) throws -> AppLimitCommandEnvelope)?
     private var savedAppLimitIngestOverride: ((AppLimitCommandEnvelope) throws -> AppLimitCommandDisposition)?
     private var savedAppLimitOwnerExecuteOverride: ((LockCommand, AppLimitCommandEnvelope, UUID) async -> AppLimitOwnerExecutionResult)?
+    private var savedAppLimitReceiptReadbackOverride: ((UUID) throws -> AppLimitApplyReceipt?)?
     private var savedAckCommandOverride: ((UUID, String, [String: Any]?) async throws -> Void)?
 
     override func setUp() async throws {
         savedDeviceIDProvider = poller.childDeviceIDProvider
         savedPollOverride = poller.oneShotPollOverride
+        savedAppLimitRecoveryOverride = poller.appLimitRecoveryOverride
+        poller.appLimitRecoveryOverride = {}
         savedPollCommandsOverride = poller.pollCommandsOverride
         savedLockedSetIDOverride = poller.saveLockedSetIDOverride
         savedAfterRekey = poller.afterRekeyShieldRecord
         savedAppLimitEnvelopeOverride = poller.appLimitEnvelopeOverride
         savedAppLimitIngestOverride = poller.appLimitIngestOverride
         savedAppLimitOwnerExecuteOverride = poller.appLimitOwnerExecuteOverride
+        savedAppLimitReceiptReadbackOverride = poller.appLimitReceiptReadbackOverride
         savedAckCommandOverride = poller.ackCommandOverride
     }
 
     override func tearDown() async throws {
         poller.childDeviceIDProvider = savedDeviceIDProvider
         poller.oneShotPollOverride = savedPollOverride
+        poller.appLimitRecoveryOverride = savedAppLimitRecoveryOverride
         poller.pollCommandsOverride = savedPollCommandsOverride
         poller.saveLockedSetIDOverride = savedLockedSetIDOverride
         poller.afterRekeyShieldRecord = savedAfterRekey
         poller.appLimitEnvelopeOverride = savedAppLimitEnvelopeOverride
         poller.appLimitIngestOverride = savedAppLimitIngestOverride
         poller.appLimitOwnerExecuteOverride = savedAppLimitOwnerExecuteOverride
+        poller.appLimitReceiptReadbackOverride = savedAppLimitReceiptReadbackOverride
         poller.ackCommandOverride = savedAckCommandOverride
     }
 
@@ -97,6 +104,7 @@ final class CommandPollerTests: XCTestCase {
             storeRevision: 42
         )
         var ownerExecutions = 0
+        poller.appLimitReceiptReadbackOverride = { _ in receipt }
         let ack = try await runAppLimitPoll(
             commandKey: "set_limit",
             token: 10,
@@ -162,6 +170,7 @@ final class CommandPollerTests: XCTestCase {
             storeRevision: 77
         )
         var ownerExecutions = 0
+        poller.appLimitReceiptReadbackOverride = { _ in receipt }
         let ack = try await runAppLimitPoll(
             commandKey: "set_limit",
             token: 10,
@@ -175,6 +184,62 @@ final class CommandPollerTests: XCTestCase {
         XCTAssertEqual(ack.status, "confirmed")
         XCTAssertEqual(ack.detail?["receipt_revision"] as? UInt64, 77)
         XCTAssertEqual(ack.detail?["disposition"] as? String, "duplicate_applied")
+    }
+
+    func testConfirmedOwnerResultWithoutCurrentReceiptAcksPending() async throws {
+        let receipt = AppLimitApplyReceipt(
+            ruleID: appLimitRuleID,
+            orderingToken: 10,
+            commandKind: .set,
+            armID: UUID(),
+            source: "app_owner",
+            appliedAt: Date(timeIntervalSince1970: 1_700_000_100),
+            storeRevision: 42
+        )
+        poller.appLimitReceiptReadbackOverride = { _ in nil }
+
+        let ack = try await runAppLimitPoll(
+            commandKey: "set_limit",
+            token: 10,
+            disposition: .acceptedNeedsOwner
+        ) { _, _, _ in
+            AppLimitOwnerExecutionResult(
+                result: .confirmedExact(
+                    verb: .setLimit,
+                    displayName: "YouTube",
+                    effectiveState: nil
+                ),
+                receipt: receipt
+            )
+        }
+
+        XCTAssertEqual(ack.status, "pending")
+        XCTAssertNil(ack.detail?["receipt_revision"])
+    }
+
+    func testDuplicateAppliedReceiptRejectedByCurrentReadbackAcksPending() async throws {
+        let staleReceipt = AppLimitApplyReceipt(
+            ruleID: appLimitRuleID,
+            orderingToken: 10,
+            commandKind: .set,
+            armID: UUID(),
+            source: "app_owner",
+            appliedAt: Date(timeIntervalSince1970: 1_700_000_100),
+            storeRevision: 41
+        )
+        poller.appLimitReceiptReadbackOverride = { _ in nil }
+
+        let ack = try await runAppLimitPoll(
+            commandKey: "set_limit",
+            token: 10,
+            disposition: .duplicateApplied(staleReceipt)
+        ) { _, _, _ in
+            XCTFail("duplicate applied must not rerun owner effects")
+            return AppLimitOwnerExecutionResult(result: .failed(.malformed), receipt: nil)
+        }
+
+        XCTAssertEqual(ack.status, "pending")
+        XCTAssertNil(ack.detail?["receipt_revision"])
     }
 
     func testEqualTokenConflictFailsClosedWithoutOwnerEffects() async throws {

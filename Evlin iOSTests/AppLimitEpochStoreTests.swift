@@ -58,6 +58,43 @@ final class AppLimitEpochStoreTests: XCTestCase {
         XCTAssertEqual(restarted.lastMutationSource, .poll)
     }
 
+    func testTransactionAcceptsByteExactReadbackWhenDateCanonicalizesByOneULP() throws {
+        let ruleID = UUID(uuidString: "10000000-0000-0000-0000-000000000002")!
+        let owner = UUID(uuidString: "20000000-0000-0000-0000-000000000002")!
+        let commandID = UUID(uuidString: "30000000-0000-0000-0000-000000000002")!
+        let createdAt = Date(
+            timeIntervalSinceReferenceDate: Double(bitPattern: 4_740_046_264_882_201_161)
+        )
+        let store = makeStore(owner: owner)
+
+        try store.transaction(source: .poll, expectedOwner: owner) { state in
+            state.slots[ruleID] = AppLimitVersionSlot(
+                ruleID: ruleID,
+                latestOrderingToken: 1,
+                latestKind: .set,
+                latestPayloadDigest: "set-1",
+                activeRule: makeRule(id: ruleID),
+                clearTombstone: nil,
+                pendingOwnerWork: AppLimitOwnerWork(
+                    workID: UUID(uuidString: "40000000-0000-0000-0000-000000000002")!,
+                    commandID: commandID,
+                    ruleID: ruleID,
+                    orderingToken: 1,
+                    commandKind: .set,
+                    payloadDigest: "set-1",
+                    source: .poll,
+                    createdAt: createdAt
+                ),
+                appliedReceipt: nil
+            )
+        }
+
+        let persistedDate = try XCTUnwrap(
+            makeStore(owner: owner).read().slots[ruleID]?.pendingOwnerWork?.createdAt
+        )
+        XCTAssertEqual(persistedDate.timeIntervalSince1970, createdAt.timeIntervalSince1970)
+    }
+
     func testTransactionCannotClearBoundOwner() throws {
         let ruleID = UUID(uuidString: "10000000-0000-0000-0000-000000000099")!
         let owner = UUID(uuidString: "20000000-0000-0000-0000-000000000099")!

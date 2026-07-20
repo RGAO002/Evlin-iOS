@@ -87,6 +87,127 @@ final class AppLimitEffectJournalTests: XCTestCase {
         XCTAssertEqual(receipt?.source, "device_activity_monitor")
     }
 
+    func testCrashAfterDurableLocalMutationReopensAndConvergesBeforeReceipt() throws {
+        let harness = try makeHarness()
+        let callback = try acceptedCallback(
+            harness.fixture,
+            kind: .enforcement,
+            threshold: harness.fixture.rule.budgetMinutes
+        )
+        let usageStore = EarnedTimeStore(suiteName: harness.suiteName)
+        let shieldPersistence = AppLimitShieldPersistence(
+            store: harness.defaults,
+            storageKey: shieldStorageKey
+        )
+        let crashingJournal = AppLimitEffectJournal(
+            defaults: harness.defaults,
+            epochStore: harness.fixture.store,
+            afterLocalMutation: { throw JournalTestError.simulatedCrash }
+        )
+        _ = try crashingJournal.enqueue(callback, now: referenceDate)
+        let firstClaim = try XCTUnwrap(crashingJournal.claimNext(
+            workerID: workerA,
+            now: referenceDate,
+            leaseDuration: 30
+        ))
+
+        XCTAssertThrowsError(try crashingJournal.applyLocal(
+            firstClaim,
+            source: "device_activity_monitor",
+            appliedAt: referenceDate
+        ) { callback in
+            try applyDurableLocalEffects(
+                callback,
+                usageStore: usageStore,
+                shieldPersistence: shieldPersistence
+            )
+        }) { error in
+            XCTAssertEqual(error as? JournalTestError, .simulatedCrash)
+        }
+        XCTAssertNil(try crashingJournal.effect(for: firstClaim.effect.key)?.localReceipt)
+        XCTAssertEqual(
+            usageStore.appLimitReportedMinutes(
+                ruleID: callback.rule.id,
+                usageDate: callback.provenance.usageDate
+            ),
+            callback.adjustedEstimateMinutes
+        )
+        XCTAssertEqual(try shieldPersistence.load().count, 1)
+
+        let reopened = AppLimitEffectJournal(
+            defaults: harness.defaults,
+            epochStore: harness.fixture.store
+        )
+        let reclaimed = try XCTUnwrap(reopened.claimNext(
+            workerID: workerB,
+            now: referenceDate.addingTimeInterval(31),
+            leaseDuration: 30
+        ))
+        let receipt = try reopened.applyLocal(
+            reclaimed,
+            source: "lifecycle_recovery",
+            appliedAt: referenceDate.addingTimeInterval(31)
+        ) { callback in
+            try applyDurableLocalEffects(
+                callback,
+                usageStore: usageStore,
+                shieldPersistence: shieldPersistence
+            )
+        }
+
+        XCTAssertNotNil(receipt)
+        XCTAssertEqual(
+            usageStore.appLimitReportedMinutes(
+                ruleID: callback.rule.id,
+                usageDate: callback.provenance.usageDate
+            ),
+            callback.adjustedEstimateMinutes
+        )
+        let shields = try shieldPersistence.load()
+        XCTAssertEqual(shields.count, 1)
+        XCTAssertEqual(shields[LimitShieldLogic.recordKey(for: callback.rule)]?.sources, [.limit])
+        XCTAssertEqual(try reopened.effect(for: reclaimed.effect.key)?.localReceipt, receipt)
+    }
+
+    func testShieldPersistenceFailureOrReadbackMismatchNeverRecordsLocalReceipt() throws {
+        let harness = try makeHarness()
+        let callback = try acceptedCallback(
+            harness.fixture,
+            kind: .enforcement,
+            threshold: harness.fixture.rule.budgetMinutes
+        )
+        let store = ShieldPersistenceStoreStub()
+        let persistence = AppLimitShieldPersistence(
+            store: store,
+            storageKey: shieldStorageKey
+        )
+        let shields = LimitShieldLogic.applyingLimit(
+            to: [:],
+            callback: callback,
+            now: referenceDate
+        )
+
+        store.synchronizeResult = false
+        XCTAssertThrowsError(try persistence.persist(shields))
+
+        store.synchronizeResult = true
+        store.serveStaleReadback = true
+        _ = try harness.journal.enqueue(callback, now: referenceDate)
+        let claim = try XCTUnwrap(harness.journal.claimNext(
+            workerID: workerA,
+            now: referenceDate,
+            leaseDuration: 30
+        ))
+        XCTAssertThrowsError(try harness.journal.applyLocal(
+            claim,
+            source: "device_activity_monitor",
+            appliedAt: referenceDate
+        ) { _ in
+            try persistence.persist(shields)
+        })
+        XCTAssertNil(try harness.journal.effect(for: claim.effect.key)?.localReceipt)
+    }
+
     func testNewerClearBetweenClaimAndShieldPreventsOldMutationAndReceipt() throws {
         let harness = try makeHarness()
         _ = try harness.journal.enqueue(
@@ -116,10 +237,8 @@ final class AppLimitEffectJournalTests: XCTestCase {
 
     func testUsageRequestCarriesOrderingTokenAndAcceptedBodyCommitsAfterCAS() async throws {
         let harness = try makeHarness()
-        _ = try harness.journal.enqueue(
-            acceptedCallback(harness.fixture, threshold: 5),
-            now: referenceDate
-        )
+        let callback = try acceptedCallback(harness.fixture, threshold: 5)
+        _ = try harness.journal.enqueue(callback, now: referenceDate)
         let claim = try XCTUnwrap(harness.journal.claimNext(
             workerID: workerA,
             now: referenceDate,
@@ -150,11 +269,42 @@ final class AppLimitEffectJournalTests: XCTestCase {
         )
         XCTAssertEqual(body["ordering_token"] as? Int64, 7)
         XCTAssertEqual(body["rule_id"] as? String, harness.fixture.rule.id.uuidString.lowercased())
+        XCTAssertEqual(
+            body["client_sample_id"] as? String,
+            AppLimitUsageReporter.clientSampleID(for: callback)
+        )
         XCTAssertEqual(receipt?.currentOrderingToken, 7)
         XCTAssertEqual(
             try harness.journal.effect(for: claim.effect.key)?.usageReceipt,
             receipt
         )
+    }
+
+    func testUsageSampleIdentitySeparatesArmsAndOrderingTokensWithinBackendLimit() throws {
+        let harness = try makeHarness()
+        let original = try acceptedCallback(harness.fixture, threshold: 5)
+        let differentArm = callback(
+            original,
+            orderingToken: original.provenance.ruleRevision,
+            armID: UUID(uuidString: "30000000-0000-0000-0000-000000000099")!
+        )
+        let differentRevision = callback(
+            original,
+            orderingToken: original.provenance.ruleRevision + 1,
+            armID: original.provenance.armID
+        )
+
+        let originalID = AppLimitUsageReporter.clientSampleID(for: original)
+        let differentArmID = AppLimitUsageReporter.clientSampleID(for: differentArm)
+        let differentRevisionID = AppLimitUsageReporter.clientSampleID(for: differentRevision)
+
+        XCTAssertNotEqual(originalID, differentArmID)
+        XCTAssertNotEqual(originalID, differentRevisionID)
+        XCTAssertTrue(originalID.contains(":r\(original.provenance.ruleRevision):"))
+        XCTAssertTrue(originalID.contains(":a\(original.provenance.armID.uuidString.lowercased()):"))
+        XCTAssertLessThanOrEqual(originalID.utf8.count, 255)
+        XCTAssertLessThanOrEqual(differentArmID.utf8.count, 255)
+        XCTAssertLessThanOrEqual(differentRevisionID.utf8.count, 255)
     }
 
     func testHTTP200AcceptedFalseDoesNotCommitUsageReceipt() async throws {
@@ -191,6 +341,140 @@ final class AppLimitEffectJournalTests: XCTestCase {
         XCTAssertNil(persisted.usageReceipt)
         XCTAssertEqual(persisted.backendRejection?.reason, "stale_ordering_token")
         XCTAssertEqual(persisted.backendRejection?.currentOrderingToken, 8)
+    }
+
+    func testFutureOrderingTokenReleasesLeaseAndBacksOffWithoutBusyLoop() async throws {
+        let harness = try makeHarness()
+        _ = try harness.journal.enqueue(
+            acceptedCallback(harness.fixture, threshold: 5),
+            now: referenceDate
+        )
+        let claim = try XCTUnwrap(harness.journal.claimNext(
+            workerID: workerA,
+            now: referenceDate,
+            leaseDuration: 30
+        ))
+        let transport = UsageTransportStub(
+            statusCode: 200,
+            response: .rejected(
+                ruleID: harness.fixture.rule.id,
+                usageDate: harness.fixture.usageDate,
+                currentOrderingToken: 6,
+                reason: "future_ordering_token"
+            )
+        )
+
+        let receipt = try await harness.journal.submitUsage(
+            claim,
+            baseURL: URL(string: "https://example.invalid")!,
+            deviceID: harness.fixture.owner,
+            transport: transport,
+            appliedAt: referenceDate
+        )
+        XCTAssertNil(receipt)
+
+        let retained = try XCTUnwrap(harness.journal.effect(for: claim.effect.key))
+        XCTAssertNil(retained.backendRejection)
+        XCTAssertNil(retained.lease)
+        let retryNotBefore = try XCTUnwrap(retained.retryNotBefore)
+        XCTAssertGreaterThan(retryNotBefore, referenceDate)
+        XCTAssertLessThanOrEqual(retryNotBefore, referenceDate.addingTimeInterval(300))
+        XCTAssertNil(try harness.journal.claimNext(
+            workerID: workerB,
+            now: retryNotBefore.addingTimeInterval(-0.001),
+            leaseDuration: 30
+        ))
+        XCTAssertNotNil(try harness.journal.claimNext(
+            workerID: workerB,
+            now: retryNotBefore,
+            leaseDuration: 30
+        ))
+    }
+
+    func testAuthoritativeTerminalRejectionsNeverBecomeChargeableAgain() async throws {
+        for reason in [
+            "stale_ordering_token",
+            "rule_cleared",
+            "usage_counting_not_allowed",
+            "unrecognized_authoritative_rejection",
+        ] {
+            let harness = try makeHarness()
+            _ = try harness.journal.enqueue(
+                acceptedCallback(harness.fixture, threshold: 5),
+                now: referenceDate
+            )
+            let claim = try XCTUnwrap(harness.journal.claimNext(
+                workerID: workerA,
+                now: referenceDate,
+                leaseDuration: 30
+            ))
+            let transport = UsageTransportStub(
+                statusCode: 200,
+                response: .rejected(
+                    ruleID: harness.fixture.rule.id,
+                    usageDate: harness.fixture.usageDate,
+                    currentOrderingToken: 8,
+                    reason: reason
+                )
+            )
+
+            let receipt = try await harness.journal.submitUsage(
+                claim,
+                baseURL: URL(string: "https://example.invalid")!,
+                deviceID: harness.fixture.owner,
+                transport: transport,
+                appliedAt: referenceDate
+            )
+            XCTAssertNil(receipt)
+            let terminal = try XCTUnwrap(harness.journal.effect(for: claim.effect.key))
+            XCTAssertEqual(terminal.backendRejection?.reason, reason)
+            XCTAssertNil(terminal.usageReceipt)
+            XCTAssertNil(try harness.journal.claimNext(
+                workerID: workerB,
+                now: referenceDate.addingTimeInterval(3_600),
+                leaseDuration: 30
+            ))
+        }
+    }
+
+    func testTransportHTTPAndDecodeFailuresRemainRetryable() async throws {
+        let failures: [RawUsageTransportStub.Mode] = [
+            .throwing,
+            .response(statusCode: 503, data: Data()),
+            .response(statusCode: 200, data: Data("not-json".utf8)),
+        ]
+        for failure in failures {
+            let harness = try makeHarness()
+            _ = try harness.journal.enqueue(
+                acceptedCallback(harness.fixture, threshold: 5),
+                now: referenceDate
+            )
+            let claim = try XCTUnwrap(harness.journal.claimNext(
+                workerID: workerA,
+                now: referenceDate,
+                leaseDuration: 30
+            ))
+
+            do {
+                _ = try await harness.journal.submitUsage(
+                    claim,
+                    baseURL: URL(string: "https://example.invalid")!,
+                    deviceID: harness.fixture.owner,
+                    transport: RawUsageTransportStub(mode: failure),
+                    appliedAt: referenceDate
+                )
+                XCTFail("expected retryable transport failure")
+            } catch {}
+
+            let retained = try XCTUnwrap(harness.journal.effect(for: claim.effect.key))
+            XCTAssertNil(retained.backendRejection)
+            XCTAssertNil(retained.usageReceipt)
+            XCTAssertNotNil(try harness.journal.claimNext(
+                workerID: workerB,
+                now: referenceDate.addingTimeInterval(31),
+                leaseDuration: 30
+            ))
+        }
     }
 
     func testNewerSetDuringTransportPreventsOldUsageCommitAfterResponse() async throws {
@@ -308,9 +592,25 @@ final class AppLimitEffectJournalTests: XCTestCase {
         addTeardownBlock { defaults.removePersistentDomain(forName: suiteName) }
         return JournalHarness(
             fixture: fixture,
+            suiteName: suiteName,
             defaults: defaults,
             journal: AppLimitEffectJournal(defaults: defaults, epochStore: fixture.store)
         )
+    }
+
+    private func applyDurableLocalEffects(
+        _ callback: AppLimitValidatedCallback,
+        usageStore: EarnedTimeStore,
+        shieldPersistence: AppLimitShieldPersistence
+    ) throws {
+        AppLimitCallbackLocalLedger.record(callback, store: usageStore)
+        guard callback.effectKind == .enforcement else { return }
+        let updated = LimitShieldLogic.applyingLimit(
+            to: try shieldPersistence.load(),
+            callback: callback,
+            now: referenceDate
+        )
+        try shieldPersistence.persist(updated)
     }
 
     private func acceptedCallback(
@@ -332,6 +632,36 @@ final class AppLimitEffectJournalTests: XCTestCase {
             throw JournalTestError.callbackNotAccepted
         }
         return callback
+    }
+
+    private func callback(
+        _ callback: AppLimitValidatedCallback,
+        orderingToken: Int64,
+        armID: UUID
+    ) -> AppLimitValidatedCallback {
+        let original = callback.provenance
+        return AppLimitValidatedCallback(
+            rule: callback.rule,
+            provenance: AppLimitArmProvenance(
+                ruleID: original.ruleID,
+                ruleRevision: orderingToken,
+                childDeviceID: original.childDeviceID,
+                usageDate: original.usageDate,
+                timezone: original.timezone,
+                scheduleWindow: original.scheduleWindow,
+                tokenDigest: original.tokenDigest,
+                budgetMinutes: original.budgetMinutes,
+                startedAt: original.startedAt,
+                baseAcceptedMinutes: original.baseAcceptedMinutes,
+                lastRawThresholdMinutes: original.lastRawThresholdMinutes,
+                ignoredWhilePausedMinutes: original.ignoredWhilePausedMinutes,
+                activityName: AppLimitPlanner.v2ActivityName(armID: armID),
+                armID: armID
+            ),
+            effectKind: callback.effectKind,
+            rawThresholdMinutes: callback.rawThresholdMinutes,
+            adjustedEstimateMinutes: callback.adjustedEstimateMinutes
+        )
     }
 
     private func replaceWithClear(_ fixture: AppLimitCallbackFixture, token: Int64) throws {
@@ -384,11 +714,34 @@ final class AppLimitEffectJournalTests: XCTestCase {
 
 private struct JournalHarness {
     let fixture: AppLimitCallbackFixture
+    let suiteName: String
     let defaults: UserDefaults
     let journal: AppLimitEffectJournal
 }
 
-private enum JournalTestError: Error { case callbackNotAccepted }
+private enum JournalTestError: Error {
+    case callbackNotAccepted
+    case simulatedCrash
+    case transportFailure
+}
+
+private final class ShieldPersistenceStoreStub: AppLimitShieldPersistenceStore {
+    var synchronizeResult = true
+    var serveStaleReadback = false
+    private var persisted: [String: Data] = [:]
+
+    func data(forKey defaultName: String) -> Data? {
+        serveStaleReadback ? nil : persisted[defaultName]
+    }
+
+    func set(_ value: Any?, forKey defaultName: String) {
+        persisted[defaultName] = value as? Data
+    }
+
+    func synchronize() -> Bool {
+        synchronizeResult
+    }
+}
 
 private actor UsageTransportStub: MeteringHTTPTransport {
     let statusCode: Int
@@ -422,6 +775,37 @@ private actor UsageTransportStub: MeteringHTTPTransport {
     }
 }
 
+private actor RawUsageTransportStub: MeteringHTTPTransport {
+    enum Mode {
+        case throwing
+        case response(statusCode: Int, data: Data)
+    }
+
+    let mode: Mode
+
+    init(mode: Mode) {
+        self.mode = mode
+    }
+
+    func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+        switch mode {
+        case .throwing:
+            throw JournalTestError.transportFailure
+        case .response(let statusCode, let data):
+            return (
+                data,
+                HTTPURLResponse(
+                    url: request.url!,
+                    statusCode: statusCode,
+                    httpVersion: nil,
+                    headerFields: nil
+                )!
+            )
+        }
+    }
+}
+
 private let workerA = UUID(uuidString: "50000000-0000-0000-0000-000000000001")!
 private let workerB = UUID(uuidString: "50000000-0000-0000-0000-000000000002")!
 private let referenceDate = Date(timeIntervalSince1970: 1_721_174_400)
+private let shieldStorageKey = "evlin.shieldRecords"

@@ -103,6 +103,138 @@ enum CommandDeliveryDiagnostics {
     }
 }
 
+@MainActor
+private final class AppLimitOwnerActionEffectPort: AppLimitOwnerEffectPort, @unchecked Sendable {
+    private let executor: ActionExecutor
+    private let ownerChildDeviceID: UUID
+
+    init(executor: ActionExecutor = .shared, ownerChildDeviceID: UUID) {
+        self.executor = executor
+        self.ownerChildDeviceID = ownerChildDeviceID
+    }
+
+    func apply(
+        work: AppLimitOwnerWork,
+        slot: AppLimitVersionSlot
+    ) async throws -> AppLimitOwnerEffectResult {
+        try await executor.recoverAppLimitOwnerEffect(
+            work: work,
+            slot: slot,
+            expectedChildID: ownerChildDeviceID
+        )
+    }
+}
+
+@MainActor
+private final class AppLimitOwnerAPIReadbackPort: AppLimitOwnerReadbackPort, @unchecked Sendable {
+    private let api: APIClient
+
+    init(baseURL: URL) {
+        api = APIClient(baseURL: baseURL.absoluteString)
+    }
+
+    func confirm(commandID: UUID, receipt: AppLimitApplyReceipt) async throws {
+        var detail: [String: Any] = [
+            "ordering_token": receipt.orderingToken,
+            "rule_id": receipt.ruleID.uuidString,
+            "receipt_revision": receipt.storeRevision,
+            "receipt_source": receipt.source,
+        ]
+        if let armID = receipt.armID { detail["arm_id"] = armID.uuidString }
+        try await api.ack(commandID: commandID, status: "confirmed", detail: detail)
+    }
+}
+
+@MainActor
+private final class AppLimitOwnerRecoveryEntry {
+    static let shared = AppLimitOwnerRecoveryEntry()
+
+    private let defaults: UserDefaults?
+    private let injectedDriver: AppLimitOwnerRecoveryDriver?
+
+    init(
+        defaults: UserDefaults? = UserDefaults(
+            suiteName: MeteringProductionComposition.appGroupSuiteName
+        ),
+        driver: AppLimitOwnerRecoveryDriver? = nil
+    ) {
+        self.defaults = defaults
+        injectedDriver = driver
+    }
+
+    func recoverIfConfigured() async {
+        guard let configuration = MeteringProcessConfiguration.load(defaults: defaults) else {
+            return
+        }
+        let driver = injectedDriver ?? AppLimitOwnerRecoveryDriver(
+            effectPort: AppLimitOwnerActionEffectPort(
+                ownerChildDeviceID: configuration.owner
+            ),
+            readbackPort: AppLimitOwnerAPIReadbackPort(baseURL: configuration.baseURL)
+        )
+        await driver.recover(ownerChildDeviceID: configuration.owner)
+    }
+}
+
+@MainActor
+final class AppLimitEffectRecoveryEntry {
+    static let shared = AppLimitEffectRecoveryEntry()
+
+    private let defaults: UserDefaults?
+    private let driver: AppLimitEffectRecoveryDriver
+    private let now: () -> Date
+
+    init(
+        defaults: UserDefaults? = UserDefaults(
+            suiteName: MeteringProductionComposition.appGroupSuiteName
+        ),
+        driver: AppLimitEffectRecoveryDriver? = nil,
+        now: @escaping () -> Date = Date.init
+    ) {
+        self.defaults = defaults
+        self.driver = driver ?? AppLimitEffectRecoveryDriver(
+            projectRestrictions: {
+                await ActiveLockStore.shared.reapplyCurrentRestrictions()
+            }
+        )
+        self.now = now
+    }
+
+    func recoverIfConfigured() async {
+        guard let configuration = MeteringProcessConfiguration.load(defaults: defaults) else {
+            return
+        }
+        await driver.recover(
+            baseURL: configuration.baseURL,
+            ownerChildDeviceID: configuration.owner,
+            now: now()
+        )
+    }
+}
+
+@MainActor
+enum AppLimitRecoveryTrigger {
+    static func launch() async {
+        await AppLimitOwnerRecoveryEntry.shared.recoverIfConfigured()
+        await AppLimitEffectRecoveryEntry.shared.recoverIfConfigured()
+    }
+
+    static func foreground() async {
+        await AppLimitOwnerRecoveryEntry.shared.recoverIfConfigured()
+        await AppLimitEffectRecoveryEntry.shared.recoverIfConfigured()
+    }
+
+    static func silentRemoteNotification() async {
+        await AppLimitOwnerRecoveryEntry.shared.recoverIfConfigured()
+        await AppLimitEffectRecoveryEntry.shared.recoverIfConfigured()
+    }
+
+    static func pollCompletion() async {
+        await AppLimitOwnerRecoveryEntry.shared.recoverIfConfigured()
+        await AppLimitEffectRecoveryEntry.shared.recoverIfConfigured()
+    }
+}
+
 /// Foreground command poller. Every 5s, fetches pending commands from the backend
 /// and dispatches them to ActionExecutor. Posts ack back on completion.
 ///
@@ -160,6 +292,7 @@ final class CommandPoller {
     var appLimitEnvelopeOverride: ((PollCommandDTO, LockCommand) throws -> AppLimitCommandEnvelope)?
     var appLimitIngestOverride: ((AppLimitCommandEnvelope) throws -> AppLimitCommandDisposition)?
     var appLimitOwnerExecuteOverride: ((LockCommand, AppLimitCommandEnvelope, UUID) async -> AppLimitOwnerExecutionResult)?
+    var appLimitReceiptReadbackOverride: ((UUID) throws -> AppLimitApplyReceipt?)?
     var ackCommandOverride: ((UUID, String, [String: Any]?) async throws -> Void)?
 
     // MARK: - Earned-time config seams (test-only hooks; production uses the defaults)
@@ -777,11 +910,19 @@ final class CommandPoller {
             execution = nil
         }
 
+        let currentReceipt: AppLimitApplyReceipt?
+        do {
+            currentReceipt = try appLimitReceiptReadbackOverride?(envelope.ruleID)
+                ?? AppLimitProductionComposition.currentAppliedReceipt(ruleID: envelope.ruleID)
+        } catch {
+            currentReceipt = nil
+        }
         let ack = Self.appLimitAck(
             command: command,
             envelope: envelope,
             disposition: disposition,
-            execution: execution
+            execution: execution,
+            currentReceipt: currentReceipt
         )
         await postCommandAck(
             commandID: poll.command_id,
@@ -899,7 +1040,8 @@ final class CommandPoller {
         command: LockCommand,
         envelope: AppLimitCommandEnvelope,
         disposition: AppLimitCommandDisposition,
-        execution: AppLimitOwnerExecutionResult?
+        execution: AppLimitOwnerExecutionResult?,
+        currentReceipt: AppLimitApplyReceipt?
     ) -> (status: String, detail: [String: Any]) {
         var detail: [String: Any] = [
             "ordering_token": envelope.orderingToken,
@@ -920,6 +1062,7 @@ final class CommandPoller {
         case .acceptedNeedsOwner:
             detail["disposition"] = "accepted_needs_owner"
             if let receipt = execution?.receipt,
+               receipt == currentReceipt,
                case .confirmedExact = execution?.result {
                 addReceipt(receipt)
                 return ("confirmed", detail)
@@ -936,6 +1079,10 @@ final class CommandPoller {
             return ("pending", detail)
         case .duplicateApplied(let receipt):
             detail["disposition"] = "duplicate_applied"
+            guard receipt == currentReceipt else {
+                detail["reason"] = "persisted_waiting_for_owner"
+                return ("pending", detail)
+            }
             addReceipt(receipt)
             return ("confirmed", detail)
         case .superseded(let latestOrderingToken):

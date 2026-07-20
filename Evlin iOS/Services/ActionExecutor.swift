@@ -227,7 +227,13 @@ final class ActionExecutor: @unchecked Sendable {
         self.afterMutationCheckpoint = afterMutationCheckpoint
         // Default factory builds a planner sharing this executor's scheduler so
         // arming + the executor's own shield/block scheduling hit the same backend.
-        self.makeLimitPlanner = makeLimitPlanner ?? { AppLimitPlanner(scheduler: activityScheduler) }
+        self.makeLimitPlanner = makeLimitPlanner ?? {
+            AppLimitPlanner(
+                scheduler: activityScheduler,
+                epochStore: appLimitEpochStore,
+                ownerProvider: appLimitOwnerProvider
+            )
+        }
     }
 
     func execute(
@@ -425,6 +431,48 @@ final class ActionExecutor: @unchecked Sendable {
         }
     }
 
+    func recoverAppLimitOwnerEffect(
+        work: AppLimitOwnerWork,
+        slot: AppLimitVersionSlot,
+        expectedChildID: UUID
+    ) async throws -> AppLimitOwnerEffectResult {
+        guard appLimitOwnerProvider() == expectedChildID,
+              authorizationStatusProvider() == .approved,
+              slot.pendingOwnerWork == work,
+              slot.latestOrderingToken == work.orderingToken,
+              slot.latestKind == work.commandKind,
+              slot.latestPayloadDigest == work.payloadDigest
+        else { throw AppLimitOwnerWorkError.stale }
+
+        switch work.commandKind {
+        case .set:
+            guard let rule = slot.activeRule, rule.id == work.ruleID else {
+                throw AppLimitOwnerWorkError.stale
+            }
+            guard case .armed = makeLimitPlanner().arm(rules: ruleStore.all()),
+                  let current = try appLimitEpochStore.read().slots[work.ruleID],
+                  current.pendingOwnerWork == work,
+                  let provenance = current.armProvenance,
+                  provenance.ruleRevision == work.orderingToken
+            else { throw AppLimitOwnerWorkError.stale }
+            return AppLimitOwnerEffectResult(
+                armID: provenance.armID,
+                source: "app_owner_recovery"
+            )
+        case .clear:
+            let matching = await ActiveLockStore.shared.allCurrent().shields.filter {
+                $0.lastCommandID == work.ruleID && $0.sources.contains(.limit)
+            }
+            for record in matching {
+                await ActiveLockStore.shared.removeSource(.limit, fromRecordKey: record.recordKey)
+            }
+            guard case .armed = makeLimitPlanner().arm(rules: ruleStore.all()) else {
+                throw AppLimitOwnerWorkError.stale
+            }
+            return AppLimitOwnerEffectResult(armID: nil, source: "app_owner_recovery")
+        }
+    }
+
     private func applyPersistedLimitRule(
         _ rule: AppLimitRule,
         command: LockCommand,
@@ -504,11 +552,21 @@ final class ActionExecutor: @unchecked Sendable {
             // Persist whole seconds so JSON Date round-trips remain value-equal.
             // Receipt ordering comes from the token/revision, not subsecond time.
             let appliedAt = Date(timeIntervalSince1970: floor(Date().timeIntervalSince1970))
+            let armID: UUID?
+            switch work.commandKind {
+            case .set:
+                guard let provenance = slot.armProvenance,
+                      provenance.ruleRevision == work.orderingToken
+                else { throw AppLimitOwnerWorkError.stale }
+                armID = provenance.armID
+            case .clear:
+                armID = nil
+            }
             let receipt = AppLimitApplyReceipt(
                 ruleID: work.ruleID,
                 orderingToken: work.orderingToken,
                 commandKind: work.commandKind,
-                armID: nil,
+                armID: armID,
                 source: "app_owner",
                 appliedAt: appliedAt,
                 storeRevision: state.storeRevision + 1
@@ -518,19 +576,13 @@ final class ActionExecutor: @unchecked Sendable {
             state.slots[work.ruleID] = slot
             return receipt
         }
-        guard let readback = try appLimitEpochStore.read().slots[work.ruleID]?.appliedReceipt else {
+        guard try AppLimitProductionComposition.currentAppliedReceipt(
+            ruleID: work.ruleID,
+            store: appLimitEpochStore
+        ) == receipt else {
             throw AppLimitOwnerWorkError.readback
         }
-        guard readback.ruleID == receipt.ruleID,
-              readback.orderingToken == receipt.orderingToken,
-              readback.commandKind == receipt.commandKind,
-              readback.armID == receipt.armID,
-              readback.source == receipt.source,
-              readback.storeRevision == receipt.storeRevision
-        else {
-            throw AppLimitOwnerWorkError.readback
-        }
-        return readback
+        return receipt
     }
 
     /// Map a backend `reset_policy` to whether the limit window recurs daily.

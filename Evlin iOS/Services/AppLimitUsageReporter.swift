@@ -60,6 +60,20 @@ nonisolated enum AppLimitUsageReporterError: Error, Equatable {
 /// the durable effect journal; this adapter never treats status alone as proof
 /// that the backend accepted a sample.
 nonisolated enum AppLimitUsageReporter {
+    static func clientSampleID(for callback: AppLimitValidatedCallback) -> String {
+        let suffix = callback.effectKind == .enforcement
+            ? "budget"
+            : "t\(callback.rawThresholdMinutes)"
+        return [
+            "applimit",
+            callback.rule.id.uuidString.lowercased(),
+            "r\(callback.provenance.ruleRevision)",
+            "a\(callback.provenance.armID.uuidString.lowercased())",
+            callback.provenance.usageDate,
+            suffix,
+        ].joined(separator: ":")
+    }
+
     static func makeBody(
         deviceID: UUID,
         ruleID: UUID,
@@ -69,7 +83,7 @@ nonisolated enum AppLimitUsageReporter {
         thresholdMinutes: Int,
         estimatedMinutes: Int,
         observedAt: String,
-        clientSampleID: String? = nil
+        clientSampleID: String
     ) -> [String: Any] {
         let normalizedRuleID = ruleID.uuidString.lowercased()
         return [
@@ -81,8 +95,7 @@ nonisolated enum AppLimitUsageReporter {
             "threshold_minutes": thresholdMinutes,
             "estimated_minutes": estimatedMinutes,
             "observed_at": observedAt,
-            "client_sample_id": clientSampleID
-                ?? "applimit:\(normalizedRuleID):\(usageDate):t\(thresholdMinutes)",
+            "client_sample_id": clientSampleID,
         ]
     }
 
@@ -96,7 +109,7 @@ nonisolated enum AppLimitUsageReporter {
         thresholdMinutes: Int,
         estimatedMinutes: Int,
         observedAt: Date,
-        clientSampleID: String? = nil
+        clientSampleID: String
     ) throws -> URLRequest {
         let body = makeBody(
             deviceID: deviceID,
@@ -126,15 +139,6 @@ nonisolated enum AppLimitUsageReporter {
         transport: any MeteringHTTPTransport,
         observedAt: Date
     ) async throws -> AppLimitUsageServerResponse {
-        let suffix = callback.effectKind == .enforcement
-            ? "budget"
-            : "t\(callback.rawThresholdMinutes)"
-        let clientSampleID = [
-            "applimit",
-            callback.rule.id.uuidString.lowercased(),
-            callback.provenance.usageDate,
-            suffix,
-        ].joined(separator: ":")
         let request = try request(
             baseURL: baseURL,
             deviceID: deviceID,
@@ -145,7 +149,7 @@ nonisolated enum AppLimitUsageReporter {
             thresholdMinutes: callback.adjustedEstimateMinutes,
             estimatedMinutes: callback.adjustedEstimateMinutes,
             observedAt: observedAt,
-            clientSampleID: clientSampleID
+            clientSampleID: clientSampleID(for: callback)
         )
         let (data, response) = try await transport.data(for: request)
         guard let http = response as? HTTPURLResponse else {

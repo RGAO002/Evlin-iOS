@@ -391,7 +391,6 @@ nonisolated final class AppLimitEpochStore: @unchecked Sendable {
             )
             try validate(readback)
             try checkOwner(expectedOwner, state: readback)
-            guard readback == state else { throw AppLimitEpochStoreError.readbackMismatch }
         } catch {
             if writeAttempted {
                 do {
