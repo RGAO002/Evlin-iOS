@@ -83,6 +83,30 @@ final class AppLimitWakeRecoveryTests: XCTestCase {
         XCTAssertEqual(recoveries, 1)
     }
 
+    func testSilentNotificationRecoversWithoutStandardDefaultsChildID() async {
+        let poller = CommandPoller.shared
+        let originalDevice = poller.childDeviceIDProvider
+        let originalPoll = poller.oneShotPollOverride
+        let originalRecovery = poller.appLimitRecoveryOverride
+        defer {
+            poller.childDeviceIDProvider = originalDevice
+            poller.oneShotPollOverride = originalPoll
+            poller.appLimitRecoveryOverride = originalRecovery
+        }
+        poller.childDeviceIDProvider = { nil }
+        var polls = 0
+        poller.oneShotPollOverride = { _, _ in polls += 1 }
+        var recoveries = 0
+        poller.appLimitRecoveryOverride = { recoveries += 1 }
+
+        await poller.pollOnceForCurrentDevice(
+            recoveryReason: .silentRemoteNotification
+        )
+
+        XCTAssertEqual(polls, 0)
+        XCTAssertEqual(recoveries, 1)
+    }
+
     func testEqualPollDuringRecoveryDoesNotDuplicateEffect() async throws {
         let harness = makeHarness()
         let envelope = setEnvelope(token: 10)

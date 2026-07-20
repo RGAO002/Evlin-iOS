@@ -2,6 +2,72 @@ import Foundation
 import FamilyControls
 import ManagedSettings
 
+nonisolated protocol ActiveLockShieldPersistence {
+    func load() throws -> [String: ShieldRecord]
+    func persist(_ shields: [String: ShieldRecord]) throws
+}
+
+private enum ActiveLockVerifiedPersistenceError: Error {
+    case unavailable
+    case readbackMismatch
+}
+
+nonisolated struct UserDefaultsActiveLockShieldPersistence: ActiveLockShieldPersistence {
+    private let defaults: UserDefaults?
+    private let storageKey: String
+
+    init(defaults: UserDefaults?, storageKey: String = "evlin.shieldRecords") {
+        self.defaults = defaults
+        self.storageKey = storageKey
+    }
+
+    func load() throws -> [String: ShieldRecord] {
+        guard let defaults, defaults.synchronize() else {
+            throw ActiveLockVerifiedPersistenceError.unavailable
+        }
+        guard let data = defaults.data(forKey: storageKey) else { return [:] }
+        let decoded: [String: ShieldRecord]
+        if let json = try? Self.decoder.decode([String: ShieldRecord].self, from: data) {
+            decoded = json
+        } else if let legacy = try? PropertyListDecoder().decode(
+            [String: ShieldRecord].self,
+            from: data
+        ) {
+            decoded = legacy
+        } else {
+            throw ActiveLockVerifiedPersistenceError.readbackMismatch
+        }
+        let normalized = decoded.mapValues { $0.normalizedForCurrentSchema().record }
+        guard normalized.allSatisfy({ $0.key == $0.value.recordKey }) else {
+            throw ActiveLockVerifiedPersistenceError.readbackMismatch
+        }
+        return normalized
+    }
+
+    func persist(_ shields: [String: ShieldRecord]) throws {
+        guard let defaults else { throw ActiveLockVerifiedPersistenceError.unavailable }
+        let data = try Self.encoder.encode(shields)
+        defaults.set(data, forKey: storageKey)
+        guard defaults.synchronize(), defaults.data(forKey: storageKey) == data else {
+            throw ActiveLockVerifiedPersistenceError.readbackMismatch
+        }
+        _ = try load()
+    }
+
+    private static let encoder: JSONEncoder = {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys]
+        return encoder
+    }()
+
+    private static let decoder: JSONDecoder = {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return decoder
+    }()
+}
+
 /// Single source of truth for active shields + blocks on this device.
 /// See spec §3 for full design.
 ///
@@ -34,11 +100,18 @@ actor ActiveLockStore {
     private var blockRecords: [String: BlockRecord] = [:]
     private let store = ManagedSettingsStore()
     private let defaults: UserDefaults?
+    private let shieldPersistence: any ActiveLockShieldPersistence
     private let shieldsKey = "evlin.shieldRecords"
     private let blocksKey = "evlin.blockRecords"
 
-    init(defaults: UserDefaults? = UserDefaults(suiteName: "group.com.evlin.ios")) {
+    init(
+        defaults: UserDefaults? = UserDefaults(suiteName: "group.com.evlin.ios"),
+        shieldPersistence: (any ActiveLockShieldPersistence)? = nil
+    ) {
         self.defaults = defaults
+        self.shieldPersistence = shieldPersistence ?? UserDefaultsActiveLockShieldPersistence(
+            defaults: defaults
+        )
         _ = ActiveLockPersistenceLock.shared.withLock {
             restore()
         }
@@ -261,6 +334,62 @@ actor ActiveLockStore {
             recomputeAndApply()
             return toRemove
         } ?? []
+    }
+
+    /// Removes only `.limit` ownership and commits the complete shield dictionary
+    /// through synchronized byte readback before updating the actor snapshot.
+    @discardableResult
+    func removeLimitSourceVerified(
+        appTokens: Set<ApplicationToken> = [],
+        bundleID: String? = nil,
+        ruleID: UUID? = nil
+    ) throws -> [ShieldRecord] {
+        var result: Result<[ShieldRecord], Error>?
+        guard ActiveLockPersistenceLock.shared.withLock({
+            result = Result {
+                let durable = try shieldPersistence.load()
+                let bidKey = bundleID?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .lowercased()
+                let matching = durable.values.filter { record in
+                    guard record.sources.contains(.limit) else { return false }
+                    if let ruleID, record.lastCommandID == ruleID { return true }
+                    if !appTokens.isEmpty,
+                       !record.appTokens.isDisjoint(with: appTokens) {
+                        return true
+                    }
+                    if let bidKey, !bidKey.isEmpty, record.targetKey == bidKey {
+                        return true
+                    }
+                    return false
+                }
+
+                var updated = durable
+                for record in matching {
+                    updated = ShieldSourceLogic.removingSource(
+                        .limit,
+                        fromRecordKey: record.recordKey,
+                        in: updated
+                    )
+                }
+                if !matching.isEmpty { try shieldPersistence.persist(updated) }
+                let readback = try shieldPersistence.load()
+                guard Set(readback.keys) == Set(updated.keys),
+                      readback.allSatisfy({ $0.key == $0.value.recordKey }),
+                      readback.allSatisfy({ key, record in
+                          record.sources == updated[key]?.sources
+                      })
+                else {
+                    throw ActiveLockVerifiedPersistenceError.readbackMismatch
+                }
+                shieldRecords = readback
+                recomputeAndApply()
+                return matching
+            }
+        }) != nil else {
+            throw ActiveLockVerifiedPersistenceError.unavailable
+        }
+        return try result!.get()
     }
 
     // MARK: - Block API

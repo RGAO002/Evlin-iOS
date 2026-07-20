@@ -353,7 +353,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
                     claim,
                     source: "device_activity_monitor"
                 ) { [self] callback in
-                    AppLimitCallbackLocalLedger.record(callback)
+                    try AppLimitCallbackLocalLedger.record(callback)
                     if callback.effectKind == .enforcement {
                         try applyLimitShield(callback: callback)
                     }

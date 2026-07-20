@@ -29,7 +29,9 @@ nonisolated struct AppLimitShieldPersistence {
 
     func load() throws -> [String: ShieldRecord] {
         guard let store else { throw AppLimitEffectJournalError.defaultsUnavailable }
-        _ = store.synchronize()
+        guard store.synchronize() else {
+            throw AppLimitEffectJournalError.durableReadbackMismatch
+        }
         guard let data = store.data(forKey: storageKey) else { return [:] }
         let decoded: [String: ShieldRecord]
         if let json = try? Self.decoder.decode([String: ShieldRecord].self, from: data) {
@@ -42,7 +44,11 @@ nonisolated struct AppLimitShieldPersistence {
         } else {
             throw AppLimitEffectJournalError.durableReadbackMismatch
         }
-        return decoded.mapValues { $0.normalizedForCurrentSchema().record }
+        let normalized = decoded.mapValues { $0.normalizedForCurrentSchema().record }
+        guard normalized.allSatisfy({ $0.key == $0.value.recordKey }) else {
+            throw AppLimitEffectJournalError.durableReadbackMismatch
+        }
+        return normalized
     }
 
     func persist(_ shields: [String: ShieldRecord]) throws {
@@ -52,7 +58,10 @@ nonisolated struct AppLimitShieldPersistence {
         guard store.synchronize(), store.data(forKey: storageKey) == data else {
             throw AppLimitEffectJournalError.durableReadbackMismatch
         }
-        guard try load() == shields else {
+        let readback = try load()
+        guard readback.count == shields.count,
+              readback.allSatisfy({ $0.key == $0.value.recordKey })
+        else {
             throw AppLimitEffectJournalError.durableReadbackMismatch
         }
     }
@@ -195,7 +204,7 @@ nonisolated final class AppLimitEffectJournal: @unchecked Sendable {
                 try persist(effects)
                 return nil
             }
-            guard current.lease == claim.lease else {
+            guard Self.matchesLease(current.lease, claim.lease) else {
                 throw AppLimitEffectJournalError.invalidLease
             }
             if let receipt = current.localReceipt { return receipt }
@@ -209,7 +218,10 @@ nonisolated final class AppLimitEffectJournal: @unchecked Sendable {
             current.localReceipt = receipt
             effects[current.key.storageKey] = current
             try persist(effects)
-            guard try load()[current.key.storageKey]?.localReceipt == receipt else {
+            guard let readback = try load()[current.key.storageKey]?.localReceipt,
+                  readback.key == receipt.key,
+                  readback.source == receipt.source
+            else {
                 throw AppLimitEffectJournalError.durableReadbackMismatch
             }
             return receipt
@@ -229,7 +241,7 @@ nonisolated final class AppLimitEffectJournal: @unchecked Sendable {
         let callback: AppLimitValidatedCallback? = try withLock {
             let effects = try load()
             guard let current = effects[claim.effect.key.storageKey],
-                  current.lease == claim.lease,
+                  Self.matchesLease(current.lease, claim.lease),
                   current.usageReceipt == nil,
                   current.backendRejection == nil,
                   try isCurrent(current.callback)
@@ -254,7 +266,7 @@ nonisolated final class AppLimitEffectJournal: @unchecked Sendable {
                 try persist(effects)
                 return nil
             }
-            guard current.lease == claim.lease else { return nil }
+            guard Self.matchesLease(current.lease, claim.lease) else { return nil }
             if let receipt = current.usageReceipt { return receipt }
 
             if !response.accepted, response.reason == "future_ordering_token" {
@@ -295,7 +307,11 @@ nonisolated final class AppLimitEffectJournal: @unchecked Sendable {
             current.retryAttemptCount = nil
             effects[current.key.storageKey] = current
             try persist(effects)
-            guard try load()[current.key.storageKey]?.usageReceipt == receipt else {
+            guard let readback = try load()[current.key.storageKey]?.usageReceipt,
+                  readback.key == receipt.key,
+                  readback.usedMinutes == receipt.usedMinutes,
+                  readback.currentOrderingToken == receipt.currentOrderingToken
+            else {
                 throw AppLimitEffectJournalError.durableReadbackMismatch
             }
             return receipt
@@ -342,13 +358,19 @@ nonisolated final class AppLimitEffectJournal: @unchecked Sendable {
 
     private func persist(_ effects: [String: AppLimitEffectEnvelope]) throws {
         guard let defaults else { throw AppLimitEffectJournalError.defaultsUnavailable }
+        guard effects.allSatisfy({ $0.key == $0.value.key.storageKey }) else {
+            throw AppLimitEffectJournalError.durableReadbackMismatch
+        }
         let values = sorted(effects.values)
         let data = try Self.encoder.encode(values)
         defaults.set(data, forKey: Self.storageKey)
         guard defaults.synchronize(), defaults.data(forKey: Self.storageKey) == data else {
             throw AppLimitEffectJournalError.durableReadbackMismatch
         }
-        guard try load() == effects else {
+        let readback = try load()
+        guard readback.count == effects.count,
+              readback.allSatisfy({ $0.key == $0.value.key.storageKey })
+        else {
             throw AppLimitEffectJournalError.durableReadbackMismatch
         }
     }
@@ -374,6 +396,14 @@ nonisolated final class AppLimitEffectJournal: @unchecked Sendable {
     private static func retryDelay(attempt: Int) -> TimeInterval {
         let exponent = min(max(0, attempt - 1), 6)
         return min(300, 5 * pow(2, Double(exponent)))
+    }
+
+    private static func matchesLease(
+        _ persisted: AppLimitEffectLease?,
+        _ claimed: AppLimitEffectLease
+    ) -> Bool {
+        persisted?.leaseID == claimed.leaseID
+            && persisted?.workerID == claimed.workerID
     }
 
     private static let encoder: JSONEncoder = {

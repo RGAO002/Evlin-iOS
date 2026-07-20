@@ -149,6 +149,13 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
         case lockUnavailable
     }
 
+    enum AppLimitUsagePersistenceError: Error {
+        case unavailable
+        case staleUsageDate
+        case synchronizeFailed
+        case readbackMismatch
+    }
+
     private let suiteName: String
     private let defaults: UserDefaults?
     private let verificationDefaultsFactory: (String) -> UserDefaults?
@@ -1006,6 +1013,37 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
         let current = appLimitReportedMinutes(ruleID: ruleID, usageDate: usageDate)
         defaults?.set(max(current, usedMinutes), forKey: key)
         defaults?.synchronize()
+    }
+
+    func recordAppLimitUsageVerified(
+        ruleID: UUID,
+        usageDate: String,
+        usedMinutes: Int
+    ) throws {
+        guard prepareAppLimitUsageWrite(ruleID: ruleID, usageDate: usageDate) else {
+            throw AppLimitUsagePersistenceError.staleUsageDate
+        }
+        guard let defaults else {
+            throw AppLimitUsagePersistenceError.unavailable
+        }
+        let key = appLimitUsageKey(
+            prefix: appLimitReportedPrefix,
+            ruleID: ruleID,
+            usageDate: usageDate
+        )
+        let expected = max(appLimitReportedMinutes(
+            ruleID: ruleID,
+            usageDate: usageDate
+        ), max(0, usedMinutes))
+        defaults.set(expected, forKey: key)
+        guard synchronizeDefaults(defaults) else {
+            throw AppLimitUsagePersistenceError.synchronizeFailed
+        }
+        guard let verificationDefaults = verificationDefaultsFactory(suiteName),
+              defaultsValuesEqual(verificationDefaults.object(forKey: key), expected)
+        else {
+            throw AppLimitUsagePersistenceError.readbackMismatch
+        }
     }
 
     // MARK: - Reset

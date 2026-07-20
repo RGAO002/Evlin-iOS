@@ -506,6 +506,9 @@ final class CommandPoller {
                 CommandDeliveryDiagnostics.keyOneShotPoll,
                 "skipped no_child_device_id"
             )
+            if recoveryReason == .silentRemoteNotification {
+                await recoverAppLimits(after: recoveryReason)
+            }
             return
         }
         let api = currentAPIClient ?? oneShotAPIClientFactory()

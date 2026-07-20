@@ -3,6 +3,114 @@ import XCTest
 @testable import Evlin_iOS
 
 final class AppLimitEffectJournalTests: XCTestCase {
+    func testShieldPersistenceAcceptsByteExactFractionalDateRoundTrip() throws {
+        let store = ShieldPersistenceStoreStub()
+        let persistence = AppLimitShieldPersistence(
+            store: store,
+            storageKey: shieldStorageKey
+        )
+        let record = ShieldRecord(
+            recordKey: "exactApp:com.example.focus",
+            tier: .exactApp,
+            targetKey: "com.example.focus",
+            displayName: "Focus",
+            lastCommandID: UUID(),
+            appTokens: [],
+            categoryTokens: [],
+            webDomainTokens: [],
+            appliesToAll: false,
+            issuedAt: fractionalDate,
+            expiresAt: fractionalDate.addingTimeInterval(60.25),
+            originalRequest: "limit reached",
+            targetChildID: UUID(),
+            sources: [.limit]
+        )
+
+        try persistence.persist([record.recordKey: record])
+
+        let readback = try persistence.load()
+        XCTAssertEqual(Set(readback.keys), [record.recordKey])
+        XCTAssertEqual(readback[record.recordKey]?.recordKey, record.recordKey)
+        XCTAssertNotNil(store.data(forKey: shieldStorageKey))
+    }
+
+    func testJournalAcceptsFractionalDatesThroughLeaseLocalAndUsageReceipts() async throws {
+        let harness = try makeHarness()
+        let callback = try acceptedCallback(harness.fixture, threshold: 5)
+
+        let effect = try harness.journal.enqueue(callback, now: fractionalDate)
+        let claim = try XCTUnwrap(harness.journal.claimNext(
+            workerID: workerA,
+            now: fractionalDate.addingTimeInterval(1.25),
+            leaseDuration: 30.5
+        ))
+        XCTAssertEqual(
+            try harness.journal.effect(for: effect.key)?.lease?.leaseID,
+            claim.lease.leaseID
+        )
+        let localReceipt = try harness.journal.applyLocal(
+            claim,
+            source: "fractional_date_test",
+            appliedAt: fractionalDate.addingTimeInterval(2.5)
+        ) { _ in }
+        let usageReceipt = try await harness.journal.submitUsage(
+            claim,
+            baseURL: URL(string: "https://example.invalid")!,
+            deviceID: harness.fixture.owner,
+            transport: UsageTransportStub(
+                statusCode: 200,
+                response: .accepted(
+                    ruleID: harness.fixture.rule.id,
+                    usageDate: harness.fixture.usageDate,
+                    usedMinutes: 5,
+                    currentOrderingToken: 7
+                )
+            ),
+            appliedAt: fractionalDate.addingTimeInterval(3.75)
+        )
+
+        let readback = try XCTUnwrap(harness.journal.effect(for: effect.key))
+        XCTAssertNil(readback.lease)
+        XCTAssertEqual(readback.localReceipt?.key, localReceipt?.key)
+        XCTAssertEqual(readback.usageReceipt?.key, usageReceipt?.key)
+        XCTAssertNil(readback.retryNotBefore)
+    }
+
+    func testJournalAcceptsFractionalDateRetryState() async throws {
+        let harness = try makeHarness()
+        _ = try harness.journal.enqueue(
+            acceptedCallback(harness.fixture, threshold: 5),
+            now: fractionalDate
+        )
+        let claim = try XCTUnwrap(harness.journal.claimNext(
+            workerID: workerA,
+            now: fractionalDate.addingTimeInterval(1.25),
+            leaseDuration: 30.5
+        ))
+
+        let receipt = try await harness.journal.submitUsage(
+            claim,
+            baseURL: URL(string: "https://example.invalid")!,
+            deviceID: harness.fixture.owner,
+            transport: UsageTransportStub(
+                statusCode: 200,
+                response: .rejected(
+                    ruleID: harness.fixture.rule.id,
+                    usageDate: harness.fixture.usageDate,
+                    currentOrderingToken: 6,
+                    reason: "future_ordering_token"
+                )
+            ),
+            appliedAt: fractionalDate.addingTimeInterval(2.5)
+        )
+
+        XCTAssertNil(receipt)
+        let readback = try XCTUnwrap(harness.journal.effect(for: claim.effect.key))
+        XCTAssertNil(readback.lease)
+        XCTAssertEqual(readback.retryAttemptCount, 1)
+        XCTAssertNotNil(readback.retryNotBefore)
+    }
+
     func testAcceptedCallbackIsDurableBeforeClaimAndDuplicateEnqueuesOnce() throws {
         let harness = try makeHarness()
         let callback = try acceptedCallback(harness.fixture, threshold: 5)
@@ -206,6 +314,58 @@ final class AppLimitEffectJournalTests: XCTestCase {
             try persistence.persist(shields)
         })
         XCTAssertNil(try harness.journal.effect(for: claim.effect.key)?.localReceipt)
+    }
+
+    func testLedgerUnavailableSynchronizeFailureOrStaleReadbackNeverRecordsLocalReceipt() throws {
+        for failure in LocalLedgerFailure.allCases {
+            let harness = try makeHarness()
+            let callback = try acceptedCallback(harness.fixture, threshold: 5)
+            let writerSuite = "AppLimitLocalLedger.writer.\(UUID().uuidString)"
+            let staleSuite = "AppLimitLocalLedger.stale.\(UUID().uuidString)"
+            let writerDefaults = try XCTUnwrap(UserDefaults(suiteName: writerSuite))
+            writerDefaults.removePersistentDomain(forName: writerSuite)
+            defer {
+                writerDefaults.removePersistentDomain(forName: writerSuite)
+                UserDefaults(suiteName: staleSuite)?.removePersistentDomain(forName: staleSuite)
+            }
+            let usageStore: EarnedTimeStore
+            switch failure {
+            case .unavailable:
+                usageStore = EarnedTimeStore(
+                    suiteName: writerSuite,
+                    defaultsFactory: { _ in nil },
+                    verificationDefaultsFactory: { _ in nil }
+                )
+            case .synchronize:
+                usageStore = EarnedTimeStore(
+                    suiteName: writerSuite,
+                    defaultsFactory: { _ in writerDefaults },
+                    verificationDefaultsFactory: { _ in writerDefaults },
+                    synchronizeDefaults: { _ in false }
+                )
+            case .staleReadback:
+                usageStore = EarnedTimeStore(
+                    suiteName: writerSuite,
+                    defaultsFactory: { _ in writerDefaults },
+                    verificationDefaultsFactory: { _ in UserDefaults(suiteName: staleSuite) }
+                )
+            }
+            _ = try harness.journal.enqueue(callback, now: referenceDate)
+            let claim = try XCTUnwrap(harness.journal.claimNext(
+                workerID: workerA,
+                now: referenceDate,
+                leaseDuration: 30
+            ))
+
+            XCTAssertThrowsError(try harness.journal.applyLocal(
+                claim,
+                source: "ledger_failure_test",
+                appliedAt: referenceDate
+            ) { callback in
+                try AppLimitCallbackLocalLedger.record(callback, store: usageStore)
+            })
+            XCTAssertNil(try harness.journal.effect(for: claim.effect.key)?.localReceipt)
+        }
     }
 
     func testNewerClearBetweenClaimAndShieldPreventsOldMutationAndReceipt() throws {
@@ -603,7 +763,7 @@ final class AppLimitEffectJournalTests: XCTestCase {
         usageStore: EarnedTimeStore,
         shieldPersistence: AppLimitShieldPersistence
     ) throws {
-        AppLimitCallbackLocalLedger.record(callback, store: usageStore)
+        try AppLimitCallbackLocalLedger.record(callback, store: usageStore)
         guard callback.effectKind == .enforcement else { return }
         let updated = LimitShieldLogic.applyingLimit(
             to: try shieldPersistence.load(),
@@ -725,6 +885,12 @@ private enum JournalTestError: Error {
     case transportFailure
 }
 
+private enum LocalLedgerFailure: CaseIterable {
+    case unavailable
+    case synchronize
+    case staleReadback
+}
+
 private final class ShieldPersistenceStoreStub: AppLimitShieldPersistenceStore {
     var synchronizeResult = true
     var serveStaleReadback = false
@@ -808,4 +974,7 @@ private actor RawUsageTransportStub: MeteringHTTPTransport {
 private let workerA = UUID(uuidString: "50000000-0000-0000-0000-000000000001")!
 private let workerB = UUID(uuidString: "50000000-0000-0000-0000-000000000002")!
 private let referenceDate = Date(timeIntervalSince1970: 1_721_174_400)
+private let fractionalDate = Date(
+    timeIntervalSinceReferenceDate: Double(bitPattern: 4_740_046_264_882_201_161)
+)
 private let shieldStorageKey = "evlin.shieldRecords"

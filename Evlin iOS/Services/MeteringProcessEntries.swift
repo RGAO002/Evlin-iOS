@@ -214,7 +214,7 @@ final class AppLimitEffectRecoveryDriver {
                     source: "app_lifecycle_recovery",
                     appliedAt: now
                 ) { [usageStore, shieldPersistence] callback in
-                    AppLimitCallbackLocalLedger.record(callback, store: usageStore)
+                    try AppLimitCallbackLocalLedger.record(callback, store: usageStore)
                     guard callback.effectKind == .enforcement else { return }
                     let updated = LimitShieldLogic.applyingLimit(
                         to: try shieldPersistence.load(),

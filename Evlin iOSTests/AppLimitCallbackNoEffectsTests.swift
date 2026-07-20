@@ -202,7 +202,7 @@ final class AppLimitCallbackNoEffectsTests: XCTestCase {
             usageCountingAllowed: true
         ) { callback in
             acceptedEstimate = callback.adjustedEstimateMinutes
-            AppLimitCallbackLocalLedger.record(callback, store: usageStore)
+            try AppLimitCallbackLocalLedger.record(callback, store: usageStore)
             shields = LimitShieldLogic.applyingLimit(
                 to: shields,
                 rule: callback.rule,

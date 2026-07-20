@@ -24,8 +24,8 @@ nonisolated enum AppLimitCallbackLocalLedger {
     static func record(
         _ callback: AppLimitValidatedCallback,
         store: EarnedTimeStore = .shared
-    ) {
-        store.recordAppLimitUsage(
+    ) throws {
+        try store.recordAppLimitUsageVerified(
             ruleID: callback.rule.id,
             usageDate: callback.provenance.usageDate,
             usedMinutes: callback.adjustedEstimateMinutes

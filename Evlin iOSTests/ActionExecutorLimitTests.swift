@@ -932,7 +932,7 @@ final class ActionExecutorLimitTests: XCTestCase {
             expiresAt: nil,
             originalRequest: "limit",
             targetChildID: owner,
-            sources: [.limit]
+            sources: [.limit, .manual, .earnedTime, .taskPause]
         )
         let manualShield = ShieldRecord(
             recordKey: ShieldRecord.makeRecordKey(tier: .category, targetKey: "manual-focus"),
@@ -1006,8 +1006,257 @@ final class ActionExecutorLimitTests: XCTestCase {
             result.receipt
         )
         let shields = await ActiveLockStore.shared.allCurrent().shields
-        XCTAssertFalse(shields.contains { $0.recordKey == limitShield.recordKey })
+        XCTAssertEqual(
+            shields.first { $0.recordKey == limitShield.recordKey }?.sources,
+            [.manual, .earnedTime, .taskPause]
+        )
         XCTAssertTrue(shields.contains { $0.recordKey == manualShield.recordKey })
+    }
+
+    func testAuthorizedClearPersistenceFailuresNeverConfirmOrCommitReceipt() async throws {
+        for failure in OwnerClearPersistenceStoreStub.Failure.allCases {
+            let harness = try makeFailingClearHarness(failure: failure)
+
+            let result = await harness.executor.executeAppLimitOwnerWork(
+                harness.command,
+                envelope: harness.envelope,
+                expectedChildID: harness.owner,
+                identityIsCurrent: { $0 == harness.owner }
+            )
+
+            XCTAssertEqual(result.result, .failed(.execution("lock_store_unavailable")))
+            XCTAssertNil(result.receipt)
+            let slot = try XCTUnwrap(harness.epochStore.read().slots[harness.work.ruleID])
+            XCTAssertEqual(slot.pendingOwnerWork, harness.work)
+            XCTAssertNil(slot.appliedReceipt)
+        }
+    }
+
+    func testRecoveryClearPersistenceFailureNeverCommitsReceiptOrConfirms() async throws {
+        let harness = try makeFailingClearHarness(failure: .staleReadback)
+        let readback = OwnerClearReadbackRecorder()
+        let driver = AppLimitOwnerRecoveryDriver(
+            store: harness.epochStore,
+            effectPort: OwnerClearExecutorEffectPort(
+                executor: harness.executor,
+                owner: harness.owner
+            ),
+            readbackPort: readback
+        )
+
+        await driver.recover(ownerChildDeviceID: harness.owner)
+
+        let slot = try XCTUnwrap(harness.epochStore.read().slots[harness.work.ruleID])
+        XCTAssertEqual(slot.pendingOwnerWork, harness.work)
+        XCTAssertNil(slot.appliedReceipt)
+        let confirmationCount = await readback.count
+        XCTAssertEqual(confirmationCount, 0)
+    }
+
+    private func makeFailingClearHarness(
+        failure: OwnerClearPersistenceStoreStub.Failure
+    ) throws -> OwnerClearHarness {
+        let owner = UUID()
+        let ruleID = UUID()
+        let commandID = UUID()
+        let bundleID = "com.example.persistence-failure"
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "authorized-limit-clear-failure-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let epochStore = AppLimitEpochStore(
+            fileURL: directory.appendingPathComponent("epoch.json"),
+            lock: ActiveLockPersistenceLock.shared,
+            ownerProvider: { owner },
+            legacyDefaults: nil
+        )
+        let work = AppLimitOwnerWork(
+            workID: UUID(),
+            commandID: commandID,
+            ruleID: ruleID,
+            orderingToken: 11,
+            commandKind: .clear,
+            payloadDigest: "clear-11",
+            source: .poll,
+            createdAt: Date(timeIntervalSince1970: 1_700_000_100)
+        )
+        _ = try epochStore.transaction(source: .poll, expectedOwner: owner) { state in
+            state.slots[ruleID] = AppLimitVersionSlot(
+                ruleID: ruleID,
+                latestOrderingToken: 11,
+                latestKind: .clear,
+                latestPayloadDigest: "clear-11",
+                activeRule: nil,
+                clearTombstone: AppLimitClearTombstone(
+                    ruleID: ruleID,
+                    orderingToken: 11,
+                    payloadDigest: "clear-11",
+                    source: .poll,
+                    clearedAt: Date(timeIntervalSince1970: 1_700_000_100)
+                ),
+                pendingOwnerWork: work,
+                appliedReceipt: nil
+            )
+        }
+        let persistenceStore = OwnerClearPersistenceStoreStub()
+        let persistence = AppLimitShieldPersistence(store: persistenceStore)
+        let record = ShieldRecord(
+            recordKey: ShieldRecord.makeRecordKey(tier: .exactApp, targetKey: bundleID),
+            tier: .exactApp,
+            targetKey: bundleID,
+            displayName: "Persistence failure",
+            lastCommandID: ruleID,
+            appTokens: [],
+            categoryTokens: [],
+            webDomainTokens: [],
+            appliesToAll: false,
+            issuedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            expiresAt: nil,
+            originalRequest: "limit",
+            targetChildID: owner,
+            sources: [.limit, .manual]
+        )
+        try persistence.persist([record.recordKey: record])
+        persistenceStore.failure = failure
+        let lockStore = ActiveLockStore(
+            defaults: nil,
+            shieldPersistence: persistenceStore
+        )
+        let ruleStore = AppLimitRuleStore(
+            epochStore: epochStore,
+            expectedOwnerProvider: { owner }
+        )
+        let executor = ActionExecutor(
+            activityScheduler: LimitSchedulerSpy(),
+            authorizationStatusProvider: { .approved },
+            ruleStore: ruleStore,
+            appLimitEpochStore: epochStore,
+            appLimitOwnerProvider: { owner },
+            appLimitLockStore: lockStore
+        )
+        let envelope = AppLimitCommandEnvelope(
+            commandID: commandID,
+            ruleID: ruleID,
+            orderingToken: 11,
+            kind: .clear,
+            payloadDigest: "clear-11",
+            receivedAt: Date(timeIntervalSince1970: 1_700_000_100),
+            source: .poll,
+            rule: nil
+        )
+        let command = LockCommand(
+            id: commandID,
+            action: .clearLimit,
+            tier: .exactApp,
+            target: CommandTarget(
+                bundleID: bundleID,
+                originalRequest: "clear persistence failure",
+                targetDisplay: "Persistence failure",
+                targetChildID: owner
+            ),
+            durationMinutes: nil,
+            issuedAt: envelope.receivedAt,
+            clear: ClearLimit(
+                ruleId: ruleID,
+                orderingToken: 11,
+                reason: "parent_clear",
+                updatedAt: envelope.receivedAt
+            )
+        )
+        return OwnerClearHarness(
+            owner: owner,
+            epochStore: epochStore,
+            work: work,
+            executor: executor,
+            envelope: envelope,
+            command: command
+        )
+    }
+}
+
+private struct OwnerClearHarness {
+    let owner: UUID
+    let epochStore: AppLimitEpochStore
+    let work: AppLimitOwnerWork
+    let executor: ActionExecutor
+    let envelope: AppLimitCommandEnvelope
+    let command: LockCommand
+}
+
+private final class OwnerClearPersistenceStoreStub:
+    AppLimitShieldPersistenceStore,
+    ActiveLockShieldPersistence
+{
+    enum Failure: CaseIterable {
+        case reload
+        case write
+        case staleReadback
+    }
+
+    var failure: Failure? {
+        didSet {
+            staleData = persistedData
+            didWrite = false
+        }
+    }
+    private var persistedData: Data?
+    private var staleData: Data?
+    private var didWrite = false
+
+    func data(forKey defaultName: String) -> Data? {
+        if failure == .staleReadback, didWrite { return staleData }
+        return persistedData
+    }
+
+    func set(_ value: Any?, forKey defaultName: String) {
+        persistedData = value as? Data
+        didWrite = true
+    }
+
+    func synchronize() -> Bool {
+        if failure == .reload, !didWrite { return false }
+        if failure == .write, didWrite { return false }
+        return true
+    }
+
+    func load() throws -> [String: ShieldRecord] {
+        try AppLimitShieldPersistence(store: self).load()
+    }
+
+    func persist(_ shields: [String: ShieldRecord]) throws {
+        try AppLimitShieldPersistence(store: self).persist(shields)
+    }
+}
+
+@MainActor
+private final class OwnerClearExecutorEffectPort: AppLimitOwnerEffectPort, @unchecked Sendable {
+    let executor: ActionExecutor
+    let owner: UUID
+
+    init(executor: ActionExecutor, owner: UUID) {
+        self.executor = executor
+        self.owner = owner
+    }
+
+    func apply(
+        work: AppLimitOwnerWork,
+        slot: AppLimitVersionSlot
+    ) async throws -> AppLimitOwnerEffectResult {
+        try await executor.recoverAppLimitOwnerEffect(
+            work: work,
+            slot: slot,
+            expectedChildID: owner
+        )
+    }
+}
+
+private actor OwnerClearReadbackRecorder: AppLimitOwnerReadbackPort {
+    private(set) var count = 0
+
+    func confirm(commandID: UUID, receipt: AppLimitApplyReceipt) async throws {
+        count += 1
     }
 }
 

@@ -194,6 +194,7 @@ final class ActionExecutor: @unchecked Sendable {
     private let makeLimitPlanner: @Sendable () -> AppLimitPlanner
     private let appLimitEpochStore: AppLimitEpochStore
     private let appLimitOwnerProvider: @Sendable () -> UUID?
+    private let appLimitLockStore: ActiveLockStore
 
     /// iOS DeviceActivitySchedule hard minimum.
     static let minScheduleMinutes: Int = 15
@@ -209,6 +210,7 @@ final class ActionExecutor: @unchecked Sendable {
         appLimitEpochStore: AppLimitEpochStore = .shared,
         appLimitOwnerProvider: @escaping @Sendable () -> UUID? = MeteringOwnerMirror.current,
         makeLimitPlanner: (@Sendable () -> AppLimitPlanner)? = nil,
+        appLimitLockStore: ActiveLockStore = .shared,
         beforeUnshieldSourceMutation: @escaping () -> Void = {},
         beforeMutation: @escaping () async -> Void = {},
         afterMutationCheckpoint: @escaping (MutationCheckpoint) -> Void = { _ in }
@@ -222,6 +224,7 @@ final class ActionExecutor: @unchecked Sendable {
         self.ruleStore = ruleStore
         self.appLimitEpochStore = appLimitEpochStore
         self.appLimitOwnerProvider = appLimitOwnerProvider
+        self.appLimitLockStore = appLimitLockStore
         self.beforeUnshieldSourceMutation = beforeUnshieldSourceMutation
         self.beforeMutation = beforeMutation
         self.afterMutationCheckpoint = afterMutationCheckpoint
@@ -460,12 +463,7 @@ final class ActionExecutor: @unchecked Sendable {
                 source: "app_owner_recovery"
             )
         case .clear:
-            let matching = await ActiveLockStore.shared.allCurrent().shields.filter {
-                $0.lastCommandID == work.ruleID && $0.sources.contains(.limit)
-            }
-            for record in matching {
-                await ActiveLockStore.shared.removeSource(.limit, fromRecordKey: record.recordKey)
-            }
+            _ = try await appLimitLockStore.removeLimitSourceVerified(ruleID: work.ruleID)
             guard case .armed = makeLimitPlanner().arm(rules: ruleStore.all()) else {
                 throw AppLimitOwnerWorkError.stale
             }
@@ -522,10 +520,14 @@ final class ActionExecutor: @unchecked Sendable {
     ) async -> AckResult {
         let appToken = CatalogCommandTokenData.decodedApplicationToken(from: command.target)
         guard await prepareForMutation(identity) else { return Self.staleIdentityResult }
-        _ = await ActiveLockStore.shared.removeLimitShields(
-            appTokens: appToken.map { Set([$0]) } ?? [],
-            bundleID: command.target.bundleID
-        )
+        do {
+            _ = try await appLimitLockStore.removeLimitSourceVerified(
+                appTokens: appToken.map { Set([$0]) } ?? [],
+                bundleID: command.target.bundleID
+            )
+        } catch {
+            return .failed(.execution("lock_store_unavailable"))
+        }
         guard identity.isCurrent else { return Self.staleIdentityResult }
         _ = makeLimitPlanner().arm(rules: ruleStore.all())
         afterMutationCheckpoint(.clearLimitRearmed)
