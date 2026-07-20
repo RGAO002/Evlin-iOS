@@ -355,7 +355,6 @@ actor ActiveLockStore {
                     guard record.sources.contains(.limit) else { return false }
                     if let ruleID {
                         return record.limitRuleIDs.contains(ruleID)
-                            || (record.limitRuleIDs.isEmpty && record.lastCommandID == ruleID)
                     }
                     if !appTokens.isEmpty,
                        !record.appTokens.isDisjoint(with: appTokens) {

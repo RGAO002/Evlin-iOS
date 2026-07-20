@@ -1160,10 +1160,10 @@ final class ActionExecutorLimitTests: XCTestCase {
     }
 
     func testRecoveryClearDoesNotConfirmUnattributedLimitState() async throws {
-        let harness = try makeClearHarness(
-            failure: nil,
-            recordLastCommandID: UUID()
-        )
+        // A legacy record can retain the same UUID in `lastCommandID`, but it
+        // has no durable per-limit provenance. Recovery must not guess that it
+        // belongs to this clear work item.
+        let harness = try makeClearHarness(failure: nil)
         let readback = OwnerClearReadbackRecorder()
         let driver = AppLimitOwnerRecoveryDriver(
             store: harness.epochStore,

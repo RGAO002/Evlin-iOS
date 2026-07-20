@@ -854,3 +854,33 @@ Residual concern: unsigned simulator runs continue to emit existing App Group
 and ManagedSettings diagnostics. They did not affect the selected tests; no
 push, deployment, TestFlight, Render, production database, worktree, or nested
 agent was used.
+
+### Round 3 Follow-up: Fail Closed For Legacy Limit Provenance
+
+Independent review found one remaining unsafe compatibility fallback in
+`ActiveLockStore.removeLimitSourceVerified`: an old record with an empty
+`limitRuleIDs` set was treated as belonging to a rule when its historical
+`lastCommandID` happened to equal that rule ID. That value is not provenance:
+the same record can also contain manual, earned, or task-pause ownership.
+
+The negative recovery test was changed to exercise the dangerous equal-value
+case. Before the production change it was RED with four expected assertions:
+recovery removed the lock, wrote a receipt, and confirmed the clear. The
+fallback is now removed. Recovery only clears a `.limit` source when its
+durable `limitRuleIDs` contains the target rule. Empty legacy provenance stays
+pending and produces neither receipt nor confirmation.
+
+The post-fix focused verification passed 2/2 on iPhone 17 Pro, iOS 26.3.1:
+
+```bash
+SENTRY_SKIP_DSYM_UPLOAD=1 xcodebuild test CODE_SIGNING_ALLOWED=NO \
+  -disableAutomaticPackageResolution -project 'Evlin iOS.xcodeproj' \
+  -scheme 'Evlin iOS' \
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3.1' \
+  -derivedDataPath /tmp/EvlinTask14Round3 -parallel-testing-enabled NO \
+  -only-testing:'Evlin iOSTests/ActionExecutorLimitTests/testRecoveryClearRemovesDirectSetLimitFromHistoricalMixedSourceRecord' \
+  -only-testing:'Evlin iOSTests/ActionExecutorLimitTests/testRecoveryClearDoesNotConfirmUnattributedLimitState'
+```
+
+The result bundle is
+`/tmp/EvlinTask14Round3/Logs/Test/Test-Evlin iOS-2026.07.20_03-45-10--0400.xcresult`.
