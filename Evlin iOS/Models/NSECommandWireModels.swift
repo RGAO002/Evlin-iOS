@@ -255,4 +255,14 @@ nonisolated enum NSECommandWireDecoder {
         let dto = try JSONDecoder().decode(NSEWireCommand.self, from: data)
         return NSEWireCommand.lockCommand(from: dto)
     }
+
+    static func decodeAppLimitEnvelope(
+        _ data: Data,
+        source: AppLimitCommandSource = .notificationServiceExtension
+    ) throws -> AppLimitCommandEnvelope {
+        try AppLimitProductionComposition.envelope(
+            from: decode(data),
+            source: source
+        )
+    }
 }

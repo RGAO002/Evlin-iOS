@@ -13,7 +13,8 @@ import Foundation
 ///   1. reads `command_id` from `userInfo["evlin"]`,
 ///   2. GETs `/child/commands/{id}?device_id=<this device>` — auth is pure
 ///      device-ownership, no bearer (see backend `get_command_scoped`),
-///   3. decodes the command's INLINE catalog token(s) and applies the lock
+///   3. persists app-limit set/clear desired state for the main-app owner, or
+///      decodes INLINE catalog token(s) and applies non-limit lock commands
 ///      through the shared `ActiveLockStore`, whose `recomputeAndApply()` writes
 ///      the DEFAULT `ManagedSettingsStore` — the exact store + App Group state
 ///      the main app uses — so the lock survives and reconciles with the app,
@@ -87,6 +88,15 @@ final class NotificationService: UNNotificationServiceExtension {
             NSEConfig.log("fetch failed cmd=\(commandID)")
             return
         }
+        if command.action == .setLimit || command.action == .clearLimit {
+            await persistAppLimit(
+                command,
+                baseURL: baseURL,
+                deviceID: deviceID,
+                commandID: commandID
+            )
+            return
+        }
         guard let outcome = await NSELockApplier.apply(
             command,
             fetchedDeviceID: deviceID
@@ -96,6 +106,52 @@ final class NotificationService: UNNotificationServiceExtension {
         }
         await NSENetwork.ack(baseURL: baseURL, deviceID: deviceID, commandID: commandID, outcome: outcome)
         NSEConfig.log("applied+acked cmd=\(commandID) verb=\(outcome.verb) name=\(outcome.displayName)")
+    }
+
+    private func persistAppLimit(
+        _ command: LockCommand,
+        baseURL: URL,
+        deviceID: UUID,
+        commandID: UUID
+    ) async {
+        let envelope: AppLimitCommandEnvelope
+        do {
+            envelope = try AppLimitProductionComposition.envelope(
+                from: command,
+                source: .notificationServiceExtension
+            )
+        } catch {
+            NSEConfig.log("limit envelope rejected cmd=\(commandID)")
+            return
+        }
+
+        let delivery = await AppLimitProductionComposition.deliverNSE(
+            envelope: envelope,
+            coordinator: AppLimitCommandCoordinator(),
+            now: Date(),
+            postAck: { ack in
+                try await NSENetwork.ack(
+                    baseURL: baseURL,
+                    deviceID: deviceID,
+                    commandID: commandID,
+                    status: ack.status,
+                    detail: ack.detail
+                )
+            },
+            requestOwnerWake: {
+                // The backend queues a silent command wake with this same alert.
+                // Keeping the ack pending leaves the durable owner work pollable.
+                NSEConfig.log("limit owner wake requested cmd=\(commandID)")
+            }
+        )
+        guard let delivery else {
+            NSEConfig.log("limit persistence failed cmd=\(commandID)")
+            return
+        }
+        bestAttempt?.body = delivery.alertBody
+        NSEConfig.log(
+            "limit persisted cmd=\(commandID) disposition=\(delivery.ack.disposition) ack=\(delivery.ackSucceeded)"
+        )
     }
 }
 
@@ -166,9 +222,8 @@ enum NSELockApplier {
             // Not a lock-state change — leave for the app.
             return nil
         case .setLimit, .clearLimit:
-            // TODO(P6): per-app limit enforcement lives in the main app's
-            // planner/executor, not the push applier. P3 is wire-decode only,
-            // so this path makes no lock-state change here.
+            // Intercepted by NotificationService.persistAppLimit before this
+            // lock-only dispatcher. NSE never owns limit enforcement effects.
             return nil
         case .earnedTimeConfig:
             // A4: same-day pool/cap sync — handled inline in CommandPoller on the
@@ -345,6 +400,8 @@ enum NSELockApplier {
 // MARK: - Off-process networking (mirrors BigKidExtensionReporter idiom)
 
 private enum NSENetwork {
+    enum NetworkError: Error { case invalidURL, rejected }
+
     /// Build a `/child/...` URL from the App-Group base URL, slash-safe.
     private static func childEndpoint(_ baseURL: URL, _ path: String) -> URL? {
         var base = baseURL.absoluteString
@@ -367,18 +424,43 @@ private enum NSENetwork {
     /// POST /child/ack — v2 generic "confirmed" with verb/display_name so the
     /// parent receipt renders and the ack-driven escalation stops.
     static func ack(baseURL: URL, deviceID: UUID, commandID: UUID, outcome: NSELockApplier.Outcome) async {
-        guard let url = childEndpoint(baseURL, "/child/ack") else { return }
+        try? await ack(
+            baseURL: baseURL,
+            deviceID: deviceID,
+            commandID: commandID,
+            status: "confirmed",
+            detail: [
+                "verb": outcome.verb,
+                "display_name": outcome.displayName,
+                "source": "nse",
+            ]
+        )
+    }
+
+    static func ack(
+        baseURL: URL,
+        deviceID: UUID,
+        commandID: UUID,
+        status: String,
+        detail: [String: Any]
+    ) async throws {
+        guard let url = childEndpoint(baseURL, "/child/ack") else {
+            throw NetworkError.invalidURL
+        }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let body: [String: Any] = [
             "command_id": commandID.uuidString,
             "device_id": deviceID.uuidString,
-            "status": "confirmed",
-            "detail": ["verb": outcome.verb, "display_name": outcome.displayName, "source": "nse"],
+            "status": status,
+            "detail": detail,
         ]
-        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
-        _ = try? await URLSession.shared.data(for: req)
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (_, response) = try await URLSession.shared.data(for: req)
+        guard let http = response as? HTTPURLResponse,
+              (200..<300).contains(http.statusCode)
+        else { throw NetworkError.rejected }
     }
 }
 

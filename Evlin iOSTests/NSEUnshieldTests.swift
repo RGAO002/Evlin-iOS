@@ -246,6 +246,18 @@ final class NSEUnshieldTests: XCTestCase {
         }
     }
 
+    func test_nseClearDecodesCanonicalNotificationExtensionEnvelope() throws {
+        let data = try appLimitFixtureCommand("clear_limit", orderingToken: 42)
+        let envelope = try NSECommandWireDecoder.decodeAppLimitEnvelope(data)
+
+        XCTAssertEqual(envelope.commandID, UUID(uuidString: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"))
+        XCTAssertEqual(envelope.ruleID, UUID(uuidString: "11111111-1111-1111-1111-111111111111"))
+        XCTAssertEqual(envelope.orderingToken, 42)
+        XCTAssertEqual(envelope.kind, .clear)
+        XCTAssertEqual(envelope.source, .notificationServiceExtension)
+        XCTAssertFalse(envelope.payloadDigest.isEmpty)
+    }
+
     func test_nseInvalidOverrideDate_failsBeforeRemovingSource() async throws {
         let command = try NSECommandWireDecoder.decode(overrideCommandJSON(
             usageDate: "not-a-date"
