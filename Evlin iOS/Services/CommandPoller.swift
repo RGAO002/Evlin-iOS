@@ -126,26 +126,6 @@ private final class AppLimitOwnerActionEffectPort: AppLimitOwnerEffectPort, @unc
 }
 
 @MainActor
-private final class AppLimitOwnerAPIReadbackPort: AppLimitOwnerReadbackPort, @unchecked Sendable {
-    private let api: APIClient
-
-    init(baseURL: URL) {
-        api = APIClient(baseURL: baseURL.absoluteString)
-    }
-
-    func confirm(commandID: UUID, receipt: AppLimitApplyReceipt) async throws {
-        var detail: [String: Any] = [
-            "ordering_token": receipt.orderingToken,
-            "rule_id": receipt.ruleID.uuidString,
-            "receipt_revision": receipt.storeRevision,
-            "receipt_source": receipt.source,
-        ]
-        if let armID = receipt.armID { detail["arm_id"] = armID.uuidString }
-        try await api.ack(commandID: commandID, status: "confirmed", detail: detail)
-    }
-}
-
-@MainActor
 private final class AppLimitOwnerRecoveryEntry {
     static let shared = AppLimitOwnerRecoveryEntry()
 
@@ -170,7 +150,7 @@ private final class AppLimitOwnerRecoveryEntry {
             effectPort: AppLimitOwnerActionEffectPort(
                 ownerChildDeviceID: configuration.owner
             ),
-            readbackPort: AppLimitOwnerAPIReadbackPort(baseURL: configuration.baseURL)
+            readbackPort: HTTPAppLimitOwnerReadbackClient(baseURL: configuration.baseURL)
         )
         await driver.recover(ownerChildDeviceID: configuration.owner)
     }

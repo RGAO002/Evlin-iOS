@@ -85,44 +85,55 @@ final class AppLimitOwnerRecoveryDriver {
                 for: work,
                 ownerChildDeviceID: ownerChildDeviceID
             )
-            let effect = try await effectPort.apply(work: work, slot: slot)
-
-            let receipt = try store.transaction(
-                source: .wakeRecovery,
-                expectedOwner: ownerChildDeviceID
-            ) { state -> AppLimitApplyReceipt in
-                guard var current = state.slots[work.ruleID],
-                      Self.matches(work, slot: current),
-                      state.storeRevision < UInt64.max
-                else { throw RecoveryError.staleWork }
-                let armID: UUID?
-                switch work.commandKind {
-                case .set:
-                    guard let provenance = current.armProvenance,
-                          provenance.ruleRevision == work.orderingToken,
-                          effect.armID == provenance.armID
-                    else { throw RecoveryError.staleWork }
-                    armID = provenance.armID
-                case .clear:
-                    guard effect.armID == nil else { throw RecoveryError.staleWork }
-                    armID = nil
-                }
-                let appliedAt = Date(
-                    timeIntervalSince1970: floor(Date().timeIntervalSince1970)
-                )
-                let receipt = AppLimitApplyReceipt(
+            let receipt: AppLimitApplyReceipt
+            if let existing = slot.appliedReceipt {
+                guard try AppLimitReceiptReadback.currentAppliedReceipt(
                     ruleID: work.ruleID,
-                    orderingToken: work.orderingToken,
-                    commandKind: work.commandKind,
-                    armID: armID,
-                    source: effect.source,
-                    appliedAt: appliedAt,
-                    storeRevision: state.storeRevision + 1
-                )
-                current.pendingOwnerWork = nil
-                current.appliedReceipt = receipt
-                state.slots[work.ruleID] = current
-                return receipt
+                    store: store
+                ) == existing else { throw RecoveryError.receiptReadbackMismatch }
+                receipt = existing
+            } else {
+                let effect = try await effectPort.apply(work: work, slot: slot)
+                receipt = try store.transaction(
+                    source: .wakeRecovery,
+                    expectedOwner: ownerChildDeviceID
+                ) { state -> AppLimitApplyReceipt in
+                    guard var current = state.slots[work.ruleID],
+                          Self.matches(work, slot: current),
+                          current.appliedReceipt == nil,
+                          state.storeRevision < UInt64.max
+                    else { throw RecoveryError.staleWork }
+                    let armID: UUID?
+                    switch work.commandKind {
+                    case .set:
+                        guard let provenance = current.armProvenance,
+                              provenance.ruleRevision == work.orderingToken,
+                              effect.armID == provenance.armID
+                        else { throw RecoveryError.staleWork }
+                        armID = provenance.armID
+                    case .clear:
+                        guard effect.armID == nil else { throw RecoveryError.staleWork }
+                        armID = nil
+                    }
+                    let appliedAt = Date(
+                        timeIntervalSince1970: floor(Date().timeIntervalSince1970)
+                    )
+                    let receipt = AppLimitApplyReceipt(
+                        ruleID: work.ruleID,
+                        orderingToken: work.orderingToken,
+                        commandKind: work.commandKind,
+                        armID: armID,
+                        source: effect.source,
+                        appliedAt: appliedAt,
+                        storeRevision: state.storeRevision + 1
+                    )
+                    // Keep the exact work until owner confirmation succeeds.
+                    // A restart can then retry the network readback without
+                    // applying the DeviceActivity/ManagedSettings effect again.
+                    current.appliedReceipt = receipt
+                    state.slots[work.ruleID] = current
+                    return receipt
+                }
             }
 
             let persisted = try AppLimitReceiptReadback.currentAppliedReceipt(
@@ -136,7 +147,7 @@ final class AppLimitOwnerRecoveryDriver {
             let current = try store.read()
             guard current.ownerChildDeviceID == ownerChildDeviceID,
                   let currentSlot = current.slots[work.ruleID],
-                  currentSlot.pendingOwnerWork == nil,
+                  currentSlot.pendingOwnerWork == work,
                   currentSlot.latestOrderingToken == work.orderingToken,
                   currentSlot.latestKind == work.commandKind,
                   currentSlot.latestPayloadDigest == work.payloadDigest,
@@ -146,6 +157,17 @@ final class AppLimitOwnerRecoveryDriver {
                 commandID: work.commandID,
                 receipt: receipt
             )
+            try store.transaction(
+                source: .wakeRecovery,
+                expectedOwner: ownerChildDeviceID
+            ) { state in
+                guard var confirmed = state.slots[work.ruleID],
+                      Self.matches(work, slot: confirmed),
+                      confirmed.appliedReceipt == receipt
+                else { throw RecoveryError.staleWork }
+                confirmed.pendingOwnerWork = nil
+                state.slots[work.ruleID] = confirmed
+            }
         } catch {
             // Pending work remains durable unless an exact receipt was committed.
             // A later wake retries it; a newer token supersedes it in the store.

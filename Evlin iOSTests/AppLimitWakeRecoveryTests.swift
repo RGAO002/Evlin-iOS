@@ -153,6 +153,35 @@ final class AppLimitWakeRecoveryTests: XCTestCase {
         XCTAssertEqual(confirmationCount, 1)
     }
 
+    func testCrashAfterDurableReceiptBeforeConfirmationRetriesOnlyReadback() async throws {
+        let harness = makeHarness()
+        _ = try harness.coordinator.ingest(setEnvelope(token: 10))
+        let readback = FailingOnceReadback(store: harness.store)
+        let effects = RecordingEffects(store: harness.store)
+        let driver = AppLimitOwnerRecoveryDriver(
+            store: harness.store,
+            effectPort: effects,
+            readbackPort: readback
+        )
+
+        await driver.recover(ownerChildDeviceID: ownerID)
+        let afterFailure = try XCTUnwrap(harness.store.read().slots[ruleID])
+        XCTAssertNotNil(afterFailure.appliedReceipt)
+        XCTAssertNotNil(afterFailure.pendingOwnerWork)
+
+        await driver.recover(ownerChildDeviceID: ownerID)
+
+        let appliedTokens = await effects.tokens
+        let attemptCount = await readback.attemptCount
+        let confirmedCommandIDs = await readback.confirmedCommandIDs
+        XCTAssertEqual(appliedTokens, [10])
+        XCTAssertEqual(attemptCount, 2)
+        XCTAssertEqual(confirmedCommandIDs, [setCommandID])
+        let finalSlot = try XCTUnwrap(harness.store.read().slots[ruleID])
+        XCTAssertNotNil(finalSlot.appliedReceipt)
+        XCTAssertNil(finalSlot.pendingOwnerWork)
+    }
+
     func testNewerClearWhileOldSetEffectInFlightPreventsOldReceipt() async throws {
         let harness = makeHarness()
         _ = try harness.coordinator.ingest(setEnvelope(token: 10))
@@ -219,7 +248,7 @@ final class AppLimitWakeRecoveryTests: XCTestCase {
         XCTAssertFalse(entries.contains("DeferredAppLimitOwnerEffectPort"))
         XCTAssertFalse(entries.contains("DeferredAppLimitOwnerReadbackPort"))
         XCTAssertTrue(poller.contains("AppLimitOwnerActionEffectPort"))
-        XCTAssertTrue(poller.contains("AppLimitOwnerAPIReadbackPort"))
+        XCTAssertTrue(poller.contains("HTTPAppLimitOwnerReadbackClient"))
     }
 
     func testLifecycleEntryRecoversFinalEnforcementAfterProcessExitAndNetworkFailure() async throws {
@@ -413,6 +442,21 @@ private actor RecordingReadback: AppLimitOwnerReadbackPort {
             receipt
         )
         commandIDs.append(commandID)
+    }
+}
+
+private actor FailingOnceReadback: AppLimitOwnerReadbackPort {
+    private let store: AppLimitEpochStore
+    private(set) var attemptCount = 0
+    private(set) var confirmedCommandIDs: [UUID] = []
+
+    init(store: AppLimitEpochStore) { self.store = store }
+
+    func confirm(commandID: UUID, receipt: AppLimitApplyReceipt) async throws {
+        attemptCount += 1
+        XCTAssertEqual(try store.read().slots[receipt.ruleID]?.appliedReceipt, receipt)
+        if attemptCount == 1 { throw RecoveryTestError.simulatedCrash }
+        confirmedCommandIDs.append(commandID)
     }
 }
 
