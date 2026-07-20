@@ -1,8 +1,35 @@
 import Foundation
 import FamilyControls
 import ManagedSettings
+import CryptoKit
 import UIKit
 import Sentry
+
+private struct CanonicalAppLimitCommandPayload: Encodable {
+    let kind: AppLimitCommandKind
+    let ruleID: UUID
+    let orderingToken: Int64
+    let rule: AppLimitRule?
+    let clearReason: String?
+    let clearUpdatedAt: Date?
+}
+
+private enum AppLimitPollError: Error {
+    case malformed
+    case applicationNotConfigured(String)
+
+    var ackDetail: [String: Any] {
+        switch self {
+        case .malformed:
+            return ["reason": "malformed"]
+        case .applicationNotConfigured(let reference):
+            return [
+                "reason": "application_not_configured",
+                "app_reference": reference,
+            ]
+        }
+    }
+}
 
 enum CommandDeliveryDiagnostics {
     static let keyTokenRegistered = "evlin.delivery.apnsTokenRegistered"
@@ -117,6 +144,14 @@ final class CommandPoller {
 
     /// Test seam for the real network poll. Nil in production.
     var pollCommandsOverride: ((UUID, APIClient) async throws -> [PollCommandDTO])?
+
+    /// Per-app epoch seams. Production uses the canonical builder/coordinator/
+    /// owner adapter; tests replace individual boundaries without network or
+    /// App Group state.
+    var appLimitEnvelopeOverride: ((PollCommandDTO, LockCommand) throws -> AppLimitCommandEnvelope)?
+    var appLimitIngestOverride: ((AppLimitCommandEnvelope) throws -> AppLimitCommandDisposition)?
+    var appLimitOwnerExecuteOverride: ((LockCommand, AppLimitCommandEnvelope, UUID) async -> AppLimitOwnerExecutionResult)?
+    var ackCommandOverride: ((UUID, String, [String: Any]?) async throws -> Void)?
 
     // MARK: - Earned-time config seams (test-only hooks; production uses the defaults)
 
@@ -495,6 +530,16 @@ final class CommandPoller {
 
         let cmd = Self.lockCommand(from: poll)
 
+        if cmd.action == .setLimit || cmd.action == .clearLimit {
+            await handleAppLimitCommand(
+                poll: poll,
+                command: cmd,
+                expectedDeviceID: expectedDeviceID,
+                api: api
+            )
+            return
+        }
+
         var blob: Data? = nil
         if cmd.target.hasPendingBlob {
             blob = try? await api.fetchPendingBlob(commandID: cmd.id)
@@ -627,6 +672,282 @@ final class CommandPoller {
                 "failed command=\(cmd.id.uuidString) status=\(status) error=\(error.localizedDescription)"
             )
             print("[CommandPoller] ack failed for \(cmd.id): \(error)")
+        }
+    }
+
+    private func handleAppLimitCommand(
+        poll: PollCommandDTO,
+        command: LockCommand,
+        expectedDeviceID: UUID,
+        api: APIClient
+    ) async {
+        guard isExpectedDeviceCurrent(expectedDeviceID) else {
+            coalescePollForCurrentIdentity(expectedDeviceID: expectedDeviceID)
+            return
+        }
+
+        let envelope: AppLimitCommandEnvelope
+        do {
+            if let override = appLimitEnvelopeOverride {
+                envelope = try override(poll, command)
+            } else {
+                envelope = try Self.appLimitEnvelope(from: poll, command: command)
+            }
+        } catch let error as AppLimitPollError {
+            await postCommandAck(
+                commandID: poll.command_id,
+                status: "failed",
+                detail: error.ackDetail,
+                expectedDeviceID: expectedDeviceID,
+                api: api
+            )
+            return
+        } catch {
+            await postCommandAck(
+                commandID: poll.command_id,
+                status: "failed",
+                detail: ["reason": "malformed"],
+                expectedDeviceID: expectedDeviceID,
+                api: api
+            )
+            return
+        }
+
+        let disposition: AppLimitCommandDisposition
+        do {
+            if let override = appLimitIngestOverride {
+                disposition = try override(envelope)
+            } else {
+                disposition = try AppLimitCommandCoordinator().ingest(envelope)
+            }
+        } catch {
+            await postCommandAck(
+                commandID: poll.command_id,
+                status: "failed",
+                detail: [
+                    "reason": "app_limit_epoch_error",
+                    "ordering_token": envelope.orderingToken,
+                ],
+                expectedDeviceID: expectedDeviceID,
+                api: api
+            )
+            return
+        }
+
+        let execution: AppLimitOwnerExecutionResult?
+        if case .acceptedNeedsOwner = disposition {
+            if let override = appLimitOwnerExecuteOverride {
+                execution = await override(command, envelope, expectedDeviceID)
+            } else {
+                execution = await ActionExecutor.shared.executeAppLimitOwnerWork(
+                    command,
+                    envelope: envelope,
+                    expectedChildID: expectedDeviceID,
+                    identityIsCurrent: { [weak self] deviceID in
+                        self?.isExpectedDeviceCurrent(deviceID) == true
+                    }
+                )
+            }
+        } else {
+            execution = nil
+        }
+
+        let ack = Self.appLimitAck(
+            command: command,
+            envelope: envelope,
+            disposition: disposition,
+            execution: execution
+        )
+        await postCommandAck(
+            commandID: poll.command_id,
+            status: ack.status,
+            detail: ack.detail,
+            expectedDeviceID: expectedDeviceID,
+            api: api
+        )
+    }
+
+    private func postCommandAck(
+        commandID: UUID,
+        status: String,
+        detail: [String: Any]?,
+        expectedDeviceID: UUID,
+        api: APIClient
+    ) async {
+        guard isExpectedDeviceCurrent(expectedDeviceID) else { return }
+        do {
+            if let override = ackCommandOverride {
+                try await override(commandID, status, detail)
+            } else {
+                try await api.ack(commandID: commandID, status: status, detail: detail)
+            }
+            CommandDeliveryDiagnostics.record(
+                CommandDeliveryDiagnostics.keyCommandAck,
+                "ok command=\(commandID.uuidString) status=\(status)"
+            )
+        } catch {
+            CommandDeliveryDiagnostics.record(
+                CommandDeliveryDiagnostics.keyCommandAck,
+                "failed command=\(commandID.uuidString) status=\(status) error=\(error.localizedDescription)"
+            )
+        }
+    }
+
+    private static func appLimitEnvelope(
+        from poll: PollCommandDTO,
+        command: LockCommand
+    ) throws -> AppLimitCommandEnvelope {
+        let kind: AppLimitCommandKind
+        let ruleID: UUID
+        let orderingToken: Int64
+        let rule: AppLimitRule?
+        let clearReason: String?
+        let clearUpdatedAt: Date?
+
+        switch command.action {
+        case .setLimit:
+            guard let limit = command.limit else { throw AppLimitPollError.malformed }
+            guard let token = CatalogCommandTokenData.decodedApplicationToken(from: command.target) else {
+                throw AppLimitPollError.applicationNotConfigured(
+                    command.target.targetDisplay ?? command.target.bundleID ?? "App"
+                )
+            }
+            kind = .set
+            ruleID = limit.ruleId
+            orderingToken = limit.orderingToken
+            rule = AppLimitRule(
+                id: limit.ruleId,
+                appTokens: [token],
+                bundleID: command.target.bundleID ?? "",
+                displayName: command.target.targetDisplay ?? command.target.bundleID ?? "App",
+                budgetMinutes: limit.dailyBudgetMinutes,
+                window: AppLimitWindow(
+                    startMinute: limit.startMinute,
+                    endMinute: limit.endMinute,
+                    repeats: ActionExecutor.windowRepeats(forResetPolicy: limit.resetPolicy),
+                    timezone: limit.timezone
+                ),
+                effectiveFrom: limit.effectiveFrom,
+                expiresAt: limit.expiresAt
+            )
+            clearReason = nil
+            clearUpdatedAt = nil
+        case .clearLimit:
+            guard let clear = command.clear else { throw AppLimitPollError.malformed }
+            kind = .clear
+            ruleID = clear.ruleId
+            orderingToken = clear.orderingToken
+            rule = nil
+            clearReason = clear.reason
+            clearUpdatedAt = clear.updatedAt
+        default:
+            throw AppLimitPollError.malformed
+        }
+
+        let digestPayload = CanonicalAppLimitCommandPayload(
+            kind: kind,
+            ruleID: ruleID,
+            orderingToken: orderingToken,
+            rule: rule,
+            clearReason: clearReason,
+            clearUpdatedAt: clearUpdatedAt
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .secondsSince1970
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        let digest = SHA256.hash(data: try encoder.encode(digestPayload))
+            .map { String(format: "%02x", $0) }
+            .joined()
+        return AppLimitCommandEnvelope(
+            commandID: poll.command_id,
+            ruleID: ruleID,
+            orderingToken: orderingToken,
+            kind: kind,
+            payloadDigest: digest,
+            receivedAt: command.issuedAt,
+            source: .poll,
+            rule: rule
+        )
+    }
+
+    private static func appLimitAck(
+        command: LockCommand,
+        envelope: AppLimitCommandEnvelope,
+        disposition: AppLimitCommandDisposition,
+        execution: AppLimitOwnerExecutionResult?
+    ) -> (status: String, detail: [String: Any]) {
+        var detail: [String: Any] = [
+            "ordering_token": envelope.orderingToken,
+            "rule_id": envelope.ruleID.uuidString,
+            "verb": command.action.rawValue,
+            "display_name": command.target.targetDisplay ?? command.target.bundleID ?? "App",
+        ]
+
+        func addReceipt(_ receipt: AppLimitApplyReceipt) {
+            detail["receipt_revision"] = receipt.storeRevision
+            detail["receipt_source"] = receipt.source
+            if let armID = receipt.armID {
+                detail["arm_id"] = armID.uuidString
+            }
+        }
+
+        switch disposition {
+        case .acceptedNeedsOwner:
+            detail["disposition"] = "accepted_needs_owner"
+            if let receipt = execution?.receipt,
+               case .confirmedExact = execution?.result {
+                addReceipt(receipt)
+                return ("confirmed", detail)
+            }
+            if case .failed(let failure) = execution?.result {
+                detail.merge(appLimitFailureDetail(failure)) { _, new in new }
+                return ("failed", detail)
+            }
+            detail["reason"] = "persisted_waiting_for_owner"
+            return ("pending", detail)
+        case .duplicatePending:
+            detail["disposition"] = "duplicate_pending"
+            detail["reason"] = "persisted_waiting_for_owner"
+            return ("pending", detail)
+        case .duplicateApplied(let receipt):
+            detail["disposition"] = "duplicate_applied"
+            addReceipt(receipt)
+            return ("confirmed", detail)
+        case .superseded(let latestOrderingToken):
+            detail["disposition"] = "superseded"
+            detail["reason"] = "superseded_by_token"
+            detail["latest_ordering_token"] = latestOrderingToken
+            return ("confirmed", detail)
+        case .equalTokenConflict:
+            detail["disposition"] = "equal_token_conflict"
+            detail["reason"] = "equal_token_conflict"
+            return ("failed", detail)
+        }
+    }
+
+    private static func appLimitFailureDetail(_ failure: AckFailure) -> [String: Any] {
+        switch failure {
+        case .notAuthorized:
+            return ["reason": "not_authorized"]
+        case .applicationNotConfigured(let reference):
+            return ["reason": "application_not_configured", "app_reference": reference]
+        case .limitQuotaExceeded(let windows, let slotsNeeded, let cap):
+            return [
+                "reason": "limit_quota_exceeded",
+                "windows": windows,
+                "slots_needed": slotsNeeded,
+                "cap": cap,
+            ]
+        case .execution(let message):
+            return ["reason": "execution", "message": message]
+        case .malformed:
+            return ["reason": "malformed"]
+        case .listNotFound(let name):
+            return ["reason": "list_not_found", "list_name": name]
+        case .categoryNotConfigured(let category):
+            return ["reason": "category_not_configured", "category": category]
+        case .nothingToUnlock:
+            return ["reason": "nothing_to_unlock"]
         }
     }
 

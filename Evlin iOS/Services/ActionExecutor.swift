@@ -4,6 +4,16 @@ import ManagedSettings
 import DeviceActivity
 import CryptoKit
 
+struct AppLimitOwnerExecutionResult: Sendable {
+    let result: AckResult
+    let receipt: AppLimitApplyReceipt?
+}
+
+private enum AppLimitOwnerWorkError: Error {
+    case stale
+    case readback
+}
+
 enum CatalogCommandTokenData {
     static func decodedApplicationData(from target: CommandTarget) -> Data? {
         decodedData(from: target.catalogTokenDataBase64)
@@ -182,6 +192,8 @@ final class ActionExecutor: @unchecked Sendable {
     /// `execute(_:)` is a serial command path, so `arm` is never called concurrently.
     private let ruleStore: AppLimitRuleStore
     private let makeLimitPlanner: @Sendable () -> AppLimitPlanner
+    private let appLimitEpochStore: AppLimitEpochStore
+    private let appLimitOwnerProvider: @Sendable () -> UUID?
 
     /// iOS DeviceActivitySchedule hard minimum.
     static let minScheduleMinutes: Int = 15
@@ -194,6 +206,8 @@ final class ActionExecutor: @unchecked Sendable {
         earnedTimeStore: EarnedTimeStore = .shared,
         overrideUsageDateProvider: (() -> String?)? = nil,
         ruleStore: AppLimitRuleStore = .shared,
+        appLimitEpochStore: AppLimitEpochStore = .shared,
+        appLimitOwnerProvider: @escaping @Sendable () -> UUID? = MeteringOwnerMirror.current,
         makeLimitPlanner: (@Sendable () -> AppLimitPlanner)? = nil,
         beforeUnshieldSourceMutation: @escaping () -> Void = {},
         beforeMutation: @escaping () async -> Void = {},
@@ -206,6 +220,8 @@ final class ActionExecutor: @unchecked Sendable {
             earnedTimeStore.currentCanonicalPolicyUsageDate()
         }
         self.ruleStore = ruleStore
+        self.appLimitEpochStore = appLimitEpochStore
+        self.appLimitOwnerProvider = appLimitOwnerProvider
         self.beforeUnshieldSourceMutation = beforeUnshieldSourceMutation
         self.beforeMutation = beforeMutation
         self.afterMutationCheckpoint = afterMutationCheckpoint
@@ -280,9 +296,16 @@ final class ActionExecutor: @unchecked Sendable {
         case .expandLibrary:
             return .failed(.execution("expand_library handled in UI"))
         case .setLimit:
-            return await executeSetLimit(cmd, identity: identity)
+            guard cmd.limit != nil else { return .failed(.malformed) }
+            guard CatalogCommandTokenData.decodedApplicationToken(from: cmd.target) != nil else {
+                return .failed(.applicationNotConfigured(
+                    resolveExactAppFailureReference(from: cmd.target)
+                ))
+            }
+            return .failed(.execution("app_limit_owner_work_required"))
         case .clearLimit:
-            return await executeClearLimit(cmd, identity: identity)
+            guard cmd.clear != nil else { return .failed(.malformed) }
+            return .failed(.execution("app_limit_owner_work_required"))
         case .earnedTimeConfig:
             // A4: this case is intercepted in CommandPoller.execute(poll:api:) BEFORE
             // ActionExecutor is called. If it somehow arrives here, fail gracefully
@@ -311,53 +334,203 @@ final class ActionExecutor: @unchecked Sendable {
 
     // MARK: - Per-app limit (P6)
 
-    /// `set_limit`: build an `AppLimitRule` from the command, persist it, then
-    /// arm DeviceActivity via the planner. Atomic on quota: the rule is upserted
-    /// first so the planner reads it from the store, and if the planner reports
-    /// `.quotaExceeded` (it guarantees it armed NOTHING) the just-upserted rule is
-    /// rolled back so the store never keeps a rule that didn't apply.
-    private func executeSetLimit(
+    /// Applies only work already authorized by `AppLimitCommandCoordinator`.
+    /// The epoch slot is the desired-state authority; this adapter never writes
+    /// through `AppLimitRuleStore.upsert/remove`.
+    func executeAppLimitOwnerWork(
         _ cmd: LockCommand,
+        envelope: AppLimitCommandEnvelope,
+        expectedChildID: UUID,
+        identityIsCurrent: @escaping (UUID) -> Bool
+    ) async -> AppLimitOwnerExecutionResult {
+        let identity = CommandIdentityContext(
+            expectedChildID: expectedChildID,
+            identityIsCurrent: identityIsCurrent
+        )
+        guard identity.isCurrent else {
+            return AppLimitOwnerExecutionResult(result: Self.staleIdentityResult, receipt: nil)
+        }
+        guard appLimitOwnerProvider() == expectedChildID else {
+            return AppLimitOwnerExecutionResult(result: Self.staleIdentityResult, receipt: nil)
+        }
+        guard authorizationStatusProvider() == .approved else {
+            return AppLimitOwnerExecutionResult(result: .failed(.notAuthorized), receipt: nil)
+        }
+
+        let slot: AppLimitVersionSlot
+        let work: AppLimitOwnerWork
+        do {
+            guard let current = try appLimitEpochStore.read().slots[envelope.ruleID],
+                  current.latestOrderingToken == envelope.orderingToken,
+                  current.latestKind == envelope.kind,
+                  current.latestPayloadDigest == envelope.payloadDigest
+            else { throw AppLimitOwnerWorkError.stale }
+            slot = current
+            guard let pending = slot.pendingOwnerWork,
+                  pending.commandID == envelope.commandID,
+                  pending.orderingToken == envelope.orderingToken,
+                  pending.commandKind == envelope.kind,
+                  pending.payloadDigest == envelope.payloadDigest
+            else {
+                return AppLimitOwnerExecutionResult(
+                    result: .failed(.execution("stale_app_limit_owner_work")),
+                    receipt: nil
+                )
+            }
+            work = pending
+        } catch {
+            return AppLimitOwnerExecutionResult(
+                result: .failed(.execution("stale_app_limit_owner_work")),
+                receipt: nil
+            )
+        }
+
+        let result: AckResult
+        switch work.commandKind {
+        case .set:
+            guard cmd.action == .setLimit,
+                  let rule = slot.activeRule,
+                  rule.id == work.ruleID
+            else {
+                return AppLimitOwnerExecutionResult(result: .failed(.malformed), receipt: nil)
+            }
+            result = await applyPersistedLimitRule(
+                rule,
+                command: cmd,
+                identity: identity
+            )
+        case .clear:
+            guard cmd.action == .clearLimit,
+                  cmd.clear?.ruleId == work.ruleID
+            else {
+                return AppLimitOwnerExecutionResult(result: .failed(.malformed), receipt: nil)
+            }
+            result = await applyPersistedLimitClear(command: cmd, identity: identity)
+        }
+
+        guard case .confirmedExact = result, identity.isCurrent else {
+            return AppLimitOwnerExecutionResult(result: result, receipt: nil)
+        }
+
+        do {
+            let receipt = try commitAppLimitReceipt(work: work, expectedOwner: expectedChildID)
+            return AppLimitOwnerExecutionResult(result: result, receipt: receipt)
+        } catch {
+            return AppLimitOwnerExecutionResult(
+                result: .failed(.execution(
+                    "app_limit_receipt_commit_failed:\(String(describing: error))"
+                )),
+                receipt: nil
+            )
+        }
+    }
+
+    private func applyPersistedLimitRule(
+        _ rule: AppLimitRule,
+        command: LockCommand,
         identity: CommandIdentityContext
     ) async -> AckResult {
-        // 1. Guard a decoded limit payload. A nil here is a malformed/undecoded
-        //    command — NEVER ack success (the parent would read a silent no-op as
-        //    "limit applied").
-        guard let limit = cmd.limit else {
-            return .failed(.malformed)
+        guard await prepareForMutation(identity) else { return Self.staleIdentityResult }
+        let plan = makeLimitPlanner().arm(rules: ruleStore.all())
+        let result: AckResult
+        switch plan {
+        case .armed:
+            result = .confirmedExact(
+                verb: .setLimit,
+                displayName: rule.displayName,
+                effectiveState: nil
+            )
+        case .quotaExceeded(let windows, let slotsNeeded, let cap):
+            return .failed(.limitQuotaExceeded(
+                windows: windows,
+                slotsNeeded: slotsNeeded,
+                cap: cap
+            ))
+        case .partiallyArmed(let armed, let failed):
+            return .failed(.execution(
+                "per-app limit partially armed (\(armed) ok, \(failed) failed); not applied"
+            ))
         }
 
-        // 2. Decode the app token. The device cannot shield an app it holds no
-        //    token for → application_not_configured.
-        guard let token = CatalogCommandTokenData.decodedApplicationToken(from: cmd.target) else {
-            return .failed(.applicationNotConfigured(resolveExactAppFailureReference(from: cmd.target)))
+        guard identity.isCurrent else { return Self.staleIdentityResult }
+        guard let usedTodayMinutes = command.limit?.usedTodayMinutes,
+              usedTodayMinutes >= rule.budgetMinutes,
+              var record = LimitShieldLogic.applyingLimit(
+                to: [:],
+                rule: rule
+              )[LimitShieldLogic.recordKey(for: rule)]
+        else { return result }
+        record.targetChildID = identity.expectedChildID ?? record.targetChildID
+        guard await prepareForMutation(identity) else { return Self.staleIdentityResult }
+        guard await ActiveLockStore.shared.addShieldWithReceipt(record) != nil else {
+            return .failed(.execution("lock_store_unavailable"))
         }
+        return identity.isCurrent ? result : Self.staleIdentityResult
+    }
 
-        // 3. Build the rule from the command's limit payload + target metadata.
-        let display = cmd.target.targetDisplay ?? cmd.target.bundleID ?? "App"
-        let rule = AppLimitRule(
-            id: limit.ruleId,
-            appTokens: [token],
-            bundleID: cmd.target.bundleID ?? "",
-            displayName: display,
-            budgetMinutes: limit.dailyBudgetMinutes,
-            window: AppLimitWindow(
-                startMinute: limit.startMinute,
-                endMinute: limit.endMinute,
-                repeats: Self.windowRepeats(forResetPolicy: limit.resetPolicy),
-                timezone: limit.timezone
-            ),
-            effectiveFrom: limit.effectiveFrom,
-            expiresAt: limit.expiresAt
+    private func applyPersistedLimitClear(
+        command: LockCommand,
+        identity: CommandIdentityContext
+    ) async -> AckResult {
+        let appToken = CatalogCommandTokenData.decodedApplicationToken(from: command.target)
+        guard await prepareForMutation(identity) else { return Self.staleIdentityResult }
+        _ = await ActiveLockStore.shared.removeLimitShields(
+            appTokens: appToken.map { Set([$0]) } ?? [],
+            bundleID: command.target.bundleID
         )
+        guard identity.isCurrent else { return Self.staleIdentityResult }
+        _ = makeLimitPlanner().arm(rules: ruleStore.all())
+        afterMutationCheckpoint(.clearLimitRearmed)
+        guard identity.isCurrent else { return Self.staleIdentityResult }
+        let display = command.target.targetDisplay ?? command.target.bundleID ?? "App"
+        return .confirmedExact(verb: .clearLimit, displayName: display, effectiveState: nil)
+    }
 
-        // 4. Validate-then-commit (atomic on quota).
-        return await applyLimitRuleFromCommand(
-            rule,
-            displayName: display,
-            usedTodayMinutes: limit.usedTodayMinutes,
-            identity: identity
-        )
+    private func commitAppLimitReceipt(
+        work: AppLimitOwnerWork,
+        expectedOwner: UUID
+    ) throws -> AppLimitApplyReceipt {
+        let receipt = try appLimitEpochStore.transaction(
+            source: .poll,
+            expectedOwner: expectedOwner
+        ) { state -> AppLimitApplyReceipt in
+            guard var slot = state.slots[work.ruleID],
+                  slot.pendingOwnerWork == work,
+                  slot.latestOrderingToken == work.orderingToken,
+                  slot.latestKind == work.commandKind,
+                  slot.latestPayloadDigest == work.payloadDigest,
+                  state.storeRevision < UInt64.max
+            else { throw AppLimitOwnerWorkError.stale }
+            // Persist whole seconds so JSON Date round-trips remain value-equal.
+            // Receipt ordering comes from the token/revision, not subsecond time.
+            let appliedAt = Date(timeIntervalSince1970: floor(Date().timeIntervalSince1970))
+            let receipt = AppLimitApplyReceipt(
+                ruleID: work.ruleID,
+                orderingToken: work.orderingToken,
+                commandKind: work.commandKind,
+                armID: nil,
+                source: "app_owner",
+                appliedAt: appliedAt,
+                storeRevision: state.storeRevision + 1
+            )
+            slot.pendingOwnerWork = nil
+            slot.appliedReceipt = receipt
+            state.slots[work.ruleID] = slot
+            return receipt
+        }
+        guard let readback = try appLimitEpochStore.read().slots[work.ruleID]?.appliedReceipt else {
+            throw AppLimitOwnerWorkError.readback
+        }
+        guard readback.ruleID == receipt.ruleID,
+              readback.orderingToken == receipt.orderingToken,
+              readback.commandKind == receipt.commandKind,
+              readback.armID == receipt.armID,
+              readback.source == receipt.source,
+              readback.storeRevision == receipt.storeRevision
+        else {
+            throw AppLimitOwnerWorkError.readback
+        }
+        return readback
     }
 
     /// Map a backend `reset_policy` to whether the limit window recurs daily.
@@ -497,46 +670,6 @@ final class ActionExecutor: @unchecked Sendable {
             ruleStore.remove(ruleId: applied.id)
         }
         _ = makeLimitPlanner().arm(rules: ruleStore.all())
-    }
-
-    /// `clear_limit`: remove the rule, drop any `source == .limit` shield it had
-    /// auto-applied (never touching `.manual` parent shields), then re-arm so the
-    /// planner's self-healing pass stops the now-vanished `evlin.limit.window.*`
-    /// activity. Removing a non-existent rule is idempotent → still confirms.
-    private func executeClearLimit(
-        _ cmd: LockCommand,
-        identity: CommandIdentityContext
-    ) async -> AckResult {
-        guard let clear = cmd.clear else {
-            return .failed(.malformed)
-        }
-
-        // Capture the rule (if present) BEFORE removal so we know which app's
-        // limit shield to drop.
-        let existing = ruleStore.rule(forID: clear.ruleId)
-
-        // Drop the limit shield for that rule's app. Only touches source == .limit
-        // records — a parent's source == .manual shield on the same app is kept.
-        let appTokens = existing?.appTokens ?? []
-        let bundleID = existing?.bundleID ?? cmd.target.bundleID
-        guard await prepareForMutation(identity) else { return Self.staleIdentityResult }
-        _ = await ActiveLockStore.shared.removeLimitShields(
-            appTokens: appTokens,
-            bundleID: bundleID
-        )
-        guard identity.isCurrent else { return Self.staleIdentityResult }
-
-        // Re-arm without the removed rule. Self-healing discovery stops the
-        // vanished window activity.
-        guard identity.isCurrent else { return Self.staleIdentityResult }
-        ruleStore.remove(ruleId: clear.ruleId)
-        guard identity.isCurrent else { return Self.staleIdentityResult }
-        _ = makeLimitPlanner().arm(rules: ruleStore.all())
-        afterMutationCheckpoint(.clearLimitRearmed)
-        guard identity.isCurrent else { return Self.staleIdentityResult }
-
-        let display = cmd.target.targetDisplay ?? existing?.displayName ?? cmd.target.bundleID ?? "App"
-        return .confirmedExact(verb: .clearLimit, displayName: display, effectiveState: nil)
     }
 
     /// Direct receipt-action unlock path. This intentionally bypasses chat/AI

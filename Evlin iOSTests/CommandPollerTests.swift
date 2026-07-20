@@ -22,6 +22,10 @@ final class CommandPollerTests: XCTestCase {
     private var savedPollCommandsOverride: ((UUID, APIClient) async throws -> [PollCommandDTO])?
     private var savedLockedSetIDOverride: ((String, Data?) -> Void)?
     private var savedAfterRekey: ((String, String) async -> Void)?
+    private var savedAppLimitEnvelopeOverride: ((PollCommandDTO, LockCommand) throws -> AppLimitCommandEnvelope)?
+    private var savedAppLimitIngestOverride: ((AppLimitCommandEnvelope) throws -> AppLimitCommandDisposition)?
+    private var savedAppLimitOwnerExecuteOverride: ((LockCommand, AppLimitCommandEnvelope, UUID) async -> AppLimitOwnerExecutionResult)?
+    private var savedAckCommandOverride: ((UUID, String, [String: Any]?) async throws -> Void)?
 
     override func setUp() async throws {
         savedDeviceIDProvider = poller.childDeviceIDProvider
@@ -29,6 +33,10 @@ final class CommandPollerTests: XCTestCase {
         savedPollCommandsOverride = poller.pollCommandsOverride
         savedLockedSetIDOverride = poller.saveLockedSetIDOverride
         savedAfterRekey = poller.afterRekeyShieldRecord
+        savedAppLimitEnvelopeOverride = poller.appLimitEnvelopeOverride
+        savedAppLimitIngestOverride = poller.appLimitIngestOverride
+        savedAppLimitOwnerExecuteOverride = poller.appLimitOwnerExecuteOverride
+        savedAckCommandOverride = poller.ackCommandOverride
     }
 
     override func tearDown() async throws {
@@ -37,6 +45,10 @@ final class CommandPollerTests: XCTestCase {
         poller.pollCommandsOverride = savedPollCommandsOverride
         poller.saveLockedSetIDOverride = savedLockedSetIDOverride
         poller.afterRekeyShieldRecord = savedAfterRekey
+        poller.appLimitEnvelopeOverride = savedAppLimitEnvelopeOverride
+        poller.appLimitIngestOverride = savedAppLimitIngestOverride
+        poller.appLimitOwnerExecuteOverride = savedAppLimitOwnerExecuteOverride
+        poller.ackCommandOverride = savedAckCommandOverride
     }
 
     private func earnedConfigCommand() throws -> PollCommandDTO {
@@ -72,6 +84,253 @@ final class CommandPollerTests: XCTestCase {
                 XCTAssertThrowsError(try JSONDecoder().decode(PollCommandDTO.self, from: data))
             }
         }
+    }
+
+    func testAcceptedPolledLimitExecutesAuthorizedWorkAndAcksDurableReceipt() async throws {
+        let receipt = AppLimitApplyReceipt(
+            ruleID: appLimitRuleID,
+            orderingToken: 10,
+            commandKind: .set,
+            armID: nil,
+            source: "app_owner",
+            appliedAt: Date(timeIntervalSince1970: 1_700_000_100),
+            storeRevision: 42
+        )
+        var ownerExecutions = 0
+        let ack = try await runAppLimitPoll(
+            commandKey: "set_limit",
+            token: 10,
+            disposition: .acceptedNeedsOwner
+        ) { _, _, _ in
+            ownerExecutions += 1
+            return AppLimitOwnerExecutionResult(
+                result: .confirmedExact(verb: .setLimit, displayName: "YouTube", effectiveState: nil),
+                receipt: receipt
+            )
+        }
+
+        XCTAssertEqual(ownerExecutions, 1)
+        XCTAssertEqual(ack.status, "confirmed")
+        XCTAssertEqual(ack.detail?["ordering_token"] as? Int64, 10)
+        XCTAssertEqual(ack.detail?["disposition"] as? String, "accepted_needs_owner")
+        XCTAssertEqual(ack.detail?["receipt_revision"] as? UInt64, 42)
+    }
+
+    func testSupersededPolledLimitAcksWithoutOwnerEffects() async throws {
+        var ownerExecutions = 0
+        let ack = try await runAppLimitPoll(
+            commandKey: "set_limit",
+            token: 9,
+            disposition: .superseded(latestOrderingToken: 10)
+        ) { _, _, _ in
+            ownerExecutions += 1
+            return AppLimitOwnerExecutionResult(result: .failed(.malformed), receipt: nil)
+        }
+
+        XCTAssertEqual(ownerExecutions, 0)
+        XCTAssertEqual(ack.status, "confirmed")
+        XCTAssertEqual(ack.detail?["reason"] as? String, "superseded_by_token")
+        XCTAssertEqual(ack.detail?["latest_ordering_token"] as? Int64, 10)
+        XCTAssertEqual(ack.detail?["disposition"] as? String, "superseded")
+    }
+
+    func testDuplicatePendingPolledLimitAcksPendingWithoutOwnerEffects() async throws {
+        var ownerExecutions = 0
+        let ack = try await runAppLimitPoll(
+            commandKey: "set_limit",
+            token: 10,
+            disposition: .duplicatePending
+        ) { _, _, _ in
+            ownerExecutions += 1
+            return AppLimitOwnerExecutionResult(result: .failed(.malformed), receipt: nil)
+        }
+
+        XCTAssertEqual(ownerExecutions, 0)
+        XCTAssertEqual(ack.status, "pending")
+        XCTAssertEqual(ack.detail?["reason"] as? String, "persisted_waiting_for_owner")
+        XCTAssertEqual(ack.detail?["disposition"] as? String, "duplicate_pending")
+    }
+
+    func testDuplicateAppliedPolledLimitAcksStoredReceiptWithoutOwnerEffects() async throws {
+        let receipt = AppLimitApplyReceipt(
+            ruleID: appLimitRuleID,
+            orderingToken: 10,
+            commandKind: .set,
+            armID: nil,
+            source: "app_owner",
+            appliedAt: Date(timeIntervalSince1970: 1_700_000_100),
+            storeRevision: 77
+        )
+        var ownerExecutions = 0
+        let ack = try await runAppLimitPoll(
+            commandKey: "set_limit",
+            token: 10,
+            disposition: .duplicateApplied(receipt)
+        ) { _, _, _ in
+            ownerExecutions += 1
+            return AppLimitOwnerExecutionResult(result: .failed(.malformed), receipt: nil)
+        }
+
+        XCTAssertEqual(ownerExecutions, 0)
+        XCTAssertEqual(ack.status, "confirmed")
+        XCTAssertEqual(ack.detail?["receipt_revision"] as? UInt64, 77)
+        XCTAssertEqual(ack.detail?["disposition"] as? String, "duplicate_applied")
+    }
+
+    func testEqualTokenConflictFailsClosedWithoutOwnerEffects() async throws {
+        var ownerExecutions = 0
+        let ack = try await runAppLimitPoll(
+            commandKey: "set_limit",
+            token: 10,
+            disposition: .equalTokenConflict
+        ) { _, _, _ in
+            ownerExecutions += 1
+            return AppLimitOwnerExecutionResult(result: .failed(.malformed), receipt: nil)
+        }
+
+        XCTAssertEqual(ownerExecutions, 0)
+        XCTAssertEqual(ack.status, "failed")
+        XCTAssertEqual(ack.detail?["reason"] as? String, "equal_token_conflict")
+        XCTAssertEqual(ack.detail?["disposition"] as? String, "equal_token_conflict")
+    }
+
+    func testClearThenDelayedOldSetCannotResurrectRuleOrRepeatOwnerEffects() async throws {
+        let deviceID = UUID(uuidString: "CCCCCCCC-CCCC-CCCC-CCCC-CCCCCCCCCCCC")!
+        let clearDTO = try JSONDecoder().decode(
+            PollCommandDTO.self,
+            from: try appLimitFixtureCommand("clear_limit", orderingToken: 11)
+        )
+        let setDTO = try JSONDecoder().decode(
+            PollCommandDTO.self,
+            from: try appLimitFixtureCommand("set_limit", orderingToken: 10)
+        )
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "poll-limit-ordering-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = AppLimitEpochStore(
+            fileURL: directory.appendingPathComponent("epoch.json"),
+            lock: PollerEpochTestLock(),
+            ownerProvider: { deviceID },
+            legacyDefaults: nil
+        )
+        let coordinator = AppLimitCommandCoordinator(
+            store: store,
+            expectedOwnerProvider: { deviceID }
+        )
+        poller.childDeviceIDProvider = { deviceID }
+        poller.oneShotPollOverride = nil
+        poller.pollCommandsOverride = { _, _ in [clearDTO, setDTO] }
+        poller.appLimitEnvelopeOverride = { [appLimitRuleID] poll, command in
+            let isClear = command.action == .clearLimit
+            let token: Int64 = isClear ? 11 : 10
+            return AppLimitCommandEnvelope(
+                commandID: poll.command_id,
+                ruleID: appLimitRuleID,
+                orderingToken: token,
+                kind: isClear ? .clear : .set,
+                payloadDigest: isClear ? "clear-11" : "set-10",
+                receivedAt: command.issuedAt,
+                source: .poll,
+                rule: isClear ? nil : AppLimitRule(
+                    id: appLimitRuleID,
+                    appTokens: [],
+                    bundleID: "com.google.ios.youtube",
+                    displayName: "YouTube",
+                    budgetMinutes: 60,
+                    window: AppLimitWindow(
+                        startMinute: 0,
+                        endMinute: 1439,
+                        repeats: true,
+                        timezone: nil
+                    ),
+                    effectiveFrom: Date(timeIntervalSince1970: 1_700_000_000),
+                    expiresAt: nil
+                )
+            )
+        }
+        poller.appLimitIngestOverride = { try coordinator.ingest($0) }
+        var ownerExecutions = 0
+        poller.appLimitOwnerExecuteOverride = { _, _, _ in
+            ownerExecutions += 1
+            return AppLimitOwnerExecutionResult(
+                result: .failed(.execution("deferred_for_test")),
+                receipt: nil
+            )
+        }
+        var acks: [(String, [String: Any]?)] = []
+        poller.ackCommandOverride = { _, status, detail in acks.append((status, detail)) }
+
+        await poller.pollOnceForCurrentDevice()
+
+        XCTAssertEqual(ownerExecutions, 1)
+        XCTAssertEqual(acks.count, 2)
+        XCTAssertEqual(acks.last?.0, "confirmed")
+        XCTAssertEqual(acks.last?.1?["disposition"] as? String, "superseded")
+        let slot = try XCTUnwrap(store.read().slots[appLimitRuleID])
+        XCTAssertEqual(slot.latestOrderingToken, 11)
+        XCTAssertEqual(slot.latestKind, .clear)
+        XCTAssertNil(slot.activeRule)
+        XCTAssertEqual(slot.clearTombstone?.orderingToken, 11)
+    }
+
+    private var appLimitRuleID: UUID {
+        UUID(uuidString: "11111111-1111-1111-1111-111111111111")!
+    }
+
+    private func runAppLimitPoll(
+        commandKey: String,
+        token: Int64,
+        disposition: AppLimitCommandDisposition,
+        ownerExecute: @escaping (LockCommand, AppLimitCommandEnvelope, UUID) async -> AppLimitOwnerExecutionResult
+    ) async throws -> (status: String, detail: [String: Any]?) {
+        let deviceID = UUID(uuidString: "CCCCCCCC-CCCC-CCCC-CCCC-CCCCCCCCCCCC")!
+        let dto = try JSONDecoder().decode(
+            PollCommandDTO.self,
+            from: try appLimitFixtureCommand(commandKey, orderingToken: token)
+        )
+        poller.childDeviceIDProvider = { deviceID }
+        poller.oneShotPollOverride = nil
+        poller.pollCommandsOverride = { _, _ in [dto] }
+        poller.appLimitEnvelopeOverride = { [appLimitRuleID] poll, command in
+            AppLimitCommandEnvelope(
+                commandID: poll.command_id,
+                ruleID: appLimitRuleID,
+                orderingToken: token,
+                kind: commandKey == "set_limit" ? .set : .clear,
+                payloadDigest: "\(commandKey)-\(token)",
+                receivedAt: command.issuedAt,
+                source: .poll,
+                rule: commandKey == "set_limit" ? AppLimitRule(
+                    id: appLimitRuleID,
+                    appTokens: [],
+                    bundleID: "com.google.ios.youtube",
+                    displayName: "YouTube",
+                    budgetMinutes: 60,
+                    window: AppLimitWindow(
+                        startMinute: 0,
+                        endMinute: 1439,
+                        repeats: true,
+                        timezone: nil
+                    ),
+                    effectiveFrom: Date(timeIntervalSince1970: 1_700_000_000),
+                    expiresAt: nil
+                ) : nil
+            )
+        }
+        poller.appLimitIngestOverride = { _ in disposition }
+        poller.appLimitOwnerExecuteOverride = ownerExecute
+
+        var captured: (String, [String: Any]?)?
+        poller.ackCommandOverride = { commandID, status, detail in
+            XCTAssertEqual(commandID, dto.command_id)
+            captured = (status, detail)
+        }
+
+        await poller.pollOnceForCurrentDevice()
+        return try XCTUnwrap(captured)
     }
 
     private func appLimitFixtureCommand(
@@ -364,5 +623,15 @@ final class CommandPollerTests: XCTestCase {
             "not-a-uuid",
             appMode: "child"
         ))
+    }
+}
+
+private final class PollerEpochTestLock: DeviceEpochStoreLocking, @unchecked Sendable {
+    private let lock = NSLock()
+
+    func withLock<T>(_ body: () -> T) -> T? {
+        lock.lock()
+        defer { lock.unlock() }
+        return body()
     }
 }

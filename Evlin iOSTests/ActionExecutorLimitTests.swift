@@ -489,7 +489,7 @@ final class ActionExecutorLimitTests: XCTestCase {
 
     // MARK: - clear_limit removes the rule, re-arms, is idempotent → .confirmedExact
 
-    func testClearLimitRemovesRuleAndConfirms() async {
+    func testDirectClearLimitCannotRemoveRuleWithoutDurableOwnerWork() async {
         let spy = LimitSchedulerSpy()
         let executor = makeExecutor(spy: spy)
         let ruleID = UUID()
@@ -509,16 +509,14 @@ final class ActionExecutorLimitTests: XCTestCase {
         let cmd = makeClearCommand(ruleID: ruleID)
         let result = await executor.execute(cmd)
 
-        guard case let .confirmedExact(verb, _, _) = result else {
-            return XCTFail("clear_limit should confirm; got \(result)")
-        }
-        XCTAssertEqual(verb, .clearLimit)
-        XCTAssertNil(AppLimitRuleStore.shared.rule(forID: ruleID), "rule must be removed from the store")
+        XCTAssertEqual(result, .failed(.execution("app_limit_owner_work_required")))
+        XCTAssertNotNil(AppLimitRuleStore.shared.rule(forID: ruleID))
+        XCTAssertTrue(spy.armed.isEmpty)
     }
 
     /// clear_limit drops a source == .limit shield for the rule's app but PRESERVES
     /// a parent's source == .manual shield on the same app.
-    func testClearLimitDropsLimitShieldButPreservesManualShield() async {
+    func testDirectClearLimitCannotDropShieldsWithoutDurableOwnerWork() async {
         let spy = LimitSchedulerSpy()
         let executor = makeExecutor(spy: spy)
         let ruleID = UUID()
@@ -575,8 +573,8 @@ final class ActionExecutorLimitTests: XCTestCase {
         _ = await executor.execute(makeClearCommand(bundleID: bundleID, ruleID: ruleID))
 
         let shields = await ActiveLockStore.shared.allCurrent().shields
-        XCTAssertFalse(shields.contains { $0.sources.contains(.limit) },
-                       "the limit shield must be dropped on clear")
+        XCTAssertTrue(shields.contains { $0.sources.contains(.limit) },
+                      "untrusted direct clear must not drop the limit shield")
         XCTAssertTrue(shields.contains { $0.recordKey == manualShield.recordKey },
                       "the parent's manual shield must be preserved")
     }
@@ -634,12 +632,12 @@ final class ActionExecutorLimitTests: XCTestCase {
             identityIsCurrent: { $0 == currentID }
         )
 
-        XCTAssertTrue(reachedCheckpoint)
-        XCTAssertEqual(result, .failed(.execution("stale_identity")))
-        XCTAssertNil(AppLimitRuleStore.shared.rule(forID: ruleID))
+        XCTAssertFalse(reachedCheckpoint)
+        XCTAssertEqual(result, .failed(.execution("app_limit_owner_work_required")))
+        XCTAssertNotNil(AppLimitRuleStore.shared.rule(forID: ruleID))
         let shields = await ActiveLockStore.shared.allCurrent().shields
-        XCTAssertFalse(shields.contains { $0.recordKey == shield.recordKey })
-        XCTAssertTrue(spy.activeActivities.isEmpty)
+        XCTAssertTrue(shields.contains { $0.recordKey == shield.recordKey })
+        XCTAssertFalse(spy.activeActivities.isEmpty)
     }
 
     func testApplyLimitRuleFromCommandImmediatelyShieldsWhenUsedTodayAlreadyReachedBudget() async {
@@ -679,16 +677,287 @@ final class ActionExecutorLimitTests: XCTestCase {
         )
     }
 
-    /// Clearing a non-existent rule is idempotent — still confirms.
-    func testClearLimitForUnknownRuleStillConfirms() async {
+    func testDirectClearLimitForUnknownRuleStillRequiresDurableOwnerWork() async {
         let spy = LimitSchedulerSpy()
         let executor = makeExecutor(spy: spy)
         let cmd = makeClearCommand(ruleID: UUID())
 
         let result = await executor.execute(cmd)
-        guard case let .confirmedExact(verb, _, _) = result else {
-            return XCTFail("clear_limit for unknown rule should still confirm; got \(result)")
+        XCTAssertEqual(result, .failed(.execution("app_limit_owner_work_required")))
+        XCTAssertTrue(spy.armed.isEmpty)
+    }
+
+    func testDirectSetLimitWithoutTokenFailsBeforeAnyMutation() async {
+        let spy = LimitSchedulerSpy()
+        let executor = makeExecutor(spy: spy)
+
+        let result = await executor.execute(makeLimitCommand())
+
+        guard case .failed(.applicationNotConfigured) = result else {
+            return XCTFail("expected application_not_configured, got \(result)")
         }
-        XCTAssertEqual(verb, .clearLimit)
+        XCTAssertTrue(spy.armed.isEmpty)
+        XCTAssertTrue(AppLimitRuleStore.shared.all().isEmpty)
+    }
+
+    func testAuthorizedSetOwnerWorkArmsAndCommitsDurableReceipt() async throws {
+        let owner = UUID()
+        let ruleID = UUID()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "authorized-limit-work-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let lock = ActionLimitEpochTestLock()
+        let store = AppLimitEpochStore(
+            fileURL: directory.appendingPathComponent("epoch.json"),
+            lock: lock,
+            ownerProvider: { owner },
+            legacyDefaults: nil
+        )
+        let ruleStore = AppLimitRuleStore(
+            epochStore: store,
+            expectedOwnerProvider: { owner }
+        )
+        let rule = AppLimitRule(
+            id: ruleID,
+            appTokens: [],
+            bundleID: "com.example.focus",
+            displayName: "Focus",
+            budgetMinutes: 30,
+            window: AppLimitWindow(
+                startMinute: 0,
+                endMinute: 1439,
+                repeats: true,
+                timezone: "America/New_York"
+            ),
+            effectiveFrom: Date(timeIntervalSince1970: 1_700_000_000),
+            expiresAt: nil
+        )
+        let command = AppLimitCommandEnvelope(
+            commandID: UUID(),
+            ruleID: ruleID,
+            orderingToken: 10,
+            kind: .set,
+            payloadDigest: "set-10",
+            receivedAt: Date(timeIntervalSince1970: 1_700_000_100),
+            source: .poll,
+            rule: rule
+        )
+        XCTAssertEqual(
+            try AppLimitCommandCoordinator(
+                store: store,
+                expectedOwnerProvider: { owner }
+            ).ingest(command),
+            .acceptedNeedsOwner
+        )
+        XCTAssertNotNil(try store.read().slots[ruleID]?.pendingOwnerWork)
+        let spy = LimitSchedulerSpy()
+        let executor = ActionExecutor(
+            activityScheduler: spy,
+            authorizationStatusProvider: { .approved },
+            ruleStore: ruleStore,
+            appLimitEpochStore: store,
+            appLimitOwnerProvider: { owner }
+        )
+        let lockCommand = LockCommand(
+            id: command.commandID,
+            action: .setLimit,
+            tier: .exactApp,
+            target: CommandTarget(
+                bundleID: rule.bundleID,
+                originalRequest: "limit Focus",
+                targetDisplay: rule.displayName,
+                targetChildID: owner
+            ),
+            durationMinutes: nil,
+            issuedAt: command.receivedAt,
+            limit: LimitRule(
+                ruleId: ruleID,
+                orderingToken: 10,
+                dailyBudgetMinutes: 30,
+                resetPolicy: "daily",
+                startMinute: 0,
+                endMinute: 1439,
+                timezone: "America/New_York",
+                effectiveFrom: rule.effectiveFrom,
+                expiresAt: nil,
+                updatedAt: command.receivedAt
+            )
+        )
+
+        let result = await executor.executeAppLimitOwnerWork(
+            lockCommand,
+            envelope: command,
+            expectedChildID: owner,
+            identityIsCurrent: { $0 == owner }
+        )
+
+        guard case .confirmedExact(.setLimit, "Focus", _) = result.result else {
+            return XCTFail("expected confirmed set owner work, got \(result.result)")
+        }
+        XCTAssertEqual(spy.armed.count, 1)
+        let receipt = try XCTUnwrap(result.receipt)
+        XCTAssertEqual(receipt.orderingToken, 10)
+        XCTAssertGreaterThan(receipt.storeRevision, 0)
+        let reread = try XCTUnwrap(store.read().slots[ruleID])
+        XCTAssertNil(reread.pendingOwnerWork)
+        XCTAssertEqual(reread.appliedReceipt, receipt)
+    }
+
+    func testAuthorizedClearOwnerWorkRemovesOnlyLimitShieldAndCommitsReceipt() async throws {
+        let owner = UUID()
+        let ruleID = UUID()
+        let bundleID = "com.example.focus"
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "authorized-limit-clear-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = AppLimitEpochStore(
+            fileURL: directory.appendingPathComponent("epoch.json"),
+            lock: ActionLimitEpochTestLock(),
+            ownerProvider: { owner },
+            legacyDefaults: nil
+        )
+        let ruleStore = AppLimitRuleStore(
+            epochStore: store,
+            expectedOwnerProvider: { owner }
+        )
+        let rule = AppLimitRule(
+            id: ruleID,
+            appTokens: [],
+            bundleID: bundleID,
+            displayName: "Focus",
+            budgetMinutes: 30,
+            window: AppLimitWindow(
+                startMinute: 0,
+                endMinute: 1439,
+                repeats: true,
+                timezone: nil
+            ),
+            effectiveFrom: Date(timeIntervalSince1970: 1_700_000_000),
+            expiresAt: nil
+        )
+        let coordinator = AppLimitCommandCoordinator(
+            store: store,
+            expectedOwnerProvider: { owner }
+        )
+        _ = try coordinator.ingest(AppLimitCommandEnvelope(
+            commandID: UUID(),
+            ruleID: ruleID,
+            orderingToken: 10,
+            kind: .set,
+            payloadDigest: "set-10",
+            receivedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            source: .poll,
+            rule: rule
+        ))
+        let clearEnvelope = AppLimitCommandEnvelope(
+            commandID: UUID(),
+            ruleID: ruleID,
+            orderingToken: 11,
+            kind: .clear,
+            payloadDigest: "clear-11",
+            receivedAt: Date(timeIntervalSince1970: 1_700_000_100),
+            source: .poll,
+            rule: nil
+        )
+        XCTAssertEqual(try coordinator.ingest(clearEnvelope), .acceptedNeedsOwner)
+
+        let limitShield = ShieldRecord(
+            recordKey: ShieldRecord.makeRecordKey(tier: .exactApp, targetKey: bundleID),
+            tier: .exactApp,
+            targetKey: bundleID,
+            displayName: "Focus limit",
+            lastCommandID: UUID(),
+            appTokens: [],
+            categoryTokens: [],
+            webDomainTokens: [],
+            appliesToAll: false,
+            issuedAt: Date(),
+            expiresAt: nil,
+            originalRequest: "limit",
+            targetChildID: owner,
+            sources: [.limit]
+        )
+        let manualShield = ShieldRecord(
+            recordKey: ShieldRecord.makeRecordKey(tier: .category, targetKey: "manual-focus"),
+            tier: .category,
+            targetKey: "manual-focus",
+            displayName: "Manual",
+            lastCommandID: UUID(),
+            appTokens: [],
+            categoryTokens: [],
+            webDomainTokens: [],
+            appliesToAll: false,
+            issuedAt: Date(),
+            expiresAt: nil,
+            originalRequest: "manual",
+            targetChildID: owner,
+            sources: [.manual]
+        )
+        _ = await ActiveLockStore.shared.addShield(limitShield)
+        _ = await ActiveLockStore.shared.addShield(manualShield)
+
+        let spy = LimitSchedulerSpy()
+        let executor = ActionExecutor(
+            activityScheduler: spy,
+            authorizationStatusProvider: { .approved },
+            ruleStore: ruleStore,
+            appLimitEpochStore: store,
+            appLimitOwnerProvider: { owner }
+        )
+        let command = LockCommand(
+            id: clearEnvelope.commandID,
+            action: .clearLimit,
+            tier: .exactApp,
+            target: CommandTarget(
+                bundleID: bundleID,
+                originalRequest: "clear Focus",
+                targetDisplay: "Focus",
+                targetChildID: owner
+            ),
+            durationMinutes: nil,
+            issuedAt: clearEnvelope.receivedAt,
+            clear: ClearLimit(
+                ruleId: ruleID,
+                orderingToken: 11,
+                reason: "parent_clear",
+                updatedAt: clearEnvelope.receivedAt
+            )
+        )
+
+        let result = await executor.executeAppLimitOwnerWork(
+            command,
+            envelope: clearEnvelope,
+            expectedChildID: owner,
+            identityIsCurrent: { $0 == owner }
+        )
+
+        guard case .confirmedExact(.clearLimit, "Focus", _) = result.result else {
+            return XCTFail("expected confirmed clear owner work, got \(result.result)")
+        }
+        XCTAssertEqual(result.receipt?.orderingToken, 11)
+        let slot = try XCTUnwrap(store.read().slots[ruleID])
+        XCTAssertNil(slot.activeRule)
+        XCTAssertEqual(slot.clearTombstone?.orderingToken, 11)
+        XCTAssertNil(slot.pendingOwnerWork)
+        XCTAssertEqual(slot.appliedReceipt, result.receipt)
+        let shields = await ActiveLockStore.shared.allCurrent().shields
+        XCTAssertFalse(shields.contains { $0.recordKey == limitShield.recordKey })
+        XCTAssertTrue(shields.contains { $0.recordKey == manualShield.recordKey })
+    }
+}
+
+private final class ActionLimitEpochTestLock: DeviceEpochStoreLocking, @unchecked Sendable {
+    private let lock = NSLock()
+
+    func withLock<T>(_ body: () -> T) -> T? {
+        lock.lock()
+        defer { lock.unlock() }
+        return body()
     }
 }
