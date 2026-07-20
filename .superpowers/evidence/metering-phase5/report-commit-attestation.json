@@ -1,0 +1,27 @@
+{
+  "report_commit_sha": "cc2a87640f4c06db8aef7fde32ebcf1624dac91f",
+  "report_path": "docs/superpowers/reports/2026-07-17-metering-epoch-phase-5-completion.md",
+  "report_blob_sha": "aa20880b6e49088cc39cbfb0e5648646f9b26e38",
+  "report_sha256": "4391688d44a91e7e311ee04780e7b16a55768dc2adefcfed4b6d85193880b353",
+  "verifier_path": "scripts/verify_metering_phase5_completion.sh",
+  "verifier_blob_sha": "8506a122608c23c7dbdf03b4bb336a2e2a302207",
+  "verifier_sha256": "83746992562f4efa98fa58c1347d554d302ea70d13dce181fde299ce13a6e36e",
+  "release_product_script_path": "scripts/build_verify_six_release_iphoneos.sh",
+  "release_product_script_blob_sha": "b532f8af8332d6dfd87d3fe977ccb30b71226b6e",
+  "release_product_script_sha256": "038bc17885671d5193c435003a70c96f7fcb793df6e5fc55b2fccec1df59a177",
+  "phase3_attestation_path": ".superpowers/evidence/metering-phase3/report-commit-attestation.json",
+  "phase3_attestation_sha256": "eae931448f36014ac9df2239c02973decbc16ab8971e843efe790e7692eb5bf3",
+  "phase4_attestation_path": ".superpowers/evidence/metering-phase4/report-commit-attestation.json",
+  "phase4_attestation_sha256": "4ae0a92932752acb80e2fd79bde4b1c9903cce6c657794520a8ad88275ca6c97",
+  "final_command": [
+    "/bin/bash",
+    "scripts/verify_metering_phase5_completion.sh",
+    "final",
+    "cc2a87640f4c06db8aef7fde32ebcf1624dac91f"
+  ],
+  "final_exit_code": 0,
+  "final_stdout": "final_report_commit=cc2a87640f4c06db8aef7fde32ebcf1624dac91f\nphysical_status=PENDING\n",
+  "physical_status": "PENDING",
+  "phase_complete": false,
+  "releasable": false
+}
