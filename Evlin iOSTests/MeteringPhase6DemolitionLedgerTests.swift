@@ -192,4 +192,57 @@ final class MeteringPhase6DemolitionLedgerTests: XCTestCase {
             ])
         )
     }
+
+    func testT6PendingOneRelease() throws {
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: ledgerURL)) as? [String: Any]
+        )
+        let rows = try XCTUnwrap(object["demolitions"] as? [[String: Any]])
+        let row = try XCTUnwrap(rows.first { $0["id"] as? String == "T6" })
+
+        XCTAssertEqual(row["status"] as? String, "PENDING_ONE_RELEASE")
+        XCTAssertEqual(
+            try XCTUnwrap(row["replacement_commits"] as? [[String: String]]),
+            [
+                ["repository": "backend", "sha": "2406a4e080a21996afc242505164954134df8e5e"],
+                ["repository": "ios", "sha": "b219eb732a3ef783ef59b8a027513a743fe03c76"],
+            ]
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(row["vectors"] as? [String]),
+            [
+                "T6V01-missing-active",
+                "T6V02-known-disabled",
+                "T6V03-unknown-active",
+                "T6V04-protocol1-active",
+                "T6V05-v2-observe-no-mutation",
+                "T6V06-late-chunk-noop",
+                "T6V07-active-disabled-active",
+                "T6V08-v2-recovery-independent",
+            ]
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(row["evidence"] as? [[String: String]]),
+            [
+                [
+                    "path": "/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/.superpowers/evidence/metering-phase6/T6-backend-observation.log",
+                    "sha256": "3ed7a1f1bbc9e73fbbaf559005c5aa3638c421665bb082ca747d25505627cf2e",
+                ],
+                [
+                    "path": "/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/.superpowers/evidence/metering-phase6/T6-ios-observation.log",
+                    "sha256": "dde4fac269dcae62ec3201369ee1b8487e0ea8da4ece40cbeb4d37847b1c31a7",
+                ],
+            ]
+        )
+        XCTAssertTrue(row["demolition_commit"] is NSNull)
+        XCTAssertTrue(row["revert_command"] is NSNull)
+
+        let observation = try XCTUnwrap(row["release_observation"] as? [String: Any])
+        for key in [
+            "release_id", "started_at", "ended_at", "eligible_devices",
+            "legacy_callbacks_after_disable", "earned_runtime_failures", "evidence_sha256",
+        ] {
+            XCTAssertTrue(observation[key] is NSNull, key)
+        }
+    }
 }

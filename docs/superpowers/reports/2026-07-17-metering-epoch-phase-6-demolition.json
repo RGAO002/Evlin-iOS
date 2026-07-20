@@ -167,13 +167,48 @@
       "legacy_mechanism": "legacy child time-consumption total path",
       "replacement": ["earned runtime authority"],
       "deletion_criterion": "one observed release reports zero legacy consumers",
-      "replacement_commits": [],
-      "vectors": [],
-      "evidence": [],
+      "replacement_commits": [
+        {
+          "repository": "backend",
+          "sha": "2406a4e080a21996afc242505164954134df8e5e"
+        },
+        {
+          "repository": "ios",
+          "sha": "b219eb732a3ef783ef59b8a027513a743fe03c76"
+        }
+      ],
+      "vectors": [
+        "T6V01-missing-active",
+        "T6V02-known-disabled",
+        "T6V03-unknown-active",
+        "T6V04-protocol1-active",
+        "T6V05-v2-observe-no-mutation",
+        "T6V06-late-chunk-noop",
+        "T6V07-active-disabled-active",
+        "T6V08-v2-recovery-independent"
+      ],
+      "evidence": [
+        {
+          "path": "/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/.superpowers/evidence/metering-phase6/T6-backend-observation.log",
+          "sha256": "3ed7a1f1bbc9e73fbbaf559005c5aa3638c421665bb082ca747d25505627cf2e"
+        },
+        {
+          "path": "/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/.superpowers/evidence/metering-phase6/T6-ios-observation.log",
+          "sha256": "dde4fac269dcae62ec3201369ee1b8487e0ea8da4ece40cbeb4d37847b1c31a7"
+        }
+      ],
       "demolition_commit": null,
       "revert_command": null,
       "forbidden_symbols": [],
-      "release_observation": null,
+      "release_observation": {
+        "release_id": null,
+        "started_at": null,
+        "ended_at": null,
+        "eligible_devices": null,
+        "legacy_callbacks_after_disable": null,
+        "earned_runtime_failures": null,
+        "evidence_sha256": null
+      },
       "fred_approval": null
     },
     {
