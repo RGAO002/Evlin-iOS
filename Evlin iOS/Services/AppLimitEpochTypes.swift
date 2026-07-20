@@ -129,6 +129,72 @@ nonisolated struct AppLimitApplyReceipt: Codable, Equatable, Sendable {
     let storeRevision: UInt64
 }
 
+nonisolated enum AppLimitJournalEffectKind: String, Codable, Equatable, Sendable {
+    case measurement
+    case enforcement
+}
+
+nonisolated struct AppLimitEffectKey: Codable, Equatable, Hashable, Sendable {
+    let ruleID: UUID
+    let orderingToken: Int64
+    let armID: UUID
+    let effectKind: AppLimitJournalEffectKind
+    let rawThresholdMinutes: Int
+
+    var storageKey: String {
+        [
+            ruleID.uuidString.lowercased(),
+            String(orderingToken),
+            armID.uuidString.lowercased(),
+            effectKind.rawValue,
+            String(rawThresholdMinutes),
+        ].joined(separator: ":")
+    }
+}
+
+nonisolated struct AppLimitEffectLease: Codable, Equatable, Sendable {
+    let leaseID: UUID
+    let workerID: UUID
+    let claimedAt: Date
+    let expiresAt: Date
+}
+
+nonisolated struct AppLimitLocalEffectReceipt: Codable, Equatable, Sendable {
+    let key: AppLimitEffectKey
+    let source: String
+    let appliedAt: Date
+}
+
+nonisolated struct AppLimitUsageEffectReceipt: Codable, Equatable, Sendable {
+    let key: AppLimitEffectKey
+    let usedMinutes: Int
+    let currentOrderingToken: Int64
+    let appliedAt: Date
+}
+
+nonisolated struct AppLimitBackendRejection: Codable, Equatable, Sendable {
+    let currentOrderingToken: Int64
+    let reason: String
+    let rejectedAt: Date
+}
+
+nonisolated struct AppLimitEffectEnvelope: Codable, Equatable, Sendable {
+    let key: AppLimitEffectKey
+    let rule: AppLimitRule
+    let provenance: AppLimitArmProvenance
+    let adjustedEstimateMinutes: Int
+    let createdAt: Date
+    var lease: AppLimitEffectLease?
+    var localReceipt: AppLimitLocalEffectReceipt?
+    var usageReceipt: AppLimitUsageEffectReceipt?
+    var backendRejection: AppLimitBackendRejection?
+}
+
+nonisolated struct AppLimitEffectClaim: Equatable, Sendable {
+    let effect: AppLimitEffectEnvelope
+    let lease: AppLimitEffectLease
+}
+
 nonisolated struct AppLimitVersionSlot: Codable, Equatable, Sendable {
     let ruleID: UUID
     var latestOrderingToken: Int64

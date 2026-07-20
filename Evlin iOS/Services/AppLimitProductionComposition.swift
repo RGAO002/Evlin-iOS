@@ -57,6 +57,36 @@ nonisolated enum AppLimitProductionComposition {
         case applicationNotConfigured
     }
 
+    /// Returns only a receipt that was durably reread from the current slot and
+    /// still names the current command version and arm.
+    static func currentAppliedReceipt(
+        ruleID: UUID,
+        store: AppLimitEpochStore = .shared
+    ) throws -> AppLimitApplyReceipt? {
+        let state = try store.read()
+        guard let slot = state.slots[ruleID],
+              let receipt = slot.appliedReceipt,
+              receipt.ruleID == ruleID,
+              receipt.orderingToken == slot.latestOrderingToken,
+              receipt.commandKind == slot.latestKind,
+              !receipt.source.isEmpty
+        else { return nil }
+        switch slot.latestKind {
+        case .set:
+            guard slot.activeRule?.id == ruleID,
+                  let armID = slot.armProvenance?.armID,
+                  slot.armProvenance?.ruleRevision == slot.latestOrderingToken,
+                  receipt.armID == armID
+            else { return nil }
+        case .clear:
+            guard slot.activeRule == nil,
+                  slot.clearTombstone?.orderingToken == slot.latestOrderingToken,
+                  receipt.armID == nil
+            else { return nil }
+        }
+        return receipt
+    }
+
     static func envelope(
         from command: LockCommand,
         source: AppLimitCommandSource

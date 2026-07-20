@@ -145,6 +145,50 @@ final class LimitShieldLogicTests: XCTestCase {
         XCTAssertEqual(updated[LimitShieldLogic.recordKey(for: rule)]?.sources, [.limit])
     }
 
+    func test_applyingValidatedLimitCarriesRuleTokenArmAndOwnerProvenance() {
+        let ruleID = UUID(uuidString: "10000000-0000-0000-0000-000000000001")!
+        let armID = UUID(uuidString: "30000000-0000-0000-0000-000000000001")!
+        let ownerID = UUID(uuidString: "20000000-0000-0000-0000-000000000001")!
+        let rule = makeRule(id: ruleID)
+        let callback = AppLimitValidatedCallback(
+            rule: rule,
+            provenance: AppLimitArmProvenance(
+                ruleID: ruleID,
+                ruleRevision: 41,
+                childDeviceID: ownerID,
+                usageDate: "2026-07-19",
+                timezone: "America/New_York",
+                scheduleWindow: rule.window,
+                tokenDigest: "token-digest",
+                budgetMinutes: rule.budgetMinutes,
+                startedAt: Date(timeIntervalSince1970: 1_700_000_000),
+                baseAcceptedMinutes: 0,
+                lastRawThresholdMinutes: 0,
+                ignoredWhilePausedMinutes: 0,
+                activityName: AppLimitPlanner.v2ActivityName(armID: armID),
+                armID: armID
+            ),
+            effectKind: .enforcement,
+            rawThresholdMinutes: rule.budgetMinutes,
+            adjustedEstimateMinutes: rule.budgetMinutes
+        )
+
+        let record = try! XCTUnwrap(
+            LimitShieldLogic.applyingLimit(
+                to: [:],
+                callback: callback,
+                now: Date(timeIntervalSince1970: 1_721_174_400)
+            )[LimitShieldLogic.recordKey(for: rule)]
+        )
+
+        XCTAssertEqual(record.sources, [.limit])
+        XCTAssertEqual(record.lastCommandID, ruleID)
+        XCTAssertEqual(record.targetChildID, ownerID)
+        XCTAssertTrue(record.originalRequest.contains("ordering_token=41"))
+        XCTAssertTrue(record.originalRequest.contains("arm_id=\(armID.uuidString.lowercased())"))
+        XCTAssertTrue(record.originalRequest.contains("rule_id=\(ruleID.uuidString.lowercased())"))
+    }
+
     // MARK: - strippingLimitShields (daily reset)
 
     func test_strippingLimitShields_removesOnlyLimit_keepsManual() {

@@ -14,6 +14,8 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
     private let defaults = UserDefaults(suiteName: "group.com.evlin.ios")
     private let store = ManagedSettingsStore()
     private let appLimitCallbackValidator = AppLimitCallbackValidator()
+    private let appLimitEffectJournal = AppLimitEffectJournal()
+    private let appLimitEffectWorkerID = UUID()
 
     /// Build the canonical day key in the backend policy timezone when known.
     private func currentDayKey() -> String {
@@ -326,10 +328,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
                 observedAt: Date(),
                 usageCountingAllowed: EarnedTimeStore.shared.usageCountingAllowed
             ) { [self] callback in
-                postAcceptedAppLimitUsageSample(callback)
-                if callback.effectKind == .enforcement {
-                    applyLimitShield(rule: callback.rule)
-                }
+                try appLimitEffectJournal.enqueue(callback)
             }
             switch decision {
             case .rejected(let reason):
@@ -339,13 +338,55 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             case .accepted:
                 break
             }
+            drainAcceptedAppLimitEffects()
         } catch {
             NSLog("[Evlin/Ext] app limit callback validation failed: %@", String(describing: error))
         }
     }
 
-    /// This function is reachable only from an accepted validator decision.
-    private func applyLimitShield(rule: AppLimitRule) {
+    private func drainAcceptedAppLimitEffects() {
+        do {
+            while let claim = try appLimitEffectJournal.claimNext(
+                workerID: appLimitEffectWorkerID
+            ) {
+                let localReceipt = try appLimitEffectJournal.applyLocal(
+                    claim,
+                    source: "device_activity_monitor"
+                ) { [self] callback in
+                    AppLimitCallbackLocalLedger.record(callback)
+                    if callback.effectKind == .enforcement {
+                        applyLimitShield(callback: callback)
+                    }
+                }
+                guard localReceipt != nil,
+                      let baseURL = ExtensionConfig.baseURL,
+                      let deviceID = ExtensionConfig.childId
+                else { continue }
+                let journal = appLimitEffectJournal
+                Task {
+                    do {
+                        _ = try await journal.submitUsage(
+                            claim,
+                            baseURL: baseURL,
+                            deviceID: deviceID
+                        )
+                    } catch {
+                        NSLog(
+                            "[Evlin/Ext] app limit usage journal failed: %@",
+                            String(describing: error)
+                        )
+                    }
+                }
+            }
+        } catch {
+            NSLog("[Evlin/Ext] app limit effect journal failed: %@", String(describing: error))
+        }
+    }
+
+    /// Called only inside `AppLimitEffectJournal.applyLocal`, with the shared
+    /// persistence lock held across final epoch validation and receipt readback.
+    private func applyLimitShield(callback: AppLimitValidatedCallback) {
+        let rule = callback.rule
         let ruleId = rule.id
 
         // Notify THEN lock: post the local "time's up" notice on the kid's
@@ -355,14 +396,12 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         // no-ops (the extension can't and must not request authorization).
         postLimitReachedNotification(ruleId: ruleId, rule: rule)
 
-        _ = ActiveLockPersistenceLock.shared.withLock {
-            let current = loadShields()
-            let updated = LimitShieldLogic.applyingLimit(to: current, rule: rule)
-            if let data = encodeShields(updated) {
-                defaults?.set(data, forKey: shieldsKey)
-            }
-            recomputeAndApplyShields(updated)
+        let current = loadShields()
+        let updated = LimitShieldLogic.applyingLimit(to: current, callback: callback)
+        if let data = encodeShields(updated) {
+            defaults?.set(data, forKey: shieldsKey)
         }
+        recomputeAndApplyShields(updated)
 
         let ts = ISO8601DateFormatter().string(from: Date())
         defaults?.set(
@@ -376,30 +415,6 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
                   transition: .init(before: "shielded:false", after: "shielded:true"))
 
     }
-
-    private func postAcceptedAppLimitUsageSample(_ callback: AppLimitValidatedCallback) {
-        AppLimitCallbackLocalLedger.record(callback)
-        guard let baseURL = ExtensionConfig.baseURL,
-              let deviceID = ExtensionConfig.childId else { return }
-        let ruleID = callback.rule.id
-        let usageDate = callback.provenance.usageDate
-        let tz = callback.provenance.timezone
-        let adjustedEstimate = callback.adjustedEstimateMinutes
-        let sampleSuffix = callback.effectKind == .enforcement
-            ? "budget"
-            : "t\(callback.rawThresholdMinutes)"
-        let clientSampleID = "applimit:\(ruleID.uuidString.lowercased()):\(usageDate):\(sampleSuffix)"
-        Task {
-            await AppLimitUsageReporter.drainRetryQueue(baseURL: baseURL)
-            await AppLimitUsageReporter.report(
-                baseURL: baseURL, deviceID: deviceID, ruleID: ruleID,
-                usageDate: usageDate, timezone: tz,
-                thresholdMinutes: adjustedEstimate, estimatedMinutes: adjustedEstimate,
-                clientSampleID: clientSampleID
-            )
-        }
-    }
-
     /// Post the local "time's up" notification for a reached per-app limit.
     /// Content is built by the pure `LimitShieldLogic.limitReachedNotification`
     /// helper (unit-tested) and wrapped here in a `UNMutableNotificationContent`.

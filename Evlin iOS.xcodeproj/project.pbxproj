@@ -161,6 +161,7 @@
 				Models/ShieldTier.swift,
 				Services/ActiveLockPersistenceLock.swift,
 				Services/AppLimitCallbackValidator.swift,
+				Services/AppLimitEffectJournal.swift,
 				Services/AppLimitEpochStore.swift,
 				Services/AppLimitEpochTypes.swift,
 				Services/AppLimitProvenance.swift,
