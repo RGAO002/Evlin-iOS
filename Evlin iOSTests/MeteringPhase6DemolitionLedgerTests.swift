@@ -18,6 +18,12 @@ final class MeteringPhase6DemolitionLedgerTests: XCTestCase {
         repositoryRoot.appendingPathComponent("scripts/verify_metering_phase6_demolition.py")
     }
 
+    private var completionReportURL: URL {
+        repositoryRoot.appendingPathComponent(
+            "docs/superpowers/reports/2026-07-17-metering-epoch-phase-6-completion.md"
+        )
+    }
+
     func testSeedLedgerContainsEveryRegisteredDemolitionExactlyOnce() throws {
         let object = try XCTUnwrap(
             JSONSerialization.jsonObject(with: Data(contentsOf: ledgerURL)) as? [String: Any]
@@ -46,14 +52,14 @@ final class MeteringPhase6DemolitionLedgerTests: XCTestCase {
         XCTAssertTrue(byID["T10"]?["fred_approval"] is NSNull)
     }
 
-    func testOtherRowsBeginUnattestedRatherThanClaimingCompletion() throws {
+    func testRowsUseOnlyAttestedOrExplicitlyPendingStates() throws {
         let object = try XCTUnwrap(
             JSONSerialization.jsonObject(with: Data(contentsOf: ledgerURL)) as? [String: Any]
         )
         let rows = try XCTUnwrap(object["demolitions"] as? [[String: Any]])
 
         for row in rows where !["T6", "T10"].contains(row["id"] as? String) {
-            XCTAssertEqual(row["status"] as? String, "UNATTESTED", row["id"] as? String ?? "missing")
+            XCTAssertEqual(row["status"] as? String, "REMOVED", row["id"] as? String ?? "missing")
         }
     }
 
@@ -390,5 +396,55 @@ final class MeteringPhase6DemolitionLedgerTests: XCTestCase {
             try XCTUnwrap(row["forbidden_symbols"] as? [String]),
             [["locked", "Set", "Token", "Data"].joined()]
         )
+    }
+
+    func testFinalReconciliation() throws {
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: ledgerURL)) as? [String: Any]
+        )
+        let rows = try XCTUnwrap(object["demolitions"] as? [[String: Any]])
+        let byID = Dictionary(uniqueKeysWithValues: try rows.map {
+            (try XCTUnwrap($0["id"] as? String), $0)
+        })
+
+        for id in ["T1", "T2", "T3", "T4", "T5", "T7", "T8", "T9", "T11"] {
+            XCTAssertEqual(byID[id]?["status"] as? String, "REMOVED", id)
+        }
+        XCTAssertEqual(byID["T6"]?["status"] as? String, "PENDING_ONE_RELEASE")
+
+        let t10 = try XCTUnwrap(byID["T10"])
+        XCTAssertEqual(t10["status"] as? String, "PENDING_FRED_APPROVAL")
+        XCTAssertEqual(
+            Set(try XCTUnwrap(t10["vectors"] as? [String])),
+            Set([
+                "T10-manual-only-selected-set", "T10-earned-source-survives-manual-unlock",
+                "T10-task-reflection-limit-sources-survive", "T10-separate-earned-override",
+                "T10-profile-manual-CTA", "T10-C3-home-single-writer",
+            ])
+        )
+        XCTAssertEqual(try XCTUnwrap(t10["evidence"] as? [[String: String]]).count, 2)
+        XCTAssertTrue(t10["demolition_commit"] is NSNull)
+        XCTAssertTrue(t10["revert_command"] is NSNull)
+        XCTAssertTrue(t10["fred_approval"] is NSNull)
+
+        let inventory = try XCTUnwrap(object["earned_guard_inventory"] as? [[String: String]])
+        XCTAssertEqual(Set(inventory.compactMap { $0["category"] }), Set([
+            "identity_match", "physical_trust", "gate_state",
+        ]))
+        XCTAssertEqual(Set(inventory.compactMap { $0["symbol"] }), Set([
+            "authorizedEarnedGeneration", "physical_threshold_is_trustworthy",
+            "usageCountingAllowed", "usage_counting_allowed",
+        ]))
+
+        let report = try String(contentsOf: completionReportURL, encoding: .utf8)
+        XCTAssertTrue(report.contains(
+            "AUTOMATED DEMOLITION READY; T6/T10 PENDING; PHASE 6 INCOMPLETE; NOT RELEASABLE"
+        ))
+        XCTAssertEqual(report.components(separatedBy: "status_code:").count - 1, 1)
+        XCTAssertEqual(report.components(separatedBy: "phase_complete:").count - 1, 1)
+        XCTAssertEqual(report.components(separatedBy: "releasable:").count - 1, 1)
+        XCTAssertTrue(report.contains("status_code: AUTOMATED_DEMOLITION_READY_PENDING"))
+        XCTAssertTrue(report.contains("phase_complete: false"))
+        XCTAssertTrue(report.contains("releasable: false"))
     }
 }

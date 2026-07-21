@@ -1,5 +1,31 @@
 {
   "schema_version": 1,
+  "earned_guard_inventory": [
+    {
+      "category": "identity_match",
+      "repository": "ios",
+      "path": "EvlinDeviceActivityMonitor/DeviceActivityMonitorExtension.swift",
+      "symbol": "authorizedEarnedGeneration"
+    },
+    {
+      "category": "physical_trust",
+      "repository": "backend",
+      "path": "app/services/metering_epoch_contract.py",
+      "symbol": "physical_threshold_is_trustworthy"
+    },
+    {
+      "category": "gate_state",
+      "repository": "ios",
+      "path": "EvlinDeviceActivityMonitor/DeviceActivityMonitorExtension.swift",
+      "symbol": "usageCountingAllowed"
+    },
+    {
+      "category": "gate_state",
+      "repository": "backend",
+      "path": "app/services/bigkid_usage_gate.py",
+      "symbol": "usage_counting_allowed"
+    }
+  ],
   "demolitions": [
     {
       "id": "T1",
@@ -340,9 +366,38 @@
       "legacy_mechanism": "legacy unlock-selected all-source contract",
       "replacement": ["manual-only CTA", "independent override action"],
       "deletion_criterion": "Fred provides written approval after compatibility observation",
-      "replacement_commits": [],
-      "vectors": [],
-      "evidence": [],
+      "replacement_commits": [
+        {
+          "repository": "backend",
+          "sha": "79fdc6d46572bd884120ab9b12a49182ba62ffe5"
+        },
+        {
+          "repository": "ios",
+          "sha": "f91d1a99868e298696bde5da3bfe567dfd469bf1"
+        },
+        {
+          "repository": "ios",
+          "sha": "221acccc1e699f94a8e798d801eab5b85c18f493"
+        }
+      ],
+      "vectors": [
+        "T10-manual-only-selected-set",
+        "T10-earned-source-survives-manual-unlock",
+        "T10-task-reflection-limit-sources-survive",
+        "T10-separate-earned-override",
+        "T10-profile-manual-CTA",
+        "T10-C3-home-single-writer"
+      ],
+      "evidence": [
+        {
+          "path": "/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/.superpowers/evidence/metering-phase6/T10-backend.log",
+          "sha256": "227b2476c79e500c4138f37ff105ace25bb8236cf9e471e8d105a50d1865d4c7"
+        },
+        {
+          "path": "/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/.superpowers/evidence/metering-phase6/T10-ios.log",
+          "sha256": "f667ba24ac1813cde88fc9920db3be30f48333c52f15834c723090a6eddced8b"
+        }
+      ],
       "demolition_commit": null,
       "revert_command": null,
       "forbidden_symbols": [],

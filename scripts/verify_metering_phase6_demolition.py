@@ -35,6 +35,41 @@ EXPECTED_DEMOLITION_SUBJECTS = {
     "T9": "refactor: remove dead earned locked token data",
     "T11": "refactor: remove earned plus-five heuristic",
 }
+EXPECTED_GUARD_INVENTORY = {
+    (
+        "identity_match", "ios",
+        "EvlinDeviceActivityMonitor/DeviceActivityMonitorExtension.swift",
+        "authorizedEarnedGeneration",
+    ),
+    (
+        "physical_trust", "backend",
+        "app/services/metering_epoch_contract.py",
+        "physical_threshold_is_trustworthy",
+    ),
+    (
+        "gate_state", "ios",
+        "EvlinDeviceActivityMonitor/DeviceActivityMonitorExtension.swift",
+        "usageCountingAllowed",
+    ),
+    (
+        "gate_state", "backend",
+        "app/services/bigkid_usage_gate.py",
+        "usage_counting_allowed",
+    ),
+}
+EXPECTED_FINAL_STATUS = {
+    "status_code": "AUTOMATED_DEMOLITION_READY_PENDING",
+    "phase_complete": "false",
+    "releasable": "false",
+}
+EXPECTED_RELEASE_PRODUCTS = {
+    "Release-iphoneos/Evlin iOS.app/Evlin iOS",
+    "Release-iphoneos/Evlin iOS.app/PlugIns/EvlinDeviceActivityMonitor.appex/EvlinDeviceActivityMonitor",
+    "Release-iphoneos/Evlin iOS.app/Extensions/EvlinDeviceActivityReport.appex/EvlinDeviceActivityReport",
+    "Release-iphoneos/Evlin iOS.app/PlugIns/EvlinShieldConfig.appex/EvlinShieldConfig",
+    "Release-iphoneos/Evlin iOS.app/PlugIns/EvlinPushApplier.appex/EvlinPushApplier",
+    "Debug-iphoneos/Evlin iOS.app/PlugIns/Evlin iOSTests.xctest/Evlin iOSTests",
+}
 
 
 class VerificationError(RuntimeError):
@@ -97,6 +132,138 @@ def production_files(repo: Path) -> list[Path]:
     return result
 
 
+def validate_guard_inventory(
+    payload: dict[str, Any], *, ios_root: Path, backend_root: Path
+) -> None:
+    raw_inventory = payload.get("earned_guard_inventory")
+    if not isinstance(raw_inventory, list):
+        fail("earned_guard_inventory_missing")
+    inventory: set[tuple[str, str, str, str]] = set()
+    for index, entry in enumerate(raw_inventory):
+        if not isinstance(entry, dict):
+            fail(f"guard_inventory_malformed:{index}")
+        item = tuple(entry.get(key) for key in ("category", "repository", "path", "symbol"))
+        if not all(isinstance(value, str) and value for value in item):
+            fail(f"guard_inventory_malformed:{index}")
+        inventory.add(item)  # type: ignore[arg-type]
+    if len(inventory) != len(raw_inventory):
+        fail("duplicate_guard_inventory_entry")
+    if inventory != EXPECTED_GUARD_INVENTORY:
+        fail(f"guard_inventory_mismatch:{sorted(inventory)}")
+    if {item[0] for item in inventory} != {"identity_match", "physical_trust", "gate_state"}:
+        fail("guard_category_mismatch")
+    for category, repository, relative_path, symbol in inventory:
+        root = resolve_repository(repository, ios_root, backend_root)
+        path = root / relative_path
+        if not path.is_file() or symbol not in path.read_text(errors="ignore"):
+            fail(f"guard_symbol_missing:{category}:{repository}:{relative_path}:{symbol}")
+
+
+def validate_completion_report(path: Path) -> None:
+    if not path.is_file():
+        fail("completion_report_missing")
+    text = path.read_text()
+    required_banner = (
+        "AUTOMATED DEMOLITION READY; T6/T10 PENDING; "
+        "PHASE 6 INCOMPLETE; NOT RELEASABLE"
+    )
+    if required_banner not in text:
+        fail("completion_report_banner_mismatch")
+    for key, expected in EXPECTED_FINAL_STATUS.items():
+        matches = re.findall(rf"(?m)^{re.escape(key)}:\s*(\S+)\s*$", text)
+        if matches != [expected]:
+            fail(f"completion_report_status_mismatch:{key}:{matches}")
+    for row in ("T6 release observation", "T10 Fred approval", "iPhone physical gate", "iPad physical gate"):
+        if not re.search(rf"(?m)^\|\s*{re.escape(row)}\s*\|\s*PENDING\s*\|$", text):
+            fail(f"completion_report_pending_row_missing:{row}")
+
+
+def named_failures_from_log(path: Path) -> set[str]:
+    if not path.is_file():
+        fail(f"simulator_log_missing:{path}")
+    pattern = re.compile(r"Test Case '-\[Evlin_iOSTests\.([^ ]+) ([^]]+)\]' failed")
+    failures: set[str] = set()
+    for class_name, method_name in pattern.findall(path.read_text(errors="ignore")):
+        if not method_name.endswith(")"):
+            method_name += "()"
+        failures.add(f"{class_name}/{method_name}")
+    return failures
+
+
+def baseline_failures(path: Path) -> set[str]:
+    if not path.is_file():
+        fail(f"named_baseline_missing:{path}")
+    payload = json.loads(path.read_text())
+    failures = payload.get("failures") if isinstance(payload, dict) else None
+    if not isinstance(failures, list):
+        fail(f"named_baseline_malformed:{path}")
+    result = {
+        entry.get("test_identifier")
+        for entry in failures
+        if isinstance(entry, dict) and isinstance(entry.get("test_identifier"), str)
+    }
+    if len(result) != len(failures):
+        fail(f"named_baseline_malformed:{path}")
+    return result  # type: ignore[return-value]
+
+
+def validate_simulator_evidence(ios_root: Path) -> None:
+    root = ios_root / ".superpowers/evidence"
+    phase3 = root / "metering-phase3/named-failures"
+    phase6 = root / "metering-phase6"
+    protected_exception = baseline_failures(
+        phase3 / "ios-metering-protected-iphone17pro.json"
+    )
+    if protected_exception != {
+        "MeteringAuthoritativeBaseCorrectionTests/"
+        "testEveryCorrectionBoundaryReopensWithStableIDsAndConverges()"
+    }:
+        fail("protected_metering_exception_changed")
+    destinations = (
+        (
+            "iphone",
+            phase6 / "final-iphone.log",
+            phase3 / "ios-legacy-iphone17pro.json",
+        ),
+        (
+            "ipad",
+            phase6 / "final-ipad.log",
+            phase3 / "ios-legacy-ipad-m5.json",
+        ),
+    )
+    for name, log, baseline in destinations:
+        observed = named_failures_from_log(log)
+        expected = baseline_failures(baseline) | protected_exception
+        if observed != expected:
+            fail(
+                f"simulator_failure_set_changed:{name}:"
+                f"new={sorted(observed - expected)}:resolved={sorted(expected - observed)}"
+            )
+    if "-skip-testing:Evlin iOSTests/ProfileSnapshotTests" not in (
+        phase6 / "final-ipad.log"
+    ).read_text(errors="ignore"):
+        fail("ipad_snapshot_environment_exclusion_missing")
+
+
+def validate_release_evidence(path: Path) -> None:
+    if not path.is_file():
+        fail("release_evidence_missing")
+    lines = path.read_text().splitlines()
+    hashes: dict[str, str] = {}
+    mach_o_products: set[str] = set()
+    for line in lines:
+        if line.startswith("# ") and ": Mach-O " in line:
+            mach_o_products.add(line[2:].split(": Mach-O ", 1)[0])
+            continue
+        match = re.fullmatch(r"([0-9a-f]{64})  (.+)", line)
+        if match:
+            hashes[match.group(2)] = match.group(1)
+    if set(hashes) != EXPECTED_RELEASE_PRODUCTS:
+        fail(f"release_product_manifest_mismatch:{sorted(hashes)}")
+    if mach_o_products != EXPECTED_RELEASE_PRODUCTS:
+        fail(f"release_product_not_mach_o:{sorted(EXPECTED_RELEASE_PRODUCTS - mach_o_products)}")
+
+
 def validate_ledger(
     payload: Any,
     *,
@@ -137,6 +304,36 @@ def validate_ledger(
         if status in PENDING_STATUSES:
             if demolition is not None or revert_command is not None:
                 fail(f"pending_row_carries_demolition_SHA:{row_id}")
+            if final and row_id == "T10":
+                replacements = row.get("replacement_commits")
+                vectors = row.get("vectors")
+                evidence = row.get("evidence")
+                if not isinstance(replacements, list) or not replacements:
+                    fail("T10_missing_replacement_commit")
+                if not isinstance(vectors, list) or not vectors:
+                    fail("T10_missing_vector")
+                for index, replacement in enumerate(replacements):
+                    if not isinstance(replacement, dict):
+                        fail(f"T10_replacement_commit_malformed:{index}")
+                    repo = resolve_repository(
+                        replacement.get("repository"), ios_root, backend_root
+                    )
+                    require_commit(repo, replacement.get("sha"), f"T10.replacement.{index}")
+                if not isinstance(evidence, list) or len(evidence) != 2:
+                    fail("T10_missing_evidence")
+                for index, entry in enumerate(evidence):
+                    if not isinstance(entry, dict):
+                        fail(f"T10_evidence_malformed:{index}")
+                    path = Path(entry.get("path", ""))
+                    expected_hash = entry.get("sha256")
+                    if (
+                        not path.is_absolute()
+                        or not path.is_file()
+                        or not isinstance(expected_hash, str)
+                        or not HASH_PATTERN.fullmatch(expected_hash)
+                        or sha256(path) != expected_hash
+                    ):
+                        fail(f"T10_evidence_invalid:{index}")
         if status == "UNATTESTED":
             if final or not allow_unattested:
                 fail(f"unattested_row:{row_id}")
@@ -214,6 +411,9 @@ def validate_ledger(
             for path in production_files(repository):
                 if symbol in path.read_text(errors="ignore"):
                     fail(f"forbidden_symbol_present:{row_id}:{symbol}:{path}")
+
+    if final:
+        validate_guard_inventory(payload, ios_root=ios_root, backend_root=backend_root)
 
 
 def _git_commit(repo: Path, subject: str, filename: str) -> str:
@@ -386,6 +586,47 @@ def run_self_test() -> None:
         expect_failure("pending-sha", pending_sha, "pending_row_carries_demolition_SHA")
         expect_failure("final-unattested", valid, "unattested_row", final=True)
 
+        report = root / "completion.md"
+        valid_report = """AUTOMATED DEMOLITION READY; T6/T10 PENDING; PHASE 6 INCOMPLETE; NOT RELEASABLE
+status_code: AUTOMATED_DEMOLITION_READY_PENDING
+phase_complete: false
+releasable: false
+| T6 release observation | PENDING |
+| T10 Fred approval | PENDING |
+| iPhone physical gate | PENDING |
+| iPad physical gate | PENDING |
+"""
+        report.write_text(valid_report)
+        validate_completion_report(report)
+
+        def expect_report_failure(name: str, contents: str, expected: str) -> None:
+            report.write_text(contents)
+            try:
+                validate_completion_report(report)
+            except VerificationError as error:
+                if expected not in str(error):
+                    fail(f"self_test_wrong_report_error:{name}:{error}")
+            else:
+                fail(f"self_test_expected_report_failure:{name}")
+
+        expect_report_failure(
+            "complete-true",
+            valid_report.replace("phase_complete: false", "phase_complete: true"),
+            "completion_report_status_mismatch:phase_complete",
+        )
+        expect_report_failure(
+            "unknown-status",
+            valid_report.replace(
+                "AUTOMATED_DEMOLITION_READY_PENDING", "UNKNOWN"
+            ),
+            "completion_report_status_mismatch:status_code",
+        )
+        expect_report_failure(
+            "duplicate-key",
+            valid_report + "releasable: false\n",
+            "completion_report_status_mismatch:releasable",
+        )
+
     print("phase6_demolition_self_test_passed")
 
 
@@ -396,6 +637,12 @@ def parse_args() -> argparse.Namespace:
         "--backend-root",
         type=Path,
         default=Path("/Users/fred/Desktop/Evlin/code.nosync/Evlin-Backend"),
+    )
+    parser.add_argument(
+        "--completion-report",
+        type=Path,
+        default=Path(__file__).resolve().parents[1]
+        / "docs/superpowers/reports/2026-07-17-metering-epoch-phase-6-completion.md",
     )
     parser.add_argument(
         "--ledger",
@@ -425,6 +672,13 @@ def main() -> int:
             allow_unattested=args.allow_unattested,
             final=args.final,
         )
+        if args.final:
+            validate_completion_report(args.completion_report.resolve())
+            validate_simulator_evidence(args.ios_root.resolve())
+            validate_release_evidence(
+                args.ios_root.resolve()
+                / ".superpowers/evidence/metering-phase6/release-products.sha256"
+            )
         print("phase6_demolition_ledger_valid")
         return 0
     except (VerificationError, OSError, json.JSONDecodeError) as error:
