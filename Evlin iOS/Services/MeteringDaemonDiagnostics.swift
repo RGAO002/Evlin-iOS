@@ -412,4 +412,169 @@ nonisolated actor MeteringDaemonInspector {
         }
     }
 }
+
+nonisolated final class DiagnosticDeviceActivityScheduler: DeviceActivityScheduling, @unchecked Sendable {
+    private let base: any DeviceActivityScheduling
+    private let journal: MeteringDaemonDiagnosticJournal
+    private let inspector: MeteringDaemonInspector
+    private let process: String
+    private let now: @Sendable () -> Date
+
+    init(
+        base: any DeviceActivityScheduling,
+        journal: MeteringDaemonDiagnosticJournal = MeteringDaemonDiagnosticJournal(),
+        inspector: MeteringDaemonInspector = MeteringDaemonInspector(),
+        process: String = "app",
+        now: @escaping @Sendable () -> Date = { Date() }
+    ) {
+        self.base = base
+        self.journal = journal
+        self.inspector = inspector
+        self.process = process
+        self.now = now
+    }
+
+    func startMonitoring(
+        _ name: DeviceActivityName,
+        during schedule: DeviceActivitySchedule
+    ) throws {
+        let expected = MeteringDaemonConfigurationSummary.make(
+            schedule: schedule,
+            events: [:]
+        )
+        do {
+            try base.startMonitoring(name, during: schedule)
+            appendStart(name: name, expected: expected, result: .success, message: nil)
+        } catch {
+            appendStart(
+                name: name,
+                expected: expected,
+                result: .failure,
+                message: String(describing: error)
+            )
+            throw error
+        }
+    }
+
+    func startMonitoring(
+        _ activity: DeviceActivityName,
+        during schedule: DeviceActivitySchedule,
+        events: [DeviceActivityEvent.Name: DeviceActivityEvent]
+    ) throws {
+        let expected = MeteringDaemonConfigurationSummary.make(
+            schedule: schedule,
+            events: events
+        )
+        do {
+            try base.startMonitoring(activity, during: schedule, events: events)
+            appendStart(
+                name: activity,
+                expected: expected,
+                result: .success,
+                message: nil
+            )
+            let request = inspectionRequest(activity: activity, expected: expected)
+            Task { await inspector.request(request) }
+        } catch {
+            appendStart(
+                name: activity,
+                expected: expected,
+                result: .failure,
+                message: String(describing: error)
+            )
+            throw error
+        }
+    }
+
+    func stopMonitoring(_ activities: [DeviceActivityName]) {
+        base.stopMonitoring(activities)
+        for activity in activities {
+            journal.append(.init(
+                timestamp: now(),
+                process: process,
+                operation: .stopNames,
+                activityName: activity.rawValue,
+                namespace: Self.namespace(for: activity.rawValue),
+                armID: Self.armID(from: activity.rawValue),
+                expected: nil,
+                actual: nil,
+                result: .success,
+                mismatchReasons: [],
+                message: nil
+            ))
+        }
+    }
+
+    func stopMonitoring() {
+        base.stopMonitoring()
+        journal.append(.init(
+            timestamp: now(),
+            process: process,
+            operation: .stopAll,
+            activityName: nil,
+            namespace: "all",
+            armID: nil,
+            expected: nil,
+            actual: nil,
+            result: .success,
+            mismatchReasons: [],
+            message: "high_severity global DeviceActivity stop"
+        ))
+    }
+
+    func monitoredActivities() -> [DeviceActivityName] {
+        base.monitoredActivities()
+    }
+
+    private func appendStart(
+        name: DeviceActivityName,
+        expected: MeteringDaemonConfigurationSummary,
+        result: MeteringDiagnosticResult,
+        message: String?
+    ) {
+        journal.append(.init(
+            timestamp: now(),
+            process: process,
+            operation: .start,
+            activityName: name.rawValue,
+            namespace: Self.namespace(for: name.rawValue),
+            armID: Self.armID(from: name.rawValue),
+            expected: expected,
+            actual: nil,
+            result: result,
+            mismatchReasons: [],
+            message: message
+        ))
+    }
+
+    private func inspectionRequest(
+        activity: DeviceActivityName,
+        expected: MeteringDaemonConfigurationSummary
+    ) -> MeteringDaemonInspectionRequest {
+        .init(
+            reason: .afterArm,
+            process: process,
+            activityName: activity.rawValue,
+            namespace: Self.namespace(for: activity.rawValue),
+            armID: Self.armID(from: activity.rawValue),
+            expected: expected
+        )
+    }
+
+    private static func namespace(for activityName: String) -> String {
+        if activityName.hasPrefix("evlin.limit.v2.") { return "per_app_v2" }
+        if activityName.hasPrefix("evlin.limit.window.") { return "per_app_legacy" }
+        if activityName.hasPrefix("evlin.earned.") { return "earned" }
+        if activityName == "evlin.bigkid.freeplay" { return "legacy_device_total" }
+        if activityName.hasPrefix("evlin.command.") { return "command" }
+        if activityName.hasPrefix("evlin.shield.") { return "shield" }
+        if activityName.hasPrefix("evlin.block.") { return "block" }
+        return "other"
+    }
+
+    private static func armID(from activityName: String) -> UUID? {
+        guard activityName.hasPrefix("evlin.limit.v2.") else { return nil }
+        return UUID(uuidString: String(activityName.dropFirst("evlin.limit.v2.".count)))
+    }
+}
 #endif

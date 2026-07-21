@@ -137,6 +137,14 @@ struct DeviceActivityCenterScheduler: DeviceActivityScheduling {
     }
 }
 
+func makeDefaultDeviceActivityScheduler() -> DeviceActivityScheduling {
+#if DEBUG
+    DiagnosticDeviceActivityScheduler(base: DeviceActivityCenterScheduler())
+#else
+    DeviceActivityCenterScheduler()
+#endif
+}
+
 /// Translates LockCommand into ActiveLockStore mutations.
 /// See spec §6 for dispatcher logic and §3.4 for merge rules.
 final class ActionExecutor: @unchecked Sendable {
@@ -200,7 +208,7 @@ final class ActionExecutor: @unchecked Sendable {
     static let minScheduleMinutes: Int = 15
 
     init(
-        activityScheduler: DeviceActivityScheduling = DeviceActivityCenterScheduler(),
+        activityScheduler: DeviceActivityScheduling = makeDefaultDeviceActivityScheduler(),
         authorizationStatusProvider: @escaping () -> AuthorizationStatus = {
             AuthorizationCenter.shared.authorizationStatus
         },
