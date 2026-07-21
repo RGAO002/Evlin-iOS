@@ -1983,6 +1983,22 @@ struct HomeSettingsSheet: View {
 
     @ViewBuilder
     private var diagnosticsSections: some View {
+#if DEBUG
+        Section {
+            NavigationLink {
+                MeteringDaemonDiagnosticsView()
+            } label: {
+                Label("Metering Daemon", systemImage: "gauge.with.dots.needle.67percent")
+            }
+        } header: {
+            Text("Metering")
+        } footer: {
+            Text("Read-only daemon configuration evidence for Total Pool, Device Limit, and Per-App Limit.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+        }
+#endif
+
         Section {
             NavigationLink {
                 CommandDeliveryDiagnosticsView()

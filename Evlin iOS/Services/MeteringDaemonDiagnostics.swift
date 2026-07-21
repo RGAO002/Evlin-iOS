@@ -207,6 +207,82 @@ nonisolated struct MeteringDaemonDiagnosticEntry: Codable, Equatable, Sendable {
     }
 }
 
+nonisolated struct MeteringDaemonNamespaceCount: Equatable, Sendable {
+    let namespace: String
+    let count: Int
+}
+
+nonisolated struct MeteringDaemonDiagnosticsSnapshot: Equatable, Sendable {
+    let ownerChildDeviceID: UUID?
+    let persistedOwnerChildDeviceID: UUID?
+    let appMode: String
+    let identityReady: Bool
+    let protocolSelection: String
+    let startCount: Int
+    let stopNamesCount: Int
+    let stopAllCount: Int
+    let namespaceCounts: [MeteringDaemonNamespaceCount]
+    let latestReadback: MeteringDaemonDiagnosticEntry?
+    let entries: [MeteringDaemonDiagnosticEntry]
+
+    static func make(
+        ownerChildDeviceID: UUID?,
+        persistedOwnerChildDeviceID: UUID?,
+        appMode: String,
+        localSelection: MeteringLocalProtocolSelection?,
+        entries: [MeteringDaemonDiagnosticEntry]
+    ) -> Self {
+        let counts = Dictionary(grouping: entries) { $0.namespace ?? "unknown" }
+            .map { MeteringDaemonNamespaceCount(namespace: $0.key, count: $0.value.count) }
+            .sorted {
+                if $0.count != $1.count { return $0.count > $1.count }
+                return $0.namespace < $1.namespace
+            }
+        let newestFirst = entries.sorted { $0.sequence > $1.sequence }
+        return Self(
+            ownerChildDeviceID: ownerChildDeviceID,
+            persistedOwnerChildDeviceID: persistedOwnerChildDeviceID,
+            appMode: appMode,
+            identityReady: appMode == "child"
+                && ownerChildDeviceID != nil
+                && ownerChildDeviceID == persistedOwnerChildDeviceID,
+            protocolSelection: localSelection?.rawValue ?? "none",
+            startCount: entries.count { $0.operation == .start },
+            stopNamesCount: entries.count { $0.operation == .stopNames },
+            stopAllCount: entries.count { $0.operation == .stopAll },
+            namespaceCounts: counts,
+            latestReadback: newestFirst.first { $0.operation == .readback },
+            entries: newestFirst
+        )
+    }
+
+    static func manualInspectionRequests(
+        entries: [MeteringDaemonDiagnosticEntry]
+    ) -> [MeteringDaemonInspectionRequest] {
+        var latestByActivity: [String: MeteringDaemonDiagnosticEntry] = [:]
+        for entry in entries where entry.operation == .start && entry.result == .success {
+            guard let activityName = entry.activityName, entry.expected != nil else { continue }
+            if entry.sequence > (latestByActivity[activityName]?.sequence ?? 0) {
+                latestByActivity[activityName] = entry
+            }
+        }
+        return latestByActivity.values.sorted { ($0.activityName ?? "") < ($1.activityName ?? "") }
+            .compactMap { entry in
+                guard let activityName = entry.activityName, let expected = entry.expected else {
+                    return nil
+                }
+                return MeteringDaemonInspectionRequest(
+                    reason: .manual,
+                    process: "app",
+                    activityName: activityName,
+                    namespace: entry.namespace ?? "unknown",
+                    armID: entry.armID,
+                    expected: expected
+                )
+            }
+    }
+}
+
 nonisolated final class MeteringDaemonDiagnosticJournal: @unchecked Sendable {
     private struct Envelope: Codable {
         let version: Int
