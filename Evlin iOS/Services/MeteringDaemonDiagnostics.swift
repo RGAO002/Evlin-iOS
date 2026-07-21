@@ -281,4 +281,135 @@ nonisolated final class MeteringDaemonDiagnosticJournal: @unchecked Sendable {
         return try? encoder.encode(envelope)
     }
 }
+
+nonisolated enum MeteringDaemonInspectionReason: String, Codable, Sendable {
+    case afterArm = "after_arm"
+    case configurationChanged = "configuration_changed"
+    case manual
+    case audit
+}
+
+nonisolated struct MeteringDaemonInspectionRequest: Sendable {
+    let reason: MeteringDaemonInspectionReason
+    let process: String
+    let activityName: String
+    let namespace: String
+    let armID: UUID?
+    let expected: MeteringDaemonConfigurationSummary
+}
+
+nonisolated protocol MeteringDaemonReadbackPort: Sendable {
+    func configuration(activityName: String) throws -> MeteringDaemonConfigurationSummary?
+}
+
+nonisolated struct SystemMeteringDaemonReadback: MeteringDaemonReadbackPort, @unchecked Sendable {
+    private let center: DeviceActivityCenter
+
+    init(center: DeviceActivityCenter = DeviceActivityCenter()) {
+        self.center = center
+    }
+
+    func configuration(activityName: String) throws -> MeteringDaemonConfigurationSummary? {
+        let name = DeviceActivityName(activityName)
+        guard center.activities.contains(name), let schedule = center.schedule(for: name) else {
+            return nil
+        }
+        return MeteringDaemonConfigurationSummary.make(
+            schedule: schedule,
+            events: center.events(for: name)
+        )
+    }
+}
+
+private nonisolated enum MeteringDaemonReadbackOutcome: Sendable {
+    case value(MeteringDaemonConfigurationSummary?)
+    case failure(String)
+}
+
+nonisolated actor MeteringDaemonInspector {
+    private let readback: any MeteringDaemonReadbackPort
+    private let journal: MeteringDaemonDiagnosticJournal
+    private let now: @Sendable () -> Date
+    private let auditInterval: TimeInterval
+    private var inspectionInFlight = false
+    private var lastSuccessfulAuditAt: Date?
+
+    init(
+        readback: any MeteringDaemonReadbackPort = SystemMeteringDaemonReadback(),
+        journal: MeteringDaemonDiagnosticJournal = MeteringDaemonDiagnosticJournal(),
+        now: @escaping @Sendable () -> Date = { Date() },
+        auditInterval: TimeInterval = 300
+    ) {
+        self.readback = readback
+        self.journal = journal
+        self.now = now
+        self.auditInterval = auditInterval
+    }
+
+    func request(_ request: MeteringDaemonInspectionRequest) async {
+        guard !inspectionInFlight else { return }
+        let requestedAt = now()
+        if request.reason == .audit,
+           let lastSuccessfulAuditAt,
+           requestedAt.timeIntervalSince(lastSuccessfulAuditAt) < auditInterval {
+            return
+        }
+
+        inspectionInFlight = true
+        defer { inspectionInFlight = false }
+        let readback = self.readback
+        let outcome = await Task.detached(priority: .utility) {
+            do {
+                return MeteringDaemonReadbackOutcome.value(
+                    try readback.configuration(activityName: request.activityName)
+                )
+            } catch {
+                return MeteringDaemonReadbackOutcome.failure(String(describing: error))
+            }
+        }.value
+
+        switch outcome {
+        case .value(let actual):
+            if request.reason == .audit {
+                lastSuccessfulAuditAt = requestedAt
+            }
+            let differences = actual?.differences(from: request.expected) ?? []
+            let result: MeteringDiagnosticResult
+            if actual == nil {
+                result = .missing
+            } else if differences.isEmpty {
+                result = .match
+            } else {
+                result = .mismatch
+            }
+            journal.append(.init(
+                timestamp: requestedAt,
+                process: request.process,
+                operation: .readback,
+                activityName: request.activityName,
+                namespace: request.namespace,
+                armID: request.armID,
+                expected: request.expected,
+                actual: actual,
+                result: result,
+                mismatchReasons: differences,
+                message: "reason=\(request.reason.rawValue)"
+            ))
+        case .failure(let message):
+            journal.append(.init(
+                timestamp: requestedAt,
+                process: request.process,
+                operation: .readback,
+                activityName: request.activityName,
+                namespace: request.namespace,
+                armID: request.armID,
+                expected: request.expected,
+                actual: nil,
+                result: .failure,
+                mismatchReasons: [],
+                message: "reason=\(request.reason.rawValue) error=\(message)"
+            ))
+        }
+    }
+}
 #endif
