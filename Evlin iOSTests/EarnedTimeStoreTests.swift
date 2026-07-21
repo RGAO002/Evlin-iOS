@@ -678,15 +678,6 @@ final class EarnedTimeStoreTests: XCTestCase {
         XCTAssertNil(store.lockedSetID)
     }
 
-    func test_lockedSetTokenData_roundTrips() throws {
-        let store = freshStore()
-        let payload = Data("fake-token-blob".utf8)
-        store.saveLockedSetID(UUID().uuidString, tokenData: payload)
-
-        let loaded = try XCTUnwrap(store.lockedSetTokenData)
-        XCTAssertEqual(loaded, payload)
-    }
-
     func test_lockedSetID_persistsAcrossInstances() {
         let store = freshStore()
         let id = UUID().uuidString
@@ -1019,7 +1010,7 @@ final class EarnedTimeStoreTests: XCTestCase {
     func test_removeAll_clearsEverything() {
         let store = freshStore()
         store.saveMeasurementSelection(FamilyActivitySelection())
-        store.saveLockedSetID(UUID().uuidString, tokenData: Data("blob".utf8))
+        store.saveLockedSetID(UUID().uuidString, tokenData: nil)
         store.setOverride(true, forUsageDate: "2026-06-23")
         store.backendRemainingAtLastSync = 30
         store.latestDeviceEstimate = 10
@@ -1031,7 +1022,6 @@ final class EarnedTimeStoreTests: XCTestCase {
 
         XCTAssertNil(store.measurementSelection)
         XCTAssertNil(store.lockedSetID)
-        XCTAssertNil(store.lockedSetTokenData)
         XCTAssertFalse(store.isOverridden(forUsageDate: "2026-06-23"))
         XCTAssertNil(store.backendRemainingAtLastSync)
         XCTAssertNil(store.latestDeviceEstimate)

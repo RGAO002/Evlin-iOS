@@ -348,14 +348,12 @@ final class ActionExecutorTests: XCTestCase {
         let store = EarnedTimeStore.shared
         let defaults = UserDefaults(suiteName: EarnedTimeStore.appGroupSuiteName)
         let originalID = store.lockedSetID
-        let originalTokenData = store.lockedSetTokenData
         let originalSavedListTokens = defaults?.object(forKey: "evlin.savedListTokens")
         defer {
             if let originalID {
-                store.saveLockedSetID(originalID, tokenData: originalTokenData)
+                store.saveLockedSetID(originalID, tokenData: nil)
             } else {
                 defaults?.removeObject(forKey: "earned.lockedSetID")
-                defaults?.removeObject(forKey: "earned.lockedSetTokenData")
             }
             if let originalSavedListTokens {
                 defaults?.set(originalSavedListTokens, forKey: "evlin.savedListTokens")

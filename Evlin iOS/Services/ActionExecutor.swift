@@ -642,7 +642,6 @@ final class ActionExecutor: @unchecked Sendable {
         do {
             guard identity.isCurrent else { return Self.staleIdentityResult }
             let priorLockedSetID = EarnedTimeStore.shared.lockedSetID
-            let priorLockedSetTokenData = EarnedTimeStore.shared.lockedSetTokenData
             let deferredLockedSetID = identity.expectedChildID != nil
                 && cmd.tier == .savedList
                 && cmd.target.defaultLockGroup == true
@@ -675,8 +674,7 @@ final class ActionExecutor: @unchecked Sendable {
                 await rollbackShieldCommand(
                     receipt: shieldMutation.receipt,
                     deferredLockedSetID: deferredLockedSetID,
-                    priorLockedSetID: priorLockedSetID,
-                    priorLockedSetTokenData: priorLockedSetTokenData
+                    priorLockedSetID: priorLockedSetID
                 )
                 return Self.staleIdentityResult
             }
@@ -692,8 +690,7 @@ final class ActionExecutor: @unchecked Sendable {
                     await rollbackShieldCommand(
                         receipt: shieldMutation.receipt,
                         deferredLockedSetID: deferredLockedSetID,
-                        priorLockedSetID: priorLockedSetID,
-                        priorLockedSetTokenData: priorLockedSetTokenData
+                        priorLockedSetID: priorLockedSetID
                     )
                     return Self.staleIdentityResult
                 }
@@ -703,8 +700,7 @@ final class ActionExecutor: @unchecked Sendable {
                         await rollbackShieldCommand(
                             receipt: shieldMutation.receipt,
                             deferredLockedSetID: deferredLockedSetID,
-                            priorLockedSetID: priorLockedSetID,
-                            priorLockedSetTokenData: priorLockedSetTokenData
+                            priorLockedSetID: priorLockedSetID
                         )
                         return Self.staleIdentityResult
                     }
@@ -730,8 +726,7 @@ final class ActionExecutor: @unchecked Sendable {
                     await rollbackShieldCommand(
                         receipt: shieldMutation.receipt,
                         deferredLockedSetID: deferredLockedSetID,
-                        priorLockedSetID: priorLockedSetID,
-                        priorLockedSetTokenData: priorLockedSetTokenData
+                        priorLockedSetID: priorLockedSetID
                     )
                     return Self.staleIdentityResult
                 }
@@ -763,15 +758,13 @@ final class ActionExecutor: @unchecked Sendable {
     private func rollbackShieldCommand(
         receipt: ActiveLockStore.ShieldMutationReceipt,
         deferredLockedSetID: String?,
-        priorLockedSetID: String?,
-        priorLockedSetTokenData: Data?
+        priorLockedSetID: String?
     ) async {
         await rollbackAddedShield(receipt)
         if let deferredLockedSetID {
             EarnedTimeStore.shared.restoreLockedSetIDIfCurrent(
                 deferredLockedSetID,
-                priorID: priorLockedSetID,
-                priorTokenData: priorLockedSetTokenData
+                priorID: priorLockedSetID
             )
         }
     }

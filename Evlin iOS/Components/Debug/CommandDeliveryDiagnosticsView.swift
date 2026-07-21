@@ -81,7 +81,6 @@ struct CommandDeliveryDiagnosticsView: View {
             earnedRow("childId", CommandDeliveryDiagnostics.read("evlin.childId"))
             earnedRow("measurement selection", measurementSelectionSummary(store.measurementSelection))
             earnedRow("locked set id", store.lockedSetID ?? "(missing)")
-            earnedRow("locked token data", store.lockedSetTokenData == nil ? "(missing)" : "present")
 
             Button(role: .destructive) {
                 CommandDeliveryDiagnostics.remove(CommandDeliveryDiagnostics.keyEarnedLastThreshold)

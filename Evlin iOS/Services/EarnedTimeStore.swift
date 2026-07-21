@@ -100,7 +100,6 @@ nonisolated private final class EarnedReconciliationLock: @unchecked Sendable {
 /// Keys (all under the `group.com.evlin.ios` suite):
 ///   - `earned.measurementSelection`       — JSON-encoded FamilyActivitySelection
 ///   - `earned.lockedSetID`                — UUID string of the Locked catalog list
-///   - `earned.lockedSetTokenData`         — raw Data blob (opaque FamilyActivitySelection)
 ///   - `earned.overridden.<usageDate>`     — Bool override flag per date string
 ///   - `earned.backendRemainingAtLastSync` — Int minutes from last backend sync
 ///   - `earned.latestDeviceEstimate`       — Int minutes from extension's latest estimate
@@ -205,7 +204,6 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
 
     private let measurementKey   = "earned.measurementSelection"
     private let lockedSetIDKey          = "earned.lockedSetID"
-    private let lockedSetDataKey        = "earned.lockedSetTokenData"
     private let lockedSetListAliasKeyKey = "earned.lockedSetListAliasKey"
     private let lockedSetAllSelectedKey = "earned.lockedSetAllSelected"
     private let backendKey       = "earned.backendRemainingAtLastSync"
@@ -318,18 +316,12 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
         defaults?.synchronize()
     }
 
-    // MARK: - Locked-set identity + token blob
+    // MARK: - Locked-set identity
 
     /// The UUID string that identifies the Locked catalog list on the backend.
     /// The extension uses this as a tripwire key for offline shield enforcement.
     var lockedSetID: String? {
         defaults?.string(forKey: lockedSetIDKey)
-    }
-
-    /// The raw serialised `FamilyActivitySelection` data for the Locked set.
-    /// Used by the extension for offline shield enforcement without the picker.
-    var lockedSetTokenData: Data? {
-        defaults?.data(forKey: lockedSetDataKey)
     }
 
     /// The `alias_key` UUID of the "Locked set" `ChildCatalogList` on the backend.
@@ -346,30 +338,24 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
         defaults?.synchronize()
     }
 
-    /// Persist the Locked-set identity and optional token blob.
-    func saveLockedSetID(_ id: String, tokenData: Data?) {
+    /// Persist the Locked-set identity. The legacy token argument remains only
+    /// for source compatibility; DefaultLockGroupStore is the token authority.
+    func saveLockedSetID(_ id: String, tokenData _: Data?) {
         defaults?.set(id, forKey: lockedSetIDKey)
-        if let tokenData {
-            defaults?.set(tokenData, forKey: lockedSetDataKey)
-        } else {
-            defaults?.removeObject(forKey: lockedSetDataKey)
-        }
         defaults?.synchronize()
     }
 
     func restoreLockedSetIDIfCurrent(
         _ expectedCurrentID: String,
-        priorID: String?,
-        priorTokenData: Data?
+        priorID: String?
     ) {
         guard lockedSetID?.caseInsensitiveCompare(expectedCurrentID) == .orderedSame else {
             return
         }
         if let priorID {
-            saveLockedSetID(priorID, tokenData: priorTokenData)
+            saveLockedSetID(priorID, tokenData: nil)
         } else {
             defaults?.removeObject(forKey: lockedSetIDKey)
-            defaults?.removeObject(forKey: lockedSetDataKey)
             defaults?.synchronize()
         }
     }
@@ -1066,7 +1052,7 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
     /// The measurement selection is kept: it describes this device's apps,
     /// not a family policy.
     func clearUsageStateForIdentityChange() {
-        [lockedSetIDKey, lockedSetDataKey, lockedSetListAliasKeyKey,
+        [lockedSetIDKey, lockedSetListAliasKeyKey,
          lockedSetAllSelectedKey,
          backendKey, lastBackendSyncAtKey, estimateKey, acceptedUsageDateKey,
          acceptedEstimateKey, runtimeTimezoneKey, runtimePolicyRevisionKey,

@@ -385,7 +385,7 @@ final class LockedSetFullCoverageTests: XCTestCase {
 
     /// `DefaultLockGroupStore.load()` — the same call
     /// `DeviceActivityMonitorExtension.applyEarnedTimeShield` now makes
-    /// unconditionally instead of decoding the dead `lockedSetTokenData` blob
+    /// unconditionally as the single token authority
     /// — round-trips through the shared App Group store the extension reads.
     func test_defaultLockGroupStore_roundTripsForExtensionSharedPath() {
         clearLockedSetTestState()

@@ -27,7 +27,6 @@ final class RecordKeyMigrationTests: XCTestCase {
         ud?.removeObject(forKey: "evlin.blockRecords")
         ud?.removeObject(forKey: defaultGroupIDKey)
         ud?.removeObject(forKey: lockedSetIDKey)
-        ud?.removeObject(forKey: "earned.lockedSetTokenData")
         ud?.synchronize()
         EarnedTimeStore.shared.removeAll()
     }
@@ -38,7 +37,6 @@ final class RecordKeyMigrationTests: XCTestCase {
         ud?.removeObject(forKey: "evlin.blockRecords")
         ud?.removeObject(forKey: defaultGroupIDKey)
         ud?.removeObject(forKey: lockedSetIDKey)
-        ud?.removeObject(forKey: "earned.lockedSetTokenData")
         ud?.synchronize()
         EarnedTimeStore.shared.removeAll()
     }
