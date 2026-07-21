@@ -86,6 +86,27 @@ final class MeteringDaemonDiagnosticsViewTests: XCTestCase {
         }
     }
 
+    func testKidDiagnosticEntryLivesInCommandDeliveryNotParentControls() throws {
+        let sourceRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let commandDelivery = try String(
+            contentsOf: sourceRoot.appendingPathComponent(
+                "Evlin iOS/Components/Debug/CommandDeliveryDiagnosticsView.swift"
+            ),
+            encoding: .utf8
+        )
+        let parentControls = try String(
+            contentsOf: sourceRoot.appendingPathComponent(
+                "Evlin iOS/Views/Child/BigKid/ParentControlsView.swift"
+            ),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(commandDelivery.contains("MeteringDaemonDiagnosticsView()"))
+        XCTAssertFalse(parentControls.contains("MeteringDaemonDiagnosticsView()"))
+    }
+
     private func entry(
         sequence: UInt64,
         operation: MeteringDiagnosticOperation,

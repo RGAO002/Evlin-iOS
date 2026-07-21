@@ -42,6 +42,13 @@ struct CommandDeliveryDiagnosticsView: View {
             heartbeatHistorySection
             nseSpikeSection
 #if DEBUG
+            Section("Metering") {
+                NavigationLink {
+                    MeteringDaemonDiagnosticsView()
+                } label: {
+                    Label("Metering Daemon", systemImage: "gauge.with.dots.needle.67percent")
+                }
+            }
             meteringMonitorProbeSection
             AppLimitOneMinuteProbeView()
 #endif
