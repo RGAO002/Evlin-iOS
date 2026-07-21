@@ -304,6 +304,178 @@ nonisolated struct MeteringDaemonNamespaceCount: Equatable, Sendable {
     let count: Int
 }
 
+nonisolated enum MeteringDaemonActivationStage: String, Equatable, Sendable {
+    case v1
+    case dualActiveIncomplete = "dual_active_incomplete"
+    case dualActiveAwaitingActivation = "dual_active_awaiting_activation"
+    case v2Ready = "v2_ready"
+    case inconsistent
+}
+
+nonisolated struct MeteringDaemonActivationEvidenceInput: Equatable, Sendable {
+    let advertisedVersion: Int
+    let localSelection: MeteringLocalProtocolSelection
+    let epochID: UUID?
+    let routeID: UUID?
+    let routeLifecycle: MeteringRouteLifecycle?
+    let installPhase: ActivityInstallPhase?
+    let activationAcknowledged: Bool
+    var exactDaemonReadback: Bool
+}
+
+nonisolated struct MeteringDaemonActivationEvidence: Equatable, Sendable {
+    let advertisedVersion: Int
+    let localSelection: MeteringLocalProtocolSelection
+    let epochID: UUID?
+    let routeID: UUID?
+    let routeLifecycle: MeteringRouteLifecycle?
+    let installPhase: ActivityInstallPhase?
+    let activationAcknowledged: Bool
+    let exactDaemonReadback: Bool
+    let stage: MeteringDaemonActivationStage
+    let v2Ready: Bool
+
+    static func make(input: MeteringDaemonActivationEvidenceInput) -> Self {
+        let hasIdentity = input.epochID != nil && input.routeID != nil
+        let ready = input.localSelection == .v2
+            && hasIdentity
+            && input.routeLifecycle == .active
+            && input.installPhase == .active
+            && input.activationAcknowledged
+            && input.exactDaemonReadback
+
+        let stage: MeteringDaemonActivationStage
+        switch input.localSelection {
+        case .v1:
+            stage = .v1
+        case .dualActive:
+            let installed = input.installPhase == .verified
+                || input.installPhase == .dualActive
+                || input.installPhase == .active
+            stage = hasIdentity && installed && input.exactDaemonReadback
+                ? .dualActiveAwaitingActivation
+                : .dualActiveIncomplete
+        case .v2:
+            stage = ready ? .v2Ready : .inconsistent
+        }
+
+        return Self(
+            advertisedVersion: input.advertisedVersion,
+            localSelection: input.localSelection,
+            epochID: input.epochID,
+            routeID: input.routeID,
+            routeLifecycle: input.routeLifecycle,
+            installPhase: input.installPhase,
+            activationAcknowledged: input.activationAcknowledged,
+            exactDaemonReadback: input.exactDaemonReadback,
+            stage: stage,
+            v2Ready: ready
+        )
+    }
+
+    static func derive(
+        ownerChildDeviceID: UUID?,
+        state: DeviceEpochStoreState?,
+        entries: [MeteringDaemonDiagnosticEntry]
+    ) -> Self {
+        guard let ownerChildDeviceID,
+              let state,
+              state.ownerChildDeviceID == ownerChildDeviceID,
+              let ratchet = state.ratchets[ownerChildDeviceID]
+        else {
+            return make(input: .init(
+                advertisedVersion: 1,
+                localSelection: .v1,
+                epochID: nil,
+                routeID: nil,
+                routeLifecycle: nil,
+                installPhase: nil,
+                activationAcknowledged: false,
+                exactDaemonReadback: false
+            ))
+        }
+
+        let route = selectedRoute(
+            state: state,
+            ownerChildDeviceID: ownerChildDeviceID,
+            localSelection: ratchet.localSelection
+        )
+        let install = route.flatMap { route in
+            state.installWork.values
+                .filter { $0.ownerChildDeviceID == ownerChildDeviceID && $0.routeID == route.routeID }
+                .sorted { $0.createdAt > $1.createdAt }
+                .first
+        }
+        let activationAcknowledged = ratchet.activatedV2At != nil || route.map { route in
+            state.activationWork.values.contains {
+                $0.ownerChildDeviceID == ownerChildDeviceID
+                    && $0.epochID == route.epochID
+                    && $0.routeID == route.routeID
+                    && $0.retry.terminal == .succeeded
+            }
+        } == true
+        let activeRoutes = state.routes.values.filter {
+            $0.ownerChildDeviceID == ownerChildDeviceID
+                && ($0.lifecycle == .active || $0.routeID == route?.routeID)
+        }
+        let exactDaemonReadback = allRoutesHaveExactReadback(
+            routeActivityNames: activeRoutes.map(\.activityName),
+            entries: entries
+        )
+
+        return make(input: .init(
+            advertisedVersion: ratchet.advertisedVersion,
+            localSelection: ratchet.localSelection,
+            epochID: route?.epochID ?? state.activeEpochID,
+            routeID: route?.routeID,
+            routeLifecycle: route?.lifecycle,
+            installPhase: install?.phase,
+            activationAcknowledged: activationAcknowledged,
+            exactDaemonReadback: exactDaemonReadback
+        ))
+    }
+
+    static func allRoutesHaveExactReadback(
+        routeActivityNames: [String],
+        entries: [MeteringDaemonDiagnosticEntry]
+    ) -> Bool {
+        let names = Set(routeActivityNames)
+        guard !names.isEmpty else { return false }
+        return names.allSatisfy { activityName in
+            entries
+                .filter { $0.operation == .readback && $0.activityName == activityName }
+                .max { $0.sequence < $1.sequence }?
+                .result == .match
+        }
+    }
+
+    private static func selectedRoute(
+        state: DeviceEpochStoreState,
+        ownerChildDeviceID: UUID,
+        localSelection: MeteringLocalProtocolSelection
+    ) -> MeteringCallbackRoute? {
+        if localSelection == .dualActive,
+           let handoff = state.v2RouteHandoff,
+           handoff.ownerChildDeviceID == ownerChildDeviceID,
+           let route = state.routes[handoff.toRouteID] {
+            return route
+        }
+        if let activeRouteID = state.activeRouteID,
+           let route = state.routes[activeRouteID],
+           route.ownerChildDeviceID == ownerChildDeviceID {
+            return route
+        }
+        guard let activeEpochID = state.activeEpochID else { return nil }
+        let matches = state.routes.values.filter {
+            $0.ownerChildDeviceID == ownerChildDeviceID
+                && $0.epochID == activeEpochID
+                && $0.lifecycle != .retired
+                && $0.lifecycle != .tombstoned
+        }
+        return matches.count == 1 ? matches[0] : nil
+    }
+}
+
 nonisolated struct MeteringDaemonDiagnosticsSnapshot: Equatable, Sendable {
     let ownerChildDeviceID: UUID?
     let persistedOwnerChildDeviceID: UUID?

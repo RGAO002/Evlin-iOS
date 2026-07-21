@@ -14,6 +14,11 @@ struct MeteringDaemonDiagnosticsView: View {
     )
     @State private var exportText = "{}"
     @State private var refreshing = false
+    @State private var activationEvidence = MeteringDaemonActivationEvidence.derive(
+        ownerChildDeviceID: nil,
+        state: nil,
+        entries: []
+    )
 
     var body: some View {
         List {
@@ -23,6 +28,19 @@ struct MeteringDaemonDiagnosticsView: View {
                 row("owner mirror", snapshot.ownerChildDeviceID?.uuidString ?? "missing")
                 row("epoch owner", snapshot.persistedOwnerChildDeviceID?.uuidString ?? "missing")
                 row("local protocol", snapshot.protocolSelection)
+            }
+
+            Section("V2 activation evidence") {
+                row("stage", activationEvidence.stage.rawValue)
+                row("V2 READY", activationEvidence.v2Ready ? "YES" : "NO")
+                row("advertised version", String(activationEvidence.advertisedVersion))
+                row("local selection", activationEvidence.localSelection.rawValue)
+                row("epoch", activationEvidence.epochID?.uuidString ?? "missing")
+                row("route", activationEvidence.routeID?.uuidString ?? "missing")
+                row("route lifecycle", activationEvidence.routeLifecycle?.rawValue ?? "missing")
+                row("install phase", activationEvidence.installPhase?.rawValue ?? "missing")
+                row("activation ack", activationEvidence.activationAcknowledged ? "yes" : "NO")
+                row("exact daemon readback", activationEvidence.exactDaemonReadback ? "match" : "NO")
             }
 
             Section("Daemon operations") {
@@ -138,12 +156,18 @@ struct MeteringDaemonDiagnosticsView: View {
     private func reloadSnapshot() {
         let owner = MeteringOwnerMirror.current()
         let state = try? DeviceEpochStore.shared.read()
+        let entries = journal.read()
         snapshot = MeteringDaemonDiagnosticsSnapshot.make(
             ownerChildDeviceID: owner,
             persistedOwnerChildDeviceID: state?.ownerChildDeviceID,
             appMode: UserDefaults.standard.string(forKey: "appMode") ?? "",
             localSelection: owner.flatMap { state?.ratchets[$0]?.localSelection },
-            entries: journal.read()
+            entries: entries
+        )
+        activationEvidence = MeteringDaemonActivationEvidence.derive(
+            ownerChildDeviceID: owner,
+            state: state,
+            entries: entries
         )
         exportText = String(data: journal.exportData(), encoding: .utf8) ?? "{}"
     }
