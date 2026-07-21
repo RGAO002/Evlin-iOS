@@ -300,16 +300,37 @@
     },
     {
       "id": "T9",
-      "status": "UNATTESTED",
+      "status": "REMOVED",
       "legacy_mechanism": "dead earned locked token data",
       "replacement": ["no replacement required"],
       "deletion_criterion": "all dead keys and readers removed",
-      "replacement_commits": [],
-      "vectors": [],
-      "evidence": [],
-      "demolition_commit": null,
-      "revert_command": null,
-      "forbidden_symbols": [],
+      "replacement_commits": [
+        {
+          "repository": "ios",
+          "sha": "45c197c326eb0189161b43ce118e18c4d5ca9b4f"
+        },
+        {
+          "repository": "ios",
+          "sha": "8b1f842bbcde393c56f49448dba602243fa6cbc1"
+        },
+        {
+          "repository": "ios",
+          "sha": "e1046aacbcc4d654aa062db7c1849ce6bfb60257"
+        }
+      ],
+      "vectors": ["P3V01", "P3V02", "T9-locked-set-coverage", "T9-default-group-authority", "T9-active-lock-source-cas", "T9-action-rollback"],
+      "evidence": [
+        {
+          "path": "/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/.superpowers/evidence/metering-phase6/T9-focused.log",
+          "sha256": "ef2e836c0037e16feee5fca784c6b1bfdcc12a2349f4764c4f989b8578629972"
+        }
+      ],
+      "demolition_commit": {
+        "repository": "ios",
+        "sha": "2a94762f5088748ae335b4fbbd282693b96e97ad"
+      },
+      "revert_command": "git -C /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS revert 2a94762f5088748ae335b4fbbd282693b96e97ad",
+      "forbidden_symbols": ["lockedSetTokenData"],
       "release_observation": null,
       "fred_approval": null
     },

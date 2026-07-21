@@ -343,4 +343,52 @@ final class MeteringPhase6DemolitionLedgerTests: XCTestCase {
             ])
         )
     }
+
+    func testT9Attestation() throws {
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: ledgerURL)) as? [String: Any]
+        )
+        let rows = try XCTUnwrap(object["demolitions"] as? [[String: Any]])
+        let row = try XCTUnwrap(rows.first { $0["id"] as? String == "T9" })
+
+        XCTAssertEqual(row["status"] as? String, "REMOVED")
+        XCTAssertEqual(
+            Set(try XCTUnwrap(row["vectors"] as? [String])),
+            Set([
+                "P3V01", "P3V02", "T9-locked-set-coverage",
+                "T9-default-group-authority", "T9-active-lock-source-cas",
+                "T9-action-rollback",
+            ])
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(row["replacement_commits"] as? [[String: String]]),
+            [
+                ["repository": "ios", "sha": "45c197c326eb0189161b43ce118e18c4d5ca9b4f"],
+                ["repository": "ios", "sha": "8b1f842bbcde393c56f49448dba602243fa6cbc1"],
+                ["repository": "ios", "sha": "e1046aacbcc4d654aa062db7c1849ce6bfb60257"],
+            ]
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(row["evidence"] as? [[String: String]]),
+            [[
+                "path": "/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/.superpowers/evidence/metering-phase6/T9-focused.log",
+                "sha256": "ef2e836c0037e16feee5fca784c6b1bfdcc12a2349f4764c4f989b8578629972",
+            ]]
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(row["demolition_commit"] as? [String: String]),
+            [
+                "repository": "ios",
+                "sha": "2a94762f5088748ae335b4fbbd282693b96e97ad",
+            ]
+        )
+        XCTAssertEqual(
+            row["revert_command"] as? String,
+            "git -C /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS revert 2a94762f5088748ae335b4fbbd282693b96e97ad"
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(row["forbidden_symbols"] as? [String]),
+            [["locked", "Set", "Token", "Data"].joined()]
+        )
+    }
 }
