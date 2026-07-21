@@ -251,16 +251,50 @@
     },
     {
       "id": "T8",
-      "status": "UNATTESTED",
+      "status": "REMOVED",
       "legacy_mechanism": "duplicate earned activity lifecycle",
       "replacement": ["Device Epoch Store", "LegacyCompatibilityMonitorState"],
       "deletion_criterion": "replacement vectors and source-absence test pass",
-      "replacement_commits": [],
-      "vectors": [],
-      "evidence": [],
-      "demolition_commit": null,
-      "revert_command": null,
-      "forbidden_symbols": [],
+      "replacement_commits": [
+        {
+          "repository": "ios",
+          "sha": "32010ce010109b582086b67e3e46ce6288b3c96b"
+        },
+        {
+          "repository": "ios",
+          "sha": "5d86ef956f1d251d4ee229fc0b37f93751ec2698"
+        },
+        {
+          "repository": "ios",
+          "sha": "e0ee6a2aedaa7f7bd3e6b0c03c3e6eb0912f09ee"
+        },
+        {
+          "repository": "ios",
+          "sha": "fcb669d3f8677936646bc753a2cdd0028be65cf8"
+        },
+        {
+          "repository": "ios",
+          "sha": "b2eb3a41940c8b166d66fdb0a8918c91a0ffee53"
+        }
+      ],
+      "vectors": ["V01", "V08", "V09", "V13", "V21", "V22", "V28", "V36", "V37", "V38"],
+      "evidence": [
+        {
+          "path": "/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/.superpowers/evidence/metering-phase6/T8-focused.log",
+          "sha256": "0dc558fbac641a9acf2f8069c2be52f273c16ee8f057be866cf514e3af09c846"
+        }
+      ],
+      "demolition_commit": {
+        "repository": "ios",
+        "sha": "ad1e6394d08b6d95ead893589770f16ea67e586c"
+      },
+      "revert_command": "git -C /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS revert ad1e6394d08b6d95ead893589770f16ea67e586c",
+      "forbidden_symbols": [
+        "EarnedActivityGeneration",
+        "evlin.earned.activityLifecycle",
+        "evlin.earned.activityBreadcrumbs",
+        "evlin.earned.activeActivityName"
+      ],
       "release_observation": null,
       "fred_approval": null
     },

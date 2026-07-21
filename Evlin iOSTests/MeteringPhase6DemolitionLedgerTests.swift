@@ -292,4 +292,55 @@ final class MeteringPhase6DemolitionLedgerTests: XCTestCase {
             ])
         )
     }
+
+    func testT8Attestation() throws {
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: ledgerURL)) as? [String: Any]
+        )
+        let rows = try XCTUnwrap(object["demolitions"] as? [[String: Any]])
+        let row = try XCTUnwrap(rows.first { $0["id"] as? String == "T8" })
+
+        XCTAssertEqual(row["status"] as? String, "REMOVED")
+        XCTAssertEqual(
+            Set(try XCTUnwrap(row["vectors"] as? [String])),
+            Set(["V01", "V08", "V09", "V13", "V21", "V22", "V28", "V36", "V37", "V38"])
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(row["replacement_commits"] as? [[String: String]]),
+            [
+                ["repository": "ios", "sha": "32010ce010109b582086b67e3e46ce6288b3c96b"],
+                ["repository": "ios", "sha": "5d86ef956f1d251d4ee229fc0b37f93751ec2698"],
+                ["repository": "ios", "sha": "e0ee6a2aedaa7f7bd3e6b0c03c3e6eb0912f09ee"],
+                ["repository": "ios", "sha": "fcb669d3f8677936646bc753a2cdd0028be65cf8"],
+                ["repository": "ios", "sha": "b2eb3a41940c8b166d66fdb0a8918c91a0ffee53"],
+            ]
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(row["evidence"] as? [[String: String]]),
+            [[
+                "path": "/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/.superpowers/evidence/metering-phase6/T8-focused.log",
+                "sha256": "0dc558fbac641a9acf2f8069c2be52f273c16ee8f057be866cf514e3af09c846",
+            ]]
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(row["demolition_commit"] as? [String: String]),
+            [
+                "repository": "ios",
+                "sha": "ad1e6394d08b6d95ead893589770f16ea67e586c",
+            ]
+        )
+        XCTAssertEqual(
+            row["revert_command"] as? String,
+            "git -C /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS revert ad1e6394d08b6d95ead893589770f16ea67e586c"
+        )
+        XCTAssertEqual(
+            Set(try XCTUnwrap(row["forbidden_symbols"] as? [String])),
+            Set([
+                ["Earned", "Activity", "Generation"].joined(),
+                ["evlin", "earned", "activityLifecycle"].joined(separator: "."),
+                ["evlin", "earned", "activityBreadcrumbs"].joined(separator: "."),
+                ["evlin", "earned", "activeActivityName"].joined(separator: "."),
+            ])
+        )
+    }
 }
