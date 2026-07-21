@@ -70,4 +70,56 @@ nonisolated enum MeteringMonitorCapabilityProbe {
         defaults.set(log, forKey: logKey)
     }
 }
+
+nonisolated struct AppLimitTopologyProbeCallback: Codable, Equatable, Sendable {
+    let timestamp: Date
+    let activityName: String
+    let eventName: String
+}
+
+nonisolated enum AppLimitTopologyProbeCallbackStore {
+    static let prefix = "evlin.debug.topology."
+    private static let key = "evlin.debug.appLimitTopologyProbe.callbacks.v1"
+    private static let limit = 20
+
+    static func append(
+        activityName: String,
+        eventName: String,
+        timestamp: Date = Date(),
+        defaults: UserDefaults?
+    ) {
+        guard let defaults else { return }
+        _ = ActiveLockPersistenceLock.shared.withLock {
+            var callbacks = readLocked(defaults)
+            callbacks.append(.init(
+                timestamp: timestamp,
+                activityName: activityName,
+                eventName: eventName
+            ))
+            if callbacks.count > limit {
+                callbacks.removeFirst(callbacks.count - limit)
+            }
+            if let data = try? JSONEncoder().encode(callbacks) {
+                defaults.set(data, forKey: key)
+            }
+        }
+    }
+
+    static func read(defaults: UserDefaults?) -> [AppLimitTopologyProbeCallback] {
+        guard let defaults else { return [] }
+        return ActiveLockPersistenceLock.shared.withLock { readLocked(defaults) } ?? []
+    }
+
+    static func clear(defaults: UserDefaults?) {
+        guard let defaults else { return }
+        _ = ActiveLockPersistenceLock.shared.withLock {
+            defaults.removeObject(forKey: key)
+        }
+    }
+
+    private static func readLocked(_ defaults: UserDefaults) -> [AppLimitTopologyProbeCallback] {
+        guard let data = defaults.data(forKey: key) else { return [] }
+        return (try? JSONDecoder().decode([AppLimitTopologyProbeCallback].self, from: data)) ?? []
+    }
+}
 #endif

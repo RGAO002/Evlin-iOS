@@ -1,4 +1,6 @@
 #if DEBUG
+import CryptoKit
+import DeviceActivity
 import FamilyControls
 import Foundation
 import ManagedSettings
@@ -31,6 +33,8 @@ private struct AppLimitProbeReadbackPort: AppLimitOwnerReadbackPort, @unchecked 
 private enum AppLimitProbeError: LocalizedError {
     case exactlyOneAppRequired
     case missingOwner
+    case ownerMismatch
+    case topologyProbeAlreadyActive
     case tokenEncodingFailed
     case commandRejected(String)
     case receiptMissing
@@ -39,6 +43,8 @@ private enum AppLimitProbeError: LocalizedError {
         switch self {
         case .exactlyOneAppRequired: "Select exactly one app."
         case .missingOwner: "No current child-device owner is configured."
+        case .ownerMismatch: "Owner mirror and epoch-store owner do not match."
+        case .topologyProbeAlreadyActive: "Stop the active topology probe before starting another."
         case .tokenEncodingFailed: "The selected app token could not be encoded."
         case .commandRejected(let reason): "Probe command rejected: \(reason)"
         case .receiptMissing: "The arm completed without a durable applied receipt."
@@ -49,12 +55,16 @@ private enum AppLimitProbeError: LocalizedError {
 struct AppLimitOneMinuteProbeView: View {
     private static let ruleIDKey = "evlin.debug.appLimitProbe.ruleID"
     private static let startedAtKey = "evlin.debug.appLimitProbe.startedAt"
+    private static let topologyActiveModeKey = "evlin.debug.appLimitTopologyProbe.activeMode"
+    private static let topologyStartedAtKey = "evlin.debug.appLimitTopologyProbe.startedAt"
 
     @State private var selection = FamilyActivitySelection(includeEntireCategory: false)
     @State private var pickerShown = false
     @State private var running = false
     @State private var status = "Select one unused app."
     @State private var refreshTick = 0
+    @State private var topologyMode: AppLimitTopologyProbeMode = .legacyWindow
+    @State private var topologyStatus = "Run legacy and v2 separately with the same unused app."
 
     private var defaults: UserDefaults? {
         UserDefaults(suiteName: MeteringProductionComposition.appGroupSuiteName)
@@ -65,6 +75,36 @@ struct AppLimitOneMinuteProbeView: View {
     }
 
     var body: some View {
+        Section {
+            Picker("Topology", selection: $topologyMode) {
+                Text("Legacy").tag(AppLimitTopologyProbeMode.legacyWindow)
+                Text("V2").tag(AppLimitTopologyProbeMode.v2PerRule)
+            }
+            .pickerStyle(.segmented)
+
+            Button {
+                runTopologyProbe()
+            } label: {
+                Label("Arm \(topologyMode.rawValue) 1-minute probe", systemImage: "scope")
+            }
+            .disabled(running || selection.applicationTokens.count != 1 || topologyProbeIsActive)
+
+            Button(role: .destructive) {
+                stopTopologyProbe()
+            } label: {
+                Label("Stop topology probe", systemImage: "stop.circle")
+            }
+            .disabled(!topologyProbeIsActive)
+
+            probeRow("topology status", topologyStatus)
+            probeRow("active topology", defaults?.string(forKey: Self.topologyActiveModeKey) ?? "none")
+            probeRow("topology callbacks", topologyCallbackReadback)
+        } header: {
+            Text("Per-App Legacy / V2 A-B")
+        } footer: {
+            Text("DEBUG only. Both modes use the same app token, 1-minute threshold, timezone, and includesPastActivity=true. Only reserved probe names are stopped; backend policy and AppLimitEpochStore are untouched.")
+        }
+
         Section {
             Button {
                 pickerShown = true
@@ -110,6 +150,84 @@ struct AppLimitOneMinuteProbeView: View {
                 refreshTick += 1
             }
         }
+    }
+
+    private var topologyProbeIsActive: Bool {
+        defaults?.string(forKey: Self.topologyActiveModeKey) != nil
+    }
+
+    private var topologyCallbackReadback: String {
+        let callbacks = AppLimitTopologyProbeCallbackStore.read(defaults: defaults)
+        guard !callbacks.isEmpty else { return "(none)" }
+        return callbacks.map {
+            "\(timestamp($0.timestamp)) \($0.activityName) event=\($0.eventName)"
+        }.joined(separator: " | ")
+    }
+
+    private func runTopologyProbe() {
+        do {
+            guard selection.applicationTokens.count == 1,
+                  let token = selection.applicationTokens.first
+            else { throw AppLimitProbeError.exactlyOneAppRequired }
+            guard let owner = MeteringOwnerMirror.current() else {
+                throw AppLimitProbeError.missingOwner
+            }
+            guard (try? DeviceEpochStore.shared.read().ownerChildDeviceID) == owner else {
+                throw AppLimitProbeError.ownerMismatch
+            }
+            guard !topologyProbeIsActive else {
+                throw AppLimitProbeError.topologyProbeAlreadyActive
+            }
+
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+            guard let tokenData = try? encoder.encode(token) else {
+                throw AppLimitProbeError.tokenEncodingFailed
+            }
+            let tokenDigest = SHA256.hash(data: tokenData)
+                .map { String(format: "%02x", $0) }
+                .joined()
+            let now = Date()
+            let plan = try AppLimitTopologyProbePlan.make(
+                mode: topologyMode,
+                tokenDigest: tokenDigest,
+                now: now,
+                timezone: TimeZone.current.identifier
+            )
+            let schedule = try plan.schedule()
+            let event = DeviceActivityEvent(
+                applications: [token],
+                categories: [],
+                webDomains: [],
+                threshold: DateComponents(minute: 1),
+                includesPastActivity: true
+            )
+            let scheduler = DiagnosticDeviceActivityScheduler(base: DeviceActivityCenterScheduler())
+            scheduler.stopMonitoring(plan.stopActivityNames.map { DeviceActivityName($0) })
+            AppLimitTopologyProbeCallbackStore.clear(defaults: defaults)
+            try scheduler.startMonitoring(
+                DeviceActivityName(plan.activityName),
+                during: schedule,
+                events: [DeviceActivityEvent.Name(plan.eventName): event]
+            )
+            defaults?.set(topologyMode.rawValue, forKey: Self.topologyActiveModeKey)
+            defaults?.set(ISO8601DateFormatter().string(from: now), forKey: Self.topologyStartedAtKey)
+            topologyStatus = "\(timestamp(now)) armed \(topologyMode.rawValue); use only the selected app"
+            refreshTick += 1
+        } catch {
+            topologyStatus = "\(timestamp()) error=\(error.localizedDescription)"
+        }
+    }
+
+    private func stopTopologyProbe() {
+        let scheduler = DiagnosticDeviceActivityScheduler(base: DeviceActivityCenterScheduler())
+        scheduler.stopMonitoring(
+            AppLimitTopologyProbePlan.reservedActivityNames.map { DeviceActivityName($0) }
+        )
+        defaults?.removeObject(forKey: Self.topologyActiveModeKey)
+        defaults?.removeObject(forKey: Self.topologyStartedAtKey)
+        topologyStatus = "\(timestamp()) stopped reserved topology probes"
+        refreshTick += 1
     }
 
     private func arm() async {

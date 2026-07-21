@@ -212,6 +212,17 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
     override func eventDidReachThreshold(_ event: DeviceActivityEvent.Name,
                                          activity: DeviceActivityName) {
         super.eventDidReachThreshold(event, activity: activity)
+#if DEBUG
+        if event.rawValue.hasPrefix("evlin.debug.topology."),
+           activity.rawValue.hasPrefix("evlin.debug.topology.") {
+            AppLimitTopologyProbeCallbackStore.append(
+                activityName: activity.rawValue,
+                eventName: event.rawValue,
+                defaults: defaults
+            )
+            return
+        }
+#endif
         // DEBUG whole-device-measurement spike: a threshold armed on ALL
         // CATEGORIES fired. The Monitor extension (unlike the Report extension)
         // CAN write the App Group, so this marker reliably crosses back to the

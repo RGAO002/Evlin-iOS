@@ -3,6 +3,98 @@ import CryptoKit
 import DeviceActivity
 import Foundation
 
+nonisolated enum AppLimitTopologyProbeMode: String, CaseIterable, Sendable {
+    case legacyWindow = "legacy"
+    case v2PerRule = "v2"
+}
+
+nonisolated struct AppLimitTopologyProbePlan: Sendable {
+    static let legacyActivityName = "evlin.debug.topology.legacy"
+    static let v2ActivityName = "evlin.debug.topology.v2"
+    static let reservedActivityNames = [legacyActivityName, v2ActivityName]
+
+    let mode: AppLimitTopologyProbeMode
+    let activityName: String
+    let eventName: String
+    let timezone: String
+    let expected: MeteringDaemonConfigurationSummary
+    let stopActivityNames: [String]
+
+    static func make(
+        mode: AppLimitTopologyProbeMode,
+        tokenDigest: String,
+        now: Date,
+        timezone: String
+    ) throws -> Self {
+        guard let timeZone = TimeZone(identifier: timezone) else {
+            throw AppLimitTopologyProbePlanError.invalidTimezone
+        }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+        var start = DateComponents()
+        start.calendar = calendar
+        start.timeZone = timeZone
+        start.hour = 0
+        start.minute = 0
+        var end = DateComponents()
+        end.calendar = calendar
+        end.timeZone = timeZone
+        end.hour = 23
+        end.minute = 59
+        let schedule = DeviceActivitySchedule(
+            intervalStart: start,
+            intervalEnd: end,
+            repeats: true
+        )
+        let activityName = mode == .legacyWindow ? legacyActivityName : v2ActivityName
+        let eventName = "\(activityName).event"
+        let scheduleSummary = MeteringDaemonConfigurationSummary.make(
+            schedule: schedule,
+            events: [:]
+        ).schedule
+        let eventSummary = MeteringDaemonConfigurationSummary.Event(
+            name: eventName,
+            threshold: "minute=1",
+            includesPastActivity: true,
+            applicationTokenDigests: [tokenDigest],
+            categoryTokenDigests: [],
+            webDomainTokenDigests: []
+        )
+        _ = now // Run identity records the timestamp; topology remains time-invariant.
+        return Self(
+            mode: mode,
+            activityName: activityName,
+            eventName: eventName,
+            timezone: timezone,
+            expected: .init(schedule: scheduleSummary, events: [eventSummary]),
+            stopActivityNames: reservedActivityNames
+        )
+    }
+
+    func schedule() throws -> DeviceActivitySchedule {
+        guard let timeZone = TimeZone(identifier: timezone) else {
+            throw AppLimitTopologyProbePlanError.invalidTimezone
+        }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+        var start = DateComponents()
+        start.calendar = calendar
+        start.timeZone = timeZone
+        start.hour = 0
+        start.minute = 0
+        var end = DateComponents()
+        end.calendar = calendar
+        end.timeZone = timeZone
+        end.hour = 23
+        end.minute = 59
+        return DeviceActivitySchedule(intervalStart: start, intervalEnd: end, repeats: true)
+    }
+}
+
+nonisolated enum AppLimitTopologyProbePlanError: Error {
+    case invalidTimezone
+}
+
 nonisolated enum MeteringDiagnosticOperation: String, Codable, Sendable {
     case start
     case stopNames = "stop_names"
