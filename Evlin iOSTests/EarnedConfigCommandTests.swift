@@ -71,16 +71,36 @@ final class EarnedConfigCommandTests: XCTestCase {
         }
         poller.ackCommandOverride = { _, status, detail in ack = (status, detail) }
         poller.earnedPolicyRecoveryOverride = { recoveryCount += 1 }
-        let shieldsBefore = await ActiveLockStore.shared.allCurrent().shields.count
-
         await poller.pollOnceForCurrentDevice()
 
         XCTAssertEqual(ingressCount, 1)
         XCTAssertEqual(recoveryCount, 1)
         XCTAssertEqual(ack?.0, "persisted_waiting_for_owner")
         XCTAssertEqual(ack?.1?["application_state"] as? String, "pending")
-        let shieldsAfter = await ActiveLockStore.shared.allCurrent().shields.count
-        XCTAssertEqual(shieldsAfter, shieldsBefore)
+        // Both effect-capable exits are intercepted above. Do not compare the
+        // process-wide App Group shield count here: unrelated recovery tests
+        // and app startup can legitimately mutate that shared store.
+    }
+
+    func testEarnedConfigBranchReturnsBeforeActionExecutor() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: root.appendingPathComponent("Evlin iOS/Services/CommandPoller.swift"),
+            encoding: .utf8
+        )
+        let executeStart = try XCTUnwrap(source.range(of: "private func execute(poll:"))
+        let appLimitStart = try XCTUnwrap(
+            source.range(of: "private func handleAppLimitCommand(", range: executeStart.lowerBound..<source.endIndex)
+        )
+        let executeBody = source[executeStart.lowerBound..<appLimitStart.lowerBound]
+        let earnedBranch = try XCTUnwrap(executeBody.range(of: "if poll.action == CommandAction.earnedTimeConfig.rawValue {"))
+        let executorCall = try XCTUnwrap(executeBody.range(of: "ActionExecutor.shared.execute("))
+        let branchBody = executeBody[earnedBranch.lowerBound..<executorCall.lowerBound]
+
+        XCTAssertTrue(branchBody.contains("handleEarnedTimeConfig("))
+        XCTAssertTrue(branchBody.contains("return"))
     }
 
     func testSupersededPolicyGetsTerminalAckWithoutOwnerRecovery() async throws {
