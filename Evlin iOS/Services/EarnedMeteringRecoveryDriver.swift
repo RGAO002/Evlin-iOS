@@ -67,6 +67,7 @@ final class EarnedMeteringRecoveryDriver {
             return
         }
 
+        try recoverPersistedInitialAuthoritativeBaseConflict(owner: owner)
         try prepareReplacementIfNeeded(owner: owner)
         await delivery.drain(owner: owner)
         _ = try installer.reconcile(ownerChildDeviceID: owner)
@@ -84,6 +85,23 @@ final class EarnedMeteringRecoveryDriver {
         try stopAbandonedConservativeCandidates(owner: owner)
         try stopAuthoritativeBaseRejectedCandidates(owner: owner)
         try reconcileCoverage(owner: owner)
+    }
+
+    private func recoverPersistedInitialAuthoritativeBaseConflict(owner: UUID) throws {
+        try store.transaction(expectedOwner: owner) { state in
+            guard let epochID = state.activeEpochID,
+                  let epoch = state.epochs[epochID],
+                  let conflict = epoch.authoritativeBaseConflict,
+                  let route = state.routes.values.first(where: { $0.epochID == epochID })
+            else { return }
+            _ = state.replaceAuthoritativeBaseMismatchCandidate(
+                owner: owner,
+                rejectedEpochID: epochID,
+                rejectedRouteID: route.routeID,
+                conflict: conflict,
+                now: clock.now
+            )
+        }
     }
 
     private func reconcileCoverage(owner: UUID) throws {

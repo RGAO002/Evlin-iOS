@@ -3626,7 +3626,8 @@ extension DeviceEpochStoreState {
               rejectedEpoch.childDeviceID == owner,
               rejectedEpoch.status == .active,
               rejectedEpoch.registeredAt == nil,
-              rejectedEpoch.authoritativeBaseConflict == nil,
+              (rejectedEpoch.authoritativeBaseConflict == nil
+                  || rejectedEpoch.authoritativeBaseConflict == conflict),
               rejectedEpoch.baseCorrectionState == .available,
               conflict.authoritativeSnapshot.childDeviceID == owner,
               conflict.authoritativeSnapshot.usageDate == rejectedEpoch.usageDate,

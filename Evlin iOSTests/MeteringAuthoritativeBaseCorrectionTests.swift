@@ -47,6 +47,25 @@ final class MeteringAuthoritativeBaseCorrectionTests: XCTestCase {
         )
     }
 
+    func testColdReopenRecoversPersistedInitialBaseMismatch() async throws {
+        let fixture = try CorrectionFixture(owner: owner, start: start, initialBootstrap: true)
+        defer { fixture.cleanup() }
+        try fixture.seedPersistedInitialConflict(estimatedMinutes: 40)
+
+        try await fixture.driver(at: start.addingTimeInterval(1)).recover(ownerChildDeviceID: owner)
+
+        let state = try fixture.reopenedStore().read()
+        let corrected = try XCTUnwrap(state.epochs.values.first {
+            $0.epochID != fixture.rejectedEpochID && $0.baseAcceptedMinutes == 40
+        })
+        XCTAssertEqual(state.activeEpochID, corrected.epochID)
+        XCTAssertEqual(corrected.baseSource, .registrationConflict409)
+        XCTAssertEqual(state.epochs[fixture.rejectedEpochID]?.status, .retired)
+        XCTAssertTrue(state.registrationWork.values.contains {
+            $0.epochID == corrected.epochID && $0.retry.terminal == .pending
+        })
+    }
+
     func testAuthoritativeBaseMismatchAtomicallyReplacesOnlyRejectedCandidate() async throws {
         let fixture = try CorrectionFixture(owner: owner, start: start)
         defer { fixture.cleanup() }
@@ -691,6 +710,17 @@ private final class CorrectionFixture {
                 conflict: conflict,
                 now: start
             ) else { throw CorrectionFixtureError.replacementRejected }
+        }
+    }
+
+    func seedPersistedInitialConflict(estimatedMinutes: Int) throws {
+        let conflict = authoritativeConflictDTO(estimatedMinutes: estimatedMinutes)
+        try store.transaction(expectedOwner: owner) { state in
+            state.epochs[rejectedEpochID]?.authoritativeBaseConflict = conflict
+            state.registrationWork[rejectedRegistrationID]?.claim = nil
+            state.registrationWork[rejectedRegistrationID]?.retry.terminal = .superseded
+            state.registrationWork[rejectedRegistrationID]?.retry.lastErrorCode =
+                "authoritative_base_mismatch"
         }
     }
 
