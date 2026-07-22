@@ -68,6 +68,7 @@ final class EarnedMeteringRecoveryDriver {
         }
 
         try recoverPersistedInitialAuthoritativeBaseConflict(owner: owner)
+        try recoverLegacyInitialCorrectionReason(owner: owner)
         try prepareReplacementIfNeeded(owner: owner)
         await delivery.drain(owner: owner)
         _ = try installer.reconcile(ownerChildDeviceID: owner)
@@ -100,6 +101,68 @@ final class EarnedMeteringRecoveryDriver {
                 rejectedRouteID: route.routeID,
                 conflict: conflict,
                 now: clock.now
+            )
+        }
+    }
+
+    private func recoverLegacyInitialCorrectionReason(owner: UUID) throws {
+        try store.transaction(expectedOwner: owner) { state in
+            guard state.v2RouteHandoff == nil,
+                  state.ratchets[owner] == nil || state.ratchets[owner]?.localSelection == .v1,
+                  state.activeRouteID == nil,
+                  let epochID = state.activeEpochID,
+                  let epoch = state.epochs[epochID],
+                  epoch.childDeviceID == owner,
+                  epoch.registeredAt == nil,
+                  epoch.baseSource == .registrationConflict409,
+                  epoch.status == .active,
+                  let route = state.routes.values.first(where: {
+                      $0.epochID == epochID
+                          && $0.ownerChildDeviceID == owner
+                          && $0.lifecycle == .planned
+                  }),
+                  let install = state.installWork.values.first(where: {
+                      $0.routeID == route.routeID
+                  }),
+                  install.authorization == .registrationRequired,
+                  install.phase == .pendingStart,
+                  let registrationKey = state.registrationWork.first(where: {
+                      $0.value.epochID == epochID && $0.value.routeID == route.routeID
+                  })?.key,
+                  let registration = state.registrationWork[registrationKey],
+                  registration.request.reason == .policyChange,
+                  registration.retry.terminal == .rejected,
+                  registration.retry.lastErrorCode == "replacement_reason_mismatch"
+            else { return }
+
+            let request = registration.request
+            let correctedRequest = EpochRegistrationRequestDTO(
+                protocolVersion: request.protocolVersion,
+                epochID: request.epochID,
+                deviceID: request.deviceID,
+                usageDate: request.usageDate,
+                timezone: request.timezone,
+                policyRevision: request.policyRevision,
+                measurementSelectionDigest: request.measurementSelectionDigest,
+                enforcementSetID: request.enforcementSetID,
+                startedAt: request.startedAt,
+                baseAcceptedMinutes: request.baseAcceptedMinutes,
+                reason: .initial
+            )
+            state.registrationWork[registrationKey] = EpochRegistrationWork(
+                workID: registration.workID,
+                ownerChildDeviceID: registration.ownerChildDeviceID,
+                epochID: registration.epochID,
+                routeID: registration.routeID,
+                request: correctedRequest,
+                claim: nil,
+                retry: MeteringRetryState(
+                    attemptCount: 0,
+                    nextAttemptAt: clock.now,
+                    lastErrorCode: nil,
+                    terminal: .pending
+                ),
+                createdAt: registration.createdAt
             )
         }
     }

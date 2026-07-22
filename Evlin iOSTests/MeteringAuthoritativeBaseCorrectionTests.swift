@@ -42,6 +42,12 @@ final class MeteringAuthoritativeBaseCorrectionTests: XCTestCase {
             .pending
         )
         XCTAssertEqual(
+            state.registrationWork.values.first {
+                $0.epochID == corrected.epochID && $0.routeID == correctedRoute.routeID
+            }?.request.reason,
+            .initial
+        )
+        XCTAssertEqual(
             state.installWork.values.first { $0.routeID == correctedRoute.routeID }?.authorization,
             .registrationRequired
         )
@@ -63,6 +69,30 @@ final class MeteringAuthoritativeBaseCorrectionTests: XCTestCase {
         XCTAssertEqual(state.epochs[fixture.rejectedEpochID]?.status, .retired)
         XCTAssertTrue(state.registrationWork.values.contains {
             $0.epochID == corrected.epochID && $0.retry.terminal == .pending
+        })
+    }
+
+    func testColdReopenRetriesLegacyInitialCorrectionWithInitialReason() async throws {
+        let fixture = try CorrectionFixture(owner: owner, start: start, initialBootstrap: true)
+        defer { fixture.cleanup() }
+        try fixture.replaceDirectly(estimatedMinutes: 40)
+        try fixture.poisonInitialCorrectionWithLegacyReason()
+        fixture.transport.errors = [.notConnectedToInternet]
+
+        try await fixture.driver(at: start.addingTimeInterval(1)).recover(ownerChildDeviceID: owner)
+
+        XCTAssertEqual(fixture.transport.requests.count, 1)
+        let body = try XCTUnwrap(fixture.transport.requests.first?.httpBody)
+        let request = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: body) as? [String: Any]
+        )
+        XCTAssertEqual(request["reason"] as? String, EpochRegistrationReasonDTO.initial.rawValue)
+        let state = try fixture.reopenedStore().read()
+        let correctedEpochID = try XCTUnwrap(state.activeEpochID)
+        XCTAssertTrue(state.registrationWork.values.contains {
+            $0.epochID == correctedEpochID
+                && $0.request.reason == .initial
+                && $0.retry.terminal == .pending
         })
     }
 
@@ -721,6 +751,44 @@ private final class CorrectionFixture {
             state.registrationWork[rejectedRegistrationID]?.retry.terminal = .superseded
             state.registrationWork[rejectedRegistrationID]?.retry.lastErrorCode =
                 "authoritative_base_mismatch"
+        }
+    }
+
+    func poisonInitialCorrectionWithLegacyReason() throws {
+        try store.transaction(expectedOwner: owner) { state in
+            guard let correctedEpochID = state.activeEpochID,
+                  let registrationKey = state.registrationWork.first(where: {
+                      $0.value.epochID == correctedEpochID
+                  })?.key,
+                  let registration = state.registrationWork[registrationKey]
+            else { throw CorrectionFixtureError.replacementRejected }
+            let request = registration.request
+            let legacyRequest = EpochRegistrationRequestDTO(
+                protocolVersion: request.protocolVersion,
+                epochID: request.epochID,
+                deviceID: request.deviceID,
+                usageDate: request.usageDate,
+                timezone: request.timezone,
+                policyRevision: request.policyRevision,
+                measurementSelectionDigest: request.measurementSelectionDigest,
+                enforcementSetID: request.enforcementSetID,
+                startedAt: request.startedAt,
+                baseAcceptedMinutes: request.baseAcceptedMinutes,
+                reason: .policyChange
+            )
+            var retry = registration.retry
+            retry.terminal = .rejected
+            retry.lastErrorCode = "replacement_reason_mismatch"
+            state.registrationWork[registrationKey] = EpochRegistrationWork(
+                workID: registration.workID,
+                ownerChildDeviceID: registration.ownerChildDeviceID,
+                epochID: registration.epochID,
+                routeID: registration.routeID,
+                request: legacyRequest,
+                claim: nil,
+                retry: retry,
+                createdAt: registration.createdAt
+            )
         }
     }
 

@@ -3768,7 +3768,7 @@ extension DeviceEpochStoreState {
             enforcementSetID: correctedEpoch.enforcementSetID,
             startedAt: correctedEpoch.startedAt,
             baseAcceptedMinutes: correctedEpoch.baseAcceptedMinutes,
-            reason: .policyChange
+            reason: .initial
         )
 
         generations[correctedGenerationID] = correctedGeneration
