@@ -2218,18 +2218,23 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
             if isEligible(state, first) {
                 due = first
             } else if first.kind == .install,
-                      let legacySample = dueWork.dropFirst().first(where: { item in
-                          guard item.kind == .sample,
-                                let sample = state.sampleWork.values.first(where: {
-                                    $0.workID == item.workID
-                                }),
-                                sample.authorization == .legacyDeliverable
-                          else { return false }
-                          return isEligible(state, item)
+                      let networkChild = dueWork.dropFirst().first(where: { item in
+                          guard isEligible(state, item) else { return false }
+                          switch item.kind {
+                          case .registration:
+                              return true
+                          case .sample:
+                              return state.sampleWork.values.contains {
+                                  $0.workID == item.workID
+                                      && $0.authorization == .legacyDeliverable
+                              }
+                          case .identityCleanup, .rollover, .install, .activation, .shield:
+                              return false
+                          }
                       }) {
-                // Installation is local work. It must not strand the v1 lane
-                // that keeps accounting alive while v2 registration settles.
-                due = legacySample
+                // Installation is local work. It must not strand registration
+                // or the v1 lane that keeps accounting alive during cutover.
+                due = networkChild
             } else if first.kind == .rollover,
                       let rollover = state.rolloverEffectsWork,
                       rollover.workID == first.workID,

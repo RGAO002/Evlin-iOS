@@ -138,6 +138,66 @@ final class MeteringEpochDeliveryTests: XCTestCase {
         XCTAssertEqual(try store.read().sampleWork.values.first?.retry.terminal, .succeeded)
     }
 
+    func testVerifiedLocalInstallCannotBlockRegistrationRecovery() async throws {
+        let fileURL = temporaryStoreURL()
+        defer { removeTemporaryStore(fileURL) }
+        let store = makeStore(fileURL: fileURL)
+        let registrationID = UUID()
+        try store.transaction(expectedOwner: owner) { state in
+            state = makeBaseState()
+            let installID = UUID()
+            state.installWork[installID] = ActivityInstallWork(
+                workID: installID,
+                ownerChildDeviceID: owner,
+                routeID: routeID,
+                authorization: .futurePlanned,
+                phase: .verified,
+                claim: nil,
+                retry: MeteringRetryState(
+                    attemptCount: 0,
+                    nextAttemptAt: start.addingTimeInterval(-60),
+                    lastErrorCode: nil,
+                    terminal: .pending
+                ),
+                createdAt: start.addingTimeInterval(-60)
+            )
+            var registration = makeRegistrationWork(
+                workID: registrationID,
+                createdAt: start.addingTimeInterval(-30)
+            )
+            registration.retry = MeteringRetryState(
+                attemptCount: 1,
+                nextAttemptAt: start.addingTimeInterval(-30),
+                lastErrorCode: "legacy_http_409_recheck",
+                terminal: .pending
+            )
+            state.registrationWork[registrationID] = registration
+        }
+
+        let transport = DeliveryTestTransport()
+        transport.results = [(
+            try encoded(EpochRegistrationResponseDTO(
+                status: .alreadyRegistered,
+                epochID: epochID,
+                meteringProtocolVersion: 2,
+                snapshot: makeSnapshot(counted: true, warning: nil),
+                epochStatus: .active
+            )),
+            HTTPURLResponse(url: baseURL, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        )]
+        let delivery = MeteringEpochDelivery(
+            baseURL: baseURL,
+            store: store,
+            transport: transport,
+            clock: DeliveryTestClock(now: start)
+        )
+
+        await delivery.drain(owner: owner)
+
+        XCTAssertEqual(transport.requests.count, 1)
+        XCTAssertEqual(try store.read().registrationWork[registrationID]?.retry.terminal, .succeeded)
+    }
+
     func testTransientEnforcementSetConflictRetriesThenRegisters() async throws {
         let fileURL = temporaryStoreURL()
         defer { removeTemporaryStore(fileURL) }
