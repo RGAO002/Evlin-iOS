@@ -1779,8 +1779,8 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                 deviceID: owner,
                 usageDate: epoch.usageDate,
                 timezone: epoch.canonicalTimezone,
-                activityName: route.activityName,
-                eventName: input.eventName,
+                activityName: MeteringSampleWireAliases.activityName(routeID: route.routeID),
+                eventName: MeteringSampleWireAliases.eventName(thresholdMinutes: rawThreshold),
                 thresholdMinutes: rawThreshold,
                 estimatedMinutes: estimatedMinutes,
                 observedAt: input.observedAt,
@@ -2987,7 +2987,8 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                       epoch.childDeviceID == owner,
                       work.request.epochID == epochID,
                       work.request.lane == .v2,
-                      work.request.activityName == route.activityName,
+                      work.request.activityName == MeteringSampleWireAliases.activityName(routeID: routeID)
+                        || work.request.activityName == route.activityName,
                       work.request.usageDate == route.usageDate,
                       work.request.usageDate == epoch.usageDate,
                       work.createdAt >= route.createdAt

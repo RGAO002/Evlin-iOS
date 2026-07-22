@@ -95,6 +95,127 @@ final class MeteringEpochDeliveryTests: XCTestCase {
     private let baseURL = URL(string: "https://metering-epoch-delivery.test")!
     private let start = Date(timeIntervalSince1970: 1_784_179_200)
 
+    func testRejectedPhysicalNamespaceSampleIsRewrittenAndRetriedForExactActiveRoute() async throws {
+        let fileURL = temporaryStoreURL()
+        defer { removeTemporaryStore(fileURL) }
+        let store = makeStore(fileURL: fileURL)
+        let sampleID = UUID()
+        let invalidSampleID = UUID()
+        try store.transaction(expectedOwner: owner) { state in
+            state = makeBaseState()
+            state.ratchets[owner]?.localSelection = .v2
+            let physicalActivity = MeteringRouteNamespace.activityName(routeID: routeID)
+            let physicalEvent = MeteringRouteNamespace.eventName(routeID: routeID, thresholdMinutes: 10)
+            let original = try XCTUnwrap(state.routes[routeID])
+            state.routes[routeID] = MeteringCallbackRoute(
+                routeID: original.routeID,
+                activityName: physicalActivity,
+                namespace: MeteringRouteNamespace.prefix,
+                generationID: original.generationID,
+                generationKey: original.generationKey,
+                ownerChildDeviceID: original.ownerChildDeviceID,
+                usageDate: original.usageDate,
+                epochID: original.epochID,
+                plannedSchedule: original.plannedSchedule,
+                installedSchedule: original.installedSchedule,
+                plannedEvents: [MeteringEventPlan(eventName: physicalEvent, thresholdMinutes: 10)],
+                installedEvents: original.installedEvents,
+                lifecycle: original.lifecycle,
+                createdAt: original.createdAt
+            )
+            state.sampleWork[sampleID] = EpochSampleWork(
+                workID: sampleID,
+                ownerChildDeviceID: owner,
+                epochID: epochID,
+                routeID: routeID,
+                request: EpochSampleRequestDTO(
+                    deviceID: owner,
+                    usageDate: "2026-07-16",
+                    timezone: "America/New_York",
+                    activityName: physicalActivity,
+                    eventName: physicalEvent,
+                    thresholdMinutes: 10,
+                    estimatedMinutes: 50,
+                    observedAt: start,
+                    clientSampleID: MeteringSampleWireAliases.clientSampleID(
+                        lane: .v2,
+                        routeID: routeID,
+                        thresholdMinutes: 10
+                    ),
+                    protocolVersion: 2,
+                    epochID: epochID,
+                    generationArmedAt: nil,
+                    generationOffsetMinutes: nil
+                ),
+                authorization: .v2Deliverable,
+                retry: MeteringRetryState(
+                    attemptCount: 0,
+                    nextAttemptAt: start,
+                    lastErrorCode: "event_namespace_mismatch",
+                    terminal: .rejected
+                ),
+                createdAt: start
+            )
+            state.sampleWork[invalidSampleID] = EpochSampleWork(
+                workID: invalidSampleID,
+                ownerChildDeviceID: owner,
+                epochID: epochID,
+                routeID: routeID,
+                request: EpochSampleRequestDTO(
+                    deviceID: owner,
+                    usageDate: "2026-07-16",
+                    timezone: "America/New_York",
+                    activityName: physicalActivity,
+                    eventName: physicalEvent,
+                    thresholdMinutes: 10,
+                    estimatedMinutes: 50,
+                    observedAt: start,
+                    clientSampleID: "not-the-route-sample-id",
+                    protocolVersion: 2,
+                    epochID: epochID,
+                    generationArmedAt: nil,
+                    generationOffsetMinutes: nil
+                ),
+                authorization: .v2Deliverable,
+                retry: MeteringRetryState(
+                    attemptCount: 0,
+                    nextAttemptAt: start,
+                    lastErrorCode: "event_namespace_mismatch",
+                    terminal: .rejected
+                ),
+                createdAt: start
+            )
+        }
+        let transport = DeliveryTestTransport()
+        transport.results = [(
+            try encoded(makeSnapshot(counted: true, warning: nil)),
+            HTTPURLResponse(url: baseURL, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        )]
+        let delivery = MeteringEpochDelivery(
+            baseURL: baseURL,
+            store: store,
+            transport: transport,
+            clock: DeliveryTestClock(now: start)
+        )
+
+        await delivery.drain(owner: owner)
+
+        XCTAssertEqual(transport.requests.count, 1)
+        let body = try XCTUnwrap(transport.requests.first?.httpBody)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        XCTAssertEqual(
+            json["activity_name"] as? String,
+            MeteringSampleWireAliases.activityName(routeID: routeID)
+        )
+        XCTAssertEqual(json["event_name"] as? String, MeteringSampleWireAliases.eventName(thresholdMinutes: 10))
+        let final = try XCTUnwrap(try store.read().sampleWork[sampleID])
+        XCTAssertEqual(final.retry.terminal, .succeeded)
+        XCTAssertEqual(final.request.activityName, MeteringSampleWireAliases.activityName(routeID: routeID))
+        let invalid = try XCTUnwrap(try store.read().sampleWork[invalidSampleID])
+        XCTAssertEqual(invalid.retry.terminal, .rejected)
+        XCTAssertEqual(invalid.request.activityName, MeteringRouteNamespace.activityName(routeID: routeID))
+    }
+
     func testVerifiedLocalInstallCannotBlockLegacySampleDelivery() async throws {
         let fileURL = temporaryStoreURL()
         defer { removeTemporaryStore(fileURL) }
@@ -171,8 +292,8 @@ final class MeteringEpochDeliveryTests: XCTestCase {
                     deviceID: owner,
                     usageDate: route.usageDate,
                     timezone: route.plannedSchedule.timezoneIdentifier,
-                    activityName: route.activityName,
-                    eventName: "evlin.earned.t5",
+                    activityName: MeteringSampleWireAliases.activityName(routeID: routeID),
+                    eventName: MeteringSampleWireAliases.eventName(thresholdMinutes: 5),
                     thresholdMinutes: 5,
                     estimatedMinutes: 5,
                     observedAt: start,

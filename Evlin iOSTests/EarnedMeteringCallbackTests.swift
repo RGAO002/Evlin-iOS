@@ -41,6 +41,14 @@ final class EarnedMeteringCallbackTests: XCTestCase {
         XCTAssertEqual(work?.authorization, .v2Deliverable)
         XCTAssertEqual(work?.request.estimatedMinutes, 17)
         XCTAssertEqual(work?.request.lane, .v2)
+        XCTAssertEqual(
+            work?.request.activityName,
+            MeteringSampleWireAliases.activityName(routeID: fixture.routeID)
+        )
+        XCTAssertEqual(
+            work?.request.eventName,
+            MeteringSampleWireAliases.eventName(thresholdMinutes: 5)
+        )
     }
 
     func testTerminalCallbackCommitsPreparedShieldReferenceWithSampleButEarlyCallbackCommitsNeither() throws {

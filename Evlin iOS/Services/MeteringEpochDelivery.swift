@@ -169,6 +169,7 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
         if importLegacyWork, await self.importLegacyWork(owner: owner) {
             return
         }
+        reopenRejectedPhysicalNamespaceSamplesIfNeeded(owner: owner)
         reopenLegacyOpaque409IfNeeded(owner: owner)
 
         while true {
@@ -183,6 +184,86 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
                 await deliverActivation(work: work, owner: owner, claim: claim)
             case let .sample(work, claim):
                 await deliverSample(work: work, owner: owner, claim: claim)
+            }
+        }
+    }
+
+    private func reopenRejectedPhysicalNamespaceSamplesIfNeeded(owner: UUID) {
+        try? store.transaction(expectedOwner: owner) { state in
+            for (key, work) in state.sampleWork {
+                guard work.ownerChildDeviceID == owner,
+                      work.authorization == .v2Deliverable,
+                      work.retry.terminal == .rejected,
+                      work.retry.lastErrorCode == "event_namespace_mismatch",
+                      work.claim == nil,
+                      let routeID = work.routeID,
+                      let epochID = work.epochID,
+                      state.activeRouteID == routeID,
+                      state.activeEpochID == epochID,
+                      let route = state.routes[routeID],
+                      route.ownerChildDeviceID == owner,
+                      route.epochID == epochID,
+                      route.lifecycle == .active,
+                      state.activeGenerationID == route.generationID,
+                      let epoch = state.epochs[epochID],
+                      epoch.childDeviceID == owner,
+                      epoch.status == .active,
+                      epoch.authoritativeBaseConflict == nil,
+                      work.request.lane == .v2,
+                      work.request.epochID == epochID,
+                      work.request.activityName == route.activityName,
+                      route.activityName == MeteringRouteNamespace.activityName(routeID: routeID),
+                      let parsed = MeteringRouteNamespace.parse(
+                        activityName: work.request.activityName,
+                        eventName: work.request.eventName
+                      ),
+                      parsed.routeID == routeID,
+                      parsed.thresholdMinutes == work.request.thresholdMinutes,
+                      route.plannedEvents.contains(where: {
+                        $0.eventName == work.request.eventName
+                            && $0.thresholdMinutes == work.request.thresholdMinutes
+                      }),
+                      work.request.clientSampleID == MeteringSampleWireAliases.clientSampleID(
+                        lane: .v2,
+                        routeID: routeID,
+                        thresholdMinutes: work.request.thresholdMinutes
+                      )
+                else { continue }
+
+                let oldRequest = work.request
+                let rewrittenRequest = EpochSampleRequestDTO(
+                    deviceID: oldRequest.deviceID,
+                    usageDate: oldRequest.usageDate,
+                    timezone: oldRequest.timezone,
+                    activityName: MeteringSampleWireAliases.activityName(routeID: routeID),
+                    eventName: MeteringSampleWireAliases.eventName(
+                        thresholdMinutes: oldRequest.thresholdMinutes
+                    ),
+                    thresholdMinutes: oldRequest.thresholdMinutes,
+                    estimatedMinutes: oldRequest.estimatedMinutes,
+                    observedAt: oldRequest.observedAt,
+                    clientSampleID: oldRequest.clientSampleID,
+                    protocolVersion: oldRequest.protocolVersion,
+                    epochID: oldRequest.epochID,
+                    generationArmedAt: oldRequest.generationArmedAt,
+                    generationOffsetMinutes: oldRequest.generationOffsetMinutes
+                )
+                state.sampleWork[key] = EpochSampleWork(
+                    workID: work.workID,
+                    ownerChildDeviceID: work.ownerChildDeviceID,
+                    epochID: work.epochID,
+                    routeID: work.routeID,
+                    request: rewrittenRequest,
+                    authorization: work.authorization,
+                    claim: nil,
+                    retry: MeteringRetryState(
+                        attemptCount: work.retry.attemptCount + 1,
+                        nextAttemptAt: clock.now,
+                        lastErrorCode: "legacy_physical_namespace_recheck",
+                        terminal: .pending
+                    ),
+                    createdAt: work.createdAt
+                )
             }
         }
     }
@@ -1137,7 +1218,10 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
                 && sample.request.epochID == epochID
                 && sample.request.usageDate == route.usageDate
                 && sample.request.usageDate == epoch.usageDate
-                && sample.request.activityName == route.activityName
+                && sample.request.activityName == MeteringSampleWireAliases.activityName(routeID: routeID)
+                && sample.request.eventName == MeteringSampleWireAliases.eventName(
+                    thresholdMinutes: sample.request.thresholdMinutes
+                )
         }
     }
 
