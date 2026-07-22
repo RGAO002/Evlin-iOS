@@ -300,7 +300,9 @@ final class ActionExecutor: @unchecked Sendable {
             guard identity.isCurrent else {
                 return Self.staleIdentityResult
             }
-            cancelAllScheduled()
+            for record in cleared {
+                cancelScheduled(recordKey: record.recordKey)
+            }
             return .confirmedExact(verb: .unshieldAll, displayName: "\(cleared.count) shield(s) cleared", effectiveState: nil)
         case .unblockAll:
             guard await prepareForMutation(identity) else { return Self.staleIdentityResult }
@@ -1547,10 +1549,6 @@ final class ActionExecutor: @unchecked Sendable {
     private func cancelScheduled(recordKey: String) {
         let name = DeviceActivityName(deviceActivityNameFor(recordKey: recordKey))
         activityScheduler.stopMonitoring([name])
-    }
-
-    private func cancelAllScheduled() {
-        activityScheduler.stopMonitoring()
     }
 
     private func deviceActivityNameFor(recordKey: String) -> String {

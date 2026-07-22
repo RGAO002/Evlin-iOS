@@ -35,6 +35,42 @@ final class ActionExecutorTests: XCTestCase {
         XCTAssertGreaterThan(interval, 0)
     }
 
+    func testUnshieldAllStopsOnlyRemovedShieldSchedulesNotAllMetering() async throws {
+        let childID = UUID()
+        let record = makeCategoryShield(childID: childID)
+        _ = await ActiveLockStore.shared.addShield(record)
+        let spy = DeviceActivitySchedulerSpy()
+        let executor = ActionExecutor(
+            activityScheduler: spy,
+            authorizationStatusProvider: { .approved }
+        )
+        let command = LockCommand(
+            id: UUID(),
+            action: .unshieldAll,
+            tier: .all,
+            target: CommandTarget(
+                originalRequest: "unlock everything",
+                targetDisplay: "All apps",
+                targetChildID: childID
+            ),
+            durationMinutes: nil,
+            issuedAt: Date()
+        )
+
+        let result = await executor.execute(command)
+
+        guard case .confirmedExact(.unshieldAll, _, _) = result else {
+            return XCTFail("unshield_all must succeed")
+        }
+        let remainingShields = await ActiveLockStore.shared.allCurrent().shields
+        XCTAssertTrue(remainingShields.isEmpty)
+        XCTAssertFalse(spy.stopped.contains(where: { $0 == nil }))
+        XCTAssertEqual(
+            spy.stopped,
+            [[DeviceActivityName(expectedShieldActivityName(recordKey: record.recordKey))]]
+        )
+    }
+
     func testIdentityChangeWhileMutationIsDelayedCannotPersistOldBlock() async {
         let oldID = UUID()
         let newID = UUID()
@@ -515,6 +551,10 @@ final class ActionExecutorTests: XCTestCase {
 
     private func expectedBlockActivityName(bundleID: String) -> String {
         "evlin.block.\(sha256Hex16(Data(bundleID.utf8)))"
+    }
+
+    private func expectedShieldActivityName(recordKey: String) -> String {
+        "evlin.shield.\(sha256Hex16(Data(recordKey.utf8)))"
     }
 
     private func sha256Hex16(_ data: Data) -> String {
