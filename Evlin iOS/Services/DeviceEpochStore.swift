@@ -3428,6 +3428,16 @@ extension DeviceEpochStoreState {
         conflict: EpochRegistrationConflictDTO,
         now: Date
     ) -> Bool {
+        if replaceInitialAuthoritativeBaseMismatchCandidate(
+            owner: owner,
+            rejectedEpochID: rejectedEpochID,
+            rejectedRouteID: rejectedRouteID,
+            conflict: conflict,
+            now: now
+        ) {
+            return true
+        }
+
         guard ownerChildDeviceID == owner,
               var handoff = v2RouteHandoff,
               handoff.ownerChildDeviceID == owner,
@@ -3590,6 +3600,179 @@ extension DeviceEpochStoreState {
             createdAt: now
         )
         v2RouteHandoff = handoff
+        return true
+    }
+
+    private mutating func replaceInitialAuthoritativeBaseMismatchCandidate(
+        owner: UUID,
+        rejectedEpochID: UUID,
+        rejectedRouteID: UUID,
+        conflict: EpochRegistrationConflictDTO,
+        now: Date
+    ) -> Bool {
+        guard ownerChildDeviceID == owner,
+              v2RouteHandoff == nil,
+              ratchets[owner] == nil || ratchets[owner]?.localSelection == .v1,
+              activeGenerationID != nil,
+              activeEpochID == rejectedEpochID,
+              activeRouteID == nil,
+              let rejectedRoute = routes[rejectedRouteID],
+              var rejectedEpoch = epochs[rejectedEpochID],
+              let rejectedGeneration = generations[rejectedRoute.generationID],
+              activeGenerationID == rejectedGeneration.generationID,
+              rejectedRoute.epochID == rejectedEpochID,
+              rejectedRoute.ownerChildDeviceID == owner,
+              rejectedRoute.lifecycle == .planned,
+              rejectedEpoch.childDeviceID == owner,
+              rejectedEpoch.status == .active,
+              rejectedEpoch.registeredAt == nil,
+              rejectedEpoch.authoritativeBaseConflict == nil,
+              rejectedEpoch.baseCorrectionState == .available,
+              conflict.authoritativeSnapshot.childDeviceID == owner,
+              conflict.authoritativeSnapshot.usageDate == rejectedEpoch.usageDate,
+              conflict.authoritativeSnapshot.usageDate == rejectedRoute.usageDate,
+              let rejectedInstallKey = installWork.first(where: {
+                  $0.value.routeID == rejectedRouteID
+              })?.key,
+              installWork.values.filter({ $0.routeID == rejectedRouteID }).count == 1,
+              installWork[rejectedInstallKey]?.phase == .pendingStart,
+              !registrationWork.values.contains(where: {
+                  $0.epochID == rejectedEpochID
+                      && $0.routeID == rejectedRouteID
+                      && $0.retry.terminal == .succeeded
+              }),
+              !activationWork.values.contains(where: {
+                  $0.epochID == rejectedEpochID
+                      && $0.routeID == rejectedRouteID
+                      && $0.retry.terminal == .succeeded
+              }),
+              let rejectedCanonicalDayEnd = canonicalDayEnd(
+                  usageDate: rejectedRoute.usageDate,
+                  timeZoneIdentifier: rejectedEpoch.canonicalTimezone
+              )
+        else { return false }
+
+        terminalizeAuthoritativeBaseCandidate(
+            epochID: rejectedEpochID,
+            routeID: rejectedRouteID,
+            conflict: conflict,
+            canonicalDayEnd: rejectedCanonicalDayEnd,
+            now: now
+        )
+        guard let terminalizedRejectedEpoch = epochs[rejectedEpochID] else { return false }
+        rejectedEpoch = terminalizedRejectedEpoch
+
+        let correctedGenerationID = UUID()
+        let correctedEpochID = UUID()
+        let correctedRouteID = UUID()
+        let correctedInstallID = UUID()
+        let correctedRegistrationID = UUID()
+        let correctedGeneration = MeteringPolicyGeneration(
+            generationID: correctedGenerationID,
+            protocolVersion: rejectedGeneration.protocolVersion,
+            childDeviceID: owner,
+            canonicalTimezone: rejectedGeneration.canonicalTimezone,
+            policyRevision: rejectedGeneration.policyRevision,
+            measurementSelectionDigest: rejectedGeneration.measurementSelectionDigest,
+            enforcementSetID: rejectedGeneration.enforcementSetID,
+            measurementSelectionBytes: rejectedGeneration.measurementSelectionBytes,
+            createdAt: now,
+            retiredAt: nil,
+            configuredPoolMinutes: rejectedGeneration.configuredPoolMinutes,
+            configuredDeviceCapMinutes: rejectedGeneration.configuredDeviceCapMinutes
+        )
+        let correctedEpoch = DeviceDailyEpoch(
+            epochID: correctedEpochID,
+            protocolVersion: rejectedEpoch.protocolVersion,
+            childDeviceID: owner,
+            usageDate: rejectedEpoch.usageDate,
+            canonicalTimezone: rejectedEpoch.canonicalTimezone,
+            policyRevision: rejectedEpoch.policyRevision,
+            measurementSelectionDigest: rejectedEpoch.measurementSelectionDigest,
+            enforcementSetID: rejectedEpoch.enforcementSetID,
+            startedAt: now,
+            registeredAt: nil,
+            baseAcceptedMinutes: conflict.authoritativeSnapshot.estimatedMinutes,
+            baseSource: .registrationConflict409,
+            lastRawThresholdMinutes: 0,
+            excludedWhilePausedMinutes: 0,
+            status: .active,
+            resumeBoundaryPending: false,
+            retiredAt: nil,
+            retireReason: nil,
+            exhaustedAt: nil,
+            baseCorrectionState: .used
+        )
+        let correctedRoute = MeteringCallbackRoute(
+            routeID: correctedRouteID,
+            activityName: callbackActivityName(routeID: correctedRouteID),
+            namespace: "evlin.earned.v2.",
+            generationID: correctedGenerationID,
+            generationKey: rejectedRoute.generationKey,
+            ownerChildDeviceID: owner,
+            usageDate: rejectedRoute.usageDate,
+            epochID: correctedEpochID,
+            plannedSchedule: rejectedRoute.plannedSchedule,
+            installedSchedule: nil,
+            plannedEvents: rejectedRoute.plannedEvents.map { event in
+                MeteringEventPlan(
+                    eventName: callbackEventName(
+                        routeID: correctedRouteID,
+                        thresholdMinutes: event.thresholdMinutes
+                    ),
+                    thresholdMinutes: event.thresholdMinutes
+                )
+            },
+            installedEvents: nil,
+            lifecycle: .planned,
+            createdAt: now
+        )
+        let pendingRetry = MeteringRetryState(
+            attemptCount: 0,
+            nextAttemptAt: now,
+            lastErrorCode: nil,
+            terminal: .pending
+        )
+        let correctedRequest = EpochRegistrationRequestDTO(
+            protocolVersion: 2,
+            epochID: correctedEpochID,
+            deviceID: owner,
+            usageDate: correctedEpoch.usageDate,
+            timezone: correctedEpoch.canonicalTimezone,
+            policyRevision: correctedEpoch.policyRevision,
+            measurementSelectionDigest: correctedEpoch.measurementSelectionDigest,
+            enforcementSetID: correctedEpoch.enforcementSetID,
+            startedAt: correctedEpoch.startedAt,
+            baseAcceptedMinutes: correctedEpoch.baseAcceptedMinutes,
+            reason: .policyChange
+        )
+
+        generations[correctedGenerationID] = correctedGeneration
+        epochs[correctedEpochID] = correctedEpoch
+        routes[correctedRouteID] = correctedRoute
+        installWork[correctedInstallID] = ActivityInstallWork(
+            workID: correctedInstallID,
+            ownerChildDeviceID: owner,
+            routeID: correctedRouteID,
+            authorization: .registrationRequired,
+            phase: .pendingStart,
+            claim: nil,
+            retry: pendingRetry,
+            createdAt: now
+        )
+        registrationWork[correctedRegistrationID] = EpochRegistrationWork(
+            workID: correctedRegistrationID,
+            ownerChildDeviceID: owner,
+            epochID: correctedEpochID,
+            routeID: correctedRouteID,
+            request: correctedRequest,
+            claim: nil,
+            retry: pendingRetry,
+            createdAt: now
+        )
+        activeGenerationID = correctedGenerationID
+        activeEpochID = correctedEpochID
+        activeRouteID = nil
         return true
     }
 

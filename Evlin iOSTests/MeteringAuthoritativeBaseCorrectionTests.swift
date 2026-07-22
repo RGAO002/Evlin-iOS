@@ -10,6 +10,43 @@ final class MeteringAuthoritativeBaseCorrectionTests: XCTestCase {
     private let start = Date(timeIntervalSince1970: 1_784_937_600)
     private let baseURL = URL(string: "https://example.invalid/api/v1")!
 
+    func testInitialV1ToV2RegistrationBaseMismatchMintsCorrectedBootstrapCandidate() async throws {
+        let fixture = try CorrectionFixture(owner: owner, start: start, initialBootstrap: true)
+        defer { fixture.cleanup() }
+        fixture.transport.results = [fixture.authoritativeConflict(estimatedMinutes: 40)]
+
+        await fixture.delivery.drain(owner: owner)
+
+        let state = try fixture.store.read()
+        let corrected = try XCTUnwrap(state.epochs.values.first {
+            $0.epochID != fixture.rejectedEpochID && $0.baseAcceptedMinutes == 40
+        })
+        let correctedRoute = try XCTUnwrap(state.routes.values.first { $0.epochID == corrected.epochID })
+        XCTAssertEqual(state.generations.count, 2)
+        XCTAssertEqual(state.epochs[fixture.rejectedEpochID]?.status, .retired)
+        XCTAssertEqual(
+            state.epochs[fixture.rejectedEpochID]?.retireReason,
+            .authoritativeBaseMismatch
+        )
+        XCTAssertEqual(corrected.baseSource, .registrationConflict409)
+        XCTAssertEqual(corrected.baseCorrectionState, .used)
+        XCTAssertEqual(state.activeGenerationID, correctedRoute.generationID)
+        XCTAssertEqual(state.activeEpochID, corrected.epochID)
+        XCTAssertNil(state.activeRouteID)
+        XCTAssertNil(state.v2RouteHandoff)
+        XCTAssertTrue(state.ratchets.isEmpty)
+        XCTAssertEqual(
+            state.registrationWork.values.first {
+                $0.epochID == corrected.epochID && $0.routeID == correctedRoute.routeID
+            }?.retry.terminal,
+            .pending
+        )
+        XCTAssertEqual(
+            state.installWork.values.first { $0.routeID == correctedRoute.routeID }?.authorization,
+            .registrationRequired
+        )
+    }
+
     func testAuthoritativeBaseMismatchAtomicallyReplacesOnlyRejectedCandidate() async throws {
         let fixture = try CorrectionFixture(owner: owner, start: start)
         defer { fixture.cleanup() }
@@ -589,7 +626,8 @@ private final class CorrectionFixture {
     init(
         owner: UUID,
         start: Date,
-        lock: any DeviceEpochStoreLocking = ActiveLockPersistenceLock.shared
+        lock: any DeviceEpochStoreLocking = ActiveLockPersistenceLock.shared,
+        initialBootstrap: Bool = false
     ) throws {
         self.owner = owner
         self.start = start
@@ -605,10 +643,12 @@ private final class CorrectionFixture {
             clock: clock
         )
         try store.transaction(expectedOwner: owner) { state in
-            state = makeState()
+            state = makeState(initialBootstrap: initialBootstrap)
         }
-        try startMonitor(routeID: priorRouteID, store: store)
-        try startMonitor(routeID: rejectedRouteID, store: store)
+        if !initialBootstrap {
+            try startMonitor(routeID: priorRouteID, store: store)
+            try startMonitor(routeID: rejectedRouteID, store: store)
+        }
     }
 
     var rejectedGenerationKey: MeteringGenerationKey {
@@ -872,13 +912,13 @@ private final class CorrectionFixture {
         )!
     }
 
-    private func makeState() -> DeviceEpochStoreState {
+    private func makeState(initialBootstrap: Bool) -> DeviceEpochStoreState {
         let priorGeneration = generation(id: priorGenerationID)
         let rejectedGeneration = generation(id: rejectedGenerationID)
         let priorEpoch = epoch(id: priorEpochID, generation: priorGeneration, registeredAt: start)
         let rejectedEpoch = epoch(id: rejectedEpochID, generation: rejectedGeneration, registeredAt: nil)
         let priorRoute = route(id: priorRouteID, epoch: priorEpoch, generation: priorGeneration, lifecycle: .active)
-        let rejectedRoute = route(id: rejectedRouteID, epoch: rejectedEpoch, generation: rejectedGeneration, lifecycle: .active)
+        var rejectedRoute = route(id: rejectedRouteID, epoch: rejectedEpoch, generation: rejectedGeneration, lifecycle: .active)
         let retry = MeteringRetryState(attemptCount: 0, nextAttemptAt: start, lastErrorCode: nil, terminal: .pending)
         let registration = EpochRegistrationWork(
             workID: rejectedRegistrationID,
@@ -890,6 +930,29 @@ private final class CorrectionFixture {
             retry: retry,
             createdAt: start
         )
+        if initialBootstrap {
+            rejectedRoute.lifecycle = .planned
+            rejectedRoute.installedSchedule = nil
+            rejectedRoute.installedEvents = nil
+            return DeviceEpochStoreState(
+                ownerChildDeviceID: owner,
+                generations: [rejectedGenerationID: rejectedGeneration],
+                activeGenerationID: rejectedGenerationID,
+                epochs: [rejectedEpochID: rejectedEpoch],
+                activeEpochID: rejectedEpochID,
+                routes: [rejectedRouteID: rejectedRoute],
+                activeRouteID: nil,
+                registrationWork: [rejectedRegistrationID: registration],
+                installWork: [
+                    rejectedInstallID: install(
+                        id: rejectedInstallID,
+                        routeID: rejectedRouteID,
+                        authorization: .registrationRequired,
+                        phase: .pendingStart
+                    )
+                ]
+            )
+        }
         return DeviceEpochStoreState(
             ownerChildDeviceID: owner,
             generations: [priorGenerationID: priorGeneration, rejectedGenerationID: rejectedGeneration],
