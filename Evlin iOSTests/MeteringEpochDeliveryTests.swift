@@ -138,6 +138,78 @@ final class MeteringEpochDeliveryTests: XCTestCase {
         XCTAssertEqual(try store.read().sampleWork.values.first?.retry.terminal, .succeeded)
     }
 
+    func testVerifiedLocalInstallCannotBlockAuthorizedV2SampleDelivery() async throws {
+        let fileURL = temporaryStoreURL()
+        defer { removeTemporaryStore(fileURL) }
+        let store = makeStore(fileURL: fileURL)
+        let sampleID = UUID()
+        try store.transaction(expectedOwner: owner) { state in
+            state = makeBaseState()
+            let installID = UUID()
+            state.installWork[installID] = ActivityInstallWork(
+                workID: installID,
+                ownerChildDeviceID: owner,
+                routeID: routeID,
+                authorization: .registered,
+                phase: .verified,
+                claim: nil,
+                retry: MeteringRetryState(
+                    attemptCount: 0,
+                    nextAttemptAt: start.addingTimeInterval(-1),
+                    lastErrorCode: nil,
+                    terminal: .pending
+                ),
+                createdAt: start.addingTimeInterval(-1)
+            )
+            let route = try XCTUnwrap(state.routes[routeID])
+            state.sampleWork[sampleID] = EpochSampleWork(
+                workID: sampleID,
+                ownerChildDeviceID: owner,
+                epochID: epochID,
+                routeID: routeID,
+                request: EpochSampleRequestDTO(
+                    deviceID: owner,
+                    usageDate: route.usageDate,
+                    timezone: route.plannedSchedule.timezoneIdentifier,
+                    activityName: route.activityName,
+                    eventName: "evlin.earned.t5",
+                    thresholdMinutes: 5,
+                    estimatedMinutes: 5,
+                    observedAt: start,
+                    clientSampleID: "v2-ready-install",
+                    protocolVersion: 2,
+                    epochID: epochID,
+                    generationArmedAt: nil,
+                    generationOffsetMinutes: nil
+                ),
+                authorization: .v2Deliverable,
+                retry: MeteringRetryState(
+                    attemptCount: 0,
+                    nextAttemptAt: start,
+                    lastErrorCode: nil,
+                    terminal: .pending
+                ),
+                createdAt: start
+            )
+        }
+        let transport = DeliveryTestTransport()
+        transport.results = [(
+            try encoded(makeSnapshot(counted: true, warning: nil)),
+            HTTPURLResponse(url: baseURL, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        )]
+        let delivery = MeteringEpochDelivery(
+            baseURL: baseURL,
+            store: store,
+            transport: transport,
+            clock: DeliveryTestClock(now: start)
+        )
+
+        await delivery.drain(owner: owner)
+
+        XCTAssertEqual(transport.requests.count, 1)
+        XCTAssertEqual(try store.read().sampleWork[sampleID]?.retry.terminal, .succeeded)
+    }
+
     func testVerifiedLocalInstallCannotBlockRegistrationRecovery() async throws {
         let fileURL = temporaryStoreURL()
         defer { removeTemporaryStore(fileURL) }
@@ -1939,6 +2011,98 @@ final class MeteringEpochDeliveryTests: XCTestCase {
         XCTAssertEqual(final.activationWork.values.first?.retry.lastErrorCode, "epoch_mismatch")
         XCTAssertEqual(final.activationWork.values.first?.retry.terminal, .rejected)
         XCTAssertEqual(final.ratchets[owner]?.localSelection, .dualActive)
+    }
+
+    func testActivationCanPassPendingInstallEnvelopeOnceInstallIsDualActive() async throws {
+        let fileURL = temporaryStoreURL()
+        defer { removeTemporaryStore(fileURL) }
+        let store = makeStore(fileURL: fileURL)
+        try store.transaction(expectedOwner: owner) { state in
+            state = makeBaseState()
+            let plannedRouteID = UUID()
+            let currentRoute = try XCTUnwrap(state.routes[routeID])
+            state.routes[plannedRouteID] = MeteringCallbackRoute(
+                routeID: plannedRouteID,
+                activityName: "evlin.earned.budget.\(plannedRouteID.uuidString.lowercased())",
+                namespace: currentRoute.namespace,
+                generationID: currentRoute.generationID,
+                generationKey: currentRoute.generationKey,
+                ownerChildDeviceID: owner,
+                usageDate: currentRoute.usageDate,
+                epochID: epochID,
+                plannedSchedule: currentRoute.plannedSchedule,
+                installedSchedule: currentRoute.plannedSchedule,
+                plannedEvents: currentRoute.plannedEvents,
+                installedEvents: currentRoute.plannedEvents,
+                lifecycle: .planned,
+                createdAt: start.addingTimeInterval(-1)
+            )
+            let plannedInstallID = UUID()
+            state.installWork[plannedInstallID] = ActivityInstallWork(
+                workID: plannedInstallID,
+                ownerChildDeviceID: owner,
+                routeID: plannedRouteID,
+                authorization: .futurePlanned,
+                phase: .verified,
+                claim: nil,
+                retry: MeteringRetryState(
+                    attemptCount: 0,
+                    nextAttemptAt: start.addingTimeInterval(-1),
+                    lastErrorCode: nil,
+                    terminal: .pending
+                ),
+                createdAt: start.addingTimeInterval(-1)
+            )
+            let registrationID = UUID()
+            var registration = makeRegistrationWork(workID: registrationID, createdAt: start)
+            registration.retry.terminal = .succeeded
+            state.registrationWork[registrationID] = registration
+            state.installWork[UUID()] = ActivityInstallWork(
+                workID: UUID(),
+                ownerChildDeviceID: owner,
+                routeID: routeID,
+                authorization: .registered,
+                phase: .dualActive,
+                claim: nil,
+                retry: MeteringRetryState(
+                    attemptCount: 0,
+                    nextAttemptAt: start,
+                    lastErrorCode: nil,
+                    terminal: .pending
+                ),
+                createdAt: start
+            )
+            authorizeInitialDualActiveActivation(&state)
+        }
+        let transport = DeliveryTestTransport()
+        let response = HTTPURLResponse(url: baseURL, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        transport.results = [
+            (try encoded(EpochActivationResponseDTO(
+                status: .activated,
+                epochID: epochID,
+                epochStatus: .active,
+                meteringProtocolVersion: 2,
+                snapshot: makeSnapshot(counted: true, warning: nil)
+            )), response)
+        ]
+        let delivery = MeteringEpochDelivery(
+            baseURL: baseURL,
+            store: store,
+            transport: transport,
+            clock: DeliveryTestClock(now: start)
+        )
+        try delivery.enqueueActivation(
+            EpochActivationRequestDTO(protocolVersion: 2, deviceID: owner, routeID: routeID, verifiedAt: start),
+            owner: owner,
+            epochID: epochID,
+            routeID: routeID
+        )
+
+        await delivery.drain(owner: owner)
+
+        let final = try store.read()
+        XCTAssertEqual(transport.requests.count, 1)
+        XCTAssertEqual(final.activationWork.values.first?.retry.terminal, .succeeded)
     }
 
     func testActivationWaitsForVerifiedInstall() async throws {

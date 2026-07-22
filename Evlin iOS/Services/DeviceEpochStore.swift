@@ -2214,6 +2214,25 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         try transaction(expectedOwner: owner) { state in
             let dueWork = state.dueWork(now: now)
             guard let first = dueWork.first else { return nil }
+            func onlyReadyInstallEnvelopesPrecede(_ item: MeteringDueWork) -> Bool {
+                guard let candidateIndex = dueWork.firstIndex(where: {
+                    $0.workID == item.workID
+                }) else { return false }
+                return dueWork[..<candidateIndex].allSatisfy { preceding in
+                    guard preceding.kind == .install,
+                          let install = state.installWork.values.first(where: {
+                              $0.workID == preceding.workID
+                          }),
+                          install.ownerChildDeviceID == owner
+                    else { return false }
+                    switch install.phase {
+                    case .verified, .dualActive, .active:
+                        return true
+                    case .pendingStart, .starting, .installed, .pendingStop, .stopped:
+                        return false
+                    }
+                }
+            }
             let due: MeteringDueWork
             if isEligible(state, first) {
                 due = first
@@ -2224,11 +2243,15 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                           case .registration:
                               return true
                           case .sample:
-                              return state.sampleWork.values.contains {
+                              guard let sample = state.sampleWork.values.first(where: {
                                   $0.workID == item.workID
-                                      && $0.authorization == .legacyDeliverable
-                              }
-                          case .identityCleanup, .rollover, .install, .activation, .shield:
+                              }) else { return false }
+                              if sample.authorization == .legacyDeliverable { return true }
+                              return sample.authorization == .v2Deliverable
+                                  && onlyReadyInstallEnvelopesPrecede(item)
+                          case .activation:
+                              return onlyReadyInstallEnvelopesPrecede(item)
+                          case .identityCleanup, .rollover, .install, .shield:
                               return false
                           }
                       }) {
