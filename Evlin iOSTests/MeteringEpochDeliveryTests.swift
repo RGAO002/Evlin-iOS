@@ -95,6 +95,140 @@ final class MeteringEpochDeliveryTests: XCTestCase {
     private let baseURL = URL(string: "https://metering-epoch-delivery.test")!
     private let start = Date(timeIntervalSince1970: 1_784_179_200)
 
+    func testVerifiedLocalInstallCannotBlockLegacySampleDelivery() async throws {
+        let fileURL = temporaryStoreURL()
+        defer { removeTemporaryStore(fileURL) }
+        let store = makeStore(fileURL: fileURL)
+        try store.transaction(expectedOwner: owner) { state in
+            state = makeBaseState()
+            let installID = UUID()
+            state.installWork[installID] = ActivityInstallWork(
+                workID: installID,
+                ownerChildDeviceID: owner,
+                routeID: routeID,
+                authorization: .futurePlanned,
+                phase: .verified,
+                claim: nil,
+                retry: MeteringRetryState(
+                    attemptCount: 0,
+                    nextAttemptAt: start.addingTimeInterval(-1),
+                    lastErrorCode: nil,
+                    terminal: .pending
+                ),
+                createdAt: start.addingTimeInterval(-1)
+            )
+        }
+
+        let transport = DeliveryTestTransport()
+        transport.results = [(
+            try encoded(makeSnapshot(counted: true, warning: nil)),
+            HTTPURLResponse(url: baseURL, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        )]
+        let delivery = MeteringEpochDelivery(
+            baseURL: baseURL,
+            store: store,
+            transport: transport,
+            clock: DeliveryTestClock(now: start)
+        )
+        try delivery.enqueueV1(makeV1(threshold: 5), owner: owner)
+
+        await delivery.drain(owner: owner)
+
+        XCTAssertEqual(transport.requests.count, 1)
+        XCTAssertEqual(try store.read().sampleWork.values.first?.retry.terminal, .succeeded)
+    }
+
+    func testTransientEnforcementSetConflictRetriesThenRegisters() async throws {
+        let fileURL = temporaryStoreURL()
+        defer { removeTemporaryStore(fileURL) }
+        let store = makeStore(fileURL: fileURL)
+        try store.transaction(expectedOwner: owner) { $0 = makeBaseState() }
+        let clock = DeliveryTestClock(now: start)
+        let transport = DeliveryTestTransport()
+        transport.results = [
+            (
+                Data(#"{"detail":"enforcement_set_mismatch"}"#.utf8),
+                HTTPURLResponse(url: baseURL, statusCode: 409, httpVersion: nil, headerFields: nil)!
+            ),
+            (
+                try encoded(EpochRegistrationResponseDTO(
+                    status: .registered,
+                    epochID: epochID,
+                    meteringProtocolVersion: 2,
+                    snapshot: makeSnapshot(counted: true, warning: nil),
+                    epochStatus: .active
+                )),
+                HTTPURLResponse(url: baseURL, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            )
+        ]
+        let delivery = MeteringEpochDelivery(
+            baseURL: baseURL,
+            store: store,
+            transport: transport,
+            clock: clock
+        )
+        try delivery.enqueueRegistration(
+            makeValidRegistrationRequest(),
+            owner: owner,
+            epochID: epochID,
+            routeID: routeID
+        )
+
+        await delivery.drain(owner: owner)
+        var registration = try XCTUnwrap(try store.read().registrationWork.values.first)
+        XCTAssertEqual(registration.retry.terminal, .pending)
+        XCTAssertEqual(registration.retry.lastErrorCode, "enforcement_set_mismatch")
+
+        clock.now = start.addingTimeInterval(5)
+        await delivery.drain(owner: owner)
+
+        registration = try XCTUnwrap(try store.read().registrationWork.values.first)
+        XCTAssertEqual(transport.requests.count, 2)
+        XCTAssertEqual(registration.retry.terminal, .succeeded)
+    }
+
+    func testLegacyOpaque409IsRecheckedAfterUpgrade() async throws {
+        let fileURL = temporaryStoreURL()
+        defer { removeTemporaryStore(fileURL) }
+        let store = makeStore(fileURL: fileURL)
+        let workID = UUID()
+        try store.transaction(expectedOwner: owner) { state in
+            state = makeBaseState()
+            var work = makeRegistrationWork(workID: workID, createdAt: start)
+            work.retry = MeteringRetryState(
+                attemptCount: 0,
+                nextAttemptAt: start,
+                lastErrorCode: "http_409",
+                terminal: .rejected
+            )
+            state.registrationWork[workID] = work
+        }
+        let transport = DeliveryTestTransport()
+        transport.results = [(
+            try encoded(EpochRegistrationResponseDTO(
+                status: .alreadyRegistered,
+                epochID: epochID,
+                meteringProtocolVersion: 2,
+                snapshot: makeSnapshot(counted: true, warning: nil),
+                epochStatus: .active
+            )),
+            HTTPURLResponse(url: baseURL, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        )]
+        let delivery = MeteringEpochDelivery(
+            baseURL: baseURL,
+            store: store,
+            transport: transport,
+            clock: DeliveryTestClock(now: start.addingTimeInterval(60))
+        )
+
+        await delivery.drain(owner: owner)
+
+        let final = try XCTUnwrap(try store.read().registrationWork[workID])
+        XCTAssertEqual(transport.requests.count, 1)
+        XCTAssertEqual(final.retry.terminal, .succeeded)
+        XCTAssertNil(final.retry.lastErrorCode)
+    }
+
     func testV1MetadataVariantsAndLegacyFallbackSurviveProducerReopenWithIdenticalRequests() async throws {
         let fileURL = temporaryStoreURL()
         defer { removeTemporaryStore(fileURL) }
@@ -980,7 +1114,7 @@ final class MeteringEpochDeliveryTests: XCTestCase {
         XCTAssertTrue(transport.requests.isEmpty)
     }
 
-    func testReadyInstallAtGlobalDueHeadBlocksLowerNetworkWork() async throws {
+    func testReadyInstallAtGlobalDueHeadDoesNotBlockLegacySample() async throws {
         let fileURL = temporaryStoreURL()
         defer { removeTemporaryStore(fileURL) }
         let store = makeStore(fileURL: fileURL)
@@ -995,13 +1129,14 @@ final class MeteringEpochDeliveryTests: XCTestCase {
         }
         let transport = DeliveryTestTransport()
         transport.results = [
-            (Data(#"{\"code\":\"duplicate\"}"#.utf8), HTTPURLResponse(url: baseURL, statusCode: 409, httpVersion: nil, headerFields: nil)!)
+            (Data(#"{"code":"duplicate"}"#.utf8), HTTPURLResponse(url: baseURL, statusCode: 409, httpVersion: nil, headerFields: nil)!)
         ]
         let delivery = MeteringEpochDelivery(baseURL: baseURL, store: store, transport: transport, clock: DeliveryTestClock(now: start))
 
         await delivery.drain(owner: owner)
 
-        XCTAssertTrue(transport.requests.isEmpty)
+        XCTAssertEqual(transport.requests.count, 1)
+        XCTAssertEqual(try store.read().sampleWork.values.first?.retry.terminal, .succeeded)
     }
 
     func testWaitingForRegistrationSampleAtDueHeadBlocksLowerLegacySample() async throws {

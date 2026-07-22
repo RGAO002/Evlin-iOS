@@ -169,6 +169,7 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
         if importLegacyWork, await self.importLegacyWork(owner: owner) {
             return
         }
+        reopenLegacyOpaque409IfNeeded(owner: owner)
 
         while true {
             if settleLeadingInvalidRegistration(owner: owner) {
@@ -183,6 +184,39 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
             case let .sample(work, claim):
                 await deliverSample(work: work, owner: owner, claim: claim)
             }
+        }
+    }
+
+    private func reopenLegacyOpaque409IfNeeded(owner: UUID) {
+        try? store.transaction(expectedOwner: owner) { state in
+            let candidates = state.registrationWork
+                .filter { _, work in
+                    work.ownerChildDeviceID == owner
+                        && work.retry.terminal == .rejected
+                        && work.retry.lastErrorCode == "http_409"
+                        && work.retry.attemptCount == 0
+                        && work.claim == nil
+                        && state.hasCurrentRegistrationProvenance(
+                            owner: owner,
+                            epochID: work.epochID,
+                            routeID: work.routeID
+                        )
+                }
+                .sorted { lhs, rhs in
+                    if lhs.value.createdAt != rhs.value.createdAt {
+                        return lhs.value.createdAt < rhs.value.createdAt
+                    }
+                    return lhs.key.uuidString.lowercased() < rhs.key.uuidString.lowercased()
+                }
+            guard let (key, work) = candidates.first else { return }
+            var reopened = work
+            reopened.retry = MeteringRetryState(
+                attemptCount: 1,
+                nextAttemptAt: clock.now,
+                lastErrorCode: "legacy_http_409_recheck",
+                terminal: .pending
+            )
+            state.registrationWork[key] = reopened
         }
     }
 
@@ -238,6 +272,11 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
         if statusCode == 409, errorCode(data: data) == "authoritative_base_mismatch",
            let conflict = try? JSONDecoder.metering.decode(EpochRegistrationConflictDTO.self, from: data) {
             return .authoritativeBaseMismatch(conflict)
+        }
+        if statusCode == 409,
+           let code = errorCode(data: data),
+           code == "enforcement_set_mismatch" || code == "started_at_in_future" {
+            return .retry(code: code)
         }
         return .terminal(code: errorCode(data: data) ?? "http_\(statusCode)")
     }
@@ -980,8 +1019,14 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
     }
 
     private static func errorCode(data: Data) -> String? {
-        struct ErrorEnvelope: Decodable { let code: String }
-        return try? JSONDecoder.metering.decode(ErrorEnvelope.self, from: data).code
+        struct ErrorEnvelope: Decodable {
+            let code: String?
+            let detail: String?
+        }
+        guard let envelope = try? JSONDecoder.metering.decode(ErrorEnvelope.self, from: data) else {
+            return nil
+        }
+        return envelope.code ?? envelope.detail
     }
 
     private func isSuppressedCandidate(_ epochID: UUID?, state: DeviceEpochStoreState) -> Bool {

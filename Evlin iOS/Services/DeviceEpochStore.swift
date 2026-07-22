@@ -2217,6 +2217,19 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
             let due: MeteringDueWork
             if isEligible(state, first) {
                 due = first
+            } else if first.kind == .install,
+                      let legacySample = dueWork.dropFirst().first(where: { item in
+                          guard item.kind == .sample,
+                                let sample = state.sampleWork.values.first(where: {
+                                    $0.workID == item.workID
+                                }),
+                                sample.authorization == .legacyDeliverable
+                          else { return false }
+                          return isEligible(state, item)
+                      }) {
+                // Installation is local work. It must not strand the v1 lane
+                // that keeps accounting alive while v2 registration settles.
+                due = legacySample
             } else if first.kind == .rollover,
                       let rollover = state.rolloverEffectsWork,
                       rollover.workID == first.workID,
