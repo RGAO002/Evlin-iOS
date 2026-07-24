@@ -44,6 +44,60 @@ final class MeteringProductionIntegrationTests: XCTestCase {
         withExtendedLifetime(callback) {}
     }
 
+    func testProductionRolloverResetAdvancesAcceptedUsageDateWithoutDaemonMutation() throws {
+        let owner = UUID()
+        let suiteName = "metering-rollover-reset-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defaults.set(
+            owner.uuidString.lowercased(),
+            forKey: MeteringProductionComposition.ownerKey
+        )
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let earnedStore = EarnedTimeStore(suiteName: suiteName)
+        XCTAssertEqual(
+            earnedStore.reconcileAcceptedUsage(
+                usageDate: "2026-09-13",
+                serverEstimatedMinutes: 37
+            ),
+            37
+        )
+        let resetter = MeteringRolloverEffectResetter(earnedStore: earnedStore)
+        let work = RolloverEffectsWork(
+            workID: UUID(),
+            ownerChildDeviceID: owner,
+            fromUsageDate: "2026-09-13",
+            toUsageDate: "2026-09-14",
+            oldEpochID: UUID(),
+            newEpochID: UUID(),
+            oldRouteID: UUID(),
+            newRouteID: UUID(),
+            retry: MeteringRetryState(
+                attemptCount: 0,
+                nextAttemptAt: Date(),
+                lastErrorCode: nil,
+                terminal: .pending
+            ),
+            earnedSourceResetAcknowledged: false,
+            perAppResetAcknowledged: false,
+            taskStateResetAcknowledged: false,
+            bypassExpiryAcknowledged: false,
+            registrationAcknowledged: false,
+            installAcknowledged: false,
+            activationAcknowledged: false,
+            oldStopAcknowledged: false,
+            createdAt: Date()
+        )
+
+        for effect in MeteringRolloverLocalEffect.allCases {
+            try resetter.apply(effect, work: work)
+        }
+
+        XCTAssertEqual(earnedStore.acceptedUsageDate, "2026-09-14")
+        XCTAssertEqual(earnedStore.acceptedEstimateMinutes, 0)
+        XCTAssertEqual(earnedStore.latestDeviceEstimate, 0)
+    }
+
     private func makeFixture(seedPendingStart: Bool) throws -> ProductionLinkFixture {
         let baseURL = URL(string: "https://example.invalid/api/v1")!
         let owner = UUID()
@@ -124,8 +178,7 @@ private final class ProductionLinkFixture {
     }
 }
 
-@MainActor
-private final class ProductionLinkCenter: MeteringDeviceActivityCenter {
+private nonisolated final class ProductionLinkCenter: MeteringDeviceActivityCenter, @unchecked Sendable {
     private var records: [DeviceActivityName: (DeviceActivitySchedule, [DeviceActivityEvent.Name: DeviceActivityEvent])] = [:]
     var startCalls: [DeviceActivityName] = []
     var activities: [DeviceActivityName] { Array(records.keys) }

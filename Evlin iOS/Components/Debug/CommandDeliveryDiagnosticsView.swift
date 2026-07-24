@@ -1,12 +1,19 @@
 import SwiftUI
 import FamilyControls
 import ManagedSettings
+#if DEBUG
+import DeviceActivity
+#endif
 
 struct CommandDeliveryDiagnosticsView: View {
     @State private var refreshTick: Int = 0
     @State private var sepSelection = FamilyActivitySelection(includeEntireCategory: false)
     @State private var sepShowPicker = false
     @State private var sepShieldStatus = "—"
+#if DEBUG
+    @State private var meteringRepairInProgress = false
+    @State private var meteringRepairStatus: String?
+#endif
     private let sepStore = ManagedSettingsStore(named: .init("evlin.sep.test"))
 
     var body: some View {
@@ -47,6 +54,25 @@ struct CommandDeliveryDiagnosticsView: View {
                     MeteringDaemonDiagnosticsView()
                 } label: {
                     Label("Metering Daemon", systemImage: "gauge.with.dots.needle.67percent")
+                }
+                Button {
+                    meteringRepairInProgress = true
+                    meteringRepairStatus = "Repairing…"
+                    Task {
+                        meteringRepairStatus = await CommandDeliveryMeteringRepair.run()
+                        meteringRepairInProgress = false
+                        refreshTick += 1
+                    }
+                } label: {
+                    Label("Repair metering activities", systemImage: "wrench.and.screwdriver")
+                }
+                .disabled(meteringRepairInProgress)
+
+                if let meteringRepairStatus {
+                    Text(meteringRepairStatus)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
                 }
             }
             meteringMonitorProbeSection
@@ -376,3 +402,105 @@ struct CommandDeliveryDiagnosticsView: View {
         refreshTick += 1
     }
 }
+
+#if DEBUG
+/// K-device-only recovery tool. It removes only stale Evlin metering activities,
+/// then reuses the production recovery paths. It never clears selections,
+/// accounting data, ManagedSettings, or lock records.
+nonisolated enum CommandDeliveryMeteringRepair {
+    static func staleEarnedActivityNames(
+        liveActivityNames: Set<String>,
+        desiredEarnedActivityNames: Set<String>
+    ) -> [String] {
+        liveActivityNames
+            .filter {
+                (LegacyMeteringActivity.isEarnedActivityName($0)
+                    || $0.hasPrefix(MeteringRouteNamespace.prefix))
+                    && !desiredEarnedActivityNames.contains($0)
+            }
+            .sorted()
+    }
+
+    @MainActor
+    static func run() async -> String {
+        guard let owner = MeteringOwnerMirror.current() else {
+            return "Not repaired: missing K-device identity."
+        }
+
+        let repairTask: Task<(Bool, String), Never> = Task.detached(priority: .userInitiated) {
+            let center = SystemMeteringDeviceActivityCenter()
+            let epochStore = DeviceEpochStore.shared
+            let state: DeviceEpochStoreState
+            do {
+                state = try epochStore.read()
+            } catch {
+                return (false, "Not repaired: could not read metering state: \(error)")
+            }
+            guard state.ownerChildDeviceID == owner else {
+                return (false, "Not repaired: metering owner does not match this K device.")
+            }
+
+            let desiredNames = Set(state.installWork.values.compactMap { work -> String? in
+                guard work.ownerChildDeviceID == owner,
+                      work.retry.terminal == .pending || work.retry.terminal == .succeeded,
+                      work.phase != .pendingStop,
+                      work.phase != .stopped,
+                      let route = state.routes[work.routeID],
+                      route.lifecycle == .planned || route.lifecycle == .active
+                else { return nil }
+                return route.activityName
+            })
+            let staleNames = staleEarnedActivityNames(
+                liveActivityNames: Set(center.activities.map(\.rawValue)),
+                desiredEarnedActivityNames: desiredNames
+            )
+            if !staleNames.isEmpty {
+                center.stopMonitoring(staleNames.map { DeviceActivityName($0) })
+            }
+
+            do {
+                try epochStore.transaction(expectedOwner: owner) { state in
+                    for key in state.installWork.keys {
+                        guard var work = state.installWork[key],
+                              work.ownerChildDeviceID == owner,
+                              work.retry.terminal == .pending
+                        else { continue }
+                        switch work.phase {
+                        case .pendingStart, .starting, .installed:
+                            work.phase = .pendingStart
+                            work.claim = nil
+                            work.retry.nextAttemptAt = Date()
+                            state.installWork[key] = work
+                        case .verified, .dualActive, .active, .pendingStop, .stopped:
+                            continue
+                        }
+                    }
+                }
+            } catch {
+                return (false, "Not repaired: could not schedule earned recovery: \(error)")
+            }
+
+            let perApp = AppLimitPlanner().arm(rules: AppLimitRuleStore.shared.all())
+            let perAppText: String
+            switch perApp {
+            case .armed(let activities, let events):
+                perAppText = "per-app armed (\(activities) activities, \(events) events)"
+            case .partiallyArmed(let armed, let failed):
+                perAppText = "per-app partial (\(armed) armed, \(failed) failed)"
+            case .quotaExceeded(let windows, let needed, let cap):
+                perAppText = "per-app quota exceeded (\(windows) windows, \(needed)/\(cap) slots)"
+            }
+            return (
+                true,
+                "Stopped \(staleNames.count) stale earned activities; \(perAppText); earned recovery requested."
+            )
+        }
+        let result = await repairTask.value
+
+        guard result.0 else { return result.1 }
+        await AppMeteringEntry.shared.recoverIfConfigured()
+        await AppLimitRecoveryTrigger.foreground()
+        return result.1
+    }
+}
+#endif

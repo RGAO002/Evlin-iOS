@@ -2112,6 +2112,11 @@ struct UpdateNotificationPreferencesBody: Codable {
     var muted_types: [String]?
 }
 
+/// Wire DTO for GET /me/agreement and POST /me/agreement/ack.
+struct AgreementAckStatusDTO: Decodable {
+    let acked_version: String?
+}
+
 extension APIClient {
     /// Runs an authed JSON request through the single-flight-refresh layer and
     /// decodes the response. Throws `APIError.serverError` on a non-2xx status.
@@ -2134,6 +2139,21 @@ extension APIClient {
     /// FamilyStore loads. 🔑 get_current_account.
     func fetchMeProfile() async throws -> MeProfileResponseDTO {
         try await authedJSON(path: "/me/profile", method: "GET")
+    }
+
+    /// GET /me/agreement — which Beta Participation Agreement version this
+    /// account has acknowledged (nil = never). Drives the parent-root launch
+    /// gate. 🔑 get_current_account.
+    func fetchAgreementAck() async throws -> AgreementAckStatusDTO {
+        try await authedJSON(path: "/me/agreement", method: "GET")
+    }
+
+    /// POST /me/agreement/ack — record that the signed-in parent read the
+    /// given agreement version to the end. Idempotent. 🔑 get_current_account.
+    @discardableResult
+    func postAgreementAck(version: String) async throws -> AgreementAckStatusDTO {
+        let body = try JSONSerialization.data(withJSONObject: ["version": version])
+        return try await authedJSON(path: "/me/agreement/ack", method: "POST", jsonBody: body)
     }
 
     /// GET /family — the family aggregate (family block + children + parent
@@ -2920,6 +2940,7 @@ extension APIClient {
         let display_name: String?
         let artwork_url: String?
         let daily_budget_minutes: Int
+        let ordering_token: Int
         let reset_policy: String
         let window_start_minute: Int
         let window_end_minute: Int
@@ -2961,6 +2982,7 @@ extension APIClient {
         let child_device_id: UUID
         let bundle_id: String
         let daily_budget_minutes: Int
+        let based_on_ordering_token: Int?
         let window_start_minute: Int
         let window_end_minute: Int
         // Without a timezone the backend resolves the rule's "today" as the
@@ -3010,6 +3032,7 @@ extension APIClient {
         childDeviceID: UUID,
         bundleID: String,
         dailyBudgetMinutes: Int,
+        basedOnOrderingToken: Int? = nil,
         displayName: String? = nil
     ) async throws -> AppLimitRuleDTO {
         let body = AppLimitCreateBody(
@@ -3017,6 +3040,7 @@ extension APIClient {
             child_device_id: childDeviceID,
             bundle_id: bundleID,
             daily_budget_minutes: dailyBudgetMinutes,
+            based_on_ordering_token: basedOnOrderingToken,
             window_start_minute: 0,
             window_end_minute: 1439,
             timezone: TimeZone.current.identifier,
@@ -3031,13 +3055,15 @@ extension APIClient {
     /// DELETE /parent/app-limits/{rule_id} — disable the rule and emit a
     /// clear_limit command. `familyID` is sent as `family_id_q` for the
     /// backend's header/body family cross-check.
-    func clearAppLimit(familyID: UUID, ruleID: UUID) async throws {
+    @discardableResult
+    func clearAppLimit(familyID: UUID, ruleID: UUID) async throws -> AppLimitRuleDTO {
         var comps = URLComponents()
         comps.path = "/parent/app-limits/\(ruleID.uuidString)"
         comps.queryItems = [URLQueryItem(name: "family_id_q", value: familyID.uuidString)]
         let path = comps.string ?? "/parent/app-limits/\(ruleID.uuidString)"
-        let _: AppLimitRuleClearResponseDTO = try await authedJSONAppLimit(
+        let envelope: AppLimitRuleClearResponseDTO = try await authedJSONAppLimit(
             path: path, method: "DELETE")
+        return envelope.rule
     }
 
     /// GET /parent/app-limits?child_device_id=&family_id_q= — active rules for a

@@ -180,6 +180,15 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         defaults?.set(marker, forKey: "evlin.lastIntervalDidEnd")
         NSLog("[Evlin/Ext] intervalDidEnd %@", marker)
 
+        if raw.hasPrefix(MeteringRouteNamespace.prefix) {
+            Task { @MainActor in
+                await DAMMeteringEntry.shared.handleIntervalDidEnd(
+                    activityName: raw
+                )
+            }
+            return
+        }
+
         // Two activity namespaces fire here:
         //   "evlin.shield.<16-byte-hex-of-recordKey>" — timed shield expiring
         //   "evlin.block.<16-byte-hex-of-bundleID>"  — timed block expiring
@@ -212,6 +221,25 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
     override func eventDidReachThreshold(_ event: DeviceActivityEvent.Name,
                                          activity: DeviceActivityName) {
         super.eventDidReachThreshold(event, activity: activity)
+#if DEBUG
+        let thresholdEntryCount =
+            (defaults?.integer(forKey: "evlin.metering.thresholdEntryCount") ?? 0) + 1
+        let thresholdEntry = [
+            ISO8601DateFormatter().string(from: Date()),
+            "activity=\(activity.rawValue)",
+            "event=\(event.rawValue)",
+            "entry=\(thresholdEntryCount)",
+        ].joined(separator: " ")
+        defaults?.set(
+            thresholdEntryCount,
+            forKey: "evlin.metering.thresholdEntryCount"
+        )
+        defaults?.set(
+            thresholdEntry,
+            forKey: "evlin.metering.lastThresholdEntry"
+        )
+        defaults?.synchronize()
+#endif
 #if DEBUG
         if event.rawValue.hasPrefix("evlin.debug.topology."),
            activity.rawValue.hasPrefix("evlin.debug.topology.") {
@@ -289,8 +317,22 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
                 observedAt: Date(),
                 projectShields: project
             )
+#if DEBUG
+            defaults?.set(
+                "\(ISO8601DateFormatter().string(from: Date())) \(String(describing: outcome))",
+                forKey: "evlin.metering.lastV2ThresholdOutcome"
+            )
+            defaults?.synchronize()
+#endif
             NSLog("[Evlin/Ext] v2 metering callback %@", String(describing: outcome))
         } catch {
+#if DEBUG
+            defaults?.set(
+                "\(ISO8601DateFormatter().string(from: Date())) failed=\(String(describing: error))",
+                forKey: "evlin.metering.lastV2ThresholdOutcome"
+            )
+            defaults?.synchronize()
+#endif
             NSLog("[Evlin/Ext] v2 metering callback failed: %@", String(describing: error))
         }
         Task { @MainActor in

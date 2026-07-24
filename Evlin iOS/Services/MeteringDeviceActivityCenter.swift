@@ -1,7 +1,12 @@
 import DeviceActivity
 
-@MainActor
-protocol MeteringDeviceActivityCenter {
+// nonisolated (NOT @MainActor): every call here is a synchronous XPC round
+// trip to the DeviceActivity daemon. Pinning them to the main actor made the
+// coverage-refresh loop block the main thread long enough to trip the
+// FrontBoard scene-update watchdog (0x8badf00d). Apple's DeviceActivityCenter
+// is safe to call off the main thread, so the recovery driver runs this work
+// on a detached background task.
+nonisolated protocol MeteringDeviceActivityCenter: Sendable {
     var activities: [DeviceActivityName] { get }
     func schedule(for activity: DeviceActivityName) -> DeviceActivitySchedule?
     func events(for activity: DeviceActivityName) -> [DeviceActivityEvent.Name: DeviceActivityEvent]
@@ -13,8 +18,7 @@ protocol MeteringDeviceActivityCenter {
     func stopMonitoring(_ activities: [DeviceActivityName])
 }
 
-@MainActor
-struct SystemMeteringDeviceActivityCenter: MeteringDeviceActivityCenter {
+struct SystemMeteringDeviceActivityCenter: MeteringDeviceActivityCenter, @unchecked Sendable {
     private let center: DeviceActivityCenter
 
     init(center: DeviceActivityCenter = DeviceActivityCenter()) {

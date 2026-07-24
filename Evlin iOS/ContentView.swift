@@ -116,6 +116,19 @@ struct ParentRootView: View {
     @State private var profilePath = NavigationPath()
     @State private var insightsPath = NavigationPath()
     @State private var banner: (title: String, body: String, avatarURL: String?)? = nil
+    /// Beta Participation Agreement launch gate (existing accounts that never
+    /// saw the onboarding agreement step, or the agreement version bumped).
+    @State private var showAgreementGate = false
+    /// First-visit spotlight tours — every tab gets one. Each flag flips true
+    /// the moment its tour starts displaying (interruptions never re-nag);
+    /// Settings' "Replay the tours" clears them all.
+    @AppStorage("parentHomeTourSeen") private var parentHomeTourSeen = false
+    @AppStorage("parentCalendarTourSeen") private var calendarTourSeen = false
+    @AppStorage("parentChatTourSeen") private var chatTourSeen = false
+    @AppStorage("parentLibraryTourSeen") private var libraryTourSeen = false
+    @AppStorage("parentInsightsTourSeen") private var insightsTourSeen = false
+    /// The tour currently on screen (steps + final-button label). One at a time.
+    @State private var activeTour: (steps: [TourStep], lastButton: String)? = nil
     @State private var reflectionStore = ParentReflectionFixtureStore()
     @State private var parentReflectionPollTask: Task<Void, Never>? = nil
     @AppStorage("evlin.childDeviceID") private var pairedChildID: String = ""
@@ -194,6 +207,44 @@ struct ParentRootView: View {
         }
         .ignoresSafeArea(.keyboard, edges: .bottom)
         .task { await notifBell.refresh() }
+        // Beta Participation Agreement launch gate: parents who onboarded
+        // before the agreement step existed (or after a version bump) must
+        // read it once. Fail-open on any network/auth error — never lock a
+        // parent out of the app because the check couldn't run; the next
+        // launch re-checks.
+        .task { await checkAgreementGate() }
+        .fullScreenCover(isPresented: $showAgreementGate,
+                         onDismiss: { maybeStartTour(for: selectedTab) }) {
+            BetaAgreementGateView { confirmAgreementGate() }
+        }
+        // First-visit spotlight tours. Attached here (outer ZStack) so the
+        // anchors from tab content AND the tab bar have both merged, and the
+        // overlay covers the tab bar too.
+        .overlayPreferenceValue(TourAnchorKey.self) { anchors in
+            if let tour = activeTour {
+                SpotlightTourOverlay(steps: tour.steps,
+                                     anchors: anchors,
+                                     lastButtonTitle: tour.lastButton,
+                                     onStepChange: { target in
+                    // Below-the-fold targets: the owning tab view listens and
+                    // scrolls its own ScrollViewReader.
+                    NotificationCenter.default.post(name: .evlinTourStepChanged,
+                                                    object: nil,
+                                                    userInfo: ["target": target])
+                }) {
+                    withAnimation(.easeOut(duration: 0.25)) { activeTour = nil }
+                }
+            }
+        }
+        // Settings "Replay the tours" clears every flag → home restarts
+        // immediately, other tabs restart on their next visit.
+        .onChange(of: parentHomeTourSeen) { _, seen in
+            if !seen { maybeStartTour(for: selectedTab) }
+        }
+        // Every tab teaches itself with a spotlight tour on first visit.
+        .onChange(of: selectedTab) { _, tab in
+            maybeStartTour(for: tab)
+        }
         .onChange(of: scenePhase) { _, p in
             if p == .active { Task { await notifBell.refresh() } }
         }
@@ -317,6 +368,137 @@ struct ParentRootView: View {
             return profiles.first { $0.id == owner.id }
         }
         return profiles.count == 1 ? profiles.first : nil
+    }
+
+    /// Show the agreement gate iff the server says this account hasn't acked
+    /// the current version. `try?` makes every failure mode (offline, expired
+    /// token, old backend without the endpoint) fail OPEN: no gate.
+    private func checkAgreementGate() async {
+        if let status = try? await apiClient.fetchAgreementAck(),
+           status.acked_version != BetaAgreementContent.wireVersion {
+            showAgreementGate = true
+        }
+        // Gate resolved (shown or not). If it's not up, the tour may start;
+        // if it IS up, the cover's onDismiss re-attempts.
+        if !showAgreementGate { maybeStartTour(for: selectedTab) }
+    }
+
+    // MARK: - First-visit spotlight tours (one per tab)
+
+    private func tourSeen(_ tab: EvlinTab) -> Bool {
+        switch tab {
+        case .home: return parentHomeTourSeen
+        case .calendar: return calendarTourSeen
+        case .chat: return chatTourSeen
+        case .library: return libraryTourSeen
+        case .insights: return insightsTourSeen
+        }
+    }
+
+    private func markTourSeen(_ tab: EvlinTab) {
+        switch tab {
+        case .home: parentHomeTourSeen = true
+        case .calendar: calendarTourSeen = true
+        case .chat: chatTourSeen = true
+        case .library: libraryTourSeen = true
+        case .insights: insightsTourSeen = true
+        }
+    }
+
+    /// Queue rule: one modal teaching moment at a time, only for the tab the
+    /// user is looking at, never on top of the agreement gate, and never
+    /// re-shown once it has started displaying (Settings' replay clears the
+    /// flags to opt back in).
+    private func maybeStartTour(for tab: EvlinTab) {
+        guard !tourSeen(tab), !showAgreementGate, activeTour == nil else { return }
+        Task { @MainActor in
+            // Let the tab's content render and lay out before resolving anchors.
+            try? await Task.sleep(nanoseconds: tab == .home ? 250_000_000 : 450_000_000)
+            guard !tourSeen(tab), !showAgreementGate, activeTour == nil,
+                  selectedTab == tab else { return }
+            markTourSeen(tab)   // mark at display time — interruptions don't re-nag
+            withAnimation(.easeOut(duration: 0.3)) {
+                activeTour = (steps: tourSteps(for: tab),
+                              lastButton: tab == .home ? "Start exploring" : "Done")
+            }
+        }
+    }
+
+    /// Per-tab scripts. Kid name is live (first child profile); targets are
+    /// tagged in the tab views (`home.*`, `calendar.*`, …) and EvlinTabBar
+    /// (`tab.*`). Steps whose target isn't on screen are skipped by the
+    /// overlay automatically.
+    private func tourSteps(for tab: EvlinTab) -> [TourStep] {
+        let kid = familyStore.childProfiles.first?.name ?? "your kid"
+        switch tab {
+        case .home:
+            return [
+                TourStep(target: "home.childCard",
+                         text: "This is \(kid)'s home. Lock apps, set limits, assign tasks — everything starts here."),
+                TourStep(target: "home.bell",
+                         text: "\(kid)'s requests and completed tasks land here — check in when you see the red dot.",
+                         padding: 8, cornerRadius: 24),
+                TourStep(target: "home.settings",
+                         text: "Family settings, devices, and replaying these tours all live here.",
+                         padding: 8, cornerRadius: 24),
+                TourStep(target: "tab.chat",
+                         text: "The fastest way to get things done: just tell Evlin — \u{201C}Lock Roblox at 8 tonight.\u{201D}",
+                         cornerRadius: 14),
+                TourStep(target: "tab.insights",
+                         text: "Weekly screen-time reports and habit insights live here. Each tab gives you a quick intro like this on your first visit.",
+                         cornerRadius: 14),
+            ]
+        case .calendar:
+            return [
+                TourStep(target: "calendar.header",
+                         text: "Your family's week at a glance. Swipe or tap a day to move around."),
+                TourStep(target: "calendar.events",
+                         text: "Study and play blocks live here — they apply to \(kid)'s phone automatically at the right time."),
+                TourStep(target: "calendar.add",
+                         text: "Add a block by hand, or just ask Evlin in Chat — \u{201C}homework 5 to 6 every weekday.\u{201D}",
+                         padding: 8, cornerRadius: 24),
+            ]
+        case .chat:
+            return [
+                TourStep(target: "chat.starters",
+                         text: "New here? Tap a starter — the first message writes itself."),
+                TourStep(target: "chat.quickPrompts",
+                         text: "Curated quick asks. One tap sends them.",
+                         cornerRadius: 14),
+                TourStep(target: "chat.input",
+                         text: "Or just type what you need — \u{201C}give \(kid) 30 extra minutes\u{201D}, \u{201C}lock games at 8\u{201D}. Evlin does the rest.",
+                         cornerRadius: 16),
+            ]
+        case .library:
+            return [
+                TourStep(target: "library.reels",
+                         text: "Screened short reels — safe content \(kid) can watch."),
+                TourStep(target: "library.lessons",
+                         text: "Trending lessons — learning \(kid) can earn screen time with."),
+                TourStep(target: "library.categories",
+                         text: "Browse by topic to find content worth unlocking."),
+            ]
+        case .insights:
+            return [
+                TourStep(target: "insights.filter",
+                         text: "Switch between kids to see each one's numbers.",
+                         cornerRadius: 20),
+                TourStep(target: "insights.daily",
+                         text: "Daily screen time, day by day — spot the trend early."),
+                TourStep(target: "insights.breakdown",
+                         text: "The full breakdown by app and category. Your weekly report builds on this."),
+            ]
+        }
+    }
+
+    /// Confirm tap in the gate: record the ack, then release the cover.
+    /// Dismisses even if the POST fails — the next launch's check re-prompts,
+    /// which beats trapping the parent behind a network error.
+    private func confirmAgreementGate() {
+        Task {
+            try? await apiClient.postAgreementAck(version: BetaAgreementContent.wireVersion)
+            showAgreementGate = false
+        }
     }
 
     private func startParentReflectionPolling() {

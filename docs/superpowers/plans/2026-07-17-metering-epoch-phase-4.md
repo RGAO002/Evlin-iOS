@@ -954,13 +954,13 @@ The staged name list must contain exactly the six declared files.
 
 **Interfaces:** Remove or make unreachable every legacy direct set/clear production write after the transactional path is green. Poll, NSE, wake, app launch, DAM callback, pause/resume, planner, shield, usage reporter, and ack receipt all consume the same slot/work transaction and current-token recheck.
 
-**RED:** Add a deterministic scheduler that interleaves all three command sources around transaction/claim/effect/readback boundaries. Run P4V01-P4V20 and assert every permutation ends with identical canonical store bytes, no old-set resurrection, one clear tombstone, at most one arm/effect/ack, and correct source/receipt. Add a source scan rejecting production calls to legacy `AppLimitRuleStore.upsert/remove` outside the compatibility facade.
+**RED:** Add a deterministic scheduler that interleaves all three command sources around transaction/claim/effect/readback boundaries. Run P4V01-P4V20 and assert every permutation ends with identical canonical store bytes, no old-set resurrection, one clear tombstone, at most one arm/effect/ack, and correct source/receipt. Add the expired-newer-then-old-set vector: with an empty slot, an expired set at token 5 must durably advance the slot with an expiry tombstone before its terminal `confirmed` ACK; a delayed live set at token 3 must then be superseded and must not arm or mutate shields. The expiry tombstone must be identity-safe, survive process restart, and preserve the existing backend-compatible `confirmed` ACK with `disposition: expired`; do not add an unsupported `AckStatus.expired`. Add a source scan rejecting production calls to legacy `AppLimitRuleStore.upsert/remove` outside the compatibility facade.
 
 ```bash
 (cd /Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS && xcodebuild test -project '/Users/fred/Desktop/Evlin/code.nosync/Evlin-iOS/Evlin iOS.xcodeproj' -scheme 'Evlin iOS' -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3.1' IPHONEOS_DEPLOYMENT_TARGET=17.6 TARGETED_DEVICE_FAMILY='1,2' -only-testing:'Evlin iOSTests/AppLimitProductionReorderingTests' -only-testing:'Evlin iOSTests/MeteringEpochVectorCoverageTests')
 ```
 
-**Minimal GREEN:** Route the last legacy callers through composition and delete only now-unreachable direct mutation methods. Do not refactor unrelated command actions.
+**Minimal GREEN:** Route the last legacy callers through composition and delete only now-unreachable direct mutation methods. Make the expiry decision enter the same durable newest-token transaction as every other app-limit command, with an explicit expiry tombstone rather than an in-memory early return. Do not refactor unrelated command actions.
 
 **Verify:**
 

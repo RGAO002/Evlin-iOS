@@ -26,7 +26,6 @@ nonisolated final class DatedRouteInstaller: @unchecked Sendable {
     private let processIdentity: MeteringProcessIdentity
     private let clock: any MeteringClock
 
-    @MainActor
     init(store: DeviceEpochStore = .shared, center: any MeteringDeviceActivityCenter, processIdentity: MeteringProcessIdentity, clock: any MeteringClock = MeteringRuntimeClock.live()) {
         self.store = store
         self.center = center
@@ -34,8 +33,8 @@ nonisolated final class DatedRouteInstaller: @unchecked Sendable {
         self.clock = clock
     }
 
-    @MainActor
     func reconcile(ownerChildDeviceID: UUID) throws -> [DatedRouteInstallResult] {
+        try stopOrphanedV2Activities(ownerChildDeviceID: ownerChildDeviceID)
         var results: [DatedRouteInstallResult] = []
         for due in try store.dueInstallWork(owner: ownerChildDeviceID, now: clock.now) {
             if due.authorization == .registrationRequired {
@@ -54,12 +53,50 @@ nonisolated final class DatedRouteInstaller: @unchecked Sendable {
         return results
     }
 
+    private func stopOrphanedV2Activities(ownerChildDeviceID owner: UUID) throws {
+        let state = try store.read()
+        guard state.ownerChildDeviceID == owner else { return }
+        // An install owner may be between daemon mutation and durable adoption.
+        // Let that lease finish before performing global orphan reconciliation.
+        guard !state.installWork.values.contains(where: {
+            $0.ownerChildDeviceID == owner
+                && $0.phase == .starting
+                && $0.claim != nil
+        }) else { return }
+        let desiredNames = Set(state.routes.values.compactMap { route -> String? in
+            guard route.ownerChildDeviceID == owner,
+                  route.lifecycle == .planned || route.lifecycle == .active,
+                  state.generations[route.generationID]?.retiredAt == nil
+            else { return nil }
+            return route.activityName
+        })
+        let stale = center.activities.filter {
+            $0.rawValue.hasPrefix(MeteringRouteNamespace.prefix)
+                && !desiredNames.contains($0.rawValue)
+        }
+        if !stale.isEmpty {
+            center.stopMonitoring(stale)
+            try store.transaction(expectedOwner: owner) { state in
+                for key in state.installWork.keys {
+                    guard var work = state.installWork[key],
+                          work.ownerChildDeviceID == owner,
+                          work.phase == .pendingStart,
+                          work.retry.terminal == .pending,
+                          work.retry.lastErrorCode == "excessiveActivities"
+                    else { continue }
+                    work.claim = nil
+                    work.retry.nextAttemptAt = clock.now
+                    state.installWork[key] = work
+                }
+            }
+        }
+    }
+
     /// Projects the bounded product horizon from Apple's currently installed
     /// activities. Persisted install phases are not sufficient proof: another
     /// Screen Time client or the daemon may have removed a route after Evlin
     /// last wrote its state.
     @discardableResult
-    @MainActor
     func refreshCoverage(ownerChildDeviceID owner: UUID) throws -> MonitorCoverageState? {
         let state = try store.read()
         guard state.ownerChildDeviceID == owner else { return nil }
@@ -160,7 +197,6 @@ nonisolated final class DatedRouteInstaller: @unchecked Sendable {
         return coverage
     }
 
-    @MainActor
     private func reconcileClaimed(_ claimed: (work: ActivityInstallWork, priorPhase: ActivityInstallPhase, claim: ActivityInstallClaim), owner: UUID) throws -> ClaimedReconcileOutcome {
         let state: DeviceEpochStoreState
         do {
@@ -177,7 +213,11 @@ nonisolated final class DatedRouteInstaller: @unchecked Sendable {
                 stopFilling: false
             )
         }
-        guard state.hasCurrentRegistrationProvenance(owner: owner, epochID: route.epochID, routeID: route.routeID) else {
+        guard state.hasCurrentInstallProvenance(
+            owner: owner,
+            route: route,
+            authorization: claimed.work.authorization
+        ) else {
             let superseded = try store.supersedeInstallWork(
                 workID: claimed.work.workID,
                 token: claimed.claim.token,
@@ -228,6 +268,18 @@ nonisolated final class DatedRouteInstaller: @unchecked Sendable {
         } catch {
             let isExcessive = (error as? DeviceActivityCenter.MonitoringError) == .excessiveActivities
             let code = isExcessive ? "excessiveActivities" : "startFailed"
+#if DEBUG
+            if isExcessive {
+                let activityNames = center.activities
+                    .map(\.rawValue)
+                    .sorted()
+                    .joined(separator: ",")
+                print(
+                    "[MeteringDaemonCapacity] count=\(center.activities.count) "
+                        + "attempted=\(activity.rawValue) active=\(activityNames)"
+                )
+            }
+#endif
             guard try store.deferInstallWork(workID: claimed.work.workID, token: claimed.claim.token, owner: owner, now: clock.now, code: code, installLimited: isExcessive) else {
                 return ClaimedReconcileOutcome(
                     result: .deferred(workID: claimed.work.workID, code: "claimLost"),
@@ -241,7 +293,6 @@ nonisolated final class DatedRouteInstaller: @unchecked Sendable {
         }
     }
 
-    @MainActor
     private func deferClaimedWork(
         _ claimed: (work: ActivityInstallWork, priorPhase: ActivityInstallPhase, claim: ActivityInstallClaim),
         owner: UUID,
@@ -261,7 +312,6 @@ nonisolated final class DatedRouteInstaller: @unchecked Sendable {
         return .deferred(workID: claimed.work.workID, code: code)
     }
 
-    @MainActor
     private func expectedConfiguration(for route: MeteringCallbackRoute, state: DeviceEpochStoreState) throws -> (schedule: DeviceActivitySchedule, events: [DeviceActivityEvent.Name: DeviceActivityEvent]) {
         guard let timeZone = TimeZone(identifier: route.plannedSchedule.timezoneIdentifier), let generation = state.generations[route.generationID] else {
             throw MeteringDatedScheduleError.invalidUsageDate(route.usageDate)
@@ -269,7 +319,19 @@ nonisolated final class DatedRouteInstaller: @unchecked Sendable {
         let selection = try JSONDecoder().decode(FamilyActivitySelection.self, from: generation.measurementSelectionBytes)
         var eventNames = Set<String>()
         var events: [DeviceActivityEvent.Name: DeviceActivityEvent] = [:]
-        for plan in route.plannedEvents {
+#if DEBUG
+        // DIAGNOSTIC A/B (2026-07-24): per-app activities with 1-2 events fire on
+        // device; earned activities with 12-24 events never fire. Install only the
+        // two lowest thresholds to isolate "too many events per activity" as the
+        // cause. Store keeps all planned events; only the daemon install is capped.
+        // REMOVE after the experiment concludes.
+        let plannedEventPlans = route.plannedEvents
+            .sorted { $0.thresholdMinutes < $1.thresholdMinutes }
+            .prefix(2)
+#else
+        let plannedEventPlans = route.plannedEvents
+#endif
+        for plan in plannedEventPlans {
             guard plan.thresholdMinutes > 0,
                   plan.eventName == MeteringRouteNamespace.eventName(
                       routeID: route.routeID,
@@ -284,10 +346,16 @@ nonisolated final class DatedRouteInstaller: @unchecked Sendable {
                 thresholdMinutes: plan.thresholdMinutes
             )
         }
-        return (try MeteringDatedSchedule.datedSchedule(usageDate: route.usageDate, timeZone: timeZone), events)
+        return (
+            try MeteringDatedSchedule.datedSchedule(
+                usageDate: route.usageDate,
+                timeZone: timeZone,
+                intervalStartAt: route.plannedSchedule.intervalStartAt
+            ),
+            events
+        )
     }
 
-    @MainActor
     private func daemonMatches(activity: DeviceActivityName, expected: (schedule: DeviceActivitySchedule, events: [DeviceActivityEvent.Name: DeviceActivityEvent])) -> Bool {
         guard center.activities.contains(activity), let schedule = center.schedule(for: activity), exactSchedule(schedule, expected.schedule) else { return false }
         let events = center.events(for: activity)
@@ -302,7 +370,6 @@ nonisolated final class DatedRouteInstaller: @unchecked Sendable {
         }
     }
 
-    @MainActor
     private func exactSchedule(_ lhs: DeviceActivitySchedule, _ rhs: DeviceActivitySchedule) -> Bool {
         lhs.intervalStart == rhs.intervalStart
             && lhs.intervalEnd == rhs.intervalEnd

@@ -43,6 +43,8 @@ struct EvlinTabBar: View {
         HStack(spacing: 0) {
             ForEach(EvlinTab.allCases, id: \.self) { tab in
                 tabItem(tab)
+                    // Spotlight-tour anchors ("tab.chat", "tab.insights", …).
+                    .tourTarget("tab.\(tab.rawValue.lowercased())")
             }
         }
         .padding(.horizontal, 4)

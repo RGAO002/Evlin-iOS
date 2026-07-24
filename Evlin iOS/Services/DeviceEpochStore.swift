@@ -110,9 +110,31 @@ nonisolated struct DeviceDailyEpoch: Codable, Equatable, Sendable {
 }
 
 nonisolated struct DatedSchedulePlan: Codable, Equatable, Sendable {
+    // DIAGNOSTIC A/B (2026-07-24): topology 6 = arm-from-now interval start.
+    // Thresholds already crossed at arm time never fire (finding ④, confirmed on
+    // clean device tonight); starting the interval at arm time makes fresh usage
+    // count from zero, matching the only shapes that ever fired on device.
+    static let currentTopologyVersion = 8
+
     let usageDate: String
     let timezoneIdentifier: String
     let calendarIdentifier: String
+    let topologyVersion: Int?
+    let intervalStartAt: Date?
+
+    init(
+        usageDate: String,
+        timezoneIdentifier: String,
+        calendarIdentifier: String,
+        topologyVersion: Int? = currentTopologyVersion,
+        intervalStartAt: Date? = nil
+    ) {
+        self.usageDate = usageDate
+        self.timezoneIdentifier = timezoneIdentifier
+        self.calendarIdentifier = calendarIdentifier
+        self.topologyVersion = topologyVersion
+        self.intervalStartAt = intervalStartAt
+    }
 }
 
 nonisolated struct MeteringEventPlan: Codable, Equatable, Sendable {
@@ -133,7 +155,7 @@ nonisolated struct MeteringCallbackRoute: Codable, Equatable, Sendable {
     let ownerChildDeviceID: UUID
     let usageDate: String
     let epochID: UUID
-    let plannedSchedule: DatedSchedulePlan
+    var plannedSchedule: DatedSchedulePlan
     var installedSchedule: DatedSchedulePlan?
     let plannedEvents: [MeteringEventPlan]
     var installedEvents: [MeteringEventPlan]?
@@ -919,12 +941,21 @@ extension DeviceEpochStoreState {
             append(value.workID, kind: .registration, retry: value.retry, createdAt: value.createdAt)
         }
         for value in installWork.values {
-            append(value.workID, kind: .install, retry: value.retry, createdAt: value.createdAt)
+            switch value.phase {
+            case .pendingStart, .starting, .installed:
+                append(value.workID, kind: .install, retry: value.retry, createdAt: value.createdAt)
+            case .verified, .dualActive, .active, .pendingStop, .stopped:
+                break
+            }
         }
         for value in activationWork.values {
+            guard routes[value.routeID]?.lifecycle == .active,
+                  epochs[value.epochID]?.status == .active
+            else { continue }
             append(value.workID, kind: .activation, retry: value.retry, createdAt: value.createdAt)
         }
         for value in sampleWork.values {
+            guard value.authorization != .waitingForRegistration else { continue }
             append(value.workID, kind: .sample, retry: value.retry, createdAt: value.createdAt)
         }
         for value in shieldReferences.values {
@@ -1361,6 +1392,36 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                 throw DeviceEpochStoreInvariantError.invalidState(
                     "rollover does not target the next reserved canonical route"
                 )
+            }
+
+            let matchingInstallKeys = state.installWork.compactMap { key, work in
+                work.routeID == newRoute.routeID ? key : nil
+            }
+            guard matchingInstallKeys.count == 1,
+                  let newInstallKey = matchingInstallKeys.first,
+                  var newInstall = state.installWork[newInstallKey]
+            else {
+                throw DeviceEpochStoreInvariantError.invalidState(
+                    "rollover route does not have one install work item"
+                )
+            }
+            if newInstall.retry.terminal == .superseded,
+               newInstall.retry.lastErrorCode == "route_superseded",
+               newInstall.authorization == .futurePlanned,
+               newInstall.phase == .pendingStart,
+               newInstall.claim == nil,
+               state.hasCurrentRegistrationProvenance(
+                   owner: owner,
+                   epochID: newRoute.epochID,
+                   routeID: newRoute.routeID
+               ) {
+                newInstall.retry = MeteringRetryState(
+                    attemptCount: 0,
+                    nextAttemptAt: now,
+                    lastErrorCode: nil,
+                    terminal: .pending
+                )
+                state.installWork[newInstallKey] = newInstall
             }
 
             if let existing = state.rolloverEffectsWork {
@@ -1973,16 +2034,124 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
     func dueInstallWork(owner: UUID, now: Date) throws -> [ActivityInstallWork] {
         let state = try read()
         guard state.ownerChildDeviceID == owner else { throw DeviceEpochStoreError.ownerMismatch }
-        return state.dueWork(now: now).compactMap { due in
-            guard due.kind == .install else { return nil }
-            return state.installWork.values.first { $0.workID == due.workID }
-        }.filter { work in
+        let dueByWorkID = Dictionary(uniqueKeysWithValues: state.dueWork(now: now).map {
+            ($0.workID, $0)
+        })
+        return state.installWork.values.filter { work in
+            guard dueByWorkID[work.workID]?.kind == .install else { return false }
             switch work.phase {
             case .pendingStart, .starting, .installed:
                 return true
             case .verified, .dualActive, .active, .pendingStop, .stopped:
                 return false
             }
+        }.sorted { lhs, rhs in
+            let lhsDate = state.routes[lhs.routeID]?.usageDate ?? ""
+            let rhsDate = state.routes[rhs.routeID]?.usageDate ?? ""
+            if lhsDate != rhsDate { return lhsDate < rhsDate }
+            guard let lhsDue = dueByWorkID[lhs.workID],
+                  let rhsDue = dueByWorkID[rhs.workID]
+            else {
+                return lhs.workID.uuidString.lowercased()
+                    < rhs.workID.uuidString.lowercased()
+            }
+            if lhsDue.nextAttemptAt != rhsDue.nextAttemptAt {
+                return lhsDue.nextAttemptAt < rhsDue.nextAttemptAt
+            }
+            if lhsDue.createdAt != rhsDue.createdAt {
+                return lhsDue.createdAt < rhsDue.createdAt
+            }
+            return lhs.workID.uuidString.lowercased()
+                < rhs.workID.uuidString.lowercased()
+        }
+    }
+
+    @discardableResult
+    func prepareCurrentDayInstallStartMigrationIfNeeded(
+        owner: UUID,
+        now: Date
+    ) throws -> UUID? {
+        try transaction(expectedOwner: owner) { state -> UUID? in
+            guard let routeID = state.activeRouteID,
+                  var route = state.routes[routeID],
+                  route.ownerChildDeviceID == owner,
+                  route.lifecycle == .active,
+                  (route.plannedSchedule.topologyVersion ?? 0) < DatedSchedulePlan.currentTopologyVersion,
+                  MeteringEpochContract.canonicalUsageDate(
+                      at: now,
+                      timezoneIdentifier: route.plannedSchedule.timezoneIdentifier
+                  ) == route.usageDate,
+                  let epoch = state.epochs[route.epochID],
+                  epoch.lastRawThresholdMinutes == 0
+            else { return nil }
+            guard let timeZone = TimeZone(
+                identifier: route.plannedSchedule.timezoneIdentifier
+            ) else { return nil }
+            let usageDateParts = route.usageDate.split(separator: "-").compactMap {
+                Int($0)
+            }
+            guard usageDateParts.count == 3 else { return nil }
+            var calendar = Calendar(identifier: .gregorian)
+            calendar.locale = Locale(identifier: "en_US_POSIX")
+            calendar.timeZone = timeZone
+            guard let canonicalStart = calendar.date(from: DateComponents(
+                calendar: calendar,
+                timeZone: timeZone,
+                year: usageDateParts[0],
+                month: usageDateParts[1],
+                day: usageDateParts[2]
+            )) else { return nil }
+            let matchingInstallKeys = state.installWork.compactMap { key, work in
+                work.routeID == routeID ? key : nil
+            }
+            guard matchingInstallKeys.count == 1,
+                  let installKey = matchingInstallKeys.first,
+                  var install = state.installWork[installKey],
+                  install.phase == .active
+            else { return nil }
+
+            route.plannedSchedule = DatedSchedulePlan(
+                usageDate: route.plannedSchedule.usageDate,
+                timezoneIdentifier: route.plannedSchedule.timezoneIdentifier,
+                calendarIdentifier: route.plannedSchedule.calendarIdentifier,
+                topologyVersion: DatedSchedulePlan.currentTopologyVersion,
+                // DIAGNOSTIC A/B: arm-from-now — fresh usage counts from zero so
+                // the low thresholds are NOT pre-crossed at install time.
+                intervalStartAt: max(now, canonicalStart)
+            )
+            state.routes[routeID] = route
+            install.phase = .pendingStart
+            install.claim = nil
+            install.retry = MeteringRetryState(
+                attemptCount: 0,
+                nextAttemptAt: now,
+                lastErrorCode: nil,
+                terminal: .pending
+            )
+            state.installWork[installKey] = install
+            return install.workID
+        }
+    }
+
+    @discardableResult
+    func finalizeCurrentDayInstallStartMigrationIfNeeded(owner: UUID) throws -> Bool {
+        try transaction(expectedOwner: owner) { state in
+            guard state.v2RouteHandoff == nil,
+                  let routeID = state.activeRouteID,
+                  let route = state.routes[routeID],
+                  route.ownerChildDeviceID == owner,
+                  route.lifecycle == .active,
+                  route.plannedSchedule.intervalStartAt != nil
+            else { return false }
+            let matchingInstallKeys = state.installWork.compactMap { key, work in
+                work.routeID == routeID ? key : nil
+            }
+            guard matchingInstallKeys.count == 1,
+                  let installKey = matchingInstallKeys.first,
+                  state.installWork[installKey]?.phase == .verified
+            else { return false }
+            state.installWork[installKey]?.phase = .active
+            return true
         }
     }
 
@@ -2004,11 +2173,11 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
             case .verified, .dualActive, .active, .pendingStop, .stopped:
                 return nil
             }
-            guard let route = state.routes[work.routeID],
-                  state.hasCurrentRegistrationProvenance(
+            guard var route = state.routes[work.routeID],
+                  state.hasCurrentInstallProvenance(
                       owner: owner,
-                      epochID: route.epochID,
-                      routeID: route.routeID
+                      route: route,
+                      authorization: work.authorization
                   )
             else {
                 work.claim = nil
@@ -2046,7 +2215,11 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                   claim.expiresAt > now
             else { return false }
             guard let route = state.routes[work.routeID],
-                  state.hasCurrentRegistrationProvenance(owner: owner, epochID: route.epochID, routeID: route.routeID)
+                  state.hasCurrentInstallProvenance(
+                      owner: owner,
+                      route: route,
+                      authorization: work.authorization
+                  )
             else {
                 work.claim = nil
                 work.retry.terminal = .superseded
@@ -2071,7 +2244,11 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                   claim.expiresAt > now
             else { return false }
             guard let route = state.routes[work.routeID],
-                  state.hasCurrentRegistrationProvenance(owner: owner, epochID: route.epochID, routeID: route.routeID)
+                  state.hasCurrentInstallProvenance(
+                      owner: owner,
+                      route: route,
+                      authorization: work.authorization
+                  )
             else {
                 work.claim = nil
                 work.retry.terminal = .superseded
@@ -2104,10 +2281,10 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                   claim.expiresAt > now
             else { return false }
             guard let failedRoute = state.routes[work.routeID],
-                  state.hasCurrentRegistrationProvenance(
+                  state.hasCurrentInstallProvenance(
                       owner: owner,
-                      epochID: failedRoute.epochID,
-                      routeID: failedRoute.routeID
+                      route: failedRoute,
+                      authorization: work.authorization
                   )
             else {
                 work.claim = nil
@@ -2399,7 +2576,35 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
             && candidateEpoch.baseSource == .childState200
             && candidateEpoch.resumeBoundaryPending
             && state.epochs[handoff.fromEpochID]?.status == .paused
-        return authoritativeCorrection || conservativeResume
+        let namedReplacement: Bool
+        if let priorEpoch = state.epochs[handoff.fromEpochID] {
+            let activeKey = MeteringEpochKey(
+                protocolVersion: priorEpoch.protocolVersion,
+                childDeviceID: priorEpoch.childDeviceID,
+                usageDate: priorEpoch.usageDate,
+                canonicalTimezone: priorEpoch.canonicalTimezone,
+                policyRevision: priorEpoch.policyRevision,
+                measurementSelectionDigest: priorEpoch.measurementSelectionDigest,
+                enforcementSetID: priorEpoch.enforcementSetID
+            )
+            let candidateKey = MeteringEpochKey(
+                protocolVersion: candidateEpoch.protocolVersion,
+                childDeviceID: candidateEpoch.childDeviceID,
+                usageDate: candidateEpoch.usageDate,
+                canonicalTimezone: candidateEpoch.canonicalTimezone,
+                policyRevision: candidateEpoch.policyRevision,
+                measurementSelectionDigest: candidateEpoch.measurementSelectionDigest,
+                enforcementSetID: candidateEpoch.enforcementSetID
+            )
+            namedReplacement = MeteringEpochContract.replacementReason(
+                active: activeKey,
+                next: candidateKey,
+                explicitRecovery: nil
+            ) != nil
+        } else {
+            namedReplacement = false
+        }
+        return authoritativeCorrection || conservativeResume || namedReplacement
     }
 
     @discardableResult
@@ -3147,7 +3352,9 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
             guard let candidateHandoff else {
                 guard canCollectHandoff(priorHandoff, from: priorState)
                         || canAbandonAuthoritativeBaseCorrection(priorHandoff, in: candidate)
-                        || canAbandonConservativeResume(priorHandoff, in: candidate) else {
+                        || canAbandonConservativeResume(priorHandoff, in: candidate)
+                        || canAbandonSupersededCandidate(priorHandoff, in: candidate)
+                        || canCancelBackwardPreparingHandoff(priorHandoff, in: candidate) else {
                     throw DeviceEpochStoreInvariantError.invalidState("handoff was removed before exact stop acknowledgement")
                 }
                 return
@@ -3377,6 +3584,77 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         return registrationTerminated || activationTerminated
     }
 
+    private func canAbandonSupersededCandidate(
+        _ handoff: V2RouteHandoff,
+        in state: DeviceEpochStoreState
+    ) -> Bool {
+        guard handoff.phase == .cutoverReady,
+              state.activeGenerationID == handoff.fromGenerationID,
+              state.activeEpochID == handoff.fromEpochID,
+              state.activeRouteID == handoff.fromRouteID,
+              let rejectedEpoch = state.epochs[handoff.toEpochID],
+              rejectedEpoch.status == .retired,
+              rejectedEpoch.retireReason == .activationSuperseded,
+              state.routes[handoff.toRouteID]?.lifecycle == .tombstoned,
+              state.tombstones[handoff.toRouteID] != nil,
+              state.installWork.values.filter({
+                  $0.routeID == handoff.toRouteID && $0.phase == .pendingStop
+              }).count == 1,
+              state.routes.values.contains(where: {
+                  $0.ownerChildDeviceID == handoff.ownerChildDeviceID
+                      && $0.routeID != handoff.fromRouteID
+                      && $0.routeID != handoff.toRouteID
+                      && $0.usageDate == state.routes[handoff.toRouteID]?.usageDate
+                      && $0.generationID != handoff.fromGenerationID
+                      && $0.generationID != handoff.toGenerationID
+                      && $0.lifecycle == .planned
+                      && state.epochs[$0.epochID]?.status == .active
+              })
+        else { return false }
+        let registrationTerminated = state.registrationWork.values.contains {
+            $0.epochID == handoff.toEpochID
+                && $0.routeID == handoff.toRouteID
+                && $0.retry.terminal != .pending
+                && $0.retry.terminal != .succeeded
+        }
+        let registrationSucceeded = state.registrationWork.values.contains {
+            $0.epochID == handoff.toEpochID
+                && $0.routeID == handoff.toRouteID
+                && $0.retry.terminal == .succeeded
+        }
+        let activationSucceeded = state.activationWork.values.contains {
+            $0.epochID == handoff.toEpochID
+                && $0.routeID == handoff.toRouteID
+                && $0.retry.terminal == .succeeded
+        }
+        return registrationTerminated && !registrationSucceeded && !activationSucceeded
+    }
+
+    private func canCancelBackwardPreparingHandoff(
+        _ handoff: V2RouteHandoff,
+        in state: DeviceEpochStoreState
+    ) -> Bool {
+        guard handoff.phase == .preparing,
+              state.activeGenerationID == handoff.fromGenerationID,
+              state.activeEpochID == handoff.fromEpochID,
+              state.activeRouteID == handoff.fromRouteID,
+              let priorRoute = state.routes[handoff.fromRouteID],
+              let candidateRoute = state.routes[handoff.toRouteID],
+              candidateRoute.lifecycle == .planned,
+              let candidateGeneration = state.generations[handoff.toGenerationID],
+              candidateRoute.createdAt < priorRoute.createdAt || candidateGeneration.retiredAt != nil
+        else { return false }
+        let installs = state.installWork.values.filter { $0.routeID == handoff.toRouteID }
+        guard installs.count == 1,
+              installs[0].phase == .pendingStart,
+              installs[0].retry.terminal == .superseded,
+              installs[0].retry.lastErrorCode == "backward_handoff_cancelled"
+        else { return false }
+        return !state.activationWork.values.contains {
+            $0.routeID == handoff.toRouteID && $0.retry.terminal == .succeeded
+        }
+    }
+
     private func restore(_ priorData: Data?, at url: URL) throws {
         var restoreError: Error?
         do {
@@ -3402,6 +3680,42 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
 }
 
 extension DeviceEpochStoreState {
+    func hasCurrentInstallProvenance(
+        owner: UUID,
+        route: MeteringCallbackRoute,
+        authorization: MeteringInstallAuthorization
+    ) -> Bool {
+        if hasCurrentRegistrationProvenance(
+            owner: owner,
+            epochID: route.epochID,
+            routeID: route.routeID
+        ) {
+            return true
+        }
+
+        guard authorization == .futurePlanned,
+              ownerChildDeviceID == owner,
+              hasEligibleRouteEpochGeneration(
+                  owner: owner,
+                  route: route,
+                  epoch: epochs[route.epochID],
+                  generation: generations[route.generationID]
+              ),
+              currentHorizonUsageDates(
+                  owner: owner,
+                  generationID: route.generationID
+              ).contains(route.usageDate),
+              let handoff = v2RouteHandoff,
+              handoff.ownerChildDeviceID == owner,
+              handoff.toGenerationID == route.generationID,
+              handoff.phase == .preparing
+                || handoff.phase == .dualV2
+                || handoff.phase == .cutoverReady
+        else { return false }
+
+        return hasExactHandoffPriorProvenance(owner: owner, handoff: handoff)
+    }
+
     func isExactCanonicalRolloverCandidate(
         owner: UUID,
         handoff: V2RouteHandoff,
@@ -3942,10 +4256,20 @@ extension DeviceEpochStoreState {
                 epoch: fromEpoch,
                 generation: fromGeneration
             )
-            && currentHorizonUsageDates(
-                owner: owner,
-                generationID: handoff.fromGenerationID
-            ).contains(fromRoute.usageDate)
+            && (
+                currentHorizonUsageDates(
+                    owner: owner,
+                    generationID: handoff.fromGenerationID
+                ).contains(fromRoute.usageDate)
+                || isExactCanonicalDayRolloverPrior(
+                    handoff: handoff,
+                    fromRoute: fromRoute,
+                    fromEpoch: fromEpoch,
+                    toRoute: toRoute,
+                    toEpoch: toEpoch,
+                    generation: fromGeneration
+                )
+            )
         if hasActivePrior { return true }
 
         let hasPausedPriorConservativeResume = fromEpoch.status == .paused
@@ -3983,6 +4307,57 @@ extension DeviceEpochStoreState {
                 timeZoneIdentifier: fromGeneration.canonicalTimezone
             )
         return hasAcknowledgedRetiredPriorRecovery
+    }
+
+    private func isExactCanonicalDayRolloverPrior(
+        handoff: V2RouteHandoff,
+        fromRoute: MeteringCallbackRoute,
+        fromEpoch: DeviceDailyEpoch,
+        toRoute: MeteringCallbackRoute,
+        toEpoch: DeviceDailyEpoch,
+        generation: MeteringPolicyGeneration
+    ) -> Bool {
+        guard handoff.phase == .cutoverReady,
+              handoff.fromGenerationID == handoff.toGenerationID,
+              fromRoute.generationID == generation.generationID,
+              toRoute.generationID == generation.generationID,
+              fromRoute.usageDate == fromEpoch.usageDate,
+              toRoute.usageDate == toEpoch.usageDate,
+              toEpoch.status == .active,
+              toEpoch.retiredAt == nil,
+              toEpoch.childDeviceID == fromEpoch.childDeviceID,
+              toEpoch.canonicalTimezone == fromEpoch.canonicalTimezone,
+              toEpoch.policyRevision == fromEpoch.policyRevision,
+              toEpoch.measurementSelectionDigest == fromEpoch.measurementSelectionDigest,
+              toEpoch.enforcementSetID == fromEpoch.enforcementSetID,
+              isNextCanonicalUsageDate(
+                  fromRoute.usageDate,
+                  toRoute.usageDate,
+                  timeZoneIdentifier: generation.canonicalTimezone
+              )
+        else { return false }
+        return true
+    }
+
+    private func isNextCanonicalUsageDate(
+        _ prior: String,
+        _ next: String,
+        timeZoneIdentifier: String
+    ) -> Bool {
+        guard let timeZone = TimeZone(identifier: timeZoneIdentifier) else { return false }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.locale = Locale(identifier: "en_US_POSIX")
+        calendar.timeZone = timeZone
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = timeZone
+        formatter.dateFormat = "yyyy-MM-dd"
+        guard let priorDate = formatter.date(from: prior),
+              formatter.string(from: priorDate) == prior,
+              let nextDate = calendar.date(byAdding: .day, value: 1, to: priorDate)
+        else { return false }
+        return formatter.string(from: nextDate) == next
     }
 
     func currentHorizonUsageDates(owner: UUID, generationID: UUID) -> [String] {

@@ -419,8 +419,7 @@ private final class ResumeTransport: MeteringHTTPTransport, @unchecked Sendable 
     }
 }
 
-@MainActor
-private final class ResumeCenter: MeteringDeviceActivityCenter {
+private nonisolated final class ResumeCenter: MeteringDeviceActivityCenter, @unchecked Sendable {
     var records: [DeviceActivityName: (DeviceActivitySchedule, [DeviceActivityEvent.Name: DeviceActivityEvent])] = [:]
     var stopCalls: [[DeviceActivityName]] = []
     var activities: [DeviceActivityName] { Array(records.keys) }

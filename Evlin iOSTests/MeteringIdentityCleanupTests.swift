@@ -349,8 +349,7 @@ private struct IdentityCleanupTransport: MeteringHTTPTransport {
     }
 }
 
-@MainActor
-private final class IdentityCleanupCenter: MeteringDeviceActivityCenter {
+private nonisolated final class IdentityCleanupCenter: MeteringDeviceActivityCenter, @unchecked Sendable {
     private(set) var active: Set<DeviceActivityName>
     private(set) var stoppedNames: [String] = []
 

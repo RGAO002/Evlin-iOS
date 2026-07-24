@@ -504,6 +504,27 @@ struct HomeSettingsSheet: View {
         }
 
         Section("About") {
+            Button {
+                // Clearing every tour flag re-arms all first-visit tours:
+                // Home replays immediately (ParentRootView observes its
+                // flag); each other tab replays on its next visit. Close
+                // the sheet so the Home tour is instantly visible.
+                for key in ["parentHomeTourSeen", "parentCalendarTourSeen",
+                            "parentChatTourSeen", "parentLibraryTourSeen",
+                            "parentInsightsTourSeen", "parentProfileTourSeen",
+                            "parentDeviceLimitsTourSeen"] {
+                    UserDefaults.standard.set(false, forKey: key)
+                }
+                onClose()
+            } label: {
+                settingsRow(
+                    title: "Replay the tours",
+                    subtitle: "Re-run each tab's quick intro",
+                    systemImage: "sparkles",
+                    accent: .evPrimary
+                )
+            }
+
             settingsRow(
                 title: "Version",
                 subtitle: "",

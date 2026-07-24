@@ -68,11 +68,14 @@ struct CalendarView: View {
     var body: some View {
         VStack(spacing: 0) {
             outerDayNav
+                .tourTarget("calendar.header")
             ZStack(alignment: .bottomTrailing) {
                 scrollContainer
+                    .tourTarget("calendar.events")
                 floatingAddButton
                     .padding(.trailing, 20)
                     .padding(.bottom, 24)
+                    .tourTarget("calendar.add")
             }
         }
         .background(Color.evSurfaceContainerLow)

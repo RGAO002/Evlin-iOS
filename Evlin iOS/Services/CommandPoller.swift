@@ -197,11 +197,13 @@ enum AppLimitRecoveryTrigger {
     static func launch() async {
         await AppLimitOwnerRecoveryEntry.shared.recoverIfConfigured()
         await AppLimitEffectRecoveryEntry.shared.recoverIfConfigured()
+        await reconcileAlreadyAppliedRules()
     }
 
     static func foreground() async {
         await AppLimitOwnerRecoveryEntry.shared.recoverIfConfigured()
         await AppLimitEffectRecoveryEntry.shared.recoverIfConfigured()
+        await reconcileAlreadyAppliedRules()
     }
 
     static func silentRemoteNotification() async {
@@ -212,6 +214,20 @@ enum AppLimitRecoveryTrigger {
     static func pollCompletion() async {
         await AppLimitOwnerRecoveryEntry.shared.recoverIfConfigured()
         await AppLimitEffectRecoveryEntry.shared.recoverIfConfigured()
+    }
+
+    private static func reconcileAlreadyAppliedRules() async {
+        guard let owner = MeteringOwnerMirror.current() else { return }
+
+        // DeviceActivity calls are synchronous XPC. Capture the verified owner
+        // before leaving the main actor, then reconcile off-main so foreground
+        // recovery cannot trip the scene-update watchdog.
+        _ = await Task.detached(priority: .utility) {
+            let rules = AppLimitRuleStore.shared.all()
+            return AppLimitPlanner(
+                ownerProvider: { owner }
+            ).arm(rules: rules)
+        }.value
     }
 }
 

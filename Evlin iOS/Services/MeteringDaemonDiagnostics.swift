@@ -1,6 +1,7 @@
 #if DEBUG
 import CryptoKit
 import DeviceActivity
+import FamilyControls
 import Foundation
 
 nonisolated enum AppLimitTopologyProbeMode: String, CaseIterable, Sendable {
@@ -521,8 +522,11 @@ nonisolated struct MeteringDaemonDiagnosticsSnapshot: Equatable, Sendable {
     }
 
     static func manualInspectionRequests(
-        entries: [MeteringDaemonDiagnosticEntry]
+        entries: [MeteringDaemonDiagnosticEntry],
+        ownerChildDeviceID: UUID? = nil,
+        state: DeviceEpochStoreState? = nil
     ) -> [MeteringDaemonInspectionRequest] {
+        var requestsByActivity: [String: MeteringDaemonInspectionRequest] = [:]
         var latestByActivity: [String: MeteringDaemonDiagnosticEntry] = [:]
         for entry in entries where entry.operation == .start && entry.result == .success {
             guard let activityName = entry.activityName, entry.expected != nil else { continue }
@@ -530,20 +534,71 @@ nonisolated struct MeteringDaemonDiagnosticsSnapshot: Equatable, Sendable {
                 latestByActivity[activityName] = entry
             }
         }
-        return latestByActivity.values.sorted { ($0.activityName ?? "") < ($1.activityName ?? "") }
-            .compactMap { entry in
-                guard let activityName = entry.activityName, let expected = entry.expected else {
-                    return nil
-                }
-                return MeteringDaemonInspectionRequest(
-                    reason: .manual,
-                    process: "app",
-                    activityName: activityName,
-                    namespace: entry.namespace ?? "unknown",
-                    armID: entry.armID,
-                    expected: expected
-                )
+        for entry in latestByActivity.values {
+            guard let activityName = entry.activityName, let expected = entry.expected else {
+                continue
             }
+            requestsByActivity[activityName] = MeteringDaemonInspectionRequest(
+                reason: .manual,
+                process: "app",
+                activityName: activityName,
+                namespace: entry.namespace ?? "unknown",
+                armID: entry.armID,
+                expected: expected
+            )
+        }
+        if let ownerChildDeviceID,
+           let state,
+           let activeEarned = activeEarnedInspectionRequest(
+               ownerChildDeviceID: ownerChildDeviceID,
+               state: state
+           ) {
+            requestsByActivity[activeEarned.activityName] = activeEarned
+        }
+        return requestsByActivity.values.sorted { $0.activityName < $1.activityName }
+    }
+
+    private static func activeEarnedInspectionRequest(
+        ownerChildDeviceID: UUID,
+        state: DeviceEpochStoreState
+    ) -> MeteringDaemonInspectionRequest? {
+        guard state.ownerChildDeviceID == ownerChildDeviceID,
+              let routeID = state.activeRouteID,
+              let route = state.routes[routeID],
+              route.ownerChildDeviceID == ownerChildDeviceID,
+              route.lifecycle == .active,
+              let generation = state.generations[route.generationID],
+              let timeZone = TimeZone(identifier: route.plannedSchedule.timezoneIdentifier),
+              let selection = try? JSONDecoder().decode(
+                  FamilyActivitySelection.self,
+                  from: generation.measurementSelectionBytes
+              ),
+              let schedule = try? MeteringDatedSchedule.datedSchedule(
+                  usageDate: route.usageDate,
+                  timeZone: timeZone
+              )
+        else { return nil }
+
+        let events = Dictionary(uniqueKeysWithValues: route.plannedEvents.map { plan in
+            (
+                DeviceActivityEvent.Name(plan.eventName),
+                MeteringDatedSchedule.makeEvent(
+                    selection: selection,
+                    thresholdMinutes: plan.thresholdMinutes
+                )
+            )
+        })
+        return MeteringDaemonInspectionRequest(
+            reason: .manual,
+            process: "app",
+            activityName: route.activityName,
+            namespace: route.namespace,
+            armID: nil,
+            expected: MeteringDaemonConfigurationSummary.make(
+                schedule: schedule,
+                events: events
+            )
+        )
     }
 }
 

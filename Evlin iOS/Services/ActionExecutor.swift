@@ -509,9 +509,18 @@ final class ActionExecutor: @unchecked Sendable {
         }
 
         guard identity.isCurrent else { return Self.staleIdentityResult }
-        guard let usedTodayMinutes = command.limit?.usedTodayMinutes,
-              usedTodayMinutes >= rule.budgetMinutes,
-              var record = LimitShieldLogic.applyingLimit(
+        guard let usedTodayMinutes = command.limit?.usedTodayMinutes else { return result }
+        if usedTodayMinutes < rule.budgetMinutes {
+            guard await prepareForMutation(identity) else { return Self.staleIdentityResult }
+            do {
+                _ = try await appLimitLockStore.removeLimitSourceVerified(ruleID: rule.id)
+            } catch {
+                return .failed(.execution("lock_store_unavailable"))
+            }
+            return identity.isCurrent ? result : Self.staleIdentityResult
+        }
+
+        guard var record = LimitShieldLogic.applyingLimit(
                 to: [:],
                 rule: rule
               )[LimitShieldLogic.recordKey(for: rule)]

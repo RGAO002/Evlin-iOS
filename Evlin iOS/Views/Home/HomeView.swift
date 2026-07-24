@@ -37,9 +37,11 @@ struct HomeView: View {
                     HeaderIconButton(systemName: "bell", badge: bellHasNew) {
                         onOpenNotifications()
                     }
+                    .tourTarget("home.bell")
                     HeaderIconButton(systemName: "gearshape") {
                         showSettings = true
                     }
+                    .tourTarget("home.settings")
                 }
             }
 
@@ -71,6 +73,9 @@ struct HomeView: View {
                                     child: child,
                                     onOpenProfile: onOpenProfile
                                 )
+                                // Spotlight tour highlights the FIRST card only.
+                                .tourTarget("home.childCard",
+                                            enabled: child.id == children.first?.id)
                             }
                         }
                     }

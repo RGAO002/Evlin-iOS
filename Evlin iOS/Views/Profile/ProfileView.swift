@@ -305,7 +305,57 @@ struct ProfileView: View {
         )
     }
 
+    /// First-visit spotlight tour (5 stops, top-to-bottom). Seen-flag flips at
+    /// display time; Settings' "Replay the tours" clears it along with the rest.
+    @AppStorage("parentProfileTourSeen") private var profileTourSeen = false
+    @State private var showProfileTour = false
+    /// Captured from the body's ScrollViewReader so the tour can scroll
+    /// below-the-fold targets (devices / rules) into view.
+    @State private var tourScrollProxy: ScrollViewProxy?
+
+    private var profileTourSteps: [TourStep] {
+        let kid = displayChild.name
+        // Layout order top → bottom so the hole travels down the page.
+        return [
+            TourStep(target: "profile.screenTime",
+                     text: "\(kid)'s live screen time against today's limit — it updates as they use their phone."),
+            TourStep(target: "profile.lockApps",
+                     text: "One tap locks or unlocks everything. Changes reach \(kid)'s phone in seconds.",
+                     cornerRadius: 16),
+            TourStep(target: "profile.tasks",
+                     text: "Assign tasks with screen-time rewards. \(kid) checks them off, you approve."),
+            TourStep(target: "profile.devices",
+                     text: "Every device \(kid) uses is enrolled here. Tap one to manage its apps — including per-app daily limits."),
+            TourStep(target: "profile.rules",
+                     text: "The rules currently active on \(kid)'s devices, all in one place."),
+        ]
+    }
+
+    private func maybeStartProfileTour() {
+        // Only when the overview sections are actually on screen (an active
+        // reflection replaces them), and never on top of another overlay.
+        guard !profileTourSeen,
+              profileTab == .overview || activeReflectionSummary == nil else { return }
+        Task { @MainActor in
+            // Let the push transition and first layout settle.
+            try? await Task.sleep(nanoseconds: 450_000_000)
+            guard !profileTourSeen else { return }
+            profileTourSeen = true   // mark at display time
+            withAnimation(.easeOut(duration: 0.3)) { showProfileTour = true }
+        }
+    }
+
     var body: some View {
+        // Reader wraps the whole screen so the spotlight tour can scroll its
+        // in-ScrollView targets into view (proxy captured into state because
+        // the tour overlay attaches outside this closure).
+        ScrollViewReader { sp in
+            profileContent
+                .onAppear { tourScrollProxy = sp }
+        }
+    }
+
+    private var profileContent: some View {
         ZStack(alignment: .bottomTrailing) {
         VStack(spacing: 0) {
             GlassmorphicHeader(title: "\(displayChild.name)'s Space", onBack: onBack) {
@@ -361,6 +411,8 @@ struct ProfileView: View {
                         }
                     } else {
                         summaryCard
+                            .tourTarget("profile.screenTime")
+                            .id("profile.screenTime")
                     }
 
                     // Reflection sub-tab hides everything else (HTML lines
@@ -399,6 +451,8 @@ struct ProfileView: View {
                                     .padding(.top, 4)
                             }
                         }
+                        .tourTarget("profile.tasks")
+                        .id("profile.tasks")
 
                         // NOTE: "Today's Schedule" section was removed because the
                         // latest design HTML (Evlin Parent Dashboard (1).html) no
@@ -412,9 +466,13 @@ struct ProfileView: View {
 
                         // Enrolled Devices (collapsible — HTML 1064-1085)
                         devicesSection
+                            .tourTarget("profile.devices")
+                            .id("profile.devices")
 
                         // Active Rules (collapsible) — moved to bottom per HTML 1086-1121
                         activeRulesSection
+                            .tourTarget("profile.rules")
+                            .id("profile.rules")
                     }
                 }
                 .padding(.horizontal, 20)
@@ -454,6 +512,22 @@ struct ProfileView: View {
         .background(Color.evSurfaceContainerLow)
         .navigationBarBackButtonHidden(true)
         .enableSwipeBack()
+        .onAppear { maybeStartProfileTour() }
+        // First-visit mini-tour overlay (anchors: profile.* targets above).
+        .overlayPreferenceValue(TourAnchorKey.self) { anchors in
+            if showProfileTour {
+                SpotlightTourOverlay(steps: profileTourSteps,
+                                     anchors: anchors,
+                                     lastButtonTitle: "Done",
+                                     onStepChange: { target in
+                    withAnimation(.easeInOut(duration: 0.3)) {
+                        tourScrollProxy?.scrollTo(target, anchor: .center)
+                    }
+                }) {
+                    withAnimation(.easeOut(duration: 0.25)) { showProfileTour = false }
+                }
+            }
+        }
         // Task Detail is now a NavigationStack push handled by the parent
         // stack (see `appNavigationDestination`). Edit Task lives inside
         // TaskDetailView itself.
@@ -1861,6 +1935,8 @@ struct ProfileView: View {
                 .opacity(displayedChildDeviceIDs.isEmpty
                          ? 0.45
                          : (lockBusy || !manualLockPresentation.allowsTap ? 0.7 : 1))
+                .tourTarget("profile.lockApps")
+                .id("profile.lockApps")
 
                 if let notice = automaticLockNotice {
                     HStack(alignment: .center, spacing: 8) {

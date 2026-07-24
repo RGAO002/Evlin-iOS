@@ -1,4 +1,5 @@
 #if DEBUG
+import FamilyControls
 import Foundation
 import XCTest
 @testable import Evlin_iOS
@@ -68,6 +69,59 @@ final class MeteringDaemonDiagnosticsViewTests: XCTestCase {
         XCTAssertEqual(requests[0].reason, .manual)
     }
 
+    func testManualInspectionRequestsIncludeActiveEarnedRouteWithoutStartJournal() throws {
+        let owner = UUID(uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")!
+        let start = Date(timeIntervalSince1970: 1_768_665_600)
+        let storeURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("metering-daemon-view-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: storeURL) }
+
+        let store = DeviceEpochStore(fileURL: storeURL, ownerProvider: { owner })
+        let selectionBytes = try JSONEncoder().encode(FamilyActivitySelection())
+        let key = MeteringGenerationKey(
+            protocolVersion: 2,
+            childDeviceID: owner,
+            canonicalTimezone: "America/New_York",
+            policyRevision: "diagnostic-fixture",
+            measurementSelectionDigest: MeteringEpochContract.selectionDigest(
+                persistedBytes: selectionBytes
+            ),
+            enforcementSetID: UUID()
+        )
+        let plan = try store.reconcileMeteringHorizon(.init(
+            ownerChildDeviceID: owner,
+            today: "2026-01-17",
+            generationKey: key,
+            persistedSelectionBytes: selectionBytes,
+            poolMinutes: 120,
+            deviceCapMinutes: 60,
+            authoritativeBaseAcceptedMinutes: 0,
+            now: start
+        ))
+        let routeID = try XCTUnwrap(plan.routeIDsByUsageDate["2026-01-17"])
+        try store.transaction(expectedOwner: owner) { state in
+            state.activeGenerationID = plan.generationID
+            state.activeEpochID = state.routes[routeID]?.epochID
+            state.activeRouteID = routeID
+            state.routes[routeID]?.lifecycle = .active
+        }
+        let state = try store.read()
+        let activityName = try XCTUnwrap(state.routes[routeID]?.activityName)
+
+        let requests = MeteringDaemonDiagnosticsSnapshot.manualInspectionRequests(
+            entries: [],
+            ownerChildDeviceID: owner,
+            state: state
+        )
+
+        let request = try XCTUnwrap(requests.first { $0.activityName == activityName })
+        XCTAssertEqual(request.namespace, MeteringRouteNamespace.prefix)
+        XCTAssertEqual(request.reason, .manual)
+        XCTAssertEqual(request.expected.events.count, 12)
+        XCTAssertTrue(request.expected.events.contains { $0.threshold == "minute=5" })
+        XCTAssertTrue(request.expected.events.contains { $0.threshold == "minute=60" })
+    }
+
     func testDiagnosticViewSourceHasNoMeteringOrLockMutationCalls() throws {
         let sourceURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -105,6 +159,54 @@ final class MeteringDaemonDiagnosticsViewTests: XCTestCase {
 
         XCTAssertTrue(commandDelivery.contains("MeteringDaemonDiagnosticsView()"))
         XCTAssertFalse(parentControls.contains("MeteringDaemonDiagnosticsView()"))
+    }
+
+    func testCommandDeliveryResetStopsOnlyStaleEarnedActivities() {
+        let desired = "evlin.earned.budget.current"
+        let staleLegacy = "evlin.earned.budget"
+        let staleGenerated = "evlin.earned.budget.stale"
+        let perApp = "evlin.limit.v2.rule"
+        let commandHeartbeat = "evlin.command.heartbeat"
+
+        let stopped = CommandDeliveryMeteringRepair.staleEarnedActivityNames(
+            liveActivityNames: Set([
+                desired,
+                staleLegacy,
+                staleGenerated,
+                perApp,
+                commandHeartbeat,
+            ]),
+            desiredEarnedActivityNames: Set([desired])
+        )
+
+        XCTAssertEqual(stopped, [staleLegacy, staleGenerated])
+    }
+
+    func testCommandDeliveryResetStopsStaleV2EarnedActivityButPreservesDesiredRoute() {
+        let desired = "evlin.earned.v2.11111111-1111-1111-1111-111111111111"
+        let stale = "evlin.earned.v2.22222222-2222-2222-2222-222222222222"
+        let perApp = "evlin.limit.v2.33333333-3333-3333-3333-333333333333"
+
+        let stopped = CommandDeliveryMeteringRepair.staleEarnedActivityNames(
+            liveActivityNames: Set([desired, stale, perApp]),
+            desiredEarnedActivityNames: Set([desired])
+        )
+
+        XCTAssertEqual(stopped, [stale])
+    }
+
+    func testCommandDeliveryContainsDebugOnlyMeteringRepairAction() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent(
+                "Evlin iOS/Components/Debug/CommandDeliveryDiagnosticsView.swift"
+            )
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+
+        XCTAssertTrue(source.contains("Repair metering activities"))
+        XCTAssertTrue(source.contains("CommandDeliveryMeteringRepair.run()"))
+        XCTAssertTrue(source.contains("#if DEBUG"))
     }
 
     private func entry(

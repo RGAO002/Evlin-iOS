@@ -1022,9 +1022,7 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
             usageDate: usageDate
         ), max(0, usedMinutes))
         defaults.set(expected, forKey: key)
-        guard synchronizeDefaults(defaults) else {
-            throw AppLimitUsagePersistenceError.synchronizeFailed
-        }
+        _ = synchronizeDefaults(defaults)
         guard let verificationDefaults = verificationDefaultsFactory(suiteName),
               defaultsValuesEqual(verificationDefaults.object(forKey: key), expected)
         else {

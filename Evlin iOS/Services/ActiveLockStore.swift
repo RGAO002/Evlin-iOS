@@ -22,9 +22,8 @@ nonisolated struct UserDefaultsActiveLockShieldPersistence: ActiveLockShieldPers
     }
 
     func load() throws -> [String: ShieldRecord] {
-        guard let defaults, defaults.synchronize() else {
-            throw ActiveLockVerifiedPersistenceError.unavailable
-        }
+        guard let defaults else { throw ActiveLockVerifiedPersistenceError.unavailable }
+        _ = defaults.synchronize()
         guard let data = defaults.data(forKey: storageKey) else { return [:] }
         let decoded: [String: ShieldRecord]
         if let json = try? Self.decoder.decode([String: ShieldRecord].self, from: data) {
@@ -48,7 +47,8 @@ nonisolated struct UserDefaultsActiveLockShieldPersistence: ActiveLockShieldPers
         guard let defaults else { throw ActiveLockVerifiedPersistenceError.unavailable }
         let data = try Self.encoder.encode(shields)
         defaults.set(data, forKey: storageKey)
-        guard defaults.synchronize(), defaults.data(forKey: storageKey) == data else {
+        _ = defaults.synchronize()
+        guard defaults.data(forKey: storageKey) == data else {
             throw ActiveLockVerifiedPersistenceError.readbackMismatch
         }
         _ = try load()

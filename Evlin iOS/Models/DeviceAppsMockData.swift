@@ -17,6 +17,8 @@ struct DeviceAppItem: Identifiable, Hashable {
     /// Backend rule id once a limit exists. `nil` = no active rule (limit off);
     /// carried so the toggle/clear can DELETE the right rule.
     var ruleID: UUID? = nil
+    /// Server mutation version used to reject delayed parent writes.
+    var orderingToken: Int? = nil
 }
 
 enum DeviceAppsMockData {
@@ -110,9 +112,73 @@ struct AppLimitRuleSummary: Equatable {
     let ruleID: UUID
     let bundleID: String
     let dailyBudgetMinutes: Int
+    let orderingToken: Int?
     /// Coarse minutes used today for this app (backend `used_minutes`). Drives the
     /// per-app usage bar. Defaulted so callers/tests that don't supply it compile.
     var usedMinutes: Int = 0
+
+    init(
+        ruleID: UUID,
+        bundleID: String,
+        dailyBudgetMinutes: Int,
+        orderingToken: Int? = nil,
+        usedMinutes: Int = 0
+    ) {
+        self.ruleID = ruleID
+        self.bundleID = bundleID
+        self.dailyBudgetMinutes = dailyBudgetMinutes
+        self.orderingToken = orderingToken
+        self.usedMinutes = usedMinutes
+    }
+}
+
+/// Serializes mutations per app and threads each server response's version
+/// into the next request. Mutations for different apps remain independent.
+@MainActor
+final class AppLimitEditQueue {
+    struct ServerState: Equatable {
+        var ruleID: UUID?
+        var orderingToken: Int?
+    }
+
+    typealias Operation = @MainActor (ServerState) async -> ServerState?
+
+    private var states: [String: ServerState] = [:]
+    private var tails: [String: Task<Void, Never>] = [:]
+    private var tailIDs: [String: UUID] = [:]
+
+    func seed(key: String, state: ServerState) {
+        guard tails[key] == nil else { return }
+        states[key] = state
+    }
+
+    func state(for key: String) -> ServerState {
+        states[key] ?? ServerState(ruleID: nil, orderingToken: nil)
+    }
+
+    func enqueue(key: String, operation: @escaping Operation) {
+        let previous = tails[key]
+        let tailID = UUID()
+        let task = Task { @MainActor [weak self] in
+            if let previous {
+                await previous.value
+            }
+            guard let self else { return }
+            if let replacement = await operation(self.state(for: key)) {
+                self.states[key] = replacement
+            }
+            if self.tailIDs[key] == tailID {
+                self.tails[key] = nil
+                self.tailIDs[key] = nil
+            }
+        }
+        tails[key] = task
+        tailIDs[key] = tailID
+    }
+
+    func waitForIdle(key: String) async {
+        await tails[key]?.value
+    }
 }
 
 // MARK: - Optimistic-update supersession (P9 review)
@@ -169,10 +235,12 @@ enum DeviceAppLimitMerge {
                 updated.usedMin = rule.usedMinutes
                 updated.enabled = true
                 updated.ruleID = rule.ruleID
+                updated.orderingToken = rule.orderingToken
             } else {
                 updated.enabled = false
                 updated.usedMin = 0
                 updated.ruleID = nil
+                updated.orderingToken = nil
             }
             return updated
         }

@@ -44,6 +44,7 @@ enum OnboardingStep: Equatable {
     // v2 Parent flow (new cases)
     case parentSignIn            // mockup 3: "Create your parent account"
     case parentProfile           // mockup 4: "Tell us about you"
+    case parentBetaAgreement     // Beta Participation Agreement — scroll-to-bottom read gate
     case parentNewOrJoin         // mockup 5: "New family — or join an existing one"
     case parentCoParentJoin      // Plan 5: co-parent "waiting for owner approval" poll
     case parentBackInInstantly   // Plan 8: returning-parent / approved-co-parent recovery
@@ -617,11 +618,28 @@ struct OnboardingCoordinator: View {
             case .parentProfile:
                 ParentProfileStep(
                     apiClient: apiClient,
+                    onSaved: { step = .parentBetaAgreement },
+                    onBack: { step = .parentSignIn }
+                )
+
+            case .parentBetaAgreement:
+                // Beta Participation Agreement read gate — sits between account
+                // profile and family enrollment so BOTH the new-family owner and
+                // a joining co-parent pass through it, before any child is enrolled.
+                ParentBetaAgreementStep(
                     // Single device always starts a new family (the kid created it) → skip the
                     // new-or-join chooser and go straight to pairing.
                     // Single device: pair programmatically with the known code (no scan screen).
-                    onSaved: { singleDevice ? singleDevicePairAndContinue() : (step = .parentNewOrJoin) },
-                    onBack: { step = .parentSignIn }
+                    onContinue: {
+                        // Record the read ack (best-effort — if it doesn't land,
+                        // the parent-root launch gate re-prompts on first open).
+                        Task {
+                            try? await apiClient.postAgreementAck(
+                                version: BetaAgreementContent.wireVersion)
+                        }
+                        singleDevice ? singleDevicePairAndContinue() : (step = .parentNewOrJoin)
+                    },
+                    onBack: { step = .parentProfile }
                 )
 
             case .parentNewOrJoin:

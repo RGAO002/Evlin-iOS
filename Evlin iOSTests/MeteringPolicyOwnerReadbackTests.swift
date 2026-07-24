@@ -116,6 +116,80 @@ final class MeteringPolicyOwnerReadbackTests: XCTestCase {
         XCTAssertEqual(requestCount, 2)
     }
 
+    func testMissingAppGroupSelectionRecoversFromCurrentOwnersActiveGeneration() throws {
+        let fixture = activeFixture()
+        let suiteName = "metering-policy-selection-recovery-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let recovered = try XCTUnwrap(
+            MeteringProductionComposition.recoverablePolicyInputs(
+                owner: owner,
+                desired: fixture.policy,
+                state: fixture.state,
+                defaults: defaults,
+                selectionIsValid: { _ in true }
+            )
+        )
+
+        XCTAssertEqual(
+            recovered.selectionBytes,
+            fixture.state.generations[fixture.state.activeGenerationID!]?.measurementSelectionBytes
+        )
+        XCTAssertEqual(recovered.enforcementSetID, enforcement)
+        XCTAssertEqual(
+            defaults.data(forKey: MeteringProductionComposition.selectionKey),
+            recovered.selectionBytes
+        )
+        XCTAssertEqual(
+            defaults.string(forKey: MeteringProductionComposition.lockedSetIDKey),
+            enforcement.uuidString
+        )
+    }
+
+    func testMissingAppGroupSelectionNeverRecoversFromAnotherOwner() throws {
+        let fixture = activeFixture()
+        let suiteName = "metering-policy-selection-wrong-owner-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        XCTAssertNil(MeteringProductionComposition.recoverablePolicyInputs(
+            owner: UUID(),
+            desired: fixture.policy,
+            state: fixture.state,
+            defaults: defaults,
+            selectionIsValid: { _ in true }
+        ))
+        XCTAssertNil(defaults.data(forKey: MeteringProductionComposition.selectionKey))
+        XCTAssertNil(defaults.string(forKey: MeteringProductionComposition.lockedSetIDKey))
+    }
+
+    func testAcknowledgedDesiredPolicyStillRepairsMissingAppGroupInputs() throws {
+        var fixture = activeFixture()
+        fixture.state.desiredPolicy?.ackedAt = Date(timeIntervalSince1970: 1_000)
+        let suiteName = "metering-policy-selection-acked-recovery-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        XCTAssertTrue(MeteringProductionComposition.repairPersistedPolicyInputsIfPossible(
+            owner: owner,
+            state: fixture.state,
+            defaults: defaults,
+            selectionIsValid: { _ in true }
+        ))
+        XCTAssertEqual(
+            defaults.data(forKey: MeteringProductionComposition.selectionKey),
+            fixture.state.generations[fixture.state.activeGenerationID!]?.measurementSelectionBytes
+        )
+        XCTAssertEqual(
+            defaults.string(forKey: MeteringProductionComposition.lockedSetIDKey),
+            enforcement.uuidString
+        )
+    }
+
     private func activeFixture() -> (policy: MeteringDesiredPolicy, state: DeviceEpochStoreState) {
         let generationID = UUID()
         let epochID = UUID()

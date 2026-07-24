@@ -1,4 +1,5 @@
 import DeviceActivity
+import FamilyControls
 import XCTest
 @testable import Evlin_iOS
 
@@ -64,6 +65,111 @@ final class MeteringRolloverRecoveryTests: XCTestCase {
             now: start.addingTimeInterval(86_400)
         ))
         XCTAssertEqual(try Data(contentsOf: storeURL), before)
+    }
+
+    func testColdReopenAfterCanonicalMidnightPreparesAndCompletesRollover() async throws {
+        let fixture = try seedActiveAndReservedRoutes()
+        let initial = try store.read()
+        let center = RolloverCenter()
+        center.seed(DeviceActivityName(try XCTUnwrap(initial.routes[fixture.oldRouteID]?.activityName)))
+        center.seed(DeviceActivityName(try XCTUnwrap(initial.routes[fixture.newRouteID]?.activityName)))
+        let transport = RolloverTransport(results: [
+            registrationResult(epochID: fixture.newEpochID),
+            activationResult(epochID: fixture.newEpochID)
+        ])
+        let clock = RolloverClock(now: start.addingTimeInterval(86_430))
+        let driver = makeDriver(center: center, transport: transport, clock: clock)
+
+        try await driver.recover(ownerChildDeviceID: owner)
+
+        let state = try store.read()
+        XCTAssertEqual(state.rolloverEffectsWork?.fromUsageDate, "2026-07-17")
+        XCTAssertEqual(state.rolloverEffectsWork?.toUsageDate, "2026-07-18")
+        XCTAssertEqual(state.rolloverEffectsWork?.retry.terminal, .succeeded)
+        XCTAssertEqual(state.activeEpochID, fixture.newEpochID)
+        XCTAssertEqual(state.activeRouteID, fixture.newRouteID)
+    }
+
+    func testRolloverActivationKeepsExactPriorAuthorityAfterHorizonAdvances() async throws {
+        let fixture = try seedActiveAndReservedRoutes()
+        let seeded = try store.read()
+        let generation = try XCTUnwrap(seeded.generations[seeded.activeGenerationID!])
+        _ = try store.reconcileMeteringHorizon(MeteringHorizonRequest(
+            ownerChildDeviceID: owner,
+            today: "2026-07-18",
+            generationKey: MeteringGenerationKey(
+                protocolVersion: generation.protocolVersion,
+                childDeviceID: owner,
+                canonicalTimezone: generation.canonicalTimezone,
+                policyRevision: generation.policyRevision,
+                measurementSelectionDigest: generation.measurementSelectionDigest,
+                enforcementSetID: generation.enforcementSetID
+            ),
+            persistedSelectionBytes: generation.measurementSelectionBytes,
+            poolMinutes: try XCTUnwrap(generation.configuredPoolMinutes),
+            deviceCapMinutes: try XCTUnwrap(generation.configuredDeviceCapMinutes),
+            authoritativeBaseAcceptedMinutes: 0,
+            now: start.addingTimeInterval(86_430)
+        ))
+        let expanded = try store.read()
+        XCTAssertEqual(
+            Set(expanded.routes.values.filter {
+                $0.generationID == generation.generationID
+            }.map(\.usageDate)).count,
+            MeteringHorizonPlanner.dateCount + 1
+        )
+        let center = RolloverCenter()
+        center.seed(DeviceActivityName(try XCTUnwrap(expanded.routes[fixture.oldRouteID]?.activityName)))
+        center.seed(DeviceActivityName(try XCTUnwrap(expanded.routes[fixture.newRouteID]?.activityName)))
+        let transport = RolloverTransport(results: [
+            registrationResult(epochID: fixture.newEpochID),
+            activationResult(epochID: fixture.newEpochID)
+        ])
+
+        try await makeDriver(
+            center: center,
+            transport: transport,
+            clock: RolloverClock(now: start.addingTimeInterval(86_430))
+        ).recover(ownerChildDeviceID: owner)
+
+        let state = try store.read()
+        XCTAssertEqual(state.activeRouteID, fixture.newRouteID)
+        XCTAssertEqual(state.rolloverEffectsWork?.retry.terminal, .succeeded)
+    }
+
+    func testColdReopenRepairsLegacySupersededNewDayInstallBeforeRollover() async throws {
+        let fixture = try seedActiveAndReservedRoutes()
+        try store.transaction(expectedOwner: owner) { state in
+            let installID = try XCTUnwrap(
+                state.installWork.first(where: {
+                    $0.value.routeID == fixture.newRouteID
+                })?.key
+            )
+            state.installWork[installID]?.phase = .pendingStart
+            state.installWork[installID]?.claim = nil
+            state.installWork[installID]?.retry.terminal = .superseded
+            state.installWork[installID]?.retry.lastErrorCode = "route_superseded"
+        }
+        let initial = try store.read()
+        let center = RolloverCenter()
+        center.seed(DeviceActivityName(try XCTUnwrap(initial.routes[fixture.oldRouteID]?.activityName)))
+        let transport = RolloverTransport(results: [
+            registrationResult(epochID: fixture.newEpochID),
+            activationResult(epochID: fixture.newEpochID)
+        ])
+        let clock = RolloverClock(now: start.addingTimeInterval(86_430))
+
+        try await makeDriver(center: center, transport: transport, clock: clock)
+            .recover(ownerChildDeviceID: owner)
+
+        let state = try store.read()
+        let install = try XCTUnwrap(
+            state.installWork.values.first { $0.routeID == fixture.newRouteID }
+        )
+        XCTAssertEqual(install.retry.terminal, .pending)
+        XCTAssertNil(install.retry.lastErrorCode)
+        XCTAssertEqual(state.rolloverEffectsWork?.retry.terminal, .succeeded)
+        XCTAssertEqual(state.activeRouteID, fixture.newRouteID)
     }
 
     func testRecoveryActivatesNewDayBeforeRetiringAndStoppingOldRoute() async throws {
@@ -139,6 +245,22 @@ final class MeteringRolloverRecoveryTests: XCTestCase {
             "/api/v1/child/earned-time/epochs",
             "/api/v1/child/earned-time/epochs/\(fixture.newEpochID.uuidString.lowercased())/activation"
         ])
+        let registrationBody = try XCTUnwrap(transport.requests.first?.httpBody)
+        let registrationDecoder = JSONDecoder()
+        registrationDecoder.dateDecodingStrategy = .iso8601
+        let registration = try registrationDecoder.decode(
+            EpochRegistrationRequestDTO.self,
+            from: registrationBody
+        )
+        XCTAssertEqual(registration.usageDate, "2026-07-18")
+        XCTAssertEqual(
+            MeteringEpochContract.canonicalUsageDate(
+                at: registration.startedAt,
+                timezoneIdentifier: registration.timezone
+            ),
+            registration.usageDate,
+            "day-rollover registration must not reuse the prior day's horizon-planning timestamp"
+        )
 
         let nextWorkID = try store.prepareCanonicalRollover(
             owner: owner,
@@ -297,7 +419,7 @@ final class MeteringRolloverRecoveryTests: XCTestCase {
         newEpochID: UUID,
         newRouteID: UUID
     ) {
-        let selection = Data([0x41, 0x42, 0x43])
+        let selection = try JSONEncoder().encode(FamilyActivitySelection())
         let generationKey = MeteringGenerationKey(
             protocolVersion: 2,
             childDeviceID: owner,
@@ -467,21 +589,34 @@ private final class RolloverTransport: MeteringHTTPTransport, @unchecked Sendabl
     }
 }
 
-@MainActor
-private final class RolloverCenter: MeteringDeviceActivityCenter {
+private nonisolated final class RolloverCenter: MeteringDeviceActivityCenter, @unchecked Sendable {
     var records: Set<DeviceActivityName> = []
+    var schedules: [DeviceActivityName: DeviceActivitySchedule] = [:]
+    var eventMaps: [DeviceActivityName: [DeviceActivityEvent.Name: DeviceActivityEvent]] = [:]
     var stopCalls: [[DeviceActivityName]] = []
     var activities: [DeviceActivityName] { Array(records) }
-    func schedule(for activity: DeviceActivityName) -> DeviceActivitySchedule? { nil }
-    func events(for activity: DeviceActivityName) -> [DeviceActivityEvent.Name: DeviceActivityEvent] { [:] }
+    func schedule(for activity: DeviceActivityName) -> DeviceActivitySchedule? {
+        schedules[activity]
+    }
+    func events(for activity: DeviceActivityName) -> [DeviceActivityEvent.Name: DeviceActivityEvent] {
+        eventMaps[activity] ?? [:]
+    }
     func startMonitoring(
         _ activity: DeviceActivityName,
         during schedule: DeviceActivitySchedule,
         events: [DeviceActivityEvent.Name: DeviceActivityEvent]
-    ) throws { records.insert(activity) }
+    ) throws {
+        records.insert(activity)
+        schedules[activity] = schedule
+        eventMaps[activity] = events
+    }
     func stopMonitoring(_ activities: [DeviceActivityName]) {
         stopCalls.append(activities)
-        activities.forEach { records.remove($0) }
+        activities.forEach {
+            records.remove($0)
+            schedules.removeValue(forKey: $0)
+            eventMaps.removeValue(forKey: $0)
+        }
     }
     func seed(_ activity: DeviceActivityName) { records.insert(activity) }
 }

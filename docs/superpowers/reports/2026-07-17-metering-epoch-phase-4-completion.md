@@ -6,10 +6,10 @@ status_code: AUTOMATED_PASSED_PHYSICAL_PENDING
 phase_complete: false
 releasable: false
 task16_stale_path_removal_commit: 6dc9181df09ca1a7947e8f1eb4ab97d0e70918a6
-ios_head: 6dc9181df09ca1a7947e8f1eb4ab97d0e70918a6
-backend_head: bd202058ab3d8ba345fb37db494160165c48aea4
-gate_manifest_sha256: d19bd7ed1abf0c90566c945488525a565876cbf29e29ada6a3a47e1145fd1f03
-release_products_sha256: 646bedfdf801070eafefd6bde743ead0da9f34fb4e256d3c5b915c5eb985d506
+ios_head: b49aee1f90474a940cc0da392f3f644d79d3e1dd
+backend_head: da06fba46ffc1ed240bae7a571b72a6c50ecf239
+gate_manifest_sha256: 61d9dd6661f3bca4248337cfdd312edd69a3066ba66d7cab184549701effdd46
+release_products_sha256: c07534b67890de69daca0564e09e6a0e4968c0e550889621da16aab1c32c61b5
 vector_fixture_sha256: c565b8fc43b2964a59827e1f9883c60e7d87f97d6a9d07357145d5f50699b32a
 
 Tests ran using Debug simulator products. Five unsigned production products were
@@ -24,5 +24,5 @@ build-for-testing. This report does not claim that Release tests ran.
 | P4-DEVICE-4 | Two-device attribution | PENDING |
 
 Automated gate details, command exit codes, runtimes, and raw-log hashes are in
-`.superpowers/evidence/metering-phase4/gates.tsv`. Physical evidence is not
+`.superpowers/evidence/metering-phase4/runs/20260721T012742Z-b49aee1/gates.tsv`. Physical evidence is not
 fabricated by this automated run.

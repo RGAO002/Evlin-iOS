@@ -9,8 +9,7 @@ private struct FixedMeteringClock: MeteringClock {
     var now: Date { date }
 }
 
-@MainActor
-private struct FakeCenter: MeteringDeviceActivityCenter {
+private nonisolated struct FakeCenter: MeteringDeviceActivityCenter {
     var activities: [DeviceActivityName] = []
 
     func schedule(for activity: DeviceActivityName) -> DeviceActivitySchedule? { nil }

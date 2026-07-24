@@ -343,6 +343,26 @@ final class MeteringV2ActivationTests: XCTestCase {
         XCTAssertEqual(fixture.center.stopCalls, [[DeviceActivityName("evlin.earned.prior")]])
     }
 
+    func testPolicyReplacementRegistersCandidateWithPolicyChangeReason() async throws {
+        let fixture = try makeReplacementFixture()
+        defer { fixture.cleanup() }
+        fixture.transport.results = [
+            registrationResult(epochID: fixture.candidateEpochID),
+            activationResult(epochID: fixture.candidateEpochID)
+        ]
+
+        try await makeDriver(fixture).recover(ownerChildDeviceID: owner)
+
+        let request = try XCTUnwrap(fixture.transport.requests.first {
+            $0.url?.path == "/api/v1/child/earned-time/epochs"
+        })
+        let body = try XCTUnwrap(request.httpBody)
+        let registration = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: body) as? [String: Any]
+        )
+        XCTAssertEqual(registration["reason"] as? String, "policy_change")
+    }
+
     func testReplacementDoesNotRegisterCandidateBeforePriorInputBarrier() async throws {
         let fixture = try makeReplacementFixture()
         defer { fixture.cleanup() }
@@ -501,6 +521,135 @@ final class MeteringV2ActivationTests: XCTestCase {
         XCTAssertEqual(tombstone.stopAcknowledgedAt, handoff.priorStopAcknowledgedAt)
     }
 
+    func testCompletedReplacementHandoffIsCollectedOnNextRecovery() async throws {
+        let fixture = try makeReplacementFixture()
+        defer { fixture.cleanup() }
+        fixture.transport.results = [
+            registrationResult(epochID: fixture.candidateEpochID),
+            activationResult(epochID: fixture.candidateEpochID)
+        ]
+
+        try await makeDriver(fixture).recover(ownerChildDeviceID: owner)
+        XCTAssertNotNil(try fixture.store.read().v2RouteHandoff?.priorStopAcknowledgedAt)
+
+        try await makeDriver(fixture, at: start.addingTimeInterval(5))
+            .recover(ownerChildDeviceID: owner)
+
+        XCTAssertNil(try fixture.store.read().v2RouteHandoff)
+    }
+
+    func testTerminalRejectedReplacementYieldsToNewerPolicyCandidate() async throws {
+        let fixture = try makeReplacementFixture()
+        defer { fixture.cleanup() }
+        try fixture.addPreplannedReplacement()
+        try fixture.addPendingCandidateRegistration()
+        fixture.transport.errors = [.noResponse]
+
+        try await makeDriver(fixture).recover(ownerChildDeviceID: owner)
+        try fixture.rejectCandidateRegistration(code: "replacement_reason_mismatch")
+
+        try await makeDriver(fixture, at: start.addingTimeInterval(5))
+            .recover(ownerChildDeviceID: owner)
+
+        let state = try fixture.store.read()
+        XCTAssertEqual(state.activeRouteID, fixture.priorRouteID)
+        XCTAssertEqual(state.v2RouteHandoff?.fromRouteID, fixture.priorRouteID)
+        XCTAssertEqual(state.v2RouteHandoff?.toRouteID, fixture.recoveryRouteID)
+        XCTAssertEqual(state.routes[fixture.candidateRouteID]?.lifecycle, .tombstoned)
+        XCTAssertEqual(state.epochs[fixture.candidateEpochID]?.retireReason, .activationSuperseded)
+        XCTAssertEqual(state.installWork[fixture.candidateInstallID]?.phase, .stopped)
+    }
+
+    func testSupersededAuditDoesNotAbandonSuccessfullyRegisteredCandidate() async throws {
+        let fixture = try makeReplacementFixture()
+        defer { fixture.cleanup() }
+        try fixture.addPreplannedReplacement()
+        try fixture.addPendingCandidateRegistration()
+        fixture.transport.results = [registrationResult(epochID: fixture.candidateEpochID)]
+
+        try await makeDriver(fixture).recover(ownerChildDeviceID: owner)
+
+        let state = try fixture.store.read()
+        XCTAssertEqual(
+            state.registrationWork.values
+                .filter { $0.routeID == fixture.candidateRouteID }
+                .map { $0.retry.terminal.rawValue }
+                .sorted(),
+            [MeteringWorkTerminal.succeeded.rawValue, MeteringWorkTerminal.superseded.rawValue]
+        )
+        XCTAssertEqual(state.v2RouteHandoff?.toRouteID, fixture.candidateRouteID)
+        XCTAssertEqual(state.routes[fixture.candidateRouteID]?.lifecycle, .active)
+        XCTAssertNil(state.epochs[fixture.candidateEpochID]?.retireReason)
+    }
+
+    func testWaitingCandidateSampleDoesNotBlockItsRegistration() async throws {
+        let fixture = try makeReplacementFixture()
+        defer { fixture.cleanup() }
+        try fixture.addPendingCandidateRegistration()
+        fixture.transport.errors = [.noResponse]
+
+        try await makeDriver(fixture).recover(ownerChildDeviceID: owner)
+        try fixture.addWaitingCandidateSample(createdAt: start.addingTimeInterval(1))
+        fixture.transport.results = [registrationResult(epochID: fixture.candidateEpochID)]
+
+        try await makeDriver(fixture, at: start.addingTimeInterval(5))
+            .recover(ownerChildDeviceID: owner)
+
+        let state = try fixture.store.read()
+        XCTAssertTrue(state.registrationWork.values.contains {
+            $0.routeID == fixture.candidateRouteID
+                && $0.retry.terminal == .succeeded
+        })
+        XCTAssertEqual(
+            state.sampleWork.values.first(where: { $0.routeID == fixture.candidateRouteID })?.authorization,
+            .v2Deliverable
+        )
+    }
+
+    func testFutureHorizonRouteDoesNotSupersedeCurrentPolicyCandidate() async throws {
+        let fixture = try makeReplacementFixture()
+        defer { fixture.cleanup() }
+        try fixture.addFutureHorizonRoutes()
+        try fixture.addPendingCandidateRegistration()
+        fixture.transport.errors = [.noResponse]
+
+        try await makeDriver(fixture).recover(ownerChildDeviceID: owner)
+
+        let state = try fixture.store.read()
+        XCTAssertEqual(state.v2RouteHandoff?.toRouteID, fixture.candidateRouteID)
+        XCTAssertEqual(state.routes[fixture.candidateRouteID]?.lifecycle, .active)
+        XCTAssertNil(state.epochs[fixture.candidateEpochID]?.retireReason)
+    }
+
+    func testHistoricalPlannedRouteCannotRollActivePolicyBackward() async throws {
+        let fixture = try makeReplacementFixture()
+        defer { fixture.cleanup() }
+        let historicalRouteID = try fixture.addHistoricalPlannedReplacement()
+        try fixture.addPendingCandidateRegistration()
+        fixture.transport.errors = [.noResponse]
+
+        try await makeDriver(fixture).recover(ownerChildDeviceID: owner)
+
+        let state = try fixture.store.read()
+        XCTAssertNotEqual(state.v2RouteHandoff?.toRouteID, historicalRouteID)
+        XCTAssertEqual(state.activeRouteID, fixture.priorRouteID)
+    }
+
+    func testPersistedPreparingHandoffToHistoricalRouteIsCancelled() async throws {
+        let fixture = try makeReplacementFixture()
+        defer { fixture.cleanup() }
+        let historicalRouteID = try fixture.addHistoricalPlannedReplacement()
+        try fixture.setPreparingHandoff(to: historicalRouteID)
+
+        try await makeDriver(fixture).recover(ownerChildDeviceID: owner)
+
+        let state = try fixture.store.read()
+        XCTAssertEqual(state.v2RouteHandoff?.toRouteID, fixture.candidateRouteID)
+        XCTAssertNotEqual(state.v2RouteHandoff?.toRouteID, historicalRouteID)
+        XCTAssertEqual(state.activeRouteID, fixture.priorRouteID)
+        XCTAssertEqual(state.routes[historicalRouteID]?.lifecycle, .planned)
+    }
+
     private func makeDriver(
         _ fixture: ActivationFixture,
         at date: Date? = nil,
@@ -625,8 +774,7 @@ private final class ActivationTransport: MeteringHTTPTransport, @unchecked Senda
 
 private enum ActivationTransportError: Error { case noResponse }
 
-@MainActor
-private final class ActivationCenter: MeteringDeviceActivityCenter {
+private nonisolated final class ActivationCenter: MeteringDeviceActivityCenter, @unchecked Sendable {
     var records: [DeviceActivityName: (DeviceActivitySchedule, [DeviceActivityEvent.Name: DeviceActivityEvent])] = [:]
     var stopCalls: [[DeviceActivityName]] = []
     var preserveActivitiesWhenStopped = false
@@ -804,6 +952,81 @@ private final class ActivationFixture {
         }
     }
 
+    func addHistoricalPlannedReplacement() throws -> UUID {
+        let generationID = UUID(uuidString: "05000000-0000-4000-8000-000000000001")!
+        let epochID = UUID(uuidString: "05000000-0000-4000-8000-000000000002")!
+        let routeID = UUID(uuidString: "05000000-0000-4000-8000-000000000003")!
+        let installID = UUID(uuidString: "05000000-0000-4000-8000-000000000004")!
+        let historicalStart = start.addingTimeInterval(-100)
+        try store.transaction(expectedOwner: owner) { state in
+            let generation = makeGeneration(
+                id: generationID,
+                policy: "historical",
+                createdAt: historicalStart
+            )
+            let epoch = makeEpoch(id: epochID, generation: generation, registeredAt: nil)
+            let route = makeRoute(
+                id: routeID,
+                epoch: epoch,
+                generation: generation,
+                name: "evlin.earned.historical",
+                lifecycle: .planned,
+                createdAt: historicalStart
+            )
+            state.generations[generationID] = generation
+            state.epochs[epochID] = epoch
+            state.routes[routeID] = route
+            state.installWork[installID] = ActivityInstallWork(
+                workID: installID,
+                ownerChildDeviceID: owner,
+                routeID: routeID,
+                authorization: .offlinePending,
+                phase: .verified,
+                claim: nil,
+                retry: retry(.succeeded),
+                createdAt: historicalStart
+            )
+        }
+        return routeID
+    }
+
+    func setPreparingHandoff(to routeID: UUID) throws {
+        try store.transaction(expectedOwner: owner) { state in
+            guard let fromRoute = state.routes[priorRouteID],
+                  let toRoute = state.routes[routeID]
+            else { return }
+            state.v2RouteHandoff = V2RouteHandoff(
+                handoffID: UUID(),
+                ownerChildDeviceID: owner,
+                fromGenerationID: fromRoute.generationID,
+                fromEpochID: fromRoute.epochID,
+                fromRouteID: fromRoute.routeID,
+                toGenerationID: toRoute.generationID,
+                toEpochID: toRoute.epochID,
+                toRouteID: toRoute.routeID,
+                phase: .preparing,
+                priorRouteInputClosedAt: nil,
+                registrationAcknowledgedAt: nil,
+                activationAcknowledgedAt: nil,
+                priorStopAcknowledgedAt: nil,
+                createdAt: start
+            )
+        }
+    }
+
+    func rejectCandidateRegistration(code: String) throws {
+        try store.transaction(expectedOwner: owner) { state in
+            guard let key = state.registrationWork.first(where: {
+                $0.value.routeID == candidateRouteID
+                    && $0.value.epochID == candidateEpochID
+                    && $0.value.retry.terminal == .pending
+            })?.key else { return }
+            state.registrationWork[key]?.claim = nil
+            state.registrationWork[key]?.retry.terminal = .rejected
+            state.registrationWork[key]?.retry.lastErrorCode = code
+        }
+    }
+
     func setCandidateEpochStatus(_ status: DeviceDailyEpochStatus) throws {
         try store.transaction(expectedOwner: owner) { state in
             state.epochs[candidateEpochID]?.status = status
@@ -946,6 +1169,46 @@ private final class ActivationFixture {
         }
     }
 
+    func addWaitingCandidateSample(createdAt: Date) throws {
+        try store.transaction(expectedOwner: owner) { state in
+            guard let route = state.routes[candidateRouteID],
+                  let epoch = state.epochs[candidateEpochID],
+                  let event = route.plannedEvents.first
+            else { return }
+            let workID = UUID()
+            state.sampleWork[workID] = EpochSampleWork(
+                workID: workID,
+                ownerChildDeviceID: owner,
+                epochID: epoch.epochID,
+                routeID: route.routeID,
+                request: EpochSampleRequestDTO(
+                    deviceID: owner,
+                    usageDate: epoch.usageDate,
+                    timezone: epoch.canonicalTimezone,
+                    activityName: route.activityName,
+                    eventName: event.eventName,
+                    thresholdMinutes: event.thresholdMinutes,
+                    estimatedMinutes: event.thresholdMinutes,
+                    observedAt: createdAt,
+                    clientSampleID: "waiting-registration-\(workID.uuidString.lowercased())",
+                    protocolVersion: 2,
+                    epochID: epoch.epochID,
+                    generationArmedAt: nil,
+                    generationOffsetMinutes: nil
+                ),
+                authorization: .waitingForRegistration,
+                claim: nil,
+                retry: MeteringRetryState(
+                    attemptCount: 0,
+                    nextAttemptAt: createdAt,
+                    lastErrorCode: nil,
+                    terminal: .pending
+                ),
+                createdAt: createdAt
+            )
+        }
+    }
+
     func completePriorSample() throws {
         try store.transaction(expectedOwner: owner) { state in
             for (key, var work) in state.sampleWork where work.routeID == priorRouteID {
@@ -962,13 +1225,17 @@ private final class ActivationFixture {
         }
     }
 
-    private func makeGeneration(id: UUID, policy: String) -> MeteringPolicyGeneration {
+    private func makeGeneration(
+        id: UUID,
+        policy: String,
+        createdAt: Date? = nil
+    ) -> MeteringPolicyGeneration {
         MeteringPolicyGeneration(
             generationID: id, protocolVersion: 2, childDeviceID: owner,
             canonicalTimezone: "America/New_York", policyRevision: policy,
             measurementSelectionDigest: MeteringEpochContract.selectionDigest(persistedBytes: Data()),
             enforcementSetID: UUID(uuidString: "30000000-0000-4000-8000-000000000001")!,
-            measurementSelectionBytes: Data(), createdAt: start, retiredAt: nil
+            measurementSelectionBytes: Data(), createdAt: createdAt ?? start, retiredAt: nil
         )
     }
 
@@ -989,7 +1256,14 @@ private final class ActivationFixture {
         )
     }
 
-    private func makeRoute(id: UUID, epoch: DeviceDailyEpoch, generation: MeteringPolicyGeneration, name: String, lifecycle: MeteringRouteLifecycle) -> MeteringCallbackRoute {
+    private func makeRoute(
+        id: UUID,
+        epoch: DeviceDailyEpoch,
+        generation: MeteringPolicyGeneration,
+        name: String,
+        lifecycle: MeteringRouteLifecycle,
+        createdAt: Date? = nil
+    ) -> MeteringCallbackRoute {
         MeteringCallbackRoute(
             routeID: id, activityName: name, namespace: MeteringRouteNamespace.prefix,
             generationID: generation.generationID,
@@ -999,7 +1273,7 @@ private final class ActivationFixture {
             installedSchedule: DatedSchedulePlan(usageDate: epoch.usageDate, timezoneIdentifier: generation.canonicalTimezone, calendarIdentifier: "gregorian"),
             plannedEvents: [MeteringEventPlan(eventName: MeteringRouteNamespace.eventName(routeID: id, thresholdMinutes: 5), thresholdMinutes: 5)],
             installedEvents: [MeteringEventPlan(eventName: MeteringRouteNamespace.eventName(routeID: id, thresholdMinutes: 5), thresholdMinutes: 5)],
-            lifecycle: lifecycle, createdAt: start
+            lifecycle: lifecycle, createdAt: createdAt ?? start
         )
     }
 

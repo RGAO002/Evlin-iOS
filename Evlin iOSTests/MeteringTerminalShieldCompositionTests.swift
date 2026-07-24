@@ -406,8 +406,7 @@ private enum TerminalShieldFixtureError: Error {
     case missingData
 }
 
-@MainActor
-private final class TerminalCenter: MeteringDeviceActivityCenter {
+private nonisolated final class TerminalCenter: MeteringDeviceActivityCenter, @unchecked Sendable {
     var activities: [DeviceActivityName] = []
 
     func schedule(for activity: DeviceActivityName) -> DeviceActivitySchedule? { nil }

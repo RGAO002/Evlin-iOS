@@ -48,7 +48,10 @@ class ScreenTimeManager: ObservableObject {
 
     private init() {
         isAuthorized = AuthorizationCenter.shared.authorizationStatus == .approved
-        let persistedDeletion = UserDefaults.standard.object(forKey: Self.deletionProtectionDefaultsKey) as? Bool ?? true
+        // Default OFF. Only the child onboarding `DeletionProtectionStep` explicitly
+        // turns it on for the child's device — a parent device must never protect
+        // its own apps from deletion by default.
+        let persistedDeletion = UserDefaults.standard.object(forKey: Self.deletionProtectionDefaultsKey) as? Bool ?? false
         deletionProtectionEnabled = persistedDeletion
         applyDeletionProtectionToManagedSettings(persistedDeletion)
 
@@ -164,7 +167,8 @@ class ScreenTimeManager: ObservableObject {
         }
     }
 
-    /// User preference for `ManagedSettingsStore.application.denyAppRemoval`. Default ON.
+    /// User preference for `ManagedSettingsStore.application.denyAppRemoval`. Default OFF
+    /// (parent devices stay unprotected); the child onboarding step explicitly enables it.
     func setDeletionProtectionEnabled(_ enabled: Bool) {
         guard deletionProtectionEnabled != enabled else {
             applyDeletionProtectionToManagedSettings(enabled)
@@ -177,7 +181,7 @@ class ScreenTimeManager: ObservableObject {
 
     /// Re-apply persisted preference to Managed Settings (called on launch, foreground, after unlock-all).
     func syncDeletionProtectionToManagedSettings() {
-        let persisted = UserDefaults.standard.object(forKey: Self.deletionProtectionDefaultsKey) as? Bool ?? true
+        let persisted = UserDefaults.standard.object(forKey: Self.deletionProtectionDefaultsKey) as? Bool ?? false
         if persisted != deletionProtectionEnabled {
             deletionProtectionEnabled = persisted
         }

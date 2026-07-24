@@ -15,14 +15,31 @@ struct LibraryView: View {
                     }
                 }
 
-                ScrollView {
-                    VStack(spacing: 24) {
-                        trendingReels
-                        trendingLessons
-                        topicCategories
+                // ScrollViewReader: the first-visit tour scrolls below-the-fold
+                // sections into view as it reaches them (.evlinTourStepChanged).
+                ScrollViewReader { tourProxy in
+                    ScrollView {
+                        VStack(spacing: 24) {
+                            trendingReels
+                                .tourTarget("library.reels")
+                                .id("library.reels")
+                            trendingLessons
+                                .tourTarget("library.lessons")
+                                .id("library.lessons")
+                            topicCategories
+                                .tourTarget("library.categories")
+                                .id("library.categories")
+                        }
+                        .padding(20)
+                        .padding(.bottom, 40)
                     }
-                    .padding(20)
-                    .padding(.bottom, 40)
+                    .onReceive(NotificationCenter.default.publisher(for: .evlinTourStepChanged)) { note in
+                        guard let target = note.userInfo?["target"] as? String,
+                              target.hasPrefix("library.") else { return }
+                        withAnimation(.easeInOut(duration: 0.3)) {
+                            tourProxy.scrollTo(target, anchor: .center)
+                        }
+                    }
                 }
             }
             .background(Color.evSurfaceContainerLow)

@@ -1148,10 +1148,12 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
            ratchet.localSelection == .dualActive,
            state.activeRouteID == nil,
            state.activeGenerationID == route.generationID,
-           state.activeEpochID == work.epochID,
-           let legacy = state.legacy,
-           legacy.ownerChildDeviceID == owner,
-           (legacy.phase == .activeV1 || legacy.phase == .dualLanePreparingV2) {
+           state.activeEpochID == work.epochID {
+            if let legacy = state.legacy {
+                guard legacy.ownerChildDeviceID == owner,
+                      legacy.phase == .activeV1 || legacy.phase == .dualLanePreparingV2
+                else { return false }
+            }
             let exactRoutes = state.routes.values.filter {
                 $0.ownerChildDeviceID == owner
                     && $0.generationID == route.generationID

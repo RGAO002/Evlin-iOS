@@ -35,6 +35,53 @@ final class EarnedBudgetSchedulerTests: XCTestCase {
         }
     }
 
+    func testDatedScheduleUsesPersistedCurrentDayInstallStartAndIncludesObservedIntervalUsage() throws {
+        let timeZone = try XCTUnwrap(TimeZone(identifier: "America/New_York"))
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.locale = Locale(identifier: "en_US_POSIX")
+        calendar.timeZone = timeZone
+        let installStart = try XCTUnwrap(calendar.date(from: DateComponents(
+            year: 2026,
+            month: 7,
+            day: 23,
+            hour: 14,
+            minute: 37,
+            second: 12
+        )))
+
+        let schedule = try MeteringDatedSchedule.datedSchedule(
+            usageDate: "2026-07-23",
+            timeZone: timeZone,
+            intervalStartAt: installStart
+        )
+        let event = MeteringDatedSchedule.makeEvent(
+            selection: FamilyActivitySelection(),
+            thresholdMinutes: 5
+        )
+
+        XCTAssertEqual(calendar.date(from: schedule.intervalStart), installStart)
+        XCTAssertEqual(schedule.intervalEnd.hour, 0)
+        XCTAssertEqual(schedule.intervalEnd.minute, 0)
+        XCTAssertEqual(schedule.intervalEnd.day, 24)
+        XCTAssertFalse(schedule.repeats)
+        XCTAssertTrue(event.includesPastActivity)
+    }
+
+    func testLegacyDatedSchedulePlanWithoutInstallStartStillDecodesAsMidnightPlan() throws {
+        let data = Data("""
+        {
+          "usageDate": "2026-07-23",
+          "timezoneIdentifier": "America/New_York",
+          "calendarIdentifier": "gregorian"
+        }
+        """.utf8)
+
+        let plan = try JSONDecoder().decode(DatedSchedulePlan.self, from: data)
+
+        XCTAssertNil(plan.topologyVersion)
+        XCTAssertNil(plan.intervalStartAt)
+    }
+
     func testDatedScheduleUsesSuppliedTimezoneAndRejectsNonCanonicalDates() throws {
         let tokyo = try XCTUnwrap(TimeZone(identifier: "Asia/Tokyo"))
         let newYork = try XCTUnwrap(TimeZone(identifier: "America/New_York"))

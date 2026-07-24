@@ -39,6 +39,7 @@ final class AppLimitRuleDTOTests: XCTestCase {
           "display_name": "YouTube",
           "artwork_url": "https://example.com/yt.png",
           "daily_budget_minutes": 60,
+          "ordering_token": 7,
           "reset_policy": "daily",
           "window_start_minute": 0,
           "window_end_minute": 1439,
@@ -59,6 +60,7 @@ final class AppLimitRuleDTOTests: XCTestCase {
         XCTAssertEqual(dto.display_name, "YouTube")
         XCTAssertEqual(dto.artwork_url, "https://example.com/yt.png")
         XCTAssertEqual(dto.daily_budget_minutes, 60)
+        XCTAssertEqual(dto.ordering_token, 7)
         XCTAssertEqual(dto.reset_policy, "daily")
         XCTAssertEqual(dto.window_start_minute, 0)
         XCTAssertEqual(dto.window_end_minute, 1439)
@@ -79,6 +81,7 @@ final class AppLimitRuleDTOTests: XCTestCase {
           "display_name": null,
           "artwork_url": null,
           "daily_budget_minutes": 30,
+          "ordering_token": 8,
           "reset_policy": "daily",
           "window_start_minute": 0,
           "window_end_minute": 1439,
@@ -92,6 +95,7 @@ final class AppLimitRuleDTOTests: XCTestCase {
 
         let dto = try makeDecoder().decode(APIClient.AppLimitRuleDTO.self, from: data)
         XCTAssertEqual(dto.daily_budget_minutes, 30)
+        XCTAssertEqual(dto.ordering_token, 8)
         XCTAssertEqual(dto.timezone, "America/New_York")
         XCTAssertNil(dto.display_name)
     }
@@ -178,6 +182,40 @@ final class AppLimitRuleDTOTests: XCTestCase {
 
         XCTAssertTrue(merged.allSatisfy { !$0.enabled })
         XCTAssertTrue(merged.allSatisfy { $0.ruleID == nil })
+    }
+}
+
+@MainActor
+final class AppLimitEditQueueTests: XCTestCase {
+    func test_sameAppMutationsRunInIntentOrderAndThreadServerToken() async {
+        let queue = AppLimitEditQueue()
+        let ruleID = UUID()
+        queue.seed(
+            key: "facebook",
+            state: .init(ruleID: ruleID, orderingToken: 2))
+        var observedTokens: [Int?] = []
+
+        queue.enqueue(key: "facebook") { state in
+            observedTokens.append(state.orderingToken)
+            return .init(ruleID: ruleID, orderingToken: 3)
+        }
+        queue.enqueue(key: "facebook") { state in
+            observedTokens.append(state.orderingToken)
+            return .init(ruleID: ruleID, orderingToken: 4)
+        }
+
+        await queue.waitForIdle(key: "facebook")
+
+        XCTAssertEqual(observedTokens, [2, 3])
+        XCTAssertEqual(queue.state(for: "facebook").orderingToken, 4)
+
+        queue.seed(
+            key: "facebook",
+            state: .init(ruleID: ruleID, orderingToken: 9))
+        XCTAssertEqual(
+            queue.state(for: "facebook").orderingToken,
+            9,
+            "an idle queue must accept a refreshed server baseline")
     }
 }
 

@@ -251,6 +251,33 @@ final class AppLimitWakeRecoveryTests: XCTestCase {
         XCTAssertTrue(poller.contains("HTTPAppLimitOwnerReadbackClient"))
     }
 
+    func testLaunchAndForegroundReconcileAlreadyAppliedRulesAfterOwnerRecovery() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        let poller = try String(contentsOf: root.appendingPathComponent(
+            "Evlin iOS/Services/CommandPoller.swift"
+        ))
+
+        let launch = try XCTUnwrap(
+            poller.range(
+                of: "static func launch() async {"
+            ).map { poller[$0.lowerBound...] }
+        )
+        let foreground = try XCTUnwrap(
+            poller.range(
+                of: "static func foreground() async {"
+            ).map { poller[$0.lowerBound...] }
+        )
+
+        XCTAssertTrue(
+            launch.prefix(500).contains("reconcileAlreadyAppliedRules"),
+            "launch must self-heal an applied rule whose DeviceActivity provenance is missing"
+        )
+        XCTAssertTrue(
+            foreground.prefix(500).contains("reconcileAlreadyAppliedRules"),
+            "foreground must self-heal daemon loss without waiting for a new command"
+        )
+    }
+
     func testLifecycleEntryRecoversFinalEnforcementAfterProcessExitAndNetworkFailure() async throws {
         let fixture = try AppLimitCallbackFixture(budgetMinutes: 20)
         let suiteName = "AppLimitWakeRecoveryTests.effects.\(UUID().uuidString)"

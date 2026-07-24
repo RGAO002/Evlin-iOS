@@ -142,7 +142,6 @@ struct AppLimitOneMinuteProbeView: View {
         } footer: {
             Text("DEBUG only. This arms the selected app through the production command, owner-recovery, planner, and epoch-store path. It does not synthesize callbacks or alter timing, trust, owner, or gate inputs.")
         }
-        .id("app-limit-one-minute-\(refreshTick)")
         .familyActivityPicker(isPresented: $pickerShown, selection: $selection)
         .task {
             while !Task.isCancelled {

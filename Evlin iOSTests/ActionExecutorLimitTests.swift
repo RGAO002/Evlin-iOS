@@ -448,7 +448,7 @@ final class ActionExecutorLimitTests: XCTestCase {
         XCTAssertTrue(ruleStore.all().isEmpty)
     }
 
-    func testAuthorizedSetOwnerWorkArmsAndCommitsDurableReceipt() async throws {
+    func testAuthorizedSetOwnerWorkArmsReleasesUnexhaustedLimitShieldAndCommitsDurableReceipt() async throws {
         let owner = UUID()
         let ruleID = UUID()
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
@@ -508,6 +508,28 @@ final class ActionExecutorLimitTests: XCTestCase {
             appLimitEpochStore: store,
             appLimitOwnerProvider: { owner }
         )
+        let recordKey = ShieldRecord.makeRecordKey(
+            tier: .exactApp,
+            targetKey: rule.bundleID
+        )
+        let existingShield = ShieldRecord(
+            recordKey: recordKey,
+            tier: .exactApp,
+            targetKey: rule.bundleID,
+            displayName: rule.displayName,
+            lastCommandID: UUID(),
+            appTokens: [],
+            categoryTokens: [],
+            webDomainTokens: [],
+            appliesToAll: false,
+            issuedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            expiresAt: nil,
+            originalRequest: "previous exhausted limit plus manual lock",
+            targetChildID: owner,
+            sources: [.limit, .manual],
+            limitRuleIDs: [ruleID]
+        )
+        _ = await ActiveLockStore.shared.addShield(existingShield)
         let lockCommand = LockCommand(
             id: command.commandID,
             action: .setLimit,
@@ -530,7 +552,8 @@ final class ActionExecutorLimitTests: XCTestCase {
                 timezone: "America/New_York",
                 effectiveFrom: rule.effectiveFrom,
                 expiresAt: nil,
-                updatedAt: command.receivedAt
+                updatedAt: command.receivedAt,
+                usedTodayMinutes: 1
             )
         )
 
@@ -563,6 +586,11 @@ final class ActionExecutorLimitTests: XCTestCase {
             ),
             receipt
         )
+        let shieldAfterIncrease = await ActiveLockStore.shared.allCurrent().shields.first {
+            $0.recordKey == recordKey
+        }
+        XCTAssertEqual(shieldAfterIncrease?.sources, [.manual])
+        XCTAssertTrue(shieldAfterIncrease?.limitRuleIDs.isEmpty == true)
     }
 
     func testAuthorizedClearOwnerWorkRemovesOnlyLimitShieldAndCommitsReceipt() async throws {
@@ -1073,6 +1101,10 @@ private final class OwnerClearPersistenceStoreStub:
     AppLimitShieldPersistenceStore,
     ActiveLockShieldPersistence
 {
+    private enum StoreError: Error {
+        case injectedFailure
+    }
+
     enum Failure: CaseIterable {
         case reload
         case write
@@ -1100,16 +1132,16 @@ private final class OwnerClearPersistenceStoreStub:
     }
 
     func synchronize() -> Bool {
-        if failure == .reload, !didWrite { return false }
-        if failure == .write, didWrite { return false }
         return true
     }
 
     func load() throws -> [String: ShieldRecord] {
-        try AppLimitShieldPersistence(store: self).load()
+        if failure == .reload { throw StoreError.injectedFailure }
+        return try AppLimitShieldPersistence(store: self).load()
     }
 
     func persist(_ shields: [String: ShieldRecord]) throws {
+        if failure == .write { throw StoreError.injectedFailure }
         try AppLimitShieldPersistence(store: self).persist(shields)
     }
 }

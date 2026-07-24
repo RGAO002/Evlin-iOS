@@ -650,6 +650,82 @@ final class MeteringEpochDeliveryTests: XCTestCase {
         XCTAssertEqual(due.map(\.workID), [registrationID, activationID, sampleID, laterSampleID])
     }
 
+    func testCompletedInstallPhasesDoNotBlockDueNetworkSamples() throws {
+        var state = makeBaseState()
+        state.installWork.removeAll()
+        state.sampleWork.removeAll()
+        let nonActionablePhases: [ActivityInstallPhase] = [
+            .verified, .dualActive, .active, .pendingStop, .stopped
+        ]
+        for (index, phase) in nonActionablePhases.enumerated() {
+            let workID = UUID(uuidString: String(format: "10000000-0000-4000-8000-%012d", index + 1))!
+            state.installWork[workID] = ActivityInstallWork(
+                workID: workID,
+                ownerChildDeviceID: owner,
+                routeID: routeID,
+                authorization: .registered,
+                phase: phase,
+                claim: nil,
+                retry: MeteringRetryState(
+                    attemptCount: 0,
+                    nextAttemptAt: start,
+                    lastErrorCode: "historical_install_state",
+                    terminal: .pending
+                ),
+                createdAt: start.addingTimeInterval(TimeInterval(index))
+            )
+        }
+        let sampleID = UUID(uuidString: "20000000-0000-4000-8000-000000000001")!
+        state.sampleWork[sampleID] = makeSampleWork(
+            workID: sampleID,
+            createdAt: start.addingTimeInterval(10)
+        )
+
+        let due = state.dueWork(now: start.addingTimeInterval(10))
+
+        XCTAssertEqual(due.map(\.workID), [sampleID])
+        XCTAssertEqual(due.map(\.kind), [.sample])
+    }
+
+    func testWaitingForRegistrationSampleIsNotNetworkDueUntilPromoted() throws {
+        var state = makeBaseState()
+        state.installWork.removeAll()
+        state.sampleWork.removeAll()
+        let sampleID = UUID(uuidString: "30000000-0000-4000-8000-000000000001")!
+        var sample = makeSampleWork(workID: sampleID, createdAt: start)
+        sample.authorization = .waitingForRegistration
+        state.sampleWork[sampleID] = sample
+
+        XCTAssertTrue(state.dueWork(now: start).isEmpty)
+
+        state.sampleWork[sampleID]?.authorization = .v2Deliverable
+        XCTAssertEqual(state.dueWork(now: start).map(\.workID), [sampleID])
+    }
+
+    func testTombstonedActivationDoesNotBlockNewRegistration() throws {
+        var state = makeBaseState()
+        state.registrationWork.removeAll()
+        state.activationWork.removeAll()
+
+        let staleActivationID = UUID(uuidString: "40000000-0000-4000-8000-000000000001")!
+        state.activationWork[staleActivationID] = makeActivationWork(
+            workID: staleActivationID,
+            createdAt: start
+        )
+        state.routes[routeID]?.lifecycle = .tombstoned
+
+        let freshRegistrationID = UUID(uuidString: "40000000-0000-4000-8000-000000000002")!
+        state.registrationWork[freshRegistrationID] = makeRegistrationWork(
+            workID: freshRegistrationID,
+            createdAt: start.addingTimeInterval(1)
+        )
+
+        let due = state.dueWork(now: start.addingTimeInterval(1))
+
+        XCTAssertEqual(due.map(\.workID), [freshRegistrationID])
+        XCTAssertEqual(due.map(\.kind), [.registration])
+    }
+
     func testRetryScheduleUsesVirtualTimesThroughTenMinutes() async throws {
         let fileURL = temporaryStoreURL()
         let store = makeStore(fileURL: fileURL)
@@ -2224,6 +2300,72 @@ final class MeteringEpochDeliveryTests: XCTestCase {
         let final = try store.read()
         XCTAssertEqual(transport.requests.count, 1)
         XCTAssertEqual(final.activationWork.values.first?.retry.terminal, .succeeded)
+    }
+
+    func testInitialActivationDoesNotDeadlockWhenNoLegacyMonitorStateExists() async throws {
+        let fileURL = temporaryStoreURL()
+        defer { removeTemporaryStore(fileURL) }
+        let store = makeStore(fileURL: fileURL)
+        try store.transaction(expectedOwner: owner) { state in
+            state = makeBaseState()
+            let registrationID = UUID()
+            var registration = makeRegistrationWork(workID: registrationID, createdAt: start)
+            registration.retry.terminal = .succeeded
+            state.registrationWork[registrationID] = registration
+            state.installWork[UUID()] = ActivityInstallWork(
+                workID: UUID(),
+                ownerChildDeviceID: owner,
+                routeID: routeID,
+                authorization: .registered,
+                phase: .dualActive,
+                claim: nil,
+                retry: MeteringRetryState(
+                    attemptCount: 0,
+                    nextAttemptAt: start,
+                    lastErrorCode: nil,
+                    terminal: .pending
+                ),
+                createdAt: start
+            )
+            authorizeInitialDualActiveActivation(&state)
+            state.legacy = nil
+        }
+        let transport = DeliveryTestTransport()
+        let response = HTTPURLResponse(
+            url: baseURL,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: nil
+        )!
+        transport.results = [(try encoded(EpochActivationResponseDTO(
+            status: .activated,
+            epochID: epochID,
+            epochStatus: .active,
+            meteringProtocolVersion: 2,
+            snapshot: makeSnapshot(counted: true, warning: nil)
+        )), response)]
+        let delivery = MeteringEpochDelivery(
+            baseURL: baseURL,
+            store: store,
+            transport: transport,
+            clock: DeliveryTestClock(now: start)
+        )
+        try delivery.enqueueActivation(
+            EpochActivationRequestDTO(
+                protocolVersion: 2,
+                deviceID: owner,
+                routeID: routeID,
+                verifiedAt: start
+            ),
+            owner: owner,
+            epochID: epochID,
+            routeID: routeID
+        )
+
+        await delivery.drain(owner: owner)
+
+        XCTAssertEqual(transport.requests.count, 1)
+        XCTAssertEqual(try store.read().activationWork.values.first?.retry.terminal, .succeeded)
     }
 
     func testActivationWaitsForVerifiedInstall() async throws {

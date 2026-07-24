@@ -260,6 +260,14 @@ struct ChatView: View {
                 LazyVStack(spacing: Spacing.xxxl) {
                     editorialHeader
 
+                    // Tutorial layer: an empty thread teaches itself — tappable
+                    // starter prompts (same curated set + send path as the
+                    // composer chips) so the first message writes itself.
+                    if viewModel.messages.isEmpty {
+                        chatEmptyStarters
+                            .tourTarget("chat.starters")
+                    }
+
                     ForEach(viewModel.messages) { message in
                         VStack(alignment: message.role == .parent ? .trailing : .leading, spacing: Spacing.xl) {
                             // Lock confirmation card
@@ -769,10 +777,12 @@ struct ChatView: View {
                 }
                 .padding(.horizontal, Spacing.xl)
             }
+            .tourTarget("chat.quickPrompts")
 
             ChatInputBar(text: $viewModel.inputText, isFocused: $isComposerFocused) {
                 viewModel.sendMessage()
             }
+            .tourTarget("chat.input")
         }
         .padding(.top, Spacing.md)
     }
@@ -1037,6 +1047,42 @@ struct ChatView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.vertical, 20)
+    }
+
+    // MARK: - Empty-thread starter prompts (tutorial layer 3)
+
+    /// Full-width tappable examples shown only while the thread is empty.
+    /// Reuses the curated `quickPrompts` set and the same `sendQuickPrompt`
+    /// path as the composer chips, so every starter is a known-good request.
+    private var chatEmptyStarters: some View {
+        VStack(alignment: .leading, spacing: Spacing.md) {
+            Text("TRY ONE TO START")
+                .font(.custom("Inter", size: 10).weight(.heavy))
+                .tracking(1.2)
+                .foregroundStyle(Color.evOnSurfaceVariant)
+            ForEach(Array(viewModel.quickPrompts.prefix(3)), id: \.text) { prompt in
+                Button { viewModel.sendQuickPrompt(prompt) } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: prompt.icon)
+                            .font(.system(size: 14, weight: .semibold))
+                        Text(prompt.text)
+                            .font(.system(size: 14, weight: .semibold))
+                        Spacer(minLength: 0)
+                        Image(systemName: "arrow.up.circle.fill")
+                            .font(.system(size: 17))
+                            .foregroundStyle(Color.evPrimary.opacity(0.45))
+                    }
+                    .foregroundStyle(Color.evPrimary)
+                    .padding(.horizontal, 14).padding(.vertical, 13)
+                    .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Color.evSurfaceContainerLowest))
+                    .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.evOutlineVariant, lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     // MARK: - "This isn't what I meant" escape hatch

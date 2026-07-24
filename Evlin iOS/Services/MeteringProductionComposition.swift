@@ -1,6 +1,50 @@
 import FamilyControls
 import Foundation
 
+nonisolated struct MeteringRolloverEffectResetter: Sendable {
+    enum ResetError: Error {
+        case invalidDateTransition
+        case earnedSourceResetFailed
+    }
+
+    let earnedStore: EarnedTimeStore
+
+    init(earnedStore: EarnedTimeStore = .shared) {
+        self.earnedStore = earnedStore
+    }
+
+    func apply(
+        _ effect: MeteringRolloverLocalEffect,
+        work: RolloverEffectsWork
+    ) throws {
+        guard EarnedTimeStore.isCanonicalUsageDate(work.fromUsageDate),
+              EarnedTimeStore.isCanonicalUsageDate(work.toUsageDate),
+              work.fromUsageDate < work.toUsageDate
+        else { throw ResetError.invalidDateTransition }
+
+        switch effect {
+        case .earnedSource:
+            guard case .reconciled(0) = earnedStore.reconcileAcceptedUsageIfNotStale(
+                usageDate: work.toUsageDate,
+                serverEstimatedMinutes: 0,
+                expectedDeviceID: work.ownerChildDeviceID
+            ) else {
+                throw ResetError.earnedSourceResetFailed
+            }
+        case .perApp, .taskState, .bypassExpiry:
+            // These authorities are already usage-date scoped. Verifying the
+            // exact canonical transition is their reset; mutating global
+            // DeviceActivity or lock state here would destroy unrelated work.
+            break
+        }
+    }
+}
+
+nonisolated struct MeteringRecoverablePolicyInputs: Sendable {
+    let selectionBytes: Data
+    let enforcementSetID: UUID
+}
+
 nonisolated enum MeteringProductionComposition {
     static let appGroupSuiteName = "group.com.evlin.ios"
     static let baseURLKey = "evlin.baseURL"
@@ -35,13 +79,17 @@ nonisolated enum MeteringProductionComposition {
             processIdentity: identity,
             clock: clock
         )
+        let rolloverResetter = MeteringRolloverEffectResetter()
         return EarnedMeteringRecoveryDriver(
             store: store,
             delivery: delivery,
             installer: installer,
             center: center,
             processIdentity: identity,
-            clock: clock
+            clock: clock,
+            resetRolloverEffect: { effect, work in
+                try rolloverResetter.apply(effect, work: work)
+            }
         )
     }
 
@@ -111,20 +159,42 @@ nonisolated enum MeteringProductionComposition {
         now: Date
     ) throws {
         let state = try store.read()
+#if DEBUG
+        let debugSelectionBytes = defaults.data(forKey: selectionKey)
+        let debugSelection = debugSelectionBytes.flatMap {
+            try? JSONDecoder().decode(FamilyActivitySelection.self, from: $0)
+        }
+        print(
+            "[MeteringPolicyDebug] owner=\(owner.uuidString) "
+                + "storeOwner=\(state.ownerChildDeviceID?.uuidString ?? "nil") "
+                + "desired=\(state.desiredPolicy != nil) "
+                + "desiredAcked=\(state.desiredPolicy?.ackedAt != nil) "
+                + "selectionBytes=\(debugSelectionBytes?.count ?? 0) "
+                + "selectionDecoded=\(debugSelection != nil) "
+                + "apps=\(debugSelection?.applicationTokens.count ?? 0) "
+                + "categories=\(debugSelection?.categoryTokens.count ?? 0) "
+                + "web=\(debugSelection?.webDomainTokens.count ?? 0) "
+                + "lockedSet=\(defaults.string(forKey: lockedSetIDKey) ?? "nil")"
+        )
+#endif
         guard let desired = state.desiredPolicy,
-              desired.ownerChildDeviceID == owner,
-              desired.ackedAt == nil,
-              let selectionBytes = defaults.data(forKey: selectionKey),
-              let selection = try? JSONDecoder().decode(
-                  FamilyActivitySelection.self,
-                  from: selectionBytes
-              ),
-              !selection.applicationTokens.isEmpty
-                || !selection.categoryTokens.isEmpty
-                || !selection.webDomainTokens.isEmpty,
-              let enforcementSetID = desired.enforcementSetID
-                ?? defaults.string(forKey: lockedSetIDKey).flatMap(UUID.init(uuidString:))
+              desired.ownerChildDeviceID == owner
         else { return }
+        guard repairPersistedPolicyInputsIfPossible(
+            owner: owner,
+            state: state,
+            defaults: defaults
+        ) else { return }
+        guard desired.ackedAt == nil,
+              let inputs = recoverablePolicyInputs(
+                  owner: owner,
+                  desired: desired,
+                  state: state,
+                  defaults: defaults
+              )
+        else { return }
+        let selectionBytes = inputs.selectionBytes
+        let enforcementSetID = inputs.enforcementSetID
 
         let accepted: Int
         if let epochID = state.activeEpochID,
@@ -154,16 +224,97 @@ nonisolated enum MeteringProductionComposition {
             ),
             enforcementSetID: enforcementSetID
         )
-        _ = try store.reconcileMeteringHorizon(MeteringHorizonRequest(
-            ownerChildDeviceID: owner,
-            today: desired.usageDate,
-            generationKey: generationKey,
-            persistedSelectionBytes: selectionBytes,
-            poolMinutes: desired.dailyPoolMinutes,
-            deviceCapMinutes: desired.deviceCapMinutes,
-            authoritativeBaseAcceptedMinutes: boundedAccepted,
-            now: now
-        ))
+        do {
+            _ = try store.reconcileMeteringHorizon(MeteringHorizonRequest(
+                ownerChildDeviceID: owner,
+                today: desired.usageDate,
+                generationKey: generationKey,
+                persistedSelectionBytes: selectionBytes,
+                poolMinutes: desired.dailyPoolMinutes,
+                deviceCapMinutes: desired.deviceCapMinutes,
+                authoritativeBaseAcceptedMinutes: boundedAccepted,
+                now: now
+            ))
+        } catch {
+#if DEBUG
+            print("[MeteringPolicyDebug] reconcile failed: \(error)")
+#endif
+            throw error
+        }
+    }
+
+    @discardableResult
+    static func repairPersistedPolicyInputsIfPossible(
+        owner: UUID,
+        state: DeviceEpochStoreState,
+        defaults: UserDefaults,
+        selectionIsValid: (Data) -> Bool = hasValidSelection
+    ) -> Bool {
+        guard let desired = state.desiredPolicy,
+              desired.ownerChildDeviceID == owner
+        else { return false }
+        return recoverablePolicyInputs(
+            owner: owner,
+            desired: desired,
+            state: state,
+            defaults: defaults,
+            selectionIsValid: selectionIsValid
+        ) != nil
+    }
+
+    static func recoverablePolicyInputs(
+        owner: UUID,
+        desired: MeteringDesiredPolicy,
+        state: DeviceEpochStoreState,
+        defaults: UserDefaults,
+        selectionIsValid: (Data) -> Bool = hasValidSelection
+    ) -> MeteringRecoverablePolicyInputs? {
+        guard desired.ownerChildDeviceID == owner else { return nil }
+
+        let persistedSelection = defaults.data(forKey: selectionKey)
+            .flatMap { selectionIsValid($0) ? $0 : nil }
+        let persistedEnforcement = defaults.string(forKey: lockedSetIDKey)
+            .flatMap(UUID.init(uuidString:))
+        if let selectionBytes = persistedSelection,
+           let enforcementSetID = desired.enforcementSetID ?? persistedEnforcement {
+            if persistedEnforcement == nil {
+                defaults.set(enforcementSetID.uuidString, forKey: lockedSetIDKey)
+                defaults.synchronize()
+            }
+            return MeteringRecoverablePolicyInputs(
+                selectionBytes: selectionBytes,
+                enforcementSetID: enforcementSetID
+            )
+        }
+
+        guard state.ownerChildDeviceID == owner,
+              let generationID = state.activeGenerationID,
+              let generation = state.generations[generationID],
+              generation.childDeviceID == owner,
+              generation.retiredAt == nil,
+              selectionIsValid(generation.measurementSelectionBytes)
+        else { return nil }
+        let selectionBytes = generation.measurementSelectionBytes
+        let enforcementSetID = desired.enforcementSetID ?? generation.enforcementSetID
+        defaults.set(selectionBytes, forKey: selectionKey)
+        defaults.set(enforcementSetID.uuidString, forKey: lockedSetIDKey)
+        defaults.synchronize()
+        return MeteringRecoverablePolicyInputs(
+            selectionBytes: selectionBytes,
+            enforcementSetID: enforcementSetID
+        )
+    }
+
+    private static func hasValidSelection(_ bytes: Data) -> Bool {
+        guard let selection = try? JSONDecoder().decode(
+            FamilyActivitySelection.self,
+            from: bytes
+        ),
+        !selection.applicationTokens.isEmpty
+            || !selection.categoryTokens.isEmpty
+            || !selection.webDomainTokens.isEmpty
+        else { return false }
+        return true
     }
 
     static func desiredPolicyMatchesActiveReadback(

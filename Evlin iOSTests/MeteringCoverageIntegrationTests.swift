@@ -332,8 +332,7 @@ private final class CoverageClock: MeteringClock, @unchecked Sendable {
     var now: Date { date }
 }
 
-@MainActor
-private final class CoverageCenter: MeteringDeviceActivityCenter {
+private nonisolated final class CoverageCenter: MeteringDeviceActivityCenter, @unchecked Sendable {
     private struct EventRecord {
         let applications: Set<ApplicationToken>
         let categories: Set<ActivityCategoryToken>

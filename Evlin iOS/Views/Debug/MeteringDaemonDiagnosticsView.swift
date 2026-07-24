@@ -144,7 +144,11 @@ struct MeteringDaemonDiagnosticsView: View {
     @MainActor
     private func refreshReadbacks() async {
         refreshing = true
-        let requests = MeteringDaemonDiagnosticsSnapshot.manualInspectionRequests(entries: journal.read())
+        let requests = MeteringDaemonDiagnosticsSnapshot.manualInspectionRequests(
+            entries: journal.read(),
+            ownerChildDeviceID: MeteringOwnerMirror.current(),
+            state: try? DeviceEpochStore.shared.read()
+        )
         for request in requests {
             await inspector.request(request)
         }

@@ -1329,8 +1329,7 @@ private final class CorrectionOutcomeBox: @unchecked Sendable {
     }
 }
 
-@MainActor
-private final class CorrectionCenter: MeteringDeviceActivityCenter {
+private nonisolated final class CorrectionCenter: MeteringDeviceActivityCenter, @unchecked Sendable {
     private var records: [DeviceActivityName: (DeviceActivitySchedule, [DeviceActivityEvent.Name: DeviceActivityEvent])] = [:]
     var preventStops = false
     private(set) var stopCalls: [[DeviceActivityName]] = []

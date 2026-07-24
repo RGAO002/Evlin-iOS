@@ -30,23 +30,40 @@ struct InsightsView: View {
                 }
             }
 
-            ScrollView {
-                VStack(spacing: 22) {
-                    ChildFilterPills(selection: $selection, children: familyStore.childProfiles)
-                        .padding(.horizontal, -4)
+            // ScrollViewReader: the first-visit tour scrolls below-the-fold
+            // cards into view as it reaches them (.evlinTourStepChanged).
+            ScrollViewReader { tourProxy in
+                ScrollView {
+                    VStack(spacing: 22) {
+                        ChildFilterPills(selection: $selection, children: familyStore.childProfiles)
+                            .padding(.horizontal, -4)
+                            .tourTarget("insights.filter")
+                            .id("insights.filter")
 
-                    if !heroDismissed {
-                        heroCard
+                        if !heroDismissed {
+                            heroCard
+                        }
+
+                        recommendations
+
+                        dailyUsageCard
+                            .tourTarget("insights.daily")
+                            .id("insights.daily")
+
+                        detailedBreakdown
+                            .tourTarget("insights.breakdown")
+                            .id("insights.breakdown")
                     }
-
-                    recommendations
-
-                    dailyUsageCard
-
-                    detailedBreakdown
+                    .padding(20)
+                    .padding(.bottom, 40)
                 }
-                .padding(20)
-                .padding(.bottom, 40)
+                .onReceive(NotificationCenter.default.publisher(for: .evlinTourStepChanged)) { note in
+                    guard let target = note.userInfo?["target"] as? String,
+                          target.hasPrefix("insights.") else { return }
+                    withAnimation(.easeInOut(duration: 0.3)) {
+                        tourProxy.scrollTo(target, anchor: .center)
+                    }
+                }
             }
         }
         .background(Color.evSurfaceContainerLow)

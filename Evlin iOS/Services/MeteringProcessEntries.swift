@@ -55,7 +55,14 @@ final class AppLimitOwnerRecoveryDriver {
             let works: [AppLimitOwnerWork]
             do {
                 let state = try store.read()
-                guard state.ownerChildDeviceID == ownerChildDeviceID else { return }
+                guard state.ownerChildDeviceID == ownerChildDeviceID else {
+                    NSLog(
+                        "[Evlin/AppLimit] owner recovery skipped: store owner=%@ configured owner=%@",
+                        state.ownerChildDeviceID?.uuidString ?? "missing",
+                        ownerChildDeviceID.uuidString
+                    )
+                    return
+                }
                 works = state.slots.values.compactMap { slot in
                     guard let work = slot.pendingOwnerWork,
                           Self.matches(work, slot: slot)
@@ -66,6 +73,7 @@ final class AppLimitOwnerRecoveryDriver {
                     return $0.ruleID.uuidString < $1.ruleID.uuidString
                 }
             } catch {
+                NSLog("[Evlin/AppLimit] owner recovery read failed: %@", String(describing: error))
                 return
             }
 
@@ -169,6 +177,13 @@ final class AppLimitOwnerRecoveryDriver {
                 state.slots[work.ruleID] = confirmed
             }
         } catch {
+            NSLog(
+                "[Evlin/AppLimit] owner recovery failed rule=%@ token=%llu kind=%@ error=%@",
+                work.ruleID.uuidString,
+                work.orderingToken,
+                work.commandKind.rawValue,
+                String(describing: error)
+            )
             // Pending work remains durable unless an exact receipt was committed.
             // A later wake retries it; a newer token supersedes it in the store.
         }
@@ -230,7 +245,10 @@ final class AppLimitEffectRecoveryDriver {
         now: Date
     ) async {
         do {
-            while let claim = try journal.claimNext(workerID: workerID, now: now) {
+            while true {
+                guard let claim = try journal.claimNext(workerID: workerID, now: now) else {
+                    break
+                }
                 let receipt = try journal.applyLocal(
                     claim,
                     source: "app_lifecycle_recovery",
@@ -258,6 +276,7 @@ final class AppLimitEffectRecoveryDriver {
                 )
             }
         } catch {
+            NSLog("[Evlin/AppLimit] effect recovery failed: %@", String(describing: error))
             // The lease and receipts remain durable for a later lifecycle entry.
         }
     }
@@ -391,6 +410,14 @@ nonisolated final class DAMMeteringEntry: @unchecked Sendable {
         } catch {
             NSLog("[DAMMeteringEntry] shield recovery failed: %@", String(describing: error))
         }
+    }
+
+    @MainActor
+    func handleIntervalDidEnd(activityName: String) async {
+        guard activityName.hasPrefix(MeteringRouteNamespace.prefix) else {
+            return
+        }
+        await recoverIfConfigured()
     }
 
     func handle(

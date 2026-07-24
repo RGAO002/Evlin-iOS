@@ -40,6 +40,25 @@ final class MeteringColdReopenRecoveryTests: XCTestCase {
         XCTAssertEqual(fixture.center.startCalls.count, 1)
     }
 
+    func testDAMEarnedIntervalEndRunsSharedRecoveryEntry() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanUp() }
+        let entry = DAMMeteringEntry(
+            defaults: fixture.defaults,
+            store: fixture.store,
+            center: fixture.center,
+            transport: ColdReopenTransport(),
+            clock: fixture.clock,
+            instanceID: UUID()
+        )
+
+        await entry.handleIntervalDidEnd(
+            activityName: "\(MeteringRouteNamespace.prefix)\(UUID().uuidString.lowercased())"
+        )
+
+        XCTAssertEqual(fixture.center.startCalls.count, 1)
+    }
+
     func testProductionCompositionUsesOneStableIdentityPerProcessRole() {
         XCTAssertEqual(
             MeteringProductionComposition.instanceID(for: .app),
@@ -91,6 +110,7 @@ final class MeteringColdReopenRecoveryTests: XCTestCase {
         XCTAssertTrue(app.contains("AppMeteringEntry.shared.recoverIfConfigured"))
         XCTAssertTrue(dam.contains("DAMMeteringEntry.shared.recoverIfConfigured"))
         XCTAssertTrue(dam.contains("DAMMeteringEntry.shared.handle"))
+        XCTAssertTrue(dam.contains("DAMMeteringEntry.shared.handleIntervalDidEnd"))
         XCTAssertTrue(dam.contains("projectShields: project"))
         XCTAssertTrue(dam.contains("self?.recomputeAndApplyShields(shields)"))
         let synchronousHandle = try XCTUnwrap(
@@ -227,8 +247,7 @@ private final class ColdReopenFixture {
 
 }
 
-@MainActor
-private final class ColdReopenCenter: MeteringDeviceActivityCenter {
+private nonisolated final class ColdReopenCenter: MeteringDeviceActivityCenter, @unchecked Sendable {
     private var records: [DeviceActivityName: (DeviceActivitySchedule, [DeviceActivityEvent.Name: DeviceActivityEvent])] = [:]
     var startCalls: [DeviceActivityName] = []
     var stopCalls: [[DeviceActivityName]] = []

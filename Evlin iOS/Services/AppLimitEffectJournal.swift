@@ -29,9 +29,7 @@ nonisolated struct AppLimitShieldPersistence {
 
     func load() throws -> [String: ShieldRecord] {
         guard let store else { throw AppLimitEffectJournalError.defaultsUnavailable }
-        guard store.synchronize() else {
-            throw AppLimitEffectJournalError.durableReadbackMismatch
-        }
+        _ = store.synchronize()
         guard let data = store.data(forKey: storageKey) else { return [:] }
         let decoded: [String: ShieldRecord]
         if let json = try? Self.decoder.decode([String: ShieldRecord].self, from: data) {
@@ -55,7 +53,8 @@ nonisolated struct AppLimitShieldPersistence {
         guard let store else { throw AppLimitEffectJournalError.defaultsUnavailable }
         let data = try Self.encoder.encode(shields)
         store.set(data, forKey: storageKey)
-        guard store.synchronize(), store.data(forKey: storageKey) == data else {
+        _ = store.synchronize()
+        guard store.data(forKey: storageKey) == data else {
             throw AppLimitEffectJournalError.durableReadbackMismatch
         }
         let readback = try load()
@@ -155,7 +154,9 @@ nonisolated final class AppLimitEffectJournal: @unchecked Sendable {
             var effects = try load()
             var changed = false
             for candidate in sorted(effects.values) {
-                guard try isCurrent(candidate.callback) else {
+                let hasExecutionAuthority = try isCurrent(candidate.callback)
+                let hasTransportAuthority = try hasReceiptBackedTransportAuthority(candidate)
+                guard hasExecutionAuthority || hasTransportAuthority else {
                     effects.removeValue(forKey: candidate.key.storageKey)
                     changed = true
                     continue
@@ -199,15 +200,20 @@ nonisolated final class AppLimitEffectJournal: @unchecked Sendable {
         try withLock {
             var effects = try load()
             guard var current = effects[claim.effect.key.storageKey] else { return nil }
+            guard Self.matchesLease(current.lease, claim.lease) else {
+                throw AppLimitEffectJournalError.invalidLease
+            }
+            if let receipt = current.localReceipt {
+                let hasExecutionAuthority = try isCurrent(current.callback)
+                let hasTransportAuthority = try hasReceiptBackedTransportAuthority(current)
+                let canReplayReceipt = hasExecutionAuthority || hasTransportAuthority
+                if canReplayReceipt { return receipt }
+            }
             guard try isCurrent(current.callback) else {
                 effects.removeValue(forKey: current.key.storageKey)
                 try persist(effects)
                 return nil
             }
-            guard Self.matchesLease(current.lease, claim.lease) else {
-                throw AppLimitEffectJournalError.invalidLease
-            }
-            if let receipt = current.localReceipt { return receipt }
             try mutation(current.callback)
             try afterLocalMutation()
             let receipt = AppLimitLocalEffectReceipt(
@@ -240,11 +246,16 @@ nonisolated final class AppLimitEffectJournal: @unchecked Sendable {
     ) async throws -> AppLimitUsageEffectReceipt? {
         let callback: AppLimitValidatedCallback? = try withLock {
             let effects = try load()
-            guard let current = effects[claim.effect.key.storageKey],
+            guard let current = effects[claim.effect.key.storageKey] else { return nil }
+            let hasExecutionAuthority = try isCurrent(current.callback)
+            let hasTransportAuthority = try hasReceiptBackedTransportAuthority(
+                current,
+                deviceID: deviceID
+            )
+            guard hasExecutionAuthority || hasTransportAuthority,
                   Self.matchesLease(current.lease, claim.lease),
                   current.usageReceipt == nil,
-                  current.backendRejection == nil,
-                  try isCurrent(current.callback)
+                  current.backendRejection == nil
             else { return nil }
             return current.callback
         }
@@ -261,7 +272,12 @@ nonisolated final class AppLimitEffectJournal: @unchecked Sendable {
         return try withLock {
             var effects = try load()
             guard var current = effects[claim.effect.key.storageKey] else { return nil }
-            guard try isCurrent(current.callback) else {
+            let hasExecutionAuthority = try isCurrent(current.callback)
+            let hasTransportAuthority = try hasReceiptBackedTransportAuthority(
+                current,
+                deviceID: deviceID
+            )
+            guard hasExecutionAuthority || hasTransportAuthority else {
                 effects.removeValue(forKey: current.key.storageKey)
                 try persist(effects)
                 return nil
@@ -282,7 +298,7 @@ nonisolated final class AppLimitEffectJournal: @unchecked Sendable {
             }
 
             guard response.accepted,
-                  response.currentOrderingToken == current.key.orderingToken
+                  response.currentOrderingToken >= current.key.orderingToken
             else {
                 current.backendRejection = AppLimitBackendRejection(
                     currentOrderingToken: response.currentOrderingToken,
@@ -335,6 +351,21 @@ nonisolated final class AppLimitEffectJournal: @unchecked Sendable {
             && provenance.startedAt == callback.provenance.startedAt
     }
 
+    /// Once the exact local effect has a durable receipt, rule replacement may
+    /// revoke execution authority but cannot erase the physical usage fact.
+    /// Identity remains a hard fence and this path never performs local work.
+    private func hasReceiptBackedTransportAuthority(
+        _ effect: AppLimitEffectEnvelope,
+        deviceID: UUID? = nil
+    ) throws -> Bool {
+        guard let receipt = effect.localReceipt,
+              receipt.key == effect.key,
+              deviceID == nil || deviceID == effect.provenance.childDeviceID
+        else { return false }
+        let state = try epochStore.read()
+        return state.ownerChildDeviceID == effect.provenance.childDeviceID
+    }
+
     private func withLock<Value>(_ body: () throws -> Value) throws -> Value {
         var result: Result<Value, Error>?
         guard lock.withLock({ result = Result { try body() } }) != nil else {
@@ -364,7 +395,8 @@ nonisolated final class AppLimitEffectJournal: @unchecked Sendable {
         let values = sorted(effects.values)
         let data = try Self.encoder.encode(values)
         defaults.set(data, forKey: Self.storageKey)
-        guard defaults.synchronize(), defaults.data(forKey: Self.storageKey) == data else {
+        _ = defaults.synchronize()
+        guard defaults.data(forKey: Self.storageKey) == data else {
             throw AppLimitEffectJournalError.durableReadbackMismatch
         }
         let readback = try load()

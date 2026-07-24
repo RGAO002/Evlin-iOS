@@ -74,7 +74,15 @@ nonisolated enum MeteringDatedSchedule {
         if result.last != ceiling {
             result.append(ceiling)
         }
+#if DEBUG
+        // DIAGNOSTIC A/B (2026-07-24): activities carrying 12-25 threshold events
+        // never fire on device while 1-2 event activities fire. Cap thresholds at
+        // the SOURCE so every install path (horizon planning, activation,
+        // replacement) arms at most 2 events. REMOVE after the experiment.
+        return Array(result.prefix(2))
+#else
         return result
+#endif
     }
 
     static func remainingPolicy(
@@ -90,15 +98,20 @@ nonisolated enum MeteringDatedSchedule {
     static func datedSchedule(
         usageDate: String,
         timeZone: TimeZone,
+        intervalStartAt: Date? = nil,
         calendar: Calendar = Calendar(identifier: .gregorian)
     ) throws -> DeviceActivitySchedule {
         let policyCalendar = configuredCalendar(calendar, timeZone: timeZone)
-        let start = try canonicalMidnight(
+        let canonicalStart = try canonicalMidnight(
             usageDate: usageDate,
             calendar: policyCalendar,
             timeZone: timeZone
         )
-        guard let end = policyCalendar.date(byAdding: .day, value: 1, to: start) else {
+        guard let end = policyCalendar.date(byAdding: .day, value: 1, to: canonicalStart) else {
+            throw MeteringDatedScheduleError.invalidUsageDate(usageDate)
+        }
+        let start = intervalStartAt ?? canonicalStart
+        guard start >= canonicalStart, start < end else {
             throw MeteringDatedScheduleError.invalidUsageDate(usageDate)
         }
         return DeviceActivitySchedule(
@@ -108,19 +121,45 @@ nonisolated enum MeteringDatedSchedule {
         )
     }
 
+    static func canonicalStart(
+        usageDate: String,
+        timeZone: TimeZone,
+        calendar: Calendar = Calendar(identifier: .gregorian)
+    ) throws -> Date {
+        let policyCalendar = configuredCalendar(calendar, timeZone: timeZone)
+        return try canonicalMidnight(
+            usageDate: usageDate,
+            calendar: policyCalendar,
+            timeZone: timeZone
+        )
+    }
+
     static func makeEvent(
         selection: FamilyActivitySelection,
         thresholdMinutes: Int
     ) -> DeviceActivityEvent {
         precondition(thresholdMinutes > 0, "Metering event threshold must be positive")
+#if DEBUG
+        // DIAGNOSTIC FIX (2026-07-24): events carrying >50 application tokens
+        // never fire (iPhone 40 apps fired all day; iPad 180 apps never fired;
+        // AppLimitPlanner already enforces <=50 tokens/window). Cap apps at 50 —
+        // the category tokens still cover every app, so coverage semantics hold.
+        var applications = selection.applicationTokens
+        if applications.count > 50 {
+            applications = Set(Array(applications).prefix(50))
+        }
+#else
+        let applications = selection.applicationTokens
+#endif
         return DeviceActivityEvent(
-            applications: selection.applicationTokens,
+            applications: applications,
             categories: selection.categoryTokens,
             webDomains: selection.webDomainTokens,
             threshold: DateComponents(minute: thresholdMinutes),
-            includesPastActivity: false
+            includesPastActivity: true
         )
     }
+
 }
 
 extension DeviceEpochStore {
@@ -258,7 +297,8 @@ extension DeviceEpochStore {
                     plannedSchedule: DatedSchedulePlan(
                         usageDate: usageDate,
                         timezoneIdentifier: generation.canonicalTimezone,
-                        calendarIdentifier: "gregorian"
+                        calendarIdentifier: "gregorian",
+                        intervalStartAt: nil
                     ),
                     installedSchedule: nil,
                     plannedEvents: thresholds.map { thresholdMinutes in

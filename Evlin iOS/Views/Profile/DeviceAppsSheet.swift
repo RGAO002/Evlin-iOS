@@ -22,6 +22,12 @@ struct DeviceAppsSheet: View {
     @AppStorage("evlin.familyID") private var pairedFamilyID: String = ""
 
     @State private var apps: [DeviceAppItem] = []
+
+    /// First-visit App Limits spotlight tour (device cap → per-app toggles →
+    /// midnight reset). Starts only once apps have loaded so every anchor
+    /// exists; seen-flag flips at display time.
+    @AppStorage("parentDeviceLimitsTourSeen") private var deviceLimitsTourSeen = false
+    @State private var showDeviceTour = false
     /// B-hardening: resolved-icon backfill (onAppear step 3) writes ONLY here,
     /// never into `apps`. Writing into `apps[i].artworkURL` per-icon caused a
     /// SwiftUI re-render of every row over several seconds after sheet-open;
@@ -44,6 +50,7 @@ struct DeviceAppsSheet: View {
     /// interaction's response may still mutate state once its `await` resumes
     /// (see `AppLimitEditDecision`). Keeps the latest interaction authoritative.
     @State private var inflightSeq: [String: Int] = [:]
+    @State private var appLimitEditQueue = AppLimitEditQueue()
 
     // B9: device-cap + dynamic picker options
     /// The device's current daily cap in minutes. Nil = not yet loaded / not configured.
@@ -73,6 +80,28 @@ struct DeviceAppsSheet: View {
         )
     }
 
+    private var deviceTourSteps: [TourStep] {
+        [
+            TourStep(target: "device.cap",
+                     text: "\(device.name)'s daily total. It draws from the family's shared screen-time pool."),
+            TourStep(target: "device.apps",
+                     text: "App Limits: flip a toggle to give an app its own daily budget, then tap the pill to pick the minutes."),
+            TourStep(target: "device.reset",
+                     text: "Every limit here resets at midnight — a fresh budget each day.",
+                     cornerRadius: 12),
+        ]
+    }
+
+    private func maybeStartDeviceTour() {
+        guard !deviceLimitsTourSeen else { return }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 450_000_000)
+            guard !deviceLimitsTourSeen, !apps.isEmpty else { return }
+            deviceLimitsTourSeen = true   // mark at display time
+            withAnimation(.easeOut(duration: 0.3)) { showDeviceTour = true }
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -83,6 +112,9 @@ struct DeviceAppsSheet: View {
             } else if apps.isEmpty {
                 emptyPlaceholder
             } else {
+                // Reader lets the first-visit App Limits tour scroll targets
+                // (e.g. the reset note) into view.
+                ScrollViewReader { tourProxy in
                 ScrollView {
                     // B9: Device-cap card — shown at the top when a cap or pool
                     // value is available. "Daily total for this device / of {pool} shared".
@@ -90,6 +122,8 @@ struct DeviceAppsSheet: View {
                         deviceCapCard
                             .padding(.horizontal, 20)
                             .padding(.top, 16)
+                            .tourTarget("device.cap")
+                            .id("device.cap")
                     }
 
                     VStack(spacing: 0) {
@@ -130,6 +164,8 @@ struct DeviceAppsSheet: View {
                     )
                     .padding(.horizontal, 20)
                     .padding(.top, 16)
+                    .tourTarget("device.apps")
+                    .id("device.apps")
 
                     if let actionError {
                         Text(actionError)
@@ -153,6 +189,16 @@ struct DeviceAppsSheet: View {
                         .padding(.horizontal, 24)
                         .padding(.top, 12)
                         .padding(.bottom, 110)
+                        .tourTarget("device.reset")
+                        .id("device.reset")
+                }
+                .onReceive(NotificationCenter.default.publisher(for: .evlinTourStepChanged)) { note in
+                    guard let target = note.userInfo?["target"] as? String,
+                          target.hasPrefix("device.") else { return }
+                    withAnimation(.easeInOut(duration: 0.3)) {
+                        tourProxy.scrollTo(target, anchor: .center)
+                    }
+                }
                 }
             }
         }
@@ -162,6 +208,26 @@ struct DeviceAppsSheet: View {
         .navigationBarBackButtonHidden(true)
         .toolbar(.hidden, for: .navigationBar)
         .enableSwipeBack()
+        // App Limits first-visit tour: wait for the app list (anchors) to exist.
+        .onChange(of: apps.isEmpty) { _, empty in
+            if !empty { maybeStartDeviceTour() }
+        }
+        .onAppear { if !apps.isEmpty { maybeStartDeviceTour() } }
+        .overlayPreferenceValue(TourAnchorKey.self) { anchors in
+            if showDeviceTour {
+                SpotlightTourOverlay(steps: deviceTourSteps,
+                                     anchors: anchors,
+                                     lastButtonTitle: "Done",
+                                     onStepChange: { target in
+                    // The ScrollViewReader inside the list listens for this.
+                    NotificationCenter.default.post(name: .evlinTourStepChanged,
+                                                    object: nil,
+                                                    userInfo: ["target": target])
+                }) {
+                    withAnimation(.easeOut(duration: 0.25)) { showDeviceTour = false }
+                }
+            }
+        }
         .onAppear {
             if let fixtureApps {
                 apps = fixtureApps
@@ -230,11 +296,19 @@ struct DeviceAppsSheet: View {
                                 ruleID: $0.rule_id,
                                 bundleID: $0.bundle_id,
                                 dailyBudgetMinutes: $0.daily_budget_minutes,
+                                orderingToken: $0.ordering_token,
                                 usedMinutes: $0.used_minutes ?? 0)
                         }
                         merged = DeviceAppLimitMerge.apply(rules: summaries, to: catalogApps)
                     }
                     apps = merged
+                    for app in merged {
+                        appLimitEditQueue.seed(
+                            key: app.id,
+                            state: .init(
+                                ruleID: app.ruleID,
+                                orderingToken: app.orderingToken))
+                    }
                     isLoading = false
                     // 3) Backfill real icons: when the backend gave no artwork URL,
                     //    resolve the App Store icon by name (cached) and patch it in.
@@ -556,30 +630,41 @@ struct DeviceAppsSheet: View {
         apps[i].enabled = true
         let seq = (inflightSeq[app.id] ?? 0) + 1
         inflightSeq[app.id] = seq
-        Task {
+        appLimitEditQueue.enqueue(key: app.id) { serverState in
             do {
                 let rule = try await apiClient.setAppLimit(
                     familyID: famID,
                     childDeviceID: cid,
                     bundleID: bundleID,
                     dailyBudgetMinutes: minutes,
+                    basedOnOrderingToken: serverState.orderingToken,
                     displayName: app.name)
+                let nextState = AppLimitEditQueue.ServerState(
+                    ruleID: rule.rule_id,
+                    orderingToken: rule.ordering_token)
                 // Superseded by a newer tap/toggle → drop this response.
                 guard AppLimitEditDecision.decide(
-                    currentSeq: inflightSeq[app.id], capturedSeq: seq) == .apply else { return }
+                    currentSeq: inflightSeq[app.id], capturedSeq: seq) == .apply else {
+                    return nextState
+                }
                 if let j = apps.firstIndex(where: { $0.id == app.id }) {
                     apps[j].ruleID = rule.rule_id
+                    apps[j].orderingToken = rule.ordering_token
                     apps[j].limitMin = rule.daily_budget_minutes
                     apps[j].enabled = true
                 }
+                return nextState
             } catch {
                 // Superseded → do NOT revert; the newer interaction owns state.
                 guard AppLimitEditDecision.decide(
-                    currentSeq: inflightSeq[app.id], capturedSeq: seq) == .apply else { return }
+                    currentSeq: inflightSeq[app.id], capturedSeq: seq) == .apply else {
+                    return nil
+                }
                 if let j = apps.firstIndex(where: { $0.id == app.id }) {
                     apps[j] = previous
                 }
                 setActionError("Couldn't save the limit — try again.")
+                return nil
             }
         }
     }
@@ -603,7 +688,7 @@ struct DeviceAppsSheet: View {
         apps[i].enabled = on
         let seq = (inflightSeq[app.id] ?? 0) + 1
         inflightSeq[app.id] = seq
-        Task {
+        appLimitEditQueue.enqueue(key: app.id) { serverState in
             do {
                 if on {
                     // Clamp to the device's effective cap (mirrors the backend's
@@ -615,34 +700,55 @@ struct DeviceAppsSheet: View {
                         childDeviceID: cid,
                         bundleID: bundleID,
                         dailyBudgetMinutes: budget,
+                        basedOnOrderingToken: serverState.orderingToken,
                         displayName: app.name)
+                    let nextState = AppLimitEditQueue.ServerState(
+                        ruleID: rule.rule_id,
+                        orderingToken: rule.ordering_token)
                     // Superseded by a newer tap/toggle → drop this response.
                     guard AppLimitEditDecision.decide(
-                        currentSeq: inflightSeq[app.id], capturedSeq: seq) == .apply else { return }
+                        currentSeq: inflightSeq[app.id], capturedSeq: seq) == .apply else {
+                        return nextState
+                    }
                     if let j = apps.firstIndex(where: { $0.id == app.id }) {
                         apps[j].ruleID = rule.rule_id
+                        apps[j].orderingToken = rule.ordering_token
                         apps[j].limitMin = rule.daily_budget_minutes
                     }
-                } else if let ruleID = app.ruleID {
-                    try await apiClient.clearAppLimit(familyID: famID, ruleID: ruleID)
+                    return nextState
+                } else if let ruleID = serverState.ruleID {
+                    _ = try await apiClient.clearAppLimit(
+                        familyID: famID,
+                        ruleID: ruleID)
                     // Superseded by a newer tap/toggle → drop this response.
                     guard AppLimitEditDecision.decide(
-                        currentSeq: inflightSeq[app.id], capturedSeq: seq) == .apply else { return }
+                        currentSeq: inflightSeq[app.id], capturedSeq: seq) == .apply else {
+                        return AppLimitEditQueue.ServerState(
+                            ruleID: nil,
+                            orderingToken: nil)
+                    }
                     if let j = apps.firstIndex(where: { $0.id == app.id }) {
                         apps[j].ruleID = nil
+                        apps[j].orderingToken = nil
                     }
                 }
                 // OFF with no ruleID: nothing persisted yet, local flip is enough.
+                return AppLimitEditQueue.ServerState(
+                    ruleID: nil,
+                    orderingToken: nil)
             } catch {
                 // Superseded → do NOT revert; the newer interaction owns state.
                 guard AppLimitEditDecision.decide(
-                    currentSeq: inflightSeq[app.id], capturedSeq: seq) == .apply else { return }
+                    currentSeq: inflightSeq[app.id], capturedSeq: seq) == .apply else {
+                    return nil
+                }
                 if let j = apps.firstIndex(where: { $0.id == app.id }) {
                     apps[j] = previous
                 }
                 setActionError(on
                     ? "Couldn't turn on the limit — try again."
                     : "Couldn't turn off the limit — try again.")
+                return nil
             }
         }
     }

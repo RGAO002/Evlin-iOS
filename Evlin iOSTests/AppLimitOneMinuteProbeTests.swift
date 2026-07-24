@@ -67,6 +67,18 @@ final class AppLimitOneMinuteProbeTests: XCTestCase {
         }
     }
 
+    func testAutomaticRefreshDoesNotReplaceThePickerPresenterIdentity() throws {
+        let source = try text(
+            at: "Evlin iOS/Components/Debug/AppLimitOneMinuteProbeView.swift"
+        )
+
+        XCTAssertTrue(source.contains("refreshTick += 1"))
+        XCTAssertFalse(
+            source.contains(".id(\"app-limit-one-minute-\\(refreshTick)\")"),
+            "Changing a view id every second dismisses the FamilyActivity picker"
+        )
+    }
+
     func testPhysicalReportRemainsPending() throws {
         let report = try text(
             at: "docs/superpowers/reports/2026-07-17-metering-phase4-physical.md"
