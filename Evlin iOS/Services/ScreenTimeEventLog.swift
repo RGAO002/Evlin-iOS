@@ -10,7 +10,16 @@ import os
 enum ScreenTimeEventLog {
 
     static let key = "evlin.screentime.events"
-    static let cap = 500
+    /// Ring-buffer depth. Raised 500 → 2000 for the A3 metering flight
+    /// recorder: one metered day emits a callback + guard-verdict + sample
+    /// triple per ladder rung (30 rungs), plus per-pass coverage/watchdog
+    /// lines — several hundred lines a day. At 500 a single busy afternoon
+    /// rotated the morning out before the uploader's next foreground pass,
+    /// which is exactly the window we need to read after an overnight bug.
+    /// 2000 × ~250 B ≈ 500 KB of App-Group defaults, and `emit` rewrites the
+    /// whole array, so this is the ceiling worth paying for in the
+    /// extension's tight budget.
+    static let cap = 2000
     static let suiteName = "group.com.evlin.ios"
 
     private static let logger = Logger(subsystem: "com.evlin.screentime", category: "event")

@@ -239,6 +239,17 @@ nonisolated enum MeteringProductionComposition {
 #if DEBUG
             print("[MeteringPolicyDebug] reconcile failed: \(error)")
 #endif
+            // Horizon planning is what creates tomorrow's routes. A failure
+            // here is why "the device never armed the next day" — the print
+            // above is DEBUG-only, so on TestFlight it left nothing at all.
+            MeteringFlightRecorder.emitError(
+                site: "composition.horizon",
+                error: error,
+                detail: MeteringFlightRecorder.detail([
+                    ("date", desired.usageDate),
+                    ("rev", desired.policyRevision),
+                ])
+            )
             throw error
         }
     }

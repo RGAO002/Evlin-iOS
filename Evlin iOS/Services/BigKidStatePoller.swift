@@ -106,7 +106,23 @@ final class BigKidStatePoller: ObservableObject {
                 )
             } catch {
                 print("[BigKidStatePoller] metering epoch reconciliation failed: \(error)")
+                // THE silent catch. Every midnight `prepareCanonicalRollover`
+                // throw landed here and died as a console line the device
+                // never keeps — the poller then retried every 10 s forever
+                // while the child stayed on yesterday's exhausted day.
+                MeteringFlightRecorder.emitError(
+                    site: "poller.meteringRecover",
+                    error: error,
+                    detail: MeteringFlightRecorder.detail([
+                        ("allowed", String(allowed)),
+                        ("date", runtime?.usageDate ?? "nil"),
+                    ])
+                )
             }
+            // A3 watchdog: the recovery pass is the app's existing periodic
+            // metering heartbeat, so the self-check rides along with it
+            // (internally throttled to one run per 5 minutes).
+            await MeteringWatchdog.shared.runIfDue(trigger: "poll")
         }
         self.syncMeteringCoverage = Self.syncMeteringCoverageFromEpochStore
         self.markAuthoritativeReady = {
@@ -127,6 +143,7 @@ final class BigKidStatePoller: ObservableObject {
                 try await client.reportHeartbeat(globalEffectiveState: snapshot)
             } catch {
                 print("[BigKidStatePoller] report effective state failed: \(error)")
+                MeteringFlightRecorder.emitError(site: "poller.reportState", error: error)
             }
         }
         self.failOpenFamily = { await FamilyGoneDetector.failOpen() }
@@ -299,6 +316,16 @@ final class BigKidStatePoller: ObservableObject {
                 clearAuthoritativeReadiness()
                 lastError = "Screen time sync deferred"
                 print("[BigKidStatePoller] earned runtime reconciliation deferred: \(runtimeReconciliation)")
+                // Returning here skips the ENTIRE metering reconcile for this
+                // tick. If it keeps happening the device quietly stops
+                // metering, so the deferral itself has to be visible.
+                MeteringFlightRecorder.emitFailure(
+                    site: "poller.runtime",
+                    verdict: "reconcile_deferred",
+                    detail: MeteringFlightRecorder.detail([
+                        ("state", String(describing: runtimeReconciliation)),
+                    ])
+                )
                 return
             }
 
@@ -346,6 +373,13 @@ final class BigKidStatePoller: ObservableObject {
             // a deleted family can never brick the kid in a permanent lock.
             if FamilyGoneDetector.isFamilyGone(error: error) {
                 print("[BigKidStatePoller] family_removed → failing open")
+                // Terminal: the poll loop stops for good, so ALL metering stops
+                // with it. That must never be inferable only from "the bar
+                // stopped moving".
+                MeteringFlightRecorder.emitFailure(
+                    site: "poller.familyGone",
+                    verdict: "fail_open_stop"
+                )
                 familyRemoved = true
                 await failOpenFamily()
                 lastError = nil
@@ -353,6 +387,7 @@ final class BigKidStatePoller: ObservableObject {
                 return
             }
             print("[BigKidStatePoller] fetchState failed: \(error)")
+            MeteringFlightRecorder.emitError(site: "poller.fetchState", error: error)
             lastError = Self.userFacingMessage(for: error)
         }
     }

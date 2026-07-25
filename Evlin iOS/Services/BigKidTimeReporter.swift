@@ -21,6 +21,13 @@ final class BigKidTimeReporter {
             try await client.reportTimeUse(minutesUsed: Self.chunkMinutes)
         } catch {
             print("[BigKidTimeReporter] chunk report failed: \(error)")
+            MeteringFlightRecorder.emitError(
+                site: "bigkid.chunkReport",
+                error: error,
+                detail: MeteringFlightRecorder.detail([
+                    ("minutes", String(Self.chunkMinutes)),
+                ])
+            )
         }
     }
 }
