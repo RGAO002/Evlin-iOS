@@ -273,9 +273,26 @@ extension DeviceEpochStore {
 
             var routeIDsByUsageDate: [String: UUID] = [:]
             for usageDate in usageDates {
-                if let existing = state.routes.values.first(where: {
-                    $0.generationID == generation.generationID && $0.usageDate == usageDate
-                }) {
+                let reusableRoutes = state.routes.values
+                    .filter {
+                        guard $0.generationID == generation.generationID,
+                              $0.usageDate == usageDate,
+                              $0.lifecycle == .active || $0.lifecycle == .planned,
+                              let epoch = state.epochs[$0.epochID]
+                        else { return false }
+                        return epoch.status != .retired
+                    }
+                    .sorted {
+                        if $0.lifecycle != $1.lifecycle {
+                            return $0.lifecycle == .active
+                        }
+                        if $0.createdAt != $1.createdAt {
+                            return $0.createdAt > $1.createdAt
+                        }
+                        return $0.routeID.uuidString.lowercased()
+                            < $1.routeID.uuidString.lowercased()
+                    }
+                if let existing = reusableRoutes.first {
                     routeIDsByUsageDate[usageDate] = existing.routeID
                     continue
                 }

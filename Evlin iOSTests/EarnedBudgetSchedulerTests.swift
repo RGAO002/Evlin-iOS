@@ -205,6 +205,93 @@ final class EarnedBudgetSchedulerTests: XCTestCase {
         }
     }
 
+    func testHorizonReconciliationReplansTodayWhenOnlyMatchingRouteIsTombstoned() throws {
+        let owner = UUID(uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")!
+        let storeURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("metering-horizon-tombstone-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: storeURL) }
+        let store = DeviceEpochStore(fileURL: storeURL, ownerProvider: { owner })
+        let request = MeteringHorizonRequest(
+            ownerChildDeviceID: owner,
+            today: "2026-07-17",
+            generationKey: generationKey(owner: owner),
+            persistedSelectionBytes: Data([0x00, 0x01, 0xFE, 0xFF]),
+            poolMinutes: 120,
+            deviceCapMinutes: 60,
+            authoritativeBaseAcceptedMinutes: 25,
+            now: Date(timeIntervalSince1970: 1_784_764_800)
+        )
+
+        let first = try store.reconcileMeteringHorizon(request)
+        let tombstonedRouteID = try XCTUnwrap(first.routeIDsByUsageDate[request.today])
+        try store.transaction(expectedOwner: owner) { state in
+            var route = try XCTUnwrap(state.routes[tombstonedRouteID])
+            var epoch = try XCTUnwrap(state.epochs[route.epochID])
+            let relatedWorkIDs = Set(
+                state.installWork.values.filter { $0.routeID == route.routeID }.map(\.workID)
+                    + state.registrationWork.values.filter { $0.routeID == route.routeID }.map(\.workID)
+            )
+
+            route.lifecycle = .tombstoned
+            state.routes[route.routeID] = route
+            epoch.status = .retired
+            epoch.retiredAt = request.now.addingTimeInterval(60)
+            epoch.retireReason = .activationSuperseded
+            state.epochs[epoch.epochID] = epoch
+            state.tombstones[route.routeID] = MeteringRouteTombstone(
+                routeID: route.routeID,
+                activityName: route.activityName,
+                eventNames: route.plannedEvents.map(\.eventName),
+                ownerChildDeviceID: owner,
+                usageDate: route.usageDate,
+                epochID: route.epochID,
+                generationID: route.generationID,
+                canonicalDayEnd: request.now.addingTimeInterval(86_400),
+                stopAcknowledgedAt: nil,
+                referencedWorkIDs: relatedWorkIDs,
+                retainedUntil: nil
+            )
+            for (workID, var work) in state.installWork where work.routeID == route.routeID {
+                work.phase = .pendingStop
+                work.retry.terminal = .superseded
+                work.retry.lastErrorCode = "test_tombstoned"
+                state.installWork[workID] = work
+            }
+            for (workID, var work) in state.registrationWork where work.routeID == route.routeID {
+                work.retry.terminal = .superseded
+                work.retry.lastErrorCode = "test_tombstoned"
+                state.registrationWork[workID] = work
+            }
+        }
+
+        let replacement = try store.reconcileMeteringHorizon(MeteringHorizonRequest(
+            ownerChildDeviceID: request.ownerChildDeviceID,
+            today: request.today,
+            generationKey: request.generationKey,
+            persistedSelectionBytes: request.persistedSelectionBytes,
+            poolMinutes: request.poolMinutes,
+            deviceCapMinutes: request.deviceCapMinutes,
+            authoritativeBaseAcceptedMinutes: request.authoritativeBaseAcceptedMinutes,
+            now: request.now.addingTimeInterval(120)
+        ))
+        let replacementRouteID = try XCTUnwrap(replacement.routeIDsByUsageDate[request.today])
+        let state = try store.read()
+
+        XCTAssertNotEqual(replacementRouteID, tombstonedRouteID)
+        XCTAssertEqual(state.routes[tombstonedRouteID]?.lifecycle, .tombstoned)
+        XCTAssertEqual(state.epochs[state.routes[tombstonedRouteID]!.epochID]?.status, .retired)
+        XCTAssertEqual(state.routes[replacementRouteID]?.lifecycle, .planned)
+        XCTAssertEqual(state.epochs[state.routes[replacementRouteID]!.epochID]?.status, .active)
+        XCTAssertEqual(state.activeEpochID, state.routes[replacementRouteID]?.epochID)
+        XCTAssertEqual(
+            state.routes.values.filter {
+                $0.generationID == replacement.generationID && $0.usageDate == request.today
+            }.count,
+            2,
+            "the tombstone remains as audit history while one fresh route is executable"
+        )
+    }
+
     func testCurrentRouteUsesAuthoritativeBaseForRemainingLadderAndFutureRoutesUseFullLadder() throws {
         let owner = UUID(uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")!
         let storeURL = FileManager.default.temporaryDirectory

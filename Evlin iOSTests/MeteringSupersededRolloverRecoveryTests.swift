@@ -126,6 +126,77 @@ final class MeteringSupersededRolloverRecoveryTests: XCTestCase {
         XCTAssertNotEqual(state.routes[fixture.staleTodayRouteID]?.lifecycle, .active)
     }
 
+    func testSupersededRolloverReplansWhenCurrentRevisionTodayRouteWasTombstoned() async throws {
+        let fixture = try await seedSupersededRolloverDeadlock()
+        try store.transaction(expectedOwner: owner) { state in
+            var route = try XCTUnwrap(state.routes[fixture.currentTodayRouteID])
+            var epoch = try XCTUnwrap(state.epochs[route.epochID])
+            let relatedWorkIDs = Set(
+                state.installWork.values.filter { $0.routeID == route.routeID }.map(\.workID)
+                    + state.registrationWork.values.filter { $0.routeID == route.routeID }.map(\.workID)
+            )
+
+            route.lifecycle = .tombstoned
+            state.routes[route.routeID] = route
+            epoch.status = .retired
+            epoch.retiredAt = todayInstant.addingTimeInterval(60)
+            epoch.retireReason = .activationSuperseded
+            state.epochs[epoch.epochID] = epoch
+            state.tombstones[route.routeID] = MeteringRouteTombstone(
+                routeID: route.routeID,
+                activityName: route.activityName,
+                eventNames: route.plannedEvents.map(\.eventName),
+                ownerChildDeviceID: owner,
+                usageDate: route.usageDate,
+                epochID: route.epochID,
+                generationID: route.generationID,
+                canonicalDayEnd: todayInstant.addingTimeInterval(86_400),
+                stopAcknowledgedAt: nil,
+                referencedWorkIDs: relatedWorkIDs,
+                retainedUntil: nil
+            )
+            for (workID, var work) in state.installWork where work.routeID == route.routeID {
+                work.phase = .pendingStop
+                work.retry.terminal = .superseded
+                work.retry.lastErrorCode = "test_tombstoned"
+                state.installWork[workID] = work
+            }
+            for (workID, var work) in state.registrationWork where work.routeID == route.routeID {
+                work.retry.terminal = .superseded
+                work.retry.lastErrorCode = "test_tombstoned"
+                state.registrationWork[workID] = work
+            }
+        }
+
+        let replanned = try store.reconcileMeteringHorizon(MeteringHorizonRequest(
+            ownerChildDeviceID: owner,
+            today: today,
+            generationKey: generationKey(revision: currentRevision),
+            persistedSelectionBytes: selectionBytes,
+            poolMinutes: 120,
+            deviceCapMinutes: 60,
+            authoritativeBaseAcceptedMinutes: 0,
+            now: todayInstant
+        ))
+        let replacementRouteID = try XCTUnwrap(replanned.routeIDsByUsageDate[today])
+        XCTAssertNotEqual(replacementRouteID, fixture.currentTodayRouteID)
+        XCTAssertEqual(replanned.generationID, fixture.currentGenerationID)
+
+        for pass in 1...6 {
+            try await makeDriver().recover(ownerChildDeviceID: owner)
+            if try store.read().activeRouteID == replacementRouteID { break }
+            XCTAssertLessThan(pass, 6, "recovery never adopted the replanned current route")
+        }
+        try await makeDriver().recover(ownerChildDeviceID: owner)
+
+        let state = try store.read()
+        XCTAssertEqual(state.activeRouteID, replacementRouteID)
+        XCTAssertEqual(state.routes[replacementRouteID]?.lifecycle, .active)
+        XCTAssertEqual(state.routes[fixture.currentTodayRouteID]?.lifecycle, .tombstoned)
+        XCTAssertEqual(state.epochs[fixture.currentTodayEpochID]?.status, .retired)
+        XCTAssertNil(state.v2RouteHandoff)
+    }
+
     /// The four local new-day effects (earned source, per-app, task state,
     /// bypass expiry) happened exactly once for this day change and must not be
     /// replayed or undone by the yield: locally, the day really did turn over.
