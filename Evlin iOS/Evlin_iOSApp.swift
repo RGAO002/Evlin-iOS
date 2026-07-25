@@ -209,6 +209,11 @@ struct Evlin_iOSApp: App {
         guard appMode == "child" else { return }
         Task { @MainActor in
             await AppMeteringEntry.shared.recoverIfConfigured()
+            // A3 watchdog. Runs after the recovery pass so it judges the state
+            // recovery just produced, and is internally throttled (≥5 min
+            // between checks, ≥10 min between auto re-kicks) — this is called
+            // on both `onAppear` and every `.active` scene transition.
+            await MeteringWatchdog.shared.runIfDue(trigger: "foreground")
         }
     }
 

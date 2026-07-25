@@ -13,6 +13,9 @@ struct CommandDeliveryDiagnosticsView: View {
 #if DEBUG
     @State private var meteringRepairInProgress = false
     @State private var meteringRepairStatus: String?
+    @State private var meteringNukeInProgress = false
+    @State private var meteringNukeStatus: String?
+    @State private var meteringRekickStatus: String?
 #endif
     private let sepStore = ManagedSettingsStore(named: .init("evlin.sep.test"))
 
@@ -70,6 +73,49 @@ struct CommandDeliveryDiagnosticsView: View {
 
                 if let meteringRepairStatus {
                     Text(meteringRepairStatus)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+
+                // Same-name stop+start of today's ACTIVE route. Apple re-evaluates
+                // and back-delivers already-met thresholds; by now the route is
+                // fully active so the guard accepts what the instant delivery at
+                // arm time raced past. Non-destructive (state machine untouched).
+                Button {
+                    meteringRekickStatus = "Re-kicking…"
+                    Task { meteringRekickStatus = await MeteringTodayRouteRekick.run() }
+                } label: {
+                    Label("Re-kick today's route (same-name)", systemImage: "arrow.clockwise.circle")
+                }
+
+                if let meteringRekickStatus {
+                    Text(meteringRekickStatus)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+
+                // Repair only stops STALE activities, so it can't free Apple's
+                // capacity when the exhaustion is held by retired-but-registered
+                // routes (coverageExhausted). Nuclear reset stops EVERY activity
+                // (frees capacity) + clears all shields/blocks; foreground
+                // recovery then arms a fresh route.
+                Button(role: .destructive) {
+                    meteringNukeInProgress = true
+                    meteringNukeStatus = "Resetting…"
+                    Task {
+                        meteringNukeStatus = await MeteringNuclearReset.run(includeMeteringStore: true)
+                        meteringNukeInProgress = false
+                        refreshTick += 1
+                    }
+                } label: {
+                    Label("Nuclear Reset (frees Apple capacity)", systemImage: "exclamationmark.triangle.fill")
+                }
+                .disabled(meteringNukeInProgress)
+
+                if let meteringNukeStatus {
+                    Text(meteringNukeStatus)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .textSelection(.enabled)

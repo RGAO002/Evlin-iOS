@@ -2560,44 +2560,14 @@ struct HomeSettingsSheet: View {
     /// Button comment above for rationale. Idempotent: safe to call when
     /// nothing is locked. Async because ActiveLockStore is an actor.
     private func nuclearReset() async {
-        // 1. Stop every scheduled DeviceActivity callback FIRST. If we don't,
-        //    a pending intervalDidEnd could fire mid-reset and write its own
-        //    recompute back on top of us.
-        DeviceActivityCenter().stopMonitoring()
+        // Steps 1-4 (stop every activity, drop all ManagedSettings policy, wipe
+        // ActiveLockStore records, scrub App Group JSON) are shared with the
+        // K-end Command Delivery nuclear reset — see `MeteringNuclearReset`.
+        _ = await MeteringNuclearReset.run()
 
-        // 2. Drop every ManagedSettings policy this app has set. This is
-        //    broader than clearLockRestrictions() — it also clears categories,
-        //    webDomains, application.denyAppRemoval, etc. We restore the
-        //    deletion-protection one explicitly in step 5.
-        ManagedSettingsStore().clearAllSettings()
-
-        // 3. Wipe ActiveLockStore's record dicts. unshieldAll/unblockAll also
-        //    re-run recomputeAndApply which (with empty dicts) writes nils
-        //    again — belt and suspenders after step 2.
-        _ = await ActiveLockStore.shared.unshieldAll()
-        _ = await ActiveLockStore.shared.unblockAll()
-
-        // 4. Scrub every evlin.* key in the App Group. Even though steps 1-3
-        //    cover the live state, persisted JSON for shield/block records
-        //    and diagnostic markers could mislead future debugging if left.
-        if let groupDefaults = UserDefaults(suiteName: "group.com.evlin.ios") {
-            _ = ActiveLockPersistenceLock.shared.withLock {
-                for key in [
-                    "evlin.shieldRecords",
-                    "evlin.blockRecords",
-                    "evlin.lastScheduleResult",
-                    "evlin.lastIntervalDidEnd",
-                    "evlin.lastRecompute",
-                ] {
-                    groupDefaults.removeObject(forKey: key)
-                }
-            }
-        }
-
-        // 5. Re-enable deletion protection. clearAllSettings() drops
-        //    application.denyAppRemoval, which means after step 2 the parent
-        //    could accidentally delete Evlin → lose enforcement. Put it
-        //    back before returning.
+        // Re-enable deletion protection. clearAllSettings() drops
+        // application.denyAppRemoval, which means the parent could accidentally
+        // delete Evlin → lose enforcement. Put it back, and sync the UI flag.
         await MainActor.run {
             screenTimeManager.enableDeletionProtection()
             // Update the local UI flag so the lock indicator agrees.
