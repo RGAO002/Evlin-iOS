@@ -498,19 +498,88 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
         return false
     }
 
+    static func verdict(for disposition: EpochSampleHTTPDisposition) -> String {
+        switch disposition {
+        case .accepted: return "accepted"
+        case .acceptedDuplicate: return "accepted_duplicate"
+        case let .terminal(code, _): return "terminal:\(code)"
+        case let .retry(code): return "retry:\(code)"
+        }
+    }
+
+    static func verdict(for disposition: EpochRegistrationHTTPDisposition) -> String {
+        switch disposition {
+        case .registered: return "registered"
+        case .authoritativeBaseMismatch: return "authoritative_base_mismatch"
+        case let .terminal(code): return "terminal:\(code)"
+        case let .retry(code): return "retry:\(code)"
+        }
+    }
+
+    static func verdict(for disposition: EpochActivationHTTPDisposition) -> String {
+        switch disposition {
+        case .acknowledged: return "acknowledged"
+        case let .terminal(code): return "terminal:\(code)"
+        case let .retry(code): return "retry:\(code)"
+        }
+    }
+
+    /// A3 flight recorder for one network leg. Every dispatch of every queue
+    /// lands here with its HTTP status and the disposition the client derived
+    /// from it, so "the sample never arrived" can be split into never-sent,
+    /// sent-and-rejected, and sent-and-retrying without a packet capture.
+    private func recordNetworkOutcome(
+        kind: ScreenTimeEvent.Kind,
+        phase: String,
+        workID: UUID,
+        routeID: UUID?,
+        status: Int?,
+        verdict: String,
+        extra: [(String, String)] = []
+    ) {
+        MeteringFlightRecorder.emit(
+            kind: kind,
+            site: "delivery.\(phase)",
+            verdict: verdict,
+            detail: MeteringFlightRecorder.detail(
+                [("work", MeteringFlightRecorder.shortID(workID))] + extra
+            ),
+            nums: ScreenTimeEvent.Nums(http: status),
+            corrID: routeID ?? workID
+        )
+    }
+
     private func deliverRegistration(work: EpochRegistrationWork, owner: UUID, claim: MeteringNetworkClaim) async {
         let workID = work.workID
         let request: URLRequest
         do {
             request = try MeteringEpochRequests.registration(baseURL: baseURL, ownerChildDeviceID: owner, body: work.request)
         } catch {
+            recordNetworkOutcome(
+                kind: .meteringWork,
+                phase: "registration",
+                workID: workID,
+                routeID: work.routeID,
+                status: nil,
+                verdict: "malformed_request"
+            )
             await terminalizeRegistration(workID: workID, owner: owner, claim: claim, code: "malformed_request")
             return
         }
 
         do {
             let (data, response) = try await transport.data(for: request)
-            let disposition = Self.registrationDisposition(data: data, statusCode: httpStatus(response))
+            let status = httpStatus(response)
+            let disposition = Self.registrationDisposition(data: data, statusCode: status)
+            recordNetworkOutcome(
+                kind: .meteringWork,
+                phase: "registration",
+                workID: workID,
+                routeID: work.routeID,
+                status: status,
+                verdict: Self.verdict(for: disposition),
+                extra: [("date", work.request.usageDate)]
+            )
             switch disposition {
             case let .registered(response):
                 guard response.epochID == work.epochID else {
@@ -534,6 +603,15 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
                 await retryRegistration(workID: workID, owner: owner, claim: claim, code: code)
             }
         } catch {
+            recordNetworkOutcome(
+                kind: .meteringWork,
+                phase: "registration",
+                workID: workID,
+                routeID: work.routeID,
+                status: nil,
+                verdict: "network_error",
+                extra: [("err", MeteringFlightRecorder.describe(error))]
+            )
             await retryRegistration(workID: workID, owner: owner, claim: claim, code: "network_error")
         }
     }
@@ -549,13 +627,31 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
                 body: work.request
             )
         } catch {
+            recordNetworkOutcome(
+                kind: .meteringWork,
+                phase: "activation",
+                workID: workID,
+                routeID: work.routeID,
+                status: nil,
+                verdict: "malformed_request"
+            )
             await terminalizeActivation(workID: workID, owner: owner, claim: claim, code: "malformed_request")
             return
         }
 
         do {
             let (data, response) = try await transport.data(for: request)
-            switch Self.activationDisposition(data: data, statusCode: httpStatus(response)) {
+            let status = httpStatus(response)
+            let disposition = Self.activationDisposition(data: data, statusCode: status)
+            recordNetworkOutcome(
+                kind: .meteringWork,
+                phase: "activation",
+                workID: workID,
+                routeID: work.routeID,
+                status: status,
+                verdict: Self.verdict(for: disposition)
+            )
+            switch disposition {
             case let .acknowledged(response):
                 guard response.epochID == work.epochID else {
                     await terminalizeActivation(workID: workID, owner: owner, claim: claim, code: "epoch_mismatch")
@@ -581,6 +677,15 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
                 await retryActivation(workID: workID, owner: owner, claim: claim, code: code)
             }
         } catch {
+            recordNetworkOutcome(
+                kind: .meteringWork,
+                phase: "activation",
+                workID: workID,
+                routeID: work.routeID,
+                status: nil,
+                verdict: "network_error",
+                extra: [("err", MeteringFlightRecorder.describe(error))]
+            )
             await retryActivation(workID: workID, owner: owner, claim: claim, code: "network_error")
         }
     }
@@ -591,13 +696,36 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
         do {
             request = try MeteringEpochRequests.sample(baseURL: baseURL, ownerChildDeviceID: owner, body: work.request)
         } catch {
+            recordNetworkOutcome(
+                kind: .meteringSample,
+                phase: "sample",
+                workID: workID,
+                routeID: work.routeID,
+                status: nil,
+                verdict: "malformed_request"
+            )
             await terminalizeSample(workID: workID, owner: owner, claim: claim, code: "malformed_request")
             return
         }
 
         do {
             let (data, response) = try await transport.data(for: request)
-            switch Self.sampleDisposition(data: data, statusCode: httpStatus(response)) {
+            let status = httpStatus(response)
+            let disposition = Self.sampleDisposition(data: data, statusCode: status)
+            recordNetworkOutcome(
+                kind: .meteringSample,
+                phase: "sample",
+                workID: workID,
+                routeID: work.routeID,
+                status: status,
+                verdict: Self.verdict(for: disposition),
+                extra: [
+                    ("date", work.request.usageDate),
+                    ("est", String(work.request.estimatedMinutes)),
+                    ("thr", String(work.request.thresholdMinutes)),
+                ]
+            )
+            switch disposition {
             case let .accepted(snapshot):
                 guard snapshotMatches(snapshot, owner: owner, usageDate: work.request.usageDate) else {
                     await terminalizeSample(workID: workID, owner: owner, claim: claim, code: "snapshot_mismatch")
@@ -617,6 +745,15 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
                 await retrySample(workID: workID, owner: owner, claim: claim, code: code)
             }
         } catch {
+            recordNetworkOutcome(
+                kind: .meteringSample,
+                phase: "sample",
+                workID: workID,
+                routeID: work.routeID,
+                status: nil,
+                verdict: "network_error",
+                extra: [("err", MeteringFlightRecorder.describe(error))]
+            )
             await retrySample(workID: workID, owner: owner, claim: claim, code: "network_error")
         }
     }
@@ -1027,12 +1164,31 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
         terminal: MeteringWorkTerminal,
         snapshot: DeviceDaySnapshotDTO? = nil
     ) {
+        // Every `return` inside the transaction below leaves the work item
+        // CLAIMED and unsettled: the answer from the backend is thrown away and
+        // the drain loop can only pick it up again once the 60 s lease expires.
+        // That is a silent stall, so it gets its own verdict.
+        var settled = false
+        var routeID: UUID?
+        defer {
+            MeteringFlightRecorder.emit(
+                kind: .meteringSample,
+                site: "delivery.sample",
+                verdict: settled ? "settled_\(terminal.rawValue)" : "settle_skipped",
+                detail: MeteringFlightRecorder.detail([
+                    ("work", MeteringFlightRecorder.shortID(workID)),
+                    ("code", code ?? ""),
+                ]),
+                corrID: routeID ?? workID
+            )
+        }
         try? store.transaction(expectedOwner: owner) { state in
             guard let key = state.sampleWork.first(where: { $0.value.workID == workID })?.key,
                   var work = state.sampleWork[key],
                   work.ownerChildDeviceID == owner,
                   work.claim?.token == claim.token
             else { return }
+            routeID = work.routeID
             if let routeID = work.routeID {
                 guard let route = state.routes[routeID],
                       route.ownerChildDeviceID == owner,
@@ -1053,6 +1209,7 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
                 : completedRetry(from: work.retry, code: code, terminal: terminal)
             work.claim = nil
             state.sampleWork[key] = work
+            settled = true
         }
     }
 

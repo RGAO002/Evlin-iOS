@@ -55,6 +55,52 @@ final class MeteringRolloverRecoveryTests: XCTestCase {
         XCTAssertEqual(state.routes[fixture.newRouteID]?.lifecycle, .planned)
     }
 
+    // Regression (iPad, 2026-07-25): after a day rolled over, ANY later policy
+    // change / per-app limit edit / reset replaces the active route. The next
+    // midnight then found a completed rollover whose product was no longer the
+    // live route and threw "completed rollover cannot advance to the next day"
+    // — every 10s, silently — so the device stayed on the old, already
+    // exhausted day forever. A finished rollover is history and must never
+    // block the following day.
+    func testCompletedRolloverDoesNotBlockNextDayAfterActiveRouteWasReplaced() throws {
+        let fixture = try seedActiveAndReservedRoutes()
+        let firstWorkID = try store.prepareCanonicalRollover(
+            owner: owner,
+            toUsageDate: "2026-07-18",
+            now: start.addingTimeInterval(86_400)
+        )
+        // Complete it, then simulate the churn: the rollover's product is no
+        // longer the active route/epoch and its handoff is long gone.
+        try store.transaction(expectedOwner: owner) { state in
+            var work = try XCTUnwrap(state.rolloverEffectsWork)
+            work.retry = MeteringRetryState(
+                attemptCount: 0,
+                nextAttemptAt: self.start,
+                lastErrorCode: nil,
+                terminal: .succeeded
+            )
+            work.oldStopAcknowledged = true
+            state.rolloverEffectsWork = work
+            state.v2RouteHandoff = nil
+            state.routes[fixture.oldRouteID]?.lifecycle = .retired
+            state.routes[fixture.newRouteID]?.lifecycle = .active
+            state.activeRouteID = fixture.newRouteID
+            state.activeEpochID = fixture.newEpochID
+        }
+
+        let secondWorkID = try store.prepareCanonicalRollover(
+            owner: owner,
+            toUsageDate: "2026-07-19",
+            now: start.addingTimeInterval(2 * 86_400)
+        )
+
+        XCTAssertNotEqual(secondWorkID, firstWorkID, "a new day needs a new rollover")
+        let work = try XCTUnwrap(try store.read().rolloverEffectsWork)
+        XCTAssertEqual(work.workID, secondWorkID)
+        XCTAssertEqual(work.fromUsageDate, "2026-07-18")
+        XCTAssertEqual(work.toUsageDate, "2026-07-19")
+    }
+
     func testRolloverRejectsSkippingAReservedCanonicalDayByteIdentically() throws {
         _ = try seedActiveAndReservedRoutes()
         let before = try Data(contentsOf: storeURL)

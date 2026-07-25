@@ -273,6 +273,26 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             return
         }
         if activity.rawValue.hasPrefix(MeteringRouteNamespace.prefix) {
+            // A3: record the ARRIVAL, before any guard can discard it. A
+            // callback that arrives and is then dropped and a callback Apple
+            // never delivered used to look identical from the outside — that
+            // ambiguity is what made every "bars frozen" report an overnight
+            // investigation.
+            let parsed = MeteringRouteNamespace.parse(
+                activityName: activity.rawValue,
+                eventName: event.rawValue
+            )
+            MeteringFlightRecorder.emit(
+                kind: .meteringCallback,
+                site: "dam.threshold",
+                verdict: "arrived",
+                detail: MeteringFlightRecorder.detail([
+                    ("act", activity.rawValue),
+                    ("evt", event.rawValue),
+                ]),
+                nums: ScreenTimeEvent.Nums(threshold: parsed?.thresholdMinutes),
+                corrID: parsed?.routeID
+            )
             handleV2MeteringThreshold(event: event, activity: activity)
             return
         }
@@ -317,13 +337,19 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
                 observedAt: Date(),
                 projectShields: project
             )
-#if DEBUG
+            // Observability (no behavior change): record every callback outcome in
+            // ALL builds, and emit an uploadable drop event whenever the guard
+            // discards a callback. A silently-dropped late callback is exactly what
+            // hid the year-long "bars frozen" bug — discards must never be invisible.
             defaults?.set(
                 "\(ISO8601DateFormatter().string(from: Date())) \(String(describing: outcome))",
                 forKey: "evlin.metering.lastV2ThresholdOutcome"
             )
             defaults?.synchronize()
-#endif
+            if case .discarded(let reason) = outcome {
+                emitEvent(kind: .drop, source: .earnedPool, app: event.rawValue,
+                          reason: "v2_callback_discarded:\(reason)")
+            }
             NSLog("[Evlin/Ext] v2 metering callback %@", String(describing: outcome))
         } catch {
 #if DEBUG
@@ -334,6 +360,13 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             defaults?.synchronize()
 #endif
             NSLog("[Evlin/Ext] v2 metering callback failed: %@", String(describing: error))
+            // A throwing callback loses the rung entirely, and the DEBUG key
+            // above is both release-stripped and single-slot.
+            MeteringFlightRecorder.emitError(
+                site: "dam.threshold",
+                error: error,
+                detail: MeteringFlightRecorder.detail([("evt", event.rawValue)])
+            )
         }
         Task { @MainActor in
             await DAMMeteringEntry.shared.recoverIfConfigured(
@@ -651,16 +684,27 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
     /// Records with only `.earnedTime` are deleted; mixed records survive with
     /// their remaining sources. Preserves `.manual` and `.limit` sources.
     private func resetEarnedTimeShields(activity: String) {
-        let current = loadShields()
-        let stripped = ShieldSourceLogic.strippingSource(.earnedTime, from: current)
-        let removedCount = current.count - stripped.count
-        let modifiedCount = stripped.values.filter { rec in
-            current[rec.recordKey]?.sources.contains(.earnedTime) == true
-        }.count
-        if let data = encodeShields(stripped) {
-            defaults?.set(data, forKey: shieldsKey)
+        var removedCount = 0
+        var modifiedCount = 0
+        // FIX-E: this was the ONE read-modify-write of `evlin.shieldRecords` in
+        // this file that ran without the shared cross-process lock — its two
+        // siblings (`resetLimitsAtIntervalEnd`, `removeShieldByHashAndRecompute`)
+        // both take it. An unserialised read-modify-write against a key the main
+        // app and the earned-shield store write concurrently can drop a
+        // concurrent update or publish a half-written blob, which is how the
+        // terminal lock came to read bytes it could not decode.
+        _ = ActiveLockPersistenceLock.shared.withLock {
+            let current = loadShields()
+            let stripped = ShieldSourceLogic.strippingSource(.earnedTime, from: current)
+            removedCount = current.count - stripped.count
+            modifiedCount = stripped.values.filter { rec in
+                current[rec.recordKey]?.sources.contains(.earnedTime) == true
+            }.count
+            if let data = encodeShields(stripped) {
+                defaults?.set(data, forKey: shieldsKey)
+            }
+            recomputeAndApplyShields(stripped)
         }
-        recomputeAndApplyShields(stripped)
 
         let ts = ISO8601DateFormatter().string(from: Date())
         defaults?.set(

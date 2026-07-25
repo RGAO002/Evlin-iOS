@@ -69,21 +69,51 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
         // guarantee the synchronous DeviceActivity XPC never blocks the main
         // thread's scene-update watchdog. The store is internally locked, so
         // concurrent main-thread reads stay safe.
-        try await Task.detached(priority: .utility) { [self] in
-            try await performRecovery(ownerChildDeviceID: owner)
-        }.value
+        do {
+            try await Task.detached(priority: .utility) { [self] in
+                try await performRecovery(ownerChildDeviceID: owner)
+            }.value
+        } catch {
+            // Top of the recovery pipeline. Callers historically only
+            // `print`ed this, so a pass that aborted halfway — leaving the
+            // route un-armed for the rest of the day — left no durable trace.
+            MeteringFlightRecorder.emitError(
+                site: "recovery.pass",
+                error: error,
+                detail: MeteringFlightRecorder.detail([
+                    ("role", processIdentity.role.rawValue),
+                ])
+            )
+            throw error
+        }
     }
 
     private func performRecovery(ownerChildDeviceID owner: UUID) async throws {
         if try recoverIdentityCleanupIfPresent() { return }
         guard store.isCurrentOwner(owner) else { return }
         try cancelBackwardPreparingHandoffIfNeeded(owner: owner)
+        try yieldSupersededCanonicalRolloverIfNeeded(owner: owner)
         try prepareCanonicalRolloverIfNeeded(owner: owner)
-        if try await recoverCanonicalRolloverIfPresent(owner: owner) {
-            if try store.read().rolloverEffectsWork?.activationAcknowledged == true {
-                try reconcileCoverage(owner: owner)
+        do {
+            if try await recoverCanonicalRolloverIfPresent(owner: owner) {
+                if try store.read().rolloverEffectsWork?.activationAcknowledged == true {
+                    try reconcileCoverage(owner: owner)
+                }
+                return
             }
-            return
+        } catch {
+            // The midnight leg. `prepareCanonicalRollover` already records its
+            // own throw; this covers the effect/handoff/activation legs that
+            // run afterwards and can strand the device on yesterday.
+            MeteringFlightRecorder.emit(
+                kind: .meteringDay,
+                site: "recovery.rollover",
+                verdict: "recover_failed",
+                detail: MeteringFlightRecorder.detail([
+                    ("err", MeteringFlightRecorder.describe(error)),
+                ])
+            )
+            throw error
         }
 
         try collectCompletedHandoff(owner: owner)
@@ -93,6 +123,10 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
             owner: owner,
             now: clock.now
         )
+        // BUG 1 self-heal, before anything arms: a device already carrying a
+        // base that outgrew its ladder must be re-cut here, otherwise the
+        // installer below faithfully re-arms the over-running rungs.
+        _ = try store.repairLadderBaseInvariantIfNeeded(owner: owner, now: clock.now)
         try prepareReplacementIfNeeded(owner: owner)
         await delivery.drain(owner: owner)
         _ = try installer.reconcile(ownerChildDeviceID: owner)
@@ -105,6 +139,12 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
         try advanceReplacementBarrier(owner: owner)
         await delivery.drain(owner: owner)
         try promoteAcknowledgedActivation(owner: owner)
+        // Routes that just reached .active may hold callbacks Apple delivered
+        // within a second of arming, before activation could finish. Credit them
+        // now and flush the resulting samples (FIX-A birth race).
+        if !(try store.replayDeferredCallbacks(owner: owner, now: clock.now)).isEmpty {
+            await delivery.drain(owner: owner)
+        }
         try abandonTerminalConservativeCandidate(owner: owner)
         try abandonTerminalSupersededCandidate(owner: owner)
         try prepareReplacementIfNeeded(owner: owner)
@@ -135,6 +175,174 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
                 state.installWork[workID] = install
             }
             state.v2RouteHandoff = nil
+        }
+    }
+
+    /// Lets a canonical rollover that can never finish step aside so the
+    /// replacement path can carry the device into today.
+    ///
+    /// ## The deadlock this exists for (iPhone, 2026-07-25, 16 h unmetered)
+    /// Canonical rollover deliberately stays INSIDE one generation: it adopts
+    /// the next planned route of the generation that owns the active route. If
+    /// the backend has meanwhile moved to a new `policyRevision`, that route's
+    /// epoch still carries the OLD revision, so its registration is answered
+    /// with `409 policy_revision_mismatch` forever
+    /// (`Evlin-Backend/app/services/metering_epoch_registry.py` — the backend is
+    /// right; the device is asking with a dead revision). The rollover parks on
+    /// `cutoverReady`, `enqueueRolloverRegistrationIfNeeded` mints a fresh
+    /// registration every pass (a hot loop that also drains battery and hammers
+    /// the backend), and because `performRecovery` returns as soon as
+    /// `recoverCanonicalRolloverIfPresent` reports an unfinished rollover, the
+    /// replacement path — which COULD reach the new generation — is never
+    /// reached at all. The device is stuck on yesterday until reinstall.
+    ///
+    /// ## Why yielding is safe
+    /// The day has ALREADY turned over locally: this only fires once all four
+    /// local effects (earned source, per-app, task state, bypass expiry) are
+    /// acknowledged, so nothing is replayed and nothing is undone. It also only
+    /// fires while the rollover has not yet registered — a rollover the backend
+    /// already accepted is completable and must be left alone. Finally it
+    /// refuses to yield into a void: a live generation carrying the desired
+    /// revision must already hold a planned route for canonical today.
+    ///
+    /// Structurally this mirrors `cancelBackwardPreparingHandoffIfNeeded`: one
+    /// idempotent guard that terminalizes a doomed leg so the ordinary machinery
+    /// takes over. It is one-shot — the work it retires is no longer `.pending`,
+    /// which is this method's own entry condition.
+    private func yieldSupersededCanonicalRolloverIfNeeded(owner: UUID) throws {
+        let state = try store.read()
+        guard state.ownerChildDeviceID == owner,
+              let desired = state.desiredPolicy,
+              desired.ownerChildDeviceID == owner,
+              !desired.policyRevision.isEmpty,
+              let work = state.rolloverEffectsWork,
+              work.ownerChildDeviceID == owner,
+              work.retry.terminal == .pending,
+              // A rollover the backend already registered can still finish.
+              !work.registrationAcknowledged,
+              !work.activationAcknowledged,
+              // The local day change is done exactly once. Never yield before
+              // it — the replacement path does not perform these effects.
+              work.earnedSourceResetAcknowledged,
+              work.perAppResetAcknowledged,
+              work.taskStateResetAcknowledged,
+              work.bypassExpiryAcknowledged,
+              state.activeRouteID == work.oldRouteID,
+              let staleRoute = state.routes[work.newRouteID],
+              let staleGeneration = state.generations[staleRoute.generationID],
+              staleGeneration.policyRevision != desired.policyRevision,
+              let successor = supersedingTodayRoute(in: state, owner: owner, desired: desired),
+              successor.generationID != staleRoute.generationID
+        else { return }
+
+        let dayEnd = state.canonicalDayEnd(
+            usageDate: staleRoute.usageDate,
+            timeZoneIdentifier: staleGeneration.canonicalTimezone
+        )
+        try store.transaction(expectedOwner: owner) { state in
+            guard var current = state.rolloverEffectsWork,
+                  current.workID == work.workID,
+                  current.retry.terminal == .pending
+            else { return }
+            current.retry.terminal = .superseded
+            current.retry.lastErrorCode = "policy_revision_superseded"
+            current.retry.nextAttemptAt = clock.now
+            state.rolloverEffectsWork = current
+
+            if state.v2RouteHandoff?.handoffID == current.workID {
+                state.v2RouteHandoff = nil
+            }
+
+            for (key, var registration) in state.registrationWork
+            where registration.routeID == current.newRouteID && registration.retry.terminal == .pending {
+                registration.claim = nil
+                registration.retry.terminal = .superseded
+                registration.retry.lastErrorCode = "rollover_registration_superseded"
+                state.registrationWork[key] = registration
+            }
+            for (key, var activation) in state.activationWork
+            where activation.routeID == current.newRouteID && activation.retry.terminal == .pending {
+                activation.claim = nil
+                activation.retry.terminal = .superseded
+                activation.retry.lastErrorCode = "rollover_activation_superseded"
+                state.activationWork[key] = activation
+            }
+
+            // Retire the dead generation's day rather than returning it to
+            // `.planned`: a planned route for today is exactly what
+            // `prepareCanonicalRolloverIfNeeded` picks up, so leaving it there
+            // rebuilds the same doomed rollover on the very next pass.
+            guard var staleEpoch = state.epochs[staleRoute.epochID],
+                  var route = state.routes[current.newRouteID],
+                  route.lifecycle == .planned || route.lifecycle == .active,
+                  let dayEnd
+            else { return }
+            staleEpoch.status = .retired
+            staleEpoch.retiredAt = clock.now
+            staleEpoch.retireReason = .activationSuperseded
+            state.epochs[staleEpoch.epochID] = staleEpoch
+            route.lifecycle = .tombstoned
+            state.routes[route.routeID] = route
+            state.tombstones[route.routeID] = MeteringRouteTombstone(
+                routeID: route.routeID,
+                activityName: route.activityName,
+                eventNames: route.plannedEvents.map(\.eventName),
+                ownerChildDeviceID: owner,
+                usageDate: route.usageDate,
+                epochID: staleEpoch.epochID,
+                generationID: route.generationID,
+                canonicalDayEnd: dayEnd,
+                stopAcknowledgedAt: nil,
+                referencedWorkIDs: Set(
+                    state.sampleWork.values
+                        .filter { $0.routeID == route.routeID }
+                        .map(\.workID)
+                ),
+                retainedUntil: nil
+            )
+            if let installKey = uniqueInstallKey(for: route.routeID, in: state) {
+                state.installWork[installKey]?.claim = nil
+                state.installWork[installKey]?.phase = .pendingStop
+            }
+        }
+
+        MeteringFlightRecorder.emit(
+            kind: .meteringDay,
+            site: "recovery.rolloverYield",
+            verdict: "policy_revision_superseded",
+            detail: MeteringFlightRecorder.detail([
+                ("from", work.fromUsageDate),
+                ("to", work.toUsageDate),
+                ("deadGen", MeteringFlightRecorder.shortID(staleRoute.generationID)),
+                ("liveGen", MeteringFlightRecorder.shortID(successor.generationID)),
+                ("rev", MeteringFlightRecorder.clamp(desired.policyRevision, to: 40)),
+            ]),
+            corrID: work.workID,
+            transition: ScreenTimeEvent.Transition(
+                before: staleGeneration.policyRevision,
+                after: desired.policyRevision
+            )
+        )
+    }
+
+    /// The planned route for canonical today owned by a live generation that
+    /// carries the revision the backend is currently on. This is the only route
+    /// a superseded rollover is allowed to yield to, and the only one the
+    /// stale-day replacement branch will adopt.
+    private func supersedingTodayRoute(
+        in state: DeviceEpochStoreState,
+        owner: UUID,
+        desired: MeteringDesiredPolicy
+    ) -> MeteringCallbackRoute? {
+        candidateRoutes(in: state, owner: owner).first { route in
+            guard let generation = state.generations[route.generationID],
+                  generation.policyRevision == desired.policyRevision,
+                  let today = MeteringEpochContract.canonicalUsageDate(
+                      at: clock.now,
+                      timezoneIdentifier: generation.canonicalTimezone
+                  )
+            else { return false }
+            return route.usageDate == today
         }
     }
 
@@ -396,7 +604,10 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
                 },
                 installedEvents: nil,
                 lifecycle: .planned,
-                createdAt: clock.now
+                createdAt: clock.now,
+                // Cut over `runtime.estimatedMinutes` just above, so that is
+                // what a rung of this ladder is relative to (BUG 1).
+                ladderBaseMinutes: runtime.estimatedMinutes
             )
             let installID = UUID()
             state.installWork[installID] = ActivityInstallWork(
@@ -416,7 +627,12 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
         guard var work = try store.read().rolloverEffectsWork,
               work.ownerChildDeviceID == owner
         else { return false }
-        if work.retry.terminal == .succeeded { return false }
+        // Only a RUNNING rollover owns the pass. `.succeeded` is history, and
+        // `.superseded` is a rollover that `yieldSupersededCanonicalRolloverIfNeeded`
+        // retired because its generation's policy revision is dead — driving
+        // either one would re-enter the deadlock this early-return exists to
+        // break.
+        guard work.retry.terminal == .pending else { return false }
 
         for effect in MeteringRolloverLocalEffect.allCases where !rolloverEffectAcknowledged(effect, work: work) {
             try resetRolloverEffect(effect, work)
@@ -784,7 +1000,7 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
     }
 
     private func prepareReplacementIfNeeded(owner: UUID) throws {
-        try store.transaction(expectedOwner: owner) { state in
+        let crossedDay: (from: String, to: String, route: UUID)? = try store.transaction(expectedOwner: owner) { state in
             guard let ratchet = state.ratchets[owner], ratchet.localSelection == .v2,
                   state.v2RouteHandoff == nil,
                   let fromRouteID = state.activeRouteID,
@@ -797,7 +1013,7 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
                   let priorInstallKey = uniqueInstallKey(for: fromRouteID, in: state),
                   state.installWork[priorInstallKey]?.phase == .active,
                   let candidateInstallKey = uniqueInstallKey(for: candidate.routeID, in: state)
-            else { return }
+            else { return nil }
             state.v2RouteHandoff = V2RouteHandoff(
                 handoffID: UUID(),
                 ownerChildDeviceID: owner,
@@ -824,7 +1040,26 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
                 work.retry.lastErrorCode = "replacement_registration_deferred"
                 state.registrationWork[key] = work
             }
+            guard candidate.usageDate != fromRoute.usageDate else { return nil }
+            return (fromRoute.usageDate, candidate.usageDate, candidate.routeID)
         }
+        guard let crossedDay else { return }
+        // A replacement that also changes the day only happens on the rescue
+        // path above — worth a durable line, because it is the moment a device
+        // stranded on a past day starts moving again.
+        MeteringFlightRecorder.emit(
+            kind: .meteringDay,
+            site: "recovery.staleDayReplacement",
+            verdict: "adopted_today",
+            detail: MeteringFlightRecorder.detail([
+                ("route", MeteringFlightRecorder.shortID(crossedDay.route)),
+            ]),
+            corrID: crossedDay.route,
+            transition: ScreenTimeEvent.Transition(
+                before: crossedDay.from,
+                after: crossedDay.to
+            )
+        )
     }
 
     private func promoteVerifiedCandidate(owner: UUID) throws {
@@ -1305,12 +1540,57 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
 
     private func candidateRoute(in state: DeviceEpochStoreState, owner: UUID, excluding routeID: UUID) -> MeteringCallbackRoute? {
         guard let activeRoute = state.routes[routeID] else { return nil }
-        return candidateRoutes(in: state, owner: owner).first {
+        if let sameDay = candidateRoutes(in: state, owner: owner).first(where: {
             $0.routeID != routeID
                 && $0.createdAt >= activeRoute.createdAt
                 && ($0.generationID != state.activeGenerationID
                     || state.epochs[$0.epochID]?.resumeBoundaryPending == true)
                 && $0.usageDate == activeRoute.usageDate
+        }) {
+            return sameDay
+        }
+        return staleDayCandidateRoute(in: state, owner: owner, activeRoute: activeRoute)
+    }
+
+    /// The escape hatch for a device left stranded on a past day.
+    ///
+    /// Ordinary replacement only ever swaps routes WITHIN the active day, and
+    /// canonical rollover only ever advances WITHIN one generation. When the
+    /// active day is over and the active generation's policy revision is dead,
+    /// neither can move — the device meters nothing until it is reinstalled
+    /// (iPhone, 2026-07-25). This branch, reached only after the same-day search
+    /// finds nothing, lets the replacement machinery cross both boundaries at
+    /// once and adopt canonical today on the revision the backend actually
+    /// accepts.
+    ///
+    /// The desired revision is the whole gate, and deliberately so: a wedged
+    /// device also accumulates several never-retired generations on dead
+    /// revisions, each carrying a full week of planned routes, and some were
+    /// created AFTER the live one — so "newest planned route wins" adopts a
+    /// generation the backend will 409. `desiredPolicy` is the only local
+    /// authority on what the backend is currently on.
+    private func staleDayCandidateRoute(
+        in state: DeviceEpochStoreState,
+        owner: UUID,
+        activeRoute: MeteringCallbackRoute
+    ) -> MeteringCallbackRoute? {
+        guard let desired = state.desiredPolicy,
+              desired.ownerChildDeviceID == owner,
+              !desired.policyRevision.isEmpty,
+              let activeGeneration = state.generations[activeRoute.generationID],
+              activeGeneration.policyRevision != desired.policyRevision,
+              let today = MeteringEpochContract.canonicalUsageDate(
+                  at: clock.now,
+                  timezoneIdentifier: activeGeneration.canonicalTimezone
+              ),
+              activeRoute.usageDate < today
+        else { return nil }
+        return candidateRoutes(in: state, owner: owner).first {
+            $0.routeID != activeRoute.routeID
+                && $0.createdAt >= activeRoute.createdAt
+                && $0.generationID != activeRoute.generationID
+                && $0.usageDate == today
+                && state.generations[$0.generationID]?.policyRevision == desired.policyRevision
         }
     }
 
@@ -1320,10 +1600,36 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
                 && $0.lifecycle == .planned
                 && state.epochs[$0.epochID]?.status == .active
                 && state.generations[$0.generationID]?.retiredAt == nil
+                && isAdoptableGeneration($0.generationID, in: state)
         }.sorted {
             if $0.createdAt != $1.createdAt { return $0.createdAt > $1.createdAt }
             return $0.routeID.uuidString.lowercased() < $1.routeID.uuidString.lowercased()
         }
+    }
+
+    /// Generations the device is allowed to cut over to.
+    ///
+    /// A wedged device accumulates generations that were never retired because
+    /// the cutover that would have retired them never completed — the iPhone
+    /// black box from 2026-07-25 held three, each with a full week of planned
+    /// routes, and some created AFTER the live one. `candidateRoutes` ranks by
+    /// `createdAt`, so without this filter the replacement path repeatedly
+    /// adopts a dead-revision generation, gets `409 policy_revision_mismatch`,
+    /// abandons it and adopts the next one: pure churn that also stops and
+    /// restarts Apple's monitors.
+    ///
+    /// Only two generations are ever legitimate: the ACTIVE one (that is how a
+    /// conservative gate resume replaces a route inside its own generation) and
+    /// one carrying the revision `desiredPolicy` says the backend is on. With no
+    /// desired policy on record there is nothing better to go on, so every
+    /// generation stays adoptable exactly as before.
+    private func isAdoptableGeneration(_ generationID: UUID, in state: DeviceEpochStoreState) -> Bool {
+        guard let desired = state.desiredPolicy,
+              !desired.policyRevision.isEmpty,
+              desired.ownerChildDeviceID == state.ownerChildDeviceID
+        else { return true }
+        if generationID == state.activeGenerationID { return true }
+        return state.generations[generationID]?.policyRevision == desired.policyRevision
     }
 
     private func hasUniqueSuccessfulRegistration(

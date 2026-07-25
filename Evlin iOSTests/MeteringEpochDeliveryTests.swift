@@ -331,6 +331,184 @@ final class MeteringEpochDeliveryTests: XCTestCase {
         XCTAssertEqual(try store.read().sampleWork[sampleID]?.retry.terminal, .succeeded)
     }
 
+    // Regression (iPad, 2026-07-25): an earned-cap shield reference was emitted
+    // into dueWork as permanently-pending `.shield` work that NOTHING claims —
+    // not claimFirstDispatchable, not dueInstallWork, not
+    // settleLeadingInvalidRegistration — and whose retry is never terminalized.
+    // Sorted by its past nextAttemptAt it sat at the head of the queue and
+    // starved every registration/activation/sample created after it: one cap hit
+    // froze the device's metering pipeline permanently (the 02:43 reference
+    // blocked the 04:42 rollover registration, attemptCount stuck at 0).
+    func testShieldReferenceCannotStarveTheNetworkQueue() async throws {
+        let fileURL = temporaryStoreURL()
+        defer { removeTemporaryStore(fileURL) }
+        let store = makeStore(fileURL: fileURL)
+        let sampleID = UUID()
+        try store.transaction(expectedOwner: owner) { state in
+            state = makeBaseState()
+            let route = try XCTUnwrap(state.routes[routeID])
+            // A cap shield applied BEFORE the sample exists — the exact ordering
+            // that wedged the device.
+            let operationID = UUID()
+            state.shieldReferences[operationID] = EarnedShieldReference(
+                operationID: operationID,
+                ownerChildDeviceID: owner,
+                generationID: route.generationID,
+                epochID: epochID,
+                routeID: routeID,
+                recordKey: "earned-cap",
+                expectedRecordBytes: Data([1]),
+                retry: MeteringRetryState(
+                    attemptCount: 0,
+                    nextAttemptAt: start.addingTimeInterval(-600),
+                    lastErrorCode: nil,
+                    terminal: .pending
+                ),
+                createdAt: start.addingTimeInterval(-600)
+            )
+            state.sampleWork[sampleID] = EpochSampleWork(
+                workID: sampleID,
+                ownerChildDeviceID: owner,
+                epochID: epochID,
+                routeID: routeID,
+                request: EpochSampleRequestDTO(
+                    deviceID: owner,
+                    usageDate: route.usageDate,
+                    timezone: route.plannedSchedule.timezoneIdentifier,
+                    activityName: MeteringSampleWireAliases.activityName(routeID: routeID),
+                    eventName: MeteringSampleWireAliases.eventName(thresholdMinutes: 10),
+                    thresholdMinutes: 10,
+                    estimatedMinutes: 10,
+                    observedAt: start,
+                    clientSampleID: "v2-after-shield",
+                    protocolVersion: 2,
+                    epochID: epochID,
+                    generationArmedAt: nil,
+                    generationOffsetMinutes: nil
+                ),
+                authorization: .v2Deliverable,
+                retry: MeteringRetryState(
+                    attemptCount: 0,
+                    nextAttemptAt: start,
+                    lastErrorCode: nil,
+                    terminal: .pending
+                ),
+                createdAt: start
+            )
+        }
+        let transport = DeliveryTestTransport()
+        transport.results = [(
+            try encoded(makeSnapshot(counted: true, warning: nil)),
+            HTTPURLResponse(url: baseURL, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        )]
+        let delivery = MeteringEpochDelivery(
+            baseURL: baseURL,
+            store: store,
+            transport: transport,
+            clock: DeliveryTestClock(now: start)
+        )
+
+        await delivery.drain(owner: owner)
+
+        XCTAssertEqual(transport.requests.count, 1, "the shield reference must not block delivery")
+        XCTAssertEqual(try store.read().sampleWork[sampleID]?.retry.terminal, .succeeded)
+    }
+
+    func testStoppedInstallHuskCannotBlockAuthorizedV2SampleDelivery() async throws {
+        // Regression (2026-07-24 device): after a replacement, retired routes
+        // leave installWork entries with phase == .stopped but terminal still
+        // .pending. Those husks sat ahead of a due v2 sample in the network
+        // queue and the install-envelope bypass treated .stopped as blocking —
+        // the t10/485 sample starved at attemptCount=0 for hours. A stopped
+        // install performs no further daemon or network work, so it must count
+        // as a ready envelope.
+        let fileURL = temporaryStoreURL()
+        defer { removeTemporaryStore(fileURL) }
+        let store = makeStore(fileURL: fileURL)
+        let sampleID = UUID()
+        try store.transaction(expectedOwner: owner) { state in
+            state = makeBaseState()
+            let stoppedID = UUID()
+            state.installWork[stoppedID] = ActivityInstallWork(
+                workID: stoppedID,
+                ownerChildDeviceID: owner,
+                routeID: routeID,
+                authorization: .registered,
+                phase: .stopped,
+                claim: nil,
+                retry: MeteringRetryState(
+                    attemptCount: 0,
+                    nextAttemptAt: start.addingTimeInterval(-2),
+                    lastErrorCode: nil,
+                    terminal: .pending
+                ),
+                createdAt: start.addingTimeInterval(-2)
+            )
+            let verifiedID = UUID()
+            state.installWork[verifiedID] = ActivityInstallWork(
+                workID: verifiedID,
+                ownerChildDeviceID: owner,
+                routeID: routeID,
+                authorization: .registered,
+                phase: .verified,
+                claim: nil,
+                retry: MeteringRetryState(
+                    attemptCount: 0,
+                    nextAttemptAt: start.addingTimeInterval(-1),
+                    lastErrorCode: nil,
+                    terminal: .pending
+                ),
+                createdAt: start.addingTimeInterval(-1)
+            )
+            let route = try XCTUnwrap(state.routes[routeID])
+            state.sampleWork[sampleID] = EpochSampleWork(
+                workID: sampleID,
+                ownerChildDeviceID: owner,
+                epochID: epochID,
+                routeID: routeID,
+                request: EpochSampleRequestDTO(
+                    deviceID: owner,
+                    usageDate: route.usageDate,
+                    timezone: route.plannedSchedule.timezoneIdentifier,
+                    activityName: MeteringSampleWireAliases.activityName(routeID: routeID),
+                    eventName: MeteringSampleWireAliases.eventName(thresholdMinutes: 10),
+                    thresholdMinutes: 10,
+                    estimatedMinutes: 485,
+                    observedAt: start,
+                    clientSampleID: "v2-stopped-husk",
+                    protocolVersion: 2,
+                    epochID: epochID,
+                    generationArmedAt: nil,
+                    generationOffsetMinutes: nil
+                ),
+                authorization: .v2Deliverable,
+                retry: MeteringRetryState(
+                    attemptCount: 0,
+                    nextAttemptAt: start,
+                    lastErrorCode: nil,
+                    terminal: .pending
+                ),
+                createdAt: start
+            )
+        }
+        let transport = DeliveryTestTransport()
+        transport.results = [(
+            try encoded(makeSnapshot(counted: true, warning: nil)),
+            HTTPURLResponse(url: baseURL, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        )]
+        let delivery = MeteringEpochDelivery(
+            baseURL: baseURL,
+            store: store,
+            transport: transport,
+            clock: DeliveryTestClock(now: start)
+        )
+
+        await delivery.drain(owner: owner)
+
+        XCTAssertEqual(transport.requests.count, 1)
+        XCTAssertEqual(try store.read().sampleWork[sampleID]?.retry.terminal, .succeeded)
+    }
+
     func testVerifiedLocalInstallCannotBlockRegistrationRecovery() async throws {
         let fileURL = temporaryStoreURL()
         defer { removeTemporaryStore(fileURL) }

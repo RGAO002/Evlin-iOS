@@ -1070,6 +1070,13 @@ nonisolated enum NSECommandSourceResolver {
         switch wireValue {
         case "earned_time": return [.earnedTime]
         case "task_pause": return [.taskPause]
+        // A per-app budget can be lowered below what the child already used
+        // today. The device's own threshold is edge-triggered and will never
+        // fire for an amount already spent, so the backend converges that case
+        // by sending the shield itself. It must carry `.limit` — the same source
+        // and record key `LimitShieldLogic` uses — so raising the budget or
+        // clearing the rule releases it instead of leaving a sticky manual lock.
+        case "limit": return [.limit]
         default: return [.manual]
         }
     }

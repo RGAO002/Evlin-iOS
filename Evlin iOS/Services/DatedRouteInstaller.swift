@@ -38,19 +38,48 @@ nonisolated final class DatedRouteInstaller: @unchecked Sendable {
         var results: [DatedRouteInstallResult] = []
         for due in try store.dueInstallWork(owner: ownerChildDeviceID, now: clock.now) {
             if due.authorization == .registrationRequired {
-                results.append(.deferred(workID: due.workID, code: "registrationRequired"))
+                let result = DatedRouteInstallResult.deferred(workID: due.workID, code: "registrationRequired")
+                recordInstallOutcome(result, routeID: due.routeID, attempts: due.retry.attemptCount)
+                results.append(result)
                 continue
             }
             guard let claimed = try store.claimInstallWork(workID: due.workID, owner: ownerChildDeviceID, processIdentity: processIdentity, now: clock.now) else {
                 continue
             }
             let outcome = try reconcileClaimed(claimed, owner: ownerChildDeviceID)
+            recordInstallOutcome(
+                outcome.result,
+                routeID: claimed.work.routeID,
+                attempts: claimed.work.retry.attemptCount
+            )
             results.append(outcome.result)
             if outcome.stopFilling {
                 break
             }
         }
         return results
+    }
+
+    /// A3: a deferred install is the arming leg failing. It used to leave only
+    /// a retry code inside the store, which nothing surfaced — the visible
+    /// symptom was simply that the bar never moved.
+    private func recordInstallOutcome(
+        _ result: DatedRouteInstallResult,
+        routeID: UUID,
+        attempts: Int
+    ) {
+        guard case let .deferred(workID, code) = result else { return }
+        MeteringFlightRecorder.emit(
+            kind: .meteringWork,
+            site: "installer.install",
+            verdict: "deferred:\(code)",
+            detail: MeteringFlightRecorder.detail([
+                ("work", MeteringFlightRecorder.shortID(workID)),
+                ("attempts", String(attempts)),
+            ]),
+            nums: ScreenTimeEvent.Nums(count: attempts),
+            corrID: routeID
+        )
     }
 
     private func stopOrphanedV2Activities(ownerChildDeviceID owner: UUID) throws {
@@ -149,17 +178,39 @@ nonisolated final class DatedRouteInstaller: @unchecked Sendable {
         }, by: \.usageDate)
 
         var readyThrough: String?
+        // The FIRST date that failed and WHY — `daemonMatches` used to answer
+        // with a bare Bool, so a coverage flip to `coverageExhausted` named no
+        // culprit and every debugging session started from zero.
+        var firstFailure: (usageDate: String, reason: String, summary: String)?
         for usageDate in requiredDates {
+            var dateFailure: (reason: String, summary: String)?
             let covered = routesByDate[usageDate, default: []].contains { route in
-                guard functioningRouteIDs.contains(route.routeID),
-                      let expected = try? expectedConfiguration(for: route, state: state)
-                else { return false }
-                return daemonMatches(
+                guard functioningRouteIDs.contains(route.routeID) else {
+                    if dateFailure == nil {
+                        dateFailure = ("install_phase", "route=\(MeteringFlightRecorder.shortID(route.routeID))")
+                    }
+                    return false
+                }
+                guard let expected = try? expectedConfiguration(for: route, state: state) else {
+                    if dateFailure == nil {
+                        dateFailure = ("expected_config", "route=\(MeteringFlightRecorder.shortID(route.routeID))")
+                    }
+                    return false
+                }
+                let result = probe(
                     activity: DeviceActivityName(route.activityName),
                     expected: expected
                 )
+                if !result.isHealthy, dateFailure == nil {
+                    dateFailure = (result.failure ?? "unknown", result.summary)
+                }
+                return result.isHealthy
             }
-            guard covered else { break }
+            guard covered else {
+                let failure = dateFailure ?? ("no_route", "routes=0")
+                firstFailure = (usageDate, failure.reason, failure.summary)
+                break
+            }
             readyThrough = usageDate
         }
 
@@ -191,8 +242,29 @@ nonisolated final class DatedRouteInstaller: @unchecked Sendable {
             refreshedAt: clock.now,
             errorCode: status == .ready ? nil : errorCode
         )
+        let priorCoverage = state.coverage
         try store.transaction(expectedOwner: owner) { state in
             state.coverage = coverage
+        }
+        // Only a CHANGE is worth a line — this runs on every recovery pass and
+        // a per-pass green heartbeat would flood the ring buffer.
+        if priorCoverage?.status != coverage.status
+            || priorCoverage?.readyThroughUsageDate != coverage.readyThroughUsageDate {
+            MeteringFlightRecorder.emit(
+                kind: .meteringCover,
+                site: "installer.coverage",
+                verdict: coverage.status.rawValue,
+                detail: MeteringFlightRecorder.detail([
+                    ("failedOn", firstFailure?.usageDate ?? ""),
+                    ("failing", firstFailure?.reason ?? ""),
+                    ("probe", firstFailure?.summary ?? ""),
+                    ("errCode", coverage.errorCode ?? ""),
+                ]),
+                transition: ScreenTimeEvent.Transition(
+                    before: "\(priorCoverage?.status.rawValue ?? "none")@\(priorCoverage?.readyThroughUsageDate ?? "nil")",
+                    after: "\(coverage.status.rawValue)@\(coverage.readyThroughUsageDate ?? "nil")"
+                )
+            )
         }
         return coverage
     }
@@ -250,12 +322,70 @@ nonisolated final class DatedRouteInstaller: @unchecked Sendable {
             )
         }
 
+        // Never RE-arm a day that is already over. `startMonitoring` for a
+        // finished interval throws `invalidDateComponents` — observed on iPhone
+        // 2026-07-25, where a device wedged on the previous day kept re-arming
+        // yesterday's route and threw every single time. Re-arming is the
+        // damaging direction: `absorbCreditedProgressForRearm` has already moved
+        // the ledger by the time Apple refuses, and the route the daemon was
+        // holding does not come back. Deferring is cheaper (no XPC round trip)
+        // and names the real cause.
+        //
+        // Deliberately scoped to routes that were already started at least once
+        // (`priorPhase != .pendingStart`). A never-armed route for a past day is
+        // self-limiting: `hasCurrentInstallProvenance` drops it as soon as it
+        // falls out of the generation's current horizon, so it is superseded
+        // rather than retried, and no ledger has moved.
+        if claimed.priorPhase != .pendingStart,
+           let routeTimeZone = TimeZone(identifier: route.plannedSchedule.timezoneIdentifier),
+           MeteringDatedSchedule.hasElapsed(
+               usageDate: route.usageDate,
+               timeZone: routeTimeZone,
+               now: clock.now
+           ) {
+            MeteringFlightRecorder.emitFailure(
+                site: "installer.install",
+                verdict: "usage_date_elapsed",
+                detail: MeteringFlightRecorder.detail([
+                    ("date", route.usageDate),
+                    ("phase", claimed.priorPhase.rawValue),
+                ]),
+                corrID: route.routeID
+            )
+            return ClaimedReconcileOutcome(
+                result: try deferClaimedWork(
+                    claimed,
+                    owner: owner,
+                    code: "usageDateElapsed",
+                    installLimited: false
+                ),
+                stopFilling: false
+            )
+        }
+
         do {
-            try center.startMonitoring(activity, during: expected.schedule, events: expected.events)
+            // Re-arming restarts Apple's counter at zero; carry what this route
+            // already earned into the base so the ladder's next rung still means
+            // "5 more minutes" instead of dead time (see the method's comment).
+            try store.absorbCreditedProgressForRearm(
+                routeID: route.routeID,
+                owner: owner,
+                trigger: "install:\(claimed.priorPhase.rawValue)"
+            )
+            // Arm what the store holds NOW. The absorb re-cuts the ladder in its
+            // own transaction, so `expected` — read before it — describes rungs
+            // priced against the OLD base. Arming those would recreate BUG 1 on
+            // the successful path: the daemon holding a ladder the store has
+            // already re-priced.
+            let armed = try expectedConfigurationAfterAbsorb(
+                routeID: route.routeID,
+                fallback: expected
+            )
+            try center.startMonitoring(activity, during: armed.schedule, events: armed.events)
             guard try store.recordInstalledRoute(workID: claimed.work.workID, token: claimed.claim.token, owner: owner, now: clock.now) else {
                 return ClaimedReconcileOutcome(result: .deferred(workID: claimed.work.workID, code: "claimLost"), stopFilling: false)
             }
-            guard daemonMatches(activity: activity, expected: expected) else {
+            guard daemonMatches(activity: activity, expected: armed) else {
                 guard try store.deferInstallWork(workID: claimed.work.workID, token: claimed.claim.token, owner: owner, now: clock.now, code: "verificationFailed", installLimited: false) else {
                     return ClaimedReconcileOutcome(result: .deferred(workID: claimed.work.workID, code: "claimLost"), stopFilling: false)
                 }
@@ -280,6 +410,20 @@ nonisolated final class DatedRouteInstaller: @unchecked Sendable {
                 )
             }
 #endif
+            // Arming the daemon failed. Before A3 this only ever reached a
+            // DEBUG `print` plus a retry code buried in the store, so a device
+            // that could not arm looked identical to one that simply had no
+            // usage yet.
+            MeteringFlightRecorder.emitError(
+                site: "installer.start",
+                error: error,
+                detail: MeteringFlightRecorder.detail([
+                    ("code", code),
+                    ("activities", String(center.activities.count)),
+                    ("phase", claimed.priorPhase.rawValue),
+                ]),
+                corrID: route.routeID
+            )
             guard try store.deferInstallWork(workID: claimed.work.workID, token: claimed.claim.token, owner: owner, now: clock.now, code: code, installLimited: isExcessive) else {
                 return ClaimedReconcileOutcome(
                     result: .deferred(workID: claimed.work.workID, code: "claimLost"),
@@ -312,6 +456,22 @@ nonisolated final class DatedRouteInstaller: @unchecked Sendable {
         return .deferred(workID: claimed.work.workID, code: code)
     }
 
+    /// Re-reads the route after `absorbCreditedProgressForRearm` and rebuilds the
+    /// configuration from the ladder it left behind. Falls back to the
+    /// pre-absorb configuration when the route or its expected configuration
+    /// cannot be rebuilt — arming the previous shape is strictly better than
+    /// arming nothing, and the coverage probe catches the mismatch.
+    private func expectedConfigurationAfterAbsorb(
+        routeID: UUID,
+        fallback: (schedule: DeviceActivitySchedule, events: [DeviceActivityEvent.Name: DeviceActivityEvent])
+    ) throws -> (schedule: DeviceActivitySchedule, events: [DeviceActivityEvent.Name: DeviceActivityEvent]) {
+        guard let state = try? store.read(),
+              let refreshed = state.routes[routeID],
+              let rebuilt = try? expectedConfiguration(for: refreshed, state: state)
+        else { return fallback }
+        return rebuilt
+    }
+
     private func expectedConfiguration(for route: MeteringCallbackRoute, state: DeviceEpochStoreState) throws -> (schedule: DeviceActivitySchedule, events: [DeviceActivityEvent.Name: DeviceActivityEvent]) {
         guard let timeZone = TimeZone(identifier: route.plannedSchedule.timezoneIdentifier), let generation = state.generations[route.generationID] else {
             throw MeteringDatedScheduleError.invalidUsageDate(route.usageDate)
@@ -319,18 +479,14 @@ nonisolated final class DatedRouteInstaller: @unchecked Sendable {
         let selection = try JSONDecoder().decode(FamilyActivitySelection.self, from: generation.measurementSelectionBytes)
         var eventNames = Set<String>()
         var events: [DeviceActivityEvent.Name: DeviceActivityEvent] = [:]
-#if DEBUG
-        // DIAGNOSTIC A/B (2026-07-24): per-app activities with 1-2 events fire on
-        // device; earned activities with 12-24 events never fire. Install only the
-        // two lowest thresholds to isolate "too many events per activity" as the
-        // cause. Store keeps all planned events; only the daemon install is capped.
-        // REMOVE after the experiment concludes.
+        // The 2026-07-24 A/B that capped this at the two lowest thresholds was
+        // measuring the interval-anchor bug (see `MeteringDatedSchedule`), not
+        // the event count. Keeping the cap after that fix meant the daemon only
+        // ever held t5 and t10: both fired exactly on schedule and then the bar
+        // froze for good, because no further rung existed on Apple's side even
+        // though the route had planned 30 of them.
         let plannedEventPlans = route.plannedEvents
-            .sorted { $0.thresholdMinutes < $1.thresholdMinutes }
-            .prefix(2)
-#else
-        let plannedEventPlans = route.plannedEvents
-#endif
+
         for plan in plannedEventPlans {
             guard plan.thresholdMinutes > 0,
                   plan.eventName == MeteringRouteNamespace.eventName(
@@ -356,24 +512,22 @@ nonisolated final class DatedRouteInstaller: @unchecked Sendable {
         )
     }
 
+    /// Delegates to the shared `MeteringDaemonProbe` so the installer, the
+    /// debug re-kick report and the A3 watchdog can never drift apart on what
+    /// "the daemon matches" means.
     private func daemonMatches(activity: DeviceActivityName, expected: (schedule: DeviceActivitySchedule, events: [DeviceActivityEvent.Name: DeviceActivityEvent])) -> Bool {
-        guard center.activities.contains(activity), let schedule = center.schedule(for: activity), exactSchedule(schedule, expected.schedule) else { return false }
-        let events = center.events(for: activity)
-        guard events.keys == expected.events.keys else { return false }
-        return events.allSatisfy { name, event in
-            guard let expectedEvent = expected.events[name] else { return false }
-            return event.applications == expectedEvent.applications
-                && event.categories == expectedEvent.categories
-                && event.webDomains == expectedEvent.webDomains
-                && event.threshold == expectedEvent.threshold
-                && event.includesPastActivity == expectedEvent.includesPastActivity
-        }
+        probe(activity: activity, expected: expected).isHealthy
     }
 
-    private func exactSchedule(_ lhs: DeviceActivitySchedule, _ rhs: DeviceActivitySchedule) -> Bool {
-        lhs.intervalStart == rhs.intervalStart
-            && lhs.intervalEnd == rhs.intervalEnd
-            && lhs.repeats == rhs.repeats
-            && lhs.warningTime == rhs.warningTime
+    private func probe(
+        activity: DeviceActivityName,
+        expected: (schedule: DeviceActivitySchedule, events: [DeviceActivityEvent.Name: DeviceActivityEvent])
+    ) -> MeteringDaemonProbeResult {
+        MeteringDaemonProbe.probe(
+            center: center,
+            activity: activity,
+            expectedSchedule: expected.schedule,
+            expectedEvents: expected.events
+        )
     }
 }

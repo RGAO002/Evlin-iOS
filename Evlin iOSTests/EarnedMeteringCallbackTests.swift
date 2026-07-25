@@ -245,27 +245,177 @@ final class EarnedMeteringCallbackTests: XCTestCase {
         }
     }
 
-    func testPlannedAndRetiredRoutesAreByteIdenticalDiscards() throws {
-        for lifecycle in [MeteringRouteLifecycle.planned, .retired] {
-            let fixture = try CallbackFixture.active()
-            defer { fixture.cleanup() }
-            try fixture.mutate { state in
-                state.routes[fixture.routeID]?.lifecycle = lifecycle
-                state.activeRouteID = nil
-                state.activeEpochID = nil
-                state.activeGenerationID = nil
-            }
-            let before = try Data(contentsOf: fixture.storeURL)
-
-            let outcome = try fixture.callbackHandler().handle(
-                fixture.callback(threshold: 5),
-                expectedOwnerChildDeviceID: fixture.owner
-            )
-
-            guard case .discarded = outcome else { return XCTFail("\(lifecycle) must reject") }
-            XCTAssertEqual(try Data(contentsOf: fixture.storeURL), before, "\(lifecycle)")
-            XCTAssertTrue(try fixture.store.read().sampleWork.isEmpty)
+    // A retired route is finished: its callback is a zero-effect discard. A PLANNED
+    // route is the opposite case — it is still activating, so its callback is
+    // parked for replay (FIX-A) rather than dropped. Both credit nothing now;
+    // only the planned one leaves a durable trace.
+    func testRetiredRouteDiscardsWithoutEffectWhilePlannedRouteParksForReplay() throws {
+        let retired = try CallbackFixture.active()
+        defer { retired.cleanup() }
+        try retired.mutate { state in
+            state.routes[retired.routeID]?.lifecycle = .retired
+            state.activeRouteID = nil
+            state.activeEpochID = nil
+            state.activeGenerationID = nil
         }
+        let retiredBefore = try Data(contentsOf: retired.storeURL)
+
+        let retiredOutcome = try retired.callbackHandler().handle(
+            retired.callback(threshold: 5),
+            expectedOwnerChildDeviceID: retired.owner
+        )
+
+        guard case .discarded = retiredOutcome else { return XCTFail("retired must reject") }
+        XCTAssertEqual(try Data(contentsOf: retired.storeURL), retiredBefore,
+                       "a retired route must leave the store byte-identical")
+
+        let planned = try CallbackFixture.active()
+        defer { planned.cleanup() }
+        try planned.mutate { state in
+            state.routes[planned.routeID]?.lifecycle = .planned
+            state.activeRouteID = nil
+            state.activeEpochID = nil
+            state.activeGenerationID = nil
+        }
+
+        let plannedOutcome = try planned.callbackHandler().handle(
+            planned.callback(threshold: 5),
+            expectedOwnerChildDeviceID: planned.owner
+        )
+
+        XCTAssertEqual(plannedOutcome, .discarded(reason: "deferred_pending_activation"))
+        let plannedState = try planned.store.read()
+        XCTAssertEqual(plannedState.deferredCallbacks.count, 1,
+                       "a still-activating route must park its callback")
+        XCTAssertTrue(plannedState.sampleWork.isEmpty,
+                      "parking must credit nothing until the route activates")
+    }
+
+    // P3 late-callback grace: Apple delivers threshold callbacks 5-15 min late. A
+    // policy change that retires the route mid-flight must NOT silently drop a
+    // genuine, already-earned callback (the year-long "bars frozen" root cause).
+    // The lost minutes are credited to the CURRENT active epoch's base via
+    // high-water — WITHOUT relaxing the strict current-route provenance guard.
+    func testLateCallbackForRouteRetiredWithinGraceCreditsCurrentEpoch() throws {
+        let fixture = try CallbackFixture.active()  // original epoch base = 12
+        defer { fixture.cleanup() }
+        let successorEpoch = try fixture.retireOriginalAndActivateSuccessor(
+            retiredAt: fixture.start.addingTimeInterval(4 * 60)  // retired 1 min before the callback
+        )
+
+        let outcome = try fixture.callbackHandler().handle(
+            fixture.callback(threshold: 5),  // late callback for the RETIRED route
+            expectedOwnerChildDeviceID: fixture.owner
+        )
+
+        let state = try fixture.store.read()
+        XCTAssertEqual(state.epochs[successorEpoch]?.baseAcceptedMinutes, 12 + 5,
+                       "lost 5 minutes must be credited to the current epoch base")
+        guard case .queued = outcome else {
+            return XCTFail("late retired callback within grace must be credited, got \(outcome)")
+        }
+    }
+
+    // Bound the grace: a callback for a route retired LONG before it arrives
+    // (beyond the grace window) is still discarded — no stale-replay credit.
+    func testLateCallbackForRouteRetiredBeforeGraceIsStillDiscarded() throws {
+        let fixture = try CallbackFixture.active()
+        defer { fixture.cleanup() }
+        let successorEpoch = try fixture.retireOriginalAndActivateSuccessor(
+            retiredAt: fixture.start.addingTimeInterval(-3600)  // retired an hour before now
+        )
+        let baseBefore = try fixture.store.read().epochs[successorEpoch]?.baseAcceptedMinutes
+
+        let outcome = try fixture.callbackHandler().handle(
+            fixture.callback(threshold: 5),
+            expectedOwnerChildDeviceID: fixture.owner
+        )
+
+        guard case .discarded = outcome else {
+            return XCTFail("callback beyond grace must be discarded, got \(outcome)")
+        }
+        XCTAssertEqual(try fixture.store.read().epochs[successorEpoch]?.baseAcceptedMinutes, baseBefore,
+                       "beyond-grace callback must not touch the current epoch base")
+    }
+
+    // FIX-A birth race: Apple back-delivers already-met thresholds ~1s after
+    // startMonitoring, while the route needs two network round trips to reach
+    // .active. Those callbacks used to hit the strict provenance guard and were
+    // dropped for good (Apple never re-sends), so every mid-day re-arm silently
+    // lost the day's minutes. They must be parked and credited on activation.
+    func testCallbackForRouteStillActivatingIsParkedThenCreditedOnActivation() throws {
+        let fixture = try CallbackFixture.active()
+        defer { fixture.cleanup() }
+        // A still-activating route is by definition not the active one yet — the
+        // store's coherence check rejects an activeRouteID pointing at a planned
+        // route, so model the real pre-activation shape.
+        try fixture.mutate { state in
+            state.routes[fixture.routeID]?.lifecycle = .planned
+            state.activeRouteID = nil
+            state.activeEpochID = nil
+            state.activeGenerationID = nil
+        }
+
+        let parkOutcome = try fixture.callbackHandler().handle(
+            fixture.callback(threshold: 5),
+            expectedOwnerChildDeviceID: fixture.owner
+        )
+
+        XCTAssertEqual(parkOutcome, .discarded(reason: "deferred_pending_activation"))
+        XCTAssertEqual(try fixture.store.read().deferredCallbacks.count, 1,
+                       "a provenance-valid callback must be parked, not dropped")
+        XCTAssertTrue(try fixture.store.read().sampleWork.isEmpty,
+                      "parking must not credit anything before the route activates")
+
+        // Activation completes: the route becomes active and adopts the pointers.
+        try fixture.mutate { state in
+            state.routes[fixture.routeID]?.lifecycle = .active
+            state.activeRouteID = fixture.routeID
+            state.activeEpochID = fixture.epochID
+            state.activeGenerationID = fixture.generationID
+        }
+        let results = try fixture.store.replayDeferredCallbacks(
+            owner: fixture.owner,
+            now: fixture.start.addingTimeInterval(6 * 60)
+        )
+
+        XCTAssertEqual(results.count, 1)
+        guard case .queued = results[0] else {
+            return XCTFail("activated route must credit its parked callback, got \(results[0])")
+        }
+        let state = try fixture.store.read()
+        XCTAssertEqual(state.sampleWork.count, 1, "credited callback must enqueue one sample")
+        XCTAssertTrue(state.deferredCallbacks.isEmpty, "replayed entry must be cleared")
+    }
+
+    // Bound the parking area: a route that never activates must not keep its
+    // callbacks forever (they would credit stale minutes if it activated hours
+    // later), and the entry must not leak.
+    func testParkedCallbackExpiresWhenRouteNeverActivates() throws {
+        let fixture = try CallbackFixture.active()
+        defer { fixture.cleanup() }
+        try fixture.mutate { state in
+            state.routes[fixture.routeID]?.lifecycle = .planned
+            state.activeRouteID = nil
+            state.activeEpochID = nil
+            state.activeGenerationID = nil
+        }
+        _ = try fixture.callbackHandler().handle(
+            fixture.callback(threshold: 5),
+            expectedOwnerChildDeviceID: fixture.owner
+        )
+        XCTAssertEqual(try fixture.store.read().deferredCallbacks.count, 1)
+
+        let results = try fixture.store.replayDeferredCallbacks(
+            owner: fixture.owner,
+            now: fixture.start.addingTimeInterval(
+                DeviceEpochStore.deferredCallbackGraceSeconds + 600
+            )
+        )
+
+        XCTAssertTrue(results.isEmpty, "an unactivated route must credit nothing")
+        XCTAssertTrue(try fixture.store.read().deferredCallbacks.isEmpty,
+                      "expired parked entry must be pruned")
     }
 
     func testPriorDayTombstoneIsResolvedAndHasZeroEffects() throws {
@@ -1103,6 +1253,117 @@ private final class CallbackFixture {
                 observedAt: start.addingTimeInterval(5 * 60)
             )
         )
+    }
+
+    /// Simulates a mid-flight policy replacement: retires the original
+    /// generation/epoch/route and activates a fresh successor in a NEW generation
+    /// (same day / owner / selection-digest / enforcement-set). The successor's
+    /// base carries the original's ALREADY-ACCEPTED minutes but NOT any in-flight
+    /// threshold — modelling a late callback whose minutes never reached the
+    /// successor. Returns the successor epoch id.
+    @discardableResult
+    func retireOriginalAndActivateSuccessor(retiredAt: Date) throws -> UUID {
+        let successorGen = UUID()
+        let successorEpoch = UUID()
+        let successorRoute = UUID()
+        let successorInstall = UUID()
+        try mutate { state in
+            guard let oldGen = state.generations[generationID],
+                  let oldEpoch = state.epochs[epochID] else { return }
+            state.generations[generationID]?.retiredAt = retiredAt
+            state.epochs[epochID]?.status = .retired
+            state.epochs[epochID]?.retiredAt = retiredAt
+            state.epochs[epochID]?.retireReason = .policyChange
+            state.routes[routeID]?.lifecycle = .retired
+
+            let gen = MeteringPolicyGeneration(
+                generationID: successorGen,
+                protocolVersion: 2,
+                childDeviceID: owner,
+                canonicalTimezone: oldGen.canonicalTimezone,
+                policyRevision: "policy-2",
+                measurementSelectionDigest: oldGen.measurementSelectionDigest,
+                enforcementSetID: oldGen.enforcementSetID,
+                measurementSelectionBytes: oldGen.measurementSelectionBytes,
+                createdAt: retiredAt,
+                retiredAt: nil
+            )
+            let epoch = DeviceDailyEpoch(
+                epochID: successorEpoch,
+                protocolVersion: 2,
+                childDeviceID: owner,
+                usageDate: oldEpoch.usageDate,
+                canonicalTimezone: gen.canonicalTimezone,
+                policyRevision: gen.policyRevision,
+                measurementSelectionDigest: gen.measurementSelectionDigest,
+                enforcementSetID: gen.enforcementSetID,
+                startedAt: retiredAt,
+                registeredAt: retiredAt,
+                baseAcceptedMinutes: oldEpoch.baseAcceptedMinutes,
+                baseSource: .childState200,
+                lastRawThresholdMinutes: 0,
+                excludedWhilePausedMinutes: 0,
+                status: .active,
+                resumeBoundaryPending: false,
+                retiredAt: nil,
+                retireReason: nil,
+                exhaustedAt: nil,
+                baseCorrectionState: .available
+            )
+            let schedule = DatedSchedulePlan(
+                usageDate: epoch.usageDate,
+                timezoneIdentifier: gen.canonicalTimezone,
+                calendarIdentifier: "gregorian"
+            )
+            let event = MeteringEventPlan(
+                eventName: MeteringRouteNamespace.eventName(routeID: successorRoute, thresholdMinutes: 5),
+                thresholdMinutes: 5
+            )
+            state.generations[successorGen] = gen
+            state.epochs[successorEpoch] = epoch
+            state.routes[successorRoute] = MeteringCallbackRoute(
+                routeID: successorRoute,
+                activityName: MeteringRouteNamespace.activityName(routeID: successorRoute),
+                namespace: MeteringRouteNamespace.prefix,
+                generationID: successorGen,
+                generationKey: MeteringGenerationKey(
+                    protocolVersion: 2,
+                    childDeviceID: owner,
+                    canonicalTimezone: gen.canonicalTimezone,
+                    policyRevision: gen.policyRevision,
+                    measurementSelectionDigest: gen.measurementSelectionDigest,
+                    enforcementSetID: gen.enforcementSetID
+                ),
+                ownerChildDeviceID: owner,
+                usageDate: epoch.usageDate,
+                epochID: successorEpoch,
+                plannedSchedule: schedule,
+                installedSchedule: schedule,
+                plannedEvents: [event],
+                installedEvents: [event],
+                lifecycle: .active,
+                createdAt: retiredAt
+            )
+            state.installWork[successorInstall] = ActivityInstallWork(
+                workID: successorInstall,
+                ownerChildDeviceID: owner,
+                routeID: successorRoute,
+                authorization: .registered,
+                phase: .active,
+                claim: nil,
+                retry: MeteringRetryState(
+                    attemptCount: 0,
+                    nextAttemptAt: retiredAt,
+                    lastErrorCode: nil,
+                    terminal: .succeeded
+                ),
+                createdAt: retiredAt
+            )
+            state.activeGenerationID = successorGen
+            state.activeEpochID = successorEpoch
+            state.activeRouteID = successorRoute
+        }
+        return successorEpoch
     }
 
     func mutate(_ body: (inout DeviceEpochStoreState) -> Void) throws {

@@ -142,6 +142,66 @@ nonisolated struct MeteringEventPlan: Codable, Equatable, Sendable {
     let thresholdMinutes: Int
 }
 
+/// The ladder arithmetic, in the one file every metering target links.
+///
+/// `MeteringDatedSchedule` used to own it, but BUG 1's fix makes the STORE
+/// re-cut ladders (a base that moves without its rungs is what reported 305
+/// minutes into a 180-minute pool), and `DeviceEpochStore` is compiled into
+/// `EvlinPushApplier`, which does not carry `MeteringDatedSchedule`.
+/// `MeteringDatedSchedule` now delegates here so there is exactly one cut.
+nonisolated enum MeteringLadderMath {
+    static let bucketMinutes = 5
+    static let guardEventCount = 48
+
+    /// Rungs covering `remainingMinutes`, in `bucketMinutes` steps widened just
+    /// enough to stay within `guardEventCount` events.
+    static func thresholds(remainingMinutes: Int) -> [Int] {
+        guard remainingMinutes > 0 else { return [] }
+        let minimumStep = remainingMinutes / guardEventCount
+            + (remainingMinutes % guardEventCount == 0 ? 0 : 1)
+        let step = max(
+            bucketMinutes,
+            ((minimumStep + bucketMinutes - 1) / bucketMinutes) * bucketMinutes
+        )
+        var result = stride(from: step, through: remainingMinutes, by: step).map { $0 }
+        if result.last != remainingMinutes {
+            result.append(remainingMinutes)
+        }
+        return result
+    }
+
+    /// The absolute ceiling of one usage date: the highest minute total any rung
+    /// of that day's ladder may ever report. `nil` when the generation predates
+    /// the pool/cap capture, in which case no bound is claimed rather than one
+    /// being invented.
+    static func ceiling(poolMinutes: Int?, capMinutes: Int?) -> Int? {
+        guard let poolMinutes, let capMinutes else { return nil }
+        let ceiling = min(poolMinutes, capMinutes)
+        return ceiling > 0 ? ceiling : nil
+    }
+
+    /// Cuts a fresh ladder for `routeID` over the minutes still available above
+    /// `ladderBaseMinutes`. `nil` when nothing meaningful is left, so callers can
+    /// tell "re-cut" apart from "there is no ladder left to cut".
+    static func plannedEvents(
+        routeID: UUID,
+        ladderBaseMinutes: Int,
+        ceilingMinutes: Int
+    ) -> [MeteringEventPlan]? {
+        let remaining = ceilingMinutes - max(0, ladderBaseMinutes)
+        guard remaining >= bucketMinutes else { return nil }
+        let cut = thresholds(remainingMinutes: remaining)
+        guard !cut.isEmpty else { return nil }
+        let activityName = "evlin.earned.v2.\(routeID.uuidString.lowercased())"
+        return cut.map { threshold in
+            MeteringEventPlan(
+                eventName: "\(activityName).t\(threshold)",
+                thresholdMinutes: threshold
+            )
+        }
+    }
+}
+
 nonisolated enum MeteringRouteLifecycle: String, Codable, Sendable {
     case planned, active, retired, tombstoned
 }
@@ -157,10 +217,30 @@ nonisolated struct MeteringCallbackRoute: Codable, Equatable, Sendable {
     let epochID: UUID
     var plannedSchedule: DatedSchedulePlan
     var installedSchedule: DatedSchedulePlan?
-    let plannedEvents: [MeteringEventPlan]
+    var plannedEvents: [MeteringEventPlan]
     var installedEvents: [MeteringEventPlan]?
     var lifecycle: MeteringRouteLifecycle
     let createdAt: Date
+    /// The epoch base `plannedEvents` was cut against — i.e. what a rung of this
+    /// ladder MEANS. A threshold `T` promises "the child has now used
+    /// `ladderBaseMinutes + T` minutes today", and the ladder is cut so
+    /// `ladderBaseMinutes + topRung == min(pool, cap)`.
+    ///
+    /// It exists because the base and the ladder are two records of the same
+    /// fact and they were free to drift apart. `absorbCreditedProgressForRearm`
+    /// raised `epoch.baseAcceptedMinutes` without re-cutting the rungs, so a
+    /// ladder cut for base 20 (top rung 160) was still armed while the base read
+    /// 145 — and `base + threshold` reported 305 minutes against a 180-minute
+    /// pool (iPad 2026-07-25 13:37, `used:295` / `used:305`). Reporting against
+    /// THIS value instead of the live base makes the sample correct even when
+    /// Apple re-delivers a rung of a ladder the store has already moved past,
+    /// which no amount of atomicity around the re-arm can prevent.
+    ///
+    /// `nil` = a route persisted before this field existed. Its ladder base is
+    /// unknowable, so the callback path falls back to the epoch base and leans
+    /// on the ceiling clamp; `repairLadderBaseInvariantIfNeeded` re-cuts it into
+    /// a self-consistent state on the next recovery pass.
+    var ladderBaseMinutes: Int? = nil
 }
 
 nonisolated struct MeteringRouteTombstone: Codable, Equatable, Sendable {
@@ -259,7 +339,36 @@ nonisolated struct MeteringAuthorizedCallbackInput: Equatable, Sendable {
     let jitterSeconds: Int
 }
 
-nonisolated struct MeteringTerminalShieldCandidate: Equatable, Sendable {
+/// A provenance-valid callback that arrived before its route finished
+/// activating.
+///
+/// Apple back-delivers thresholds the day's ledger has already met within ~1s of
+/// `startMonitoring`, while a route only reaches `.active` after two network
+/// round trips (registration + activation). Any mid-day (re)arm therefore loses
+/// that first delivery to the strict `lifecycle == .active` provenance guard —
+/// and Apple never re-sends a threshold it considers delivered, so the minutes
+/// were gone for good (observed 2026-07-24 at 19:13 and 19:46). Parking the
+/// callback here and replaying it once the route activates makes the race
+/// non-lossy without relaxing any provenance check.
+nonisolated struct DeferredMeteringCallback: Codable, Equatable, Sendable {
+    let ownerChildDeviceID: UUID
+    let routeID: UUID
+    let activityName: String
+    let eventName: String
+    let namespace: String
+    let thresholdMinutes: Int
+    let observedAt: Date
+    let jitterSeconds: Int
+    let parkedAt: Date
+
+    /// Route + event is the natural identity: a redelivery of the same threshold
+    /// must collapse onto the same entry rather than accumulate.
+    static func key(routeID: UUID, eventName: String) -> String {
+        "\(routeID.uuidString.lowercased())|\(eventName)"
+    }
+}
+
+nonisolated struct MeteringTerminalShieldCandidate: Codable, Equatable, Sendable {
     let operationID: UUID
     let ownerChildDeviceID: UUID
     let generationID: UUID
@@ -837,6 +946,7 @@ nonisolated struct DeviceEpochStoreState: Codable, Equatable, Sendable {
     var coverage: MonitorCoverageState?
     var ratchets: [UUID: MeteringOwnerRatchet]
     var desiredPolicy: MeteringDesiredPolicy?
+    var deferredCallbacks: [String: DeferredMeteringCallback]
 
     init(
         schemaVersion: Int = Self.currentSchemaVersion,
@@ -859,7 +969,8 @@ nonisolated struct DeviceEpochStoreState: Codable, Equatable, Sendable {
         rolloverEffectsWork: RolloverEffectsWork? = nil,
         coverage: MonitorCoverageState? = nil,
         ratchets: [UUID: MeteringOwnerRatchet] = [:],
-        desiredPolicy: MeteringDesiredPolicy? = nil
+        desiredPolicy: MeteringDesiredPolicy? = nil,
+        deferredCallbacks: [String: DeferredMeteringCallback] = [:]
     ) {
         self.schemaVersion = schemaVersion
         self.ownerChildDeviceID = ownerChildDeviceID
@@ -882,6 +993,7 @@ nonisolated struct DeviceEpochStoreState: Codable, Equatable, Sendable {
         self.coverage = coverage
         self.ratchets = ratchets
         self.desiredPolicy = desiredPolicy
+        self.deferredCallbacks = deferredCallbacks
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -889,7 +1001,7 @@ nonisolated struct DeviceEpochStoreState: Codable, Equatable, Sendable {
         case epochs, activeEpochID, routes, activeRouteID, tombstones
         case v2RouteHandoff, legacy, registrationWork, activationWork, sampleWork
         case installWork, shieldReferences, identityCleanupWork, rolloverEffectsWork
-        case coverage, ratchets, desiredPolicy
+        case coverage, ratchets, desiredPolicy, deferredCallbacks
     }
 
     init(from decoder: Decoder) throws {
@@ -915,6 +1027,10 @@ nonisolated struct DeviceEpochStoreState: Codable, Equatable, Sendable {
         coverage = try values.decodeIfPresent(MonitorCoverageState.self, forKey: .coverage)
         ratchets = try values.decodeIfPresent([UUID: MeteringOwnerRatchet].self, forKey: .ratchets) ?? [:]
         desiredPolicy = try values.decodeIfPresent(MeteringDesiredPolicy.self, forKey: .desiredPolicy)
+        deferredCallbacks = try values.decodeIfPresent(
+            [String: DeferredMeteringCallback].self,
+            forKey: .deferredCallbacks
+        ) ?? [:]
     }
 }
 
@@ -958,9 +1074,19 @@ extension DeviceEpochStoreState {
             guard value.authorization != .waitingForRegistration else { continue }
             append(value.workID, kind: .sample, retry: value.retry, createdAt: value.createdAt)
         }
-        for value in shieldReferences.values {
-            append(value.operationID, kind: .shield, retry: value.retry, createdAt: value.createdAt)
-        }
+        // Shield references are deliberately NOT due work. Nothing claims them:
+        // `claimFirstDispatchable` rejects `.shield`, `dueInstallWork` filters to
+        // `.install`, and `settleLeadingInvalidRegistration` only looks at
+        // `.registration`. Their retry state is also never terminalized — a
+        // reference is written once when the cap shield is applied and then kept
+        // for release bookkeeping — so every one of them stayed permanently due
+        // with a past `nextAttemptAt`, sat at the head of the ordering, and
+        // starved every registration/activation/sample created after it. One
+        // cap hit therefore froze the device's whole metering pipeline for good
+        // (iPad 2026-07-25: a reference from 02:43 blocked the 04:42 rollover
+        // registration, which never reached attempt 1). Shield lifecycle is
+        // driven by `EarnedShieldEffectStore`, not by this queue.
+        _ = shieldReferences
 
         return work.sorted {
             if $0.nextAttemptAt != $1.nextAttemptAt { return $0.nextAttemptAt < $1.nextAttemptAt }
@@ -1097,6 +1223,22 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
 
     func read() throws -> DeviceEpochStoreState {
         try withLock { try loadState() }
+    }
+
+    /// Recovery primitive: delete the persisted metering state entirely so the
+    /// next `read()`/`transaction` starts from a fresh empty store (the store is
+    /// file-backed with no in-memory cache — see `loadState()` — so removing the
+    /// file is sufficient). Used only by the K-device nuclear reset (see
+    /// `MeteringNuclearReset`) to dig out of a wedged state — paused epoch +
+    /// `coverageExhausted` + churned retired epochs — that `Repair`
+    /// (stale-activity cleanup) cannot clear. Callers MUST have already stopped
+    /// Apple's activities so no in-flight callback transaction rewrites the file
+    /// after this returns.
+    func purgePersistedState() throws {
+        try withLock {
+            let url = try resolvedFileURL()
+            try fileIO.remove(at: url)
+        }
     }
 
     func ingestDesiredPolicy(
@@ -1334,7 +1476,14 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         toUsageDate: String,
         now: Date
     ) throws -> UUID {
-        try transaction(expectedOwner: owner) { state in
+        // Every `throw` below used to be swallowed by the caller
+        // (`BigKidStatePoller` only `print`ed it), so a device that could not
+        // roll over silently stayed on the previous day FOREVER while the
+        // poller retried every 10 s. The rollover verdict is now recorded on
+        // both paths, with the full invariant message.
+        var fromUsageDate = ""
+        do {
+            let workID = try transaction(expectedOwner: owner) { state in
             guard let oldRouteID = state.activeRouteID,
                   let oldRoute = state.routes[oldRouteID],
                   oldRoute.ownerChildDeviceID == owner,
@@ -1346,6 +1495,7 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                     "rollover has no active old route"
                 )
             }
+            fromUsageDate = oldRoute.usageDate
 
             if let existing = state.rolloverEffectsWork,
                existing.retry.terminal == .pending {
@@ -1425,21 +1575,35 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
             }
 
             if let existing = state.rolloverEffectsWork {
-                guard existing.retry.terminal == .succeeded,
-                      existing.ownerChildDeviceID == owner,
-                      existing.newEpochID == oldEpoch.epochID,
-                      existing.newRouteID == oldRoute.routeID,
-                      existing.oldStopAcknowledged,
-                      let completedHandoff = state.v2RouteHandoff,
-                      completedHandoff.handoffID == existing.workID,
-                      completedHandoff.phase == .committed,
-                      completedHandoff.priorStopAcknowledgedAt != nil
+                // A finished rollover is HISTORY: the only thing that matters is
+                // that it belongs to this owner and is no longer running. It must
+                // NOT be required to still own the active route.
+                //
+                // The previous version demanded `existing.newRouteID ==
+                // oldRoute.routeID` (plus a matching committed handoff), i.e.
+                // "yesterday's rollover product is still the live route". Any
+                // policy change, per-app limit edit, reset or generation churn
+                // replaces the active route — so from the first such change
+                // onward this guard could never pass again and EVERY following
+                // midnight threw "completed rollover cannot advance to the next
+                // day". The device then stayed on the old (already exhausted)
+                // day forever, silently: the poller retries every 10s and
+                // `BigKidStatePoller` only prints the error. That is the
+                // year-long "bar frozen after I changed something" pattern
+                // (proven on iPad 2026-07-25: rollover product 2177C592 vs live
+                // route 1CE7CC31 → stuck at 07-24 with 07-25 ready server-side).
+                guard existing.ownerChildDeviceID == owner,
+                      existing.retry.terminal != .pending
                 else {
                     throw DeviceEpochStoreInvariantError.invalidState(
-                        "completed rollover cannot advance to the next day"
+                        "a foreign or in-flight rollover blocks the next day"
                     )
                 }
-                state.v2RouteHandoff = nil
+                // Drop the finished handoff only if it belongs to that rollover;
+                // an unrelated live handoff must survive.
+                if let handoff = state.v2RouteHandoff, handoff.handoffID == existing.workID {
+                    state.v2RouteHandoff = nil
+                }
             }
 
             let workID = UUID()
@@ -1469,6 +1633,38 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                 createdAt: now
             )
             return workID
+            }
+            MeteringFlightRecorder.emit(
+                kind: .meteringDay,
+                site: "store.rollover",
+                verdict: "prepared",
+                detail: MeteringFlightRecorder.detail([
+                    ("from", fromUsageDate),
+                    ("to", toUsageDate),
+                    ("work", MeteringFlightRecorder.shortID(workID)),
+                ]),
+                transition: ScreenTimeEvent.Transition(
+                    before: fromUsageDate,
+                    after: toUsageDate
+                )
+            )
+            return workID
+        } catch {
+            MeteringFlightRecorder.emit(
+                kind: .meteringDay,
+                site: "store.rollover",
+                verdict: "prepare_failed",
+                detail: MeteringFlightRecorder.detail([
+                    ("from", fromUsageDate),
+                    ("to", toUsageDate),
+                    ("err", MeteringFlightRecorder.describe(error)),
+                ]),
+                transition: ScreenTimeEvent.Transition(
+                    before: fromUsageDate,
+                    after: toUsageDate
+                )
+            )
+            throw error
         }
     }
 
@@ -1655,25 +1851,243 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         preparedShieldReference: EarnedShieldReference? = nil
     ) throws -> MeteringAuthorizedCallbackResult {
         guard isCurrentOwner(owner) else {
+            recordCallbackVerdict(
+                .discarded(reason: "owner_mismatch"),
+                input: input,
+                site: "store.callback",
+                state: nil
+            )
             return .discarded(reason: "owner_mismatch")
         }
 
         let preflight = try read()
         guard preflight.ownerChildDeviceID == owner else {
-            return .discarded(reason: preflight.ownerChildDeviceID == nil ? "missing_owner" : "owner_mismatch")
+            let result = MeteringAuthorizedCallbackResult.discarded(
+                reason: preflight.ownerChildDeviceID == nil ? "missing_owner" : "owner_mismatch"
+            )
+            recordCallbackVerdict(result, input: input, site: "store.callback", state: preflight)
+            return result
         }
         guard preflight.routes[input.routeID] != nil else {
-            return .discarded(reason: preflight.tombstones[input.routeID] == nil ? "unknown_route" : "tombstoned_route")
+            let result = MeteringAuthorizedCallbackResult.discarded(
+                reason: preflight.tombstones[input.routeID] == nil ? "unknown_route" : "tombstoned_route"
+            )
+            recordCallbackVerdict(result, input: input, site: "store.callback", state: preflight)
+            return result
         }
 
-        return try transaction(expectedOwner: owner) { state in
-            authorizeV2Callback(
-                &state,
-                input: input,
-                owner: owner,
-                preparedShieldReference: preparedShieldReference
+        do {
+            var enqueued: EpochSampleWork?
+            let result = try transaction(expectedOwner: owner) { state in
+                let outcome = authorizeV2Callback(
+                    &state,
+                    input: input,
+                    owner: owner,
+                    preparedShieldReference: preparedShieldReference
+                )
+                if case .queued(let workID) = outcome {
+                    enqueued = state.sampleWork[workID]
+                }
+                return outcome
+            }
+            recordCallbackVerdict(result, input: input, site: "store.callback", state: preflight)
+            if let enqueued, preflight.sampleWork[enqueued.workID] == nil {
+                recordSampleEnqueued(enqueued, site: "store.callback")
+            }
+            return result
+        } catch {
+            // A throwing transaction (readback mismatch, invariant violation)
+            // used to lose the callback with no trace at all — the caller only
+            // saw `throws` and the extension logged it to a key that the next
+            // callback overwrote.
+            MeteringFlightRecorder.emitError(
+                site: "store.callback",
+                error: error,
+                detail: MeteringFlightRecorder.detail([
+                    ("evt", input.eventName),
+                    ("thr", String(input.thresholdMinutes)),
+                ]),
+                corrID: input.routeID
+            )
+            throw error
+        }
+    }
+
+    /// Flight-recorder emission for a newly created v2 sample work item — the
+    /// head of the sample chain. `estimatedMinutes` is the number the backend
+    /// will actually be told (`base + raw - excludedWhilePaused`), so a bar
+    /// that disagrees with the device can be traced to the exact minute value
+    /// that left here.
+    private func recordSampleEnqueued(_ work: EpochSampleWork, site: String) {
+        MeteringFlightRecorder.emit(
+            kind: .meteringSample,
+            site: site,
+            verdict: "enqueued",
+            detail: MeteringFlightRecorder.detail([
+                ("work", MeteringFlightRecorder.shortID(work.workID)),
+                ("date", work.request.usageDate),
+                ("auth", work.authorization.rawValue),
+                ("sampleID", work.request.clientSampleID),
+            ]),
+            nums: ScreenTimeEvent.Nums(
+                used: work.request.estimatedMinutes,
+                threshold: work.request.thresholdMinutes
+            ),
+            corrID: work.routeID
+        )
+    }
+
+    /// Flight-recorder emission for one v2 threshold verdict.
+    ///
+    /// Every branch exit of `authorizeV2Callback` funnels its
+    /// `MeteringAuthorizedCallbackResult` through here, together with the
+    /// numbers the decision was actually made on (`baseAcceptedMinutes`,
+    /// `lastRawThresholdMinutes`, `excludedWhilePausedMinutes`) and the
+    /// coverage status — so "too_early" and "epoch_not_active" stop being
+    /// unfalsifiable one-word mysteries.
+    ///
+    /// The three legacy debug defaults (`evlin.metering.lastV2ThresholdOutcome`
+    /// et al.) are intentionally left alone; this is additive.
+    private func recordCallbackVerdict(
+        _ result: MeteringAuthorizedCallbackResult,
+        input: MeteringAuthorizedCallbackInput,
+        site: String,
+        state: DeviceEpochStoreState?
+    ) {
+        let route = state?.routes[input.routeID]
+        let epoch = route.flatMap { state?.epochs[$0.epochID] }
+        let verdict: String
+        switch result {
+        case .queued(let workID):
+            // A rung that re-fires resolves to the SAME sample work item.
+            // Calling both "queued" hid genuine duplicate storms.
+            verdict = state?.sampleWork[workID] == nil ? "queued" : "queued_duplicate"
+        case .discarded(let reason):
+            verdict = reason
+        }
+        var pairs: [(String, String)] = [
+            ("evt", input.eventName),
+            ("life", route.map { $0.lifecycle.rawValue } ?? "no_route"),
+        ]
+        if let coverage = state?.coverage {
+            pairs.append(("cover", coverage.status.rawValue))
+            pairs.append(("ready", coverage.readyThroughUsageDate ?? "nil"))
+        } else if state != nil {
+            pairs.append(("cover", "none"))
+        }
+        if let epoch {
+            pairs.append(("date", epoch.usageDate))
+            pairs.append(("status", epoch.status.rawValue))
+            // The physical-time bound that produces `too_early`.
+            pairs.append(("started", ISO8601DateFormatter().string(from: epoch.startedAt)))
+        }
+        if case .queued(let workID) = result {
+            pairs.append(("work", MeteringFlightRecorder.shortID(workID)))
+        }
+        MeteringFlightRecorder.emit(
+            kind: .meteringGuard,
+            site: site,
+            verdict: verdict,
+            detail: MeteringFlightRecorder.detail(pairs),
+            nums: ScreenTimeEvent.Nums(
+                base: epoch?.baseAcceptedMinutes,
+                raw: epoch?.lastRawThresholdMinutes,
+                threshold: input.thresholdMinutes,
+                excluded: epoch?.excludedWhilePausedMinutes
+            ),
+            corrID: input.routeID
+        )
+    }
+
+    /// Credits callbacks that were parked awaiting activation and whose route has
+    /// since become active, and prunes entries that can never be credited (route
+    /// gone or tombstoned, or the grace window elapsed).
+    ///
+    /// Replay runs the parked input back through the SAME authorization path, so
+    /// every guard — provenance, physical-time plausibility, coverage, ratchet —
+    /// is enforced exactly as it would have been for a live callback. A replayed
+    /// entry can never re-park, because parking requires `lifecycle == .planned`.
+    @discardableResult
+    func replayDeferredCallbacks(owner: UUID, now: Date) throws -> [MeteringAuthorizedCallbackResult] {
+        guard isCurrentOwner(owner) else { return [] }
+        let priorState = try read()
+        guard !priorState.deferredCallbacks.isEmpty else { return [] }
+        // Replayed inputs + their verdicts, emitted AFTER the transaction
+        // commits so a rolled-back write never leaves a phantom in the
+        // timeline. Pruned (never-creditable) parks are counted separately —
+        // silently dropping them is how birth-race callbacks used to vanish.
+        var replayed: [(MeteringAuthorizedCallbackInput, MeteringAuthorizedCallbackResult)] = []
+        var prunedReasons: [String] = []
+        var enqueued: [EpochSampleWork] = []
+        let results = try transaction(expectedOwner: owner) { state in
+            var results: [MeteringAuthorizedCallbackResult] = []
+            for key in state.deferredCallbacks.keys.sorted() {
+                guard let parked = state.deferredCallbacks[key] else { continue }
+                guard parked.ownerChildDeviceID == owner,
+                      state.tombstones[parked.routeID] == nil,
+                      let route = state.routes[parked.routeID]
+                else {
+                    state.deferredCallbacks[key] = nil
+                    prunedReasons.append("route_gone")
+                    continue
+                }
+                switch route.lifecycle {
+                case .active:
+                    state.deferredCallbacks[key] = nil
+                    let input = MeteringAuthorizedCallbackInput(
+                        routeID: parked.routeID,
+                        activityName: parked.activityName,
+                        eventName: parked.eventName,
+                        namespace: parked.namespace,
+                        thresholdMinutes: parked.thresholdMinutes,
+                        observedAt: parked.observedAt,
+                        now: now,
+                        jitterSeconds: parked.jitterSeconds
+                    )
+                    let result = authorizeV2Callback(
+                        &state,
+                        input: input,
+                        owner: owner,
+                        preparedShieldReference: nil
+                    )
+                    replayed.append((input, result))
+                    if case .queued(let workID) = result,
+                       priorState.sampleWork[workID] == nil,
+                       let work = state.sampleWork[workID] {
+                        enqueued.append(work)
+                    }
+                    results.append(result)
+                case .planned:
+                    if now.timeIntervalSince(parked.parkedAt) > Self.deferredCallbackGraceSeconds {
+                        state.deferredCallbacks[key] = nil
+                        prunedReasons.append("grace_elapsed")
+                    }
+                case .retired, .tombstoned:
+                    state.deferredCallbacks[key] = nil
+                    prunedReasons.append("route_\(route.lifecycle.rawValue)")
+                }
+            }
+            return results
+        }
+        for (input, result) in replayed {
+            recordCallbackVerdict(result, input: input, site: "store.replay", state: priorState)
+        }
+        for work in enqueued {
+            recordSampleEnqueued(work, site: "store.replay")
+        }
+        if !replayed.isEmpty || !prunedReasons.isEmpty {
+            MeteringFlightRecorder.emit(
+                kind: .meteringReplay,
+                site: "store.replay",
+                verdict: replayed.isEmpty ? "pruned_only" : "replayed",
+                detail: MeteringFlightRecorder.detail([
+                    ("parked", String(priorState.deferredCallbacks.count)),
+                    ("pruned", prunedReasons.sorted().joined(separator: ",")),
+                ]),
+                nums: ScreenTimeEvent.Nums(count: replayed.count)
             )
         }
+        return results
     }
 
     private func authorizeV2Callback(
@@ -1684,6 +2098,20 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
     ) -> MeteringAuthorizedCallbackResult {
         if state.tombstones[input.routeID] != nil {
             return .discarded(reason: "tombstoned_route")
+        }
+        // P3 late-callback grace: a genuine callback for a route retired mid-flight
+        // (Apple delivers 5-15 min late) is credited to the current active epoch —
+        // without relaxing the strict current-route provenance guard below.
+        if let adopted = adoptLateRetiredCallbackIfEligible(&state, input: input, owner: owner) {
+            return adopted
+        }
+        // FIX-A birth race: Apple back-delivers already-met thresholds ~1s after
+        // startMonitoring, before the route can finish activating. Park those
+        // instead of dropping them; `replayDeferredCallbacks` credits them once
+        // the route is active. Every provenance check still applies — only the
+        // lifecycle is allowed to be `.planned`.
+        if let parked = parkCallbackAwaitingActivationIfEligible(&state, input: input, owner: owner) {
+            return parked
         }
         guard state.ownerChildDeviceID == owner,
               let route = state.routes[input.routeID],
@@ -1713,6 +2141,15 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
             return .discarded(reason: "route_provenance_mismatch")
         }
 
+        // Thresholds are RELATIVE to this epoch: the ladder is cut over
+        // `remaining = pool - baseAcceptedMinutes` and a sample reports
+        // `base + threshold`. So a threshold T genuinely requires T minutes of
+        // wall clock since `startedAt` — do NOT credit the base here (tried
+        // 2026-07-24, it silently disables this anti-cheat bound for every epoch
+        // born with a base). Apple's own events count the whole day
+        // (`includesPastActivity: true`), so a mid-day epoch does see instant
+        // back-delivery that lands here as `too_early`; that absolute-vs-relative
+        // mismatch is a separate open design item, not a reason to weaken this.
         let earliest = epoch.startedAt.addingTimeInterval(
             TimeInterval(input.thresholdMinutes * 60 - input.jitterSeconds)
         )
@@ -1816,7 +2253,48 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         }
 
         let rawThreshold = max(epoch.lastRawThresholdMinutes, input.thresholdMinutes)
-        let estimatedMinutes = epoch.baseAcceptedMinutes + max(0, rawThreshold - epoch.excludedWhilePausedMinutes)
+        // BUG 1 — report against the base THIS LADDER was cut from, not the
+        // epoch's current base.
+        //
+        // A rung is a promise about a total: "t150 means 150 minutes past the
+        // base this ladder was cut for". `absorbCreditedProgressForRearm` used
+        // to move the base without re-cutting the rungs, and any rung Apple
+        // still held then resolved against a base that had grown underneath it:
+        // base 145 + a rung from a ladder cut at base 20 reported 295 and 305
+        // minutes into a 180-minute pool (iPad 2026-07-25 13:37). The re-arm is
+        // now atomic with the re-cut, but Apple can re-deliver a rung of a
+        // registration the store has already replaced, so the ladder's own base
+        // — not the live one — is what a rung must be resolved against.
+        let ladderBase = state.ladderBaseMinutes(for: route)
+        let uncappedMinutes = ladderBase + max(0, rawThreshold - epoch.excludedWhilePausedMinutes)
+        // Cheap insurance, deliberately independent of the invariant above: no
+        // sample may ever claim more than the day's whole pool, however the
+        // ledger got there.
+        let ceilingMinutes = state.ladderCeilingMinutes(for: route)
+        let estimatedMinutes = ceilingMinutes.map { min(uncappedMinutes, $0) } ?? uncappedMinutes
+        if let ceilingMinutes, uncappedMinutes > ceilingMinutes {
+            MeteringFlightRecorder.emit(
+                kind: .meteringSample,
+                site: "store.callback",
+                verdict: "clamped_over_ceiling",
+                detail: MeteringFlightRecorder.detail([
+                    ("ladderBase", String(ladderBase)),
+                    ("epochBase", String(epoch.baseAcceptedMinutes)),
+                    ("ceiling", String(ceilingMinutes)),
+                ]),
+                nums: ScreenTimeEvent.Nums(
+                    used: estimatedMinutes,
+                    base: epoch.baseAcceptedMinutes,
+                    raw: epoch.lastRawThresholdMinutes,
+                    threshold: rawThreshold
+                ),
+                corrID: route.routeID,
+                transition: ScreenTimeEvent.Transition(
+                    before: String(uncappedMinutes),
+                    after: String(estimatedMinutes)
+                )
+            )
+        }
         let clientSampleID = MeteringSampleWireAliases.clientSampleID(
             lane: .v2,
             routeID: route.routeID,
@@ -1852,6 +2330,249 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                 generationOffsetMinutes: nil
             ),
             authorization: sampleAuthorization,
+            claim: nil,
+            retry: MeteringRetryState(
+                attemptCount: 0,
+                nextAttemptAt: input.now,
+                lastErrorCode: nil,
+                terminal: .pending
+            ),
+            createdAt: input.now
+        )
+        return .queued(sampleWorkID: workID)
+    }
+
+    /// P3 late-callback grace window. Apple delivers threshold callbacks 5-15 min
+    /// after the usage they describe; 20 min covers that plus margin while still
+    /// bounding stale-replay exposure.
+    private static let lateCallbackGraceSeconds: TimeInterval = 20 * 60
+
+    /// How long a callback may wait for its route to activate. Activation is two
+    /// network round trips, so minutes are normal and hours mean it will never
+    /// happen.
+    static let deferredCallbackGraceSeconds: TimeInterval = 60 * 60
+
+    /// Bounds the parking area so a pathological arm loop cannot grow the store.
+    private static let deferredCallbackCapacity = 32
+
+    /// Parks a callback whose route passes every provenance check but has not
+    /// finished activating yet (`lifecycle == .planned`). Returns nil — meaning
+    /// "fall through to the strict guard" — for anything else, so no other
+    /// discard path changes behaviour.
+    private func parkCallbackAwaitingActivationIfEligible(
+        _ state: inout DeviceEpochStoreState,
+        input: MeteringAuthorizedCallbackInput,
+        owner: UUID
+    ) -> MeteringAuthorizedCallbackResult? {
+        guard state.ownerChildDeviceID == owner,
+              let route = state.routes[input.routeID],
+              route.lifecycle == .planned,
+              route.ownerChildDeviceID == owner,
+              route.routeID == input.routeID,
+              route.activityName == input.activityName,
+              route.namespace == input.namespace,
+              let generation = state.generations[route.generationID],
+              let epoch = state.epochs[route.epochID],
+              route.epochID == epoch.epochID,
+              route.generationID == generation.generationID,
+              route.usageDate == epoch.usageDate,
+              epoch.childDeviceID == owner,
+              epoch.protocolVersion == 2,
+              epoch.retiredAt == nil,
+              epoch.canonicalTimezone == generation.canonicalTimezone,
+              epoch.policyRevision == generation.policyRevision,
+              epoch.measurementSelectionDigest == generation.measurementSelectionDigest,
+              epoch.enforcementSetID == generation.enforcementSetID,
+              generation.childDeviceID == owner,
+              generation.protocolVersion == 2,
+              generation.retiredAt == nil,
+              route.plannedEvents.contains(where: {
+                  $0.eventName == input.eventName && $0.thresholdMinutes == input.thresholdMinutes
+              })
+        else { return nil }
+
+        let key = DeferredMeteringCallback.key(routeID: input.routeID, eventName: input.eventName)
+        // Drop entries whose grace has elapsed before enforcing capacity, so a
+        // burst of dead parks can never crowd out a live one.
+        state.deferredCallbacks = state.deferredCallbacks.filter { _, parked in
+            input.now.timeIntervalSince(parked.parkedAt) <= Self.deferredCallbackGraceSeconds
+        }
+        guard state.deferredCallbacks[key] != nil
+                || state.deferredCallbacks.count < Self.deferredCallbackCapacity
+        else {
+            return .discarded(reason: "deferred_capacity_exhausted")
+        }
+        state.deferredCallbacks[key] = DeferredMeteringCallback(
+            ownerChildDeviceID: owner,
+            routeID: input.routeID,
+            activityName: input.activityName,
+            eventName: input.eventName,
+            namespace: input.namespace,
+            thresholdMinutes: input.thresholdMinutes,
+            observedAt: input.observedAt,
+            jitterSeconds: input.jitterSeconds,
+            parkedAt: input.now
+        )
+        return .discarded(reason: "deferred_pending_activation")
+    }
+
+    /// Credits a genuine but late threshold callback whose route was retired
+    /// mid-flight (policy replacement) to the CURRENT active epoch's base via
+    /// high-water — the year-long "bars frozen" root cause was silently dropping
+    /// exactly these. This never relaxes the strict current-route provenance guard
+    /// (`callbackRouteAuthorization`); it only fires when a current active epoch of
+    /// the SAME day / owner / selection-digest / enforcement-set exists, and
+    /// `max()` means it can never inflate beyond genuinely-observed usage. Returns
+    /// nil to fall through to the strict path (which then discards as before).
+    private func adoptLateRetiredCallbackIfEligible(
+        _ state: inout DeviceEpochStoreState,
+        input: MeteringAuthorizedCallbackInput,
+        owner: UUID
+    ) -> MeteringAuthorizedCallbackResult? {
+        guard state.ownerChildDeviceID == owner,
+              let retiredRoute = state.routes[input.routeID],
+              retiredRoute.ownerChildDeviceID == owner,
+              retiredRoute.activityName == input.activityName,
+              retiredRoute.namespace == input.namespace,
+              let retiredGeneration = state.generations[retiredRoute.generationID],
+              let retiredEpoch = state.epochs[retiredRoute.epochID],
+              retiredEpoch.epochID == retiredRoute.epochID,
+              retiredRoute.usageDate == retiredEpoch.usageDate,
+              retiredRoute.plannedEvents.contains(where: {
+                  $0.eventName == input.eventName && $0.thresholdMinutes == input.thresholdMinutes
+              })
+        else { return nil }
+
+        // Only genuinely-retired routes qualify — live routes take the strict path.
+        let isRetired = retiredRoute.lifecycle != .active
+            || retiredGeneration.retiredAt != nil
+            || retiredEpoch.retiredAt != nil
+        guard isRetired else { return nil }
+
+        // Retirement must be recent relative to callback arrival (grace window).
+        guard let retiredAt = [retiredGeneration.retiredAt, retiredEpoch.retiredAt]
+                .compactMap({ $0 }).max(),
+              input.now >= retiredAt,
+              input.now.timeIntervalSince(retiredAt) <= Self.lateCallbackGraceSeconds
+        else { return nil }
+
+        // The current active epoch must be the SAME measurement lineage. A genuine
+        // selection change (different apps) is NOT the same measurement — fall
+        // through and conservatively drop rather than mis-credit.
+        guard let currentEpochID = state.activeEpochID,
+              let currentEpoch = state.epochs[currentEpochID],
+              let currentRouteID = state.activeRouteID,
+              let currentRoute = state.routes[currentRouteID],
+              currentEpoch.epochID == currentRoute.epochID,
+              currentEpoch.status == .active,
+              currentEpoch.retiredAt == nil,
+              currentEpoch.exhaustedAt == nil,
+              currentEpoch.authoritativeBaseConflict == nil,
+              currentEpoch.childDeviceID == owner,
+              currentEpoch.usageDate == retiredEpoch.usageDate,
+              currentEpoch.measurementSelectionDigest == retiredEpoch.measurementSelectionDigest,
+              currentEpoch.enforcementSetID == retiredEpoch.enforcementSetID
+        else { return nil }
+
+        // High-water credit of the lost minutes: the retired epoch genuinely
+        // observed (base + threshold) real minutes that never reached a sample.
+        //
+        // BUG 1: this is the second place a base is lifted, and it lifts it from
+        // a DIFFERENT epoch's ladder. Bound it by the day's ceiling for the same
+        // reason the callback path is bounded — an unbounded lift here would
+        // reproduce the compounding through the late-adoption door.
+        let ceilingMinutes = state.ladderCeilingMinutes(for: currentRoute)
+        let recoveredUncapped = retiredEpoch.baseAcceptedMinutes + input.thresholdMinutes
+        let recovered = ceilingMinutes.map { min(recoveredUncapped, $0) } ?? recoveredUncapped
+        guard recovered > currentEpoch.baseAcceptedMinutes else {
+            return .discarded(reason: "late_retired_already_counted")
+        }
+        if let ceilingMinutes, recoveredUncapped > ceilingMinutes {
+            MeteringFlightRecorder.emit(
+                kind: .meteringSample,
+                site: "store.lateAdopt",
+                verdict: "clamped_over_ceiling",
+                detail: MeteringFlightRecorder.detail([
+                    ("ceiling", String(ceilingMinutes)),
+                ]),
+                nums: ScreenTimeEvent.Nums(
+                    used: recovered,
+                    threshold: input.thresholdMinutes
+                ),
+                corrID: currentRoute.routeID,
+                transition: ScreenTimeEvent.Transition(
+                    before: String(recoveredUncapped),
+                    after: String(recovered)
+                )
+            )
+        }
+        // `baseAcceptedMinutes` is immutable; rebuild the epoch with the lifted base
+        // (every other field copied verbatim).
+        let creditedEpoch = DeviceDailyEpoch(
+            epochID: currentEpoch.epochID,
+            protocolVersion: currentEpoch.protocolVersion,
+            childDeviceID: currentEpoch.childDeviceID,
+            usageDate: currentEpoch.usageDate,
+            canonicalTimezone: currentEpoch.canonicalTimezone,
+            policyRevision: currentEpoch.policyRevision,
+            measurementSelectionDigest: currentEpoch.measurementSelectionDigest,
+            enforcementSetID: currentEpoch.enforcementSetID,
+            startedAt: currentEpoch.startedAt,
+            registeredAt: currentEpoch.registeredAt,
+            baseAcceptedMinutes: recovered,
+            baseSource: currentEpoch.baseSource,
+            lastRawThresholdMinutes: currentEpoch.lastRawThresholdMinutes,
+            excludedWhilePausedMinutes: currentEpoch.excludedWhilePausedMinutes,
+            status: currentEpoch.status,
+            resumeBoundaryPending: currentEpoch.resumeBoundaryPending,
+            retiredAt: currentEpoch.retiredAt,
+            retireReason: currentEpoch.retireReason,
+            exhaustedAt: currentEpoch.exhaustedAt,
+            baseCorrectionState: currentEpoch.baseCorrectionState,
+            authoritativeBaseConflict: currentEpoch.authoritativeBaseConflict
+        )
+        state.epochs[currentEpochID] = creditedEpoch
+
+        // Queue one sample for the CURRENT route/epoch so the bar advances. Keyed
+        // off the retired route id so it can never collide with the current route's
+        // own threshold samples (dedup-safe).
+        let estimatedUncapped = creditedEpoch.baseAcceptedMinutes
+            + max(0, creditedEpoch.lastRawThresholdMinutes - creditedEpoch.excludedWhilePausedMinutes)
+        // Same hard bound as the main callback path: no sample may bill more
+        // than the day's whole pool, whatever door it came through.
+        let estimatedMinutes = ceilingMinutes.map { min(estimatedUncapped, $0) } ?? estimatedUncapped
+        let clientSampleID = MeteringSampleWireAliases.clientSampleID(
+            lane: .v2,
+            routeID: retiredRoute.routeID,
+            thresholdMinutes: input.thresholdMinutes
+        )
+        if let existing = state.sampleWork.values.first(where: {
+            $0.ownerChildDeviceID == owner && $0.request.clientSampleID == clientSampleID
+        }) {
+            return .queued(sampleWorkID: existing.workID)
+        }
+        let workID = UUID()
+        state.sampleWork[workID] = EpochSampleWork(
+            workID: workID,
+            ownerChildDeviceID: owner,
+            epochID: currentEpoch.epochID,
+            routeID: currentRoute.routeID,
+            request: EpochSampleRequestDTO(
+                deviceID: owner,
+                usageDate: currentEpoch.usageDate,
+                timezone: currentEpoch.canonicalTimezone,
+                activityName: MeteringSampleWireAliases.activityName(routeID: currentRoute.routeID),
+                eventName: MeteringSampleWireAliases.eventName(thresholdMinutes: input.thresholdMinutes),
+                thresholdMinutes: input.thresholdMinutes,
+                estimatedMinutes: estimatedMinutes,
+                observedAt: input.observedAt,
+                clientSampleID: clientSampleID,
+                protocolVersion: 2,
+                epochID: currentEpoch.epochID,
+                generationArmedAt: nil,
+                generationOffsetMinutes: nil
+            ),
+            authorization: .v2Deliverable,
             claim: nil,
             retry: MeteringRetryState(
                 attemptCount: 0,
@@ -1990,8 +2711,20 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         state: DeviceEpochStoreState
     ) -> Bool {
         guard let coverage = state.coverage else { return true }
-        return coverage.ownerChildDeviceID == owner
-            && coverage.status != .coverageExhausted
+        guard coverage.ownerChildDeviceID == owner else { return false }
+        // A callback IS proof that Apple has this exact route armed — it is the
+        // daemon telling us the threshold fired. Coverage is only a local,
+        // periodically-recomputed *snapshot* of whether the monitors look
+        // installed, and it is deliberately conservative: `refreshCoverage`
+        // reports `coverageExhausted` for a route it cannot confirm, including
+        // during the sub-second window right after `startMonitoring` when the
+        // daemon has not yet published the activity. Letting that snapshot veto
+        // the daemon's own delivery discards genuinely earned minutes that Apple
+        // will never re-send (iPad 2026-07-25: every re-arm produced a callback
+        // dropped as `epoch_not_active` while coverage caught up seconds later).
+        // Coverage still guards OTHER routes, where it is the only signal.
+        if state.activeRouteID == route.routeID { return true }
+        return coverage.status != .coverageExhausted
             && (coverage.readyThroughUsageDate ?? "") >= route.usageDate
     }
 
@@ -2206,6 +2939,355 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         }
     }
 
+    /// Fold the progress already credited on a route into the epoch's base,
+    /// immediately before that route is re-armed with Apple.
+    ///
+    /// Re-arming restarts the daemon's counter at zero (the events carry
+    /// `includesPastActivity: false`), but the ladder keeps its rungs — so a
+    /// route sitting at `lastRawThresholdMinutes = 10` needs 15 more minutes of
+    /// real use before any rung can exceed what is already credited. That gap is
+    /// invisible dead time: the child keeps using the device and the bar does
+    /// not move. Since every policy edit, reset or repair re-arms, this is the
+    /// mechanism behind "the bar froze after I changed something" (iPad
+    /// 2026-07-25: three re-arms in an hour, each buying a fresh dead zone).
+    ///
+    /// Moving the credited minutes into `baseAcceptedMinutes` and resetting the
+    /// raw high-water keeps the ledger identical — base + raw is unchanged — and
+    /// makes the next rung mean "5 more minutes" again. No-op when nothing has
+    /// been credited yet.
+    ///
+    /// BUG 1: moving the base is only half the operation. The rungs are cut over
+    /// `ceiling - base`, so a base that moves without its ladder leaves every
+    /// rung meaning more minutes than it did when it was armed — base 145 under
+    /// a ladder cut at base 20 made the top rung report 305 minutes into a
+    /// 180-minute pool (iPad 2026-07-25 13:37). The re-cut therefore happens in
+    /// THIS transaction, and `route.ladderBaseMinutes` records which base the
+    /// new rungs belong to. Callers must arm what the store holds AFTER this
+    /// returns, not the configuration they read before it.
+    /// - Parameter trigger: what caused the re-arm (`install`, `rekick`,
+    ///   `policy_change`, `rollover`, …). Recorded in the flight-recorder
+    ///   event so a base that jumped can be attributed to the exact re-arm
+    ///   that carried it — the "bar froze after I changed something" trail.
+    @discardableResult
+    func absorbCreditedProgressForRearm(
+        routeID: UUID,
+        owner: UUID,
+        trigger: String = "unspecified"
+    ) throws -> Bool {
+        var beforeBase = 0
+        var beforeRaw = 0
+        var afterBase = 0
+        var absorbed = false
+        var skipReason = "no_epoch"
+        defer {
+            MeteringFlightRecorder.emit(
+                kind: .meteringRearm,
+                site: "store.absorb",
+                verdict: absorbed ? "absorbed" : skipReason,
+                detail: MeteringFlightRecorder.detail([
+                    ("trigger", trigger),
+                    ("beforeBase", String(beforeBase)),
+                    ("beforeRaw", String(beforeRaw)),
+                    ("afterBase", String(afterBase)),
+                ]),
+                nums: ScreenTimeEvent.Nums(base: afterBase, raw: beforeRaw),
+                corrID: routeID,
+                transition: ScreenTimeEvent.Transition(
+                    before: "base:\(beforeBase)+raw:\(beforeRaw)",
+                    after: "base:\(afterBase)+raw:0"
+                )
+            )
+        }
+        do {
+            return try transaction(expectedOwner: owner) { state in
+            guard var route = state.routes[routeID],
+                  route.ownerChildDeviceID == owner,
+                  var epoch = state.epochs[route.epochID],
+                  epoch.childDeviceID == owner
+            else { return false }
+            beforeBase = epoch.baseAcceptedMinutes
+            beforeRaw = epoch.lastRawThresholdMinutes
+            guard epoch.status == .active else {
+                skipReason = "epoch_\(epoch.status.rawValue)"
+                return false
+            }
+            guard epoch.lastRawThresholdMinutes > 0 else {
+                skipReason = "nothing_credited"
+                afterBase = epoch.baseAcceptedMinutes
+                return false
+            }
+            // Minutes credited while paused are excluded from the ledger, so
+            // carrying the raw high-water wholesale would invent them. Carrying
+            // `raw - excluded` and zeroing both keeps `base + max(0, raw -
+            // excluded)` — the ledger — bit-identical across the re-arm.
+            let credited = max(
+                0,
+                epoch.lastRawThresholdMinutes - epoch.excludedWhilePausedMinutes
+            )
+            // The ladder must be re-cut for the carried base in this same
+            // transaction.
+            let carried: Int
+            let candidateLadder: [MeteringEventPlan]?
+            if let ceiling = state.ladderCeilingMinutes(for: route) {
+                // The base may never pass the day's ceiling, whatever the raw
+                // high-water says. Without this the absorb COMPOUNDS: a rung of
+                // a stale ladder re-populates `lastRawThresholdMinutes`, the
+                // next re-arm folds it in again, and the base climbs 145 → 305
+                // → 425 → 460 against a 180-minute pool (iPad 2026-07-25). The
+                // re-cut is what stops those stale rungs being credited at all;
+                // this is the bound that holds even if one slips through.
+                carried = min(epoch.baseAcceptedMinutes + credited, ceiling)
+                candidateLadder = MeteringLadderMath.plannedEvents(
+                    routeID: route.routeID,
+                    ladderBaseMinutes: carried,
+                    ceilingMinutes: ceiling
+                )
+            } else {
+                // Generation predates the pool/cap capture, so there is no
+                // honest ceiling to shrink against — inventing one from the
+                // current rungs would refuse absorbs the ledger has legitimately
+                // passed. Keep the ladder's SPAN and only re-anchor it to the
+                // carried base; the invariant that matters (a rung means
+                // `ladderBase + T`) still holds, and the report path simply
+                // claims no clamp it cannot justify.
+                carried = epoch.baseAcceptedMinutes + credited
+                candidateLadder = MeteringLadderMath.plannedEvents(
+                    routeID: route.routeID,
+                    ladderBaseMinutes: 0,
+                    ceilingMinutes: route.plannedEvents.map(\.thresholdMinutes).max() ?? 0
+                )
+            }
+            guard let recut = candidateLadder else {
+                // Nothing left above the carried base: absorbing here would
+                // raise the base under a ladder that can no longer be re-cut,
+                // which is exactly the state BUG 1 produced. Leave the ledger
+                // untouched; the day is over and the terminal rung owns it.
+                skipReason = "no_remaining"
+                afterBase = epoch.baseAcceptedMinutes
+                return false
+            }
+            route.plannedEvents = recut
+            route.ladderBaseMinutes = carried
+            state.routes[route.routeID] = route
+            afterBase = carried
+            absorbed = true
+            state.epochs[epoch.epochID] = DeviceDailyEpoch(
+                epochID: epoch.epochID,
+                protocolVersion: epoch.protocolVersion,
+                childDeviceID: epoch.childDeviceID,
+                usageDate: epoch.usageDate,
+                canonicalTimezone: epoch.canonicalTimezone,
+                policyRevision: epoch.policyRevision,
+                measurementSelectionDigest: epoch.measurementSelectionDigest,
+                enforcementSetID: epoch.enforcementSetID,
+                startedAt: epoch.startedAt,
+                registeredAt: epoch.registeredAt,
+                baseAcceptedMinutes: carried,
+                baseSource: epoch.baseSource,
+                lastRawThresholdMinutes: 0,
+                // Zeroed together with the raw high-water: the paused minutes it
+                // recorded were measured on the raw scale that just collapsed
+                // into the base, so keeping it would subtract them twice.
+                excludedWhilePausedMinutes: 0,
+                status: epoch.status,
+                resumeBoundaryPending: epoch.resumeBoundaryPending,
+                retiredAt: epoch.retiredAt,
+                retireReason: epoch.retireReason,
+                exhaustedAt: epoch.exhaustedAt,
+                baseCorrectionState: epoch.baseCorrectionState,
+                authoritativeBaseConflict: epoch.authoritativeBaseConflict
+            )
+            return true
+            }
+        } catch {
+            // A failed absorb is worse than a no-op: the caller re-arms anyway
+            // and the child then loses `beforeRaw` minutes of dead time.
+            absorbed = false
+            skipReason = "tx_error"
+            MeteringFlightRecorder.emitError(
+                site: "store.absorb",
+                error: error,
+                detail: MeteringFlightRecorder.detail([("trigger", trigger)]),
+                corrID: routeID
+            )
+            throw error
+        }
+    }
+
+    /// Self-heal for devices already carrying a base/ladder split (BUG 1).
+    ///
+    /// The iPad this was found on holds `base=145` under a ladder cut at base 20
+    /// whose top rung is 160 — `145 + 160 = 305` against a 180-minute pool. That
+    /// state cannot repair itself: nothing re-cuts a ladder once it is planned,
+    /// so every rung Apple still holds keeps over-reporting until midnight, and
+    /// each further re-arm folds a stale rung back in (145 → 305 → 425 → 460).
+    /// This runs on every recovery pass, detects the three ways the invariant
+    /// can be broken, and re-cuts today's ladder against the epoch's real
+    /// ledger — bounded by the pool, which is what pulls a compounded base back.
+    ///
+    /// Detection is deliberately not "`ladderBaseMinutes == nil`": routes
+    /// persisted before that field are the majority and most of them are
+    /// perfectly consistent. A route is only rewritten when its ladder can
+    /// actually over-run the day (`ladderBase + topRung > ceiling`), when it
+    /// records a base its epoch no longer agrees with, or when the base has
+    /// already climbed past the whole pool.
+    ///
+    /// The install work is pushed back to `pendingStart` so the installer arms
+    /// the corrected ladder — leaving Apple holding rungs the store has re-cut
+    /// away would be a milder version of the same bug.
+    @discardableResult
+    func repairLadderBaseInvariantIfNeeded(owner: UUID, now: Date) throws -> Bool {
+        var verdict = "consistent"
+        var beforeSummary = ""
+        var afterSummary = ""
+        var repairedRouteID: UUID?
+        defer {
+            if verdict != "consistent" {
+            MeteringFlightRecorder.emit(
+                kind: .meteringRepair,
+                site: "store.ladderRepair",
+                verdict: verdict,
+                detail: MeteringFlightRecorder.detail([
+                    ("route", MeteringFlightRecorder.shortID(repairedRouteID)),
+                ]),
+                corrID: repairedRouteID,
+                transition: ScreenTimeEvent.Transition(
+                    before: beforeSummary,
+                    after: afterSummary
+                )
+            )
+            }
+        }
+        return try transaction(expectedOwner: owner) { state in
+            guard let routeID = state.activeRouteID,
+                  var route = state.routes[routeID],
+                  route.ownerChildDeviceID == owner,
+                  route.lifecycle == .active,
+                  var epoch = state.epochs[route.epochID],
+                  epoch.childDeviceID == owner,
+                  epoch.status == .active,
+                  epoch.retiredAt == nil,
+                  epoch.authoritativeBaseConflict == nil,
+                  let ceiling = state.ladderCeilingMinutes(for: route),
+                  let topRung = route.plannedEvents.map(\.thresholdMinutes).max()
+            else { return false }
+
+            let ladderBase = state.ladderBaseMinutes(for: route)
+            let overrunsPool = ladderBase + topRung > ceiling
+            let disagreesWithEpoch = route.ladderBaseMinutes != epoch.baseAcceptedMinutes
+            // A base that has already climbed past the whole pool is the
+            // compounded form of the same split (iPad: base 460 against a
+            // 180-minute pool) and must be pulled back even if the ladder alone
+            // happens to look plausible.
+            let baseExceedsPool = epoch.baseAcceptedMinutes > ceiling
+            guard overrunsPool || disagreesWithEpoch || baseExceedsPool else { return false }
+
+            // Already clamped as far as this repair can go — do not re-run.
+            //
+            // The exhausted branch below cannot clear its own trigger: it leaves
+            // the stale rungs armed on purpose, so `overrunsPool` stays true and
+            // the next recovery pass repairs the identical state again. Measured
+            // on the iPad 2026-07-25: 45 identical `clamped_exhausted` records in
+            // three minutes, every one with `before == after`. Harmless to the
+            // ledger, but it is a no-op loop that burns the pass and drowns the
+            // flight recorder (repair events carry a transition, so the recorder
+            // deliberately never suppresses them).
+            //
+            // Deliberately NOT a permanent flag: the guard reads live values, so
+            // a later pool increase raises `ceiling`, a cut becomes possible
+            // again, and the real repair runs on the very next pass.
+            let alreadyClampedAtCeiling = epoch.baseAcceptedMinutes == ceiling
+                && route.ladderBaseMinutes == ceiling
+                && epoch.lastRawThresholdMinutes == 0
+                && epoch.excludedWhilePausedMinutes == 0
+            if alreadyClampedAtCeiling { return false }
+
+            repairedRouteID = routeID
+            beforeSummary = "base:\(epoch.baseAcceptedMinutes)"
+                + "+raw:\(epoch.lastRawThresholdMinutes)"
+                + "/ladder:\(ladderBase)+\(topRung)"
+
+            // Re-cut from where the ledger actually stands, bounded by the pool.
+            // The re-arm below restarts Apple's counter at zero, so the new rungs
+            // must be relative to the whole ledger — and the ledger itself may
+            // never exceed the day's ceiling, which is what pulls an inflated
+            // base back to a self-consistent value.
+            let credited = max(
+                0,
+                epoch.lastRawThresholdMinutes - epoch.excludedWhilePausedMinutes
+            )
+            let ledger = min(epoch.baseAcceptedMinutes + credited, ceiling)
+            let recut = MeteringLadderMath.plannedEvents(
+                routeID: routeID,
+                ladderBaseMinutes: ledger,
+                ceilingMinutes: ceiling
+            )
+            // The corrected base is written back in BOTH branches. When the pool
+            // is spent there is no ladder left to cut, but leaving the store
+            // claiming 460 of 180 minutes would keep every later sample wrong;
+            // the rungs Apple still holds are then bounded by `ladderBaseMinutes`
+            // plus the callback clamp.
+            state.epochs[epoch.epochID] = DeviceDailyEpoch(
+                epochID: epoch.epochID,
+                protocolVersion: epoch.protocolVersion,
+                childDeviceID: epoch.childDeviceID,
+                usageDate: epoch.usageDate,
+                canonicalTimezone: epoch.canonicalTimezone,
+                policyRevision: epoch.policyRevision,
+                measurementSelectionDigest: epoch.measurementSelectionDigest,
+                enforcementSetID: epoch.enforcementSetID,
+                startedAt: epoch.startedAt,
+                registeredAt: epoch.registeredAt,
+                baseAcceptedMinutes: ledger,
+                baseSource: epoch.baseSource,
+                lastRawThresholdMinutes: 0,
+                excludedWhilePausedMinutes: 0,
+                status: epoch.status,
+                resumeBoundaryPending: epoch.resumeBoundaryPending,
+                retiredAt: epoch.retiredAt,
+                retireReason: epoch.retireReason,
+                exhaustedAt: epoch.exhaustedAt,
+                baseCorrectionState: epoch.baseCorrectionState,
+                authoritativeBaseConflict: epoch.authoritativeBaseConflict
+            )
+            epoch = state.epochs[epoch.epochID] ?? epoch
+            route.ladderBaseMinutes = ledger
+            guard let recut else {
+                // The pool is spent: there is nothing left to cut, so the rungs
+                // Apple still holds stay armed. They can no longer over-report —
+                // `ladderBaseMinutes` now equals the ceiling and the callback
+                // clamp bounds the total — and the terminal rung still locks.
+                state.routes[routeID] = route
+                verdict = "clamped_exhausted"
+                afterSummary = "base:\(ledger)+raw:0/ceiling:\(ceiling)"
+                return true
+            }
+            route.plannedEvents = recut
+            state.routes[routeID] = route
+            for (workKey, var work) in state.installWork where work.routeID == routeID {
+                switch work.phase {
+                case .pendingStop, .stopped:
+                    continue
+                case .pendingStart, .starting, .installed, .verified, .dualActive, .active:
+                    break
+                }
+                work.claim = nil
+                work.phase = .pendingStart
+                work.retry = MeteringRetryState(
+                    attemptCount: 0,
+                    nextAttemptAt: now,
+                    lastErrorCode: "ladder_base_repaired",
+                    terminal: .pending
+                )
+                state.installWork[workKey] = work
+            }
+            verdict = overrunsPool || baseExceedsPool ? "recut_overrun" : "recut_desync"
+            afterSummary = "base:\(ledger)+raw:0"
+                + "/ladder:\(ledger)+\(recut.map(\.thresholdMinutes).max() ?? 0)"
+            return true
+        }
+    }
+
     func recordInstalledRoute(workID: UUID, token: UUID, owner: UUID, now: Date) throws -> Bool {
         try transaction(expectedOwner: owner) { state in
             guard let key = state.installWork.first(where: { $0.value.workID == workID })?.key,
@@ -2403,9 +3485,14 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                           install.ownerChildDeviceID == owner
                     else { return false }
                     switch install.phase {
-                    case .verified, .dualActive, .active:
+                    // .stopped is a churn husk: its daemon mutation is over and it
+                    // will never perform network work, so it cannot invalidate a
+                    // sample behind it. Treating it as blocking starved the sample
+                    // queue forever after any replacement (49 envelopes, 6 stopped
+                    // → t10 sample attemptCount=0 for hours, 2026-07-24).
+                    case .verified, .dualActive, .active, .stopped:
                         return true
-                    case .pendingStart, .starting, .installed, .pendingStop, .stopped:
+                    case .pendingStart, .starting, .installed, .pendingStop:
                         return false
                     }
                 }
@@ -3680,6 +4767,25 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
 }
 
 extension DeviceEpochStoreState {
+    /// The day ceiling this route's ladder must respect, taken from the policy
+    /// the generation was created with. `nil` only for generations persisted
+    /// before pool/cap were captured — those get no clamp because inventing one
+    /// would be worse than reporting the raw number.
+    func ladderCeilingMinutes(for route: MeteringCallbackRoute) -> Int? {
+        guard let generation = generations[route.generationID] else { return nil }
+        return MeteringLadderMath.ceiling(
+            poolMinutes: generation.configuredPoolMinutes,
+            capMinutes: generation.configuredDeviceCapMinutes
+        )
+    }
+
+    /// What a rung of `route`'s CURRENTLY PLANNED ladder is relative to.
+    /// Falls back to the epoch base for routes persisted before
+    /// `ladderBaseMinutes` existed.
+    func ladderBaseMinutes(for route: MeteringCallbackRoute) -> Int {
+        route.ladderBaseMinutes ?? epochs[route.epochID]?.baseAcceptedMinutes ?? 0
+    }
+
     func hasCurrentInstallProvenance(
         owner: UUID,
         route: MeteringCallbackRoute,
@@ -3876,7 +4982,14 @@ extension DeviceEpochStoreState {
             },
             installedEvents: nil,
             lifecycle: .planned,
-            createdAt: now
+            createdAt: now,
+            // Deliberately carries the REJECTED route's ladder base: the rungs
+            // are a relabelled copy of the old ladder, while the epoch's base
+            // jumps to the backend's authoritative figure. Recording the honest
+            // (stale) base is what lets `repairLadderBaseInvariantIfNeeded`
+            // notice the split and re-cut, instead of the split silently
+            // re-pricing every rung (BUG 1).
+            ladderBaseMinutes: rejectedRoute.ladderBaseMinutes
         )
         let pendingRetry = MeteringRetryState(
             attemptCount: 0,
@@ -4064,7 +5177,14 @@ extension DeviceEpochStoreState {
             },
             installedEvents: nil,
             lifecycle: .planned,
-            createdAt: now
+            createdAt: now,
+            // Deliberately carries the REJECTED route's ladder base: the rungs
+            // are a relabelled copy of the old ladder, while the epoch's base
+            // jumps to the backend's authoritative figure. Recording the honest
+            // (stale) base is what lets `repairLadderBaseInvariantIfNeeded`
+            // notice the split and re-cut, instead of the split silently
+            // re-pricing every rung (BUG 1).
+            ladderBaseMinutes: rejectedRoute.ladderBaseMinutes
         )
         let pendingRetry = MeteringRetryState(
             attemptCount: 0,

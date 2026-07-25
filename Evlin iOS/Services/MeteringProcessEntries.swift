@@ -328,6 +328,7 @@ final class AppMeteringEntry {
             try await driver.recover(ownerChildDeviceID: configuration.owner)
         } catch {
             print("[AppMeteringEntry] recovery failed: \(error)")
+            MeteringFlightRecorder.emitError(site: "app.recover", error: error)
         }
     }
 }
@@ -401,6 +402,7 @@ nonisolated final class DAMMeteringEntry: @unchecked Sendable {
             try await driver.recover(ownerChildDeviceID: configuration.owner)
         } catch {
             NSLog("[DAMMeteringEntry] network recovery failed: %@", String(describing: error))
+            MeteringFlightRecorder.emitError(site: "dam.recover", error: error)
         }
         do {
             try recoverShieldEffects(
@@ -409,6 +411,7 @@ nonisolated final class DAMMeteringEntry: @unchecked Sendable {
             )
         } catch {
             NSLog("[DAMMeteringEntry] shield recovery failed: %@", String(describing: error))
+            MeteringFlightRecorder.emitError(site: "dam.shieldRecover", error: error)
         }
     }
 
@@ -475,6 +478,35 @@ nonisolated final class DAMMeteringEntry: @unchecked Sendable {
             envelope = prepared
         } catch {
             NSLog("[DAMMeteringEntry] terminal shield prepare failed: %@", String(describing: error))
+            // The terminal rung is the one that applies the lock, and Apple
+            // delivers it exactly once — the `callback.handle` below ratchets
+            // the epoch past it, so there is no second chance from the daemon.
+            // Logging the throw and carrying on meant "the child's time ran out
+            // and nothing locked", with no durable trace for any retry to act
+            // on (kid_extension 2026-07-25 13:37:28, `durableReadbackMismatch`).
+            // Queue the lock durably instead: `recoverShieldEffects` retries it
+            // on every wake until it lands, and the minutes still count.
+            MeteringFlightRecorder.emitError(
+                site: "dam.terminalShield",
+                error: error,
+                detail: MeteringFlightRecorder.detail([("queued", "retry")]),
+                corrID: candidate.routeID
+            )
+            do {
+                try effectStore.recordPendingTerminal(
+                    candidate,
+                    errorCode: MeteringFlightRecorder.describe(error),
+                    now: clock.now
+                )
+            } catch {
+                // Losing the durable queue is the one failure that genuinely
+                // cannot be retried later, so it gets its own record.
+                MeteringFlightRecorder.emitError(
+                    site: "dam.terminalQueue",
+                    error: error,
+                    corrID: candidate.routeID
+                )
+            }
             return try callback.handle(
                 appleCallback,
                 expectedOwnerChildDeviceID: configuration.owner
@@ -508,6 +540,18 @@ nonisolated final class DAMMeteringEntry: @unchecked Sendable {
         expectedOwner: UUID,
         projectShields: ([String: ShieldRecord]) -> Void = { _ in }
     ) throws {
+        // FIX-E: terminal locks whose prepare failed are retried FIRST — they
+        // are the ones where "not yet" means an unlocked device.
+        let terminalsChanged = try effectStore.drainPendingTerminals(
+            expectedOwner: expectedOwner,
+            selection: self.selectionProvider(),
+            appliesToAll: earnedStore.lockedSetAllSelected,
+            isSuppressed: { candidate in
+                !self.earnedStore.usageCountingAllowed
+                    || self.earnedStore.isOverridden(forUsageDate: candidate.usageDate)
+            },
+            now: clock.now
+        )
         let changed = try effectStore.recover(
             expectedOwner: expectedOwner,
             isSuppressed: { envelope in
@@ -518,7 +562,7 @@ nonisolated final class DAMMeteringEntry: @unchecked Sendable {
                     || self.earnedStore.isOverridden(forUsageDate: route.usageDate)
             }
         )
-        if changed {
+        if changed || terminalsChanged {
             projectShields(try effectStore.loadShieldRecords())
         }
     }

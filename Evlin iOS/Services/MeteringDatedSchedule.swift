@@ -53,36 +53,31 @@ nonisolated enum MeteringHorizonPlanner {
 }
 
 nonisolated enum MeteringDatedSchedule {
-    static let earnedBucketMinutes = 5
-    static let guardEventCount = 48
+    // Re-exported from `MeteringLadderMath` (which owns the cut) so the two can
+    // never drift; `EarnedBudgetScheduler` reads them from here.
+    static let earnedBucketMinutes = MeteringLadderMath.bucketMinutes
+    static let guardEventCount = MeteringLadderMath.guardEventCount
 
+    /// Most application tokens one `DeviceActivityEvent` may carry. Beyond this
+    /// the event silently never fires (observed 2026-07-24; `AppLimitPlanner`
+    /// enforces the same bound for its own windows). Named rather than inline so
+    /// the number is greppable from both stacks when it is finally confirmed.
+    static let applicationTokenCap = 50
+
+    /// The 2026-07-24 A/B that capped this at 2 events ("activities carrying
+    /// 12-25 thresholds never fire, 1-2 event ones do") measured the interval
+    /// anchor bug, not the event count: with the interval pinned to canonical
+    /// midnight, every rung below the day's existing ledger was already behind
+    /// Apple's counter, so a long ladder looked dead while a short one — whose
+    /// two rungs Apple back-delivered once at arm time — looked alive. Now that
+    /// today's interval starts at `now`, every rung is genuinely ahead of the
+    /// counter, so the full ladder is armed again.
+    ///
+    /// The arithmetic itself lives in `MeteringLadderMath` because
+    /// `DeviceEpochStore` re-cuts ladders and is linked into targets this file
+    /// is not a member of (`EvlinPushApplier`).
     static func thresholds(poolMinutes: Int, capMinutes: Int) -> [Int] {
-        let ceiling = min(poolMinutes, capMinutes)
-        guard ceiling > 0 else { return [] }
-
-        let minimumStep = ceiling / guardEventCount
-            + (ceiling % guardEventCount == 0 ? 0 : 1)
-        let step = max(
-            earnedBucketMinutes,
-            ((minimumStep + earnedBucketMinutes - 1) / earnedBucketMinutes) * earnedBucketMinutes
-        )
-        var result = stride(
-            from: step,
-            through: ceiling,
-            by: step
-        ).map { $0 }
-        if result.last != ceiling {
-            result.append(ceiling)
-        }
-#if DEBUG
-        // DIAGNOSTIC A/B (2026-07-24): activities carrying 12-25 threshold events
-        // never fire on device while 1-2 event activities fire. Cap thresholds at
-        // the SOURCE so every install path (horizon planning, activation,
-        // replacement) arms at most 2 events. REMOVE after the experiment.
-        return Array(result.prefix(2))
-#else
-        return result
-#endif
+        MeteringLadderMath.thresholds(remainingMinutes: min(poolMinutes, capMinutes))
     }
 
     static func remainingPolicy(
@@ -94,6 +89,7 @@ nonisolated enum MeteringDatedSchedule {
         guard remainingCeiling > 0 else { return nil }
         return (remainingCeiling, remainingCeiling)
     }
+
 
     static func datedSchedule(
         usageDate: String,
@@ -134,29 +130,72 @@ nonisolated enum MeteringDatedSchedule {
         )
     }
 
+    /// True once `now` is at or past the canonical END of `usageDate`.
+    ///
+    /// Apple rejects `startMonitoring` for an interval that has already
+    /// finished with `invalidDateComponents` — reproduced on iPhone 2026-07-25,
+    /// where the watchdog kept trying to re-kick YESTERDAY's route (the device
+    /// was wedged on the previous day) and threw on every attempt. Nothing may
+    /// arm a day that is over, so this is the one shared predicate every arming
+    /// path consults.
+    ///
+    /// A usage date this calendar cannot parse returns `true`: an unusable date
+    /// is never safe to arm.
+    static func hasElapsed(
+        usageDate: String,
+        timeZone: TimeZone,
+        now: Date,
+        calendar: Calendar = Calendar(identifier: .gregorian)
+    ) -> Bool {
+        let policyCalendar = configuredCalendar(calendar, timeZone: timeZone)
+        guard let start = try? canonicalMidnight(
+            usageDate: usageDate,
+            calendar: policyCalendar,
+            timeZone: timeZone
+        ), let end = policyCalendar.date(byAdding: .day, value: 1, to: start) else {
+            return true
+        }
+        return now >= end
+    }
+
     static func makeEvent(
         selection: FamilyActivitySelection,
         thresholdMinutes: Int
     ) -> DeviceActivityEvent {
         precondition(thresholdMinutes > 0, "Metering event threshold must be positive")
-#if DEBUG
         // DIAGNOSTIC FIX (2026-07-24): events carrying >50 application tokens
         // never fire (iPhone 40 apps fired all day; iPad 180 apps never fired;
         // AppLimitPlanner already enforces <=50 tokens/window). Cap apps at 50 —
         // the category tokens still cover every app, so coverage semantics hold.
+        //
+        // Applies to EVERY configuration, deliberately. It was `#if DEBUG` until
+        // 2026-07-25, which inverted the risk: every on-device build we have ever
+        // verified is a Debug one, so Release alone would have shipped the
+        // uncapped path — the exact shape that produced the silent iPad. Whether
+        // 50 is truly Apple's limit is still unconfirmed (see the backlog item);
+        // until it is, both configurations run the behaviour we have evidence for.
         var applications = selection.applicationTokens
-        if applications.count > 50 {
-            applications = Set(Array(applications).prefix(50))
+        if applications.count > applicationTokenCap {
+            applications = Set(Array(applications).prefix(applicationTokenCap))
         }
-#else
-        let applications = selection.applicationTokens
-#endif
         return DeviceActivityEvent(
             applications: applications,
             categories: selection.categoryTokens,
             webDomains: selection.webDomainTokens,
             threshold: DateComponents(minute: thresholdMinutes),
-            includesPastActivity: true
+            // Count only usage that happens AFTER this monitor starts.
+            //
+            // The ladder is cut over `remaining = pool - baseAcceptedMinutes`, so
+            // a rung means "N more minutes from here", and `authorizeV2Callback`
+            // enforces exactly that (a rung may not be credited before N minutes
+            // of wall clock have passed since `epoch.startedAt`). With
+            // `includesPastActivity: true` the daemon instead compared the rungs
+            // against the whole interval's ledger, so a mid-day arm fired every
+            // rung within ~1s — and those deliveries were then correctly rejected
+            // as `too_early`, one per rung, never to be re-sent. Apple's counter
+            // and this ladder now measure the same thing; minutes spent before
+            // this monitor existed stay accounted for in `baseAcceptedMinutes`.
+            includesPastActivity: false
         )
     }
 
@@ -298,7 +337,28 @@ extension DeviceEpochStore {
                         usageDate: usageDate,
                         timezoneIdentifier: generation.canonicalTimezone,
                         calendarIdentifier: "gregorian",
-                        intervalStartAt: nil
+                        // Today's monitor must measure from NOW, not from
+                        // canonical midnight.
+                        //
+                        // Apple counts a `includesPastActivity: true` event from
+                        // the interval start, while this ladder is cut over
+                        // `remaining = pool - baseAcceptedMinutes` — i.e. it means
+                        // "N more minutes from here". Starting the interval at
+                        // midnight makes those two disagree by exactly the
+                        // minutes already spent today, so every rung of a
+                        // mid-day (re)arm is already behind the daemon's counter:
+                        // Apple back-delivers them once, ~1s after
+                        // startMonitoring, and then nothing fires for the rest of
+                        // the day. That is why a parent changing any setting
+                        // during the day silently stopped the pool until
+                        // midnight, and why the debug re-kick button was the only
+                        // way back. Anchoring at `now` makes the daemon measure
+                        // the same thing the ladder promises; minutes already
+                        // spent are preserved in `baseAcceptedMinutes`.
+                        //
+                        // Future days plan at midnight as before (`now` is not
+                        // inside their interval anyway).
+                        intervalStartAt: isToday ? request.now : nil
                     ),
                     installedSchedule: nil,
                     plannedEvents: thresholds.map { thresholdMinutes in
@@ -312,7 +372,11 @@ extension DeviceEpochStore {
                     },
                     installedEvents: nil,
                     lifecycle: .planned,
-                    createdAt: request.now
+                    createdAt: request.now,
+                    // The base these thresholds were cut against — the same
+                    // number the epoch is born with, recorded so a later base
+                    // move can never silently re-price the rungs (BUG 1).
+                    ladderBaseMinutes: isToday ? request.authoritativeBaseAcceptedMinutes : 0
                 )
                 let installWorkID = UUID()
                 state.installWork[installWorkID] = ActivityInstallWork(

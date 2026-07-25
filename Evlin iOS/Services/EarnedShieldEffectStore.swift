@@ -28,6 +28,22 @@ nonisolated struct EarnedShieldEffectEnvelope: Codable, Equatable, Sendable {
     let createdAt: Date
 }
 
+/// A terminal rung whose lock could not be prepared, kept until it is.
+///
+/// The terminal rung is a ONE-SHOT delivery: Apple fires it once and the
+/// callback that consumes it ratchets `epoch.lastRawThresholdMinutes` past it
+/// forever. Before this existed, a `prepareTerminal` throw was logged and then
+/// the rung was consumed anyway — the child's time ran out, no lock was applied,
+/// and nothing durable remained for any retry to find. That is the difference
+/// between "the lock was late" and "the lock never happens today".
+nonisolated struct EarnedShieldPendingTerminal: Codable, Equatable, Sendable {
+    let candidate: MeteringTerminalShieldCandidate
+    var attemptCount: Int
+    var lastErrorCode: String
+    let firstFailedAt: Date
+    var lastAttemptedAt: Date
+}
+
 nonisolated enum EarnedShieldCAS {
     static func releasingEarnedSource(
         current: ShieldRecord?,
@@ -47,6 +63,7 @@ nonisolated final class EarnedShieldEffectStore: @unchecked Sendable {
     static let envelopeKey = "evlin.earnedShieldEffectEnvelopes.v1"
     static let shieldsKey = "evlin.shieldRecords"
     static let blocksKey = "evlin.blockRecords"
+    static let pendingTerminalKey = "evlin.earnedShieldPendingTerminals.v1"
 
     private let defaults: UserDefaults?
     private let lock: ActiveLockPersistenceLock
@@ -409,6 +426,157 @@ nonisolated final class EarnedShieldEffectStore: @unchecked Sendable {
         return requiresProjection
     }
 
+    // MARK: - Terminal lock durability (FIX-E)
+
+    /// Records a terminal rung whose lock could not be prepared, so a later wake
+    /// can finish the job. Idempotent per `operationID`: repeated failures bump
+    /// the attempt counter rather than queueing a second lock.
+    func recordPendingTerminal(
+        _ candidate: MeteringTerminalShieldCandidate,
+        errorCode: String,
+        now: Date
+    ) throws {
+        try withPersistenceLock {
+            var pending = try loadPendingTerminals()
+            if var existing = pending[candidate.operationID] {
+                existing.attemptCount += 1
+                existing.lastErrorCode = errorCode
+                existing.lastAttemptedAt = now
+                pending[candidate.operationID] = existing
+            } else {
+                pending[candidate.operationID] = EarnedShieldPendingTerminal(
+                    candidate: candidate,
+                    attemptCount: 1,
+                    lastErrorCode: errorCode,
+                    firstFailedAt: now,
+                    lastAttemptedAt: now
+                )
+            }
+            try persistPendingTerminals(pending)
+        }
+    }
+
+    func pendingTerminals(expectedOwner: UUID) throws -> [EarnedShieldPendingTerminal] {
+        try withPersistenceLock {
+            try loadPendingTerminals().values
+                .filter { $0.candidate.ownerChildDeviceID == expectedOwner }
+                .sorted { $0.firstFailedAt < $1.firstFailedAt }
+        }
+    }
+
+    /// Retries every queued terminal lock. Returns true when a shield changed and
+    /// the caller must re-project.
+    ///
+    /// A queued entry leaves only three ways:
+    ///   * the lock lands (prepare + `apply` succeed) — dequeued;
+    ///   * the epoch it belongs to is no longer the active one (day rolled over,
+    ///     policy replaced) — dequeued as `superseded`, because locking for a day
+    ///     that is over would be wrong;
+    ///   * it stays queued, with its attempt count and last error recorded.
+    /// It is never dropped silently.
+    @discardableResult
+    func drainPendingTerminals(
+        expectedOwner: UUID,
+        selection: @autoclosure () -> FamilyActivitySelection,
+        appliesToAll: Bool,
+        isSuppressed: (MeteringTerminalShieldCandidate) -> Bool,
+        now: Date
+    ) throws -> Bool {
+        var changed = false
+        for entry in try pendingTerminals(expectedOwner: expectedOwner) {
+            let candidate = entry.candidate
+            do {
+                guard !isSuppressed(candidate) else {
+                    try dequeuePendingTerminal(candidate.operationID, verdict: "suppressed")
+                    continue
+                }
+                guard let envelope = try prepareTerminal(
+                    candidate,
+                    selection: selection(),
+                    appliesToAll: appliesToAll,
+                    isSuppressed: { isSuppressed(candidate) }
+                ) else {
+                    // `prepareTerminal` returning nil means this operation has
+                    // already been released — there is nothing left to apply.
+                    try dequeuePendingTerminal(candidate.operationID, verdict: "already_released")
+                    continue
+                }
+                // `apply` — not `applyPrepared` — because the original callback
+                // committed no shield reference (that is what failed), so the
+                // reference has to be created here before the CAS.
+                try apply(envelope)
+                changed = true
+                try dequeuePendingTerminal(candidate.operationID, verdict: "locked")
+            } catch EarnedShieldEffectError.authorizationChanged {
+                // The epoch/route this lock belonged to is no longer current.
+                try dequeuePendingTerminal(candidate.operationID, verdict: "superseded")
+            } catch {
+                try recordPendingTerminal(
+                    candidate,
+                    errorCode: MeteringFlightRecorder.describe(error),
+                    now: now
+                )
+                MeteringFlightRecorder.emitError(
+                    site: "shield.terminalRetry",
+                    error: error,
+                    detail: MeteringFlightRecorder.detail([
+                        ("attempts", String(entry.attemptCount + 1)),
+                        ("date", candidate.usageDate),
+                    ]),
+                    corrID: candidate.routeID
+                )
+            }
+        }
+        return changed
+    }
+
+    private func dequeuePendingTerminal(_ operationID: UUID, verdict: String) throws {
+        let removed: EarnedShieldPendingTerminal? = try withPersistenceLock {
+            var pending = try loadPendingTerminals()
+            let removed = pending.removeValue(forKey: operationID)
+            if removed != nil {
+                try persistPendingTerminals(pending)
+            }
+            return removed
+        }
+        guard let removed else { return }
+        MeteringFlightRecorder.emit(
+            kind: .meteringRepair,
+            site: "shield.terminalRetry",
+            verdict: verdict,
+            detail: MeteringFlightRecorder.detail([
+                ("attempts", String(removed.attemptCount)),
+                ("lastErr", removed.lastErrorCode),
+            ]),
+            corrID: removed.candidate.routeID
+        )
+    }
+
+    private func loadPendingTerminals() throws -> [UUID: EarnedShieldPendingTerminal] {
+        guard let defaults else { throw EarnedShieldEffectError.defaultsUnavailable }
+        defaults.synchronize()
+        guard let data = defaults.data(forKey: Self.pendingTerminalKey) else { return [:] }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard let value = try? decoder.decode(
+            [UUID: EarnedShieldPendingTerminal].self,
+            from: data
+        ) else {
+            // An unreadable queue must not become a reason to stop locking.
+            // Losing the queue is bad; refusing every future lock is worse.
+            MeteringFlightRecorder.emitFailure(
+                site: "shield.terminalQueue",
+                verdict: "unreadable_reset"
+            )
+            return [:]
+        }
+        return value
+    }
+
+    private func persistPendingTerminals(_ pending: [UUID: EarnedShieldPendingTerminal]) throws {
+        try persist(pending, key: Self.pendingTerminalKey)
+    }
+
     func reference(for envelope: EarnedShieldEffectEnvelope) throws -> EarnedShieldReference {
         EarnedShieldReference(
             operationID: envelope.operationID,
@@ -470,8 +638,35 @@ nonisolated final class EarnedShieldEffectStore: @unchecked Sendable {
         try load([UUID: EarnedShieldEffectEnvelope].self, key: Self.envelopeKey)
     }
 
+    /// Reads the shared `evlin.shieldRecords` blob the way every OTHER reader of
+    /// that key reads it: JSON first, PropertyList for legacy payloads, then
+    /// `normalizedForCurrentSchema()`.
+    ///
+    /// This store used to decode it with a private JSON-only decoder — the one
+    /// reader in the app without those two fallbacks. `ActiveLockStore`,
+    /// `AppLimitShieldPersistence` and the DeviceActivity extension all carry
+    /// them, and all three write to the same key, so a payload any of them
+    /// considers valid made `prepareTerminal` throw `durableReadbackMismatch`
+    /// (kid_extension 2026-07-25 13:37:28) — and a throw there means the child
+    /// runs out of time and is never locked.
     private func loadShields() throws -> [String: ShieldRecord] {
-        try load([String: ShieldRecord].self, key: Self.shieldsKey)
+        guard let defaults else { throw EarnedShieldEffectError.defaultsUnavailable }
+        defaults.synchronize()
+        guard let data = defaults.data(forKey: Self.shieldsKey) else { return [:] }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let decoded: [String: ShieldRecord]
+        if let json = try? decoder.decode([String: ShieldRecord].self, from: data) {
+            decoded = json
+        } else if let legacy = try? PropertyListDecoder().decode(
+            [String: ShieldRecord].self,
+            from: data
+        ) {
+            decoded = legacy
+        } else {
+            throw EarnedShieldEffectError.durableReadbackMismatch
+        }
+        return decoded.mapValues { $0.normalizedForCurrentSchema().record }
     }
 
     private func load<T: Decodable>(_ type: T.Type, key: String) throws -> T {
