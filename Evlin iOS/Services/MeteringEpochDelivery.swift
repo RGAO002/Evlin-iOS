@@ -1345,6 +1345,7 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
                 && $0.phase == .active
         }
         return priorInstalls.count == 1
+            || state.hasExactStaleDayPriorAbsent(owner: owner, handoff: handoff)
     }
 
     private func isSampleDispatchable(

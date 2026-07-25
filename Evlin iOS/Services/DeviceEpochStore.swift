@@ -3465,6 +3465,38 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
     }
 
     @discardableResult
+    func supersedeUnprovenRegistrationRequiredInstall(
+        workID: UUID,
+        owner: UUID
+    ) throws -> Bool {
+        try transaction(expectedOwner: owner) { state in
+            guard let key = state.installWork.first(where: { $0.value.workID == workID })?.key,
+                  var work = state.installWork[key],
+                  work.ownerChildDeviceID == owner,
+                  work.authorization == .registrationRequired,
+                  work.phase == .pendingStart,
+                  work.retry.terminal == .pending,
+                  let route = state.routes[work.routeID],
+                  let generation = state.generations[route.generationID],
+                  generation.generationID != state.activeGenerationID,
+                  let desired = state.desiredPolicy,
+                  desired.ownerChildDeviceID == owner,
+                  generation.policyRevision != desired.policyRevision,
+                  !state.hasCurrentInstallProvenance(
+                      owner: owner,
+                      route: route,
+                      authorization: work.authorization
+                  )
+            else { return false }
+            work.claim = nil
+            work.retry.terminal = .superseded
+            work.retry.lastErrorCode = "route_superseded"
+            state.installWork[key] = work
+            return true
+        }
+    }
+
+    @discardableResult
     func claimFirstNetworkWork(
         owner: UUID,
         now: Date,
@@ -3608,7 +3640,10 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                           switch install.phase {
                           case .verified, .dualActive, .active:
                               return true
-                          case .pendingStart, .starting, .installed, .pendingStop, .stopped:
+                          case .stopped:
+                              return install.routeID == handoff.fromRouteID
+                                  && state.hasExactStaleDayPriorAbsent(owner: owner, handoff: handoff)
+                          case .pendingStart, .starting, .installed, .pendingStop:
                               return false
                           }
                       }),
@@ -5427,6 +5462,46 @@ extension DeviceEpochStoreState {
                 timeZoneIdentifier: fromGeneration.canonicalTimezone
             )
         return hasAcknowledgedRetiredPriorRecovery
+    }
+
+    func hasExactStaleDayPriorAbsent(owner: UUID, handoff: V2RouteHandoff) -> Bool {
+        guard hasExactHandoffPriorProvenance(owner: owner, handoff: handoff),
+              let fromRoute = routes[handoff.fromRouteID],
+              let toRoute = routes[handoff.toRouteID],
+              fromRoute.usageDate < toRoute.usageDate,
+              isStaleActiveRouteConfirmedAbsent(
+                  owner: owner,
+                  routeID: handoff.fromRouteID
+              )
+        else { return false }
+        return true
+    }
+
+    func isStaleActiveRouteConfirmedAbsent(owner: UUID, routeID: UUID) -> Bool {
+        guard ownerChildDeviceID == owner,
+              activeRouteID == routeID,
+              let route = routes[routeID],
+              route.ownerChildDeviceID == owner,
+              route.lifecycle == .active,
+              activeEpochID == route.epochID,
+              let epoch = epochs[route.epochID],
+              epoch.childDeviceID == owner,
+              epoch.status == .active,
+              epoch.retiredAt == nil,
+              activeGenerationID == route.generationID,
+              let generation = generations[route.generationID],
+              generation.childDeviceID == owner,
+              generation.retiredAt == nil,
+              route.installedSchedule != nil,
+              !(route.installedEvents?.isEmpty ?? true)
+        else { return false }
+        let matches = installWork.values.filter {
+            $0.ownerChildDeviceID == owner && $0.routeID == routeID
+        }
+        guard matches.count == 1, let install = matches.first else { return false }
+        return install.phase == .stopped
+            && install.retry.terminal == .succeeded
+            && install.retry.lastErrorCode == "stale_day_prior_absent"
     }
 
     private func isExactCanonicalDayRolloverPrior(

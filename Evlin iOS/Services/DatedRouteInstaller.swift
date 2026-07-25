@@ -38,7 +38,14 @@ nonisolated final class DatedRouteInstaller: @unchecked Sendable {
         var results: [DatedRouteInstallResult] = []
         for due in try store.dueInstallWork(owner: ownerChildDeviceID, now: clock.now) {
             if due.authorization == .registrationRequired {
-                let result = DatedRouteInstallResult.deferred(workID: due.workID, code: "registrationRequired")
+                let superseded = try store.supersedeUnprovenRegistrationRequiredInstall(
+                    workID: due.workID,
+                    owner: ownerChildDeviceID
+                )
+                let result = DatedRouteInstallResult.deferred(
+                    workID: due.workID,
+                    code: superseded ? "routeSuperseded" : "registrationRequired"
+                )
                 recordInstallOutcome(result, routeID: due.routeID, attempts: due.retry.attemptCount)
                 results.append(result)
                 continue

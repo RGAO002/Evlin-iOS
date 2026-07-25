@@ -93,6 +93,7 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
         guard store.isCurrentOwner(owner) else { return }
         try cancelBackwardPreparingHandoffIfNeeded(owner: owner)
         try yieldSupersededCanonicalRolloverIfNeeded(owner: owner)
+        try markElapsedActivePriorAbsentIfNeeded(owner: owner)
         try prepareCanonicalRolloverIfNeeded(owner: owner)
         do {
             if try await recoverCanonicalRolloverIfPresent(owner: owner) {
@@ -353,9 +354,23 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
               state.rolloverEffectsWork?.retry.terminal != .pending,
               let activeRouteID = state.activeRouteID,
               let activeRoute = state.routes[activeRouteID],
+              let activeEpoch = state.epochs[activeRoute.epochID],
+              activeEpoch.status == .active,
+              activeEpoch.retiredAt == nil,
               let generation = state.generations[activeRoute.generationID],
               generation.childDeviceID == owner,
               generation.retiredAt == nil,
+              state.installWork.values.filter({
+                  $0.ownerChildDeviceID == owner && $0.routeID == activeRouteID
+              }).count == 1,
+              let activeInstall = state.installWork.values.first(where: {
+                  $0.ownerChildDeviceID == owner && $0.routeID == activeRouteID
+              }),
+              activeInstall.phase == .active
+                  || state.isStaleActiveRouteConfirmedAbsent(
+                      owner: owner,
+                      routeID: activeRouteID
+                  ),
               let canonicalToday = MeteringEpochContract.canonicalUsageDate(
                   at: clock.now,
                   timezoneIdentifier: generation.canonicalTimezone
@@ -378,6 +393,51 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
             toUsageDate: nextUsageDate,
             now: clock.now
         )
+    }
+
+    private func markElapsedActivePriorAbsentIfNeeded(owner: UUID) throws {
+        let activeActivityNames = Set(center.activities.map(\.rawValue))
+        try store.transaction(expectedOwner: owner) { state in
+            guard let routeID = state.activeRouteID,
+                  let route = state.routes[routeID],
+                  route.ownerChildDeviceID == owner,
+                  route.lifecycle == .active,
+                  let epoch = state.epochs[route.epochID],
+                  epoch.childDeviceID == owner,
+                  epoch.status == .active,
+                  epoch.retiredAt == nil,
+                  let generation = state.generations[route.generationID],
+                  generation.childDeviceID == owner,
+                  generation.retiredAt == nil,
+                  route.installedSchedule != nil,
+                  !(route.installedEvents?.isEmpty ?? true),
+                  !activeActivityNames.contains(route.activityName),
+                  let installKey = uniqueInstallKey(for: routeID, in: state),
+                  var install = state.installWork[installKey],
+                  install.phase == .pendingStart,
+                  install.retry.terminal == .pending,
+                  (
+                      install.retry.lastErrorCode == "startFailed"
+                          || install.retry.lastErrorCode == "usageDateElapsed"
+                  ),
+                  let timeZone = TimeZone(identifier: epoch.canonicalTimezone),
+                  MeteringDatedSchedule.hasElapsed(
+                      usageDate: route.usageDate,
+                      timeZone: timeZone,
+                      now: clock.now
+                  )
+            else { return }
+
+            install.phase = .stopped
+            install.claim = nil
+            install.retry = MeteringRetryState(
+                attemptCount: install.retry.attemptCount,
+                nextAttemptAt: install.retry.nextAttemptAt,
+                lastErrorCode: "stale_day_prior_absent",
+                terminal: .succeeded
+            )
+            state.installWork[installKey] = install
+        }
     }
 
     private func collectCompletedHandoff(owner: UUID) throws {
@@ -1011,9 +1071,17 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
                   let candidateEpoch = state.epochs[candidate.epochID],
                   let candidateGeneration = state.generations[candidate.generationID],
                   let priorInstallKey = uniqueInstallKey(for: fromRouteID, in: state),
-                  state.installWork[priorInstallKey]?.phase == .active,
+                  let priorInstall = state.installWork[priorInstallKey],
                   let candidateInstallKey = uniqueInstallKey(for: candidate.routeID, in: state)
             else { return nil }
+
+            guard priorInstall.phase == .active
+                    || state.isStaleActiveRouteConfirmedAbsent(
+                        owner: owner,
+                        routeID: fromRouteID
+                    )
+            else { return nil }
+
             state.v2RouteHandoff = V2RouteHandoff(
                 handoffID: UUID(),
                 ownerChildDeviceID: owner,
@@ -1222,7 +1290,9 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
                   let candidateInstallKey = uniqueInstallKey(for: candidate.routeID, in: state),
                   state.installWork[candidateInstallKey]?.phase == .dualActive,
                   let priorInstallKey = uniqueInstallKey(for: prior.routeID, in: state),
-                  state.installWork[priorInstallKey]?.phase == .active,
+                  let priorInstall = state.installWork[priorInstallKey],
+                  priorInstall.phase == .active
+                      || state.hasExactStaleDayPriorAbsent(owner: owner, handoff: handoff),
                   let priorCanonicalDayEnd = state.canonicalDayEnd(
                       usageDate: prior.usageDate,
                       timeZoneIdentifier: priorEpoch.canonicalTimezone
@@ -1258,6 +1328,10 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
                 referencedWorkIDs: Set(state.sampleWork.values.filter { $0.routeID == prior.routeID }.map(\.workID)),
                 retainedUntil: nil
             )
+            // Even an already-absent stale prior moves through pendingStop so
+            // the existing two-transaction stop acknowledgement invariant
+            // remains intact. The next pass observes daemon absence and
+            // atomically persists `.stopped` plus both acknowledgements.
             state.installWork[priorInstallKey]?.phase = .pendingStop
             handoff.phase = .committed
             handoff.registrationAcknowledgedAt = clock.now
