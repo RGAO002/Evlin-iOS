@@ -95,6 +95,23 @@ final class AppLimitEpochStoreTests: XCTestCase {
         XCTAssertEqual(persistedDate.timeIntervalSince1970, createdAt.timeIntervalSince1970)
     }
 
+    func testVersionSlotDecodesLegacyJSONWithoutAuthoritativeUsage() throws {
+        let ruleID = UUID(uuidString: "10000000-0000-0000-0000-000000000003")!
+        let slot = makeSetSlot(ruleID: ruleID, token: 3, source: .poll)
+        let encoded = try JSONEncoder().encode(slot)
+        var object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        )
+        object.removeValue(forKey: "authoritativeUsedTodayMinutes")
+        let legacyBytes = try JSONSerialization.data(withJSONObject: object)
+
+        let decoded = try JSONDecoder().decode(AppLimitVersionSlot.self, from: legacyBytes)
+
+        XCTAssertEqual(decoded.ruleID, ruleID)
+        XCTAssertNil(decoded.authoritativeUsedTodayMinutes)
+        XCTAssertFalse(decoded.isAuthoritativelyExhausted)
+    }
+
     func testTransactionCannotClearBoundOwner() throws {
         let ruleID = UUID(uuidString: "10000000-0000-0000-0000-000000000099")!
         let owner = UUID(uuidString: "20000000-0000-0000-0000-000000000099")!

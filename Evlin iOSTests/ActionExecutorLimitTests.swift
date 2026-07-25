@@ -490,7 +490,8 @@ final class ActionExecutorLimitTests: XCTestCase {
             payloadDigest: "set-10",
             receivedAt: Date(timeIntervalSince1970: 1_700_000_100),
             source: .poll,
-            rule: rule
+            rule: rule,
+            authoritativeUsedTodayMinutes: 1
         )
         XCTAssertEqual(
             try AppLimitCommandCoordinator(
@@ -577,6 +578,24 @@ final class ActionExecutorLimitTests: XCTestCase {
         XCTAssertNotNil(receipt.armID)
         XCTAssertGreaterThan(receipt.storeRevision, 0)
         let reread = try XCTUnwrap(store.read().slots[ruleID])
+        XCTAssertEqual(
+            reread.armProvenance?.baseAcceptedMinutes,
+            1,
+            "the new arm must preserve the server-confirmed usage already consumed today"
+        )
+        let armID = try XCTUnwrap(reread.armProvenance?.armID)
+        let enforcementEvent = try XCTUnwrap(
+            spy.armed.first?.events[
+                DeviceActivityEvent.Name(
+                    AppLimitPlanner.v2EnforcementEventName(armID: armID)
+                )
+            ]
+        )
+        XCTAssertEqual(
+            enforcementEvent.threshold.minute,
+            29,
+            "a 30-minute rule with 1 minute already used must arm only the 29-minute remainder"
+        )
         XCTAssertNil(reread.pendingOwnerWork)
         XCTAssertEqual(reread.appliedReceipt, receipt)
         XCTAssertEqual(
@@ -591,6 +610,177 @@ final class ActionExecutorLimitTests: XCTestCase {
         }
         XCTAssertEqual(shieldAfterIncrease?.sources, [.manual])
         XCTAssertTrue(shieldAfterIncrease?.limitRuleIDs.isEmpty == true)
+    }
+
+    func testRecoverySetOwnerWorkUsesPersistedAuthoritativeRemainder() async throws {
+        let owner = UUID()
+        let ruleID = UUID()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "authorized-limit-recovery-remainder-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = AppLimitEpochStore(
+            fileURL: directory.appendingPathComponent("epoch.json"),
+            lock: ActiveLockPersistenceLock.shared,
+            ownerProvider: { owner },
+            legacyDefaults: nil
+        )
+        let ruleStore = AppLimitRuleStore(
+            epochStore: store,
+            expectedOwnerProvider: { owner }
+        )
+        let rule = AppLimitRule(
+            id: ruleID,
+            appTokens: [],
+            bundleID: "com.example.recovery-remainder",
+            displayName: "Recovery remainder",
+            budgetMinutes: 15,
+            window: AppLimitWindow(
+                startMinute: 0,
+                endMinute: 1439,
+                repeats: true,
+                timezone: "America/New_York"
+            ),
+            effectiveFrom: Date(timeIntervalSince1970: 1_700_000_000),
+            expiresAt: nil
+        )
+        let envelope = AppLimitCommandEnvelope(
+            commandID: UUID(),
+            ruleID: ruleID,
+            orderingToken: 12,
+            kind: .set,
+            payloadDigest: "set-12-used-11",
+            receivedAt: Date(timeIntervalSince1970: 1_700_000_100),
+            source: .notificationServiceExtension,
+            rule: rule,
+            authoritativeUsedTodayMinutes: 11
+        )
+        XCTAssertEqual(
+            try AppLimitCommandCoordinator(
+                store: store,
+                expectedOwnerProvider: { owner }
+            ).ingest(envelope),
+            .acceptedNeedsOwner
+        )
+        let slot = try XCTUnwrap(store.read().slots[ruleID])
+        let work = try XCTUnwrap(slot.pendingOwnerWork)
+        let spy = LimitSchedulerSpy()
+        let executor = ActionExecutor(
+            activityScheduler: spy,
+            authorizationStatusProvider: { .approved },
+            ruleStore: ruleStore,
+            appLimitEpochStore: store,
+            appLimitOwnerProvider: { owner }
+        )
+
+        let effect = try await executor.recoverAppLimitOwnerEffect(
+            work: work,
+            slot: slot,
+            expectedChildID: owner
+        )
+
+        let reread = try XCTUnwrap(store.read().slots[ruleID])
+        XCTAssertEqual(reread.armProvenance?.baseAcceptedMinutes, 11)
+        XCTAssertEqual(effect.armID, reread.armProvenance?.armID)
+        let armID = try XCTUnwrap(effect.armID)
+        let enforcementEvent = try XCTUnwrap(
+            spy.armed.first?.events[
+                DeviceActivityEvent.Name(
+                    AppLimitPlanner.v2EnforcementEventName(armID: armID)
+                )
+            ]
+        )
+        XCTAssertEqual(enforcementEvent.threshold.minute, 4)
+    }
+
+    func testRecoverySetOwnerWorkStopsOldMonitorAndShieldsWhenAlreadyExhausted() async throws {
+        let owner = UUID()
+        let ruleID = UUID()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "authorized-limit-recovery-exhausted-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = AppLimitEpochStore(
+            fileURL: directory.appendingPathComponent("epoch.json"),
+            lock: ActiveLockPersistenceLock.shared,
+            ownerProvider: { owner },
+            legacyDefaults: nil
+        )
+        let ruleStore = AppLimitRuleStore(
+            epochStore: store,
+            expectedOwnerProvider: { owner }
+        )
+        let rule = AppLimitRule(
+            id: ruleID,
+            appTokens: [],
+            bundleID: "com.example.recovery-exhausted",
+            displayName: "Recovery exhausted",
+            budgetMinutes: 1,
+            window: AppLimitWindow(
+                startMinute: 0,
+                endMinute: 1439,
+                repeats: true,
+                timezone: "America/New_York"
+            ),
+            effectiveFrom: Date(timeIntervalSince1970: 1_700_000_000),
+            expiresAt: nil
+        )
+        let envelope = AppLimitCommandEnvelope(
+            commandID: UUID(),
+            ruleID: ruleID,
+            orderingToken: 13,
+            kind: .set,
+            payloadDigest: "set-13-used-11",
+            receivedAt: Date(timeIntervalSince1970: 1_700_000_100),
+            source: .notificationServiceExtension,
+            rule: rule,
+            authoritativeUsedTodayMinutes: 11
+        )
+        XCTAssertEqual(
+            try AppLimitCommandCoordinator(
+                store: store,
+                expectedOwnerProvider: { owner }
+            ).ingest(envelope),
+            .acceptedNeedsOwner
+        )
+        let slot = try XCTUnwrap(store.read().slots[ruleID])
+        let work = try XCTUnwrap(slot.pendingOwnerWork)
+        let spy = LimitSchedulerSpy()
+        let staleActivity = DeviceActivityName("evlin.limit.v2.\(UUID().uuidString.lowercased())")
+        try spy.startMonitoring(
+            staleActivity,
+            during: DeviceActivitySchedule(
+                intervalStart: DateComponents(hour: 0, minute: 0),
+                intervalEnd: DateComponents(hour: 23, minute: 59),
+                repeats: true
+            )
+        )
+        let executor = ActionExecutor(
+            activityScheduler: spy,
+            authorizationStatusProvider: { .approved },
+            ruleStore: ruleStore,
+            appLimitEpochStore: store,
+            appLimitOwnerProvider: { owner }
+        )
+
+        let effect = try await executor.recoverAppLimitOwnerEffect(
+            work: work,
+            slot: slot,
+            expectedChildID: owner
+        )
+
+        XCTAssertNil(effect.armID)
+        XCTAssertTrue(spy.monitoredActivities().isEmpty)
+        XCTAssertTrue(spy.armed.isEmpty)
+        let shield = await ActiveLockStore.shared.allCurrent().shields.first {
+            $0.recordKey == LimitShieldLogic.recordKey(for: rule)
+        }
+        XCTAssertEqual(shield?.sources, [.limit])
+        XCTAssertEqual(shield?.limitRuleIDs, [ruleID])
     }
 
     func testAuthorizedClearOwnerWorkRemovesOnlyLimitShieldAndCommitsReceipt() async throws {
@@ -791,7 +981,8 @@ final class ActionExecutorLimitTests: XCTestCase {
             payloadDigest: "set-10",
             receivedAt: Date(timeIntervalSince1970: 1_700_000_100),
             source: .poll,
-            rule: rule
+            rule: rule,
+            authoritativeUsedTodayMinutes: rule.budgetMinutes
         )
         XCTAssertEqual(try coordinator.ingest(setEnvelope), .acceptedNeedsOwner)
 

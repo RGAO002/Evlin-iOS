@@ -114,11 +114,18 @@ final class AppLimitOwnerRecoveryDriver {
                     let armID: UUID?
                     switch work.commandKind {
                     case .set:
-                        guard let provenance = current.armProvenance,
-                              provenance.ruleRevision == work.orderingToken,
-                              effect.armID == provenance.armID
-                        else { throw RecoveryError.staleWork }
-                        armID = provenance.armID
+                        if current.isAuthoritativelyExhausted {
+                            guard effect.armID == nil else {
+                                throw RecoveryError.staleWork
+                            }
+                            armID = nil
+                        } else {
+                            guard let provenance = current.armProvenance,
+                                  provenance.ruleRevision == work.orderingToken,
+                                  effect.armID == provenance.armID
+                            else { throw RecoveryError.staleWork }
+                            armID = provenance.armID
+                        }
                     case .clear:
                         guard effect.armID == nil else { throw RecoveryError.staleWork }
                         armID = nil

@@ -74,6 +74,7 @@ nonisolated enum AppLimitProductionComposition {
         let ruleID: UUID
         let orderingToken: Int64
         let rule: AppLimitRule?
+        let authoritativeUsedTodayMinutes: Int?
         let clearReason: String?
         let clearUpdatedAt: Date?
 
@@ -102,6 +103,7 @@ nonisolated enum AppLimitProductionComposition {
                 effectiveFrom: limit.effectiveFrom,
                 expiresAt: limit.expiresAt
             )
+            authoritativeUsedTodayMinutes = limit.usedTodayMinutes
             clearReason = nil
             clearUpdatedAt = nil
         case .clearLimit:
@@ -110,6 +112,7 @@ nonisolated enum AppLimitProductionComposition {
             ruleID = clear.ruleId
             orderingToken = clear.orderingToken
             rule = nil
+            authoritativeUsedTodayMinutes = nil
             clearReason = clear.reason
             clearUpdatedAt = clear.updatedAt
         default:
@@ -138,7 +141,8 @@ nonisolated enum AppLimitProductionComposition {
             payloadDigest: digest,
             receivedAt: command.issuedAt,
             source: source,
-            rule: rule
+            rule: rule,
+            authoritativeUsedTodayMinutes: authoritativeUsedTodayMinutes
         )
     }
 

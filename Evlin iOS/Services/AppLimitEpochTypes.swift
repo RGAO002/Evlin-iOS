@@ -98,6 +98,29 @@ nonisolated struct AppLimitCommandEnvelope: Codable, Equatable, Sendable {
     let receivedAt: Date
     let source: AppLimitCommandSource
     let rule: AppLimitRule?
+    let authoritativeUsedTodayMinutes: Int?
+
+    init(
+        commandID: UUID,
+        ruleID: UUID,
+        orderingToken: Int64,
+        kind: AppLimitCommandKind,
+        payloadDigest: String,
+        receivedAt: Date,
+        source: AppLimitCommandSource,
+        rule: AppLimitRule?,
+        authoritativeUsedTodayMinutes: Int? = nil
+    ) {
+        self.commandID = commandID
+        self.ruleID = ruleID
+        self.orderingToken = orderingToken
+        self.kind = kind
+        self.payloadDigest = payloadDigest
+        self.receivedAt = receivedAt
+        self.source = source
+        self.rule = rule
+        self.authoritativeUsedTodayMinutes = authoritativeUsedTodayMinutes
+    }
 }
 
 nonisolated struct AppLimitClearTombstone: Codable, Equatable, Sendable {
@@ -207,6 +230,31 @@ nonisolated struct AppLimitVersionSlot: Codable, Equatable, Sendable {
     var pendingOwnerWork: AppLimitOwnerWork?
     var appliedReceipt: AppLimitApplyReceipt?
     var armProvenance: AppLimitArmProvenance? = nil
+    var authoritativeUsedTodayMinutes: Int? = nil
+
+    init(
+        ruleID: UUID,
+        latestOrderingToken: Int64,
+        latestKind: AppLimitCommandKind,
+        latestPayloadDigest: String,
+        activeRule: AppLimitRule?,
+        clearTombstone: AppLimitClearTombstone?,
+        pendingOwnerWork: AppLimitOwnerWork?,
+        appliedReceipt: AppLimitApplyReceipt?,
+        armProvenance: AppLimitArmProvenance? = nil,
+        authoritativeUsedTodayMinutes: Int? = nil
+    ) {
+        self.ruleID = ruleID
+        self.latestOrderingToken = latestOrderingToken
+        self.latestKind = latestKind
+        self.latestPayloadDigest = latestPayloadDigest
+        self.activeRule = activeRule
+        self.clearTombstone = clearTombstone
+        self.pendingOwnerWork = pendingOwnerWork
+        self.appliedReceipt = appliedReceipt
+        self.armProvenance = armProvenance
+        self.authoritativeUsedTodayMinutes = authoritativeUsedTodayMinutes
+    }
 }
 
 nonisolated struct AppLimitReplacementKey: Codable, Equatable, Sendable {
@@ -261,6 +309,14 @@ nonisolated struct AppLimitArmProvenance: Codable, Equatable, Sendable {
 }
 
 nonisolated extension AppLimitVersionSlot {
+    var isAuthoritativelyExhausted: Bool {
+        guard latestKind == .set,
+              let rule = activeRule,
+              let authoritativeUsedTodayMinutes
+        else { return false }
+        return authoritativeUsedTodayMinutes >= rule.budgetMinutes
+    }
+
     init(accepting command: AppLimitCommandEnvelope) {
         let ownerWork = AppLimitOwnerWork(
             workID: command.commandID,
@@ -286,7 +342,8 @@ nonisolated extension AppLimitVersionSlot {
                 clearedAt: command.receivedAt
             ) : nil,
             pendingOwnerWork: ownerWork,
-            appliedReceipt: nil
+            appliedReceipt: nil,
+            authoritativeUsedTodayMinutes: command.authoritativeUsedTodayMinutes
         )
     }
 
@@ -435,11 +492,15 @@ nonisolated enum AppLimitReceiptReadback {
         else { return nil }
         switch slot.latestKind {
         case .set:
-            guard slot.activeRule?.id == ruleID,
-                  let armID = slot.armProvenance?.armID,
-                  slot.armProvenance?.ruleRevision == slot.latestOrderingToken,
-                  receipt.armID == armID
-            else { return nil }
+            guard slot.activeRule?.id == ruleID else { return nil }
+            if slot.isAuthoritativelyExhausted {
+                guard receipt.armID == nil else { return nil }
+            } else {
+                guard let armID = slot.armProvenance?.armID,
+                      slot.armProvenance?.ruleRevision == slot.latestOrderingToken,
+                      receipt.armID == armID
+                else { return nil }
+            }
         case .clear:
             guard slot.activeRule == nil,
                   slot.clearTombstone?.orderingToken == slot.latestOrderingToken,

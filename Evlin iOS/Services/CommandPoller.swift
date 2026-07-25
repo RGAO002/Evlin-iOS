@@ -969,6 +969,7 @@ final class CommandPoller {
         let ruleID: UUID
         let orderingToken: Int64
         let rule: AppLimitRule?
+        let authoritativeUsedTodayMinutes: Int?
         let clearReason: String?
         let clearUpdatedAt: Date?
 
@@ -998,6 +999,7 @@ final class CommandPoller {
                 effectiveFrom: limit.effectiveFrom,
                 expiresAt: limit.expiresAt
             )
+            authoritativeUsedTodayMinutes = limit.usedTodayMinutes
             clearReason = nil
             clearUpdatedAt = nil
         case .clearLimit:
@@ -1006,6 +1008,7 @@ final class CommandPoller {
             ruleID = clear.ruleId
             orderingToken = clear.orderingToken
             rule = nil
+            authoritativeUsedTodayMinutes = nil
             clearReason = clear.reason
             clearUpdatedAt = clear.updatedAt
         default:
@@ -1034,7 +1037,8 @@ final class CommandPoller {
             payloadDigest: digest,
             receivedAt: command.issuedAt,
             source: .poll,
-            rule: rule
+            rule: rule,
+            authoritativeUsedTodayMinutes: authoritativeUsedTodayMinutes
         )
     }
 

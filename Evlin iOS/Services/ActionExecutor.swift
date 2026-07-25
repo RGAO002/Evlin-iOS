@@ -14,6 +14,13 @@ private enum AppLimitOwnerWorkError: Error {
     case readback
 }
 
+private enum AppLimitConvergenceError: Error {
+    case stale
+    case lockStoreUnavailable
+    case quotaExceeded(windows: Int, slotsNeeded: Int, cap: Int)
+    case partiallyArmed(armed: Int, failed: Int)
+}
+
 enum CatalogCommandTokenData {
     static func decodedApplicationData(from target: CommandTarget) -> Data? {
         decodedData(from: target.catalogTokenDataBase64)
@@ -415,7 +422,7 @@ final class ActionExecutor: @unchecked Sendable {
             }
             result = await applyPersistedLimitRule(
                 rule,
-                command: cmd,
+                slot: slot,
                 identity: identity
             )
         case .clear:
@@ -462,14 +469,19 @@ final class ActionExecutor: @unchecked Sendable {
             guard let rule = slot.activeRule, rule.id == work.ruleID else {
                 throw AppLimitOwnerWorkError.stale
             }
-            guard case .armed = makeLimitPlanner().arm(rules: ruleStore.all()),
-                  let current = try appLimitEpochStore.read().slots[work.ruleID],
-                  current.pendingOwnerWork == work,
-                  let provenance = current.armProvenance,
-                  provenance.ruleRevision == work.orderingToken
+            let armID = try await convergePersistedLimitRule(
+                rule,
+                slot: slot,
+                targetChildID: expectedChildID,
+                mutationAllowed: {
+                    self.appLimitOwnerProvider() == expectedChildID
+                }
+            )
+            guard let current = try appLimitEpochStore.read().slots[work.ruleID],
+                  current.pendingOwnerWork == work
             else { throw AppLimitOwnerWorkError.stale }
             return AppLimitOwnerEffectResult(
-                armID: provenance.armID,
+                armID: armID,
                 source: "app_owner_recovery"
             )
         case .clear:
@@ -483,54 +495,140 @@ final class ActionExecutor: @unchecked Sendable {
 
     private func applyPersistedLimitRule(
         _ rule: AppLimitRule,
-        command: LockCommand,
+        slot: AppLimitVersionSlot,
         identity: CommandIdentityContext
     ) async -> AckResult {
-        guard await prepareForMutation(identity) else { return Self.staleIdentityResult }
-        let plan = makeLimitPlanner().arm(rules: ruleStore.all())
-        let result: AckResult
-        switch plan {
-        case .armed:
-            result = .confirmedExact(
+        do {
+            _ = try await convergePersistedLimitRule(
+                rule,
+                slot: slot,
+                targetChildID: identity.expectedChildID,
+                mutationAllowed: {
+                    await self.prepareForMutation(identity)
+                }
+            )
+            return identity.isCurrent ? .confirmedExact(
                 verb: .setLimit,
                 displayName: rule.displayName,
                 effectiveState: nil
-            )
-        case .quotaExceeded(let windows, let slotsNeeded, let cap):
+            ) : Self.staleIdentityResult
+        } catch AppLimitConvergenceError.stale {
+            return Self.staleIdentityResult
+        } catch AppLimitConvergenceError.lockStoreUnavailable {
+            return .failed(.execution("lock_store_unavailable"))
+        } catch AppLimitConvergenceError.quotaExceeded(
+            let windows,
+            let slotsNeeded,
+            let cap
+        ) {
             return .failed(.limitQuotaExceeded(
                 windows: windows,
                 slotsNeeded: slotsNeeded,
                 cap: cap
             ))
-        case .partiallyArmed(let armed, let failed):
+        } catch AppLimitConvergenceError.partiallyArmed(let armed, let failed) {
             return .failed(.execution(
                 "per-app limit partially armed (\(armed) ok, \(failed) failed); not applied"
             ))
+        } catch {
+            return .failed(.execution("app_limit_convergence_failed"))
+        }
+    }
+
+    private func convergePersistedLimitRule(
+        _ rule: AppLimitRule,
+        slot: AppLimitVersionSlot,
+        targetChildID: UUID?,
+        mutationAllowed: @escaping () async -> Bool
+    ) async throws -> UUID? {
+        guard await mutationAllowed() else {
+            throw AppLimitConvergenceError.stale
+        }
+        if slot.isAuthoritativelyExhausted {
+            guard var record = LimitShieldLogic.applyingLimit(
+                to: [:],
+                rule: rule
+            )[LimitShieldLogic.recordKey(for: rule)]
+            else { throw AppLimitConvergenceError.lockStoreUnavailable }
+            record.targetChildID = targetChildID ?? record.targetChildID
+            guard await appLimitLockStore.addShieldWithReceipt(record) != nil else {
+                throw AppLimitConvergenceError.lockStoreUnavailable
+            }
         }
 
-        guard identity.isCurrent else { return Self.staleIdentityResult }
-        guard let usedTodayMinutes = command.limit?.usedTodayMinutes else { return result }
-        if usedTodayMinutes < rule.budgetMinutes {
-            guard await prepareForMutation(identity) else { return Self.staleIdentityResult }
+        guard await mutationAllowed() else {
+            throw AppLimitConvergenceError.stale
+        }
+        let plan = makeLimitPlanner().arm(
+            rules: appLimitSchedulingRules(for: slot)
+        )
+        switch plan {
+        case .armed:
+            break
+        case .quotaExceeded(let windows, let slotsNeeded, let cap):
+            throw AppLimitConvergenceError.quotaExceeded(
+                windows: windows,
+                slotsNeeded: slotsNeeded,
+                cap: cap
+            )
+        case .partiallyArmed(let armed, let failed):
+            throw AppLimitConvergenceError.partiallyArmed(
+                armed: armed,
+                failed: failed
+            )
+        }
+
+        guard await mutationAllowed() else {
+            throw AppLimitConvergenceError.stale
+        }
+        if let usedTodayMinutes = slot.authoritativeUsedTodayMinutes,
+           usedTodayMinutes < rule.budgetMinutes {
             do {
                 _ = try await appLimitLockStore.removeLimitSourceVerified(ruleID: rule.id)
             } catch {
-                return .failed(.execution("lock_store_unavailable"))
+                throw AppLimitConvergenceError.lockStoreUnavailable
             }
-            return identity.isCurrent ? result : Self.staleIdentityResult
         }
 
-        guard var record = LimitShieldLogic.applyingLimit(
-                to: [:],
-                rule: rule
-              )[LimitShieldLogic.recordKey(for: rule)]
-        else { return result }
-        record.targetChildID = identity.expectedChildID ?? record.targetChildID
-        guard await prepareForMutation(identity) else { return Self.staleIdentityResult }
-        guard await ActiveLockStore.shared.addShieldWithReceipt(record) != nil else {
-            return .failed(.execution("lock_store_unavailable"))
+        guard await mutationAllowed(),
+              let current = try appLimitEpochStore.read().slots[slot.ruleID],
+              current.latestOrderingToken == slot.latestOrderingToken,
+              current.latestKind == slot.latestKind,
+              current.latestPayloadDigest == slot.latestPayloadDigest
+        else { throw AppLimitConvergenceError.stale }
+
+        if let usedTodayMinutes = slot.authoritativeUsedTodayMinutes,
+           usedTodayMinutes >= rule.budgetMinutes {
+            return nil
         }
-        return identity.isCurrent ? result : Self.staleIdentityResult
+        guard let provenance = current.armProvenance,
+              provenance.ruleRevision == slot.latestOrderingToken
+        else { throw AppLimitConvergenceError.stale }
+        return provenance.armID
+    }
+
+    private func appLimitSchedulingRules(
+        for slot: AppLimitVersionSlot
+    ) -> [AppLimitRule] {
+        guard let usedTodayMinutes = slot.authoritativeUsedTodayMinutes,
+              let canonicalRule = slot.activeRule
+        else { return ruleStore.all() }
+
+        let accepted = max(0, usedTodayMinutes)
+        return ruleStore.all().compactMap { rule in
+            guard rule.id == canonicalRule.id else { return rule }
+            guard accepted < canonicalRule.budgetMinutes else { return nil }
+            return AppLimitRule(
+                id: canonicalRule.id,
+                appTokens: canonicalRule.appTokens,
+                bundleID: canonicalRule.bundleID,
+                displayName: canonicalRule.displayName,
+                budgetMinutes: canonicalRule.budgetMinutes - accepted,
+                window: canonicalRule.window,
+                effectiveFrom: canonicalRule.effectiveFrom,
+                expiresAt: canonicalRule.expiresAt
+            )
+        }
     }
 
     private func applyPersistedLimitClear(
@@ -576,10 +674,14 @@ final class ActionExecutor: @unchecked Sendable {
             let armID: UUID?
             switch work.commandKind {
             case .set:
-                guard let provenance = slot.armProvenance,
-                      provenance.ruleRevision == work.orderingToken
-                else { throw AppLimitOwnerWorkError.stale }
-                armID = provenance.armID
+                if slot.isAuthoritativelyExhausted {
+                    armID = nil
+                } else {
+                    guard let provenance = slot.armProvenance,
+                          provenance.ruleRevision == work.orderingToken
+                    else { throw AppLimitOwnerWorkError.stale }
+                    armID = provenance.armID
+                }
             case .clear:
                 armID = nil
             }
