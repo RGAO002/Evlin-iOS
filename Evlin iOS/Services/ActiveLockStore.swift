@@ -262,6 +262,35 @@ actor ActiveLockStore {
         } ?? nil
     }
 
+    /// Applies an `AppLimitEnforcementConverger` decision to the durable shield
+    /// set, inside the same persistence lock every other mutation uses.
+    ///
+    /// Convergence is expressed as a whole-map transform rather than
+    /// add/remove calls so the pure decision and the durable write cannot drift:
+    /// `converge` alone decides what the map becomes, and this only persists it.
+    /// Returns whether anything actually changed, which is what the caller logs —
+    /// a no-op re-delivery must be visibly distinguishable from a real effect.
+    @discardableResult
+    func applyLimitConvergence(
+        _ decision: AppLimitEnforcementDecision,
+        now: Date
+    ) -> Bool {
+        ActiveLockPersistenceLock.shared.withLock {
+            guard reloadDurableState() else { return false }
+            let before = shieldRecords
+            let after = AppLimitEnforcementConverger.converge(
+                decision,
+                into: before,
+                now: now
+            )
+            guard after != before else { return false }
+            shieldRecords = after
+            persist()
+            recomputeAndApply()
+            return true
+        } ?? false
+    }
+
     @discardableResult
     func unshieldAll() -> [ShieldRecord] {
         ActiveLockPersistenceLock.shared.withLock {

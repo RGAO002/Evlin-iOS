@@ -157,10 +157,49 @@ final class NotificationService: UNNotificationServiceExtension {
             NSEConfig.log("limit persistence failed cmd=\(commandID)")
             return
         }
+        await convergeLimitShield(envelope: envelope, command: command, commandID: commandID)
         bestAttempt?.body = delivery.alertBody
         NSEConfig.log(
             "limit persisted cmd=\(commandID) disposition=\(delivery.ack.disposition) ack=\(delivery.ackSucceeded)"
         )
+    }
+
+    /// Make the shield agree with the budget this command just set — here, in
+    /// the extension that received it.
+    ///
+    /// The decision used to live on the backend, which could only guess whether
+    /// the device was already shielded, and guessed wrong in one direction:
+    /// raising a limit above today's usage emitted nothing and left the app
+    /// locked (Fred, 2026-07-25: Snapchat 20/20 raised to 120, never unlocked).
+    /// The device is the only party that both knows the shield's real state and
+    /// can change it, so it decides — from the two numbers the command carries,
+    /// with no reference to what came before.
+    ///
+    /// Running it in the NSE rather than the app is the point: a push arrives
+    /// even when the app is not running, so the lock follows the parent's edit
+    /// immediately instead of waiting for the child to next open Evlin.
+    private func convergeLimitShield(
+        envelope: AppLimitCommandEnvelope,
+        command: LockCommand,
+        commandID: UUID
+    ) async {
+        let decision = AppLimitEnforcementConverger.decide(
+            for: envelope,
+            bundleID: command.target.bundleID
+        )
+        switch decision {
+        case .defer_(let reason):
+            // Deliberately no effect: the owner settles it on the next pass.
+            NSEConfig.log("limit shield deferred cmd=\(commandID) reason=\(reason)")
+        case .shield(let rule, let used):
+            let applied = await ActiveLockStore.shared.applyLimitConvergence(decision, now: Date())
+            NSEConfig.log(
+                "limit shield cmd=\(commandID) used=\(used)/\(rule.budgetMinutes) applied=\(applied)"
+            )
+        case .release(_, let recordKey):
+            let applied = await ActiveLockStore.shared.applyLimitConvergence(decision, now: Date())
+            NSEConfig.log("limit release cmd=\(commandID) key=\(recordKey) applied=\(applied)")
+        }
     }
 
     private func persistEarnedPolicy(
