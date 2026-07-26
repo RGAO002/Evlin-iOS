@@ -161,17 +161,38 @@ nonisolated struct AppLimitEffectKey: Codable, Equatable, Hashable, Sendable {
     let ruleID: UUID
     let orderingToken: Int64
     let armID: UUID
+    let usageDate: String?
     let effectKind: AppLimitJournalEffectKind
     let rawThresholdMinutes: Int
 
+    init(
+        ruleID: UUID,
+        orderingToken: Int64,
+        armID: UUID,
+        usageDate: String? = nil,
+        effectKind: AppLimitJournalEffectKind,
+        rawThresholdMinutes: Int
+    ) {
+        self.ruleID = ruleID
+        self.orderingToken = orderingToken
+        self.armID = armID
+        self.usageDate = usageDate
+        self.effectKind = effectKind
+        self.rawThresholdMinutes = rawThresholdMinutes
+    }
+
     var storageKey: String {
-        [
+        var components = [
             ruleID.uuidString.lowercased(),
             String(orderingToken),
             armID.uuidString.lowercased(),
-            effectKind.rawValue,
-            String(rawThresholdMinutes),
-        ].joined(separator: ":")
+        ]
+        if let usageDate {
+            components.append(usageDate)
+        }
+        components.append(effectKind.rawValue)
+        components.append(String(rawThresholdMinutes))
+        return components.joined(separator: ":")
     }
 }
 

@@ -7,6 +7,12 @@ nonisolated final class AppLimitProvenanceStore: @unchecked Sendable {
         let replaced: Bool
     }
 
+    enum IntervalRolloverResult: Equatable, Sendable {
+        case rolledOver(from: String, to: String)
+        case unchanged(usageDate: String)
+        case rejected(reason: String)
+    }
+
     private enum ProvenanceError: Error {
         case missingCurrentRule
         case ownerMismatch
@@ -108,6 +114,88 @@ nonisolated final class AppLimitProvenanceStore: @unchecked Sendable {
             slot.armProvenance = current
             state.slots[provenance.ruleID] = slot
             return current
+        }
+    }
+
+    /// Advances the accounting identity of an already-running recurring Apple
+    /// monitor. DeviceActivity resets its event counters at the interval
+    /// boundary, so this transition must not replace or restart the monitor.
+    func rolloverRecurringInterval(
+        activityName: String,
+        now: Date
+    ) throws -> IntervalRolloverResult {
+        let snapshot = try store.read()
+        let snapshotMatches = snapshot.slots.values.compactMap { slot -> AppLimitArmProvenance? in
+            guard slot.armProvenance?.activityName == activityName else { return nil }
+            return slot.armProvenance
+        }
+        guard snapshotMatches.count == 1,
+              let expectedOwner = snapshotMatches.first?.childDeviceID
+        else {
+            return .rejected(reason: "unknown_activity")
+        }
+
+        return try store.transaction(
+            source: .wakeRecovery,
+            expectedOwner: expectedOwner
+        ) { state in
+            let matches = state.slots.values.compactMap {
+                slot -> (AppLimitVersionSlot, AppLimitArmProvenance)? in
+                guard let provenance = slot.armProvenance,
+                      provenance.activityName == activityName
+                else { return nil }
+                return (slot, provenance)
+            }
+            guard matches.count == 1, let (matchedSlot, provenance) = matches.first,
+                  state.ownerChildDeviceID == expectedOwner,
+                  provenance.childDeviceID == expectedOwner,
+                  matchedSlot.latestKind == .set,
+                  let rule = matchedSlot.activeRule,
+                  rule.id == provenance.ruleID,
+                  matchedSlot.ruleID == provenance.ruleID,
+                  matchedSlot.latestOrderingToken == provenance.ruleRevision,
+                  rule.window.repeats,
+                  provenance.scheduleWindow == rule.window,
+                  provenance.budgetMinutes == rule.budgetMinutes,
+                  provenance.tokenDigest == Self.tokenDigest(rule: rule),
+                  provenance.activityName
+                    == "evlin.limit.v2.\(provenance.armID.uuidString.lowercased())",
+                  let timezone = TimeZone(identifier: provenance.timezone)
+            else {
+                return .rejected(reason: "stale_provenance")
+            }
+
+            let usageDate = Self.usageDate(now, timezone: timezone)
+            if usageDate == provenance.usageDate {
+                return .unchanged(usageDate: usageDate)
+            }
+            guard usageDate > provenance.usageDate else {
+                return .rejected(reason: "backward_usage_date")
+            }
+
+            var slot = matchedSlot
+            slot.armProvenance = AppLimitArmProvenance(
+                ruleID: provenance.ruleID,
+                ruleRevision: provenance.ruleRevision,
+                childDeviceID: provenance.childDeviceID,
+                usageDate: usageDate,
+                timezone: provenance.timezone,
+                scheduleWindow: provenance.scheduleWindow,
+                tokenDigest: provenance.tokenDigest,
+                budgetMinutes: provenance.budgetMinutes,
+                startedAt: now,
+                baseAcceptedMinutes: 0,
+                lastRawThresholdMinutes: 0,
+                ignoredWhilePausedMinutes: 0,
+                pausedAt: provenance.pausedAt,
+                monitorStartPending: false,
+                predecessorIgnoredWhilePausedMinutes: provenance.ignoredWhilePausedMinutes,
+                activityName: provenance.activityName,
+                armID: provenance.armID
+            )
+            slot.authoritativeUsedTodayMinutes = 0
+            state.slots[slot.ruleID] = slot
+            return .rolledOver(from: provenance.usageDate, to: usageDate)
         }
     }
 

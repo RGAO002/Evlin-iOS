@@ -113,6 +113,7 @@ nonisolated final class AppLimitEffectJournal: @unchecked Sendable {
                 ruleID: callback.rule.id,
                 orderingToken: callback.provenance.ruleRevision,
                 armID: callback.provenance.armID,
+                usageDate: callback.provenance.usageDate,
                 effectKind: Self.journalKind(callback.effectKind),
                 rawThresholdMinutes: callback.rawThresholdMinutes
             )
