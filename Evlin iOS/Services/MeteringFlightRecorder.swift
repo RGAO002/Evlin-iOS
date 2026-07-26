@@ -112,8 +112,67 @@ nonisolated enum MeteringFlightRecorder {
         corrID: UUID? = nil,
         transition: ScreenTimeEvent.Transition? = nil
     ) {
+        let event = makeEvent(
+            kind: kind,
+            source: source,
+            site: site,
+            verdict: verdict,
+            detail: detail,
+            nums: nums,
+            corrID: corrID,
+            transition: transition
+        )
+#if DEBUG
+        if let testSink {
+            testSink(event)
+            return
+        }
+#endif
+        for durable in suppressor.admit(event, now: Date()) {
+            ScreenTimeEventLog.emit(durable)
+        }
+    }
+
+    /// Callback arrival is useful diagnostic evidence, but it must not load and
+    /// rewrite the full App-Group event ring before the constrained extension
+    /// has persisted the sample. The completed verdict remains a durable event.
+    static func emitCallbackArrival(
+        site: String,
+        detail: String = "",
+        nums: ScreenTimeEvent.Nums? = nil,
+        corrID: UUID? = nil
+    ) {
+        let event = makeEvent(
+            kind: .meteringCallback,
+            source: .earnedPool,
+            site: site,
+            verdict: "arrived",
+            detail: detail,
+            nums: nums,
+            corrID: corrID,
+            transition: nil
+        )
+#if DEBUG
+        if let testSink {
+            testSink(event)
+            return
+        }
+#endif
+        ScreenTimeEventLog.emitExtensionBreadcrumb(event)
+    }
+
+    private static func makeEvent(
+        kind: ScreenTimeEvent.Kind,
+        source: ScreenTimeEvent.Source?,
+        site: String,
+        verdict: String,
+        detail: String,
+        nums: ScreenTimeEvent.Nums?,
+        corrID: UUID?,
+        transition: ScreenTimeEvent.Transition?
+    ) -> ScreenTimeEvent {
         let app = detail.isEmpty ? site : "\(site) \(detail)"
-        let event = ScreenTimeEvent(
+        return ScreenTimeEvent(
             ts: ISO8601DateFormatter().string(from: Date()),
             emitter: currentEmitter(),
             deviceID: currentDeviceID(),
@@ -127,15 +186,6 @@ nonisolated enum MeteringFlightRecorder {
             policyGen: nil,
             corrID: corrID.map { clamp($0.uuidString, to: corrIDLimit) }
         )
-#if DEBUG
-        if let testSink {
-            testSink(event)
-            return
-        }
-#endif
-        for durable in suppressor.admit(event, now: Date()) {
-            ScreenTimeEventLog.emit(durable)
-        }
     }
 
     /// Guards the shared ring buffer against a single repeating line erasing the

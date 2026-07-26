@@ -3,6 +3,163 @@ import XCTest
 @testable import Evlin_iOS
 
 final class EarnedMeteringCallbackTests: XCTestCase {
+    func testRejectedCallbackReadsTheEpochRootOnlyOnce() throws {
+        let fileIO = CountingCallbackFileIO()
+        let fixture = try CallbackFixture.active(fileIO: fileIO)
+        defer { fixture.cleanup() }
+        fileIO.resetReadCount()
+
+        let outcome = try fixture.store.enqueueAuthorizedV2Callback(
+            fixture.authorizedInput(observedAt: fixture.start),
+            owner: fixture.owner
+        )
+
+        XCTAssertEqual(outcome, .discarded(reason: "too_early"))
+        XCTAssertEqual(
+            fileIO.readCount,
+            1,
+            "The extension cannot retain a preflight root while decoding the same root again."
+        )
+    }
+
+    func testPersistedOwnerMismatchIsOneReadByteIdenticalDiscard() throws {
+        let fixture = try CallbackFixture.active()
+        defer { fixture.cleanup() }
+        let currentOwner = UUID()
+        let fileIO = CountingCallbackFileIO()
+        let store = DeviceEpochStore(
+            fileURL: fixture.storeURL,
+            lock: CallbackFixtureLock(),
+            fileIO: fileIO,
+            ownerProvider: { currentOwner }
+        )
+        let before = try Data(contentsOf: fixture.storeURL)
+
+        let outcome = try store.enqueueAuthorizedV2Callback(
+            fixture.authorizedInput(),
+            owner: currentOwner
+        )
+
+        XCTAssertEqual(outcome, .discarded(reason: "owner_mismatch"))
+        XCTAssertEqual(try Data(contentsOf: fixture.storeURL), before)
+        XCTAssertEqual(fileIO.readCount, 1)
+    }
+
+    func testCompactionCollapsesDuplicateTerminalRegistrationFailures() throws {
+        let fixture = try CallbackFixture.active()
+        defer { fixture.cleanup() }
+        try fixture.mutate { state in
+            guard let generation = state.generations[fixture.generationID],
+                  let epoch = state.epochs[fixture.epochID]
+            else { return }
+            for offset in 0..<100 {
+                let workID = UUID()
+                state.registrationWork[workID] = EpochRegistrationWork(
+                    workID: workID,
+                    ownerChildDeviceID: fixture.owner,
+                    epochID: fixture.epochID,
+                    routeID: fixture.routeID,
+                    request: EpochRegistrationRequestDTO(
+                        protocolVersion: 2,
+                        epochID: fixture.epochID,
+                        deviceID: fixture.owner,
+                        usageDate: epoch.usageDate,
+                        timezone: generation.canonicalTimezone,
+                        policyRevision: generation.policyRevision,
+                        measurementSelectionDigest: generation.measurementSelectionDigest,
+                        enforcementSetID: generation.enforcementSetID,
+                        startedAt: fixture.start,
+                        baseAcceptedMinutes: epoch.baseAcceptedMinutes,
+                        reason: .initial
+                    ),
+                    claim: nil,
+                    retry: MeteringRetryState(
+                        attemptCount: 1,
+                        nextAttemptAt: fixture.start,
+                        lastErrorCode: "policy_revision_mismatch",
+                        terminal: .rejected
+                    ),
+                    createdAt: fixture.start.addingTimeInterval(TimeInterval(offset))
+                )
+            }
+            let divergentWorkID = UUID()
+            state.registrationWork[divergentWorkID] = EpochRegistrationWork(
+                workID: divergentWorkID,
+                ownerChildDeviceID: fixture.owner,
+                epochID: fixture.epochID,
+                routeID: fixture.routeID,
+                request: EpochRegistrationRequestDTO(
+                    protocolVersion: 2,
+                    epochID: fixture.epochID,
+                    deviceID: fixture.owner,
+                    usageDate: epoch.usageDate,
+                    timezone: generation.canonicalTimezone,
+                    policyRevision: generation.policyRevision,
+                    measurementSelectionDigest: generation.measurementSelectionDigest,
+                    enforcementSetID: generation.enforcementSetID,
+                    startedAt: fixture.start,
+                    baseAcceptedMinutes: epoch.baseAcceptedMinutes,
+                    reason: .policyChange
+                ),
+                claim: nil,
+                retry: MeteringRetryState(
+                    attemptCount: 1,
+                    nextAttemptAt: fixture.start,
+                    lastErrorCode: "policy_revision_mismatch",
+                    terminal: .rejected
+                ),
+                createdAt: fixture.start.addingTimeInterval(200)
+            )
+            for terminal in [MeteringWorkTerminal.pending, .succeeded] {
+                let workID = UUID()
+                state.registrationWork[workID] = EpochRegistrationWork(
+                    workID: workID,
+                    ownerChildDeviceID: fixture.owner,
+                    epochID: fixture.epochID,
+                    routeID: fixture.routeID,
+                    request: EpochRegistrationRequestDTO(
+                        protocolVersion: 2,
+                        epochID: fixture.epochID,
+                        deviceID: fixture.owner,
+                        usageDate: epoch.usageDate,
+                        timezone: generation.canonicalTimezone,
+                        policyRevision: generation.policyRevision,
+                        measurementSelectionDigest: generation.measurementSelectionDigest,
+                        enforcementSetID: generation.enforcementSetID,
+                        startedAt: fixture.start,
+                        baseAcceptedMinutes: epoch.baseAcceptedMinutes,
+                        reason: .initial
+                    ),
+                    claim: nil,
+                    retry: MeteringRetryState(
+                        attemptCount: 1,
+                        nextAttemptAt: fixture.start,
+                        lastErrorCode: nil,
+                        terminal: terminal
+                    ),
+                    createdAt: fixture.start.addingTimeInterval(300)
+                )
+            }
+        }
+
+        let removed = try fixture.store.compactTerminalRegistrationHistory(owner: fixture.owner)
+        let state = try fixture.store.read()
+
+        XCTAssertEqual(removed, 99)
+        XCTAssertEqual(state.registrationWork.count, 4)
+        XCTAssertEqual(
+            state.registrationWork.values
+                .first(where: { $0.request.reason == .initial && $0.retry.terminal == .rejected })?
+                .createdAt,
+            fixture.start.addingTimeInterval(99)
+        )
+        XCTAssertTrue(state.registrationWork.values.contains {
+            $0.request.reason == .policyChange && $0.retry.terminal == .rejected
+        })
+        XCTAssertTrue(state.registrationWork.values.contains { $0.retry.terminal == .pending })
+        XCTAssertTrue(state.registrationWork.values.contains { $0.retry.terminal == .succeeded })
+    }
+
     func testMalformedCallbackIsDiscardedWithoutBootstrappingAnOwner() throws {
         let owner = UUID()
         let fixture = CallbackFixture(owner: owner)
@@ -1029,7 +1186,7 @@ final class EarnedMeteringCallbackTests: XCTestCase {
         let outcome = CallbackOutcomeBox()
         let barrierSucceeded = BoolBox()
 
-        lock.pauseAfterNextTwoAcquisitions()
+        lock.pauseNextAcquisition()
         DispatchQueue.global().async {
             outcome.value = try? fixture.callbackHandler().handle(
                 fixture.callback(threshold: 5),
@@ -1115,21 +1272,31 @@ private final class CallbackFixture {
     let routeID = UUID()
     let installID = UUID()
 
-    init(owner: UUID, lock: any DeviceEpochStoreLocking = CallbackFixture.defaultLock) {
+    init(
+        owner: UUID,
+        lock: any DeviceEpochStoreLocking = CallbackFixture.defaultLock,
+        fileIO: any DeviceEpochFileIO = SystemDeviceEpochFileIO()
+    ) {
         self.owner = owner
         start = Date(timeIntervalSince1970: 1_784_937_600)
         storeURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("earned-metering-callback-\(UUID().uuidString).json")
-        store = DeviceEpochStore(fileURL: storeURL, lock: lock, ownerProvider: { owner })
+        store = DeviceEpochStore(
+            fileURL: storeURL,
+            lock: lock,
+            fileIO: fileIO,
+            ownerProvider: { owner }
+        )
     }
 
     private static let defaultLock = CallbackFixtureLock()
 
     static func active(
         usageDate: String = "2026-07-18",
-        lock: any DeviceEpochStoreLocking = CallbackFixture.defaultLock
+        lock: any DeviceEpochStoreLocking = CallbackFixture.defaultLock,
+        fileIO: any DeviceEpochFileIO = SystemDeviceEpochFileIO()
     ) throws -> CallbackFixture {
-        let fixture = CallbackFixture(owner: UUID(), lock: lock)
+        let fixture = CallbackFixture(owner: UUID(), lock: lock, fileIO: fileIO)
         try fixture.store.transaction(expectedOwner: fixture.owner) { state in
             state = fixture.activeState(usageDate: usageDate)
         }
@@ -1381,16 +1548,18 @@ private final class CallbackFixture {
     func authorizedInput(
         activityName: String? = nil,
         eventName: String? = nil,
-        namespace: String? = nil
+        namespace: String? = nil,
+        observedAt: Date? = nil
     ) -> MeteringAuthorizedCallbackInput {
-        MeteringAuthorizedCallbackInput(
+        let observedAt = observedAt ?? start.addingTimeInterval(5 * 60)
+        return MeteringAuthorizedCallbackInput(
             routeID: routeID,
             activityName: activityName ?? MeteringRouteNamespace.activityName(routeID: routeID),
             eventName: eventName ?? MeteringRouteNamespace.eventName(routeID: routeID, thresholdMinutes: 5),
             namespace: namespace ?? MeteringRouteNamespace.prefix,
             thresholdMinutes: 5,
-            observedAt: start.addingTimeInterval(5 * 60),
-            now: start.addingTimeInterval(5 * 60),
+            observedAt: observedAt,
+            now: observedAt,
             jitterSeconds: EarnedMeteringCallback.defaultJitterSeconds
         )
     }
@@ -1687,6 +1856,28 @@ private final class CallbackFixture {
     }
 }
 
+private final class CountingCallbackFileIO: DeviceEpochFileIO, @unchecked Sendable {
+    private let backing = SystemDeviceEpochFileIO()
+    private(set) var readCount = 0
+
+    func resetReadCount() {
+        readCount = 0
+    }
+
+    func read(from url: URL) throws -> Data? {
+        readCount += 1
+        return try backing.read(from: url)
+    }
+
+    func writeAtomically(_ data: Data, to url: URL) throws {
+        try backing.writeAtomically(data, to: url)
+    }
+
+    func remove(at url: URL) throws {
+        try backing.remove(at: url)
+    }
+}
+
 private final class CallbackFixtureLock: DeviceEpochStoreLocking, @unchecked Sendable {
     private let lock = NSLock()
 
@@ -1707,12 +1898,6 @@ private final class CallbackRaceLock: DeviceEpochStoreLocking, @unchecked Sendab
     func pauseNextAcquisition() {
         lock.lock()
         pauseAtAcquisition = acquisitionCount + 1
-        lock.unlock()
-    }
-
-    func pauseAfterNextTwoAcquisitions() {
-        lock.lock()
-        pauseAtAcquisition = acquisitionCount + 2
         lock.unlock()
     }
 

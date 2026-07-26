@@ -282,10 +282,8 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
                 activityName: activity.rawValue,
                 eventName: event.rawValue
             )
-            MeteringFlightRecorder.emit(
-                kind: .meteringCallback,
+            MeteringFlightRecorder.emitCallbackArrival(
                 site: "dam.threshold",
-                verdict: "arrived",
                 detail: MeteringFlightRecorder.detail([
                     ("act", activity.rawValue),
                     ("evt", event.rawValue),

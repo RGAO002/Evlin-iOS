@@ -42,6 +42,18 @@ final class ScreenTimeEventLogTests: XCTestCase {
         XCTAssertEqual(read.last?.reason, "r\(ScreenTimeEventLog.cap + 9)")
     }
 
+    func test_extensionBreadcrumbDoesNotRewriteTheDurableRing() {
+        let original = (0..<50).map { "existing-\($0)" }
+        defaults.set(original, forKey: ScreenTimeEventLog.key)
+
+        ScreenTimeEventLog.emitExtensionBreadcrumb(event("arrived"), into: defaults)
+
+        XCTAssertEqual(defaults.stringArray(forKey: ScreenTimeEventLog.key), original)
+        XCTAssertNotNil(
+            defaults.string(forKey: ScreenTimeEventLog.extensionBreadcrumbKey)
+        )
+    }
+
     func test_clear_empties() {
         ScreenTimeEventLog.emit(event("x"), into: defaults)
         ScreenTimeEventLog.clear(in: defaults)

@@ -322,6 +322,22 @@ final class AppMeteringEntry {
         guard let configuration = MeteringProcessConfiguration.load(defaults: defaults) else {
             return
         }
+        // Maintenance runs only in the app process, where memory is not capped
+        // like the DeviceActivity extension, and off the main actor so a large
+        // historical root cannot stall scene updates.
+        do {
+            let maintenanceStore = store
+            _ = try await Task.detached(priority: .utility) {
+                try maintenanceStore.compactTerminalRegistrationHistory(
+                    owner: configuration.owner
+                )
+            }.value
+        } catch {
+            MeteringFlightRecorder.emitError(
+                site: "app.compact",
+                error: error
+            )
+        }
         let driver = MeteringProductionComposition.makeRecoveryDriver(
             baseURL: configuration.baseURL,
             role: .app,

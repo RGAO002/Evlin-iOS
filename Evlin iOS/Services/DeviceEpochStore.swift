@@ -385,6 +385,29 @@ nonisolated enum MeteringAuthorizedCallbackResult: Equatable, Sendable {
     case discarded(reason: String)
 }
 
+private nonisolated struct MeteringCallbackVerdictContext {
+    let routeLifecycle: String
+    let coverageStatus: String?
+    let coverageReadyThrough: String?
+    let epochUsageDate: String?
+    let epochStatus: String?
+    let epochStartedAt: Date?
+    let baseAcceptedMinutes: Int?
+    let lastRawThresholdMinutes: Int?
+    let excludedWhilePausedMinutes: Int?
+    let sampleAlreadyExisted: Bool
+}
+
+private nonisolated struct TerminalRegistrationHistoryKey: Hashable {
+    let ownerChildDeviceID: UUID
+    let epochID: UUID
+    let routeID: UUID
+    let requestBytes: Data
+    let terminal: String
+    let errorCode: String?
+    let attemptCount: Int
+}
+
 nonisolated struct EpochSampleWork: Codable, Equatable, Sendable {
     let workID: UUID
     let ownerChildDeviceID: UUID
@@ -1841,10 +1864,60 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         )
     }
 
+    /// Keeps one diagnostic row for each repeated terminal registration result.
+    /// Pending and successful work are never compacted because they still carry
+    /// protocol state; this only removes semantically equivalent historical
+    /// failures with the same immutable request and retry verdict.
+    @discardableResult
+    func compactTerminalRegistrationHistory(owner: UUID) throws -> Int {
+        guard isCurrentOwner(owner) else { return 0 }
+        return try transaction(expectedOwner: owner) { state in
+            // Identity cleanup names exact historical work IDs and must finish
+            // before those rows can be compacted. Rollover and handoff refer to
+            // routes/epochs instead; retaining the newest row per terminal
+            // result preserves every decision they inspect.
+            guard state.identityCleanupWork == nil else { return 0 }
+
+            var newestByKey: [TerminalRegistrationHistoryKey: EpochRegistrationWork] = [:]
+            var compactableIDs: Set<UUID> = []
+            for work in state.registrationWork.values
+            where work.ownerChildDeviceID == owner
+                && work.claim == nil
+                && work.retry.terminal != .pending
+                && work.retry.terminal != .succeeded {
+                let key = TerminalRegistrationHistoryKey(
+                    ownerChildDeviceID: work.ownerChildDeviceID,
+                    epochID: work.epochID,
+                    routeID: work.routeID,
+                    requestBytes: try Self.encoder.encode(work.request),
+                    terminal: work.retry.terminal.rawValue,
+                    errorCode: work.retry.lastErrorCode,
+                    attemptCount: work.retry.attemptCount
+                )
+                compactableIDs.insert(work.workID)
+                if let current = newestByKey[key] {
+                    if work.createdAt > current.createdAt
+                        || (work.createdAt == current.createdAt
+                            && work.workID.uuidString < current.workID.uuidString) {
+                        newestByKey[key] = work
+                    }
+                } else {
+                    newestByKey[key] = work
+                }
+            }
+
+            let retainedIDs = Set(newestByKey.values.map(\.workID))
+            let removableIDs = compactableIDs.subtracting(retainedIDs)
+            for workID in removableIDs {
+                state.registrationWork[workID] = nil
+            }
+            return removableIDs.count
+        }
+    }
+
     /// The callback boundary is deliberately the sole local producer of v2
-    /// sample work. It performs a non-mutating preflight first so rejected
-    /// callbacks cannot bootstrap an empty root, then repeats every authority
-    /// check under the root lock before any high-water or queue mutation.
+    /// sample work. Authority checks and mutation share one root decode under
+    /// the lock; rejected callbacks cannot bootstrap an empty root.
     func enqueueAuthorizedV2Callback(
         _ input: MeteringAuthorizedCallbackInput,
         owner: UUID,
@@ -1855,30 +1928,44 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                 .discarded(reason: "owner_mismatch"),
                 input: input,
                 site: "store.callback",
-                state: nil
+                context: nil
             )
             return .discarded(reason: "owner_mismatch")
         }
 
-        let preflight = try read()
-        guard preflight.ownerChildDeviceID == owner else {
-            let result = MeteringAuthorizedCallbackResult.discarded(
-                reason: preflight.ownerChildDeviceID == nil ? "missing_owner" : "owner_mismatch"
-            )
-            recordCallbackVerdict(result, input: input, site: "store.callback", state: preflight)
-            return result
-        }
-        guard preflight.routes[input.routeID] != nil else {
-            let result = MeteringAuthorizedCallbackResult.discarded(
-                reason: preflight.tombstones[input.routeID] == nil ? "unknown_route" : "tombstoned_route"
-            )
-            recordCallbackVerdict(result, input: input, site: "store.callback", state: preflight)
-            return result
-        }
-
         do {
             var enqueued: EpochSampleWork?
-            let result = try transaction(expectedOwner: owner) { state in
+            var context: MeteringCallbackVerdictContext?
+            let result = try transaction(
+                expectedOwner: owner,
+                bootstrapOwnerIfMissing: false,
+                allowPersistedOwnerMismatchForNoop: true
+            ) { state -> MeteringAuthorizedCallbackResult in
+                let sampleIDsBeforeAuthorization = Set(state.sampleWork.keys)
+                if state.ownerChildDeviceID != owner {
+                    context = callbackVerdictContext(
+                        input: input,
+                        state: state,
+                        sampleAlreadyExisted: false
+                    )
+                    return .discarded(
+                        reason: state.ownerChildDeviceID == nil
+                            ? "missing_owner"
+                            : "owner_mismatch"
+                    )
+                }
+                guard state.routes[input.routeID] != nil else {
+                    context = callbackVerdictContext(
+                        input: input,
+                        state: state,
+                        sampleAlreadyExisted: false
+                    )
+                    return .discarded(
+                        reason: state.tombstones[input.routeID] == nil
+                            ? "unknown_route"
+                            : "tombstoned_route"
+                    )
+                }
                 let outcome = authorizeV2Callback(
                     &state,
                     input: input,
@@ -1887,11 +1974,27 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                 )
                 if case .queued(let workID) = outcome {
                     enqueued = state.sampleWork[workID]
+                    context = callbackVerdictContext(
+                        input: input,
+                        state: state,
+                        sampleAlreadyExisted: sampleIDsBeforeAuthorization.contains(workID)
+                    )
+                } else {
+                    context = callbackVerdictContext(
+                        input: input,
+                        state: state,
+                        sampleAlreadyExisted: false
+                    )
                 }
                 return outcome
             }
-            recordCallbackVerdict(result, input: input, site: "store.callback", state: preflight)
-            if let enqueued, preflight.sampleWork[enqueued.workID] == nil {
+            recordCallbackVerdict(
+                result,
+                input: input,
+                site: "store.callback",
+                context: context
+            )
+            if let enqueued, context?.sampleAlreadyExisted == false {
                 recordSampleEnqueued(enqueued, site: "store.callback")
             }
             return result
@@ -1952,34 +2055,34 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         _ result: MeteringAuthorizedCallbackResult,
         input: MeteringAuthorizedCallbackInput,
         site: String,
-        state: DeviceEpochStoreState?
+        context: MeteringCallbackVerdictContext?
     ) {
-        let route = state?.routes[input.routeID]
-        let epoch = route.flatMap { state?.epochs[$0.epochID] }
         let verdict: String
         switch result {
-        case .queued(let workID):
+        case .queued:
             // A rung that re-fires resolves to the SAME sample work item.
             // Calling both "queued" hid genuine duplicate storms.
-            verdict = state?.sampleWork[workID] == nil ? "queued" : "queued_duplicate"
+            verdict = context?.sampleAlreadyExisted == true ? "queued_duplicate" : "queued"
         case .discarded(let reason):
             verdict = reason
         }
         var pairs: [(String, String)] = [
             ("evt", input.eventName),
-            ("life", route.map { $0.lifecycle.rawValue } ?? "no_route"),
+            ("life", context?.routeLifecycle ?? "no_route"),
         ]
-        if let coverage = state?.coverage {
-            pairs.append(("cover", coverage.status.rawValue))
-            pairs.append(("ready", coverage.readyThroughUsageDate ?? "nil"))
-        } else if state != nil {
+        if let coverageStatus = context?.coverageStatus {
+            pairs.append(("cover", coverageStatus))
+            pairs.append(("ready", context?.coverageReadyThrough ?? "nil"))
+        } else if context != nil {
             pairs.append(("cover", "none"))
         }
-        if let epoch {
-            pairs.append(("date", epoch.usageDate))
-            pairs.append(("status", epoch.status.rawValue))
+        if let epochUsageDate = context?.epochUsageDate {
+            pairs.append(("date", epochUsageDate))
+            pairs.append(("status", context?.epochStatus ?? "unknown"))
             // The physical-time bound that produces `too_early`.
-            pairs.append(("started", ISO8601DateFormatter().string(from: epoch.startedAt)))
+            if let startedAt = context?.epochStartedAt {
+                pairs.append(("started", ISO8601DateFormatter().string(from: startedAt)))
+            }
         }
         if case .queued(let workID) = result {
             pairs.append(("work", MeteringFlightRecorder.shortID(workID)))
@@ -1990,12 +2093,33 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
             verdict: verdict,
             detail: MeteringFlightRecorder.detail(pairs),
             nums: ScreenTimeEvent.Nums(
-                base: epoch?.baseAcceptedMinutes,
-                raw: epoch?.lastRawThresholdMinutes,
+                base: context?.baseAcceptedMinutes,
+                raw: context?.lastRawThresholdMinutes,
                 threshold: input.thresholdMinutes,
-                excluded: epoch?.excludedWhilePausedMinutes
+                excluded: context?.excludedWhilePausedMinutes
             ),
             corrID: input.routeID
+        )
+    }
+
+    private func callbackVerdictContext(
+        input: MeteringAuthorizedCallbackInput,
+        state: DeviceEpochStoreState,
+        sampleAlreadyExisted: Bool
+    ) -> MeteringCallbackVerdictContext {
+        let route = state.routes[input.routeID]
+        let epoch = route.flatMap { state.epochs[$0.epochID] }
+        return MeteringCallbackVerdictContext(
+            routeLifecycle: route?.lifecycle.rawValue ?? "no_route",
+            coverageStatus: state.coverage?.status.rawValue,
+            coverageReadyThrough: state.coverage?.readyThroughUsageDate,
+            epochUsageDate: epoch?.usageDate,
+            epochStatus: epoch?.status.rawValue,
+            epochStartedAt: epoch?.startedAt,
+            baseAcceptedMinutes: epoch?.baseAcceptedMinutes,
+            lastRawThresholdMinutes: epoch?.lastRawThresholdMinutes,
+            excludedWhilePausedMinutes: epoch?.excludedWhilePausedMinutes,
+            sampleAlreadyExisted: sampleAlreadyExisted
         )
     }
 
@@ -2070,7 +2194,22 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
             return results
         }
         for (input, result) in replayed {
-            recordCallbackVerdict(result, input: input, site: "store.replay", state: priorState)
+            let sampleAlreadyExisted: Bool
+            if case .queued(let workID) = result {
+                sampleAlreadyExisted = priorState.sampleWork[workID] != nil
+            } else {
+                sampleAlreadyExisted = false
+            }
+            recordCallbackVerdict(
+                result,
+                input: input,
+                site: "store.replay",
+                context: callbackVerdictContext(
+                    input: input,
+                    state: priorState,
+                    sampleAlreadyExisted: sampleAlreadyExisted
+                )
+            )
         }
         for work in enqueued {
             recordSampleEnqueued(work, site: "store.replay")
@@ -3732,6 +3871,8 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
     @discardableResult
     internal func transaction<Value>(
         expectedOwner: UUID?,
+        bootstrapOwnerIfMissing: Bool = true,
+        allowPersistedOwnerMismatchForNoop: Bool = false,
         _ mutate: (inout DeviceEpochStoreState) throws -> Value
     ) throws -> Value {
         try withLock {
@@ -3745,22 +3886,32 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
             let priorData = loaded.persistedData
             var state = loaded.state
             try validateStatic(state, expectedOwner: nil, requireOwnerMatch: false)
-            try checkOwner(expectedOwner: expectedOwner, state: state)
+            if allowPersistedOwnerMismatchForNoop {
+                guard ownerProvider() == expectedOwner else {
+                    throw DeviceEpochStoreError.ownerMismatch
+                }
+            } else {
+                try checkOwner(expectedOwner: expectedOwner, state: state)
+            }
 
-            if state.ownerChildDeviceID == nil {
+            if bootstrapOwnerIfMissing, state.ownerChildDeviceID == nil {
                 state.ownerChildDeviceID = expectedOwner
             }
 
             var candidate = state
             let value = try mutate(&candidate)
+
+            // A rejected callback may inspect an unowned root, but must not
+            // bootstrap it merely by arriving. The loaded root was already
+            // statically validated above, so an unchanged transaction is safe.
+            guard candidate != state else { return value }
+
             try checkOwner(expectedOwner: expectedOwner, state: candidate)
             try validateStatic(candidate, expectedOwner: expectedOwner, requireOwnerMatch: true)
             try validateTransactionDelta(candidate: candidate, priorState: state)
 
             // Re-encoding an unchanged Codable value can produce different bytes on
             // some SDKs. Rejected callback paths must be byte-identical no-ops.
-            guard candidate != state else { return value }
-
             let encoded = try Self.encoder.encode(candidate)
             guard encoded != priorData else { return value }
             var writeAttempted = false

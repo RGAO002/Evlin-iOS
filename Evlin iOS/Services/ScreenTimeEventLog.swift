@@ -10,15 +10,9 @@ import os
 enum ScreenTimeEventLog {
 
     static let key = "evlin.screentime.events"
-    /// Ring-buffer depth. Raised 500 → 2000 for the A3 metering flight
-    /// recorder: one metered day emits a callback + guard-verdict + sample
-    /// triple per ladder rung (30 rungs), plus per-pass coverage/watchdog
-    /// lines — several hundred lines a day. At 500 a single busy afternoon
-    /// rotated the morning out before the uploader's next foreground pass,
-    /// which is exactly the window we need to read after an overnight bug.
-    /// 2000 × ~250 B ≈ 500 KB of App-Group defaults, and `emit` rewrites the
-    /// whole array, so this is the ceiling worth paying for in the
-    /// extension's tight budget.
+    static let extensionBreadcrumbKey = "evlin.screentime.extensionBreadcrumb"
+    /// Callback arrival bypasses this ring so the extension can persist the
+    /// sample before paying the cost of durable diagnostics.
     static let cap = 2000
     static let suiteName = "group.com.evlin.ios"
 
@@ -41,6 +35,23 @@ enum ScreenTimeEventLog {
             log = Array(log.suffix(cap))
         }
         defaults.set(log, forKey: key)
+    }
+
+    /// Records callback arrival without loading or rewriting the durable ring.
+    /// This is intentionally a single-slot breadcrumb: the callback verdict and
+    /// sample remain durable ring events after the epoch transaction completes.
+    static func emitExtensionBreadcrumb(_ event: ScreenTimeEvent) {
+        guard let d = shared else { return }
+        emitExtensionBreadcrumb(event, into: d)
+    }
+
+    static func emitExtensionBreadcrumb(
+        _ event: ScreenTimeEvent,
+        into defaults: UserDefaults
+    ) {
+        let line = event.jsonLine()
+        logger.log("\(line, privacy: .public)")
+        defaults.set(line, forKey: extensionBreadcrumbKey)
     }
 
     static func read() -> [ScreenTimeEvent] {
