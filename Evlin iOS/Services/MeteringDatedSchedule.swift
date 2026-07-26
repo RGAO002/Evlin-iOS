@@ -174,10 +174,17 @@ nonisolated enum MeteringDatedSchedule {
         // uncapped path — the exact shape that produced the silent iPad. Whether
         // 50 is truly Apple's limit is still unconfirmed (see the backlog item);
         // until it is, both configurations run the behaviour we have evidence for.
-        var applications = selection.applicationTokens
-        if applications.count > applicationTokenCap {
-            applications = Set(Array(applications).prefix(applicationTokenCap))
-        }
+        let applications = deterministicallyCapped(
+            selection.applicationTokens,
+            limit: applicationTokenCap,
+            stableKey: { token in
+                guard let data = try? JSONEncoder().encode(token) else {
+                    assertionFailure("FamilyActivityToken must remain encodable")
+                    return Data()
+                }
+                return data
+            }
+        )
         return DeviceActivityEvent(
             applications: applications,
             categories: selection.categoryTokens,
@@ -197,6 +204,20 @@ nonisolated enum MeteringDatedSchedule {
             // this monitor existed stay accounted for in `baseAcceptedMinutes`.
             includesPastActivity: false
         )
+    }
+
+    static func deterministicallyCapped<Value: Hashable>(
+        _ values: Set<Value>,
+        limit: Int,
+        stableKey: (Value) -> Data
+    ) -> Set<Value> {
+        guard limit >= 0, values.count > limit else { return values }
+        let ranked = values.map { value in
+            (value: value, key: stableKey(value))
+        }.sorted { lhs, rhs in
+            lhs.key.lexicographicallyPrecedes(rhs.key)
+        }
+        return Set(ranked.prefix(limit).map(\.value))
     }
 
 }
@@ -300,6 +321,12 @@ extension DeviceEpochStore {
                 let routeID = UUID()
                 let epochID = UUID()
                 let isToday = usageDate == request.today
+                let epochStartedAt = isToday
+                    ? request.now
+                    : try MeteringDatedSchedule.canonicalStart(
+                        usageDate: usageDate,
+                        timeZone: timeZone
+                    )
                 state.epochs[epochID] = DeviceDailyEpoch(
                     epochID: epochID,
                     protocolVersion: generation.protocolVersion,
@@ -309,7 +336,7 @@ extension DeviceEpochStore {
                     policyRevision: generation.policyRevision,
                     measurementSelectionDigest: generation.measurementSelectionDigest,
                     enforcementSetID: generation.enforcementSetID,
-                    startedAt: request.now,
+                    startedAt: epochStartedAt,
                     registeredAt: nil,
                     baseAcceptedMinutes: isToday ? request.authoritativeBaseAcceptedMinutes : 0,
                     baseSource: .childState200,
@@ -357,11 +384,11 @@ extension DeviceEpochStore {
                         // Today's monitor must measure from NOW, not from
                         // canonical midnight.
                         //
-                        // Apple counts a `includesPastActivity: true` event from
-                        // the interval start, while this ladder is cut over
+                        // The ladder is cut over
                         // `remaining = pool - baseAcceptedMinutes` — i.e. it means
-                        // "N more minutes from here". Starting the interval at
-                        // midnight makes those two disagree by exactly the
+                        // "N more minutes from here". Earlier builds used
+                        // `includesPastActivity: true`; starting their interval
+                        // at midnight made the daemon disagree by exactly the
                         // minutes already spent today, so every rung of a
                         // mid-day (re)arm is already behind the daemon's counter:
                         // Apple back-delivers them once, ~1s after

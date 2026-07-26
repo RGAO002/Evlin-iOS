@@ -1310,7 +1310,10 @@ nonisolated enum MeteringEpochTransition: Equatable, Sendable {
 }
 
 nonisolated enum MeteringEpochContract {
-    static let defaultJitterSeconds = 30
+    // Field evidence (iPad, 2026-07-26): a legitimate five-minute callback
+    // arrived at 265 seconds. Keep the default at the contract's hard maximum
+    // so normal DeviceActivity scheduling jitter cannot reset a healthy route.
+    static let defaultJitterSeconds = 60
     static let maximumJitterSeconds = 60
 
     static func selectionDigest(persistedBytes: Data) -> String {

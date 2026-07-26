@@ -232,6 +232,7 @@ final class BigKidStatePollerTests: XCTestCase {
             reconcileReflectionLock: { _ in },
             applySnapshot: { _, _ in events.append("apply") },
             mirrorChildIdentity: { _ in events.append("mirror") },
+            replayMeteringCallbacks: { events.append("callback-replay") },
             syncEarnedRuntime: { _ in
                 events.append("runtime")
                 return .reconciled(15)
@@ -252,7 +253,20 @@ final class BigKidStatePollerTests: XCTestCase {
 
         await poller.refreshNow()
 
-        XCTAssertEqual(events, ["mirror", "apply", "runtime", "gate", "epoch", "coverage", "ready", "arm"])
+        XCTAssertEqual(
+            events,
+            [
+                "mirror",
+                "callback-replay",
+                "apply",
+                "runtime",
+                "gate",
+                "epoch",
+                "coverage",
+                "ready",
+                "arm",
+            ]
+        )
     }
 
     func test_refresh_identityTransitionDoesNotArmBeforeRuntimeAndGate() async {

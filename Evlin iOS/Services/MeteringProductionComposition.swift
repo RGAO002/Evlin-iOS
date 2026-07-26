@@ -95,9 +95,10 @@ nonisolated enum MeteringProductionComposition {
 
     static func makeCallback(
         store: DeviceEpochStore = .shared,
-        clock: any MeteringClock = MeteringRuntimeClock.live()
+        clock: any MeteringClock = MeteringRuntimeClock.live(),
+        journal: EarnedV2CallbackJournal = EarnedV2CallbackJournal()
     ) -> EarnedMeteringCallback {
-        EarnedMeteringCallback(store: store, clock: clock)
+        EarnedMeteringCallback(store: store, clock: clock, journal: journal)
     }
 
     @MainActor

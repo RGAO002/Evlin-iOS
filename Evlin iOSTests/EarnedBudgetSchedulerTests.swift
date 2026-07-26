@@ -132,6 +132,58 @@ final class EarnedBudgetSchedulerTests: XCTestCase {
         )
     }
 
+    func testFutureEpochStartsAtItsCanonicalMidnightRatherThanPlanningTime() throws {
+        let owner = UUID(uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")!
+        let storeURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("metering-future-start-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: storeURL) }
+        let store = DeviceEpochStore(fileURL: storeURL, ownerProvider: { owner })
+        let planningTime = try XCTUnwrap(
+            ISO8601DateFormatter().date(from: "2026-07-17T04:40:00Z")
+        )
+
+        let plan = try store.reconcileMeteringHorizon(MeteringHorizonRequest(
+            ownerChildDeviceID: owner,
+            today: "2026-07-17",
+            generationKey: generationKey(owner: owner),
+            persistedSelectionBytes: Data([0x00, 0x01, 0xFE, 0xFF]),
+            poolMinutes: 240,
+            deviceCapMinutes: 240,
+            authoritativeBaseAcceptedMinutes: 0,
+            now: planningTime
+        ))
+        let state = try store.read()
+        let futureRouteID = try XCTUnwrap(plan.routeIDsByUsageDate["2026-07-18"])
+        let futureRoute = try XCTUnwrap(state.routes[futureRouteID])
+        let futureEpoch = try XCTUnwrap(state.epochs[futureRoute.epochID])
+        let expectedStart = try MeteringDatedSchedule.canonicalStart(
+            usageDate: "2026-07-18",
+            timeZone: try XCTUnwrap(TimeZone(identifier: "America/New_York"))
+        )
+
+        XCTAssertEqual(futureEpoch.startedAt, expectedStart)
+        XCTAssertNotEqual(futureEpoch.startedAt, planningTime)
+    }
+
+    func testCappedSelectionIsStableAcrossInputOrder() throws {
+        let forward = Set((0..<80).map { String(format: "app-%03d", $0) })
+        let reverse = Set((0..<80).reversed().map { String(format: "app-%03d", $0) })
+
+        let first = MeteringDatedSchedule.deterministicallyCapped(
+            forward,
+            limit: 50,
+            stableKey: { Data($0.utf8) }
+        )
+        let second = MeteringDatedSchedule.deterministicallyCapped(
+            reverse,
+            limit: 50,
+            stableKey: { Data($0.utf8) }
+        )
+
+        XCTAssertEqual(first, second)
+        XCTAssertEqual(first.count, 50)
+    }
+
     func testHorizonReconciliationPersistsOneGenerationAndEightImmutableDatedRoutes() throws {
         let owner = UUID(uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")!
         let storeURL = FileManager.default.temporaryDirectory

@@ -328,7 +328,7 @@ nonisolated enum EpochSampleAuthorization: String, Codable, Sendable {
     case legacyDeliverable, waitingForRegistration, v2Deliverable
 }
 
-nonisolated struct MeteringAuthorizedCallbackInput: Equatable, Sendable {
+nonisolated struct MeteringAuthorizedCallbackInput: Codable, Equatable, Sendable {
     let routeID: UUID
     let activityName: String
     let eventName: String
@@ -383,6 +383,11 @@ nonisolated struct MeteringTerminalShieldCandidate: Codable, Equatable, Sendable
 nonisolated enum MeteringAuthorizedCallbackResult: Equatable, Sendable {
     case queued(sampleWorkID: UUID)
     case discarded(reason: String)
+}
+
+nonisolated struct MeteringPreparedAuthorizedCallback: Equatable, Sendable {
+    let result: MeteringAuthorizedCallbackResult
+    let work: EpochSampleWork?
 }
 
 private nonisolated struct MeteringCallbackVerdictContext {
@@ -934,6 +939,11 @@ nonisolated struct V2RouteHandoff: Codable, Equatable, Sendable {
     var activationAcknowledgedAt: Date?
     var priorStopAcknowledgedAt: Date?
     let createdAt: Date
+    /// Same-key replacements need an explicit, auditable reason. In
+    /// particular, a physical route whose one-shot event names were already
+    /// delivered must recover through a fresh identity, not masquerade as a
+    /// policy change or re-arm the consumed names in place.
+    var explicitRecovery: MeteringExplicitRecovery? = nil
 }
 
 nonisolated struct MeteringOwnerRatchet: Codable, Equatable, Sendable {
@@ -1738,6 +1748,256 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         )
     }
 
+    /// Repairs roots written by the same-generation authoritative-base bug.
+    ///
+    /// The rejected candidate and the active prior route shared a generation,
+    /// but terminalizing the candidate retired that shared generation. The
+    /// corrected route was then rejected by the provenance firewall and left
+    /// the handoff permanently preparing. This migration recognizes only that
+    /// complete persisted shape and retries the existing corrected identity.
+    @discardableResult
+    func recoverLegacyRetiredPriorAuthoritativeCorrection(
+        owner: UUID,
+        now: Date
+    ) throws -> Bool {
+        guard isCurrentOwner(owner) else { return false }
+        return try transaction(expectedOwner: owner) { state in
+            guard let handoff = state.v2RouteHandoff,
+                  handoff.ownerChildDeviceID == owner,
+                  handoff.phase == .preparing,
+                  state.activeGenerationID == handoff.fromGenerationID,
+                  state.activeEpochID == handoff.fromEpochID,
+                  state.activeRouteID == handoff.fromRouteID,
+                  var priorGeneration = state.generations[handoff.fromGenerationID],
+                  priorGeneration.childDeviceID == owner,
+                  priorGeneration.retiredAt != nil,
+                  let priorEpoch = state.epochs[handoff.fromEpochID],
+                  priorEpoch.childDeviceID == owner,
+                  priorEpoch.status == .active,
+                  priorEpoch.retiredAt == nil,
+                  let priorRoute = state.routes[handoff.fromRouteID],
+                  priorRoute.ownerChildDeviceID == owner,
+                  priorRoute.generationID == handoff.fromGenerationID,
+                  priorRoute.epochID == handoff.fromEpochID,
+                  priorRoute.lifecycle == .active,
+                  let correctedGeneration = state.generations[handoff.toGenerationID],
+                  correctedGeneration.childDeviceID == owner,
+                  correctedGeneration.retiredAt == nil,
+                  let correctedEpoch = state.epochs[handoff.toEpochID],
+                  correctedEpoch.childDeviceID == owner,
+                  correctedEpoch.status == .active,
+                  correctedEpoch.retiredAt == nil,
+                  correctedEpoch.baseSource == .registrationConflict409,
+                  correctedEpoch.baseCorrectionState == .used,
+                  let correctedRoute = state.routes[handoff.toRouteID],
+                  correctedRoute.ownerChildDeviceID == owner,
+                  correctedRoute.generationID == handoff.toGenerationID,
+                  correctedRoute.epochID == handoff.toEpochID,
+                  correctedRoute.lifecycle == .planned,
+                  priorRoute.generationKey == correctedRoute.generationKey
+            else { return false }
+
+            let rejectedIntermediaries = state.routes.values.filter { route in
+                guard route.ownerChildDeviceID == owner,
+                      route.routeID != priorRoute.routeID,
+                      route.routeID != correctedRoute.routeID,
+                      route.generationID == handoff.fromGenerationID,
+                      route.usageDate == priorRoute.usageDate,
+                      route.generationKey == priorRoute.generationKey,
+                      route.lifecycle == .tombstoned,
+                      let epoch = state.epochs[route.epochID]
+                else { return false }
+                return epoch.status == .retired
+                    && epoch.retireReason == .authoritativeBaseMismatch
+                    && epoch.baseCorrectionState == .used
+                    && epoch.authoritativeBaseConflict != nil
+                    && state.tombstones[route.routeID] != nil
+            }
+            guard rejectedIntermediaries.count == 1 else { return false }
+
+            let installKeys = state.installWork.compactMap { key, work -> UUID? in
+                guard work.ownerChildDeviceID == owner,
+                      work.routeID == correctedRoute.routeID,
+                      work.authorization == .offlinePending,
+                      work.phase == .pendingStart,
+                      work.claim == nil,
+                      work.retry.terminal == .superseded,
+                      work.retry.lastErrorCode == "route_superseded"
+                else { return nil }
+                return key
+            }
+            let registrationKeys = state.registrationWork.compactMap {
+                key, work -> UUID? in
+                guard work.ownerChildDeviceID == owner,
+                      work.epochID == correctedEpoch.epochID,
+                      work.routeID == correctedRoute.routeID,
+                      work.claim == nil,
+                      work.retry.terminal == .superseded,
+                      work.retry.lastErrorCode == "route_superseded"
+                else { return nil }
+                return key
+            }
+            guard installKeys.count == 1,
+                  registrationKeys.count == 1,
+                  !state.activationWork.values.contains(where: {
+                      $0.ownerChildDeviceID == owner
+                          && $0.routeID == correctedRoute.routeID
+                          && $0.retry.terminal == .succeeded
+                  })
+            else { return false }
+
+            priorGeneration.retiredAt = nil
+            state.generations[priorGeneration.generationID] = priorGeneration
+
+            let installKey = installKeys[0]
+            let priorInstallRetry = state.installWork[installKey]?.retry
+            state.installWork[installKey]?.retry = MeteringRetryState(
+                attemptCount: priorInstallRetry?.attemptCount ?? 0,
+                nextAttemptAt: now,
+                lastErrorCode: nil,
+                terminal: .pending
+            )
+
+            let registrationKey = registrationKeys[0]
+            let priorRegistrationRetry = state.registrationWork[registrationKey]?.retry
+            state.registrationWork[registrationKey]?.retry = MeteringRetryState(
+                attemptCount: priorRegistrationRetry?.attemptCount ?? 0,
+                nextAttemptAt: now,
+                lastErrorCode: nil,
+                terminal: .pending
+            )
+            return true
+        }
+    }
+
+    /// Repairs a base-correction handoff written before corrections declared
+    /// identity recovery explicitly.
+    ///
+    /// Those roots already installed the corrected route and closed the prior
+    /// route's input, but registered the unchanged immutable epoch key as a
+    /// policy change. The backend correctly rejected that declaration and the
+    /// device stayed at cutoverReady forever. Only rewrite the existing work
+    /// when the complete historical shape matches; never mint another route.
+    @discardableResult
+    func recoverLegacySameKeyCorrectionReasonMismatch(
+        owner: UUID,
+        now: Date
+    ) throws -> Bool {
+        guard isCurrentOwner(owner) else { return false }
+        return try transaction(expectedOwner: owner) { state in
+            guard var handoff = state.v2RouteHandoff,
+                  handoff.ownerChildDeviceID == owner,
+                  handoff.phase == .cutoverReady,
+                  handoff.explicitRecovery == nil,
+                  state.activeGenerationID == handoff.fromGenerationID,
+                  state.activeEpochID == handoff.fromEpochID,
+                  state.activeRouteID == handoff.fromRouteID,
+                  let priorGeneration = state.generations[handoff.fromGenerationID],
+                  priorGeneration.childDeviceID == owner,
+                  priorGeneration.retiredAt == nil,
+                  let priorEpoch = state.epochs[handoff.fromEpochID],
+                  priorEpoch.childDeviceID == owner,
+                  priorEpoch.status == .active,
+                  priorEpoch.retiredAt == nil,
+                  let priorRoute = state.routes[handoff.fromRouteID],
+                  priorRoute.ownerChildDeviceID == owner,
+                  priorRoute.generationID == handoff.fromGenerationID,
+                  priorRoute.epochID == handoff.fromEpochID,
+                  priorRoute.lifecycle == .active,
+                  let correctedGeneration = state.generations[handoff.toGenerationID],
+                  correctedGeneration.childDeviceID == owner,
+                  correctedGeneration.retiredAt == nil,
+                  let correctedEpoch = state.epochs[handoff.toEpochID],
+                  correctedEpoch.childDeviceID == owner,
+                  correctedEpoch.status == .active,
+                  correctedEpoch.retiredAt == nil,
+                  correctedEpoch.baseSource == .registrationConflict409,
+                  correctedEpoch.baseCorrectionState == .used,
+                  let correctedRoute = state.routes[handoff.toRouteID],
+                  correctedRoute.ownerChildDeviceID == owner,
+                  correctedRoute.generationID == handoff.toGenerationID,
+                  correctedRoute.epochID == handoff.toEpochID,
+                  correctedRoute.lifecycle == .active,
+                  priorRoute.usageDate == correctedRoute.usageDate,
+                  priorRoute.generationKey == correctedRoute.generationKey,
+                  let priorInstall = state.installWork.values.first(where: {
+                      $0.ownerChildDeviceID == owner
+                          && $0.routeID == priorRoute.routeID
+                  }),
+                  priorInstall.phase == .active
+            else { return false }
+
+            let correctedInstallKeys = state.installWork.compactMap {
+                key, work -> UUID? in
+                guard work.ownerChildDeviceID == owner,
+                      work.routeID == correctedRoute.routeID,
+                      work.authorization == .offlinePending,
+                      work.phase == .dualActive,
+                      work.claim == nil
+                else { return nil }
+                return key
+            }
+            let registrationKeys = state.registrationWork.compactMap {
+                key, work -> UUID? in
+                guard work.ownerChildDeviceID == owner,
+                      work.epochID == correctedEpoch.epochID,
+                      work.routeID == correctedRoute.routeID,
+                      work.request.reason == .policyChange,
+                      work.claim == nil,
+                      work.retry.terminal == .rejected,
+                      work.retry.lastErrorCode == "replacement_reason_mismatch"
+                else { return nil }
+                return key
+            }
+            guard correctedInstallKeys.count == 1,
+                  registrationKeys.count == 1,
+                  !state.activationWork.values.contains(where: {
+                      $0.ownerChildDeviceID == owner
+                          && $0.epochID == correctedEpoch.epochID
+                          && $0.routeID == correctedRoute.routeID
+                          && $0.retry.terminal == .succeeded
+                  })
+            else { return false }
+
+            let registrationKey = registrationKeys[0]
+            guard let registration = state.registrationWork[registrationKey] else {
+                return false
+            }
+            let request = registration.request
+            let correctedRequest = EpochRegistrationRequestDTO(
+                protocolVersion: request.protocolVersion,
+                epochID: request.epochID,
+                deviceID: request.deviceID,
+                usageDate: request.usageDate,
+                timezone: request.timezone,
+                policyRevision: request.policyRevision,
+                measurementSelectionDigest: request.measurementSelectionDigest,
+                enforcementSetID: request.enforcementSetID,
+                startedAt: request.startedAt,
+                baseAcceptedMinutes: request.baseAcceptedMinutes,
+                reason: .identityRecovery
+            )
+            state.registrationWork[registrationKey] = EpochRegistrationWork(
+                workID: registration.workID,
+                ownerChildDeviceID: registration.ownerChildDeviceID,
+                epochID: registration.epochID,
+                routeID: registration.routeID,
+                request: correctedRequest,
+                claim: nil,
+                retry: MeteringRetryState(
+                    attemptCount: 0,
+                    nextAttemptAt: now,
+                    lastErrorCode: nil,
+                    terminal: .pending
+                ),
+                createdAt: registration.createdAt
+            )
+            handoff.explicitRecovery = .identityRecovery
+            state.v2RouteHandoff = handoff
+            return true
+        }
+    }
+
     /// Release is never a generic source removal. The operation must still be
     /// referenced by this owner and the originating epoch must have entered one
     /// of the narrow terminal paths that is allowed to unwind earned shielding.
@@ -1915,6 +2175,252 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         }
     }
 
+    /// Bounds the control-plane root after the daemon has confirmed that a
+    /// retired generation no longer owns any physical activity.
+    ///
+    /// Physical stop must happen first. A crash between stop and this
+    /// transaction is harmless because the next recovery observes the same
+    /// absent names and retries collection. References that can still drive an
+    /// effect keep their generation intact.
+    @discardableResult
+    func compactPhysicallyAbsentRetiredHistory(
+        owner: UUID,
+        physicallyInstalledActivityNames: Set<String>,
+        now: Date = Date()
+    ) throws -> Int {
+        guard isCurrentOwner(owner) else { return 0 }
+        return try transaction(expectedOwner: owner) { state in
+            guard state.identityCleanupWork == nil else { return 0 }
+
+            var protectedGenerationIDs: Set<UUID> = []
+            var protectedEpochIDs: Set<UUID> = []
+            var protectedRouteIDs: Set<UUID> = []
+            var sampleCompactionBlockedRouteIDs: Set<UUID> = []
+            if let handoff = state.v2RouteHandoff {
+                protectedGenerationIDs.formUnion([
+                    handoff.fromGenerationID,
+                    handoff.toGenerationID,
+                ])
+                protectedEpochIDs.formUnion([handoff.fromEpochID, handoff.toEpochID])
+                protectedRouteIDs.formUnion([handoff.fromRouteID, handoff.toRouteID])
+                sampleCompactionBlockedRouteIDs.formUnion([
+                    handoff.fromRouteID,
+                    handoff.toRouteID,
+                ])
+            }
+            if let rollover = state.rolloverEffectsWork,
+               rollover.retry.terminal == .pending {
+                protectedEpochIDs.formUnion([rollover.oldEpochID, rollover.newEpochID])
+                protectedRouteIDs.formUnion([rollover.oldRouteID, rollover.newRouteID])
+                sampleCompactionBlockedRouteIDs.formUnion([
+                    rollover.oldRouteID,
+                    rollover.newRouteID,
+                ])
+            }
+            protectedEpochIDs.formUnion(state.shieldReferences.values.map(\.epochID))
+            protectedRouteIDs.formUnion(state.shieldReferences.values.map(\.routeID))
+            protectedRouteIDs.formUnion(state.deferredCallbacks.values.map(\.routeID))
+            sampleCompactionBlockedRouteIDs.formUnion(
+                state.deferredCallbacks.values.map(\.routeID)
+            )
+
+            let retiredGenerationIDs = Set(state.generations.values.compactMap {
+                generation -> UUID? in
+                guard generation.childDeviceID == owner,
+                      generation.retiredAt != nil,
+                      generation.generationID != state.activeGenerationID
+                else { return nil }
+                return generation.generationID
+            })
+
+            // A retained retired generation may still carry many already-sent
+            // rungs. One maximum successful sample preserves the accepted
+            // high-water; pending work and current-route history are untouched.
+            var removedCount = 0
+            let compactableRetiredRouteIDs = Set(state.routes.values.compactMap {
+                route -> UUID? in
+                guard state.generations[route.generationID]?.retiredAt != nil,
+                      !sampleCompactionBlockedRouteIDs.contains(route.routeID),
+                      !physicallyInstalledActivityNames.contains(route.activityName)
+                else { return nil }
+                return route.routeID
+            })
+            for routeID in compactableRetiredRouteIDs {
+                let works = state.sampleWork.values.filter { $0.routeID == routeID }
+                guard works.allSatisfy({
+                    $0.claim == nil && $0.retry.terminal != .pending
+                }) else { continue }
+                let retainedSucceededID = works
+                    .filter { $0.retry.terminal == .succeeded }
+                    .max {
+                        if $0.request.estimatedMinutes != $1.request.estimatedMinutes {
+                            return $0.request.estimatedMinutes < $1.request.estimatedMinutes
+                        }
+                        if $0.createdAt != $1.createdAt {
+                            return $0.createdAt < $1.createdAt
+                        }
+                        return $0.workID.uuidString > $1.workID.uuidString
+                    }?
+                    .workID
+                let removable = works.compactMap { work -> UUID? in
+                    work.workID == retainedSucceededID ? nil : work.workID
+                }
+                for workID in removable {
+                    state.sampleWork[workID] = nil
+                }
+                if var tombstone = state.tombstones[routeID] {
+                    tombstone.referencedWorkIDs.subtract(removable)
+                    state.tombstones[routeID] = tombstone
+                }
+                removedCount += removable.count
+            }
+
+            let removableRetiredRouteIDs = Set(state.routes.values.compactMap {
+                route -> UUID? in
+                let retiredGenerationIsCollectable =
+                    retiredGenerationIDs.contains(route.generationID)
+                    && !protectedGenerationIDs.contains(route.generationID)
+                let stoppedSupersededRouteIsCollectable: Bool = {
+                    guard route.lifecycle == .tombstoned,
+                          route.routeID != state.activeRouteID,
+                          route.epochID != state.activeEpochID,
+                          let epoch = state.epochs[route.epochID],
+                          epoch.status == .retired,
+                          epoch.retireReason == .activationSuperseded,
+                          let tombstone = state.tombstones[route.routeID],
+                          let stoppedAt = tombstone.stopAcknowledgedAt,
+                          now.timeIntervalSince(stoppedAt) >= Self.lateCallbackGraceSeconds
+                    else { return false }
+                    return state.installWork.values
+                        .filter { $0.routeID == route.routeID }
+                        .allSatisfy {
+                            $0.phase == .stopped
+                                && $0.claim == nil
+                        }
+                }()
+                guard retiredGenerationIsCollectable || stoppedSupersededRouteIsCollectable,
+                      !protectedRouteIDs.contains(route.routeID),
+                      !protectedEpochIDs.contains(route.epochID),
+                      route.lifecycle != .active,
+                      !physicallyInstalledActivityNames.contains(route.activityName),
+                      state.registrationWork.values
+                        .filter({ $0.routeID == route.routeID })
+                        .allSatisfy({
+                            $0.claim == nil && $0.retry.terminal != .pending
+                        }),
+                      state.activationWork.values
+                        .filter({ $0.routeID == route.routeID })
+                        .allSatisfy({
+                            $0.claim == nil && $0.retry.terminal != .pending
+                        }),
+                      state.sampleWork.values
+                        .filter({ $0.routeID == route.routeID })
+                        .allSatisfy({
+                            $0.claim == nil && $0.retry.terminal != .pending
+                        }),
+                      state.installWork.values
+                        .filter({ $0.routeID == route.routeID })
+                        .allSatisfy({ $0.claim == nil })
+                else { return nil }
+                return route.routeID
+            })
+            for routeID in removableRetiredRouteIDs {
+                guard let route = state.routes[routeID] else { continue }
+                let registrationIDs = state.registrationWork.values
+                    .filter { $0.routeID == routeID }
+                    .map(\.workID)
+                let activationIDs = state.activationWork.values
+                    .filter { $0.routeID == routeID }
+                    .map(\.workID)
+                let sampleIDs = state.sampleWork.values
+                    .filter { $0.routeID == routeID }
+                    .map(\.workID)
+                let installIDs = state.installWork.values
+                    .filter { $0.routeID == routeID }
+                    .map(\.workID)
+                registrationIDs.forEach { state.registrationWork[$0] = nil }
+                activationIDs.forEach { state.activationWork[$0] = nil }
+                sampleIDs.forEach { state.sampleWork[$0] = nil }
+                installIDs.forEach { state.installWork[$0] = nil }
+                state.tombstones[routeID] = nil
+                state.routes[routeID] = nil
+                if !state.routes.values.contains(where: { $0.epochID == route.epochID }) {
+                    state.epochs[route.epochID] = nil
+                }
+                removedCount += 1
+                    + registrationIDs.count
+                    + activationIDs.count
+                    + sampleIDs.count
+                    + installIDs.count
+            }
+            for generationID in retiredGenerationIDs
+            where !protectedGenerationIDs.contains(generationID)
+                && !state.routes.values.contains(where: {
+                    $0.generationID == generationID
+                }) {
+                state.generations[generationID] = nil
+                removedCount += 1
+            }
+            return removedCount
+        }
+    }
+
+    /// The callback boundary is deliberately the sole local producer of v2
+    /// sample work. Authority checks and mutation share one root decode under
+    /// the lock; rejected callbacks cannot bootstrap an empty root.
+    func prepareAuthorizedV2Callback(
+        _ input: MeteringAuthorizedCallbackInput,
+        owner: UUID
+    ) throws -> MeteringPreparedAuthorizedCallback {
+        guard isCurrentOwner(owner) else {
+            return MeteringPreparedAuthorizedCallback(
+                result: .discarded(reason: "owner_mismatch"),
+                work: nil
+            )
+        }
+
+        let state = try read()
+        guard state.ownerChildDeviceID == owner else {
+            return MeteringPreparedAuthorizedCallback(
+                result: .discarded(
+                    reason: state.ownerChildDeviceID == nil
+                        ? "missing_owner"
+                        : "owner_mismatch"
+                ),
+                work: nil
+            )
+        }
+        guard state.routes[input.routeID] != nil else {
+            return MeteringPreparedAuthorizedCallback(
+                result: .discarded(
+                    reason: state.tombstones[input.routeID] == nil
+                        ? "unknown_route"
+                        : "tombstoned_route"
+                ),
+                work: nil
+            )
+        }
+
+        var candidate = state
+        let result = authorizeV2Callback(
+            &candidate,
+            input: input,
+            owner: owner,
+            preparedShieldReference: nil
+        )
+        try checkOwner(expectedOwner: owner, state: candidate)
+        try validateStatic(candidate, expectedOwner: owner, requireOwnerMatch: true)
+        try validateTransactionDelta(candidate: candidate, priorState: state)
+
+        let work: EpochSampleWork?
+        if case let .queued(workID) = result {
+            work = candidate.sampleWork[workID]
+        } else {
+            work = nil
+        }
+        return MeteringPreparedAuthorizedCallback(result: result, work: work)
+    }
+
     /// The callback boundary is deliberately the sole local producer of v2
     /// sample work. Authority checks and mutation share one root decode under
     /// the lock; rejected callbacks cannot bootstrap an empty root.
@@ -1939,7 +2445,8 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
             let result = try transaction(
                 expectedOwner: owner,
                 bootstrapOwnerIfMissing: false,
-                allowPersistedOwnerMismatchForNoop: true
+                allowPersistedOwnerMismatchForNoop: true,
+                debugLabel: "v2_callback"
             ) { state -> MeteringAuthorizedCallbackResult in
                 let sampleIDsBeforeAuthorization = Set(state.sampleWork.keys)
                 if state.ownerChildDeviceID != owner {
@@ -2286,13 +2793,22 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         // wall clock since `startedAt` — do NOT credit the base here (tried
         // 2026-07-24, it silently disables this anti-cheat bound for every epoch
         // born with a base). Apple's own events count the whole day
-        // (`includesPastActivity: true`), so a mid-day epoch does see instant
-        // back-delivery that lands here as `too_early`; that absolute-vs-relative
-        // mismatch is a separate open design item, not a reason to weaken this.
+        // Events use `includesPastActivity: false`, but on-device evidence shows
+        // that starting a replacement from inside this extension callback can
+        // still synchronously consume every new one-shot event. The guard below
+        // rejects that false progress and marks the physical route for a fresh
+        // identity; it must never weaken the elapsed-time bound.
         let earliest = epoch.startedAt.addingTimeInterval(
             TimeInterval(input.thresholdMinutes * 60 - input.jitterSeconds)
         )
         guard input.observedAt >= earliest else {
+            let installKeys = state.installWork.compactMap { key, work in
+                work.routeID == route.routeID ? key : nil
+            }
+            if installKeys.count == 1, let installKey = installKeys.first {
+                state.installWork[installKey]?.retry.lastErrorCode =
+                    "physical_events_consumed_too_early"
+            }
             return .discarded(reason: "too_early")
         }
 
@@ -2613,8 +3129,9 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
               currentEpoch.enforcementSetID == retiredEpoch.enforcementSetID
         else { return nil }
 
-        // High-water credit of the lost minutes: the retired epoch genuinely
-        // observed (base + threshold) real minutes that never reached a sample.
+        // Offer the lost minutes to the backend: the retired epoch observed
+        // `base + threshold`, but observation alone is not authority to lift the
+        // current epoch's base.
         //
         // BUG 1: this is the second place a base is lifted, and it lifts it from
         // a DIFFERENT epoch's ladder. Bound it by the day's ceiling for the same
@@ -2645,41 +3162,13 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                 )
             )
         }
-        // `baseAcceptedMinutes` is immutable; rebuild the epoch with the lifted base
-        // (every other field copied verbatim).
-        let creditedEpoch = DeviceDailyEpoch(
-            epochID: currentEpoch.epochID,
-            protocolVersion: currentEpoch.protocolVersion,
-            childDeviceID: currentEpoch.childDeviceID,
-            usageDate: currentEpoch.usageDate,
-            canonicalTimezone: currentEpoch.canonicalTimezone,
-            policyRevision: currentEpoch.policyRevision,
-            measurementSelectionDigest: currentEpoch.measurementSelectionDigest,
-            enforcementSetID: currentEpoch.enforcementSetID,
-            startedAt: currentEpoch.startedAt,
-            registeredAt: currentEpoch.registeredAt,
-            baseAcceptedMinutes: recovered,
-            baseSource: currentEpoch.baseSource,
-            lastRawThresholdMinutes: currentEpoch.lastRawThresholdMinutes,
-            excludedWhilePausedMinutes: currentEpoch.excludedWhilePausedMinutes,
-            status: currentEpoch.status,
-            resumeBoundaryPending: currentEpoch.resumeBoundaryPending,
-            retiredAt: currentEpoch.retiredAt,
-            retireReason: currentEpoch.retireReason,
-            exhaustedAt: currentEpoch.exhaustedAt,
-            baseCorrectionState: currentEpoch.baseCorrectionState,
-            authoritativeBaseConflict: currentEpoch.authoritativeBaseConflict
-        )
-        state.epochs[currentEpochID] = creditedEpoch
-
         // Queue one sample for the CURRENT route/epoch so the bar advances. Keyed
         // off the retired route id so it can never collide with the current route's
-        // own threshold samples (dedup-safe).
-        let estimatedUncapped = creditedEpoch.baseAcceptedMinutes
-            + max(0, creditedEpoch.lastRawThresholdMinutes - creditedEpoch.excludedWhilePausedMinutes)
-        // Same hard bound as the main callback path: no sample may bill more
-        // than the day's whole pool, whatever door it came through.
-        let estimatedMinutes = ceilingMinutes.map { min(estimatedUncapped, $0) } ?? estimatedUncapped
+        // own threshold samples (dedup-safe). The current base remains unchanged
+        // until this work reaches `.succeeded`; a later re-arm then carries the
+        // accepted request estimate through the same proof path as every other
+        // sample.
+        let estimatedMinutes = recovered
         let clientSampleID = MeteringSampleWireAliases.clientSampleID(
             lane: .v2,
             routeID: retiredRoute.routeID,
@@ -3155,14 +3644,17 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                 afterBase = epoch.baseAcceptedMinutes
                 return false
             }
-            // Minutes credited while paused are excluded from the ledger, so
-            // carrying the raw high-water wholesale would invent them. Carrying
-            // `raw - excluded` and zeroing both keeps `base + max(0, raw -
-            // excluded)` — the ledger — bit-identical across the re-arm.
-            let credited = max(
-                0,
-                epoch.lastRawThresholdMinutes - epoch.excludedWhilePausedMinutes
-            )
+            // Raw callbacks are observations, not credits. The backend can
+            // reject one as physically impossible after it has already raised
+            // `lastRawThresholdMinutes`; carrying that high-water into the next
+            // ladder permanently poisons the route. Only a durable succeeded
+            // sample for this exact route/epoch proves the backend accepted the
+            // estimate.
+            let acceptedBase = state.highestDurablyAcceptedMinutes(
+                owner: owner,
+                epoch: epoch,
+                route: route
+            ) ?? epoch.baseAcceptedMinutes
             // The ladder must be re-cut for the carried base in this same
             // transaction.
             let carried: Int
@@ -3175,7 +3667,7 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                 // → 425 → 460 against a 180-minute pool (iPad 2026-07-25). The
                 // re-cut is what stops those stale rungs being credited at all;
                 // this is the bound that holds even if one slips through.
-                carried = min(epoch.baseAcceptedMinutes + credited, ceiling)
+                carried = min(acceptedBase, ceiling)
                 candidateLadder = MeteringLadderMath.plannedEvents(
                     routeID: route.routeID,
                     ladderBaseMinutes: carried,
@@ -3189,7 +3681,7 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                 // carried base; the invariant that matters (a rung means
                 // `ladderBase + T`) still holds, and the report path simply
                 // claims no clamp it cannot justify.
-                carried = epoch.baseAcceptedMinutes + credited
+                carried = acceptedBase
                 candidateLadder = MeteringLadderMath.plannedEvents(
                     routeID: route.routeID,
                     ladderBaseMinutes: 0,
@@ -3298,7 +3790,8 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
             }
         }
         return try transaction(expectedOwner: owner) { state in
-            guard let routeID = state.activeRouteID,
+            guard state.v2RouteHandoff == nil,
+                  let routeID = state.activeRouteID,
                   var route = state.routes[routeID],
                   route.ownerChildDeviceID == owner,
                   route.lifecycle == .active,
@@ -3319,7 +3812,68 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
             // 180-minute pool) and must be pulled back even if the ladder alone
             // happens to look plausible.
             let baseExceedsPool = epoch.baseAcceptedMinutes > ceiling
-            guard overrunsPool || disagreesWithEpoch || baseExceedsPool else { return false }
+            let durablyAccepted = state.highestDurablyAcceptedMinutes(
+                owner: owner,
+                epoch: epoch,
+                route: route
+            )
+            let routeInstallRows = state.installWork.values.filter {
+                $0.routeID == routeID
+            }
+            // The old repair re-armed the same physical activity after some of
+            // its one-shot event names had already produced accepted samples.
+            // Its install marker survives even after the numbers become
+            // perfectly consistent, making this an exact persisted diagnosis
+            // rather than a timeout or timestamp heuristic.
+            let reusedPhysicalIdentityAfterInPlaceRepair =
+                routeInstallRows.count == 1
+                && routeInstallRows[0].retry.lastErrorCode == "ladder_base_repaired"
+                && state.sampleWork.values.contains {
+                    $0.routeID == routeID && $0.retry.terminal == .succeeded
+                }
+            let physicalEventsConsumedTooEarly =
+                routeInstallRows.count == 1
+                && routeInstallRows[0].retry.lastErrorCode
+                    == "physical_events_consumed_too_early"
+            // A poisoned base can be internally self-consistent: the affected
+            // iPad held base=225, ladderBase=225 and rungs 5/10/15 under a
+            // 240-minute ceiling. Only the succeeded backend work proves that
+            // 100, not 225, was the last accepted value.
+            // A successful rung advances the durable estimate while the
+            // ladder base intentionally stays fixed. Comparing the backend
+            // evidence with the base alone made every accepted t5/t10/... look
+            // like corruption and minted a fresh physical route after each
+            // callback. Compare like with like: the estimate represented by
+            // this exact ladder base and its current accepted raw high-water.
+            let projectedAccepted = min(
+                ladderBase + max(
+                    0,
+                    epoch.lastRawThresholdMinutes - epoch.excludedWhilePausedMinutes
+                ),
+                ceiling
+            )
+            // Recovery reaches this check before it drains network work. A raw
+            // rung with pending sample work has not been rejected; comparing it
+            // with the last durable value would manufacture an identity change
+            // during every normal callback/upload race (and indefinitely while
+            // offline). Defer only this authority check until the sample reaches
+            // a terminal verdict. Structural ladder violations still repair.
+            let hasUnsettledSampleEvidence = state.sampleWork.values.contains {
+                $0.ownerChildDeviceID == owner
+                    && $0.epochID == epoch.epochID
+                    && $0.routeID == route.routeID
+                    && $0.retry.terminal == .pending
+            }
+            let disagreesWithDurableAuthority = durablyAccepted.map {
+                !hasUnsettledSampleEvidence && $0 != projectedAccepted
+            } ?? false
+            guard overrunsPool
+                    || disagreesWithEpoch
+                    || baseExceedsPool
+                    || disagreesWithDurableAuthority
+                    || reusedPhysicalIdentityAfterInPlaceRepair
+                    || physicalEventsConsumedTooEarly
+            else { return false }
 
             // Already clamped as far as this repair can go — do not re-run.
             //
@@ -3346,28 +3900,82 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                 + "+raw:\(epoch.lastRawThresholdMinutes)"
                 + "/ladder:\(ladderBase)+\(topRung)"
 
-            // Re-cut from where the ledger actually stands, bounded by the pool.
-            // The re-arm below restarts Apple's counter at zero, so the new rungs
-            // must be relative to the whole ledger — and the ledger itself may
-            // never exceed the day's ceiling, which is what pulls an inflated
-            // base back to a self-consistent value.
-            let credited = max(
-                0,
-                epoch.lastRawThresholdMinutes - epoch.excludedWhilePausedMinutes
-            )
-            let ledger = min(epoch.baseAcceptedMinutes + credited, ceiling)
-            let recut = MeteringLadderMath.plannedEvents(
-                routeID: routeID,
+            // Re-cut from the highest value durably accepted by the backend.
+            // `lastRawThresholdMinutes` is only an observation: it may belong to
+            // a sample the backend rejected as physically impossible. Using it
+            // here reintroduced the same poison during cold-start recovery that
+            // `absorbCreditedProgressForRearm` had just removed.
+            let accepted = durablyAccepted ?? epoch.baseAcceptedMinutes
+            let ledger = min(accepted, ceiling)
+            let candidateEpochID = UUID()
+            let candidateRouteID = UUID()
+            let candidateInstallID = UUID()
+            guard let candidateEvents = MeteringLadderMath.plannedEvents(
+                routeID: candidateRouteID,
                 ladderBaseMinutes: ledger,
                 ceilingMinutes: ceiling
-            )
-            // The corrected base is written back in BOTH branches. When the pool
-            // is spent there is no ladder left to cut, but leaving the store
-            // claiming 460 of 180 minutes would keep every later sample wrong;
-            // the rungs Apple still holds are then bounded by `ladderBaseMinutes`
-            // plus the callback clamp.
-            state.epochs[epoch.epochID] = DeviceDailyEpoch(
-                epochID: epoch.epochID,
+            ) else {
+                // The pool is spent: there is nothing left to cut, so the rungs
+                // Apple still holds stay armed. They can no longer over-report —
+                // `ladderBaseMinutes` now equals the ceiling and the callback
+                // clamp bounds the total — and the terminal rung still locks.
+                state.epochs[epoch.epochID] = DeviceDailyEpoch(
+                    epochID: epoch.epochID,
+                    protocolVersion: epoch.protocolVersion,
+                    childDeviceID: epoch.childDeviceID,
+                    usageDate: epoch.usageDate,
+                    canonicalTimezone: epoch.canonicalTimezone,
+                    policyRevision: epoch.policyRevision,
+                    measurementSelectionDigest: epoch.measurementSelectionDigest,
+                    enforcementSetID: epoch.enforcementSetID,
+                    startedAt: epoch.startedAt,
+                    registeredAt: epoch.registeredAt,
+                    baseAcceptedMinutes: ledger,
+                    baseSource: epoch.baseSource,
+                    lastRawThresholdMinutes: 0,
+                    excludedWhilePausedMinutes: 0,
+                    status: epoch.status,
+                    resumeBoundaryPending: epoch.resumeBoundaryPending,
+                    retiredAt: epoch.retiredAt,
+                    retireReason: epoch.retireReason,
+                    exhaustedAt: epoch.exhaustedAt,
+                    baseCorrectionState: epoch.baseCorrectionState,
+                    authoritativeBaseConflict: epoch.authoritativeBaseConflict
+                )
+                route.ladderBaseMinutes = ledger
+                state.routes[routeID] = route
+                verdict = "clamped_exhausted"
+                afterSummary = "base:\(ledger)+raw:0/ceiling:\(ceiling)"
+                return true
+            }
+
+            guard let generation = state.generations[route.generationID] else {
+                return false
+            }
+
+            // DeviceActivity threshold events are one-shot under their
+            // activity/event names. Re-installing a corrected ladder on this
+            // same route can read back perfectly while every new rung has
+            // already fired earlier in the day. Mint a fresh physical identity
+            // and let the existing make-before-break barrier prove it before
+            // retiring the route that is still authoritative.
+            let priorInstallKeys = state.installWork.compactMap { key, work in
+                work.routeID == routeID ? key : nil
+            }
+            guard priorInstallKeys.count == 1,
+                  let priorInstallKey = priorInstallKeys.first
+            else { return false }
+            if state.installWork[priorInstallKey]?.phase == .verified {
+                // Older recovery code could verify the daemon readback after
+                // the route had already become the logical active route without
+                // promoting its install row. Normalize that persisted split so
+                // the cutover barrier can later prove and retire this exact row.
+                state.installWork[priorInstallKey]?.phase = .active
+                state.installWork[priorInstallKey]?.claim = nil
+                state.installWork[priorInstallKey]?.retry.terminal = .succeeded
+            }
+            let candidateEpoch = DeviceDailyEpoch(
+                epochID: candidateEpochID,
                 protocolVersion: epoch.protocolVersion,
                 childDeviceID: epoch.childDeviceID,
                 usageDate: epoch.usageDate,
@@ -3375,54 +3983,88 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                 policyRevision: epoch.policyRevision,
                 measurementSelectionDigest: epoch.measurementSelectionDigest,
                 enforcementSetID: epoch.enforcementSetID,
-                startedAt: epoch.startedAt,
-                registeredAt: epoch.registeredAt,
+                startedAt: now,
+                registeredAt: nil,
                 baseAcceptedMinutes: ledger,
-                baseSource: epoch.baseSource,
+                baseSource: .childState200,
                 lastRawThresholdMinutes: 0,
                 excludedWhilePausedMinutes: 0,
-                status: epoch.status,
-                resumeBoundaryPending: epoch.resumeBoundaryPending,
-                retiredAt: epoch.retiredAt,
-                retireReason: epoch.retireReason,
-                exhaustedAt: epoch.exhaustedAt,
-                baseCorrectionState: epoch.baseCorrectionState,
-                authoritativeBaseConflict: epoch.authoritativeBaseConflict
+                status: .active,
+                resumeBoundaryPending: false,
+                retiredAt: nil,
+                retireReason: nil,
+                exhaustedAt: nil,
+                baseCorrectionState: .available
             )
-            epoch = state.epochs[epoch.epochID] ?? epoch
-            route.ladderBaseMinutes = ledger
-            guard let recut else {
-                // The pool is spent: there is nothing left to cut, so the rungs
-                // Apple still holds stay armed. They can no longer over-report —
-                // `ladderBaseMinutes` now equals the ceiling and the callback
-                // clamp bounds the total — and the terminal rung still locks.
-                state.routes[routeID] = route
-                verdict = "clamped_exhausted"
-                afterSummary = "base:\(ledger)+raw:0/ceiling:\(ceiling)"
-                return true
-            }
-            route.plannedEvents = recut
-            state.routes[routeID] = route
-            for (workKey, var work) in state.installWork where work.routeID == routeID {
-                switch work.phase {
-                case .pendingStop, .stopped:
-                    continue
-                case .pendingStart, .starting, .installed, .verified, .dualActive, .active:
-                    break
-                }
-                work.claim = nil
-                work.phase = .pendingStart
-                work.retry = MeteringRetryState(
+            let candidateRoute = MeteringCallbackRoute(
+                routeID: candidateRouteID,
+                activityName: "evlin.earned.v2.\(candidateRouteID.uuidString.lowercased())",
+                namespace: "evlin.earned.v2.",
+                generationID: generation.generationID,
+                generationKey: route.generationKey,
+                ownerChildDeviceID: owner,
+                usageDate: route.usageDate,
+                epochID: candidateEpochID,
+                plannedSchedule: DatedSchedulePlan(
+                    usageDate: route.plannedSchedule.usageDate,
+                    timezoneIdentifier: route.plannedSchedule.timezoneIdentifier,
+                    calendarIdentifier: route.plannedSchedule.calendarIdentifier,
+                    topologyVersion: DatedSchedulePlan.currentTopologyVersion,
+                    intervalStartAt: now
+                ),
+                installedSchedule: nil,
+                plannedEvents: candidateEvents,
+                installedEvents: nil,
+                lifecycle: .planned,
+                createdAt: now,
+                ladderBaseMinutes: ledger
+            )
+            state.epochs[candidateEpochID] = candidateEpoch
+            state.routes[candidateRouteID] = candidateRoute
+            state.installWork[candidateInstallID] = ActivityInstallWork(
+                workID: candidateInstallID,
+                ownerChildDeviceID: owner,
+                routeID: candidateRouteID,
+                authorization: .offlinePending,
+                phase: .pendingStart,
+                claim: nil,
+                retry: MeteringRetryState(
                     attemptCount: 0,
                     nextAttemptAt: now,
-                    lastErrorCode: "ladder_base_repaired",
+                    lastErrorCode: "physical_identity_repaired",
                     terminal: .pending
-                )
-                state.installWork[workKey] = work
+                ),
+                createdAt: now
+            )
+            state.v2RouteHandoff = V2RouteHandoff(
+                handoffID: UUID(),
+                ownerChildDeviceID: owner,
+                fromGenerationID: route.generationID,
+                fromEpochID: epoch.epochID,
+                fromRouteID: route.routeID,
+                toGenerationID: generation.generationID,
+                toEpochID: candidateEpochID,
+                toRouteID: candidateRouteID,
+                phase: .preparing,
+                priorRouteInputClosedAt: nil,
+                registrationAcknowledgedAt: nil,
+                activationAcknowledgedAt: nil,
+                priorStopAcknowledgedAt: nil,
+                createdAt: now,
+                explicitRecovery: .identityRecovery
+            )
+            if reusedPhysicalIdentityAfterInPlaceRepair {
+                verdict = "replacement_reused_identity"
+            } else if physicalEventsConsumedTooEarly {
+                verdict = "replacement_consumed_events"
+            } else {
+                verdict = overrunsPool || baseExceedsPool
+                    ? "replacement_overrun"
+                    : "replacement_desync"
             }
-            verdict = overrunsPool || baseExceedsPool ? "recut_overrun" : "recut_desync"
             afterSummary = "base:\(ledger)+raw:0"
-                + "/ladder:\(ledger)+\(recut.map(\.thresholdMinutes).max() ?? 0)"
+                + "/route:\(candidateRouteID.uuidString.lowercased())"
+                + "/ladder:\(ledger)+\(candidateEvents.map(\.thresholdMinutes).max() ?? 0)"
             return true
         }
     }
@@ -3453,6 +4095,18 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
             state.routes[route.routeID]?.installedSchedule = route.plannedSchedule
             state.routes[route.routeID]?.installedEvents = route.plannedEvents
             return true
+        }
+    }
+
+    @discardableResult
+    func reconcileEpochStartsFromSuccessfulRegistrations(owner: UUID) throws -> Bool {
+        try transaction(expectedOwner: owner) { state in
+            var changed = false
+            for work in state.registrationWork.values
+            where work.ownerChildDeviceID == owner && work.retry.terminal == .succeeded {
+                changed = state.reconcileEpochStartFromSuccessfulRegistration(work) || changed
+            }
+            return changed
         }
     }
 
@@ -3873,19 +4527,25 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         expectedOwner: UUID?,
         bootstrapOwnerIfMissing: Bool = true,
         allowPersistedOwnerMismatchForNoop: Bool = false,
+        debugLabel: String? = nil,
         _ mutate: (inout DeviceEpochStoreState) throws -> Value
     ) throws -> Value {
-        try withLock {
+        debugTransactionCheckpoint(debugLabel, stage: "before_lock")
+        return try withLock {
+            debugTransactionCheckpoint(debugLabel, stage: "lock_acquired")
             let url = try resolvedFileURL()
             let initialData = try fileIO.read(from: url)
+            debugTransactionCheckpoint(debugLabel, stage: "initial_read")
             let loaded = try loadPersistedState(
                 at: url,
                 initialData: initialData,
                 didReadInitialData: true
             )
+            debugTransactionCheckpoint(debugLabel, stage: "state_loaded")
             let priorData = loaded.persistedData
             var state = loaded.state
             try validateStatic(state, expectedOwner: nil, requireOwnerMatch: false)
+            debugTransactionCheckpoint(debugLabel, stage: "prior_validated")
             if allowPersistedOwnerMismatchForNoop {
                 guard ownerProvider() == expectedOwner else {
                     throw DeviceEpochStoreError.ownerMismatch
@@ -3900,24 +4560,34 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
 
             var candidate = state
             let value = try mutate(&candidate)
+            debugTransactionCheckpoint(debugLabel, stage: "mutation_complete")
 
             // A rejected callback may inspect an unowned root, but must not
             // bootstrap it merely by arriving. The loaded root was already
             // statically validated above, so an unchanged transaction is safe.
-            guard candidate != state else { return value }
+            guard candidate != state else {
+                debugTransactionCheckpoint(debugLabel, stage: "unchanged_complete")
+                return value
+            }
 
             try checkOwner(expectedOwner: expectedOwner, state: candidate)
             try validateStatic(candidate, expectedOwner: expectedOwner, requireOwnerMatch: true)
             try validateTransactionDelta(candidate: candidate, priorState: state)
+            debugTransactionCheckpoint(debugLabel, stage: "candidate_validated")
 
             // Re-encoding an unchanged Codable value can produce different bytes on
             // some SDKs. Rejected callback paths must be byte-identical no-ops.
             let encoded = try Self.encoder.encode(candidate)
-            guard encoded != priorData else { return value }
+            debugTransactionCheckpoint(debugLabel, stage: "candidate_encoded")
+            guard encoded != priorData else {
+                debugTransactionCheckpoint(debugLabel, stage: "same_bytes_complete")
+                return value
+            }
             var writeAttempted = false
             do {
                 writeAttempted = true
                 try fileIO.writeAtomically(encoded, to: url)
+                debugTransactionCheckpoint(debugLabel, stage: "candidate_written")
                 guard let readbackData = try fileIO.read(from: url) else {
                     throw DeviceEpochStoreError.readbackMismatch
                 }
@@ -3927,8 +4597,10 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                     throw DeviceEpochStoreError.readbackMismatch
                 }
                 let readback = try decodeState(readbackData)
+                debugTransactionCheckpoint(debugLabel, stage: "readback_decoded")
                 try validateStatic(readback, expectedOwner: expectedOwner, requireOwnerMatch: true)
                 try checkOwner(expectedOwner: expectedOwner, state: readback)
+                debugTransactionCheckpoint(debugLabel, stage: "transaction_complete")
                 return value
             } catch {
                 if writeAttempted {
@@ -3941,6 +4613,19 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                 throw error
             }
         }
+    }
+
+    private func debugTransactionCheckpoint(_ label: String?, stage: String) {
+#if DEBUG
+        guard let label,
+              let defaults = UserDefaults(suiteName: MeteringOwnerMirror.suiteName)
+        else { return }
+        defaults.set(
+            "\(ISO8601DateFormatter().string(from: Date())) \(label).\(stage)",
+            forKey: "evlin.metering.lastTransactionStage"
+        )
+        defaults.synchronize()
+#endif
     }
 
     /// Continue one already-prepared identity retirement after the mutable
@@ -4884,23 +5569,23 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                       && state.epochs[$0.epochID]?.status == .active
               })
         else { return false }
-        let registrationTerminated = state.registrationWork.values.contains {
+        let candidateRegistrations = state.registrationWork.values.filter {
             $0.epochID == handoff.toEpochID
                 && $0.routeID == handoff.toRouteID
-                && $0.retry.terminal != .pending
+        }
+        let registrationTerminated = candidateRegistrations.contains {
+            $0.retry.terminal != .pending
                 && $0.retry.terminal != .succeeded
         }
-        let registrationSucceeded = state.registrationWork.values.contains {
-            $0.epochID == handoff.toEpochID
-                && $0.routeID == handoff.toRouteID
-                && $0.retry.terminal == .succeeded
+        let registrationStillUsable = candidateRegistrations.contains {
+            $0.retry.terminal == .pending || $0.retry.terminal == .succeeded
         }
         let activationSucceeded = state.activationWork.values.contains {
             $0.epochID == handoff.toEpochID
                 && $0.routeID == handoff.toRouteID
                 && $0.retry.terminal == .succeeded
         }
-        return registrationTerminated && !registrationSucceeded && !activationSucceeded
+        return registrationTerminated && !registrationStillUsable && !activationSucceeded
     }
 
     private func canCancelBackwardPreparingHandoff(
@@ -4953,6 +5638,96 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
 }
 
 extension DeviceEpochStoreState {
+    nonisolated func highestDurablyAcceptedMinutes(
+        owner: UUID,
+        epoch: DeviceDailyEpoch,
+        route: MeteringCallbackRoute
+    ) -> Int? {
+        let registeredBases = registrationWork.values.compactMap { work -> Int? in
+            guard work.ownerChildDeviceID == owner,
+                  work.epochID == epoch.epochID,
+                  work.routeID == route.routeID,
+                  work.retry.terminal == .succeeded,
+                  registrationRequest(work.request, matches: epoch, route: route, owner: owner)
+            else { return nil }
+            return work.request.baseAcceptedMinutes
+        }
+        let acceptedSamples = sampleWork.values.compactMap { work -> Int? in
+            guard work.ownerChildDeviceID == owner,
+                  work.epochID == epoch.epochID,
+                  work.routeID == route.routeID,
+                  work.retry.terminal == .succeeded,
+                  work.request.protocolVersion == 2,
+                  work.request.epochID == epoch.epochID,
+                  work.request.deviceID == owner,
+                  work.request.usageDate == epoch.usageDate
+            else { return nil }
+            return work.request.estimatedMinutes
+        }
+        return (registeredBases + acceptedSamples).max()
+    }
+
+    @discardableResult
+    nonisolated mutating func reconcileEpochStartFromSuccessfulRegistration(
+        _ work: EpochRegistrationWork
+    ) -> Bool {
+        guard work.retry.terminal == .succeeded,
+              let route = routes[work.routeID],
+              let epoch = epochs[work.epochID],
+              registrationRequest(
+                  work.request,
+                  matches: epoch,
+                  route: route,
+                  owner: work.ownerChildDeviceID
+              ),
+              epoch.startedAt != work.request.startedAt
+        else { return false }
+
+        epochs[epoch.epochID] = DeviceDailyEpoch(
+            epochID: epoch.epochID,
+            protocolVersion: epoch.protocolVersion,
+            childDeviceID: epoch.childDeviceID,
+            usageDate: epoch.usageDate,
+            canonicalTimezone: epoch.canonicalTimezone,
+            policyRevision: epoch.policyRevision,
+            measurementSelectionDigest: epoch.measurementSelectionDigest,
+            enforcementSetID: epoch.enforcementSetID,
+            startedAt: work.request.startedAt,
+            registeredAt: epoch.registeredAt,
+            baseAcceptedMinutes: epoch.baseAcceptedMinutes,
+            baseSource: epoch.baseSource,
+            lastRawThresholdMinutes: epoch.lastRawThresholdMinutes,
+            excludedWhilePausedMinutes: epoch.excludedWhilePausedMinutes,
+            status: epoch.status,
+            resumeBoundaryPending: epoch.resumeBoundaryPending,
+            retiredAt: epoch.retiredAt,
+            retireReason: epoch.retireReason,
+            exhaustedAt: epoch.exhaustedAt,
+            baseCorrectionState: epoch.baseCorrectionState,
+            authoritativeBaseConflict: epoch.authoritativeBaseConflict
+        )
+        return true
+    }
+
+    private nonisolated func registrationRequest(
+        _ request: EpochRegistrationRequestDTO,
+        matches epoch: DeviceDailyEpoch,
+        route: MeteringCallbackRoute,
+        owner: UUID
+    ) -> Bool {
+        request.protocolVersion == 2
+            && request.deviceID == owner
+            && request.epochID == epoch.epochID
+            && route.epochID == epoch.epochID
+            && route.ownerChildDeviceID == owner
+            && request.usageDate == epoch.usageDate
+            && request.usageDate == route.usageDate
+            && request.timezone == epoch.canonicalTimezone
+            && request.policyRevision == epoch.policyRevision
+            && request.measurementSelectionDigest == epoch.measurementSelectionDigest
+            && request.enforcementSetID == epoch.enforcementSetID
+    }
+
     /// The day ceiling this route's ladder must respect, taken from the policy
     /// the generation was created with. `nil` only for generations persisted
     /// before pool/cap were captured — those get no clamp because inventing one
@@ -5435,7 +6210,16 @@ extension DeviceEpochStoreState {
         epoch.retiredAt = now
         epoch.retireReason = .authoritativeBaseMismatch
         epochs[epochID] = epoch
-        generations[route.generationID]?.retiredAt = now
+        let generationStillOwnsActivePrior = activeRouteID
+            .flatMap { routes[$0] }
+            .map {
+                $0.routeID != routeID
+                    && $0.generationID == route.generationID
+                    && $0.lifecycle == .active
+            } ?? false
+        if !generationStillOwnsActivePrior {
+            generations[route.generationID]?.retiredAt = now
+        }
 
         route.lifecycle = .tombstoned
         routes[routeID] = route

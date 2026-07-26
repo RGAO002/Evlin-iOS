@@ -3,7 +3,76 @@ import XCTest
 @testable import Evlin_iOS
 
 final class EarnedMeteringCallbackTests: XCTestCase {
-    func testRejectedCallbackReadsTheEpochRootOnlyOnce() throws {
+    func testDurableNonterminalCallbackQueuesSidecarWithoutRewritingEpochRoot() throws {
+        let fileIO = CountingCallbackFileIO()
+        let fixture = try CallbackFixture.active(fileIO: fileIO)
+        defer { fixture.cleanup() }
+        let suiteName = "earned-v2-callback-journal-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let journal = EarnedV2CallbackJournal(
+            defaults: defaults,
+            lock: CallbackFixtureLock()
+        )
+        let callback = EarnedMeteringCallback(
+            store: fixture.store,
+            clock: CallbackClock(now: fixture.start.addingTimeInterval(5 * 60)),
+            journal: journal
+        )
+        fileIO.resetCounts()
+
+        let outcome = try callback.handleDurably(
+            fixture.callback(threshold: 5),
+            expectedOwnerChildDeviceID: fixture.owner
+        )
+
+        guard case let .queued(workID) = outcome else {
+            return XCTFail("Expected a durable queued callback, got \(outcome)")
+        }
+        XCTAssertEqual(fileIO.writeCount, 0)
+        XCTAssertTrue(try fixture.store.read().sampleWork.isEmpty)
+        let pending = try journal.pending(owner: fixture.owner)
+        XCTAssertEqual(pending.count, 1)
+        XCTAssertEqual(pending[0].work.workID, workID)
+        XCTAssertEqual(pending[0].work.request.thresholdMinutes, 5)
+    }
+
+    func testV2CallbackSidecarReplayImportsExactlyOnceAfterRestart() throws {
+        let fileIO = CountingCallbackFileIO()
+        let fixture = try CallbackFixture.active(fileIO: fileIO)
+        defer { fixture.cleanup() }
+        let suiteName = "earned-v2-callback-journal-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let journal = EarnedV2CallbackJournal(
+            defaults: defaults,
+            lock: CallbackFixtureLock()
+        )
+        let callback = EarnedMeteringCallback(
+            store: fixture.store,
+            clock: CallbackClock(now: fixture.start.addingTimeInterval(5 * 60)),
+            journal: journal
+        )
+        _ = try callback.handleDurably(
+            fixture.callback(threshold: 5),
+            expectedOwnerChildDeviceID: fixture.owner
+        )
+
+        let first = try journal.replay(into: fixture.store, owner: fixture.owner)
+        let afterFirst = try fixture.store.read()
+        let second = try journal.replay(into: fixture.store, owner: fixture.owner)
+        let afterSecond = try fixture.store.read()
+
+        XCTAssertEqual(first, 1)
+        XCTAssertEqual(second, 0)
+        XCTAssertEqual(afterFirst.sampleWork.count, 1)
+        XCTAssertEqual(afterSecond.sampleWork, afterFirst.sampleWork)
+        XCTAssertTrue(try journal.pending(owner: fixture.owner).isEmpty)
+    }
+
+    func testRejectedConsumedCallbackUsesOneDecodeAndOneCommittedReadback() throws {
         let fileIO = CountingCallbackFileIO()
         let fixture = try CallbackFixture.active(fileIO: fileIO)
         defer { fixture.cleanup() }
@@ -17,8 +86,8 @@ final class EarnedMeteringCallbackTests: XCTestCase {
         XCTAssertEqual(outcome, .discarded(reason: "too_early"))
         XCTAssertEqual(
             fileIO.readCount,
-            1,
-            "The extension cannot retain a preflight root while decoding the same root again."
+            2,
+            "Persisting the consumed-route marker requires exactly one transactional readback."
         )
     }
 
@@ -160,6 +229,103 @@ final class EarnedMeteringCallbackTests: XCTestCase {
         XCTAssertTrue(state.registrationWork.values.contains { $0.retry.terminal == .succeeded })
     }
 
+    func testCompactionCollectsStoppedSupersededRouteFromActiveGeneration() throws {
+        let fixture = try CallbackFixture.active()
+        defer { fixture.cleanup() }
+        let stale = try fixture.addStoppedSupersededRoute(
+            stoppedAt: fixture.start,
+            installTerminal: .pending
+        )
+
+        let removed = try fixture.store.compactPhysicallyAbsentRetiredHistory(
+            owner: fixture.owner,
+            physicallyInstalledActivityNames: [
+                MeteringRouteNamespace.activityName(routeID: fixture.routeID)
+            ],
+            now: fixture.start.addingTimeInterval(20 * 60)
+        )
+        let state = try fixture.store.read()
+
+        XCTAssertEqual(removed, 3)
+        XCTAssertNil(state.routes[stale.routeID])
+        XCTAssertNil(state.epochs[stale.epochID])
+        XCTAssertNil(state.tombstones[stale.routeID])
+        XCTAssertNil(state.installWork[stale.installID])
+        XCTAssertNil(state.registrationWork[stale.registrationID])
+        XCTAssertNotNil(state.generations[fixture.generationID])
+        XCTAssertEqual(state.activeRouteID, fixture.routeID)
+    }
+
+    func testCompactionRetainsStoppedSupersededRouteDuringLateCallbackGrace() throws {
+        let fixture = try CallbackFixture.active()
+        defer { fixture.cleanup() }
+        let stale = try fixture.addStoppedSupersededRoute(
+            stoppedAt: fixture.start
+        )
+
+        let removed = try fixture.store.compactPhysicallyAbsentRetiredHistory(
+            owner: fixture.owner,
+            physicallyInstalledActivityNames: [
+                MeteringRouteNamespace.activityName(routeID: fixture.routeID)
+            ],
+            now: fixture.start.addingTimeInterval((20 * 60) - 1)
+        )
+        let state = try fixture.store.read()
+
+        XCTAssertEqual(removed, 0)
+        XCTAssertNotNil(state.routes[stale.routeID])
+        XCTAssertNotNil(state.epochs[stale.epochID])
+        XCTAssertNotNil(state.tombstones[stale.routeID])
+    }
+
+    func testCompactionRetainsStoppedSupersededRouteStillInstalledInDaemon() throws {
+        let fixture = try CallbackFixture.active()
+        defer { fixture.cleanup() }
+        let stale = try fixture.addStoppedSupersededRoute(
+            stoppedAt: fixture.start
+        )
+
+        let removed = try fixture.store.compactPhysicallyAbsentRetiredHistory(
+            owner: fixture.owner,
+            physicallyInstalledActivityNames: [
+                MeteringRouteNamespace.activityName(routeID: fixture.routeID),
+                MeteringRouteNamespace.activityName(routeID: stale.routeID),
+            ],
+            now: fixture.start.addingTimeInterval(20 * 60)
+        )
+        let state = try fixture.store.read()
+
+        XCTAssertEqual(removed, 0)
+        XCTAssertNotNil(state.routes[stale.routeID])
+        XCTAssertNotNil(state.epochs[stale.epochID])
+        XCTAssertNotNil(state.tombstones[stale.routeID])
+    }
+
+    func testCompactionRetainsStoppedSupersededRouteWithPendingWork() throws {
+        let fixture = try CallbackFixture.active()
+        defer { fixture.cleanup() }
+        let stale = try fixture.addStoppedSupersededRoute(
+            stoppedAt: fixture.start,
+            registrationTerminal: .pending
+        )
+
+        let removed = try fixture.store.compactPhysicallyAbsentRetiredHistory(
+            owner: fixture.owner,
+            physicallyInstalledActivityNames: [
+                MeteringRouteNamespace.activityName(routeID: fixture.routeID)
+            ],
+            now: fixture.start.addingTimeInterval(20 * 60)
+        )
+        let state = try fixture.store.read()
+
+        XCTAssertEqual(removed, 0)
+        XCTAssertNotNil(state.routes[stale.routeID])
+        XCTAssertEqual(
+            state.registrationWork[stale.registrationID]?.retry.terminal,
+            .pending
+        )
+    }
+
     func testMalformedCallbackIsDiscardedWithoutBootstrappingAnOwner() throws {
         let owner = UUID()
         let fixture = CallbackFixture(owner: owner)
@@ -263,17 +429,21 @@ final class EarnedMeteringCallbackTests: XCTestCase {
         XCTAssertTrue(try early.store.read().shieldReferences.isEmpty)
     }
 
-    func testThirtyOneSecondsEarlyIsByteIdenticalAndQueuesNothing() throws {
+    func testThirtyOneSecondsEarlyMarksConsumedRouteAndQueuesNothing() throws {
         let fixture = try CallbackFixture.active()
         defer { fixture.cleanup() }
-        let before = try Data(contentsOf: fixture.storeURL)
         let callback = fixture.callback(threshold: 5, observedAt: fixture.start.addingTimeInterval(269))
 
         let outcome = try fixture.callbackHandler().handle(callback, expectedOwnerChildDeviceID: fixture.owner)
 
         XCTAssertEqual(outcome, .discarded(reason: "too_early"))
-        XCTAssertEqual(try Data(contentsOf: fixture.storeURL), before)
-        XCTAssertTrue(try fixture.store.read().sampleWork.isEmpty)
+        let state = try fixture.store.read()
+        XCTAssertTrue(state.sampleWork.isEmpty)
+        XCTAssertEqual(state.epochs[fixture.epochID]?.lastRawThresholdMinutes, 0)
+        XCTAssertEqual(
+            state.installWork[fixture.installID]?.retry.lastErrorCode,
+            "physical_events_consumed_too_early"
+        )
     }
 
     func testInvalidJitterIsFailClosedWithoutAnyRootMutation() throws {
@@ -451,8 +621,8 @@ final class EarnedMeteringCallbackTests: XCTestCase {
     // P3 late-callback grace: Apple delivers threshold callbacks 5-15 min late. A
     // policy change that retires the route mid-flight must NOT silently drop a
     // genuine, already-earned callback (the year-long "bars frozen" root cause).
-    // The lost minutes are credited to the CURRENT active epoch's base via
-    // high-water — WITHOUT relaxing the strict current-route provenance guard.
+    // The lost minutes are queued against the CURRENT active epoch without
+    // raising its base until the backend accepts the sample.
     func testLateCallbackForRouteRetiredWithinGraceCreditsCurrentEpoch() throws {
         let fixture = try CallbackFixture.active()  // original epoch base = 12
         defer { fixture.cleanup() }
@@ -466,8 +636,16 @@ final class EarnedMeteringCallbackTests: XCTestCase {
         )
 
         let state = try fixture.store.read()
-        XCTAssertEqual(state.epochs[successorEpoch]?.baseAcceptedMinutes, 12 + 5,
-                       "lost 5 minutes must be credited to the current epoch base")
+        XCTAssertEqual(
+            state.epochs[successorEpoch]?.baseAcceptedMinutes,
+            12,
+            "a raw late callback cannot raise the base before backend acceptance"
+        )
+        XCTAssertEqual(
+            state.sampleWork.values.first?.request.estimatedMinutes,
+            17,
+            "the recovered minutes still have to be offered to the backend"
+        )
         guard case .queued = outcome else {
             return XCTFail("late retired callback within grace must be credited, got \(outcome)")
         }
@@ -1067,13 +1245,15 @@ final class EarnedMeteringCallbackTests: XCTestCase {
 
         let rejected = try CallbackFixture.active()
         defer { rejected.cleanup() }
-        let before = try Data(contentsOf: rejected.storeURL)
         let rejectedOutcome = try rejected.callbackHandler(jitterSeconds: 0).handle(
             rejected.callback(threshold: 5, observedAt: rejected.start.addingTimeInterval(299)),
             expectedOwnerChildDeviceID: rejected.owner
         )
         XCTAssertEqual(rejectedOutcome, .discarded(reason: "too_early"))
-        XCTAssertEqual(try Data(contentsOf: rejected.storeURL), before)
+        XCTAssertEqual(
+            try rejected.store.read().installWork[rejected.installID]?.retry.lastErrorCode,
+            "physical_events_consumed_too_early"
+        )
     }
 
     func testJitterSixtyAcceptsExactAllowanceAndRejectsSixtyOneSecondsEarly() throws {
@@ -1087,13 +1267,15 @@ final class EarnedMeteringCallbackTests: XCTestCase {
 
         let rejected = try CallbackFixture.active()
         defer { rejected.cleanup() }
-        let before = try Data(contentsOf: rejected.storeURL)
         let rejectedOutcome = try rejected.callbackHandler(jitterSeconds: 60).handle(
             rejected.callback(threshold: 5, observedAt: rejected.start.addingTimeInterval(239)),
             expectedOwnerChildDeviceID: rejected.owner
         )
         XCTAssertEqual(rejectedOutcome, .discarded(reason: "too_early"))
-        XCTAssertEqual(try Data(contentsOf: rejected.storeURL), before)
+        XCTAssertEqual(
+            try rejected.store.read().installWork[rejected.installID]?.retry.lastErrorCode,
+            "physical_events_consumed_too_early"
+        )
     }
 
     func testDualV2CandidateQueuesWaitingForRegistrationWithoutSummingRouteUsage() throws {
@@ -1420,6 +1602,143 @@ private final class CallbackFixture {
                 observedAt: start.addingTimeInterval(5 * 60)
             )
         )
+    }
+
+    func addStoppedSupersededRoute(
+        stoppedAt: Date,
+        installTerminal: MeteringWorkTerminal = .superseded,
+        registrationTerminal: MeteringWorkTerminal = .superseded
+    ) throws -> (routeID: UUID, epochID: UUID, installID: UUID, registrationID: UUID) {
+        let staleRouteID = UUID()
+        let staleEpochID = UUID()
+        let staleInstallID = UUID()
+        let staleRegistrationID = UUID()
+        try mutate { state in
+            guard let generation = state.generations[generationID],
+                  let activeEpoch = state.epochs[epochID]
+            else { return }
+            let staleEpoch = DeviceDailyEpoch(
+                epochID: staleEpochID,
+                protocolVersion: 2,
+                childDeviceID: owner,
+                usageDate: activeEpoch.usageDate,
+                canonicalTimezone: generation.canonicalTimezone,
+                policyRevision: generation.policyRevision,
+                measurementSelectionDigest: generation.measurementSelectionDigest,
+                enforcementSetID: generation.enforcementSetID,
+                startedAt: stoppedAt.addingTimeInterval(-300),
+                registeredAt: nil,
+                baseAcceptedMinutes: activeEpoch.baseAcceptedMinutes,
+                baseSource: .childState200,
+                lastRawThresholdMinutes: 0,
+                excludedWhilePausedMinutes: 0,
+                status: .retired,
+                resumeBoundaryPending: false,
+                retiredAt: stoppedAt,
+                retireReason: .activationSuperseded,
+                exhaustedAt: nil,
+                baseCorrectionState: .available
+            )
+            let event = MeteringEventPlan(
+                eventName: MeteringRouteNamespace.eventName(
+                    routeID: staleRouteID,
+                    thresholdMinutes: 5
+                ),
+                thresholdMinutes: 5
+            )
+            let schedule = DatedSchedulePlan(
+                usageDate: staleEpoch.usageDate,
+                timezoneIdentifier: generation.canonicalTimezone,
+                calendarIdentifier: "gregorian"
+            )
+            let staleRoute = MeteringCallbackRoute(
+                routeID: staleRouteID,
+                activityName: MeteringRouteNamespace.activityName(routeID: staleRouteID),
+                namespace: MeteringRouteNamespace.prefix,
+                generationID: generationID,
+                generationKey: MeteringGenerationKey(
+                    protocolVersion: 2,
+                    childDeviceID: owner,
+                    canonicalTimezone: generation.canonicalTimezone,
+                    policyRevision: generation.policyRevision,
+                    measurementSelectionDigest: generation.measurementSelectionDigest,
+                    enforcementSetID: generation.enforcementSetID
+                ),
+                ownerChildDeviceID: owner,
+                usageDate: staleEpoch.usageDate,
+                epochID: staleEpochID,
+                plannedSchedule: schedule,
+                installedSchedule: schedule,
+                plannedEvents: [event],
+                installedEvents: [event],
+                lifecycle: .tombstoned,
+                createdAt: stoppedAt.addingTimeInterval(-300)
+            )
+            let retry = MeteringRetryState(
+                attemptCount: 1,
+                nextAttemptAt: stoppedAt,
+                lastErrorCode: "activation_superseded",
+                terminal: .superseded
+            )
+            state.epochs[staleEpochID] = staleEpoch
+            state.routes[staleRouteID] = staleRoute
+            state.tombstones[staleRouteID] = MeteringRouteTombstone(
+                routeID: staleRouteID,
+                activityName: staleRoute.activityName,
+                eventNames: [event.eventName],
+                ownerChildDeviceID: owner,
+                usageDate: staleEpoch.usageDate,
+                epochID: staleEpochID,
+                generationID: generationID,
+                canonicalDayEnd: stoppedAt.addingTimeInterval(86_400),
+                stopAcknowledgedAt: stoppedAt,
+                referencedWorkIDs: [staleInstallID, staleRegistrationID],
+                retainedUntil: stoppedAt.addingTimeInterval(86_400)
+            )
+            state.installWork[staleInstallID] = ActivityInstallWork(
+                workID: staleInstallID,
+                ownerChildDeviceID: owner,
+                routeID: staleRouteID,
+                authorization: .offlinePending,
+                phase: .stopped,
+                claim: nil,
+                retry: MeteringRetryState(
+                    attemptCount: retry.attemptCount,
+                    nextAttemptAt: retry.nextAttemptAt,
+                    lastErrorCode: retry.lastErrorCode,
+                    terminal: installTerminal
+                ),
+                createdAt: staleRoute.createdAt
+            )
+            state.registrationWork[staleRegistrationID] = EpochRegistrationWork(
+                workID: staleRegistrationID,
+                ownerChildDeviceID: owner,
+                epochID: staleEpochID,
+                routeID: staleRouteID,
+                request: EpochRegistrationRequestDTO(
+                    protocolVersion: 2,
+                    epochID: staleEpochID,
+                    deviceID: owner,
+                    usageDate: staleEpoch.usageDate,
+                    timezone: staleEpoch.canonicalTimezone,
+                    policyRevision: staleEpoch.policyRevision,
+                    measurementSelectionDigest: staleEpoch.measurementSelectionDigest,
+                    enforcementSetID: staleEpoch.enforcementSetID,
+                    startedAt: staleEpoch.startedAt,
+                    baseAcceptedMinutes: staleEpoch.baseAcceptedMinutes,
+                    reason: .identityRecovery
+                ),
+                claim: nil,
+                retry: MeteringRetryState(
+                    attemptCount: retry.attemptCount,
+                    nextAttemptAt: retry.nextAttemptAt,
+                    lastErrorCode: retry.lastErrorCode,
+                    terminal: registrationTerminal
+                ),
+                createdAt: staleRoute.createdAt
+            )
+        }
+        return (staleRouteID, staleEpochID, staleInstallID, staleRegistrationID)
     }
 
     /// Simulates a mid-flight policy replacement: retires the original
@@ -1859,9 +2178,15 @@ private final class CallbackFixture {
 private final class CountingCallbackFileIO: DeviceEpochFileIO, @unchecked Sendable {
     private let backing = SystemDeviceEpochFileIO()
     private(set) var readCount = 0
+    private(set) var writeCount = 0
+
+    func resetCounts() {
+        readCount = 0
+        writeCount = 0
+    }
 
     func resetReadCount() {
-        readCount = 0
+        resetCounts()
     }
 
     func read(from url: URL) throws -> Data? {
@@ -1870,6 +2195,7 @@ private final class CountingCallbackFileIO: DeviceEpochFileIO, @unchecked Sendab
     }
 
     func writeAtomically(_ data: Data, to url: URL) throws {
+        writeCount += 1
         try backing.writeAtomically(data, to: url)
     }
 

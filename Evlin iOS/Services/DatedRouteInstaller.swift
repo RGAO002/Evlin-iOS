@@ -37,6 +37,12 @@ nonisolated final class DatedRouteInstaller: @unchecked Sendable {
         try stopOrphanedV2Activities(ownerChildDeviceID: ownerChildDeviceID)
         var results: [DatedRouteInstallResult] = []
         for due in try store.dueInstallWork(owner: ownerChildDeviceID, now: clock.now) {
+            if try leavesCurrentDayStartForApp(
+                due,
+                ownerChildDeviceID: ownerChildDeviceID
+            ) {
+                continue
+            }
             if due.authorization == .registrationRequired {
                 let superseded = try store.supersedeUnprovenRegistrationRequiredInstall(
                     workID: due.workID,
@@ -65,6 +71,30 @@ nonisolated final class DatedRouteInstaller: @unchecked Sendable {
             }
         }
         return results
+    }
+
+    /// Starting a fresh current-day activity from inside a DeviceActivity
+    /// callback can synchronously back-deliver all of its one-shot events into
+    /// the same extension process. Those events are then consumed even though
+    /// the physical-time guard correctly refuses to credit them. The app owns
+    /// fresh current-day starts; the monitor may still adopt interrupted work
+    /// and preinstall future dates.
+    private func leavesCurrentDayStartForApp(
+        _ work: ActivityInstallWork,
+        ownerChildDeviceID owner: UUID
+    ) throws -> Bool {
+        guard processIdentity.role == .deviceActivityMonitor,
+              work.phase == .pendingStart
+        else { return false }
+        let state = try store.read()
+        guard state.ownerChildDeviceID == owner,
+              let route = state.routes[work.routeID],
+              let today = MeteringEpochContract.canonicalUsageDate(
+                  at: clock.now,
+                  timezoneIdentifier: route.plannedSchedule.timezoneIdentifier
+              )
+        else { return false }
+        return route.usageDate == today
     }
 
     /// A3: a deferred install is the arming leg failing. It used to leave only
@@ -126,6 +156,11 @@ nonisolated final class DatedRouteInstaller: @unchecked Sendable {
                 }
             }
         }
+        let physicallyInstalledNames = Set(center.activities.map(\.rawValue))
+        try store.compactPhysicallyAbsentRetiredHistory(
+            owner: owner,
+            physicallyInstalledActivityNames: physicallyInstalledNames
+        )
     }
 
     /// Projects the bounded product horizon from Apple's currently installed

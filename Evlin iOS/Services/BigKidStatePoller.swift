@@ -33,6 +33,7 @@ final class BigKidStatePoller: ObservableObject {
     private let reconcileIdentityTransition: () -> Bool
     private let applySnapshot: (ChildStateResponse, BigKidState) -> Void
     private let mirrorChildIdentity: (UUID) -> Void
+    private let replayMeteringCallbacks: () async -> Void
     private let syncEarnedRuntime: (EarnedTimeRuntime?) -> EarnedTimeStore.RuntimePolicyReconciliation
     private let setUsageCountingAllowed: (Bool) -> Bool
     private let reconcileMeteringRuntime: (Bool, EarnedTimeRuntime?) async -> Void
@@ -94,6 +95,9 @@ final class BigKidStatePoller: ObservableObject {
         }
         self.mirrorChildIdentity = { childID in
             EarnedBudgetArming.mirrorChildIdentity(childID, epochStore: .shared)
+        }
+        self.replayMeteringCallbacks = {
+            await AppMeteringEntry.shared.replayCallbacksIfConfigured()
         }
         self.syncEarnedRuntime = Self.syncEarnedRuntimeFromSnapshot
         self.setUsageCountingAllowed = Self.writeUsageCountingAllowed
@@ -163,6 +167,7 @@ final class BigKidStatePoller: ObservableObject {
             state.apply(snapshot)
         },
         mirrorChildIdentity: @escaping (UUID) -> Void = { _ in },
+        replayMeteringCallbacks: @escaping () async -> Void = {},
         syncEarnedRuntime: @escaping (EarnedTimeRuntime?) -> EarnedTimeStore.RuntimePolicyReconciliation = BigKidStatePoller.syncEarnedRuntimeFromSnapshot,
         setUsageCountingAllowed: @escaping (Bool) -> Bool = BigKidStatePoller.writeUsageCountingAllowed,
         reconcileMeteringRuntime: @escaping (Bool, EarnedTimeRuntime?) async -> Void = { _, _ in },
@@ -188,6 +193,7 @@ final class BigKidStatePoller: ObservableObject {
         self.reconcileIdentityTransition = reconcileIdentityTransition
         self.applySnapshot = applySnapshot
         self.mirrorChildIdentity = mirrorChildIdentity
+        self.replayMeteringCallbacks = replayMeteringCallbacks
         self.syncEarnedRuntime = syncEarnedRuntime
         self.setUsageCountingAllowed = setUsageCountingAllowed
         self.reconcileMeteringRuntime = reconcileMeteringRuntime
@@ -294,6 +300,11 @@ final class BigKidStatePoller: ObservableObject {
             if let expectedChildID {
                 mirrorChildIdentity(expectedChildID)
             }
+            guard isExpectedIdentityCurrent(expectedChildID) else {
+                requestPollForCurrentIdentity()
+                return
+            }
+            await replayMeteringCallbacks()
             guard isExpectedIdentityCurrent(expectedChildID) else {
                 requestPollForCurrentIdentity()
                 return

@@ -299,6 +299,7 @@ final class AppMeteringEntry {
     private let transport: any MeteringHTTPTransport
     private let clock: any MeteringClock
     private let instanceID: UUID
+    private let callbackJournal: EarnedV2CallbackJournal
 
     init(
         defaults: UserDefaults? = UserDefaults(
@@ -308,7 +309,8 @@ final class AppMeteringEntry {
         center: (any MeteringDeviceActivityCenter)? = nil,
         transport: any MeteringHTTPTransport = URLSession.shared,
         clock: any MeteringClock = MeteringRuntimeClock.live(),
-        instanceID: UUID = MeteringProductionComposition.instanceID(for: .app)
+        instanceID: UUID = MeteringProductionComposition.instanceID(for: .app),
+        callbackJournal: EarnedV2CallbackJournal = EarnedV2CallbackJournal()
     ) {
         self.defaults = defaults
         self.store = store
@@ -316,12 +318,14 @@ final class AppMeteringEntry {
         self.transport = transport
         self.clock = clock
         self.instanceID = instanceID
+        self.callbackJournal = callbackJournal
     }
 
     func recoverIfConfigured() async {
         guard let configuration = MeteringProcessConfiguration.load(defaults: defaults) else {
             return
         }
+        await replayCallbacks(owner: configuration.owner)
         // Maintenance runs only in the app process, where memory is not capped
         // like the DeviceActivity extension, and off the main actor so a large
         // historical root cannot stall scene updates.
@@ -354,6 +358,33 @@ final class AppMeteringEntry {
             MeteringFlightRecorder.emitError(site: "app.recover", error: error)
         }
     }
+
+    /// Drain callbacks recorded by the DeviceActivity extension without
+    /// requiring a scene transition or a manual repair action.
+    func replayCallbacksIfConfigured() async {
+        guard let configuration = MeteringProcessConfiguration.load(defaults: defaults) else {
+            return
+        }
+        await replayCallbacks(owner: configuration.owner)
+    }
+
+    private func replayCallbacks(owner: UUID) async {
+        do {
+            let replayStore = store
+            let replayJournal = callbackJournal
+            _ = try await Task.detached(priority: .utility) {
+                try replayJournal.replay(
+                    into: replayStore,
+                    owner: owner
+                )
+            }.value
+        } catch {
+            MeteringFlightRecorder.emitError(
+                site: "app.callbackJournal",
+                error: error
+            )
+        }
+    }
 }
 
 /// This injected process entry is intentionally nonisolated. Under the
@@ -373,6 +404,7 @@ nonisolated final class DAMMeteringEntry: @unchecked Sendable {
     private let earnedStore: EarnedTimeStore
     private let effectStore: EarnedShieldEffectStore
     private let selectionProvider: () -> FamilyActivitySelection
+    private let callbackJournal: EarnedV2CallbackJournal
 
     init(
         defaults: UserDefaults? = UserDefaults(
@@ -387,6 +419,7 @@ nonisolated final class DAMMeteringEntry: @unchecked Sendable {
         ),
         earnedStore: EarnedTimeStore = .shared,
         effectStore: EarnedShieldEffectStore? = nil,
+        callbackJournal: EarnedV2CallbackJournal = EarnedV2CallbackJournal(),
         selectionProvider: @escaping () -> FamilyActivitySelection = {
             DefaultLockGroupStore.load()
         }
@@ -402,6 +435,7 @@ nonisolated final class DAMMeteringEntry: @unchecked Sendable {
             defaults: defaults,
             epochStore: store
         )
+        self.callbackJournal = callbackJournal
         self.selectionProvider = selectionProvider
     }
 
@@ -452,26 +486,58 @@ nonisolated final class DAMMeteringEntry: @unchecked Sendable {
         observedAt: Date,
         projectShields: ([String: ShieldRecord]) -> Void = { _ in }
     ) throws -> EarnedMeteringCallbackOutcome {
+#if DEBUG
+        func checkpoint(_ stage: String) {
+            defaults?.set(
+                "\(ISO8601DateFormatter().string(from: Date())) \(stage)"
+                    + " activity=\(activityName) event=\(eventName)",
+                forKey: "evlin.metering.lastCallbackStage"
+            )
+            defaults?.synchronize()
+        }
+        checkpoint("entered")
+#endif
         guard let configuration = MeteringProcessConfiguration.load(defaults: defaults) else {
+#if DEBUG
+            checkpoint("missing_configuration")
+#endif
             return .discarded(reason: "missing_shared_configuration")
         }
+#if DEBUG
+        checkpoint("configuration_loaded")
+#endif
         let callback = MeteringProductionComposition.makeCallback(
             store: store,
-            clock: clock
+            clock: clock,
+            journal: callbackJournal
         )
         let appleCallback = MeteringAppleCallback(
             activityName: activityName,
             eventName: eventName,
             observedAt: observedAt
         )
-        guard let candidate = try callback.terminalCandidate(
+#if DEBUG
+        checkpoint("before_terminal_candidate")
+#endif
+        let terminalCandidate = try callback.terminalCandidate(
             appleCallback,
             expectedOwnerChildDeviceID: configuration.owner
-        ) else {
-            return try callback.handle(
+        )
+#if DEBUG
+        checkpoint("after_terminal_candidate")
+#endif
+        guard let candidate = terminalCandidate else {
+#if DEBUG
+            checkpoint("before_callback_handle")
+#endif
+            let outcome = try callback.handleDurably(
                 appleCallback,
                 expectedOwnerChildDeviceID: configuration.owner
             )
+#if DEBUG
+            checkpoint("after_callback_handle")
+#endif
+            return outcome
         }
 
         let suppressed = {

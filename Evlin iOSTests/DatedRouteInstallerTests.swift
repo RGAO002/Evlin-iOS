@@ -46,6 +46,68 @@ final class DatedRouteInstallerTests: XCTestCase {
         XCTAssertEqual(try fixture.firstStore.read().installWork[work.workID]?.claim?.token, appClaim?.claim.token)
     }
 
+    func testDAMLeavesCurrentDayStartForAppOwner() throws {
+        let fixture = try makeFixture()
+        let initial = try fixture.firstStore.read()
+        let work = try work(forUsageDate: "2026-07-18", in: initial)
+        let route = try XCTUnwrap(initial.routes[work.routeID])
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.locale = Locale(identifier: "en_US_POSIX")
+        calendar.timeZone = try XCTUnwrap(
+            TimeZone(identifier: route.plannedSchedule.timezoneIdentifier)
+        )
+        let currentDay = try XCTUnwrap(calendar.date(from: DateComponents(
+            year: 2026,
+            month: 7,
+            day: 18,
+            hour: 12
+        )))
+        fixture.clock.date = currentDay
+        try fixture.firstStore.transaction(expectedOwner: owner) { state in
+            state.routes[route.routeID]?.plannedSchedule = DatedSchedulePlan(
+                usageDate: route.plannedSchedule.usageDate,
+                timezoneIdentifier: route.plannedSchedule.timezoneIdentifier,
+                calendarIdentifier: route.plannedSchedule.calendarIdentifier,
+                intervalStartAt: currentDay
+            )
+            for key in state.installWork.keys {
+                state.installWork[key]?.retry.nextAttemptAt =
+                    key == work.workID
+                        ? currentDay
+                        : currentDay.addingTimeInterval(24 * 60 * 60)
+            }
+        }
+        let center = DatedCenter()
+        let dam = DatedRouteInstaller(
+            store: fixture.firstStore,
+            center: center,
+            processIdentity: MeteringProcessIdentity(
+                role: .deviceActivityMonitor,
+                instanceID: UUID()
+            ),
+            clock: fixture.clock
+        )
+
+        XCTAssertEqual(try dam.reconcile(ownerChildDeviceID: owner), [])
+        XCTAssertTrue(center.startCalls.isEmpty)
+        XCTAssertEqual(
+            try fixture.firstStore.read().installWork[work.workID]?.phase,
+            .pendingStart
+        )
+
+        let app = DatedRouteInstaller(
+            store: fixture.firstStore,
+            center: center,
+            processIdentity: MeteringProcessIdentity(role: .app, instanceID: UUID()),
+            clock: fixture.clock
+        )
+        XCTAssertEqual(
+            try app.reconcile(ownerChildDeviceID: owner),
+            [.verified(workID: work.workID)]
+        )
+        XCTAssertEqual(center.startCalls, [DeviceActivityName(route.activityName)])
+    }
+
     func testInstallCASRefusesStaleClaim() throws {
         let fixture = try makeFixture()
         let work = try fixture.firstStore.read().installWork.values.first { $0.phase == .pendingStart }!
@@ -401,6 +463,63 @@ final class DatedRouteInstallerTests: XCTestCase {
             try fixture.firstStore.read().installWork[currentWork.workID]
         )
         XCTAssertEqual(repairedWork.phase, .verified)
+    }
+
+    func testReconcileCollectsRetiredGenerationAfterDaemonConfirmsItsActivitiesAreAbsent() throws {
+        let fixture = try makeFixture()
+        let retired = try addRetiredGeneration(to: fixture.firstStore)
+        let center = DatedCenter()
+        center.install(route: retired.route)
+        let installer = DatedRouteInstaller(
+            store: fixture.firstStore,
+            center: center,
+            processIdentity: MeteringProcessIdentity(role: .app, instanceID: UUID()),
+            clock: fixture.clock
+        )
+
+        _ = try installer.reconcile(ownerChildDeviceID: owner)
+
+        let persisted = try fixture.firstStore.read()
+        XCTAssertTrue(center.stopCalls.contains([DeviceActivityName(retired.route.activityName)]))
+        XCTAssertNil(persisted.generations[retired.generationID])
+        XCTAssertNil(persisted.epochs[retired.epochID])
+        XCTAssertNil(persisted.routes[retired.route.routeID])
+        XCTAssertFalse(persisted.installWork.values.contains { $0.routeID == retired.route.routeID })
+    }
+
+    func testReconcilePreservesRetiredGenerationReferencedByShieldReceipt() throws {
+        let fixture = try makeFixture()
+        let retired = try addRetiredGeneration(to: fixture.firstStore, addShieldReference: true)
+        let center = DatedCenter()
+        center.install(route: retired.route)
+        let installer = DatedRouteInstaller(
+            store: fixture.firstStore,
+            center: center,
+            processIdentity: MeteringProcessIdentity(role: .app, instanceID: UUID()),
+            clock: fixture.clock
+        )
+
+        _ = try installer.reconcile(ownerChildDeviceID: owner)
+
+        let persisted = try fixture.firstStore.read()
+        XCTAssertTrue(center.stopCalls.contains([DeviceActivityName(retired.route.activityName)]))
+        XCTAssertNotNil(persisted.generations[retired.generationID])
+        XCTAssertNotNil(persisted.epochs[retired.epochID])
+        XCTAssertNotNil(persisted.routes[retired.route.routeID])
+        XCTAssertEqual(
+            persisted.routes.values.filter {
+                $0.generationID == retired.generationID
+            }.map(\.routeID),
+            [retired.route.routeID]
+        )
+        XCTAssertTrue(persisted.shieldReferences.values.contains {
+            $0.generationID == retired.generationID
+        })
+        let retainedSamples = persisted.sampleWork.values.filter {
+            $0.routeID == retired.route.routeID
+        }
+        XCTAssertEqual(retainedSamples.count, 1)
+        XCTAssertEqual(retainedSamples.first?.request.estimatedMinutes, 10)
     }
 
     func testInstallerStartsCurrentUsageDateBeforeFutureRoutesWithEqualRetryTime() throws {
@@ -1543,6 +1662,217 @@ final class DatedRouteInstallerTests: XCTestCase {
             }
         }
         return DatedFixture(firstStore: store, secondStore: makeStore(), clock: clock, io: io)
+    }
+
+    private func addRetiredGeneration(
+        to store: DeviceEpochStore,
+        addShieldReference: Bool = false
+    ) throws -> (generationID: UUID, epochID: UUID, route: MeteringCallbackRoute) {
+        let initial = try store.read()
+        let templateRoute = try XCTUnwrap(initial.routes.values.first)
+        let templateGeneration = try XCTUnwrap(initial.generations[templateRoute.generationID])
+        let templateEpoch = try XCTUnwrap(initial.epochs[templateRoute.epochID])
+        let generationID = UUID()
+        let epochID = UUID()
+        let routeID = UUID()
+        let generation = MeteringPolicyGeneration(
+            generationID: generationID,
+            protocolVersion: templateGeneration.protocolVersion,
+            childDeviceID: templateGeneration.childDeviceID,
+            canonicalTimezone: templateGeneration.canonicalTimezone,
+            policyRevision: templateGeneration.policyRevision,
+            measurementSelectionDigest: templateGeneration.measurementSelectionDigest,
+            enforcementSetID: templateGeneration.enforcementSetID,
+            measurementSelectionBytes: templateGeneration.measurementSelectionBytes,
+            createdAt: start.addingTimeInterval(-120),
+            retiredAt: start.addingTimeInterval(-60),
+            configuredPoolMinutes: templateGeneration.configuredPoolMinutes,
+            configuredDeviceCapMinutes: templateGeneration.configuredDeviceCapMinutes
+        )
+        let epoch = DeviceDailyEpoch(
+            epochID: epochID,
+            protocolVersion: templateEpoch.protocolVersion,
+            childDeviceID: templateEpoch.childDeviceID,
+            usageDate: templateEpoch.usageDate,
+            canonicalTimezone: templateEpoch.canonicalTimezone,
+            policyRevision: templateEpoch.policyRevision,
+            measurementSelectionDigest: templateEpoch.measurementSelectionDigest,
+            enforcementSetID: templateEpoch.enforcementSetID,
+            startedAt: start.addingTimeInterval(-120),
+            registeredAt: start.addingTimeInterval(-120),
+            baseAcceptedMinutes: 0,
+            baseSource: templateEpoch.baseSource,
+            lastRawThresholdMinutes: 0,
+            excludedWhilePausedMinutes: 0,
+            status: .retired,
+            resumeBoundaryPending: false,
+            retiredAt: start.addingTimeInterval(-60),
+            retireReason: .policyChange,
+            exhaustedAt: nil,
+            baseCorrectionState: .available
+        )
+        let route = MeteringCallbackRoute(
+            routeID: routeID,
+            activityName: MeteringRouteNamespace.activityName(routeID: routeID),
+            namespace: MeteringRouteNamespace.prefix,
+            generationID: generationID,
+            generationKey: MeteringGenerationKey(
+                protocolVersion: generation.protocolVersion,
+                childDeviceID: generation.childDeviceID,
+                canonicalTimezone: generation.canonicalTimezone,
+                policyRevision: generation.policyRevision,
+                measurementSelectionDigest: generation.measurementSelectionDigest,
+                enforcementSetID: generation.enforcementSetID
+            ),
+            ownerChildDeviceID: owner,
+            usageDate: epoch.usageDate,
+            epochID: epochID,
+            plannedSchedule: templateRoute.plannedSchedule,
+            installedSchedule: templateRoute.plannedSchedule,
+            plannedEvents: templateRoute.plannedEvents,
+            installedEvents: templateRoute.plannedEvents,
+            lifecycle: .planned,
+            createdAt: start.addingTimeInterval(-120)
+        )
+        let installID = UUID()
+        try store.transaction(expectedOwner: owner) { state in
+            state.generations[generationID] = generation
+            state.epochs[epochID] = epoch
+            state.routes[routeID] = route
+            state.installWork[installID] = ActivityInstallWork(
+                workID: installID,
+                ownerChildDeviceID: owner,
+                routeID: routeID,
+                authorization: .registered,
+                phase: .verified,
+                claim: nil,
+                retry: MeteringRetryState(
+                    attemptCount: 0,
+                    nextAttemptAt: start,
+                    lastErrorCode: nil,
+                    terminal: .pending
+                ),
+                createdAt: start.addingTimeInterval(-120)
+            )
+            if addShieldReference {
+                let redundantRouteID = UUID()
+                let redundantEpochID = UUID()
+                let redundantEpoch = DeviceDailyEpoch(
+                    epochID: redundantEpochID,
+                    protocolVersion: epoch.protocolVersion,
+                    childDeviceID: epoch.childDeviceID,
+                    usageDate: epoch.usageDate,
+                    canonicalTimezone: epoch.canonicalTimezone,
+                    policyRevision: epoch.policyRevision,
+                    measurementSelectionDigest: epoch.measurementSelectionDigest,
+                    enforcementSetID: epoch.enforcementSetID,
+                    startedAt: epoch.startedAt,
+                    registeredAt: epoch.registeredAt,
+                    baseAcceptedMinutes: epoch.baseAcceptedMinutes,
+                    baseSource: epoch.baseSource,
+                    lastRawThresholdMinutes: epoch.lastRawThresholdMinutes,
+                    excludedWhilePausedMinutes: epoch.excludedWhilePausedMinutes,
+                    status: epoch.status,
+                    resumeBoundaryPending: epoch.resumeBoundaryPending,
+                    retiredAt: epoch.retiredAt,
+                    retireReason: epoch.retireReason,
+                    exhaustedAt: epoch.exhaustedAt,
+                    baseCorrectionState: epoch.baseCorrectionState
+                )
+                let redundantRoute = MeteringCallbackRoute(
+                    routeID: redundantRouteID,
+                    activityName: MeteringRouteNamespace.activityName(
+                        routeID: redundantRouteID
+                    ),
+                    namespace: route.namespace,
+                    generationID: generationID,
+                    generationKey: route.generationKey,
+                    ownerChildDeviceID: owner,
+                    usageDate: route.usageDate,
+                    epochID: redundantEpochID,
+                    plannedSchedule: route.plannedSchedule,
+                    installedSchedule: route.installedSchedule,
+                    plannedEvents: route.plannedEvents,
+                    installedEvents: route.installedEvents,
+                    lifecycle: .planned,
+                    createdAt: route.createdAt
+                )
+                let redundantInstallID = UUID()
+                state.epochs[redundantEpochID] = redundantEpoch
+                state.routes[redundantRouteID] = redundantRoute
+                state.installWork[redundantInstallID] = ActivityInstallWork(
+                    workID: redundantInstallID,
+                    ownerChildDeviceID: owner,
+                    routeID: redundantRouteID,
+                    authorization: .registered,
+                    phase: .verified,
+                    claim: nil,
+                    retry: MeteringRetryState(
+                        attemptCount: 0,
+                        nextAttemptAt: start,
+                        lastErrorCode: nil,
+                        terminal: .pending
+                    ),
+                    createdAt: start.addingTimeInterval(-120)
+                )
+                state.shieldReferences[routeID] = EarnedShieldReference(
+                    operationID: routeID,
+                    ownerChildDeviceID: owner,
+                    generationID: generationID,
+                    epochID: epochID,
+                    routeID: routeID,
+                    recordKey: "test-retained-shield",
+                    expectedRecordBytes: Data("record".utf8),
+                    retry: MeteringRetryState(
+                        attemptCount: 0,
+                        nextAttemptAt: start,
+                        lastErrorCode: nil,
+                        terminal: .succeeded
+                    ),
+                    createdAt: start.addingTimeInterval(-120)
+                )
+                for threshold in [5, 10] {
+                    let sampleID = UUID()
+                    state.sampleWork[sampleID] = EpochSampleWork(
+                        workID: sampleID,
+                        ownerChildDeviceID: owner,
+                        epochID: epochID,
+                        routeID: routeID,
+                        request: EpochSampleRequestDTO(
+                            deviceID: owner,
+                            usageDate: epoch.usageDate,
+                            timezone: epoch.canonicalTimezone,
+                            activityName: MeteringSampleWireAliases.activityName(routeID: routeID),
+                            eventName: MeteringSampleWireAliases.eventName(
+                                thresholdMinutes: threshold
+                            ),
+                            thresholdMinutes: threshold,
+                            estimatedMinutes: threshold,
+                            observedAt: start.addingTimeInterval(TimeInterval(threshold * 60)),
+                            clientSampleID: MeteringSampleWireAliases.clientSampleID(
+                                lane: .v2,
+                                routeID: routeID,
+                                thresholdMinutes: threshold
+                            ),
+                            protocolVersion: 2,
+                            epochID: epochID,
+                            generationArmedAt: nil,
+                            generationOffsetMinutes: nil
+                        ),
+                        authorization: .v2Deliverable,
+                        claim: nil,
+                        retry: MeteringRetryState(
+                            attemptCount: 1,
+                            nextAttemptAt: start,
+                            lastErrorCode: nil,
+                            terminal: .succeeded
+                        ),
+                        createdAt: start.addingTimeInterval(TimeInterval(-100 + threshold))
+                    )
+                }
+            }
+        }
+        return (generationID, epochID, route)
     }
 
     private func work(forUsageDate usageDate: String, in state: DeviceEpochStoreState) throws -> ActivityInstallWork {

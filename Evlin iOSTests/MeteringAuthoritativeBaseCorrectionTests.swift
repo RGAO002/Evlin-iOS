@@ -66,10 +66,99 @@ final class MeteringAuthoritativeBaseCorrectionTests: XCTestCase {
         })
         XCTAssertEqual(state.activeEpochID, corrected.epochID)
         XCTAssertEqual(corrected.baseSource, .registrationConflict409)
-        XCTAssertEqual(state.epochs[fixture.rejectedEpochID]?.status, .retired)
+        XCTAssertNil(
+            state.epochs[fixture.rejectedEpochID],
+            "cold recovery should collect the physically absent rejected candidate"
+        )
+        XCTAssertNil(state.routes[fixture.rejectedRouteID])
         XCTAssertTrue(state.registrationWork.values.contains {
             $0.epochID == corrected.epochID && $0.retry.terminal == .pending
         })
+    }
+
+    func testColdReopenRepairsLegacyRetiredPriorCorrectionDeadEnd() async throws {
+        let fixture = try CorrectionFixture(
+            owner: owner,
+            start: start,
+            sameGenerationCandidate: true
+        )
+        defer { fixture.cleanup() }
+        try fixture.replaceDirectly(estimatedMinutes: 37)
+        try fixture.seedLegacyRetiredPriorCorrectionDeadEnd()
+        fixture.transport.results = [
+            fixture.registrationResponse(),
+            fixture.activationResponse(),
+        ]
+
+        try await fixture.driver(at: start.addingTimeInterval(1))
+            .recover(ownerChildDeviceID: owner)
+
+        let state = try fixture.store.read()
+        let correctedRouteID = try XCTUnwrap(state.v2RouteHandoff?.toRouteID)
+        XCTAssertEqual(state.activeRouteID, correctedRouteID)
+        XCTAssertEqual(state.v2RouteHandoff?.phase, .committed)
+        XCTAssertEqual(
+            state.registrationWork.values.first {
+                $0.routeID == correctedRouteID
+            }?.retry.terminal,
+            .succeeded
+        )
+        XCTAssertEqual(
+            state.activationWork.values.first {
+                $0.routeID == correctedRouteID
+            }?.retry.terminal,
+            .succeeded
+        )
+    }
+
+    func testColdReopenRepairsLegacySameKeyCorrectionReasonMismatch() async throws {
+        let fixture = try CorrectionFixture(
+            owner: owner,
+            start: start,
+            sameGenerationCandidate: true
+        )
+        defer { fixture.cleanup() }
+        try fixture.replaceDirectly(estimatedMinutes: 37)
+        try fixture.openCorrectedCandidateForRegistration()
+        try fixture.poisonCutoverCorrectionWithLegacyReason()
+        fixture.transport.results = [
+            fixture.registrationResponse(),
+            fixture.activationResponse(),
+        ]
+
+        try await fixture.driver(at: start.addingTimeInterval(1))
+            .recover(ownerChildDeviceID: owner)
+
+        let state = try fixture.store.read()
+        let handoff = try XCTUnwrap(state.v2RouteHandoff)
+        XCTAssertEqual(handoff.phase, .committed)
+        XCTAssertEqual(handoff.explicitRecovery, .identityRecovery)
+        XCTAssertEqual(state.activeRouteID, handoff.toRouteID)
+        XCTAssertEqual(
+            state.registrationWork.values.first {
+                $0.routeID == handoff.toRouteID
+            }?.retry.terminal,
+            .succeeded
+        )
+        XCTAssertEqual(
+            state.registrationWork.values.first {
+                $0.routeID == handoff.toRouteID
+            }?.request.reason,
+            .identityRecovery
+        )
+        XCTAssertEqual(
+            state.activationWork.values.first {
+                $0.routeID == handoff.toRouteID
+            }?.retry.terminal,
+            .succeeded
+        )
+        XCTAssertEqual(
+            state.routes.values.filter {
+                $0.ownerChildDeviceID == owner && $0.lifecycle == .active
+            }.count,
+            1,
+            "cold recovery must reuse the persisted corrected route, not mint another candidate"
+        )
     }
 
     func testColdReopenRetriesLegacyInitialCorrectionWithInitialReason() async throws {
@@ -145,6 +234,42 @@ final class MeteringAuthoritativeBaseCorrectionTests: XCTestCase {
         XCTAssertNotEqual(correctedEpoch.baseAcceptedMinutes, 91)
         XCTAssertNotEqual(correctedEpoch.baseAcceptedMinutes, 3)
         XCTAssertNotEqual(correctedEpoch.baseAcceptedMinutes, 120)
+    }
+
+    func testSameGenerationBaseMismatchKeepsPriorRouteAuthoritativeForCorrection() async throws {
+        let fixture = try CorrectionFixture(
+            owner: owner,
+            start: start,
+            sameGenerationCandidate: true
+        )
+        defer { fixture.cleanup() }
+        fixture.transport.results = [fixture.authoritativeConflict(estimatedMinutes: 37)]
+
+        await fixture.delivery.drain(owner: owner)
+
+        let state = try fixture.store.read()
+        let replacement = try XCTUnwrap(state.v2RouteHandoff)
+        XCTAssertNil(
+            state.generations[fixture.priorGenerationID]?.retiredAt,
+            "rejecting a same-generation candidate must not retire the generation that still owns the active prior route"
+        )
+        XCTAssertEqual(state.activeGenerationID, fixture.priorGenerationID)
+        XCTAssertEqual(state.activeEpochID, fixture.priorEpochID)
+        XCTAssertEqual(state.activeRouteID, fixture.priorRouteID)
+        XCTAssertTrue(
+            state.hasCurrentRegistrationProvenance(
+                owner: owner,
+                epochID: replacement.toEpochID,
+                routeID: replacement.toRouteID
+            ),
+            "the corrected candidate must remain deliverable through the still-live prior-route handoff"
+        )
+        XCTAssertEqual(
+            state.registrationWork.values.first {
+                $0.epochID == replacement.toEpochID && $0.routeID == replacement.toRouteID
+            }?.retry.terminal,
+            .pending
+        )
     }
 
     func testSecondAuthoritativeBaseMismatchRetiresOnlyCorrectedCandidate() async throws {
@@ -228,8 +353,12 @@ final class MeteringAuthoritativeBaseCorrectionTests: XCTestCase {
         XCTAssertEqual(final.activeRouteID, correctedRouteID)
         XCTAssertEqual(final.activeEpochID, correctedEpochID)
         XCTAssertEqual(final.v2RouteHandoff?.phase, .committed)
-        XCTAssertEqual(final.epochs.count, 3)
-        XCTAssertEqual(final.routes.count, 3)
+        XCTAssertNotNil(final.epochs[fixture.priorEpochID])
+        XCTAssertNotNil(final.routes[fixture.priorRouteID])
+        XCTAssertNotNil(final.epochs[correctedEpochID])
+        XCTAssertNotNil(final.routes[correctedRouteID])
+        XCTAssertNil(final.epochs[fixture.rejectedEpochID])
+        XCTAssertNil(final.routes[fixture.rejectedRouteID])
         XCTAssertEqual(final.registrationWork.values.filter { $0.routeID == correctedRouteID }.count, 1)
         XCTAssertEqual(final.activationWork.values.filter { $0.routeID == correctedRouteID }.count, 1)
     }
@@ -308,9 +437,27 @@ final class MeteringAuthoritativeBaseCorrectionTests: XCTestCase {
             XCTAssertEqual(state.v2RouteHandoff?.toGenerationID, ids.generationID, label)
             XCTAssertEqual(state.v2RouteHandoff?.toEpochID, ids.epochID, label)
             XCTAssertEqual(state.v2RouteHandoff?.toRouteID, ids.routeID, label)
-            XCTAssertEqual(state.generations.count, 3, label)
-            XCTAssertEqual(state.epochs.count, 3, label)
-            XCTAssertEqual(state.routes.count, 3, label)
+            XCTAssertNotNil(state.generations[fixture.priorGenerationID], label)
+            XCTAssertNotNil(state.epochs[fixture.priorEpochID], label)
+            XCTAssertNotNil(state.routes[fixture.priorRouteID], label)
+            XCTAssertNotNil(state.generations[ids.generationID], label)
+            XCTAssertNotNil(state.epochs[ids.epochID], label)
+            XCTAssertNotNil(state.routes[ids.routeID], label)
+            if let rejectedRoute = state.routes[fixture.rejectedRouteID] {
+                XCTAssertEqual(rejectedRoute.lifecycle, .tombstoned, label)
+                XCTAssertEqual(
+                    state.epochs[fixture.rejectedEpochID]?.status,
+                    .retired,
+                    label
+                )
+                XCTAssertNotNil(
+                    state.generations[fixture.rejectedGenerationID]?.retiredAt,
+                    label
+                )
+            } else {
+                XCTAssertNil(state.epochs[fixture.rejectedEpochID], label)
+                XCTAssertNil(state.generations[fixture.rejectedGenerationID], label)
+            }
             XCTAssertEqual(state.activeGenerationID, fixture.priorGenerationID, label)
             XCTAssertEqual(state.activeEpochID, fixture.priorEpochID, label)
             XCTAssertEqual(state.activeRouteID, fixture.priorRouteID, label)
@@ -435,9 +582,15 @@ final class MeteringAuthoritativeBaseCorrectionTests: XCTestCase {
         XCTAssertEqual(state.activeRouteID, ids.routeID)
         XCTAssertEqual(state.installWork[fixture.priorInstallID]?.phase, .stopped)
         XCTAssertNotNil(state.v2RouteHandoff?.priorStopAcknowledgedAt)
-        XCTAssertEqual(state.generations.count, 3)
-        XCTAssertEqual(state.epochs.count, 3)
-        XCTAssertEqual(state.routes.count, 3)
+        XCTAssertNotNil(state.generations[fixture.priorGenerationID])
+        XCTAssertNotNil(state.epochs[fixture.priorEpochID])
+        XCTAssertNotNil(state.routes[fixture.priorRouteID])
+        XCTAssertNotNil(state.generations[ids.generationID])
+        XCTAssertNotNil(state.epochs[ids.epochID])
+        XCTAssertNotNil(state.routes[ids.routeID])
+        XCTAssertNil(state.generations[fixture.rejectedGenerationID])
+        XCTAssertNil(state.epochs[fixture.rejectedEpochID])
+        XCTAssertNil(state.routes[fixture.rejectedRouteID])
 
         let correctedCallback = EarnedMeteringCallback(
             store: reopened,
@@ -614,7 +767,7 @@ final class MeteringAuthoritativeBaseCorrectionTests: XCTestCase {
         )
         let priorCallback = fixture.callback(routeID: fixture.priorRouteID, threshold: 5)
 
-        lock.pauseAfterNextTwoAcquisitions()
+        lock.pauseNextAcquisition()
         DispatchQueue.global().async {
             outcome.value = try? callbackHandler.handle(
                 priorCallback,
@@ -676,7 +829,8 @@ private final class CorrectionFixture {
         owner: UUID,
         start: Date,
         lock: any DeviceEpochStoreLocking = ActiveLockPersistenceLock.shared,
-        initialBootstrap: Bool = false
+        initialBootstrap: Bool = false,
+        sameGenerationCandidate: Bool = false
     ) throws {
         self.owner = owner
         self.start = start
@@ -692,7 +846,10 @@ private final class CorrectionFixture {
             clock: clock
         )
         try store.transaction(expectedOwner: owner) { state in
-            state = makeState(initialBootstrap: initialBootstrap)
+            state = makeState(
+                initialBootstrap: initialBootstrap,
+                sameGenerationCandidate: sameGenerationCandidate
+            )
         }
         if !initialBootstrap {
             try startMonitor(routeID: priorRouteID, store: store)
@@ -754,6 +911,28 @@ private final class CorrectionFixture {
         }
     }
 
+    func seedLegacyRetiredPriorCorrectionDeadEnd() throws {
+        try store.transaction(expectedOwner: owner) { state in
+            guard let handoff = state.v2RouteHandoff,
+                  handoff.phase == .preparing
+            else { throw CorrectionFixtureError.replacementRejected }
+            state.generations[handoff.fromGenerationID]?.retiredAt = start
+            for key in state.installWork.keys where
+                state.installWork[key]?.routeID == handoff.toRouteID {
+                state.installWork[key]?.claim = nil
+                state.installWork[key]?.phase = .pendingStart
+                state.installWork[key]?.retry.terminal = .superseded
+                state.installWork[key]?.retry.lastErrorCode = "route_superseded"
+            }
+            for key in state.registrationWork.keys where
+                state.registrationWork[key]?.routeID == handoff.toRouteID {
+                state.registrationWork[key]?.claim = nil
+                state.registrationWork[key]?.retry.terminal = .superseded
+                state.registrationWork[key]?.retry.lastErrorCode = "route_superseded"
+            }
+        }
+    }
+
     func poisonInitialCorrectionWithLegacyReason() throws {
         try store.transaction(expectedOwner: owner) { state in
             guard let correctedEpochID = state.activeEpochID,
@@ -785,6 +964,34 @@ private final class CorrectionFixture {
                 epochID: registration.epochID,
                 routeID: registration.routeID,
                 request: legacyRequest,
+                claim: nil,
+                retry: retry,
+                createdAt: registration.createdAt
+            )
+        }
+    }
+
+    func poisonCutoverCorrectionWithLegacyReason() throws {
+        try store.transaction(expectedOwner: owner) { state in
+            guard var handoff = state.v2RouteHandoff,
+                  handoff.phase == .cutoverReady,
+                  let registrationKey = state.registrationWork.first(where: {
+                      $0.value.epochID == handoff.toEpochID
+                          && $0.value.routeID == handoff.toRouteID
+                  })?.key,
+                  let registration = state.registrationWork[registrationKey]
+            else { throw CorrectionFixtureError.replacementRejected }
+            handoff.explicitRecovery = nil
+            state.v2RouteHandoff = handoff
+            var retry = registration.retry
+            retry.terminal = .rejected
+            retry.lastErrorCode = "replacement_reason_mismatch"
+            state.registrationWork[registrationKey] = EpochRegistrationWork(
+                workID: registration.workID,
+                ownerChildDeviceID: registration.ownerChildDeviceID,
+                epochID: registration.epochID,
+                routeID: registration.routeID,
+                request: registration.request,
                 claim: nil,
                 retry: retry,
                 createdAt: registration.createdAt
@@ -1010,9 +1217,14 @@ private final class CorrectionFixture {
         )!
     }
 
-    private func makeState(initialBootstrap: Bool) -> DeviceEpochStoreState {
+    private func makeState(
+        initialBootstrap: Bool,
+        sameGenerationCandidate: Bool
+    ) -> DeviceEpochStoreState {
         let priorGeneration = generation(id: priorGenerationID)
-        let rejectedGeneration = generation(id: rejectedGenerationID)
+        let rejectedGeneration = sameGenerationCandidate
+            ? priorGeneration
+            : generation(id: rejectedGenerationID)
         let priorEpoch = epoch(id: priorEpochID, generation: priorGeneration, registeredAt: start)
         let rejectedEpoch = epoch(id: rejectedEpochID, generation: rejectedGeneration, registeredAt: nil)
         let priorRoute = route(id: priorRouteID, epoch: priorEpoch, generation: priorGeneration, lifecycle: .active)
@@ -1051,9 +1263,15 @@ private final class CorrectionFixture {
                 ]
             )
         }
+        let generations = sameGenerationCandidate
+            ? [priorGenerationID: priorGeneration]
+            : [
+                priorGenerationID: priorGeneration,
+                rejectedGenerationID: rejectedGeneration,
+            ]
         return DeviceEpochStoreState(
             ownerChildDeviceID: owner,
-            generations: [priorGenerationID: priorGeneration, rejectedGenerationID: rejectedGeneration],
+            generations: generations,
             activeGenerationID: priorGenerationID,
             epochs: [priorEpochID: priorEpoch, rejectedEpochID: rejectedEpoch],
             activeEpochID: priorEpochID,
@@ -1065,7 +1283,7 @@ private final class CorrectionFixture {
                 fromGenerationID: priorGenerationID,
                 fromEpochID: priorEpochID,
                 fromRouteID: priorRouteID,
-                toGenerationID: rejectedGenerationID,
+                toGenerationID: rejectedGeneration.generationID,
                 toEpochID: rejectedEpochID,
                 toRouteID: rejectedRouteID,
                 phase: .cutoverReady,
@@ -1281,10 +1499,6 @@ private final class CorrectionRaceLock: DeviceEpochStoreLocking, @unchecked Send
 
     func pauseNextAcquisition() {
         lock.withLock { pauseAtAcquisition = acquisitionCount + 1 }
-    }
-
-    func pauseAfterNextTwoAcquisitions() {
-        lock.withLock { pauseAtAcquisition = acquisitionCount + 2 }
     }
 
     func waitUntilPaused(timeout: TimeInterval) -> DispatchTimeoutResult {

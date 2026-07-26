@@ -100,12 +100,31 @@ final class MeteringLadderBaseInvariantTests: XCTestCase {
 
     // MARK: - Absorb keeps base and ladder together
 
+    func testAbsorbCarriesOnlyBackendAcceptedProgressAndDropsRejectedRawHighWater() throws {
+        let fixture = try LadderFixture.healthy(epochBase: 0, poolMinutes: 240)
+        defer { fixture.cleanup() }
+        try fixture.recordThreshold(100, terminal: .succeeded)
+        try fixture.recordThreshold(225, terminal: .rejected)
+
+        XCTAssertTrue(try fixture.store.absorbCreditedProgressForRearm(
+            routeID: fixture.routeID,
+            owner: fixture.owner,
+            trigger: "watchdog"
+        ))
+
+        let state = try fixture.store.read()
+        let epoch = try XCTUnwrap(state.epochs[fixture.epochID])
+        let route = try XCTUnwrap(state.routes[fixture.routeID])
+        XCTAssertEqual(epoch.baseAcceptedMinutes, 100)
+        XCTAssertEqual(epoch.lastRawThresholdMinutes, 0)
+        XCTAssertEqual(route.ladderBaseMinutes, 100)
+        XCTAssertEqual(route.plannedEvents.map(\.thresholdMinutes).max(), 140)
+    }
+
     func testAbsorbRecutsTheLadderForTheCarriedBaseInTheSameTransaction() throws {
         let fixture = try LadderFixture.healthy(epochBase: 20, poolMinutes: 180)
         defer { fixture.cleanup() }
-        try fixture.store.transaction(expectedOwner: fixture.owner) { state in
-            state.epochs[fixture.epochID]?.lastRawThresholdMinutes = 125
-        }
+        try fixture.recordThreshold(125, terminal: .succeeded)
 
         XCTAssertTrue(try fixture.store.absorbCreditedProgressForRearm(
             routeID: fixture.routeID,
@@ -132,9 +151,7 @@ final class MeteringLadderBaseInvariantTests: XCTestCase {
     func testAbsorbStillRemovesTheDeadZoneAfterARearm() throws {
         let fixture = try LadderFixture.healthy(epochBase: 20, poolMinutes: 180)
         defer { fixture.cleanup() }
-        try fixture.store.transaction(expectedOwner: fixture.owner) { state in
-            state.epochs[fixture.epochID]?.lastRawThresholdMinutes = 125
-        }
+        try fixture.recordThreshold(125, terminal: .succeeded)
         try fixture.store.absorbCreditedProgressForRearm(
             routeID: fixture.routeID,
             owner: fixture.owner,
@@ -183,9 +200,7 @@ final class MeteringLadderBaseInvariantTests: XCTestCase {
     func testAbsorbDeclinesWhenNoRemainingLadderCanBeCut() throws {
         let fixture = try LadderFixture.healthy(epochBase: 20, poolMinutes: 180)
         defer { fixture.cleanup() }
-        try fixture.store.transaction(expectedOwner: fixture.owner) { state in
-            state.epochs[fixture.epochID]?.lastRawThresholdMinutes = 160
-        }
+        try fixture.recordThreshold(160, terminal: .succeeded)
 
         XCTAssertFalse(try fixture.store.absorbCreditedProgressForRearm(
             routeID: fixture.routeID,
@@ -203,9 +218,9 @@ final class MeteringLadderBaseInvariantTests: XCTestCase {
     // MARK: - Self-heal for devices already broken
 
     /// The iPad's live state: base 145 under a ladder cut at 20 topping out at
-    /// 160. A device in this state cannot recover on its own — nothing re-cuts a
-    /// planned ladder — so the recovery pass has to.
-    func testCorruptedLadderIsRecutAndRearmedOnTheNextRecoveryPass() throws {
+    /// 160. Repair must prepare a fresh physical route; in-place re-arm reuses
+    /// one-shot event names that Apple already delivered.
+    func testCorruptedLadderPreparesFreshRouteOnTheNextRecoveryPass() throws {
         let fixture = try LadderFixture.corrupted(
             epochBase: 145,
             ladderBase: nil,
@@ -219,32 +234,187 @@ final class MeteringLadderBaseInvariantTests: XCTestCase {
         ))
 
         let state = try fixture.store.read()
-        let route = try XCTUnwrap(state.routes[fixture.routeID])
+        let handoff = try XCTUnwrap(state.v2RouteHandoff)
+        let route = try XCTUnwrap(state.routes[handoff.toRouteID])
         let topRung = try XCTUnwrap(route.plannedEvents.map(\.thresholdMinutes).max())
         XCTAssertEqual(route.ladderBaseMinutes, 145)
         XCTAssertEqual(topRung, 35)
         XCTAssertEqual(route.ladderBaseMinutes! + topRung, 180)
         XCTAssertEqual(
-            state.installWork[fixture.installID]?.phase, .pendingStart,
-            "the corrected ladder has to actually reach Apple"
+            state.installWork.values.first(where: {
+                $0.routeID == handoff.toRouteID
+            })?.phase,
+            .pendingStart,
+            "the fresh ladder has to actually reach Apple"
         )
         XCTAssertEqual(
-            state.installWork[fixture.installID]?.retry.lastErrorCode,
-            "ladder_base_repaired"
+            state.installWork.values.first(where: {
+                $0.routeID == handoff.toRouteID
+            })?.retry.lastErrorCode,
+            "physical_identity_repaired"
         )
         let repair = try XCTUnwrap(captured.first { $0.kind == .meteringRepair })
-        XCTAssertEqual(repair.reason, "recut_overrun")
+        XCTAssertEqual(repair.reason, "replacement_overrun")
         XCTAssertEqual(repair.transition?.before, "base:145+raw:0/ladder:145+160")
+        XCTAssertEqual(state.activeRouteID, fixture.routeID)
+        XCTAssertEqual(state.installWork[fixture.installID]?.phase, .active)
+    }
 
-        // And the rungs Apple still holds from the old ladder are now refused
-        // outright rather than credited at 295 minutes.
-        XCTAssertEqual(
-            try fixture.store.enqueueAuthorizedV2Callback(
-                fixture.input(threshold: 150, minutesAfterStart: 150),
-                owner: fixture.owner
-            ),
-            .discarded(reason: "route_provenance_mismatch")
+    func testRepairUsesDurableAcceptedEvidenceInsteadOfRejectedRawOrPoisonedBase() throws {
+        let fixture = try LadderFixture.corrupted(
+            epochBase: 225,
+            ladderBase: 225,
+            poolMinutes: 240,
+            authoritativeBase: 0,
+            ladderCutFor: 225
         )
+        defer { fixture.cleanup() }
+        try fixture.recordEvidence(estimatedMinutes: 100, terminal: .succeeded)
+        try fixture.recordEvidence(estimatedMinutes: 225, terminal: .rejected)
+
+        XCTAssertTrue(try fixture.store.repairLadderBaseInvariantIfNeeded(
+            owner: fixture.owner,
+            now: fixture.start
+        ))
+
+        let state = try fixture.store.read()
+        let handoff = try XCTUnwrap(state.v2RouteHandoff)
+        let epoch = try XCTUnwrap(state.epochs[handoff.toEpochID])
+        let route = try XCTUnwrap(state.routes[handoff.toRouteID])
+        XCTAssertEqual(epoch.baseAcceptedMinutes, 100)
+        XCTAssertEqual(epoch.lastRawThresholdMinutes, 0)
+        XCTAssertEqual(route.ladderBaseMinutes, 100)
+        XCTAssertEqual(route.plannedEvents.map(\.thresholdMinutes).max(), 140)
+    }
+
+    /// DeviceActivity threshold events are one-shot under their physical
+    /// activity/event names. Re-cutting t5...t140 onto a route that already
+    /// delivered those names leaves a daemon-perfect route that never fires.
+    /// Physical repair therefore has to mint a fresh route and epoch while the
+    /// old route remains authoritative until make-before-break completes.
+    func testRepairMintsFreshPhysicalIdentityAndIsRestartIdempotent() throws {
+        let fixture = try LadderFixture.corrupted(
+            epochBase: 225,
+            ladderBase: 225,
+            poolMinutes: 240,
+            authoritativeBase: 0,
+            ladderCutFor: 225
+        )
+        defer { fixture.cleanup() }
+        try fixture.recordEvidence(estimatedMinutes: 100, terminal: .succeeded)
+        try fixture.recordEvidence(estimatedMinutes: 225, terminal: .rejected)
+        let repairAt = fixture.start.addingTimeInterval(4 * 60 * 60)
+
+        XCTAssertTrue(try fixture.store.repairLadderBaseInvariantIfNeeded(
+            owner: fixture.owner,
+            now: repairAt
+        ))
+
+        let first = try fixture.store.read()
+        let handoff = try XCTUnwrap(first.v2RouteHandoff)
+        XCTAssertEqual(first.activeEpochID, fixture.epochID)
+        XCTAssertEqual(first.activeRouteID, fixture.routeID)
+        XCTAssertEqual(handoff.fromEpochID, fixture.epochID)
+        XCTAssertEqual(handoff.fromRouteID, fixture.routeID)
+        XCTAssertNotEqual(handoff.toEpochID, fixture.epochID)
+        XCTAssertNotEqual(handoff.toRouteID, fixture.routeID)
+        XCTAssertEqual(handoff.explicitRecovery, .identityRecovery)
+
+        let candidateEpoch = try XCTUnwrap(first.epochs[handoff.toEpochID])
+        let candidateRoute = try XCTUnwrap(first.routes[handoff.toRouteID])
+        XCTAssertEqual(candidateEpoch.baseAcceptedMinutes, 100)
+        XCTAssertEqual(candidateEpoch.startedAt, repairAt)
+        XCTAssertEqual(candidateRoute.generationID, fixture.generationID)
+        XCTAssertEqual(candidateRoute.ladderBaseMinutes, 100)
+        XCTAssertEqual(candidateRoute.plannedEvents.map(\.thresholdMinutes).max(), 140)
+        XCTAssertNotEqual(
+            candidateRoute.activityName,
+            first.routes[fixture.routeID]?.activityName
+        )
+        XCTAssertTrue(candidateRoute.plannedEvents.allSatisfy {
+            $0.eventName.contains(handoff.toRouteID.uuidString.lowercased())
+        })
+        XCTAssertEqual(
+            first.installWork.values.first(where: {
+                $0.routeID == handoff.toRouteID
+            })?.phase,
+            .pendingStart
+        )
+        XCTAssertEqual(
+            first.installWork.values.first(where: {
+                $0.routeID == fixture.routeID
+            })?.phase,
+            .active,
+            "the prior physical route stays live until the candidate verifies"
+        )
+
+        XCTAssertFalse(try fixture.store.repairLadderBaseInvariantIfNeeded(
+            owner: fixture.owner,
+            now: repairAt.addingTimeInterval(10)
+        ))
+        let replay = try fixture.store.read()
+        XCTAssertEqual(replay.v2RouteHandoff?.toEpochID, handoff.toEpochID)
+        XCTAssertEqual(replay.v2RouteHandoff?.toRouteID, handoff.toRouteID)
+    }
+
+    func testRepairNormalizesVerifiedInstallForLogicallyActivePriorRoute() throws {
+        let fixture = try LadderFixture.corrupted(
+            epochBase: 225,
+            ladderBase: 225,
+            poolMinutes: 240,
+            authoritativeBase: 100,
+            ladderCutFor: 225,
+            installPhase: .verified
+        )
+        defer { fixture.cleanup() }
+        try fixture.recordEvidence(estimatedMinutes: 100, terminal: .succeeded)
+
+        XCTAssertTrue(try fixture.store.repairLadderBaseInvariantIfNeeded(
+            owner: fixture.owner,
+            now: fixture.start.addingTimeInterval(60)
+        ))
+
+        let state = try fixture.store.read()
+        XCTAssertEqual(state.activeRouteID, fixture.routeID)
+        XCTAssertEqual(state.routes[fixture.routeID]?.lifecycle, .active)
+        XCTAssertEqual(
+            state.installWork[fixture.installID]?.phase,
+            .active,
+            "a logically active prior must be eligible for make-before-break cutover"
+        )
+    }
+
+    /// Exact persisted iPad shape after the old in-place ladder repair:
+    /// base and ladder are numerically consistent, but the install row records
+    /// `ladder_base_repaired` and this same route already has accepted samples.
+    /// Its one-shot event names have therefore been consumed.
+    func testInPlaceLadderRepairMintsFreshPhysicalIdentityEvenWhenLadderIsConsistent() throws {
+        let fixture = try LadderFixture.healthy(epochBase: 100, poolMinutes: 240)
+        defer { fixture.cleanup() }
+        try fixture.recordEvidence(estimatedMinutes: 100, terminal: .succeeded)
+        try fixture.store.transaction(expectedOwner: fixture.owner) { state in
+            state.installWork[fixture.installID]?.phase = .verified
+            state.installWork[fixture.installID]?.retry.lastErrorCode = "ladder_base_repaired"
+        }
+        let repairAt = fixture.start.addingTimeInterval(3 * 60 * 60)
+
+        XCTAssertTrue(try fixture.store.repairLadderBaseInvariantIfNeeded(
+            owner: fixture.owner,
+            now: repairAt
+        ))
+
+        let state = try fixture.store.read()
+        let handoff = try XCTUnwrap(state.v2RouteHandoff)
+        let candidate = try XCTUnwrap(state.routes[handoff.toRouteID])
+        XCTAssertNotEqual(handoff.toRouteID, fixture.routeID)
+        XCTAssertEqual(handoff.explicitRecovery, .identityRecovery)
+        XCTAssertEqual(candidate.ladderBaseMinutes, 100)
+        XCTAssertEqual(
+            candidate.plannedSchedule.intervalStartAt,
+            repairAt,
+            "the fresh activity counts only usage after its own physical birth"
+        )
+        XCTAssertEqual(state.activeRouteID, fixture.routeID)
     }
 
     /// A base that has already compounded past the whole pool (iPad reached 460
@@ -330,6 +500,104 @@ final class MeteringLadderBaseInvariantTests: XCTestCase {
         XCTAssertEqual(try fixture.store.read().routes, before.routes)
         XCTAssertTrue(captured.filter { $0.kind == .meteringRepair }.isEmpty)
     }
+
+    /// A successful rung advances the durable estimate without changing the
+    /// ladder base. The repair pass must compare that evidence with
+    /// `base + raw`, not with the base alone; otherwise every accepted rung
+    /// mints a new physical identity and resets Apple's counter.
+    func testAcceptedRungDoesNotTriggerLadderIdentityRepair() throws {
+        let fixture = try LadderFixture.healthy(epochBase: 195, poolMinutes: 240)
+        defer { fixture.cleanup() }
+        try fixture.recordEvidence(
+            estimatedMinutes: 200,
+            rawThresholdMinutes: 5,
+            terminal: .succeeded
+        )
+        let before = try fixture.store.read()
+
+        XCTAssertFalse(try fixture.store.repairLadderBaseInvariantIfNeeded(
+            owner: fixture.owner,
+            now: fixture.start.addingTimeInterval(5 * 60)
+        ))
+
+        let after = try fixture.store.read()
+        XCTAssertEqual(after.activeEpochID, before.activeEpochID)
+        XCTAssertEqual(after.activeRouteID, before.activeRouteID)
+        XCTAssertNil(after.v2RouteHandoff)
+        XCTAssertTrue(captured.filter { $0.kind == .meteringRepair }.isEmpty)
+    }
+
+    /// Recovery checks the ladder before it drains network work. A callback
+    /// queued while offline is not rejected evidence, so it must keep the
+    /// current physical identity until the backend reaches a terminal verdict.
+    func testPendingRungDoesNotTriggerLadderIdentityRepair() throws {
+        let fixture = try LadderFixture.healthy(epochBase: 195, poolMinutes: 240)
+        defer { fixture.cleanup() }
+        try fixture.recordEvidence(
+            estimatedMinutes: 200,
+            rawThresholdMinutes: 5,
+            terminal: .pending
+        )
+        let before = try fixture.store.read()
+
+        XCTAssertFalse(try fixture.store.repairLadderBaseInvariantIfNeeded(
+            owner: fixture.owner,
+            now: fixture.start.addingTimeInterval(5 * 60)
+        ))
+
+        let after = try fixture.store.read()
+        XCTAssertEqual(after.activeEpochID, before.activeEpochID)
+        XCTAssertEqual(after.activeRouteID, before.activeRouteID)
+        XCTAssertNil(after.v2RouteHandoff)
+        XCTAssertTrue(captured.filter { $0.kind == .meteringRepair }.isEmpty)
+    }
+
+    func testTooEarlyCallbackMarksPhysicalRouteConsumedWithoutCreditingUsage() throws {
+        let fixture = try LadderFixture.healthy(epochBase: 215, poolMinutes: 240)
+        defer { fixture.cleanup() }
+
+        let outcome = try fixture.store.enqueueAuthorizedV2Callback(
+            fixture.input(threshold: 5, minutesAfterStart: 0),
+            owner: fixture.owner
+        )
+
+        XCTAssertEqual(outcome, .discarded(reason: "too_early"))
+        let state = try fixture.store.read()
+        XCTAssertEqual(state.epochs[fixture.epochID]?.baseAcceptedMinutes, 215)
+        XCTAssertEqual(state.epochs[fixture.epochID]?.lastRawThresholdMinutes, 0)
+        XCTAssertTrue(state.sampleWork.isEmpty)
+        XCTAssertEqual(
+            state.installWork[fixture.installID]?.retry.lastErrorCode,
+            "physical_events_consumed_too_early"
+        )
+    }
+
+    func testConsumedPhysicalRouteMintsFreshIdentityRecovery() throws {
+        let fixture = try LadderFixture.healthy(epochBase: 215, poolMinutes: 240)
+        defer { fixture.cleanup() }
+        try fixture.store.transaction(expectedOwner: fixture.owner) { state in
+            state.installWork[fixture.installID]?.retry.lastErrorCode =
+                "physical_events_consumed_too_early"
+        }
+
+        XCTAssertTrue(try fixture.store.repairLadderBaseInvariantIfNeeded(
+            owner: fixture.owner,
+            now: fixture.start.addingTimeInterval(60)
+        ))
+
+        let state = try fixture.store.read()
+        let handoff = try XCTUnwrap(state.v2RouteHandoff)
+        XCTAssertEqual(handoff.fromRouteID, fixture.routeID)
+        XCTAssertNotEqual(handoff.toRouteID, fixture.routeID)
+        XCTAssertEqual(handoff.explicitRecovery, .identityRecovery)
+        XCTAssertEqual(state.routes[handoff.toRouteID]?.ladderBaseMinutes, 215)
+        XCTAssertEqual(
+            state.installWork.values.first(where: {
+                $0.routeID == handoff.toRouteID
+            })?.phase,
+            .pendingStart
+        )
+    }
 }
 
 // MARK: - Fixture
@@ -366,13 +634,18 @@ private final class LadderFixture {
     static func corrupted(
         epochBase: Int,
         ladderBase: Int?,
-        poolMinutes: Int
+        poolMinutes: Int,
+        authoritativeBase: Int? = nil,
+        ladderCutFor: Int = 20,
+        installPhase: ActivityInstallPhase = .active
     ) throws -> LadderFixture {
         try make(
             epochBase: epochBase,
             ladderBase: ladderBase,
             poolMinutes: poolMinutes,
-            ladderCutFor: 20
+            ladderCutFor: ladderCutFor,
+            authoritativeBase: authoritativeBase,
+            installPhase: installPhase
         )
     }
 
@@ -380,7 +653,9 @@ private final class LadderFixture {
         epochBase: Int,
         ladderBase: Int?,
         poolMinutes: Int,
-        ladderCutFor: Int? = nil
+        ladderCutFor: Int? = nil,
+        authoritativeBase: Int? = nil,
+        installPhase: ActivityInstallPhase = .active
     ) throws -> LadderFixture {
         let fixture = LadderFixture()
         let cutFor = ladderCutFor ?? epochBase
@@ -391,6 +666,34 @@ private final class LadderFixture {
                 ladderBase: ladderBase,
                 poolMinutes: poolMinutes,
                 thresholds: thresholds
+            )
+            state.installWork[fixture.installID]?.phase = installPhase
+            let registrationID = UUID()
+            state.registrationWork[registrationID] = EpochRegistrationWork(
+                workID: registrationID,
+                ownerChildDeviceID: fixture.owner,
+                epochID: fixture.epochID,
+                routeID: fixture.routeID,
+                request: EpochRegistrationRequestDTO(
+                    protocolVersion: 2,
+                    epochID: fixture.epochID,
+                    deviceID: fixture.owner,
+                    usageDate: "2026-07-18",
+                    timezone: "America/New_York",
+                    policyRevision: "policy-1",
+                    measurementSelectionDigest: state.generations[fixture.generationID]!.measurementSelectionDigest,
+                    enforcementSetID: state.generations[fixture.generationID]!.enforcementSetID,
+                    startedAt: fixture.start,
+                    baseAcceptedMinutes: authoritativeBase ?? min(epochBase, poolMinutes),
+                    reason: .initial
+                ),
+                retry: MeteringRetryState(
+                    attemptCount: 0,
+                    nextAttemptAt: fixture.start,
+                    lastErrorCode: nil,
+                    terminal: .succeeded
+                ),
+                createdAt: fixture.start
             )
         }
         return fixture
@@ -417,9 +720,81 @@ private final class LadderFixture {
         )
     }
 
-    /// The `estimatedMinutes` the one queued sample will send to the backend.
+    /// The `estimatedMinutes` the currently pending sample will send to the
+    /// backend. Fixtures may also retain succeeded evidence used to seed the
+    /// authoritative base.
     func reportedMinutes() throws -> Int? {
-        try store.read().sampleWork.values.first?.request.estimatedMinutes
+        try store.read().sampleWork.values.first(where: {
+            $0.retry.terminal == .pending
+        })?.request.estimatedMinutes
+    }
+
+    func recordThreshold(
+        _ threshold: Int,
+        terminal: MeteringWorkTerminal
+    ) throws {
+        let outcome = try store.enqueueAuthorizedV2Callback(
+            input(threshold: threshold, minutesAfterStart: threshold),
+            owner: owner
+        )
+        guard case let .queued(workID) = outcome else {
+            throw NSError(
+                domain: "MeteringLadderBaseInvariantTests",
+                code: 1,
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "expected queued threshold \(threshold), got \(outcome)",
+                ]
+            )
+        }
+        try store.transaction(expectedOwner: owner) { state in
+            state.sampleWork[workID]?.retry.terminal = terminal
+        }
+    }
+
+    func recordEvidence(
+        estimatedMinutes: Int,
+        rawThresholdMinutes: Int? = nil,
+        terminal: MeteringWorkTerminal
+    ) throws {
+        try store.transaction(expectedOwner: owner) { state in
+            let workID = UUID()
+            let rawThreshold = rawThresholdMinutes ?? estimatedMinutes
+            state.sampleWork[workID] = EpochSampleWork(
+                workID: workID,
+                ownerChildDeviceID: owner,
+                epochID: epochID,
+                routeID: routeID,
+                request: EpochSampleRequestDTO(
+                    deviceID: owner,
+                    usageDate: "2026-07-18",
+                    timezone: "America/New_York",
+                    activityName: MeteringRouteNamespace.activityName(routeID: routeID),
+                    eventName: MeteringRouteNamespace.eventName(
+                        routeID: routeID,
+                        thresholdMinutes: rawThreshold
+                    ),
+                    thresholdMinutes: rawThreshold,
+                    estimatedMinutes: estimatedMinutes,
+                    observedAt: start.addingTimeInterval(TimeInterval(rawThreshold * 60)),
+                    clientSampleID: "evidence:\(workID.uuidString.lowercased())",
+                    protocolVersion: 2,
+                    epochID: epochID,
+                    generationArmedAt: nil,
+                    generationOffsetMinutes: nil
+                ),
+                authorization: .v2Deliverable,
+                retry: MeteringRetryState(
+                    attemptCount: 0,
+                    nextAttemptAt: start,
+                    lastErrorCode: terminal == .rejected ? "implausible_threshold" : nil,
+                    terminal: terminal
+                ),
+                createdAt: start
+            )
+            let currentRaw = state.epochs[epochID]?.lastRawThresholdMinutes ?? 0
+            state.epochs[epochID]?.lastRawThresholdMinutes = max(currentRaw, rawThreshold)
+        }
     }
 
     private func state(

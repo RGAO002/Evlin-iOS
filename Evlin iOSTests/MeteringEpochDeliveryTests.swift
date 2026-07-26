@@ -2240,6 +2240,236 @@ final class MeteringEpochDeliveryTests: XCTestCase {
         }
     }
 
+    func testFirstActivationAcknowledgesExhaustedEpoch() throws {
+        let response = EpochActivationResponseDTO(
+            status: .activated,
+            epochID: epochID,
+            epochStatus: .exhausted,
+            meteringProtocolVersion: 2,
+            snapshot: makeSnapshot(counted: true, warning: nil)
+        )
+
+        let disposition = MeteringEpochDelivery.activationDisposition(
+            data: try encoded(response),
+            statusCode: 200
+        )
+
+        guard case let .acknowledged(acknowledged) = disposition else {
+            return XCTFail("an installed epoch that exhausted before activation must still commit")
+        }
+        XCTAssertEqual(acknowledged.epochStatus, .exhausted)
+    }
+
+    func testClockSkewActivationRejectionIsRetryable() {
+        let disposition = MeteringEpochDelivery.activationDisposition(
+            data: Data(#"{"detail":"activation_verified_at_invalid"}"#.utf8),
+            statusCode: 409
+        )
+
+        XCTAssertEqual(
+            disposition,
+            .retry(code: "activation_verified_at_invalid")
+        )
+    }
+
+    func testColdReopenRetriesPreviouslyRejectedClockSkewActivation() async throws {
+        let fileURL = temporaryStoreURL()
+        defer { removeTemporaryStore(fileURL) }
+        let store = makeStore(fileURL: fileURL)
+        try store.transaction(expectedOwner: owner) { state in
+            state = makeBaseState()
+            let registrationID = UUID()
+            var registration = makeRegistrationWork(workID: registrationID, createdAt: start)
+            registration.retry.terminal = .succeeded
+            state.registrationWork[registrationID] = registration
+            state.installWork[UUID()] = makeVerifiedInstallWork(createdAt: start)
+            authorizeInitialDualActiveActivation(&state)
+        }
+
+        let transport = DeliveryTestTransport()
+        let delivery = MeteringEpochDelivery(
+            baseURL: baseURL,
+            store: store,
+            transport: transport,
+            clock: DeliveryTestClock(now: start)
+        )
+        try delivery.enqueueActivation(
+            EpochActivationRequestDTO(
+                protocolVersion: 2,
+                deviceID: owner,
+                routeID: routeID,
+                verifiedAt: start
+            ),
+            owner: owner,
+            epochID: epochID,
+            routeID: routeID
+        )
+        try store.transaction(expectedOwner: owner) { state in
+            let key = try XCTUnwrap(state.activationWork.keys.first)
+            state.activationWork[key]?.retry = MeteringRetryState(
+                attemptCount: 0,
+                nextAttemptAt: start,
+                lastErrorCode: "activation_verified_at_invalid",
+                terminal: .rejected
+            )
+        }
+
+        let response = EpochActivationResponseDTO(
+            status: .activated,
+            epochID: epochID,
+            epochStatus: .active,
+            meteringProtocolVersion: 2,
+            snapshot: makeSnapshot(counted: true, warning: nil)
+        )
+        transport.results = [(
+            try encoded(response),
+            HTTPURLResponse(
+                url: baseURL,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: nil
+            )!
+        )]
+
+        await delivery.drain(owner: owner)
+
+        XCTAssertEqual(transport.requests.count, 1)
+        XCTAssertEqual(
+            try store.read().activationWork.values.first?.retry.terminal,
+            .succeeded
+        )
+    }
+
+    func testColdReopenNormalizesSharedPoolExhaustionBelowDeviceCap() async throws {
+        let fileURL = temporaryStoreURL()
+        defer { removeTemporaryStore(fileURL) }
+        let store = makeStore(fileURL: fileURL)
+        try store.transaction(expectedOwner: owner) { state in
+            state = makeBaseState()
+            let registrationID = UUID()
+            var registration = makeRegistrationWork(workID: registrationID, createdAt: start)
+            registration.retry.terminal = .succeeded
+            state.registrationWork[registrationID] = registration
+            state.installWork[UUID()] = makeVerifiedInstallWork(createdAt: start)
+            authorizeInitialDualActiveActivation(&state)
+        }
+
+        let transport = DeliveryTestTransport()
+        let response409 = HTTPURLResponse(
+            url: baseURL,
+            statusCode: 409,
+            httpVersion: nil,
+            headerFields: nil
+        )!
+        transport.results = [
+            (Data(#"{"detail":"activation_epoch_not_current"}"#.utf8), response409)
+        ]
+        let delivery = MeteringEpochDelivery(
+            baseURL: baseURL,
+            store: store,
+            transport: transport,
+            clock: DeliveryTestClock(now: start)
+        )
+        try delivery.enqueueActivation(
+            EpochActivationRequestDTO(
+                protocolVersion: 2,
+                deviceID: owner,
+                routeID: routeID,
+                verifiedAt: start
+            ),
+            owner: owner,
+            epochID: epochID,
+            routeID: routeID
+        )
+
+        await delivery.drain(owner: owner)
+        XCTAssertEqual(try store.read().activationWork.values.first?.retry.terminal, .rejected)
+
+        let response200 = HTTPURLResponse(
+            url: baseURL,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: nil
+        )!
+        transport.results = [
+            (try encoded(EpochActivationResponseDTO(
+                status: .activated,
+                epochID: epochID,
+                epochStatus: .exhausted,
+                meteringProtocolVersion: 2,
+                snapshot: makeSnapshot(counted: true, warning: nil)
+            )), response200)
+        ]
+
+        await delivery.drain(owner: owner)
+
+        let final = try store.read()
+        XCTAssertEqual(transport.requests.count, 2)
+        XCTAssertEqual(final.activationWork.values.first?.retry.terminal, .succeeded)
+        XCTAssertEqual(final.epochs[epochID]?.status, .active)
+    }
+
+    func testUpgradeRepairsSucceededActivationExhaustedBelowDeviceCap() async throws {
+        let fileURL = temporaryStoreURL()
+        defer { removeTemporaryStore(fileURL) }
+        let store = makeStore(fileURL: fileURL)
+        try store.transaction(expectedOwner: owner) { state in
+            state = makeBaseState()
+            state.epochs[epochID]?.status = .exhausted
+            if let generationID = state.activeGenerationID {
+                state.generations[generationID]?.configuredPoolMinutes = 120
+                state.generations[generationID]?.configuredDeviceCapMinutes = 60
+            }
+            state.ratchets[owner]?.localSelection = .v2
+            var activation = makeActivationWork(workID: UUID(), createdAt: start)
+            activation.retry.terminal = .succeeded
+            state.activationWork[activation.workID] = activation
+        }
+        let transport = DeliveryTestTransport()
+        let delivery = MeteringEpochDelivery(
+            baseURL: baseURL,
+            store: store,
+            transport: transport,
+            clock: DeliveryTestClock(now: start)
+        )
+
+        await delivery.drain(owner: owner)
+
+        XCTAssertTrue(transport.requests.isEmpty)
+        XCTAssertEqual(try store.read().epochs[epochID]?.status, .active)
+    }
+
+    func testUpgradeDoesNotReopenEpochAtDeviceCap() async throws {
+        let fileURL = temporaryStoreURL()
+        defer { removeTemporaryStore(fileURL) }
+        let store = makeStore(fileURL: fileURL)
+        try store.transaction(expectedOwner: owner) { state in
+            state = makeBaseState()
+            state.epochs[epochID]?.status = .exhausted
+            state.routes[routeID]?.ladderBaseMinutes = 60
+            if let generationID = state.activeGenerationID {
+                state.generations[generationID]?.configuredPoolMinutes = 120
+                state.generations[generationID]?.configuredDeviceCapMinutes = 60
+            }
+            state.ratchets[owner]?.localSelection = .v2
+            var activation = makeActivationWork(workID: UUID(), createdAt: start)
+            activation.retry.terminal = .succeeded
+            state.activationWork[activation.workID] = activation
+        }
+        let transport = DeliveryTestTransport()
+        let delivery = MeteringEpochDelivery(
+            baseURL: baseURL,
+            store: store,
+            transport: transport,
+            clock: DeliveryTestClock(now: start)
+        )
+
+        await delivery.drain(owner: owner)
+
+        XCTAssertTrue(transport.requests.isEmpty)
+        XCTAssertEqual(try store.read().epochs[epochID]?.status, .exhausted)
+    }
+
     func testInvalidRegistrationResponseCannotUnlockActivation() async throws {
         let fileURL = temporaryStoreURL()
         defer { removeTemporaryStore(fileURL) }

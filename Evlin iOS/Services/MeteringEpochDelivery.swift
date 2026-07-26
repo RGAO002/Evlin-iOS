@@ -171,6 +171,9 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
         }
         reopenRejectedPhysicalNamespaceSamplesIfNeeded(owner: owner)
         reopenLegacyOpaque409IfNeeded(owner: owner)
+        reopenLegacyPreActivationExhaustedRejectionIfNeeded(owner: owner)
+        reopenClockSkewActivationRejectionIfNeeded(owner: owner)
+        repairLegacySharedPoolExhaustionIfNeeded(owner: owner)
 
         while true {
             if settleLeadingInvalidRegistration(owner: owner) {
@@ -301,6 +304,130 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
         }
     }
 
+    private func reopenLegacyPreActivationExhaustedRejectionIfNeeded(owner: UUID) {
+        try? store.transaction(expectedOwner: owner) { state in
+            let candidates = state.activationWork
+                .filter { _, work in
+                    work.ownerChildDeviceID == owner
+                        && work.retry.terminal == .rejected
+                        && work.retry.lastErrorCode == "activation_epoch_not_current"
+                        && work.retry.attemptCount == 0
+                        && work.claim == nil
+                        && hasExactActivationAuthorization(
+                            work,
+                            owner: owner,
+                            state: state
+                        )
+                        && state.registrationWork.values.filter({
+                            $0.ownerChildDeviceID == owner
+                                && $0.epochID == work.epochID
+                                && $0.routeID == work.routeID
+                                && $0.retry.terminal == .succeeded
+                        }).count == 1
+                        && state.installWork.values.filter({
+                            $0.ownerChildDeviceID == owner
+                                && $0.routeID == work.routeID
+                                && isActivationReady($0.phase)
+                        }).count == 1
+                }
+                .sorted { lhs, rhs in
+                    if lhs.value.createdAt != rhs.value.createdAt {
+                        return lhs.value.createdAt < rhs.value.createdAt
+                    }
+                    return lhs.key.uuidString.lowercased() < rhs.key.uuidString.lowercased()
+                }
+            guard let (key, work) = candidates.first else { return }
+            var reopened = work
+            reopened.retry = MeteringRetryState(
+                attemptCount: 1,
+                nextAttemptAt: clock.now,
+                lastErrorCode: "legacy_pre_activation_exhausted_recheck",
+                terminal: .pending
+            )
+            state.activationWork[key] = reopened
+        }
+    }
+
+    private func reopenClockSkewActivationRejectionIfNeeded(owner: UUID) {
+        try? store.transaction(expectedOwner: owner) { state in
+            let candidates = state.activationWork
+                .filter { _, work in
+                    work.ownerChildDeviceID == owner
+                        && work.retry.terminal == .rejected
+                        && work.retry.lastErrorCode == "activation_verified_at_invalid"
+                        && work.claim == nil
+                        && hasExactActivationAuthorization(
+                            work,
+                            owner: owner,
+                            state: state
+                        )
+                        && state.registrationWork.values.filter({
+                            $0.ownerChildDeviceID == owner
+                                && $0.epochID == work.epochID
+                                && $0.routeID == work.routeID
+                                && $0.retry.terminal == .succeeded
+                        }).count == 1
+                        && state.installWork.values.filter({
+                            $0.ownerChildDeviceID == owner
+                                && $0.routeID == work.routeID
+                                && isActivationReady($0.phase)
+                        }).count == 1
+                }
+                .sorted { lhs, rhs in
+                    if lhs.value.createdAt != rhs.value.createdAt {
+                        return lhs.value.createdAt < rhs.value.createdAt
+                    }
+                    return lhs.key.uuidString.lowercased() < rhs.key.uuidString.lowercased()
+                }
+            guard let (key, work) = candidates.first else { return }
+            var reopened = work
+            reopened.retry = MeteringRetryState(
+                attemptCount: work.retry.attemptCount + 1,
+                nextAttemptAt: clock.now,
+                lastErrorCode: "activation_clock_skew_recheck",
+                terminal: .pending
+            )
+            state.activationWork[key] = reopened
+        }
+    }
+
+    private func repairLegacySharedPoolExhaustionIfNeeded(owner: UUID) {
+        try? store.transaction(expectedOwner: owner) { state in
+            guard state.ownerChildDeviceID == owner,
+                  state.ratchets[owner]?.localSelection == .v2,
+                  let epochID = state.activeEpochID,
+                  let routeID = state.activeRouteID,
+                  let generationID = state.activeGenerationID,
+                  var epoch = state.epochs[epochID],
+                  let route = state.routes[routeID],
+                  let generation = state.generations[generationID],
+                  epoch.childDeviceID == owner,
+                  epoch.status == .exhausted,
+                  epoch.retiredAt == nil,
+                  route.ownerChildDeviceID == owner,
+                  route.epochID == epochID,
+                  route.generationID == generationID,
+                  route.lifecycle == .active,
+                  generation.childDeviceID == owner,
+                  generation.retiredAt == nil,
+                  let deviceCap = generation.configuredDeviceCapMinutes
+                    ?? generation.configuredPoolMinutes,
+                  state.activationWork.values.contains(where: {
+                      $0.ownerChildDeviceID == owner
+                        && $0.epochID == epochID
+                        && $0.routeID == routeID
+                        && $0.retry.terminal == .succeeded
+                  })
+            else { return }
+
+            let observedMinutes = state.ladderBaseMinutes(for: route)
+                + max(0, epoch.lastRawThresholdMinutes - epoch.excludedWhilePausedMinutes)
+            guard observedMinutes < deviceCap else { return }
+            epoch.status = .active
+            state.epochs[epochID] = epoch
+        }
+    }
+
     static func sampleDisposition(data: Data, statusCode: Int) -> EpochSampleHTTPDisposition {
         if (429 == statusCode) || (500...599).contains(statusCode) {
             return .retry(code: errorCode(data: data) ?? "http_\(statusCode)")
@@ -373,13 +500,19 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
             guard response.meteringProtocolVersion == 2 else {
                 return .terminal(code: "protocol_mismatch")
             }
-            guard response.status == .alreadyActivated || response.epochStatus == .active else {
+            let firstActivationStatusAllowed = response.status == .activated
+                && (response.epochStatus == .active || response.epochStatus == .exhausted)
+            guard response.status == .alreadyActivated || firstActivationStatusAllowed else {
                 return .terminal(code: "epoch_not_active")
             }
             guard response.status == .activated || response.status == .alreadyActivated else {
                 return .terminal(code: "activation_not_acknowledged")
             }
             return .acknowledged(response)
+        }
+        if statusCode == 409,
+           errorCode(data: data) == "activation_verified_at_invalid" {
+            return .retry(code: "activation_verified_at_invalid")
         }
         return .terminal(code: errorCode(data: data) ?? "http_\(statusCode)")
     }
@@ -787,6 +920,7 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
             work.retry = completedRetry(from: work.retry, code: nil, terminal: .succeeded)
             work.claim = nil
             state.registrationWork[key] = work
+            _ = state.reconcileEpochStartFromSuccessfulRegistration(work)
             state.epochs[work.epochID]?.registeredAt = clock.now
             for (sampleKey, var sampleWork) in state.sampleWork where
                 sampleWork.ownerChildDeviceID == owner
@@ -1109,6 +1243,7 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
                       state: state
                   ),
                   let route = state.routes[work.routeID],
+                  let generation = state.generations[route.generationID],
                   route.ownerChildDeviceID == owner,
                   route.lifecycle == .active,
                   route.epochID == work.epochID,
@@ -1130,7 +1265,10 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
                       let acknowledgedStatus = DeviceDailyEpochStatus(rawValue: epochStatus.rawValue),
                       snapshotMatches(snapshot, owner: owner, usageDate: epoch.usageDate)
                 else { return }
-                epoch.status = acknowledgedStatus
+                let deviceCap = generation.configuredDeviceCapMinutes ?? snapshot.capMinutes
+                let sharedPoolOnlyExhaustion = acknowledgedStatus == .exhausted
+                    && deviceCap.map { snapshot.estimatedMinutes < $0 } == true
+                epoch.status = sharedPoolOnlyExhaustion ? .active : acknowledgedStatus
                 state.epochs[work.epochID] = epoch
             }
             work.retry = terminal == .pending

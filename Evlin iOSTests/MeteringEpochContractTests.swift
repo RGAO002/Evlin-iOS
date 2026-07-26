@@ -333,7 +333,7 @@ final class MeteringEpochContractTests: XCTestCase {
     }
 
     func testJitterConstantsAndHardMaximumClamp() {
-        XCTAssertEqual(MeteringEpochContract.defaultJitterSeconds, 30)
+        XCTAssertEqual(MeteringEpochContract.defaultJitterSeconds, 60)
         XCTAssertEqual(MeteringEpochContract.maximumJitterSeconds, 60)
 
         let verdict = MeteringEpochContract.callbackVerdict(
@@ -344,6 +344,17 @@ final class MeteringEpochContractTests: XCTestCase {
             )
         )
         XCTAssertEqual(verdict, .rejectTooEarly)
+    }
+
+    func testDefaultJitterAcceptsObservedThirtyFiveSecondEarlyCallback() {
+        let verdict = MeteringEpochContract.callbackVerdict(
+            callbackInput(
+                adjustedEstimateMinutes: 5,
+                callbackAt: Self.startedAt.addingTimeInterval(265)
+            )
+        )
+
+        XCTAssertEqual(verdict, .accept)
     }
 
     func testCallbackBeforeStartRejectsTooEarlyEvenWithZeroDelta() {

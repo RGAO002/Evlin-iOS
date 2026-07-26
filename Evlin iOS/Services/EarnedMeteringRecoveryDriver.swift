@@ -91,6 +91,7 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
     private func performRecovery(ownerChildDeviceID owner: UUID) async throws {
         if try recoverIdentityCleanupIfPresent() { return }
         guard store.isCurrentOwner(owner) else { return }
+        _ = try store.reconcileEpochStartsFromSuccessfulRegistrations(owner: owner)
         try cancelBackwardPreparingHandoffIfNeeded(owner: owner)
         try yieldSupersededCanonicalRolloverIfNeeded(owner: owner)
         try markElapsedActivePriorAbsentIfNeeded(owner: owner)
@@ -120,6 +121,14 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
         try collectCompletedHandoff(owner: owner)
         try recoverPersistedInitialAuthoritativeBaseConflict(owner: owner)
         try recoverLegacyInitialCorrectionReason(owner: owner)
+        _ = try store.recoverLegacyRetiredPriorAuthoritativeCorrection(
+            owner: owner,
+            now: clock.now
+        )
+        _ = try store.recoverLegacySameKeyCorrectionReasonMismatch(
+            owner: owner,
+            now: clock.now
+        )
         _ = try store.prepareCurrentDayInstallStartMigrationIfNeeded(
             owner: owner,
             now: clock.now
@@ -136,6 +145,8 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
         await delivery.drain(owner: owner)
         try recoverTerminalInitialActivation(owner: owner)
         try advanceReplacementBarrier(owner: owner)
+        await delivery.drain(owner: owner)
+        try recoverPhysicalIdentityRequired(owner: owner)
         await delivery.drain(owner: owner)
         try advanceReplacementBarrier(owner: owner)
         await delivery.drain(owner: owner)
@@ -525,6 +536,90 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
                 ),
                 createdAt: registration.createdAt
             )
+        }
+    }
+
+    private func recoverPhysicalIdentityRequired(owner: UUID) throws {
+        try store.transaction(expectedOwner: owner) { state in
+            guard var handoff = state.v2RouteHandoff,
+                  handoff.ownerChildDeviceID == owner,
+                  handoff.phase == .cutoverReady,
+                  handoff.explicitRecovery == nil,
+                  state.activeGenerationID == handoff.fromGenerationID,
+                  state.activeEpochID == handoff.fromEpochID,
+                  state.activeRouteID == handoff.fromRouteID,
+                  let candidateEpoch = state.epochs[handoff.toEpochID],
+                  candidateEpoch.childDeviceID == owner,
+                  candidateEpoch.status == .active,
+                  candidateEpoch.retiredAt == nil,
+                  let candidateRoute = state.routes[handoff.toRouteID],
+                  candidateRoute.ownerChildDeviceID == owner,
+                  candidateRoute.epochID == candidateEpoch.epochID,
+                  candidateRoute.lifecycle == .active,
+                  state.installWork.values.filter({
+                      $0.ownerChildDeviceID == owner
+                          && $0.routeID == candidateRoute.routeID
+                          && $0.phase == .dualActive
+                  }).count == 1,
+                  !state.activationWork.values.contains(where: {
+                      $0.ownerChildDeviceID == owner
+                          && $0.epochID == candidateEpoch.epochID
+                          && $0.routeID == candidateRoute.routeID
+                          && $0.retry.terminal == .succeeded
+                  })
+            else { return }
+
+            let rejectedKeys = state.registrationWork.compactMap {
+                key, work -> UUID? in
+                guard work.ownerChildDeviceID == owner,
+                      work.epochID == candidateEpoch.epochID,
+                      work.routeID == candidateRoute.routeID,
+                      work.claim == nil,
+                      work.retry.terminal == .rejected,
+                      work.retry.lastErrorCode
+                        == "physical_identity_recovery_required"
+                else { return nil }
+                return key
+            }
+            guard rejectedKeys.count == 1,
+                  !state.registrationWork.values.contains(where: {
+                      $0.ownerChildDeviceID == owner
+                          && $0.epochID == candidateEpoch.epochID
+                          && $0.routeID == candidateRoute.routeID
+                          && (
+                              $0.retry.terminal == .pending
+                                  || $0.retry.terminal == .succeeded
+                          )
+                  }),
+                  let rejected = state.registrationWork[rejectedKeys[0]]
+            else { return }
+
+            let request = rejected.request
+            state.registrationWork[rejectedKeys[0]] = EpochRegistrationWork(
+                workID: rejected.workID,
+                ownerChildDeviceID: rejected.ownerChildDeviceID,
+                epochID: rejected.epochID,
+                routeID: rejected.routeID,
+                request: EpochRegistrationRequestDTO(
+                    protocolVersion: request.protocolVersion,
+                    epochID: request.epochID,
+                    deviceID: request.deviceID,
+                    usageDate: request.usageDate,
+                    timezone: request.timezone,
+                    policyRevision: request.policyRevision,
+                    measurementSelectionDigest:
+                        request.measurementSelectionDigest,
+                    enforcementSetID: request.enforcementSetID,
+                    startedAt: request.startedAt,
+                    baseAcceptedMinutes: request.baseAcceptedMinutes,
+                    reason: .identityRecovery
+                ),
+                claim: nil,
+                retry: pendingRetry(),
+                createdAt: rejected.createdAt
+            )
+            handoff.explicitRecovery = .identityRecovery
+            state.v2RouteHandoff = handoff
         }
     }
 
@@ -1192,7 +1287,7 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
                           let classified = MeteringEpochContract.replacementReason(
                               active: epochKey(priorEpoch),
                               next: epochKey(epoch),
-                              explicitRecovery: nil
+                              explicitRecovery: handoff.explicitRecovery
                           ),
                           let declared = EpochRegistrationReasonDTO(rawValue: classified.rawValue)
                     else { return }
@@ -1308,11 +1403,21 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
             state.routes[prior.routeID] = prior
             priorEpoch.status = .retired
             priorEpoch.retiredAt = clock.now
-            let isConservativeResume = candidate.generationID == prior.generationID
-                && state.epochs[candidate.epochID]?.resumeBoundaryPending == true
-            priorEpoch.retireReason = isConservativeResume ? .gateResumeConservative : .policyChange
+            let isConservativeResume = handoff.explicitRecovery == .gateResumeConservative
+                || (
+                    candidate.generationID == prior.generationID
+                        && state.epochs[candidate.epochID]?.resumeBoundaryPending == true
+                )
+            let isIdentityRecovery = handoff.explicitRecovery == .identityRecovery
+            if isConservativeResume {
+                priorEpoch.retireReason = .gateResumeConservative
+            } else if isIdentityRecovery {
+                priorEpoch.retireReason = .identityRecovery
+            } else {
+                priorEpoch.retireReason = .policyChange
+            }
             state.epochs[priorEpoch.epochID] = priorEpoch
-            if !isConservativeResume {
+            if handoff.fromGenerationID != handoff.toGenerationID {
                 state.generations[handoff.fromGenerationID]?.retiredAt = clock.now
             }
             state.tombstones[prior.routeID] = MeteringRouteTombstone(
@@ -1460,16 +1565,16 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
                   )
             else { return }
 
-            let registrationTerminated = state.registrationWork.values.contains {
+            let candidateRegistrations = state.registrationWork.values.filter {
                 $0.epochID == handoff.toEpochID
                     && $0.routeID == handoff.toRouteID
-                    && $0.retry.terminal != .pending
+            }
+            let registrationTerminated = candidateRegistrations.contains {
+                $0.retry.terminal != .pending
                     && $0.retry.terminal != .succeeded
             }
-            let registrationSucceeded = state.registrationWork.values.contains {
-                $0.epochID == handoff.toEpochID
-                    && $0.routeID == handoff.toRouteID
-                    && $0.retry.terminal == .succeeded
+            let registrationStillUsable = candidateRegistrations.contains {
+                $0.retry.terminal == .pending || $0.retry.terminal == .succeeded
             }
             let activationSucceeded = state.activationWork.values.contains {
                 $0.epochID == handoff.toEpochID
@@ -1487,7 +1592,7 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
                     && state.epochs[$0.epochID]?.status == .active
             }
             guard registrationTerminated,
-                  !registrationSucceeded,
+                  !registrationStillUsable,
                   !activationSucceeded,
                   hasNewerCandidate
             else { return }

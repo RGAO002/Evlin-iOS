@@ -220,6 +220,10 @@ final class MeteringRolloverRecoveryTests: XCTestCase {
 
     func testRecoveryActivatesNewDayBeforeRetiringAndStoppingOldRoute() async throws {
         let fixture = try seedActiveAndReservedRoutes()
+        try store.transaction(expectedOwner: owner) { state in
+            let epoch = try XCTUnwrap(state.epochs[fixture.newEpochID])
+            state.epochs[fixture.newEpochID] = epochReplacingStartedAt(epoch, with: start)
+        }
         _ = try store.prepareCanonicalRollover(
             owner: owner,
             toUsageDate: "2026-07-18",
@@ -307,6 +311,11 @@ final class MeteringRolloverRecoveryTests: XCTestCase {
             registration.usageDate,
             "day-rollover registration must not reuse the prior day's horizon-planning timestamp"
         )
+        XCTAssertEqual(
+            state.epochs[fixture.newEpochID]?.startedAt,
+            registration.startedAt,
+            "a successful registration must repair the local epoch start used for physical validation"
+        )
 
         let nextWorkID = try store.prepareCanonicalRollover(
             owner: owner,
@@ -319,6 +328,35 @@ final class MeteringRolloverRecoveryTests: XCTestCase {
         XCTAssertEqual(nextState.rolloverEffectsWork?.oldRouteID, fixture.newRouteID)
         XCTAssertEqual(nextState.rolloverEffectsWork?.toUsageDate, "2026-07-19")
         XCTAssertNil(nextState.v2RouteHandoff)
+    }
+
+    func testColdRecoveryRepairsPersistedEpochStartFromSucceededRegistration() throws {
+        let fixture = try seedActiveAndReservedRoutes()
+        let stateBefore = try store.read()
+        let registration = try XCTUnwrap(
+            stateBefore.registrationWork.values.first {
+                $0.routeID == fixture.oldRouteID && $0.retry.terminal == .succeeded
+            }
+        )
+        try store.transaction(expectedOwner: owner) { state in
+            let epoch = try XCTUnwrap(state.epochs[fixture.oldEpochID])
+            state.epochs[fixture.oldEpochID] = epochReplacingStartedAt(
+                epoch,
+                with: registration.request.startedAt.addingTimeInterval(-3_600)
+            )
+        }
+
+        XCTAssertTrue(
+            try store.reconcileEpochStartsFromSuccessfulRegistrations(owner: owner)
+        )
+        XCTAssertEqual(
+            try store.read().epochs[fixture.oldEpochID]?.startedAt,
+            registration.request.startedAt
+        )
+        XCTAssertFalse(
+            try store.reconcileEpochStartsFromSuccessfulRegistrations(owner: owner),
+            "the cold-start repair must be idempotent"
+        )
     }
 
     func testOldAndNewCallbacksStayDateIsolatedAcrossRolloverBarrier() async throws {
@@ -607,6 +645,35 @@ final class MeteringRolloverRecoveryTests: XCTestCase {
             remainingMinutes: 60,
             counted: true,
             warning: nil
+        )
+    }
+
+    private func epochReplacingStartedAt(
+        _ epoch: DeviceDailyEpoch,
+        with startedAt: Date
+    ) -> DeviceDailyEpoch {
+        DeviceDailyEpoch(
+            epochID: epoch.epochID,
+            protocolVersion: epoch.protocolVersion,
+            childDeviceID: epoch.childDeviceID,
+            usageDate: epoch.usageDate,
+            canonicalTimezone: epoch.canonicalTimezone,
+            policyRevision: epoch.policyRevision,
+            measurementSelectionDigest: epoch.measurementSelectionDigest,
+            enforcementSetID: epoch.enforcementSetID,
+            startedAt: startedAt,
+            registeredAt: epoch.registeredAt,
+            baseAcceptedMinutes: epoch.baseAcceptedMinutes,
+            baseSource: epoch.baseSource,
+            lastRawThresholdMinutes: epoch.lastRawThresholdMinutes,
+            excludedWhilePausedMinutes: epoch.excludedWhilePausedMinutes,
+            status: epoch.status,
+            resumeBoundaryPending: epoch.resumeBoundaryPending,
+            retiredAt: epoch.retiredAt,
+            retireReason: epoch.retireReason,
+            exhaustedAt: epoch.exhaustedAt,
+            baseCorrectionState: epoch.baseCorrectionState,
+            authoritativeBaseConflict: epoch.authoritativeBaseConflict
         )
     }
 
