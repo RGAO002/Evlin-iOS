@@ -101,6 +101,9 @@ struct SpotlightTourOverlay: View {
 
     @State private var index = 0
     @State private var ended = false
+    /// Live-measured tooltip height (the text length varies per step) so the
+    /// placement math never lets the bubble poke off screen.
+    @State private var measuredTipHeight: CGFloat = 120
 
     private let tipWidth: CGFloat = 250
 
@@ -122,6 +125,11 @@ struct SpotlightTourOverlay: View {
                     .insetBy(dx: -step.padding, dy: -step.padding)
                 let isLast = index >= visible.count - 1
 
+                // Explicit z-order instead of a whole-overlay tap gesture:
+                // tap-to-advance lives ONLY on the dim layer, so the Skip pill
+                // and the tooltip's buttons (higher in the ZStack) get their
+                // taps first. Putting the gesture on the container swallowed
+                // the Skip button's taps.
                 ZStack {
                     // Dim + cutout. eoFill keeps the hole transparent.
                     // NOTE: no .ignoresSafeArea() here — the whole overlay
@@ -130,31 +138,38 @@ struct SpotlightTourOverlay: View {
                     // spaces shifts every hole up by the top safe-area inset.
                     TourCutoutShape(hole: hole, corner: step.cornerRadius)
                         .fill(Color.black.opacity(0.58), style: FillStyle(eoFill: true))
+                        .contentShape(Rectangle())
+                        .onTapGesture { advance(total: visible.count) }
 
                     // White ring around the hole.
                     RoundedRectangle(cornerRadius: step.cornerRadius + 3, style: .continuous)
                         .stroke(Color.white.opacity(0.85), lineWidth: 2)
                         .frame(width: hole.width + 6, height: hole.height + 6)
                         .position(x: hole.midX, y: hole.midY)
+                        .allowsHitTesting(false)
 
                     tooltip(for: step, hole: hole, isLast: isLast, in: proxy.size,
                             safeArea: proxy.safeAreaInsets,
                             totalSteps: visible.count,
                             onBack: index > 0 ? { index -= 1 } : nil,
                             onNext: { advance(total: visible.count) })
-                }
-                .contentShape(Rectangle())
-                .onTapGesture { advance(total: visible.count) }
-                .overlay(alignment: .topTrailing) {
-                    Button("Skip") { end() }
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(Color.white.opacity(0.9))
-                        .padding(.horizontal, 14).padding(.vertical, 6)
-                        .background(Capsule().fill(Color.white.opacity(0.16)))
-                        // The overlay ignores the safe area, so pad Skip back
-                        // below the status bar by the inset the proxy reports.
-                        .padding(.top, proxy.safeAreaInsets.top + 8)
-                        .padding(.trailing, 18)
+
+                    // Skip lives at the BOTTOM: the top of the screen is
+                    // crowded (notch, status bar, and the app's own header
+                    // icons — which are often the tour target itself), and a
+                    // bottom-center control is reachable one-handed. Last in
+                    // the ZStack = topmost = wins the hit test.
+                    VStack {
+                        Spacer()
+                        Button("Skip tour") { end() }
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(Color.white)
+                            .padding(.horizontal, 20).padding(.vertical, 10)
+                            .background(Capsule().fill(Color.white.opacity(0.22)))
+                            .overlay(Capsule().stroke(Color.white.opacity(0.35), lineWidth: 1))
+                            .padding(.bottom, max(proxy.safeAreaInsets.bottom,
+                                                  Self.windowSafeInsets.bottom) + 14)
+                    }
                 }
                 .animation(.spring(response: 0.38, dampingFraction: 0.86), value: index)
                 .onAppear { onStepChange?(visible[0].target) }
@@ -181,6 +196,16 @@ struct SpotlightTourOverlay: View {
         onEnd()
     }
 
+    /// Key-window safe-area insets — a notch-reliable fallback because the
+    /// overlay's own GeometryReader ignores the safe area.
+    private static var windowSafeInsets: UIEdgeInsets {
+        UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap(\.windows)
+            .first(where: \.isKeyWindow)?
+            .safeAreaInsets ?? .zero
+    }
+
     @ViewBuilder
     private func tooltip(for step: TourStep, hole: CGRect,
                          isLast: Bool, in size: CGSize,
@@ -189,12 +214,23 @@ struct SpotlightTourOverlay: View {
                          onBack: (() -> Void)?,
                          onNext: @escaping () -> Void) -> some View {
         let gap: CGFloat = 14
-        let tipHeight: CGFloat = 120   // estimate for placement math only
-        let below = hole.maxY + gap + tipHeight < size.height - safeArea.bottom
-        let rawY = below ? hole.maxY + gap + tipHeight / 2
-                         : hole.minY - gap - tipHeight / 2
-        let y = min(max(safeArea.top + tipHeight / 2, rawY),
-                    size.height - safeArea.bottom - tipHeight / 2)
+        let tipHeight = measuredTipHeight
+        // The proxy's insets can read as zero once the overlay ignores the
+        // safe area, so take the larger of it and the key window's (notch).
+        let topInset = max(safeArea.top, Self.windowSafeInsets.top)
+        let bottomInset = max(safeArea.bottom, Self.windowSafeInsets.bottom)
+        // Keep clear of the bottom-center "Skip tour" pill.
+        let skipReserve: CGFloat = 68
+        let spaceBelow = (size.height - bottomInset - skipReserve) - hole.maxY
+        let spaceAbove = hole.minY - topInset
+        let y: CGFloat = {
+            if spaceBelow >= tipHeight + gap + 8 { return hole.maxY + gap + tipHeight / 2 }
+            if spaceAbove >= tipHeight + gap + 8 { return hole.minY - gap - tipHeight / 2 }
+            // No room outside the hole (near-full-screen target): tuck the
+            // bubble INSIDE it, just under its top edge. The hole is real,
+            // visible content territory — always clear of the notch.
+            return hole.minY + gap + tipHeight / 2
+        }()
         let x = min(max(tipWidth / 2 + 12, hole.midX), size.width - tipWidth / 2 - 12)
 
         VStack(alignment: .leading, spacing: 6) {
@@ -248,6 +284,13 @@ struct SpotlightTourOverlay: View {
         .background(RoundedRectangle(cornerRadius: 14, style: .continuous)
             .fill(Color.white)
             .shadow(color: .black.opacity(0.28), radius: 16, y: 6))
+        // Measure the real rendered height (varies with text length) so the
+        // placement math above uses truth, not an estimate.
+        .background(GeometryReader { g in
+            Color.clear
+                .onAppear { measuredTipHeight = g.size.height }
+                .onChange(of: g.size.height) { _, h in measuredTipHeight = h }
+        })
         .position(x: x, y: y)
     }
 }

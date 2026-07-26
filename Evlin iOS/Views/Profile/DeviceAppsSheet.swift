@@ -345,6 +345,20 @@ struct DeviceAppsSheet: View {
                 onCancel: { pendingCascade = nil }
             )
         }
+        // Device daily total — a slider, matching the Daily Screen Time rule so
+        // the two related limits are edited the same way. Save still goes
+        // through `saveDeviceCap`, so the cascade gate above still fires when
+        // the new total would clamp an existing app limit.
+        .sheet(isPresented: $showCapPicker) {
+            if let pool = poolMinutes {
+                DeviceDailyTotalEditor(
+                    currentMinutes: deviceCapMinutes,
+                    poolMinutes: pool
+                ) { newCap in
+                    saveDeviceCap(newCap, confirmedCascade: false)
+                }
+            }
+        }
     }
 
     /// Wrapper to make EarnedCascadeDecision.Result Identifiable for .sheet(item:).
@@ -436,9 +450,13 @@ struct DeviceAppsSheet: View {
                     }
                 }
                 Spacer()
-                if !capOptions.isEmpty {
+                // Gated on the POOL, not on `capOptions`: the slider needs a
+                // ceiling, not a preset list. The backend accepts any value in
+                // 0...pool (it 422s only above the pool), so the presets were
+                // always a UI suggestion rather than an allowed set.
+                if poolMinutes != nil {
                     Button {
-                        showCapPicker.toggle()
+                        showCapPicker = true
                     } label: {
                         Image(systemName: "pencil.circle.fill")
                             .font(.system(size: 24))
@@ -448,34 +466,6 @@ struct DeviceAppsSheet: View {
                 }
             }
 
-            // Inline cap picker
-            if showCapPicker && !capOptions.isEmpty {
-                FlowLayout(spacing: 6) {
-                    ForEach(capOptions, id: \.self) { opt in
-                        Button {
-                            showCapPicker = false
-                            saveDeviceCap(opt, confirmedCascade: false)
-                        } label: {
-                            Text(DeviceAppsMockData.formatLimit(opt))
-                                .font(.custom("Manrope", size: 11).weight(.heavy))
-                                .foregroundStyle(deviceCapMinutes == opt ? .white : Color.evOnSurface)
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 6)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                        .fill(deviceCapMinutes == opt ? Color.evPrimary : Color.white)
-                                )
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                        .stroke(deviceCapMinutes == opt ? Color.evPrimary
-                                                                        : Color.evOutlineVariant,
-                                                lineWidth: 1.5)
-                                )
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-            }
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 14)

@@ -78,6 +78,40 @@ enum EarnedAppOptions {
     }
 }
 
+// MARK: - EarnedLimitRange
+//
+// The one definition of what a daily limit may be, for every editor that sets
+// one: the pool, a device's daily total, and the Daily Screen Time rule.
+//
+// It mirrors the backend's `_POOL_OPTIONS` (`range(15, 181, 5)`), which is the
+// authority — a value outside it is rejected there. Kept as a named range
+// rather than repeated literals because it had been written out separately in
+// each editor, and a ceiling raised for a test in one place then shows up in a
+// control the parent uses.
+
+enum EarnedLimitRange {
+    static let minimumMinutes = 15
+    static let maximumMinutes = 180
+    static let stepMinutes = 5
+
+    /// The highest value an editor may offer, given a pool that may itself be
+    /// out of range. Bounded by BOTH: a pool set beyond the product maximum
+    /// (only reachable outside the parent UI) must not widen a slider.
+    static func ceiling(poolMinutes: Int) -> Int {
+        Swift.min(poolMinutes, maximumMinutes)
+    }
+
+    /// `value` snapped to the step and clamped into `minimum...ceiling`, with
+    /// the floor collapsing when the ceiling is below it. `Slider` traps on an
+    /// out-of-range binding, so every editor start value goes through here.
+    static func clamped(_ value: Int, poolMinutes: Int) -> Int {
+        let top = ceiling(poolMinutes: poolMinutes)
+        let bottom = Swift.min(minimumMinutes, top)
+        let snapped = Int((Double(value) / Double(stepMinutes)).rounded()) * stepMinutes
+        return Swift.min(Swift.max(snapped, bottom), top)
+    }
+}
+
 // MARK: - EarnedCapOptions
 //
 // Pure logic for computing device-cap picker options.

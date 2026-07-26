@@ -12,6 +12,9 @@ struct DailyScreenTimeEditor: View {
     @Environment(\.dismiss) private var dismiss
     @State private var minutes: Double = 120
 
+    private static let bounds =
+        Double(EarnedLimitRange.minimumMinutes)...Double(EarnedLimitRange.maximumMinutes)
+
     // MARK: - Body
 
     var body: some View {
@@ -40,17 +43,25 @@ struct DailyScreenTimeEditor: View {
                                 .frame(maxWidth: .infinity, alignment: .center)
                                 .padding(.top, 8)
 
-                            // Slider
-                            Slider(value: $minutes, in: 15...180, step: 5)
-                                .tint(Color.evPrimary)
+                            // Slider — bounds come from `EarnedLimitRange` so
+                            // this editor and the device-total editor cannot
+                            // drift apart, and neither can drift from the
+                            // backend's `_POOL_OPTIONS`, which rejects anything
+                            // outside it.
+                            Slider(
+                                value: $minutes,
+                                in: Self.bounds,
+                                step: Double(EarnedLimitRange.stepMinutes)
+                            )
+                            .tint(Color.evPrimary)
 
                             // Range labels
                             HStack {
-                                Text("15m")
+                                Text(ProfileMockData.formatLimit(EarnedLimitRange.minimumMinutes))
                                     .font(.custom("Inter", size: 11))
                                     .foregroundStyle(Color.evOnSurfaceVariant)
                                 Spacer()
-                                Text("3h")
+                                Text(ProfileMockData.formatLimit(EarnedLimitRange.maximumMinutes))
                                     .font(.custom("Inter", size: 11))
                                     .foregroundStyle(Color.evOnSurfaceVariant)
                             }
@@ -123,7 +134,15 @@ struct DailyScreenTimeEditor: View {
             }
         }
         .onAppear {
-            minutes = Double(currentMinutes)
+            // Clamped, not assigned: a stored value outside the range (an older
+            // build, or a value written by something other than this editor)
+            // makes `Slider` trap on a binding it cannot represent.
+            minutes = Double(
+                EarnedLimitRange.clamped(
+                    currentMinutes,
+                    poolMinutes: EarnedLimitRange.maximumMinutes
+                )
+            )
         }
         // Half-height sheet (the slider + notice fit comfortably); draggable
         // up to full if needed.
