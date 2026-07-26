@@ -67,7 +67,7 @@ final class LockSelectedAppsCardModelTests: XCTestCase {
                     "device_label": "iPhone",
                 ]]
             ]],
-            "options": [["action": "restriction_unlock_selected", "label": "Unlock selected"]],
+            "options": [["action": "restriction_unlock_selected", "label": "Unblock selected"]],
         ]
 
         let model = AppControlCardModel.parse(cardID: "restriction_unlock_picker", payload: payload)
@@ -77,6 +77,7 @@ final class LockSelectedAppsCardModelTests: XCTestCase {
         XCTAssertEqual(model?.restrictionGroups.first?.childName, "Ryan")
         XCTAssertEqual(model?.restrictionGroups.first?.avatarURL?.absoluteString, "https://example.test/avatars/ryan.jpg")
         XCTAssertEqual(model?.restrictionGroups.first?.sessions.map(\.action), ["unshield", "unblock"])
+        XCTAssertEqual(model?.restrictionPrimaryActionLabel, "Unblock selected")
     }
 
     func testParseChildDisambiguationCandidateAvatar() {

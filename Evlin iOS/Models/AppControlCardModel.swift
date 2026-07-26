@@ -249,6 +249,14 @@ struct AppControlCardModel: Sendable, Equatable {
     }
 }
 
+extension AppControlCardModel {
+    var restrictionPrimaryActionLabel: String {
+        options.first {
+            $0.action == "restriction_unlock_selected"
+        }?.label ?? "Remove selected"
+    }
+}
+
 /// What ChatViewModel should do when an app-control option / candidate is tapped.
 /// Pure value type so routing is unit-testable without touching the network or
 /// SwiftUI.

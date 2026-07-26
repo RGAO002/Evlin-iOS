@@ -267,13 +267,13 @@ struct AppControlCard: View {
                     let marker = "restriction_unlock:\(token):selected:\(selected.joined(separator: ","))"
                     onOption(AppControlCardOption(
                         action: "restriction_unlock_selected",
-                        label: "Remove selected",
+                        label: model.restrictionPrimaryActionLabel,
                         forceConfirmations: [marker]
                     ))
                 } label: {
                     HStack(spacing: 6) {
                         Image(systemName: "lock.open.fill")
-                        Text("Remove selected")
+                        Text(model.restrictionPrimaryActionLabel)
                     }
                     .font(.custom("Inter", size: 14).weight(.bold))
                     .frame(maxWidth: .infinity)
