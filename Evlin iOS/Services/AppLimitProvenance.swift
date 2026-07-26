@@ -1,6 +1,52 @@
 import CryptoKit
 import Foundation
 
+nonisolated enum AppLimitIntervalStartDecision: Equatable, Sendable {
+    case notPerAppV2
+    case resetLimitShields(
+        rollover: AppLimitProvenanceStore.IntervalRolloverResult
+    )
+    case failClosed(reason: String)
+}
+
+nonisolated final class AppLimitIntervalStartRouter: @unchecked Sendable {
+    private static let activityPrefix = "evlin.limit.v2."
+
+    private let provenanceStore: AppLimitProvenanceStore
+
+    init(provenanceStore: AppLimitProvenanceStore = AppLimitProvenanceStore()) {
+        self.provenanceStore = provenanceStore
+    }
+
+    func route(activityName: String, now: Date) -> AppLimitIntervalStartDecision {
+        guard activityName.hasPrefix(Self.activityPrefix) else {
+            return .notPerAppV2
+        }
+
+        let suffix = String(activityName.dropFirst(Self.activityPrefix.count))
+        guard let armID = UUID(uuidString: suffix),
+              suffix.lowercased() == armID.uuidString.lowercased()
+        else {
+            return .failClosed(reason: "malformed_activity")
+        }
+
+        do {
+            let result = try provenanceStore.rolloverRecurringInterval(
+                activityName: activityName,
+                now: now
+            )
+            switch result {
+            case .rolledOver, .unchanged:
+                return .resetLimitShields(rollover: result)
+            case .rejected(let reason):
+                return .failClosed(reason: reason)
+            }
+        } catch {
+            return .failClosed(reason: "rollover_error")
+        }
+    }
+}
+
 nonisolated final class AppLimitProvenanceStore: @unchecked Sendable {
     struct Resolution: Equatable, Sendable {
         let provenance: AppLimitArmProvenance

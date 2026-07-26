@@ -43,4 +43,24 @@ final class LimitResetPolicyTests: XCTestCase {
             LimitShieldLogic.isDayBoundaryReset(storedDayKey: "", today: "2026-07-03")
         )
     }
+
+    /// A v2 provenance rollover is authoritative evidence that midnight passed.
+    /// It must survive a crash window where the older day-key marker was never
+    /// persisted, otherwise yesterday's limit shield can remain into the new day.
+    func test_confirmedV2RolloverForcesResetWithoutStoredDayKey() {
+        XCTAssertTrue(
+            LimitShieldLogic.shouldResetAtV2IntervalStart(
+                confirmedRollover: true,
+                storedDayKey: nil,
+                today: "2026-07-03"
+            )
+        )
+        XCTAssertFalse(
+            LimitShieldLogic.shouldResetAtV2IntervalStart(
+                confirmedRollover: false,
+                storedDayKey: nil,
+                today: "2026-07-03"
+            )
+        )
+    }
 }

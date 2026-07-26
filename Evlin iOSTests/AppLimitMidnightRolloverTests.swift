@@ -3,6 +3,61 @@ import XCTest
 @testable import Evlin_iOS
 
 final class AppLimitMidnightRolloverTests: XCTestCase {
+    func testIntervalStartRouterOwnsOnlyValidPerAppV2Activities() throws {
+        let fixture = try RolloverFixture()
+        let provenance = try fixture.provenanceStore.resolve(
+            rule: fixture.rule,
+            ownerChildDeviceID: fixture.owner,
+            now: fixture.dayOneStart
+        ).provenance
+        let router = AppLimitIntervalStartRouter(
+            provenanceStore: fixture.provenanceStore
+        )
+
+        XCTAssertEqual(
+            router.route(
+                activityName: provenance.activityName,
+                now: fixture.dayTwoStart
+            ),
+            .resetLimitShields(
+                rollover: .rolledOver(
+                    from: "2026-07-25",
+                    to: "2026-07-26"
+                )
+            )
+        )
+        XCTAssertEqual(
+            router.route(
+                activityName: provenance.activityName,
+                now: fixture.dayTwoStart.addingTimeInterval(60)
+            ),
+            .resetLimitShields(
+                rollover: .unchanged(usageDate: "2026-07-26")
+            )
+        )
+        XCTAssertEqual(
+            router.route(
+                activityName: "evlin.earned.v2.\(UUID().uuidString.lowercased())",
+                now: fixture.dayTwoStart
+            ),
+            .notPerAppV2
+        )
+        XCTAssertEqual(
+            router.route(
+                activityName: "evlin.limit.v2.not-a-uuid",
+                now: fixture.dayTwoStart
+            ),
+            .failClosed(reason: "malformed_activity")
+        )
+        XCTAssertEqual(
+            router.route(
+                activityName: "evlin.limit.v2.\(UUID().uuidString.lowercased())",
+                now: fixture.dayTwoStart
+            ),
+            .failClosed(reason: "unknown_activity")
+        )
+    }
+
     func testRecurringIntervalRollsToCanonicalNewDayWithoutReplacingMonitor() throws {
         let fixture = try RolloverFixture()
         let first = try fixture.provenanceStore.resolve(
@@ -44,6 +99,40 @@ final class AppLimitMidnightRolloverTests: XCTestCase {
         XCTAssertEqual(rolled.armID, first.armID)
         XCTAssertEqual(rolled.activityName, first.activityName)
         XCTAssertEqual(slot.authoritativeUsedTodayMinutes, 0)
+    }
+
+    func testFirstPlausibleThresholdAfterRolloverUsesTheNewDay() throws {
+        let fixture = try RolloverFixture()
+        let first = try fixture.provenanceStore.resolve(
+            rule: fixture.rule,
+            ownerChildDeviceID: fixture.owner,
+            now: fixture.dayOneStart
+        ).provenance
+        XCTAssertEqual(
+            try fixture.provenanceStore.rolloverRecurringInterval(
+                activityName: first.activityName,
+                now: fixture.dayTwoStart
+            ),
+            .rolledOver(from: "2026-07-25", to: "2026-07-26")
+        )
+
+        var accepted: AppLimitValidatedCallback?
+        let decision = try AppLimitCallbackValidator(store: fixture.store).process(
+            activityName: first.activityName,
+            eventName: AppLimitPlanner.v2MeasurementEventName(
+                armID: first.armID,
+                threshold: 15
+            ),
+            canonicalUsageDate: "2026-07-26",
+            observedAt: fixture.dayTwoStart.addingTimeInterval(15 * 60),
+            usageCountingAllowed: true
+        ) { callback in
+            accepted = callback
+        }
+
+        XCTAssertAccepted(decision, kind: .measurement)
+        XCTAssertEqual(accepted?.provenance.usageDate, "2026-07-26")
+        XCTAssertEqual(accepted?.adjustedEstimateMinutes, 15)
     }
 
     func testSameDayRolloverIsIdempotentAndBackwardDateFailsClosed() throws {

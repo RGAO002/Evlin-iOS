@@ -103,6 +103,41 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             return
         }
 
+        switch AppLimitIntervalStartRouter().route(
+            activityName: raw,
+            now: Date()
+        ) {
+        case .notPerAppV2:
+            break
+        case .resetLimitShields(let rollover):
+            let confirmedRollover: Bool
+            switch rollover {
+            case .rolledOver:
+                confirmedRollover = true
+            case .unchanged:
+                confirmedRollover = false
+            case .rejected:
+                confirmedRollover = false
+            }
+            resetLimitShields(
+                activity: raw,
+                confirmedV2Rollover: confirmedRollover
+            )
+            defaults?.set(
+                "activity=\(raw) rollover=\(rollover)",
+                forKey: "evlin.limit.v2.lastIntervalStart"
+            )
+            return
+        case .failClosed(let reason):
+            let diagnostic = "activity=\(raw) rejected=\(reason)"
+            defaults?.set(
+                diagnostic,
+                forKey: "evlin.limit.v2.lastIntervalStart"
+            )
+            NSLog("[Evlin/Ext] per-app v2 interval start rejected: %@", diagnostic)
+            return
+        }
+
         // Per-app limit daily reset (P7). The window's interval start (midnight for
         // a daily window) means a fresh day's budget. DeviceActivity auto-resets
         // each event's threshold counter at the interval boundary, so the budget
@@ -726,12 +761,19 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
     /// silently unlocking apps that are still at/over budget. We persist the last
     /// day we actually swept (`evlin.limitReset.dayKey`) and only strip when
     /// today differs from that stored key — see `LimitShieldLogic.isDayBoundaryReset`.
-    private func resetLimitShields(activity: String) {
+    private func resetLimitShields(
+        activity: String,
+        confirmedV2Rollover: Bool = false
+    ) {
         let dayKeyKey = "evlin.limitReset.dayKey"
         let today = EarnedTimeStore.shared.currentPolicyDateContext().usageDate
         let stored = defaults?.string(forKey: dayKeyKey)
 
-        guard LimitShieldLogic.isDayBoundaryReset(storedDayKey: stored, today: today) else {
+        guard LimitShieldLogic.shouldResetAtV2IntervalStart(
+            confirmedRollover: confirmedV2Rollover,
+            storedDayKey: stored,
+            today: today
+        ) else {
             defaults?.set(today, forKey: dayKeyKey)
             emitEvent(kind: .decision, source: .perAppLimit, app: "device-wide", reason: "rearm_restart_skip")
             NSLog("[Evlin/Ext] limit reset skipped (same-day re-arm) activity=%@ day=%@", activity, today)

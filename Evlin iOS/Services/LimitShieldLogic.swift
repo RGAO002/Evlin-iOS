@@ -95,6 +95,18 @@ enum LimitShieldLogic {
         return s != today
     }
 
+    /// V2 provenance rollover is stronger evidence than the legacy day marker.
+    /// This closes the crash window where provenance advances before the marker
+    /// and shield mutation are persisted.
+    static func shouldResetAtV2IntervalStart(
+        confirmedRollover: Bool,
+        storedDayKey: String?,
+        today: String
+    ) -> Bool {
+        confirmedRollover
+            || isDayBoundaryReset(storedDayKey: storedDayKey, today: today)
+    }
+
     // MARK: - "Limit reached" notification copy
 
     /// Pure builder for the local "time's up" notification the DeviceActivity
