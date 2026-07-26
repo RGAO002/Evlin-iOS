@@ -105,6 +105,23 @@ final class ReceiptCopyTests: XCTestCase {
         )
     }
 
+    func test_lockStoreUnavailableUsesParentFacingCopy() {
+        let copy = ChatViewModel.parentFacingExecutionFailure("lock_store_unavailable")
+
+        XCTAssertEqual(
+            copy,
+            "Screen Time controls weren't available on the selected kid device. Open Evlin there, then try again."
+        )
+        XCTAssertFalse(copy.contains("lock_store_unavailable"))
+    }
+
+    func test_unknownExecutionFailureDoesNotExposeInternalValue() {
+        let copy = ChatViewModel.parentFacingExecutionFailure("some_internal_code")
+
+        XCTAssertEqual(copy, "The kid device couldn't apply this command. Try again.")
+        XCTAssertFalse(copy.contains("some_internal_code"))
+    }
+
     func test_ackStatusDecodesDeliveryStateAndTimestamps() throws {
         let json = Data("""
         {

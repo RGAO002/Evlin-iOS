@@ -118,6 +118,7 @@ struct AppControlCardModel: Sendable, Equatable {
     let candidates: [AppControlCandidate]
     let aliasKey: String?
     let bundleID: String?
+    let childDeviceID: String?
     // Task 6 — lock_selected_apps_confirm payload fields.
     let appsCount: Int
     let categoriesCount: Int
@@ -141,6 +142,7 @@ struct AppControlCardModel: Sendable, Equatable {
         let targetKind = (payload["target_kind"] as? String) ?? "app"
         let aliasKey = payload["alias_key"] as? String
         let bundleID = payload["bundle_id"] as? String
+        let childDeviceID = payload["child_device_id"] as? String
 
         let optionDicts = (payload["options"] as? [[String: Any]]) ?? []
         let options: [AppControlCardOption] = optionDicts.compactMap { dict in
@@ -196,6 +198,7 @@ struct AppControlCardModel: Sendable, Equatable {
             candidates: candidates,
             aliasKey: aliasKey,
             bundleID: bundleID,
+            childDeviceID: childDeviceID,
             appsCount: appsCount,
             categoriesCount: categoriesCount,
             appPreview: appPreview,

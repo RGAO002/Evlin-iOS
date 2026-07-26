@@ -70,6 +70,21 @@ final class EventTargetCardTests: XCTestCase {
         XCTAssertEqual(Set(model.selectedIds), Set(["id-1", "id-2"]))
     }
 
+    func testDeviceSelectionReplacesPreviousChoice() {
+        var model = TargetSelectionModel(
+            options: [
+                TargetOption(id: "phone", label: "iPhone"),
+                TargetOption(id: "ipad", label: "iPad")
+            ],
+            allowsMultiple: false
+        )
+
+        model.toggle("phone")
+        model.toggle("ipad")
+
+        XCTAssertEqual(model.selectedIds, ["ipad"])
+    }
+
     // MARK: - Task 4: EventTargetRoute kind routing
 
     func testKindRoutingDecision() {

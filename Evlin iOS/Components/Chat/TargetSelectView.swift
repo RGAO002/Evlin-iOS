@@ -16,10 +16,23 @@ import SwiftUI
 
 struct TargetSelectionModel {
     let options: [TargetOption]
+    let allowsMultiple: Bool
     private(set) var selected: Set<String> = []
+
+    init(options: [TargetOption], allowsMultiple: Bool = true) {
+        self.options = options
+        self.allowsMultiple = allowsMultiple
+    }
+
     var selectedIds: [String] { options.map(\.id).filter { selected.contains($0) } }
     mutating func toggle(_ id: String) {
-        if selected.contains(id) { selected.remove(id) } else { selected.insert(id) }
+        if selected.contains(id) {
+            selected.remove(id)
+        } else if allowsMultiple {
+            selected.insert(id)
+        } else {
+            selected = [id]
+        }
     }
 }
 
@@ -29,6 +42,7 @@ struct TargetSelectionModel {
 struct TargetSelectView: View {
     let title: String
     let groups: [TargetGroup]          // flat selects pass one group with name ""
+    let allowsMultiple: Bool
     let onConfirm: ([String]) -> Void
     let onCancel: () -> Void
 
@@ -82,10 +96,17 @@ struct TargetSelectView: View {
             Text(opt.label).font(.subheadline.weight(.medium)).foregroundStyle(Color.evOnSurface)
             Spacer(minLength: 0)
             ZStack {
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(on ? Color.evPrimary : Color.clear)
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .stroke(on ? Color.evPrimary : Color.evOutline, lineWidth: 1.5)
+                if allowsMultiple {
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(on ? Color.evPrimary : Color.clear)
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .stroke(on ? Color.evPrimary : Color.evOutline, lineWidth: 1.5)
+                } else {
+                    Circle()
+                        .fill(on ? Color.evPrimary : Color.clear)
+                    Circle()
+                        .stroke(on ? Color.evPrimary : Color.evOutline, lineWidth: 1.5)
+                }
                 if on {
                     Image(systemName: "checkmark")
                         .font(.system(size: 12, weight: .bold)).foregroundStyle(.white)
@@ -173,6 +194,12 @@ struct TargetSelectView: View {
     }
 
     private func toggle(_ id: String) {
-        if selected.contains(id) { selected.remove(id) } else { selected.insert(id) }
+        if selected.contains(id) {
+            selected.remove(id)
+        } else if allowsMultiple {
+            selected.insert(id)
+        } else {
+            selected = [id]
+        }
     }
 }

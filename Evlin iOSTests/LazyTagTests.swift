@@ -266,6 +266,7 @@ final class LazyTagCatalogModelTests: XCTestCase {
             "target_display": "Instagram",
             "target_kind": "app",
             "bundle_id": "com.burbn.instagram",
+            "child_device_id": "22222222-2222-2222-2222-222222222222",
             "options": [
                 ["action": "block_now", "label": "Block Instagram", "force_confirmations": ["block_now"]],
                 ["action": "shield_anyway", "label": "Shield anyway", "force_confirmations": ["shield_anyway"]],
@@ -285,6 +286,7 @@ final class LazyTagCatalogModelTests: XCTestCase {
         XCTAssertEqual(model?.targetDisplay, "Instagram")
         XCTAssertEqual(model?.targetKind, "app")
         XCTAssertEqual(model?.bundleID, "com.burbn.instagram")
+        XCTAssertEqual(model?.childDeviceID, "22222222-2222-2222-2222-222222222222")
         XCTAssertEqual(model?.options.map(\.action), ["block_now", "shield_anyway"])
     }
 

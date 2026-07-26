@@ -607,9 +607,11 @@ struct ChatView: View {
             if !isPreview {
                 viewModel.apiClient = apiClient
             }
-            // Multi-child gate: feed live child count so the send path nil-s
-            // out child_device_id when the family has more than one child.
-            viewModel.childCountProvider = { familyStore.children.count }
+            // A cached device id is not an explicit chat target when the family
+            // has multiple kid devices, even when they belong to one child.
+            viewModel.childDeviceCountProvider = {
+                familyStore.children.reduce(0) { $0 + $1.devices.count }
+            }
             syncResolvedChildName()
             guard !isPreview else { return }
             if familyStore.children.isEmpty {

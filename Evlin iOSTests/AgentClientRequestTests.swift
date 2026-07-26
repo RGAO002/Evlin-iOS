@@ -33,4 +33,27 @@ final class AgentClientRequestTests: XCTestCase {
         XCTAssertNil(AgentClient.attachBearer(req, accessToken: "")
             .value(forHTTPHeaderField: "Authorization"))
     }
+
+    func test_targetResponseDecodesResumeChatDevice() throws {
+        let data = Data("""
+        {
+          "ok": true,
+          "resume_chat": {
+            "message": "lock fb",
+            "child_device_id": "22222222-2222-2222-2222-222222222222"
+          }
+        }
+        """.utf8)
+
+        let response = try JSONDecoder().decode(
+            AgentClient.AgentCardResponse.self,
+            from: data
+        )
+
+        XCTAssertEqual(response.resume_chat?.message, "lock fb")
+        XCTAssertEqual(
+            response.resume_chat?.child_device_id,
+            "22222222-2222-2222-2222-222222222222"
+        )
+    }
 }

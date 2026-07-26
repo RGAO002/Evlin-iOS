@@ -123,19 +123,19 @@ class ChatViewModel: ObservableObject {
     /// recursion / double-send if something upstream retries).
     private var legacyFallbackInFlight = false
 
-    /// Multi-child gate (MVP): when the paired family has >1 child profile we
+    /// Multi-device gate: when the family has >1 child device we
     /// send `child_device_id: nil` so the backend disambiguation gate asks
-    /// "which child?" instead of silently targeting the one pinned device.
-    /// Single-child families keep sending the stored id (fast path, no card).
+    /// for the exact child/device instead of silently targeting the pinned one.
+    /// A true single-device family keeps the stored id (fast path, no card).
     /// Pure function so it can be unit-tested without a live view model.
-    nonisolated static func effectiveChildDeviceID(childCount: Int, storedChildDeviceID: String?) -> String? {
-        childCount > 1 ? nil : storedChildDeviceID
+    nonisolated static func effectiveChildDeviceID(deviceCount: Int, storedChildDeviceID: String?) -> String? {
+        deviceCount > 1 ? nil : storedChildDeviceID
     }
 
-    /// Injected by ChatView from `familyStore.children.count`. Defaults to 1
+    /// Injected by ChatView from the family aggregate's device count. Defaults to 1
     /// so any code path that constructs a bare view model still sends the
-    /// stored id (single-child behaviour) rather than nil-ing it out.
-    var childCountProvider: () -> Int = { 1 }
+    /// stored id (single-device behaviour) rather than nil-ing it out.
+    var childDeviceCountProvider: () -> Int = { 1 }
 
     /// Currently-rendered confirmation card, if any. See plan Phase 9.
     /// Set when backend returns `action.card_id`, cleared when user answers.
@@ -768,6 +768,7 @@ class ChatViewModel: ObservableObject {
         userMessage: String,
         forceConfirmations: [String],
         skipFastpath: Bool = false,
+        childDeviceIDOverride: UUID? = nil
     ) {
         if chatStreamingEnabled {
             legacyFallbackInFlight = false
@@ -775,7 +776,8 @@ class ChatViewModel: ObservableObject {
                 await self?.dispatchChatStreaming(
                     userMessage: userMessage,
                     forceConfirmations: forceConfirmations,
-                    skipFastpath: skipFastpath
+                    skipFastpath: skipFastpath,
+                    childDeviceIDOverride: childDeviceIDOverride
                 )
             }
             return
@@ -783,7 +785,8 @@ class ChatViewModel: ObservableObject {
         dispatchChatLegacy(
             userMessage: userMessage,
             forceConfirmations: forceConfirmations,
-            skipFastpath: skipFastpath
+            skipFastpath: skipFastpath,
+            childDeviceIDOverride: childDeviceIDOverride
         )
     }
 
@@ -794,7 +797,8 @@ class ChatViewModel: ObservableObject {
     private func dispatchChatLegacy(
         userMessage: String,
         forceConfirmations: [String],
-        skipFastpath: Bool = false
+        skipFastpath: Bool = false,
+        childDeviceIDOverride: UUID? = nil
     ) {
         // Exclude the seed message from history sent to backend (spec §3.2).
         let history: [[String: String]] = messages.filter { !$0.isSeed }.suffix(10).map { msg in
@@ -811,7 +815,8 @@ class ChatViewModel: ObservableObject {
                     childName: self.childName,
                     history: history,
                     forceConfirmations: forceConfirmations,
-                    skipFastpath: skipFastpath
+                    skipFastpath: skipFastpath,
+                    childDeviceIDOverride: childDeviceIDOverride
                 )
                 // Source flag for "This isn't what I meant" gating — must
                 // be updated BEFORE the response handlers append the
@@ -875,7 +880,8 @@ class ChatViewModel: ObservableObject {
     private func dispatchChatStreaming(
         userMessage: String,
         forceConfirmations: [String],
-        skipFastpath: Bool
+        skipFastpath: Bool,
+        childDeviceIDOverride: UUID?
     ) async {
         errorMessage = nil
         let body: Data
@@ -883,7 +889,8 @@ class ChatViewModel: ObservableObject {
             body = try makeChatRequestBody(
                 userMessage: userMessage,
                 forceConfirmations: forceConfirmations,
-                skipFastpath: skipFastpath
+                skipFastpath: skipFastpath,
+                childDeviceIDOverride: childDeviceIDOverride
             )
         } catch {
             errorMessage = error.localizedDescription
@@ -960,7 +967,8 @@ class ChatViewModel: ObservableObject {
                 dispatchChatLegacyOnce(
                     userMessage: userMessage,
                     forceConfirmations: forceConfirmations,
-                    skipFastpath: skipFastpath
+                    skipFastpath: skipFastpath,
+                    childDeviceIDOverride: childDeviceIDOverride
                 )
                 return
             case .manualRetry(let msg):
@@ -972,7 +980,8 @@ class ChatViewModel: ObservableObject {
                     dispatchChatLegacyOnce(
                         userMessage: userMessage,
                         forceConfirmations: forceConfirmations,
-                        skipFastpath: skipFastpath
+                        skipFastpath: skipFastpath,
+                        childDeviceIDOverride: childDeviceIDOverride
                     )
                     return
                 }
@@ -991,7 +1000,8 @@ class ChatViewModel: ObservableObject {
                 dispatchChatLegacyOnce(
                     userMessage: userMessage,
                     forceConfirmations: forceConfirmations,
-                    skipFastpath: skipFastpath
+                    skipFastpath: skipFastpath,
+                    childDeviceIDOverride: childDeviceIDOverride
                 )
                 return
             }
@@ -1105,14 +1115,16 @@ class ChatViewModel: ObservableObject {
     private func dispatchChatLegacyOnce(
         userMessage: String,
         forceConfirmations: [String],
-        skipFastpath: Bool
+        skipFastpath: Bool,
+        childDeviceIDOverride: UUID?
     ) {
         guard !legacyFallbackInFlight else { return }
         legacyFallbackInFlight = true
         dispatchChatLegacy(
             userMessage: userMessage,
             forceConfirmations: forceConfirmations,
-            skipFastpath: skipFastpath
+            skipFastpath: skipFastpath,
+            childDeviceIDOverride: childDeviceIDOverride
         )
     }
 
@@ -1545,6 +1557,7 @@ class ChatViewModel: ObservableObject {
     @MainActor
     private func applyAppControlAction(_ action: AppControlAction, card: AppControlCardModel) {
         currentAppControlCard = nil
+        let selectedDeviceID = card.childDeviceID.flatMap(UUID.init(uuidString:))
         switch action {
         case .resendForceConfirmations(let tokens):
             // Re-dispatch the original parent message with the seam's tokens —
@@ -1554,10 +1567,14 @@ class ChatViewModel: ObservableObject {
                 : lastUserMessageForCard
             guard !original.isEmpty else { return }
             isThinking = true
-            dispatchChat(userMessage: original, forceConfirmations: tokens)
+            dispatchChat(
+                userMessage: original,
+                forceConfirmations: tokens,
+                childDeviceIDOverride: selectedDeviceID
+            )
         case .resendPhrase(let phrase):
             // Append a parent bubble for the disambiguated phrase, then dispatch.
-            resendWithPhrase(phrase)
+            resendWithPhrase(phrase, childDeviceIDOverride: selectedDeviceID)
         case .confirmAppAndResend(let candidateDisplay, let bundleID, let artworkURL):
             let original = lastUserMessageForCard.isEmpty
                 ? (messages.reversed().first(where: { $0.role == .parent })?.content ?? "")
@@ -1572,7 +1589,7 @@ class ChatViewModel: ObservableObject {
                 // Without a bundle id there is nothing durable to confirm. Keep
                 // the verb/duration rewrite so we do not fall back to sending
                 // just the display name.
-                resendWithPhrase(rewritten)
+                resendWithPhrase(rewritten, childDeviceIDOverride: selectedDeviceID)
                 return
             }
 
@@ -1598,7 +1615,10 @@ class ChatViewModel: ObservableObject {
                         source: "app_store_confirmed"
                     ))
                     await MainActor.run {
-                        self.resendWithPhrase(rewritten)
+                        self.resendWithPhrase(
+                            rewritten,
+                            childDeviceIDOverride: selectedDeviceID
+                        )
                     }
                 } catch {
                     await MainActor.run {
@@ -1970,11 +1990,15 @@ class ChatViewModel: ObservableObject {
         dispatchChat(userMessage: originalMsg, forceConfirmations: forceIDs)
     }
 
-    private func resendWithPhrase(_ phrase: String) {
+    private func resendWithPhrase(_ phrase: String, childDeviceIDOverride: UUID? = nil) {
         currentCard = nil
         messages.append(ChatMessage(role: .parent, content: phrase, timestamp: Date()))
         isThinking = true
-        dispatchChat(userMessage: phrase, forceConfirmations: [])
+        dispatchChat(
+            userMessage: phrase,
+            forceConfirmations: [],
+            childDeviceIDOverride: childDeviceIDOverride
+        )
     }
 
     func requestUnlock(_ target: ReceiptUnlockTarget) {
@@ -2046,7 +2070,7 @@ class ChatViewModel: ObservableObject {
         case .malformed:
             return .failedOther(reason: "The command wasn't well-formed.")
         case .execution(let message):
-            return .failedOther(reason: message)
+            return .failedOther(reason: Self.parentFacingExecutionFailure(message))
         case .limitQuotaExceeded(let windows, let slotsNeeded, let cap):
             // TODO(P6): dedicated limit-quota receipt copy. P3 routes it through
             // the generic failure surface so the switch stays exhaustive.
@@ -2054,6 +2078,17 @@ class ChatViewModel: ObservableObject {
                 reason: "Time limit needs \(slotsNeeded) schedule slot(s) "
                     + "(\(windows) window(s)) but only \(cap) are available."
             )
+        }
+    }
+
+    nonisolated static func parentFacingExecutionFailure(_ rawValue: String) -> String {
+        switch rawValue {
+        case "lock_store_unavailable":
+            return "Screen Time controls weren't available on the selected kid device. Open Evlin there, then try again."
+        case "stale_identity":
+            return "That device changed while the command was applying. Try again."
+        default:
+            return "The kid device couldn't apply this command. Try again."
         }
     }
 
@@ -3036,17 +3071,18 @@ class ChatViewModel: ObservableObject {
     private func makeChatRequestBody(
         userMessage: String,
         forceConfirmations: [String],
-        skipFastpath: Bool
+        skipFastpath: Bool,
+        childDeviceIDOverride: UUID? = nil
     ) throws -> Data {
         let history: [[String: String]] = messages.filter { !$0.isSeed }.suffix(10).map { msg in
             ["role": msg.role == .parent ? "parent" : "agent", "content": msg.content]
         }
         let familyID = UserDefaults.standard.string(forKey: "evlin.familyID")
         let storedChildID = UserDefaults.standard.string(forKey: "evlin.childDeviceID")
-        // Multi-child gate: nil out the pinned device id when >1 child so the
-        // backend asks "which child?" instead of silently targeting one device.
-        let cdid = Self.effectiveChildDeviceID(
-            childCount: childCountProvider(),
+        // Multi-device gate: a cached device id is context, not an explicit
+        // target choice for this chat turn.
+        let cdid = childDeviceIDOverride?.uuidString ?? Self.effectiveChildDeviceID(
+            deviceCount: childDeviceCountProvider(),
             storedChildDeviceID: (storedChildID?.isEmpty == false) ? storedChildID : nil
         )
 
@@ -3073,12 +3109,14 @@ class ChatViewModel: ObservableObject {
         childName: String,
         history: [[String: String]],
         forceConfirmations: [String],
-        skipFastpath: Bool = false
+        skipFastpath: Bool = false,
+        childDeviceIDOverride: UUID? = nil
     ) async throws -> (APIClient.ChatResponse, Data, String?) {
         let encodedBody = try makeChatRequestBody(
             userMessage: message,
             forceConfirmations: forceConfirmations,
-            skipFastpath: skipFastpath
+            skipFastpath: skipFastpath,
+            childDeviceIDOverride: childDeviceIDOverride
         )
 
         // B4: route through authedRequest/authedData (Bearer + single-flight 401 refresh).
@@ -3307,8 +3345,27 @@ class ChatViewModel: ObservableObject {
     }
 
     func handleResolveTarget(_ ct: String, _ ids: [String]) async {
-        do { let r = try await agentClient().resolveTarget(continuationToken: ct, selectedIds: ids)
-             await MainActor.run { applyAgentResult(r) } }
+        do {
+            let result = try await agentClient().resolveTarget(
+                continuationToken: ct,
+                selectedIds: ids
+            )
+            await MainActor.run {
+                if let resume = result.resume_chat,
+                   let deviceID = UUID(uuidString: resume.child_device_id) {
+                    pendingPlanArchCard = nil
+                    advancePlanArchCardQueue()
+                    isThinking = true
+                    dispatchChat(
+                        userMessage: resume.message,
+                        forceConfirmations: [],
+                        childDeviceIDOverride: deviceID
+                    )
+                } else {
+                    applyAgentResult(result)
+                }
+            }
+        }
         catch AgentClient.AgentTargetError.expired { await expireEventCard() }
         catch { await MainActor.run { self.errorMessage = "Couldn't continue — try again." } }
     }

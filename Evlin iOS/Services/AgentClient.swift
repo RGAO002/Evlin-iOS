@@ -149,8 +149,14 @@ extension AgentClient {
     /// Returned by event-select / resolve-target when the backend stages a NEW
     /// card to display next (e.g. a concrete event.create_confirm after a pick).
     struct AgentCardResponse: Decodable {
+        struct ResumeChat: Decodable {
+            let message: String
+            let child_device_id: String
+        }
+
         let card_payloads: [PlanArchCardPayload]?
         let ok: Bool?
+        var resume_chat: ResumeChat? = nil
     }
 
     func makeEventExecRequest(token: String) throws -> URLRequest {

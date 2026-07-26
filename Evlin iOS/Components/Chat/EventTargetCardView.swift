@@ -369,7 +369,10 @@ struct EventTargetCardView: View {
         let groups = !detail.groups("groups").isEmpty
             ? detail.groups("groups")
             : [TargetGroup(id: "flat", childName: "", options: detail.options("options"))]
-        return TargetSelectView(title: payload.title, groups: groups,
+        return TargetSelectView(
+            title: payload.title,
+            groups: groups,
+            allowsMultiple: payload.kind != "target.device_select",
             onConfirm: { ids in onResolveTarget(ct, ids) }, onCancel: onSkip)
     }
 
