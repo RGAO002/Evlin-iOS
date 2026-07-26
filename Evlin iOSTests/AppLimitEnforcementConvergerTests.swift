@@ -345,4 +345,77 @@ final class AppLimitEnforcementConvergerTests: XCTestCase {
         )
         XCTAssertEqual(out[key]?.sources, [.limit])
     }
+
+    // MARK: Kid-facing notification copy
+
+    func testShieldNoticeNamesAppBudgetAndLockedState() {
+        let r = rule(budget: 1)
+        let command = envelope(kind: .set, rule: r, usedToday: 20)
+        let decision = AppLimitEnforcementConverger.decide(
+            for: command,
+            bundleID: bundleID
+        )
+
+        XCTAssertEqual(
+            AppLimitEnforcementConverger.noticeBody(
+                for: command,
+                decision: decision,
+                fallbackDisplayName: "App"
+            ),
+            "Snapchat limit set to 1 min — now locked."
+        )
+    }
+
+    func testReleaseNoticeNamesAppBudgetAndAvailableState() {
+        let r = rule(budget: 15)
+        let command = envelope(kind: .set, rule: r, usedToday: 11)
+        let decision = AppLimitEnforcementConverger.decide(
+            for: command,
+            bundleID: bundleID
+        )
+
+        XCTAssertEqual(
+            AppLimitEnforcementConverger.noticeBody(
+                for: command,
+                decision: decision,
+                fallbackDisplayName: "App"
+            ),
+            "Snapchat limit set to 15 min — now available."
+        )
+    }
+
+    func testClearNoticeNamesAppAndAvailableState() {
+        let command = envelope(kind: .clear, rule: nil, usedToday: nil)
+        let decision = AppLimitEnforcementConverger.decide(
+            for: command,
+            bundleID: bundleID
+        )
+
+        XCTAssertEqual(
+            AppLimitEnforcementConverger.noticeBody(
+                for: command,
+                decision: decision,
+                fallbackDisplayName: "Snapchat"
+            ),
+            "Snapchat limit removed — now available."
+        )
+    }
+
+    func testDeferredNoticeExplainsHowToFinishApplyingTheLimit() {
+        let r = rule(budget: 15)
+        let command = envelope(kind: .set, rule: r, usedToday: nil)
+        let decision = AppLimitEnforcementConverger.decide(
+            for: command,
+            bundleID: bundleID
+        )
+
+        XCTAssertEqual(
+            AppLimitEnforcementConverger.noticeBody(
+                for: command,
+                decision: decision,
+                fallbackDisplayName: "App"
+            ),
+            "Snapchat limit set to 15 min — open Evlin to finish applying it."
+        )
+    }
 }

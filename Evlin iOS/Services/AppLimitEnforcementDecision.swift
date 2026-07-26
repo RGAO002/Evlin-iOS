@@ -100,6 +100,40 @@ nonisolated enum AppLimitEnforcementConverger {
         return ShieldRecord.makeRecordKey(tier: .exactApp, targetKey: trimmed)
     }
 
+    /// Kid-facing copy for the limit command and the enforcement decision made
+    /// from it. Keeping this next to `decide` prevents the notification from
+    /// describing a different state than the NSE just applied.
+    static func noticeBody(
+        for envelope: AppLimitCommandEnvelope,
+        decision: AppLimitEnforcementDecision,
+        fallbackDisplayName: String
+    ) -> String {
+        let fallback = fallbackDisplayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let displayName = {
+            let name = envelope.rule?.displayName
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return name.isEmpty ? (fallback.isEmpty ? "App" : fallback) : name
+        }()
+
+        switch decision {
+        case .shield(let rule, _):
+            return "\(displayName) limit set to \(rule.budgetMinutes) min — now locked."
+        case .release:
+            if envelope.kind == .clear {
+                return "\(displayName) limit removed — now available."
+            }
+            guard let budget = envelope.rule?.budgetMinutes else {
+                return "\(displayName) limit updated."
+            }
+            return "\(displayName) limit set to \(budget) min — now available."
+        case .defer_:
+            guard let budget = envelope.rule?.budgetMinutes else {
+                return "\(displayName) limit update needs Evlin to finish applying it."
+            }
+            return "\(displayName) limit set to \(budget) min — open Evlin to finish applying it."
+        }
+    }
+
     /// The decision applied to a shield map. Pure, so the convergence itself is
     /// testable; the caller owns persistence.
     ///

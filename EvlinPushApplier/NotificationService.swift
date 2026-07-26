@@ -157,8 +157,18 @@ final class NotificationService: UNNotificationServiceExtension {
             NSEConfig.log("limit persistence failed cmd=\(commandID)")
             return
         }
-        await convergeLimitShield(envelope: envelope, command: command, commandID: commandID)
-        bestAttempt?.body = delivery.alertBody
+        let decision = await convergeLimitShield(
+            envelope: envelope,
+            command: command,
+            commandID: commandID
+        )
+        bestAttempt?.body = AppLimitEnforcementConverger.noticeBody(
+            for: envelope,
+            decision: decision,
+            fallbackDisplayName: command.target.targetDisplay
+                ?? command.target.bundleID
+                ?? "App"
+        )
         NSEConfig.log(
             "limit persisted cmd=\(commandID) disposition=\(delivery.ack.disposition) ack=\(delivery.ackSucceeded)"
         )
@@ -182,7 +192,7 @@ final class NotificationService: UNNotificationServiceExtension {
         envelope: AppLimitCommandEnvelope,
         command: LockCommand,
         commandID: UUID
-    ) async {
+    ) async -> AppLimitEnforcementDecision {
         let decision = AppLimitEnforcementConverger.decide(
             for: envelope,
             bundleID: command.target.bundleID
@@ -200,6 +210,7 @@ final class NotificationService: UNNotificationServiceExtension {
             let applied = await ActiveLockStore.shared.applyLimitConvergence(decision, now: Date())
             NSEConfig.log("limit release cmd=\(commandID) key=\(recordKey) applied=\(applied)")
         }
+        return decision
     }
 
     private func persistEarnedPolicy(
