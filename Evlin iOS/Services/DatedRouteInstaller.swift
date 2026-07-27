@@ -119,6 +119,55 @@ nonisolated final class DatedRouteInstaller: @unchecked Sendable {
         )
     }
 
+    /// How long a route's measurement window may stay open while the route is
+    /// still only `.planned` before we call it stuck.
+    ///
+    /// Generous on purpose: activation normally completes in seconds, and a
+    /// route planned for a FUTURE day is legitimately `.planned` for days — the
+    /// staleness test below keys off the window being OPEN, never off age.
+    static let plannedWindowStuckGraceSeconds: TimeInterval = 30 * 60
+
+    /// Is this route armed with Apple, counting, and yet unable to credit
+    /// anything — permanently?
+    ///
+    /// `.planned` is a black hole. Two independent rules meet in it:
+    ///   - crediting requires `.active` (`callbackRouteAuthorization`), so a
+    ///     `.planned` route's callbacks are parked and expire, forever;
+    ///   - orphan reconciliation treats `.planned` as DESIRED, so nothing ever
+    ///     tears it down.
+    /// Both are individually correct. Together they mean a route that arms
+    /// (`startMonitoring` runs BEFORE verification) and then fails to verify
+    /// stays armed with Apple, invisible to accounting, and immune to cleanup.
+    ///
+    /// Observed on Liam's iPhone: route FE1FB0AC was planned 2026-07-26 09:52
+    /// and spent the next 14 hours receiving a threshold callback every ~15
+    /// minutes, discarding every one of them, while the bar only advanced when
+    /// the parent happened to foreground the app. Nothing in the system had a
+    /// timeout on `.planned`.
+    ///
+    /// Tearing a stuck route down cannot lose counted time: a `.planned` route
+    /// credits nothing by construction. It converts "armed and useless" into
+    /// "absent", which the planner can then fix.
+    /// BOTH conditions, and neither alone is sufficient:
+    ///
+    /// - **the window is open.** Dated routes are planned up to eight days
+    ///   ahead and sit `.planned` that whole time; tearing those down would
+    ///   silently strip every future day of its ladder.
+    /// - **it has been `.planned` too long.** Keying off the window alone is
+    ///   wrong in the other direction: a route armed at 09:00 for a window that
+    ///   opened at midnight is nine hours "open" while being seconds old, and a
+    ///   perfectly healthy fresh install would be executed on arrival.
+    ///
+    /// Routes are born `.planned`, so `createdAt` measures exactly how long this
+    /// one has failed to advance.
+    private func isStuckPlanned(_ route: MeteringCallbackRoute, now: Date) -> Bool {
+        guard route.lifecycle == .planned else { return false }
+        guard let openedAt = route.plannedSchedule.intervalStartAt,
+              now >= openedAt
+        else { return false }
+        return now.timeIntervalSince(route.createdAt) > Self.plannedWindowStuckGraceSeconds
+    }
+
     private func stopOrphanedV2Activities(ownerChildDeviceID owner: UUID) throws {
         let state = try store.read()
         guard state.ownerChildDeviceID == owner else { return }
@@ -129,9 +178,30 @@ nonisolated final class DatedRouteInstaller: @unchecked Sendable {
                 && $0.phase == .starting
                 && $0.claim != nil
         }) else { return }
+        let now = clock.now
+        let stuck = state.routes.values.filter {
+            $0.ownerChildDeviceID == owner && isStuckPlanned($0, now: now)
+        }
+        for route in stuck {
+            // A stuck route was silent for 14 hours once. It never will be again.
+            MeteringFlightRecorder.emit(
+                kind: .meteringWork,
+                site: "installer.orphan",
+                verdict: "stuck_planned_window_open",
+                detail: MeteringFlightRecorder.detail([
+                    ("act", route.activityName),
+                    ("openedAt", route.plannedSchedule.intervalStartAt.map(
+                        ISO8601DateFormatter().string(from:)
+                    ) ?? "-"),
+                ]),
+                corrID: route.routeID
+            )
+        }
+        let stuckNames = Set(stuck.map(\.activityName))
         let desiredNames = Set(state.routes.values.compactMap { route -> String? in
             guard route.ownerChildDeviceID == owner,
                   route.lifecycle == .planned || route.lifecycle == .active,
+                  !stuckNames.contains(route.activityName),
                   state.generations[route.generationID]?.retiredAt == nil
             else { return nil }
             return route.activityName

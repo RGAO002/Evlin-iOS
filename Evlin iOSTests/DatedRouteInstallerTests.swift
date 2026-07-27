@@ -2001,3 +2001,136 @@ private final class DatedRegistrationTransport: MeteringHTTPTransport, @unchecke
         return result
     }
 }
+
+
+/// Split out of `DatedRouteInstallerTests` on purpose. That class shares one
+/// date-coupled fixture that 16 of its cases currently fail on, and running
+/// alongside it was enough to stop a sibling case from running at all. A
+/// separate case class gets its own lifecycle.
+final class StuckPlannedRouteTests: XCTestCase {
+    private let owner = UUID(uuidString: "11111111-1111-1111-1111-111111111111")!
+    private let start = Date(timeIntervalSince1970: 1_784_889_600)
+
+    // MARK: - Stuck `.planned` routes
+    //
+    // These build their own store rather than calling `makeFixture()`: that
+    // fixture is date-coupled and currently broken (16 of this file's tests
+    // fail on it before any change of mine), so a test resting on it could not
+    // tell a working fix from a broken one.
+    //
+    // Every case varies only the CLOCK. Routes are born `.planned` at horizon
+    // time, so "how long has it failed to advance" is just how far the clock has
+    // moved since — and nothing has to forge a route the store would reject.
+
+    /// `.planned` used to be a black hole. Crediting requires `.active`, so a
+    /// planned route's callbacks were parked and expired forever, while orphan
+    /// reconciliation counted `.planned` as DESIRED and never tore it down. A
+    /// route that armed and then failed to verify therefore stayed armed with
+    /// Apple, counting, crediting nothing, immune to cleanup.
+    ///
+    /// Liam's iPhone, 2026-07-26 09:52 → 07-27 15:38: one such route took a
+    /// threshold callback every ~15 minutes for 14 hours and discarded every
+    /// one, while the bar advanced only when the parent foregrounded the app.
+    func testStuckPlannedRouteWhoseWindowIsOpenIsStopped() throws {
+        let bed = try makeStuckBed(now: start.addingTimeInterval(6 * 3_600))
+
+        _ = try bed.installer.reconcile(ownerChildDeviceID: owner)
+
+        XCTAssertFalse(
+            bed.center.activities.contains(DeviceActivityName(bed.route.activityName)),
+            "window open, still only planned six hours on — stuck, not desired"
+        )
+    }
+
+    /// The other half of the asymmetry. A route armed minutes ago for a window
+    /// that opened earlier today is hours "open" while being seconds old.
+    /// Judging by the window alone would execute every healthy fresh install.
+    func testFreshlyPlannedRouteInAnOpenWindowIsPreserved() throws {
+        let bed = try makeStuckBed(now: start.addingTimeInterval(60))
+
+        _ = try bed.installer.reconcile(ownerChildDeviceID: owner)
+
+        XCTAssertTrue(
+            bed.center.activities.contains(DeviceActivityName(bed.route.activityName)),
+            "planned a minute ago is not stuck, however old its window"
+        )
+    }
+
+    /// The regression this fix must not cause. Dated routes are planned up to
+    /// eight days ahead and sit `.planned` that whole time; keying staleness off
+    /// age alone would strip every future day of its ladder.
+    func testPlannedRouteForAFutureDayIsPreserved() throws {
+        let bed = try makeStuckBed(
+            now: start.addingTimeInterval(6 * 3_600),
+            usageDate: "2026-07-27"
+        )
+
+        _ = try bed.installer.reconcile(ownerChildDeviceID: owner)
+
+        XCTAssertTrue(
+            bed.center.activities.contains(DeviceActivityName(bed.route.activityName)),
+            "a window that has not opened yet cannot be stuck"
+        )
+    }
+
+    private struct StuckBed {
+        let installer: DatedRouteInstaller
+        let center: DatedCenter
+        let route: MeteringCallbackRoute
+    }
+
+    /// Builds a COHERENT store through the real horizon entry point — the store
+    /// rejects a hand-assembled route whose generation and epoch do not exist —
+    /// then leaves one route `.planned` and runs the installer at `now`.
+    private func makeStuckBed(
+        now: Date,
+        usageDate: String = "2026-07-24"
+    ) throws -> StuckBed {
+        let io = DatedFileIO()
+        let lock = DatedLock()
+        let store = DeviceEpochStore(
+            // Unique per call: a shared path lets one case's horizon leak into
+            // a sibling that runs later in the same process.
+            fileURL: URL(fileURLWithPath: "/tmp/evlin-stuck-planned-\(UUID().uuidString).json"),
+            lock: lock,
+            fileIO: io,
+            ownerProvider: { self.owner }
+        )
+        let selection = try JSONEncoder().encode(FamilyActivitySelection())
+        _ = try store.reconcileMeteringHorizon(MeteringHorizonRequest(
+            ownerChildDeviceID: owner,
+            today: "2026-07-24",
+            generationKey: MeteringGenerationKey(
+                protocolVersion: 2,
+                childDeviceID: owner,
+                canonicalTimezone: "America/New_York",
+                policyRevision: "r1",
+                measurementSelectionDigest: MeteringEpochContract.selectionDigest(
+                    persistedBytes: selection
+                ),
+                enforcementSetID: UUID()
+            ),
+            persistedSelectionBytes: selection,
+            poolMinutes: 40,
+            deviceCapMinutes: 40,
+            authoritativeBaseAcceptedMinutes: 0,
+            now: start
+        ))
+        let route = try XCTUnwrap(
+            try store.read().routes.values.first { $0.usageDate == usageDate },
+            "horizon did not plan \(usageDate)"
+        )
+        XCTAssertEqual(route.lifecycle, .planned, "horizon routes start planned")
+        let center = DatedCenter()
+        center.install(route: route)
+        let installer = DatedRouteInstaller(
+            store: store,
+            center: center,
+            processIdentity: MeteringProcessIdentity(role: .app, instanceID: UUID()),
+            clock: DatedClock(date: now)
+        )
+        return StuckBed(installer: installer, center: center, route: route)
+    }
+
+
+}
