@@ -15,6 +15,7 @@ import SwiftUI
 ///    render `candidates` as selectable rows → `onCandidate`.
 struct AppControlCard: View {
     let model: AppControlCardModel
+    let familyAvatarURLsByChildID: [String: String]
     let onOption: (AppControlCardOption) -> Void
     let onCandidate: (AppControlCandidate) -> Void
     var onCancel: (() -> Void)? = nil
@@ -194,7 +195,15 @@ struct AppControlCard: View {
             ForEach(model.restrictionGroups, id: \.id) { group in
                 VStack(alignment: .leading, spacing: 10) {
                     HStack(spacing: 10) {
-                        restrictionGroupAvatar(group)
+                        RestrictionGroupAvatar(
+                            group: group,
+                            fallbackColor: color(from: group.avatarColorHex) ?? Color.evPrimary,
+                            candidateURLs: AppControlCardModel.restrictionAvatarCandidateURLs(
+                                childID: group.id,
+                                familyAvatarURLsByChildID: familyAvatarURLsByChildID,
+                                payloadURL: group.avatarURL
+                            )
+                        )
 
                         VStack(alignment: .leading, spacing: 2) {
                             Text(group.childName)
@@ -287,42 +296,6 @@ struct AppControlCard: View {
                 .buttonStyle(.plain)
                 .disabled(selectedRestrictionIDs.isEmpty)
             }
-        }
-    }
-
-    @ViewBuilder
-    private func restrictionGroupAvatar(_ group: RestrictionUnlockGroup) -> some View {
-        let size: CGFloat = 38
-        if let url = group.avatarURL {
-            AsyncImage(url: url) { phase in
-                switch phase {
-                case .success(let image):
-                    image
-                        .resizable()
-                        .scaledToFill()
-                default:
-                    restrictionAvatarFallback(group)
-                }
-            }
-            .frame(width: size, height: size)
-            .clipShape(Circle())
-        } else {
-            restrictionAvatarFallback(group)
-                .frame(width: size, height: size)
-        }
-    }
-
-    private func restrictionAvatarFallback(_ group: RestrictionUnlockGroup) -> some View {
-        let base = color(from: group.avatarColorHex) ?? Color.evPrimary
-        let raw = group.avatarValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        let text = raw.isEmpty ? String(group.childName.prefix(1)).uppercased() : raw
-        return ZStack {
-            Circle().fill(base.opacity(0.16))
-            Text(text)
-                .font(.custom("Manrope", size: 15).weight(.heavy))
-                .foregroundStyle(base)
-                .lineLimit(1)
-                .minimumScaleFactor(0.55)
         }
     }
 
@@ -581,6 +554,68 @@ private struct CategoryChip: View {
             Capsule(style: .continuous)
                 .stroke(Color.evOutlineVariant, lineWidth: 1)
         )
+    }
+}
+
+private struct RestrictionGroupAvatar: View {
+    let group: RestrictionUnlockGroup
+    let fallbackColor: Color
+    let candidateURLs: [URL]
+    @State private var cursor: RestrictionAvatarCursor
+
+    init(
+        group: RestrictionUnlockGroup,
+        fallbackColor: Color,
+        candidateURLs: [URL]
+    ) {
+        self.group = group
+        self.fallbackColor = fallbackColor
+        self.candidateURLs = candidateURLs
+        _cursor = State(
+            initialValue: RestrictionAvatarCursor(candidateURLs: candidateURLs)
+        )
+    }
+
+    var body: some View {
+        Group {
+            if let currentURL = cursor.currentURL {
+                AsyncImage(url: currentURL) { phase in
+                    switch phase {
+                    case .success(let image):
+                        image
+                            .resizable()
+                            .scaledToFill()
+                    case .failure:
+                        fallback
+                            .task(id: currentURL) {
+                                cursor.advanceAfterFailure(for: currentURL)
+                            }
+                    default:
+                        fallback
+                    }
+                }
+            } else {
+                fallback
+            }
+        }
+        .frame(width: 38, height: 38)
+        .clipShape(Circle())
+        .onChange(of: candidateURLs) {
+            cursor = RestrictionAvatarCursor(candidateURLs: candidateURLs)
+        }
+    }
+
+    private var fallback: some View {
+        let raw = group.avatarValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = raw.isEmpty ? String(group.childName.prefix(1)).uppercased() : raw
+        return ZStack {
+            Circle().fill(fallbackColor.opacity(0.16))
+            Text(text)
+                .font(.custom("Manrope", size: 15).weight(.heavy))
+                .foregroundStyle(fallbackColor)
+                .lineLimit(1)
+                .minimumScaleFactor(0.55)
+        }
     }
 }
 

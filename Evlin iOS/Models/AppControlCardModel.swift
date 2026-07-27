@@ -86,6 +86,20 @@ struct RestrictionUnlockGroup: Sendable, Equatable, Identifiable {
     let sessions: [RestrictionUnlockRow]
 }
 
+struct RestrictionAvatarCursor: Equatable {
+    let candidateURLs: [URL]
+    private(set) var index = 0
+
+    var currentURL: URL? {
+        candidateURLs.indices.contains(index) ? candidateURLs[index] : nil
+    }
+
+    mutating func advanceAfterFailure(for failedURL: URL) {
+        guard currentURL == failedURL else { return }
+        index += 1
+    }
+}
+
 /// One disambiguation row. Mirrors the loose dict the seam projects for each
 /// candidate (`_app_control_candidate_projection`).
 struct AppControlCandidate: Sendable, Equatable, Identifiable {

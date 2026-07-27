@@ -30,7 +30,7 @@ final class LockSelectedAppsCardModelTests: XCTestCase {
         XCTAssertEqual(model?.options.first?.action, "lock_selected_apps_now")
     }
 
-    func testParseRestrictionUnlockPicker() {
+    func testParseRestrictionUnlockPicker() throws {
         let payload: [String: Any] = [
             "type": "restriction_unlock_picker",
             "title": "Current restrictions",
@@ -78,6 +78,19 @@ final class LockSelectedAppsCardModelTests: XCTestCase {
         XCTAssertEqual(model?.restrictionGroups.first?.avatarURL?.absoluteString, "https://example.test/avatars/ryan.jpg")
         XCTAssertEqual(model?.restrictionGroups.first?.sessions.map(\.action), ["unshield", "unblock"])
         XCTAssertEqual(model?.restrictionPrimaryActionLabel, "Unblock selected")
+
+        let group = try XCTUnwrap(model?.restrictionGroups.first)
+        let urls = AppControlCardModel.restrictionAvatarCandidateURLs(
+            childID: group.id,
+            familyAvatarURLsByChildID: [
+                "child-1": "https://example.test/avatars/current-ryan.jpg",
+            ],
+            payloadURL: group.avatarURL
+        )
+        XCTAssertEqual(urls.map(\.absoluteString), [
+            "https://example.test/avatars/current-ryan.jpg",
+            "https://example.test/avatars/ryan.jpg",
+        ])
     }
 
     func testRestrictionAvatarCandidatesPreferFamilyStoreByChildID() {
@@ -140,6 +153,28 @@ final class LockSelectedAppsCardModelTests: XCTestCase {
         )
 
         XCTAssertTrue(result.isEmpty)
+    }
+
+    func testRestrictionAvatarCursorAdvancesThroughFailures() {
+        let current = URL(string: "https://cdn.example/current.jpg")!
+        let backend = URL(string: "https://cdn.example/backend.jpg")!
+        var cursor = RestrictionAvatarCursor(candidateURLs: [current, backend])
+
+        XCTAssertEqual(cursor.currentURL, current)
+        cursor.advanceAfterFailure(for: current)
+        XCTAssertEqual(cursor.currentURL, backend)
+        cursor.advanceAfterFailure(for: backend)
+        XCTAssertNil(cursor.currentURL)
+    }
+
+    func testRestrictionAvatarCursorIgnoresStaleFailure() {
+        let current = URL(string: "https://cdn.example/current.jpg")!
+        let backend = URL(string: "https://cdn.example/backend.jpg")!
+        var cursor = RestrictionAvatarCursor(candidateURLs: [current, backend])
+
+        cursor.advanceAfterFailure(for: backend)
+
+        XCTAssertEqual(cursor.currentURL, current)
     }
 
     func testParseChildDisambiguationCandidateAvatar() {

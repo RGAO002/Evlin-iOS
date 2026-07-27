@@ -150,6 +150,17 @@ struct ChatView: View {
     private var isAtBottom: Bool {
         !Self.shouldShowScrollToBottomButton(bottomDistance: scrollBottomDistance)
     }
+    private var childAvatarURLsByID: [String: String] {
+        Dictionary(
+            familyStore.childProfiles.compactMap { child -> (String, String)? in
+                guard let avatarURL = child.avatarURL, !avatarURL.isEmpty else {
+                    return nil
+                }
+                return (child.id, avatarURL)
+            },
+            uniquingKeysWith: { first, _ in first }
+        )
+    }
 
     // MARK: - B6: collapsing top bar state
 
@@ -465,6 +476,7 @@ struct ChatView: View {
                         VStack(spacing: Spacing.sm) {
                             AppControlCard(
                                 model: appControlCard,
+                                familyAvatarURLsByChildID: childAvatarURLsByID,
                                 onOption: { option in viewModel.handleAppControlOption(option) },
                                 onCandidate: { candidate in viewModel.handleAppControlCandidate(candidate) },
                                 onCancel: { viewModel.dismissAppControlCard() }
