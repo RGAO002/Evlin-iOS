@@ -1,5 +1,13 @@
 import SwiftUI
 
+/// Stops a double tap from unlocking twice, and — the part that was missing —
+/// lets go afterwards.
+///
+/// `begin` used to be the only door. Once it latched, the "Remove selected"
+/// button was greyed and `.disabled` forever: a failed turn, or simply coming
+/// back to the card, left the parent looking at a dead button with no way to
+/// retry and nothing on screen explaining why. A guard with no release is not a
+/// guard, it is a trap.
 struct RestrictionUnlockSubmitGate {
     private(set) var isSubmitting = false
 
@@ -7,6 +15,12 @@ struct RestrictionUnlockSubmitGate {
         guard hasSelection, !isSubmitting else { return false }
         isSubmitting = true
         return true
+    }
+
+    /// The turn is over — succeeded, failed, or abandoned. Either way the
+    /// parent may act again.
+    mutating func finish() {
+        isSubmitting = false
     }
 }
 
@@ -29,6 +43,10 @@ struct AppControlCard: View {
     let onOption: (AppControlCardOption) -> Void
     let onCandidate: (AppControlCandidate) -> Void
     var onCancel: (() -> Void)? = nil
+    /// True while the chat turn this card started is still in flight. The card
+    /// cannot see the outcome of what it submitted, so it watches this instead:
+    /// when it goes false the turn is over and the submit gate is released.
+    var isTurnInFlight: Bool = false
     @State private var selectedRestrictionIDs: Set<String> = []
     @State private var restrictionSubmitGate = RestrictionUnlockSubmitGate()
 
@@ -90,6 +108,20 @@ struct AppControlCard: View {
             if model.kind == .restrictionUnlockPicker, selectedRestrictionIDs.isEmpty {
                 selectedRestrictionIDs = Set(model.restrictionGroups.flatMap { $0.sessions.map(\.id) })
             }
+            // Coming back to a card that was left mid-submit must not find it
+            // still latched — the turn that latched it is long gone.
+            restrictionSubmitGate.finish()
+        }
+        .onChange(of: isTurnInFlight) { _, inFlight in
+            if !inFlight { restrictionSubmitGate.finish() }
+        }
+        .onChange(of: model.pickerToken) { _, _ in
+            // A different picker is a different decision: re-arm the button and
+            // start from every row selected again.
+            restrictionSubmitGate.finish()
+            selectedRestrictionIDs = Set(
+                model.restrictionGroups.flatMap { $0.sessions.map(\.id) }
+            )
         }
     }
 

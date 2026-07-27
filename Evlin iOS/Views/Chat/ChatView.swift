@@ -479,7 +479,8 @@ struct ChatView: View {
                                 familyAvatarURLsByChildID: childAvatarURLsByID,
                                 onOption: { option in viewModel.handleAppControlOption(option) },
                                 onCandidate: { candidate in viewModel.handleAppControlCandidate(candidate) },
-                                onCancel: { viewModel.dismissAppControlCard() }
+                                onCancel: { viewModel.dismissAppControlCard() },
+                                isTurnInFlight: viewModel.isThinking
                             )
                             reinterpretButton
                         }
