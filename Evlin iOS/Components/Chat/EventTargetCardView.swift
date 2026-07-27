@@ -91,9 +91,16 @@ struct EventTargetCardView: View {
         let token = detail.string("continuation_token") ?? ""
         return VStack(alignment: .leading, spacing: 12) {
             glyphHeader("lock.shield", title: payload.title, subtitle: payload.body)
+            // Labels come from the backend, which owns the recommendation. This
+            // card is not a neutral choice: shielding one app needs a per-device
+            // token that is often absent, so "Block <app>" leads.
             HStack(spacing: 10) {
-                primaryButton("Lock") { onAppControlBatch(token, "shield", nil) }
-                primaryButton("Block") { onAppControlBatch(token, "block", nil) }
+                primaryButton(detail.string("primary_label") ?? "Block") {
+                    onAppControlBatch(token, "block", nil)
+                }
+                primaryButton(detail.string("secondary_label") ?? "Shield anyway") {
+                    onAppControlBatch(token, "shield", nil)
+                }
             }
         }
         .padding(14)
