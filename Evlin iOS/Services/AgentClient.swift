@@ -187,6 +187,39 @@ extension AgentClient {
         return r
     }
 
+    /// One shared answer for a multi-device app-control batch.
+    ///
+    /// `permanent` is an ANSWER whose minutes are absent, not an absent answer.
+    /// Encoding it the same way as "not asked yet" would make the backend ask
+    /// again, forever — so the two must stay distinguishable on the wire.
+    enum AppControlBatchDuration {
+        case minutes(Int)
+        case permanent
+
+        var wire: [String: Any] {
+            switch self {
+            case .minutes(let value): return ["kind": "minutes", "value": value]
+            case .permanent: return ["kind": "permanent"]
+            }
+        }
+    }
+
+    func makeAppControlBatchRequest(
+        continuationToken: String,
+        choice: String?,
+        duration: AppControlBatchDuration?
+    ) throws -> URLRequest {
+        var r = URLRequest(url: URL(string: "\(baseURL)/parent/agent/app-control-batch")!)
+        r.httpMethod = "POST"; r.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        r.timeoutInterval = 20
+        var payload: [String: Any] = ["continuation_token": continuationToken]
+        if let choice { payload["choice"] = choice }
+        // Omitted, never null: an absent key is how "not answered" is spelled.
+        if let duration { payload["duration"] = duration.wire }
+        r.httpBody = try JSONSerialization.data(withJSONObject: payload)
+        return r
+    }
+
     func makeEventScopeRequest(continuationToken: String, scope: String) throws -> URLRequest {
         var r = URLRequest(url: URL(string: "\(baseURL)/parent/agent/event-scope")!)
         r.httpMethod = "POST"; r.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -248,6 +281,14 @@ extension AgentClient {
     func resolveTarget(continuationToken: String, selectedIds: [String]) async throws -> AgentCardResponse {
         try await sendCardRequest(try makeResolveTargetRequest(
             continuationToken: continuationToken, selectedIds: selectedIds))
+    }
+    func appControlBatch(
+        continuationToken: String,
+        choice: String?,
+        duration: AppControlBatchDuration?
+    ) async throws -> AgentCardResponse {
+        try await sendCardRequest(try makeAppControlBatchRequest(
+            continuationToken: continuationToken, choice: choice, duration: duration))
     }
     func eventScope(continuationToken: String, scope: String = "series") async throws -> AgentCardResponse {
         try await sendCardRequest(try makeEventScopeRequest(

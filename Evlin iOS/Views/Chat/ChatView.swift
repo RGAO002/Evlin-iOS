@@ -525,7 +525,12 @@ struct ChatView: View {
                                         await viewModel.handleReflectionReview(planArchCard, approve: approve, note: note) },
                                     onScope: { ct in
                                         Task { await viewModel.handleEventScope(ct) } },
-                                    onSkip: { viewModel.dismissEventCard() })
+                                    onSkip: { viewModel.dismissEventCard() },
+                                    onAppControlBatch: { ct, choice, duration in
+                                        Task {
+                                            await viewModel.handleAppControlBatch(
+                                                ct, choice, duration)
+                                        } })
                                 reinterpretButton
                             }
                             .padding(.top, Spacing.md)

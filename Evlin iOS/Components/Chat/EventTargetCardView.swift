@@ -19,6 +19,7 @@ import SwiftUI
 
 enum EventTargetRoute: Equatable {
     case result, confirm, disambiguation, targetSelect, reflection, scope
+    case batchAdvice, batchDuration, batchResult
     init?(kind: String) {
         switch kind {
         case "event.result": self = .result
@@ -26,6 +27,11 @@ enum EventTargetRoute: Equatable {
         case "event.disambiguation": self = .disambiguation
         case "event.reflection_review_pending": self = .reflection
         case "event.scope": self = .scope
+        // Exact batch kinds MUST precede the `target.` catch-all below, or the
+        // generic device picker swallows all three.
+        case "target.app_control_batch_advice": self = .batchAdvice
+        case "target.app_control_batch_duration": self = .batchDuration
+        case "target.app_control_batch_result": self = .batchResult
         case let k where k.hasPrefix("target."): self = .targetSelect
         default: return nil
         }
@@ -51,6 +57,13 @@ struct EventTargetCardView: View {
     let onReflection: (_ approve: Bool, _ note: String) async -> Void
     let onScope: (_ continuationToken: String) -> Void
     let onSkip: () -> Void
+    /// One shared answer for a multi-device batch: a Lock/Block choice, or a
+    /// duration, never both.
+    var onAppControlBatch: (
+        _ continuationToken: String,
+        _ choice: String?,
+        _ duration: AgentClient.AppControlBatchDuration?
+    ) -> Void = { _, _, _ in }
 
     @State private var confirmState: CalendarConfirmState = .idle
     @State private var confirmErrorText: String?
@@ -65,8 +78,86 @@ struct EventTargetCardView: View {
         case .targetSelect:  targetCard
         case .reflection:    reflectionCard
         case .scope:         scopeCard
+        case .batchAdvice:   batchAdviceCard
+        case .batchDuration: batchDurationCard
+        case .batchResult:   batchResultCard
         case .none:          EmptyView()
         }
+    }
+
+    // MARK: - Multi-device app control (navy identity, NOT calendar red)
+
+    private var batchAdviceCard: some View {
+        let token = detail.string("continuation_token") ?? ""
+        return VStack(alignment: .leading, spacing: 12) {
+            glyphHeader("lock.shield", title: payload.title, subtitle: payload.body)
+            HStack(spacing: 10) {
+                primaryButton("Lock") { onAppControlBatch(token, "shield", nil) }
+                primaryButton("Block") { onAppControlBatch(token, "block", nil) }
+            }
+        }
+        .padding(14)
+        .background(batchSurface)
+    }
+
+    private var batchDurationCard: some View {
+        let token = detail.string("continuation_token") ?? ""
+        return VStack(alignment: .leading, spacing: 12) {
+            glyphHeader("clock", title: payload.title, subtitle: payload.body)
+            // Asked ONCE for the whole batch — the answer applies to every
+            // selected device.
+            HStack(spacing: 8) {
+                ForEach([15, 30, 60], id: \.self) { minutes in
+                    primaryButton(minutes == 60 ? "1h" : "\(minutes)m") {
+                        onAppControlBatch(token, nil, .minutes(minutes))
+                    }
+                }
+            }
+            primaryButton("Permanently") {
+                onAppControlBatch(token, nil, .permanent)
+            }
+        }
+        .padding(14)
+        .background(batchSurface)
+    }
+
+    private var batchResultCard: some View {
+        let rows = AppControlBatchReceiptRow.decode(detail.rawRows("rows"))
+        return VStack(alignment: .leading, spacing: 10) {
+            glyphHeader("paperplane", title: payload.title, subtitle: payload.body)
+            // One row per SELECTED device, in the order the picker showed them.
+            // A device that failed is stated plainly rather than folded into a
+            // count: "2 of 3" leaves the parent guessing which one.
+            ForEach(rows) { row in
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: row.status.iconName)
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(row.status.tint)
+                        .frame(width: 20)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(row.deviceLabel)
+                            .font(.custom("Manrope", size: 14).weight(.heavy))
+                            .foregroundStyle(Color.evOnSurface)
+                        Text(row.displayMessage)
+                            .font(.custom("Inter", size: 12))
+                            .foregroundStyle(Color.evOnSurfaceVariant)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 0)
+                }
+            }
+        }
+        .padding(14)
+        .background(batchSurface)
+    }
+
+    private var batchSurface: some View {
+        RoundedRectangle(cornerRadius: 16, style: .continuous)
+            .fill(Color.evSurfaceContainerLowest)
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(Color.evOutlineVariant.opacity(0.4), lineWidth: 1)
+            )
     }
 
     // MARK: - Shared chrome (calendar identity = evCalendar red)

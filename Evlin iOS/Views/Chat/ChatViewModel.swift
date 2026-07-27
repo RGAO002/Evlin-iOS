@@ -3376,6 +3376,24 @@ class ChatViewModel: ObservableObject {
         catch { await MainActor.run { self.errorMessage = "Couldn't continue — try again." } }
     }
 
+    /// One shared answer for a multi-device batch. The reply is another card —
+    /// the next question, or the per-device receipt — so it goes through the
+    /// same `applyAgentResult` path and keeps the pending-card queue invariant
+    /// that `handleResolveTarget` relies on.
+    func handleAppControlBatch(
+        _ ct: String,
+        _ choice: String?,
+        _ duration: AgentClient.AppControlBatchDuration?
+    ) async {
+        do {
+            let result = try await agentClient().appControlBatch(
+                continuationToken: ct, choice: choice, duration: duration)
+            await MainActor.run { applyAgentResult(result) }
+        }
+        catch AgentClient.AgentTargetError.expired { await expireEventCard() }
+        catch { await MainActor.run { self.errorMessage = "Couldn't continue — try again." } }
+    }
+
     func handleEventScope(_ ct: String) async {
         do { let r = try await agentClient().eventScope(continuationToken: ct, scope: "series")
              await MainActor.run { applyAgentResult(r) } }

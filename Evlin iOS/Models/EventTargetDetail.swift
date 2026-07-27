@@ -101,6 +101,13 @@ struct EventTargetDetail {
 
     func rows(_ key: String) -> [[String: Any]] { raw[key] as? [[String: Any]] ?? [] }
 
+    /// Raw dictionaries under `key`, left undecoded so the caller owns the
+    /// shape. Used by the multi-device receipt, whose rows are typed by
+    /// `AppControlBatchReceiptRow` rather than here.
+    func rawRows(_ key: String) -> [[String: Any]] {
+        raw[key] as? [[String: Any]] ?? []
+    }
+
     func stringList(_ key: String) -> [String] {
         (raw[key] as? [Any] ?? []).compactMap { $0 as? String }
     }
