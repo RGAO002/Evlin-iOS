@@ -1,5 +1,15 @@
 import SwiftUI
 
+struct RestrictionUnlockSubmitGate {
+    private(set) var isSubmitting = false
+
+    mutating func begin(hasSelection: Bool) -> Bool {
+        guard hasSelection, !isSubmitting else { return false }
+        isSubmitting = true
+        return true
+    }
+}
+
 /// Renders the deterministic app-control cards (Task 11) in the Informed
 /// Sentinel style. These are SEPARATE from the Brain/verb-table confirmation
 /// cards (DangerConfirmCard / AmbiguityCard / …): those build from the legacy
@@ -20,6 +30,7 @@ struct AppControlCard: View {
     let onCandidate: (AppControlCandidate) -> Void
     var onCancel: (() -> Void)? = nil
     @State private var selectedRestrictionIDs: Set<String> = []
+    @State private var restrictionSubmitGate = RestrictionUnlockSubmitGate()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -268,7 +279,9 @@ struct AppControlCard: View {
                 .buttonStyle(.plain)
 
                 Button {
-                    guard let token = model.pickerToken, !selectedRestrictionIDs.isEmpty else { return }
+                    guard restrictionSubmitGate.begin(
+                        hasSelection: !selectedRestrictionIDs.isEmpty
+                    ), let token = model.pickerToken else { return }
                     let selected = model.restrictionGroups
                         .flatMap(\.sessions)
                         .map(\.id)
@@ -281,7 +294,12 @@ struct AppControlCard: View {
                     ))
                 } label: {
                     HStack(spacing: 6) {
-                        Image(systemName: "lock.open.fill")
+                        if restrictionSubmitGate.isSubmitting {
+                            ProgressView()
+                                .tint(.white)
+                        } else {
+                            Image(systemName: "lock.open.fill")
+                        }
                         Text(model.restrictionPrimaryActionLabel)
                     }
                     .font(.custom("Inter", size: 14).weight(.bold))
@@ -290,11 +308,15 @@ struct AppControlCard: View {
                     .foregroundStyle(Color.white)
                     .background(
                         RoundedRectangle(cornerRadius: 13, style: .continuous)
-                            .fill(selectedRestrictionIDs.isEmpty ? Color.evOutline : Color.evPrimary)
+                            .fill(
+                                selectedRestrictionIDs.isEmpty || restrictionSubmitGate.isSubmitting
+                                    ? Color.evOutline
+                                    : Color.evPrimary
+                            )
                     )
                 }
                 .buttonStyle(.plain)
-                .disabled(selectedRestrictionIDs.isEmpty)
+                .disabled(selectedRestrictionIDs.isEmpty || restrictionSubmitGate.isSubmitting)
             }
         }
     }

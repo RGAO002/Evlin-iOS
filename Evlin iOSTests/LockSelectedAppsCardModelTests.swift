@@ -3,6 +3,21 @@ import XCTest
 @testable import Evlin_iOS
 
 final class LockSelectedAppsCardModelTests: XCTestCase {
+    func testRestrictionUnlockSubmitGateAllowsOnlyOneInFlightSubmission() {
+        var gate = RestrictionUnlockSubmitGate()
+
+        XCTAssertTrue(gate.begin(hasSelection: true))
+        XCTAssertFalse(gate.begin(hasSelection: true))
+        XCTAssertTrue(gate.isSubmitting)
+    }
+
+    func testRestrictionUnlockSubmitGateRequiresSelection() {
+        var gate = RestrictionUnlockSubmitGate()
+
+        XCTAssertFalse(gate.begin(hasSelection: false))
+        XCTAssertFalse(gate.isSubmitting)
+    }
+
     func testCardIDRegistersNewKinds() {
         XCTAssertEqual(CardID(rawValue: "lock_selected_apps_confirm")?.isAppControlCard, true)
         XCTAssertEqual(CardID(rawValue: "lock_selected_apps_empty")?.isAppControlCard, true)
