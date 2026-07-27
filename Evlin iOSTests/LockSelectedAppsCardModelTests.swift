@@ -45,6 +45,36 @@ final class LockSelectedAppsCardModelTests: XCTestCase {
         XCTAssertEqual(model?.options.first?.action, "lock_selected_apps_now")
     }
 
+    func testParseConfirmCardFromPlanPatchResponse() throws {
+        let data = try JSONSerialization.data(withJSONObject: [
+            "message": "Review this lock.",
+            "card_payload": [
+                "type": "lock_selected_apps_confirm",
+                "title": "Lock selected apps?",
+                "body": "Shield Facebook on Giannis's iPad for 15 min.",
+                "target_display": "Locked set",
+                "target_kind": "list",
+                "child_device_id": "22222222-2222-2222-2222-222222222222",
+                "duration_minutes": 15,
+                "options": [
+                    [
+                        "action": "lock_selected_apps_now",
+                        "label": "Lock selected apps",
+                    ],
+                ],
+            ],
+        ])
+
+        let model = AppControlCardModel.parseFromResponseData(data)
+
+        XCTAssertEqual(model?.kind, .lockSelectedAppsConfirm)
+        XCTAssertEqual(
+            model?.childDeviceID,
+            "22222222-2222-2222-2222-222222222222"
+        )
+        XCTAssertEqual(model?.durationMinutes, 15)
+    }
+
     func testParseRestrictionUnlockPicker() throws {
         let payload: [String: Any] = [
             "type": "restriction_unlock_picker",

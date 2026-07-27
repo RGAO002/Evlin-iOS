@@ -13,6 +13,7 @@ import Foundation
 enum PlanPatchOutcome {
     case executed(message: String, reasoning: String?, queuedCommands: [PlanPatchQueuedCommand])
     case followUpCard(PlanArchCardPayload)
+    case followUpAppControlCard(AppControlCardModel)
     case rejected(message: String)
     case expired(message: String)
     case error(Error)
@@ -91,6 +92,9 @@ struct PlanPatchClient {
             let message = json["message"] as? String ?? ""
             let reasoning = json["reasoning"] as? String
 
+            if let card = AppControlCardModel.parseFromResponseData(data) {
+                return .followUpAppControlCard(card)
+            }
             if let card = PlanArchCardPayload.decodeFromChatResponseData(data) {
                 return .followUpCard(card)
             }

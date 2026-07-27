@@ -18,4 +18,9 @@ final class LockSelectedAppsRoutingTests: XCTestCase {
         XCTAssertTrue(p.contains("30"))
         XCTAssertFalse(p.lowercased().contains("list"))
     }
+
+    func testSelectedSetPermanentLockPhrasePreservesPermanentChoice() {
+        let p = AppControlRouter.selectedSetLockPhrase(durationMinutes: nil)
+        XCTAssertEqual(p, "lock Locked set permanently")
+    }
 }

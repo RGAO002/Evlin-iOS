@@ -2569,6 +2569,9 @@ class ChatViewModel: ObservableObject {
                     self.pendingPlanArchCard = next
                     let body = next.body.map { "\(next.title)\n\n\($0)" } ?? next.title
                     self.messages.append(ChatMessage(role: .agent, content: body, timestamp: Date()))
+                case .followUpAppControlCard(let next):
+                    self.pendingPlanArchCard = nil
+                    self.currentAppControlCard = next
                 case .rejected(let message), .expired(let message):
                     self.messages.append(ChatMessage(role: .agent, content: message, timestamp: Date()))
                 case .error(let err):
@@ -3272,6 +3275,9 @@ class ChatViewModel: ObservableObject {
                     self.pendingPlanArchCard = next
                     let body = next.body.map { "\(next.title)\n\n\($0)" } ?? next.title
                     self.messages.append(ChatMessage(role: .agent, content: body, timestamp: Date()))
+                case .followUpAppControlCard(let next):
+                    self.pendingPlanArchCard = nil
+                    self.currentAppControlCard = next
                 case .rejected(let message), .expired(let message):
                     self.messages.append(ChatMessage(role: .agent, content: message, timestamp: Date()))
                 case .error(let err):

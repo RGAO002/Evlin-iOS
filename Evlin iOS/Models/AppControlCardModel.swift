@@ -142,6 +142,17 @@ struct AppControlCardModel: Sendable, Equatable {
     let pickerToken: String?
     let restrictionGroups: [RestrictionUnlockGroup]
 
+    /// Parse a deterministic app-control card returned by endpoints such as
+    /// plan-patch, where there is no top-level ChatAction/card_id wrapper.
+    static func parseFromResponseData(_ data: Data) -> AppControlCardModel? {
+        guard
+            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let payload = json["card_payload"] as? [String: Any],
+            let cardID = payload["type"] as? String
+        else { return nil }
+        return parse(cardID: cardID, payload: payload)
+    }
+
     /// Parse from the chat-response `card_payload` dict (already deserialised to
     /// `[String: Any]`). Returns nil when `card_id` isn't one of the
     /// app-control ids — the caller then leaves the Brain/verb-table path
@@ -332,8 +343,11 @@ enum AppControlRouter {
     /// The loop-safety invariant phrase for the lock_selected_apps_confirm card.
     /// Contains "Locked set" + the duration; must NOT contain "list" (the word
     /// "list" trips GUARD_OTHER_FAMILY and bypasses the app-control fastpath).
-    static func selectedSetLockPhrase(durationMinutes: Int) -> String {
-        "lock Locked set for \(durationMinutes) min"
+    static func selectedSetLockPhrase(durationMinutes: Int?) -> String {
+        guard let durationMinutes else {
+            return "lock Locked set permanently"
+        }
+        return "lock Locked set for \(durationMinutes) min"
     }
 
     /// Route an option tap to a concrete action. `verb` parsing comes from the
@@ -361,10 +375,13 @@ enum AppControlRouter {
         case "lock_selected_apps_now":
             // Confirm card: resend with the list-guard-safe phrase. No force so
             // we don't replay the original "lock his phone" and loop.
-            return .resendPhrase(selectedSetLockPhrase(durationMinutes: card.durationMinutes ?? 30))
+            return .resendPhrase(selectedSetLockPhrase(durationMinutes: card.durationMinutes))
         case "lock_all_apps_now":
             // Empty card: lock the whole device for the chosen duration.
-            return .resendPhrase("lock all for \(card.durationMinutes ?? 30) min")
+            if let durationMinutes = card.durationMinutes {
+                return .resendPhrase("lock all for \(durationMinutes) min")
+            }
+            return .resendPhrase("lock all permanently")
         case "cancel":
             // Explicit Cancel option (cannot_block_category / category_shield_offer
             // / lock_selected_apps_confirm / lock_selected_apps_empty) is an
