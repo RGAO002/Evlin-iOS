@@ -94,7 +94,7 @@ Run:
 xcodebuild test \
   -project "Evlin iOS.xcodeproj" \
   -scheme "Evlin iOS" \
-  -destination "platform=iOS Simulator,name=iPhone 16e,OS=26.3.1" \
+  -destination "platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3.1" \
   -only-testing:"Evlin iOSTests/LockSelectedAppsCardModelTests" \
   CODE_SIGNING_ALLOWED=NO
 ```
@@ -244,12 +244,13 @@ Add a private projection in `ChatView`:
 ```swift
 private var childAvatarURLsByID: [String: String] {
     Dictionary(
-        uniqueKeysWithValues: familyStore.childProfiles.compactMap { child in
+        familyStore.childProfiles.compactMap { child -> (String, String)? in
             guard let avatarURL = child.avatarURL, !avatarURL.isEmpty else {
                 return nil
             }
             return (child.id, avatarURL)
-        }
+        },
+        uniquingKeysWith: { first, _ in first }
     )
 }
 ```
@@ -358,7 +359,7 @@ Run:
 xcodebuild test \
   -project "Evlin iOS.xcodeproj" \
   -scheme "Evlin iOS" \
-  -destination "platform=iOS Simulator,name=iPhone 16e,OS=26.3.1" \
+  -destination "platform=iOS Simulator,name=iPhone 17 Pro,OS=26.3.1" \
   -only-testing:"Evlin iOSTests/LockSelectedAppsCardModelTests" \
   CODE_SIGNING_ALLOWED=NO
 ```
