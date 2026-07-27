@@ -126,11 +126,24 @@ enum ScreenTimeEventUploader {
 
     // MARK: - Entry point (app foreground)
 
+    /// Set once the server has answered 403 (its own upload flag is off). Stops
+    /// a device from re-POSTing a growing pending window on every foreground for
+    /// a server that has already said no.
+    private static var serverDisabled = false
+
     /// Upload everything past the watermark. Safe to call often; no-ops fast.
-    /// DEBUG builds only — Release compiles to a no-op (prod gate, review
-    /// decision 2026-07-01; the backend endpoint is also off by default).
+    ///
+    /// The gate is the SERVER's `screen_time_event_upload_enabled`, and only
+    /// that. This used to be `#if DEBUG` as well, which made the shipped app a
+    /// no-op no matter what the server said: on 2026-07-27 the flag was turned
+    /// on in production and every uploaded row still came from the backend
+    /// emitter — the devices, which hold the arming errors, the discarded
+    /// callbacks and the route lifecycle, sent nothing. A gate you can only
+    /// change by shipping a new build is not a gate you can use during a beta,
+    /// and the one time it mattered it left us reading a device's mind from the
+    /// outside.
     static func uploadPending() async {
-        #if DEBUG
+        guard !serverDisabled else { return }
         let std = UserDefaults.standard
         guard !std.bool(forKey: disableKey) else { return }
         guard let d = UserDefaults(suiteName: ScreenTimeEventLog.suiteName) else { return }
@@ -166,6 +179,14 @@ enum ScreenTimeEventUploader {
                 do {
                     let (_, resp) = try await URLSession.shared.data(for: req)
                     let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+                    if code == 403 {
+                        // The server's own gate is off. Stop for this launch
+                        // rather than re-POSTing the whole pending window at
+                        // every foreground; the watermark stays put, so nothing
+                        // is lost when the flag comes back on.
+                        serverDisabled = true
+                        return
+                    }
                     if !(200...299).contains(code) { allOK = false }
                 } catch {
                     allOK = false
@@ -176,6 +197,5 @@ enum ScreenTimeEventUploader {
         if allOK, let last = pending.last {
             d.set(lineHash(last), forKey: watermarkKey)
         }
-        #endif
     }
 }

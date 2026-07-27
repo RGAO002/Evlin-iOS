@@ -356,6 +356,37 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         }
     }
 
+    /// Seconds the callback will hold its thread waiting for a network drain.
+    /// Generous enough for one POST on a slow connection, far short of anything
+    /// the system would consider a hang.
+    private static let drainWaitSeconds: TimeInterval = 6
+
+    /// Run async work and WAIT for it, bounded.
+    ///
+    /// `eventDidReachThreshold` is a synchronous callback, and iOS may suspend
+    /// or kill the extension process as soon as it returns. Every report site
+    /// used to kick off a bare `Task { … }` and return immediately, which made
+    /// delivery a race against that suspension. On 2026-07-27 a fresh install
+    /// lost it twice in a row: thresholds fired at 18:40:53 and 18:45:53 and
+    /// both samples reached the backend at 18:49:57 — the instant a parent
+    /// happened to open the app. The bar only moved because someone looked at
+    /// it.
+    ///
+    /// Safe by construction on both ends. Nothing in the drain path is
+    /// MainActor-isolated (`EarnedSampleReporter` is a plain enum, this class is
+    /// not `@MainActor`), so blocking the calling thread cannot deadlock on it.
+    /// And if the wait expires, the entry is still durably queued and the app's
+    /// foreground drain still picks it up — i.e. exactly today's behaviour.
+    /// This can only make delivery earlier, never later.
+    private func awaitBounded(_ work: @escaping @Sendable () async -> Void) {
+        let done = DispatchSemaphore(value: 0)
+        Task {
+            defer { done.signal() }
+            await work()
+        }
+        _ = done.wait(timeout: .now() + Self.drainWaitSeconds)
+    }
+
     private func handleV2MeteringThreshold(
         event: DeviceActivityEvent.Name,
         activity: DeviceActivityName
@@ -482,7 +513,11 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
                       let deviceID = ExtensionConfig.childId
                 else { continue }
                 let journal = appLimitEffectJournal
-                Task {
+                // Same race as the earned-pool reporter, same fix — see
+                // `awaitBounded`. The per-app ladder is the one a parent watches
+                // hit its budget, so a report that lands only when someone opens
+                // the app is a limit that appears not to work.
+                awaitBounded {
                     do {
                         _ = try await journal.submitUsage(
                             claim,
@@ -678,13 +713,13 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         )
         let sampleQueued = EarnedSampleReporter.enqueueRetry(newSample)
         if let baseURL = ExtensionConfig.baseURL, sampleQueued {
-            Task {
-                let authorizationIsCurrent = {
-                    LegacyMeteringActivity.isAuthorized(
-                        generation: generation,
-                        store: .shared
-                    )
-                }
+            let authorizationIsCurrent = {
+                LegacyMeteringActivity.isAuthorized(
+                    generation: generation,
+                    store: .shared
+                )
+            }
+            awaitBounded {
                 guard authorizationIsCurrent() else { return }
                 await EarnedSampleReporter.drainRetryQueue(
                     baseURL: baseURL,
