@@ -3,6 +3,51 @@ import XCTest
 @testable import Evlin_iOS
 
 final class EarnedMeteringCallbackTests: XCTestCase {
+    func testFileBackedJournalIgnoresStaleSharedDefaultsAndSurvivesRestart() throws {
+        let fileIO = CountingCallbackFileIO()
+        let fixture = try CallbackFixture.active(fileIO: fileIO)
+        defer { fixture.cleanup() }
+        let journalURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("earned-v2-callback-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: journalURL) }
+        let suiteName = "earned-v2-callback-stale-defaults-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(Data("[]".utf8), forKey: EarnedV2CallbackJournal.storageKey)
+
+        let firstJournal = EarnedV2CallbackJournal(
+            fileURL: journalURL,
+            legacyDefaults: defaults,
+            lock: CallbackFixtureLock()
+        )
+        let callback = EarnedMeteringCallback(
+            store: fixture.store,
+            clock: CallbackClock(now: fixture.start.addingTimeInterval(5 * 60)),
+            journal: firstJournal
+        )
+
+        _ = try callback.handleDurably(
+            fixture.callback(threshold: 5),
+            expectedOwnerChildDeviceID: fixture.owner
+        )
+
+        // Simulate another process retaining a stale CFPreferences snapshot.
+        defaults.set(Data("[]".utf8), forKey: EarnedV2CallbackJournal.storageKey)
+        let restartedJournal = EarnedV2CallbackJournal(
+            fileURL: journalURL,
+            legacyDefaults: defaults,
+            lock: CallbackFixtureLock()
+        )
+        XCTAssertEqual(try restartedJournal.pending(owner: fixture.owner).count, 1)
+        XCTAssertEqual(
+            try restartedJournal.replay(into: fixture.store, owner: fixture.owner),
+            1
+        )
+        XCTAssertTrue(try restartedJournal.pending(owner: fixture.owner).isEmpty)
+        XCTAssertEqual(try fixture.store.read().sampleWork.count, 1)
+    }
+
     func testDurableNonterminalCallbackQueuesSidecarWithoutRewritingEpochRoot() throws {
         let fileIO = CountingCallbackFileIO()
         let fixture = try CallbackFixture.active(fileIO: fileIO)

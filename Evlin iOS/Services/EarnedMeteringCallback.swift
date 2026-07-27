@@ -27,17 +27,50 @@ nonisolated struct EarnedV2CallbackJournalEntry: Codable, Equatable, Sendable {
 nonisolated final class EarnedV2CallbackJournal: @unchecked Sendable {
     static let storageKey = "evlin.earned.v2.callbackJournal.v1"
     static let capacity = 64
+    private static let fileName = "earned-v2-callback-journal-v1.json"
 
-    private let defaults: UserDefaults?
+    private enum Storage {
+        case file(URL, legacyDefaults: UserDefaults?)
+        case defaults(UserDefaults?)
+    }
+
+    private let storage: Storage
     private let lock: any DeviceEpochStoreLocking
 
     init(
-        defaults: UserDefaults? = UserDefaults(
-            suiteName: MeteringProductionComposition.appGroupSuiteName
-        ),
         lock: any DeviceEpochStoreLocking = ActiveLockPersistenceLock.shared
     ) {
-        self.defaults = defaults
+        if let containerURL = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: MeteringProductionComposition.appGroupSuiteName
+        ) {
+            storage = .file(
+                containerURL.appendingPathComponent(Self.fileName),
+                legacyDefaults: UserDefaults(
+                    suiteName: MeteringProductionComposition.appGroupSuiteName
+                )
+            )
+        } else {
+            storage = .defaults(
+                UserDefaults(suiteName: MeteringProductionComposition.appGroupSuiteName)
+            )
+        }
+        self.lock = lock
+    }
+
+    init(
+        defaults: UserDefaults?,
+        lock: any DeviceEpochStoreLocking = ActiveLockPersistenceLock.shared
+    ) {
+        storage = .defaults(defaults)
+        self.lock = lock
+    }
+
+    init(
+        fileURL: URL,
+        legacyDefaults: UserDefaults? = nil,
+        lock: any DeviceEpochStoreLocking = ActiveLockPersistenceLock.shared
+    ) {
+        storage = .file(fileURL, legacyDefaults: legacyDefaults)
         self.lock = lock
     }
 
@@ -123,11 +156,35 @@ nonisolated final class EarnedV2CallbackJournal: @unchecked Sendable {
     }
 
     private func load() throws -> [EarnedV2CallbackJournalEntry] {
+        switch storage {
+        case let .file(url, legacyDefaults):
+            if FileManager.default.fileExists(atPath: url.path) {
+                return try decode(Data(contentsOf: url))
+            }
+            let migrated = try loadDefaults(legacyDefaults)
+            if !migrated.isEmpty {
+                try persistFile(migrated, to: url)
+                legacyDefaults?.removeObject(forKey: Self.storageKey)
+                _ = legacyDefaults?.synchronize()
+            }
+            return migrated
+        case let .defaults(defaults):
+            return try loadDefaults(defaults)
+        }
+    }
+
+    private func loadDefaults(
+        _ defaults: UserDefaults?
+    ) throws -> [EarnedV2CallbackJournalEntry] {
         guard let defaults else {
             throw EarnedV2CallbackJournalError.defaultsUnavailable
         }
         _ = defaults.synchronize()
         guard let data = defaults.data(forKey: Self.storageKey) else { return [] }
+        return try decode(data)
+    }
+
+    private func decode(_ data: Data) throws -> [EarnedV2CallbackJournalEntry] {
         guard let entries = try? Self.decoder.decode(
             [EarnedV2CallbackJournalEntry].self,
             from: data
@@ -141,19 +198,35 @@ nonisolated final class EarnedV2CallbackJournal: @unchecked Sendable {
     }
 
     private func persist(_ entries: [EarnedV2CallbackJournalEntry]) throws {
-        guard let defaults else {
-            throw EarnedV2CallbackJournalError.defaultsUnavailable
-        }
         guard entries.count <= Self.capacity,
               Set(entries.map(\.key)).count == entries.count
         else {
             throw EarnedV2CallbackJournalError.durableReadbackMismatch
         }
+        switch storage {
+        case let .file(url, _):
+            try persistFile(entries, to: url)
+        case let .defaults(defaults):
+            guard let defaults else {
+                throw EarnedV2CallbackJournalError.defaultsUnavailable
+            }
+            let data = try Self.encoder.encode(entries)
+            defaults.set(data, forKey: Self.storageKey)
+            guard defaults.synchronize(),
+                  defaults.data(forKey: Self.storageKey) == data
+            else {
+                throw EarnedV2CallbackJournalError.durableReadbackMismatch
+            }
+        }
+    }
+
+    private func persistFile(
+        _ entries: [EarnedV2CallbackJournalEntry],
+        to url: URL
+    ) throws {
         let data = try Self.encoder.encode(entries)
-        defaults.set(data, forKey: Self.storageKey)
-        guard defaults.synchronize(),
-              defaults.data(forKey: Self.storageKey) == data
-        else {
+        try data.write(to: url, options: .atomic)
+        guard try Data(contentsOf: url) == data else {
             throw EarnedV2CallbackJournalError.durableReadbackMismatch
         }
     }
