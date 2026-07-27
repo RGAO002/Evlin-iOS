@@ -80,6 +80,68 @@ final class LockSelectedAppsCardModelTests: XCTestCase {
         XCTAssertEqual(model?.restrictionPrimaryActionLabel, "Unblock selected")
     }
 
+    func testRestrictionAvatarCandidatesPreferFamilyStoreByChildID() {
+        let backend = URL(string: "https://cdn.example/backend.jpg")!
+        let result = AppControlCardModel.restrictionAvatarCandidateURLs(
+            childID: "child-1",
+            familyAvatarURLsByChildID: [
+                "child-1": "https://cdn.example/current.jpg",
+                "device-1": "https://cdn.example/wrong-device.jpg",
+            ],
+            payloadURL: backend
+        )
+
+        XCTAssertEqual(result.map(\.absoluteString), [
+            "https://cdn.example/current.jpg",
+            "https://cdn.example/backend.jpg",
+        ])
+    }
+
+    func testRestrictionAvatarCandidatesFallBackWhenChildMissing() {
+        let backend = URL(string: "https://cdn.example/backend.jpg")!
+        let result = AppControlCardModel.restrictionAvatarCandidateURLs(
+            childID: "child-1",
+            familyAvatarURLsByChildID: [
+                "child-2": "https://cdn.example/other.jpg",
+            ],
+            payloadURL: backend
+        )
+
+        XCTAssertEqual(result, [backend])
+    }
+
+    func testRestrictionAvatarCandidatesRejectInvalidFamilyURL() {
+        let backend = URL(string: "https://cdn.example/backend.jpg")!
+        let result = AppControlCardModel.restrictionAvatarCandidateURLs(
+            childID: "child-1",
+            familyAvatarURLsByChildID: ["child-1": "not a remote URL"],
+            payloadURL: backend
+        )
+
+        XCTAssertEqual(result, [backend])
+    }
+
+    func testRestrictionAvatarCandidatesDeduplicateIdenticalSources() {
+        let shared = URL(string: "https://cdn.example/shared.jpg")!
+        let result = AppControlCardModel.restrictionAvatarCandidateURLs(
+            childID: "child-1",
+            familyAvatarURLsByChildID: ["child-1": shared.absoluteString],
+            payloadURL: shared
+        )
+
+        XCTAssertEqual(result, [shared])
+    }
+
+    func testRestrictionAvatarCandidatesReturnEmptyWithoutUsableURL() {
+        let result = AppControlCardModel.restrictionAvatarCandidateURLs(
+            childID: "child-1",
+            familyAvatarURLsByChildID: [:],
+            payloadURL: nil
+        )
+
+        XCTAssertTrue(result.isEmpty)
+    }
+
     func testParseChildDisambiguationCandidateAvatar() {
         let payload: [String: Any] = [
             "type": "child_disambiguation",

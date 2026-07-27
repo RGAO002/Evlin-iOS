@@ -255,6 +255,32 @@ extension AppControlCardModel {
             $0.action == "restriction_unlock_selected"
         }?.label ?? "Remove selected"
     }
+
+    static func restrictionAvatarCandidateURLs(
+        childID: String,
+        familyAvatarURLsByChildID: [String: String],
+        payloadURL: URL?
+    ) -> [URL] {
+        var result: [URL] = []
+        var seen: Set<String> = []
+
+        func appendIfUsable(_ url: URL?) {
+            guard let url,
+                  let scheme = url.scheme?.lowercased(),
+                  scheme == "https" || scheme == "http",
+                  url.host != nil,
+                  seen.insert(url.absoluteString).inserted else {
+                return
+            }
+            result.append(url)
+        }
+
+        let familyURL = familyAvatarURLsByChildID[childID]
+            .flatMap(URL.init(string:))
+        appendIfUsable(familyURL)
+        appendIfUsable(payloadURL)
+        return result
+    }
 }
 
 /// What ChatViewModel should do when an app-control option / candidate is tapped.
