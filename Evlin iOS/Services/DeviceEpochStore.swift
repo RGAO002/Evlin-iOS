@@ -5312,6 +5312,7 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                         || canAbandonAuthoritativeBaseCorrection(priorHandoff, in: candidate)
                         || canAbandonConservativeResume(priorHandoff, in: candidate)
                         || canAbandonSupersededCandidate(priorHandoff, in: candidate)
+                        || canAbandonPausedCrossDaySupersededHandoff(priorHandoff, in: candidate)
                         || canCancelBackwardPreparingHandoff(priorHandoff, in: candidate) else {
                     throw DeviceEpochStoreInvariantError.invalidState("handoff was removed before exact stop acknowledgement")
                 }
@@ -5609,6 +5610,37 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
               installs[0].retry.lastErrorCode == "backward_handoff_cancelled"
         else { return false }
         return !state.activationWork.values.contains {
+            $0.routeID == handoff.toRouteID && $0.retry.terminal == .succeeded
+        }
+    }
+
+    private func canAbandonPausedCrossDaySupersededHandoff(
+        _ handoff: V2RouteHandoff,
+        in state: DeviceEpochStoreState
+    ) -> Bool {
+        guard handoff.phase == .preparing,
+              state.activeGenerationID == handoff.fromGenerationID,
+              state.activeEpochID == handoff.fromEpochID,
+              state.activeRouteID == handoff.fromRouteID,
+              state.epochs[handoff.fromEpochID]?.status == .paused,
+              let fromRoute = state.routes[handoff.fromRouteID],
+              let rejectedRoute = state.routes[handoff.toRouteID],
+              fromRoute.usageDate < rejectedRoute.usageDate,
+              rejectedRoute.lifecycle == .tombstoned,
+              let rejectedEpoch = state.epochs[handoff.toEpochID],
+              rejectedEpoch.status == .retired,
+              rejectedEpoch.retireReason == .activationSuperseded,
+              state.tombstones[handoff.toRouteID] != nil
+        else { return false }
+        let installs = state.installWork.values.filter { $0.routeID == handoff.toRouteID }
+        guard installs.count == 1,
+              installs[0].phase == .stopped,
+              installs[0].retry.terminal == .superseded,
+              installs[0].retry.lastErrorCode == "route_superseded"
+        else { return false }
+        return !state.registrationWork.values.contains {
+            $0.routeID == handoff.toRouteID && $0.retry.terminal == .succeeded
+        } && !state.activationWork.values.contains {
             $0.routeID == handoff.toRouteID && $0.retry.terminal == .succeeded
         }
     }
@@ -6378,6 +6410,39 @@ extension DeviceEpochStoreState {
             && fromEpoch.enforcementSetID == toEpoch.enforcementSetID
             && ratchets[owner]?.localSelection == .v2
         if hasPausedPriorConservativeResume { return true }
+
+        let hasPausedPriorCrossDayResume: Bool = {
+            guard fromEpoch.status == .paused,
+                  fromEpoch.retiredAt == nil,
+                  toEpoch.status == .active,
+                  toEpoch.retiredAt == nil,
+                  toEpoch.resumeBoundaryPending,
+                  toEpoch.baseSource == .childState200,
+                  fromRoute.usageDate == fromEpoch.usageDate,
+                  toRoute.usageDate == toEpoch.usageDate,
+                  fromRoute.usageDate < toRoute.usageDate,
+                  let toGeneration = generations[handoff.toGenerationID],
+                  toGeneration.childDeviceID == owner,
+                  toGeneration.retiredAt == nil,
+                  toRoute.ownerChildDeviceID == owner,
+                  toRoute.generationID == toGeneration.generationID,
+                  toRoute.epochID == toEpoch.epochID,
+                  toEpoch.canonicalTimezone == toGeneration.canonicalTimezone,
+                  toEpoch.policyRevision == toGeneration.policyRevision,
+                  toEpoch.measurementSelectionDigest == toGeneration.measurementSelectionDigest,
+                  toEpoch.enforcementSetID == toGeneration.enforcementSetID,
+                  let desiredPolicy,
+                  desiredPolicy.ownerChildDeviceID == owner,
+                  desiredPolicy.usageDate == toEpoch.usageDate,
+                  desiredPolicy.canonicalTimezone == toEpoch.canonicalTimezone,
+                  desiredPolicy.policyRevision == toEpoch.policyRevision,
+                  desiredPolicy.enforcementSetID == nil
+                    || desiredPolicy.enforcementSetID == toEpoch.enforcementSetID,
+                  ratchets[owner]?.localSelection == .v2
+            else { return false }
+            return true
+        }()
+        if hasPausedPriorCrossDayResume { return true }
 
         // An already-activated initial epoch can be authoritatively retired
         // before this device observes the response. It may make exactly one

@@ -671,21 +671,73 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
                 return
             }
 
+            retireSupersededPausedCrossDayHandoffIfNeeded(
+                state: &state,
+                owner: owner,
+                priorRouteID: priorRouteID,
+                priorEpochID: priorEpochID,
+                runtime: runtime
+            )
+
             guard priorEpoch.status == .paused,
                   state.v2RouteHandoff == nil,
-                  runtime.usageDate == priorEpoch.usageDate,
-                  runtime.timezone == generation.canonicalTimezone,
-                  runtime.policyRevision == generation.policyRevision,
                   runtime.dailyPoolMinutes > 0,
                   runtime.deviceCapMinutes > 0,
                   runtime.estimatedMinutes >= 0,
                   runtime.estimatedMinutes < min(runtime.dailyPoolMinutes, runtime.deviceCapMinutes)
             else { return }
 
+            let targetGeneration: MeteringPolicyGeneration
+            if runtime.usageDate == priorEpoch.usageDate,
+               runtime.timezone == generation.canonicalTimezone,
+               runtime.policyRevision == generation.policyRevision {
+                targetGeneration = generation
+            } else {
+                guard priorEpoch.usageDate < runtime.usageDate,
+                      let desired = state.desiredPolicy,
+                      desired.ownerChildDeviceID == owner,
+                      desired.usageDate == runtime.usageDate,
+                      desired.canonicalTimezone == runtime.timezone,
+                      desired.policyRevision == runtime.policyRevision,
+                      let current = state.generations.values
+                        .filter({
+                            $0.childDeviceID == owner
+                                && $0.retiredAt == nil
+                                && $0.canonicalTimezone == runtime.timezone
+                                && $0.policyRevision == runtime.policyRevision
+                                && (desired.enforcementSetID == nil
+                                    || $0.enforcementSetID == desired.enforcementSetID)
+                        })
+                        .sorted(by: {
+                            if $0.createdAt != $1.createdAt {
+                                return $0.createdAt > $1.createdAt
+                            }
+                            return $0.generationID.uuidString.lowercased()
+                                < $1.generationID.uuidString.lowercased()
+                        })
+                        .first
+                else { return }
+                targetGeneration = current
+            }
+
+            if priorEpoch.usageDate < runtime.usageDate {
+                for (key, var sample) in state.sampleWork
+                    where sample.ownerChildDeviceID == owner
+                        && sample.epochID == priorEpochID
+                        && sample.routeID == priorRouteID
+                        && sample.retry.terminal == .pending {
+                    sample.claim = nil
+                    sample.retry.terminal = .rejected
+                    sample.retry.lastErrorCode = "paused_day_closed"
+                    sample.retry.nextAttemptAt = clock.now
+                    state.sampleWork[key] = sample
+                }
+            }
+
             let existingCandidate = state.routes.values.contains { route in
                 guard route.ownerChildDeviceID == owner,
                       route.routeID != priorRouteID,
-                      route.generationID == generationID,
+                      route.generationID == targetGeneration.generationID,
                       route.usageDate == runtime.usageDate,
                       route.lifecycle == .planned,
                       let epoch = state.epochs[route.epochID]
@@ -704,10 +756,10 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
                 protocolVersion: 2,
                 childDeviceID: owner,
                 usageDate: runtime.usageDate,
-                canonicalTimezone: generation.canonicalTimezone,
-                policyRevision: generation.policyRevision,
-                measurementSelectionDigest: generation.measurementSelectionDigest,
-                enforcementSetID: generation.enforcementSetID,
+                canonicalTimezone: targetGeneration.canonicalTimezone,
+                policyRevision: targetGeneration.policyRevision,
+                measurementSelectionDigest: targetGeneration.measurementSelectionDigest,
+                enforcementSetID: targetGeneration.enforcementSetID,
                 startedAt: clock.now,
                 registeredAt: nil,
                 baseAcceptedMinutes: runtime.estimatedMinutes,
@@ -737,14 +789,21 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
                 routeID: routeID,
                 activityName: MeteringRouteNamespace.activityName(routeID: routeID),
                 namespace: MeteringRouteNamespace.prefix,
-                generationID: generationID,
-                generationKey: priorRoute.generationKey,
+                generationID: targetGeneration.generationID,
+                generationKey: MeteringGenerationKey(
+                    protocolVersion: targetGeneration.protocolVersion,
+                    childDeviceID: targetGeneration.childDeviceID,
+                    canonicalTimezone: targetGeneration.canonicalTimezone,
+                    policyRevision: targetGeneration.policyRevision,
+                    measurementSelectionDigest: targetGeneration.measurementSelectionDigest,
+                    enforcementSetID: targetGeneration.enforcementSetID
+                ),
                 ownerChildDeviceID: owner,
                 usageDate: runtime.usageDate,
                 epochID: epochID,
                 plannedSchedule: DatedSchedulePlan(
                     usageDate: runtime.usageDate,
-                    timezoneIdentifier: generation.canonicalTimezone,
+                    timezoneIdentifier: targetGeneration.canonicalTimezone,
                     calendarIdentifier: "gregorian"
                 ),
                 installedSchedule: nil,
@@ -776,6 +835,70 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
                 createdAt: clock.now
             )
         }
+    }
+
+    private func retireSupersededPausedCrossDayHandoffIfNeeded(
+        state: inout DeviceEpochStoreState,
+        owner: UUID,
+        priorRouteID: UUID,
+        priorEpochID: UUID,
+        runtime: EarnedTimeRuntime
+    ) {
+        guard let priorEpoch = state.epochs[priorEpochID],
+              priorEpoch.status == .paused,
+              priorEpoch.usageDate < runtime.usageDate,
+              let handoff = state.v2RouteHandoff,
+              handoff.ownerChildDeviceID == owner,
+              handoff.phase == .preparing,
+              handoff.fromRouteID == priorRouteID,
+              handoff.fromEpochID == priorEpochID,
+              var targetRoute = state.routes[handoff.toRouteID],
+              var targetEpoch = state.epochs[handoff.toEpochID],
+              targetRoute.ownerChildDeviceID == owner,
+              targetRoute.epochID == targetEpoch.epochID,
+              targetRoute.usageDate == runtime.usageDate,
+              targetRoute.lifecycle == .planned,
+              targetEpoch.status == .active,
+              targetEpoch.retiredAt == nil,
+              !targetEpoch.resumeBoundaryPending,
+              let installKey = uniqueInstallKey(for: targetRoute.routeID, in: state),
+              let install = state.installWork[installKey],
+              install.phase == .pendingStart,
+              install.retry.terminal == .superseded,
+              install.retry.lastErrorCode == "route_superseded",
+              !state.registrationWork.values.contains(where: {
+                  $0.routeID == targetRoute.routeID && $0.retry.terminal == .succeeded
+              }),
+              !state.activationWork.values.contains(where: {
+                  $0.routeID == targetRoute.routeID && $0.retry.terminal == .succeeded
+              }),
+              let dayEnd = state.canonicalDayEnd(
+                  usageDate: targetRoute.usageDate,
+                  timeZoneIdentifier: targetEpoch.canonicalTimezone
+              )
+        else { return }
+
+        targetEpoch.status = .retired
+        targetEpoch.retiredAt = clock.now
+        targetEpoch.retireReason = .activationSuperseded
+        state.epochs[targetEpoch.epochID] = targetEpoch
+        targetRoute.lifecycle = .tombstoned
+        state.routes[targetRoute.routeID] = targetRoute
+        state.tombstones[targetRoute.routeID] = MeteringRouteTombstone(
+            routeID: targetRoute.routeID,
+            activityName: targetRoute.activityName,
+            eventNames: targetRoute.plannedEvents.map(\.eventName),
+            ownerChildDeviceID: owner,
+            usageDate: targetRoute.usageDate,
+            epochID: targetEpoch.epochID,
+            generationID: targetRoute.generationID,
+            canonicalDayEnd: dayEnd,
+            stopAcknowledgedAt: clock.now,
+            referencedWorkIDs: [],
+            retainedUntil: nil
+        )
+        state.installWork[installKey]?.phase = .stopped
+        state.v2RouteHandoff = nil
     }
 
     private func recoverCanonicalRolloverIfPresent(owner: UUID) async throws -> Bool {
@@ -1177,7 +1300,7 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
                     )
             else { return nil }
 
-            state.v2RouteHandoff = V2RouteHandoff(
+            var handoff = V2RouteHandoff(
                 handoffID: UUID(),
                 ownerChildDeviceID: owner,
                 fromGenerationID: fromGeneration.generationID,
@@ -1193,6 +1316,10 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
                 priorStopAcknowledgedAt: nil,
                 createdAt: clock.now
             )
+            if candidateEpoch.resumeBoundaryPending {
+                handoff.explicitRecovery = .gateResumeConservative
+            }
+            state.v2RouteHandoff = handoff
             if state.installWork[candidateInstallKey]?.phase == .pendingStart {
                 state.installWork[candidateInstallKey]?.authorization = .offlinePending
             }

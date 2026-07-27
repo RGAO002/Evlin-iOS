@@ -198,6 +198,196 @@ final class MeteringConservativeResumeTests: XCTestCase {
         XCTAssertFalse(state.sampleWork.values.contains { $0.retry.terminal == .pending })
     }
 
+    func testPausedPriorDayResumesIntoAuthoritativeCurrentDayGeneration() async throws {
+        let fixture = try ResumeFixture(owner: owner, start: start)
+        defer { fixture.cleanup() }
+        let pausedAt = start.addingTimeInterval(3_600)
+        let nextDay = start.addingTimeInterval(86_400)
+        let pausedRuntime = resumeRuntime()
+        let currentRuntime = EarnedTimeRuntime(
+            usageDate: "2026-07-18",
+            timezone: "America/New_York",
+            policyRevision: "current-day",
+            dailyPoolMinutes: 180,
+            deviceCapMinutes: 120,
+            remainingMinutes: 120,
+            estimatedMinutes: 0
+        )
+        let driver = makeDriver(fixture, clock: ResumeClock(now: pausedAt))
+        let oldRoute = try XCTUnwrap(try fixture.store.read().routes[fixture.oldRouteID])
+        let oldEvent = try XCTUnwrap(oldRoute.plannedEvents.first)
+        let callback = EarnedMeteringCallback(
+            store: fixture.store,
+            clock: ResumeClock(now: pausedAt.addingTimeInterval(-1))
+        )
+        guard case .queued(let priorSampleID) = try callback.handle(
+            MeteringAppleCallback(
+                activityName: oldRoute.activityName,
+                eventName: oldEvent.eventName,
+                observedAt: pausedAt.addingTimeInterval(-1)
+            ),
+            expectedOwnerChildDeviceID: owner
+        ) else { return XCTFail("prior-day sample did not queue") }
+
+        try driver.reconcileUsageGate(
+            ownerChildDeviceID: owner,
+            allowed: false,
+            runtime: pausedRuntime
+        )
+        let currentGenerationID = try fixture.seedDesiredGeneration(
+            usageDate: currentRuntime.usageDate,
+            policyRevision: currentRuntime.policyRevision,
+            poolMinutes: currentRuntime.dailyPoolMinutes,
+            capMinutes: currentRuntime.deviceCapMinutes,
+            now: nextDay
+        )
+
+        let resumedAt = nextDay.addingTimeInterval(1)
+        try makeDriver(fixture, clock: ResumeClock(now: resumedAt))
+            .reconcileUsageGate(
+                ownerChildDeviceID: owner,
+                allowed: true,
+                runtime: currentRuntime
+            )
+
+        var state = try fixture.store.read()
+        let candidate = try XCTUnwrap(state.routes.values.first {
+            $0.routeID != fixture.oldRouteID
+                && $0.generationID == currentGenerationID
+                && $0.usageDate == currentRuntime.usageDate
+                && state.epochs[$0.epochID]?.resumeBoundaryPending == true
+        })
+        XCTAssertEqual(state.epochs[candidate.epochID]?.baseAcceptedMinutes, 0)
+        XCTAssertEqual(state.epochs[candidate.epochID]?.baseSource, .childState200)
+        XCTAssertEqual(state.activeRouteID, fixture.oldRouteID)
+        XCTAssertEqual(state.sampleWork[priorSampleID]?.retry.terminal, .rejected)
+        XCTAssertEqual(state.sampleWork[priorSampleID]?.retry.lastErrorCode, "paused_day_closed")
+        try fixture.store.transaction(expectedOwner: owner) { state in
+            for (key, var work) in state.installWork
+                where work.routeID != fixture.oldRouteID && work.routeID != candidate.routeID {
+                work.retry.terminal = .superseded
+                work.retry.lastErrorCode = "test_fixture_horizon_pruned"
+                state.installWork[key] = work
+            }
+            for (key, var work) in state.registrationWork
+                where work.routeID != fixture.oldRouteID && work.routeID != candidate.routeID {
+                work.retry.terminal = .superseded
+                work.retry.lastErrorCode = "test_fixture_horizon_pruned"
+                state.registrationWork[key] = work
+            }
+        }
+
+        fixture.transport.results = [
+            registrationResult(
+                epochID: candidate.epochID,
+                usageDate: currentRuntime.usageDate,
+                estimatedMinutes: currentRuntime.estimatedMinutes,
+                capMinutes: currentRuntime.deviceCapMinutes
+            ),
+            activationResult(
+                epochID: candidate.epochID,
+                usageDate: currentRuntime.usageDate,
+                estimatedMinutes: currentRuntime.estimatedMinutes,
+                capMinutes: currentRuntime.deviceCapMinutes
+            )
+        ]
+        try await makeDriver(fixture, clock: ResumeClock(now: resumedAt.addingTimeInterval(5)))
+            .recover(ownerChildDeviceID: owner)
+
+        state = try fixture.store.read()
+        XCTAssertEqual(state.activeGenerationID, currentGenerationID)
+        XCTAssertEqual(state.activeEpochID, candidate.epochID)
+        XCTAssertEqual(state.activeRouteID, candidate.routeID)
+        XCTAssertEqual(state.epochs[fixture.oldEpochID]?.retireReason, .gateResumeConservative)
+        XCTAssertEqual(
+            state.registrationWork.values.first(where: { $0.routeID == candidate.routeID })?.request.reason,
+            .gateResumeConservative
+        )
+    }
+
+    func testPausedPriorDayReplacesSupersededPreparingHandoffBeforeResume() throws {
+        let fixture = try ResumeFixture(owner: owner, start: start)
+        defer { fixture.cleanup() }
+        let pausedAt = start.addingTimeInterval(3_600)
+        let nextDay = start.addingTimeInterval(86_400)
+        let currentRuntime = EarnedTimeRuntime(
+            usageDate: "2026-07-18",
+            timezone: "America/New_York",
+            policyRevision: "current-day",
+            dailyPoolMinutes: 180,
+            deviceCapMinutes: 120,
+            remainingMinutes: 120,
+            estimatedMinutes: 0
+        )
+        try makeDriver(fixture, clock: ResumeClock(now: pausedAt))
+            .reconcileUsageGate(
+                ownerChildDeviceID: owner,
+                allowed: false,
+                runtime: resumeRuntime()
+            )
+        let currentGenerationID = try fixture.seedDesiredGeneration(
+            usageDate: currentRuntime.usageDate,
+            policyRevision: currentRuntime.policyRevision,
+            poolMinutes: currentRuntime.dailyPoolMinutes,
+            capMinutes: currentRuntime.deviceCapMinutes,
+            now: nextDay
+        )
+
+        let staleRoute = try XCTUnwrap(try fixture.store.read().routes.values.first {
+            $0.generationID == currentGenerationID
+                && $0.usageDate == currentRuntime.usageDate
+                && $0.lifecycle == .planned
+        })
+        try fixture.store.transaction(expectedOwner: owner) { state in
+            state.v2RouteHandoff = V2RouteHandoff(
+                handoffID: UUID(),
+                ownerChildDeviceID: owner,
+                fromGenerationID: try XCTUnwrap(state.activeGenerationID),
+                fromEpochID: fixture.oldEpochID,
+                fromRouteID: fixture.oldRouteID,
+                toGenerationID: currentGenerationID,
+                toEpochID: staleRoute.epochID,
+                toRouteID: staleRoute.routeID,
+                phase: .preparing,
+                priorRouteInputClosedAt: nil,
+                registrationAcknowledgedAt: nil,
+                activationAcknowledgedAt: nil,
+                priorStopAcknowledgedAt: nil,
+                createdAt: nextDay
+            )
+            let installKey = try XCTUnwrap(
+                state.installWork.first { $0.value.routeID == staleRoute.routeID }?.key
+            )
+            state.installWork[installKey]?.authorization = .offlinePending
+            state.installWork[installKey]?.retry.terminal = .superseded
+            state.installWork[installKey]?.retry.lastErrorCode = "route_superseded"
+            for (key, var work) in state.registrationWork where work.routeID == staleRoute.routeID {
+                work.retry.terminal = .superseded
+                work.retry.lastErrorCode = "replacement_registration_deferred"
+                state.registrationWork[key] = work
+            }
+        }
+
+        try makeDriver(fixture, clock: ResumeClock(now: nextDay.addingTimeInterval(1)))
+            .reconcileUsageGate(
+                ownerChildDeviceID: owner,
+                allowed: true,
+                runtime: currentRuntime
+            )
+
+        let state = try fixture.store.read()
+        XCTAssertNil(state.v2RouteHandoff)
+        XCTAssertEqual(state.routes[staleRoute.routeID]?.lifecycle, .tombstoned)
+        XCTAssertEqual(state.epochs[staleRoute.epochID]?.retireReason, .activationSuperseded)
+        XCTAssertNotNil(state.routes.values.first {
+            $0.routeID != staleRoute.routeID
+                && $0.generationID == currentGenerationID
+                && $0.usageDate == currentRuntime.usageDate
+                && $0.lifecycle == .planned
+                && state.epochs[$0.epochID]?.resumeBoundaryPending == true
+        })
+    }
+
     func testRegistrationObservesClosedGateAndPreservesPriorRouteForFreshResume() async throws {
         let fixture = try ResumeFixture(owner: owner, start: start)
         defer { fixture.cleanup() }
@@ -360,13 +550,20 @@ final class MeteringConservativeResumeTests: XCTestCase {
 
     private func registrationResult(
         epochID: UUID,
-        status: EpochStatusDTO = .active
+        status: EpochStatusDTO = .active,
+        usageDate: String = "2026-07-17",
+        estimatedMinutes: Int = 17,
+        capMinutes: Int = 60
     ) -> (Data, URLResponse) {
         let response = EpochRegistrationResponseDTO(
             status: .registered,
             epochID: epochID,
             meteringProtocolVersion: 2,
-            snapshot: snapshot(),
+            snapshot: snapshot(
+                usageDate: usageDate,
+                estimatedMinutes: estimatedMinutes,
+                capMinutes: capMinutes
+            ),
             epochStatus: status
         )
         return (try! JSONEncoder().encode(response), httpResponse())
@@ -374,27 +571,38 @@ final class MeteringConservativeResumeTests: XCTestCase {
 
     private func activationResult(
         epochID: UUID,
-        status: EpochActivationStatusDTO = .activated
+        status: EpochActivationStatusDTO = .activated,
+        usageDate: String = "2026-07-17",
+        estimatedMinutes: Int = 17,
+        capMinutes: Int = 60
     ) -> (Data, URLResponse) {
         let response = EpochActivationResponseDTO(
             status: status,
             epochID: epochID,
             epochStatus: .active,
             meteringProtocolVersion: 2,
-            snapshot: snapshot()
+            snapshot: snapshot(
+                usageDate: usageDate,
+                estimatedMinutes: estimatedMinutes,
+                capMinutes: capMinutes
+            )
         )
         return (try! JSONEncoder().encode(response), httpResponse())
     }
 
-    private func snapshot() -> DeviceDaySnapshotDTO {
+    private func snapshot(
+        usageDate: String = "2026-07-17",
+        estimatedMinutes: Int = 17,
+        capMinutes: Int = 60
+    ) -> DeviceDaySnapshotDTO {
         DeviceDaySnapshotDTO(
             childDeviceID: owner,
-            usageDate: "2026-07-17",
-            estimatedMinutes: 17,
-            capMinutes: 60,
+            usageDate: usageDate,
+            estimatedMinutes: estimatedMinutes,
+            capMinutes: capMinutes,
             childDayState: "available",
-            usedMinutes: 17,
-            remainingMinutes: 43,
+            usedMinutes: estimatedMinutes,
+            remainingMinutes: max(0, capMinutes - estimatedMinutes),
             counted: true,
             warning: nil
         )
@@ -512,6 +720,51 @@ private final class ResumeFixture {
             ))
         })
         center.records[DeviceActivityName(route.activityName)] = (schedule, events)
+    }
+
+    func seedDesiredGeneration(
+        usageDate: String,
+        policyRevision: String,
+        poolMinutes: Int,
+        capMinutes: Int,
+        now: Date
+    ) throws -> UUID {
+        let selection = try JSONEncoder().encode(FamilyActivitySelection())
+        let enforcementSetID = UUID()
+        let key = MeteringGenerationKey(
+            protocolVersion: 2,
+            childDeviceID: owner,
+            canonicalTimezone: "America/New_York",
+            policyRevision: policyRevision,
+            measurementSelectionDigest: MeteringEpochContract.selectionDigest(persistedBytes: selection),
+            enforcementSetID: enforcementSetID
+        )
+        let plan = try store.reconcileMeteringHorizon(MeteringHorizonRequest(
+            ownerChildDeviceID: owner,
+            today: usageDate,
+            generationKey: key,
+            persistedSelectionBytes: selection,
+            poolMinutes: poolMinutes,
+            deviceCapMinutes: capMinutes,
+            authoritativeBaseAcceptedMinutes: 0,
+            now: now
+        ))
+        _ = try store.ingestDesiredPolicy(MeteringDesiredPolicy(
+            commandID: UUID(),
+            ownerChildDeviceID: owner,
+            orderingToken: 1,
+            policyRevision: policyRevision,
+            usageDate: usageDate,
+            canonicalTimezone: "America/New_York",
+            dailyPoolMinutes: poolMinutes,
+            deviceCapMinutes: capMinutes,
+            remainingMinutes: min(poolMinutes, capMinutes),
+            enforcementSetID: enforcementSetID,
+            receivedAt: now,
+            appliedAt: nil,
+            ackedAt: nil
+        ))
+        return plan.generationID
     }
 
     func cleanup() { try? FileManager.default.removeItem(at: storeURL) }
