@@ -42,7 +42,8 @@ final class LockSelectedAppsCardModelTests: XCTestCase {
                 "child_id": "child-1",
                 "child_name": "Ryan",
                 "avatar": [
-                    "value": "R",
+                    "kind": "emoji",
+                    "value": "🧒",
                     "color": "#258B3A",
                     "signed_url": "https://example.test/avatars/ryan.jpg",
                 ],
@@ -75,6 +76,7 @@ final class LockSelectedAppsCardModelTests: XCTestCase {
         XCTAssertEqual(model?.pickerToken, "tok-123")
         XCTAssertEqual(model?.restrictionGroups.count, 1)
         XCTAssertEqual(model?.restrictionGroups.first?.childName, "Ryan")
+        XCTAssertEqual(model?.restrictionGroups.first?.avatarValue, "R")
         XCTAssertEqual(model?.restrictionGroups.first?.avatarURL?.absoluteString, "https://example.test/avatars/ryan.jpg")
         XCTAssertEqual(model?.restrictionGroups.first?.sessions.map(\.action), ["unshield", "unblock"])
         XCTAssertEqual(model?.restrictionPrimaryActionLabel, "Unblock selected")

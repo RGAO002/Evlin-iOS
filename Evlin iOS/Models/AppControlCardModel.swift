@@ -227,7 +227,10 @@ struct AppControlCardModel: Sendable, Equatable {
         (dicts ?? []).compactMap { dict in
             let childName = (dict["child_name"] as? String) ?? "Child"
             let avatar = dict["avatar"] as? [String: Any]
-            let avatarValue = (avatar?["value"] as? String) ?? String(childName.prefix(1)).uppercased()
+            let trimmedChildName = childName.trimmingCharacters(in: .whitespacesAndNewlines)
+            let avatarValue = trimmedChildName.isEmpty
+                ? "?"
+                : String(trimmedChildName.prefix(1)).uppercased()
             let avatarColor = avatar?["color"] as? String
             let avatarURL = (avatar?["signed_url"] as? String).flatMap(URL.init(string:))
             let devices = (dict["devices"] as? [[String: Any]]) ?? []
