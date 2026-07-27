@@ -372,7 +372,13 @@ struct EventTargetCardView: View {
         return TargetSelectView(
             title: payload.title,
             groups: groups,
-            allowsMultiple: payload.kind != "target.device_select",
+            // Devices used to be one-of-N, which is why a parent with two
+            // devices for one child had to repeat the whole request. The
+            // backend fans a multi-selection out per device now.
+            allowsMultiple: true,
+            initialSelection: TargetInitialSelection(
+                wire: detail.string("initial_selection")
+            ),
             onConfirm: { ids in onResolveTarget(ct, ids) }, onCancel: onSkip)
     }
 

@@ -14,14 +14,42 @@
 
 import SwiftUI
 
+/// Which options a multi-select starts with checked.
+///
+/// The backend decides this per card (`detail.initial_selection`) because only
+/// it knows the normalized verb: tightening actions (block/shield/lock) start
+/// with every device checked, relaxing ones (unblock/unshield/unlock) start
+/// empty. Pre-checking everything for a relax quietly hands back access on
+/// devices the parent may not have had in mind.
+enum TargetInitialSelection: String {
+    case all
+    case none
+
+    /// Anything we do not recognise — including a missing value from a build
+    /// that predates the policy — starts empty. Selecting every device by
+    /// omission is the failure this type exists to prevent.
+    init(wire: String?) {
+        self = TargetInitialSelection(rawValue: wire ?? "") ?? .none
+    }
+}
+
 struct TargetSelectionModel {
     let options: [TargetOption]
     let allowsMultiple: Bool
     private(set) var selected: Set<String> = []
 
-    init(options: [TargetOption], allowsMultiple: Bool = true) {
+    init(
+        options: [TargetOption],
+        allowsMultiple: Bool = true,
+        initialSelection: TargetInitialSelection = .none
+    ) {
         self.options = options
         self.allowsMultiple = allowsMultiple
+        // Only a multi-select may arrive pre-answered: pre-selecting a
+        // one-of-N question would silently answer what the card is asking.
+        if allowsMultiple, initialSelection == .all {
+            self.selected = Set(options.map(\.id))
+        }
     }
 
     var selectedIds: [String] { options.map(\.id).filter { selected.contains($0) } }
@@ -46,8 +74,33 @@ struct TargetSelectView: View {
     let onConfirm: ([String]) -> Void
     let onCancel: () -> Void
 
-    @State private var selected: Set<String> = []
+    @State private var selected: Set<String>
     private var allOptions: [TargetOption] { groups.flatMap(\.options) }
+
+    /// Seeds `selected` through an explicit initializer rather than from
+    /// `onAppear`. Mutating `@State` while the view is being built is a
+    /// SwiftUI trap, and seeding on appear would re-check devices the parent
+    /// had just unchecked whenever the card re-renders.
+    init(
+        title: String,
+        groups: [TargetGroup],
+        allowsMultiple: Bool,
+        initialSelection: TargetInitialSelection = .none,
+        onConfirm: @escaping ([String]) -> Void,
+        onCancel: @escaping () -> Void
+    ) {
+        self.title = title
+        self.groups = groups
+        self.allowsMultiple = allowsMultiple
+        self.onConfirm = onConfirm
+        self.onCancel = onCancel
+        let seeded = TargetSelectionModel(
+            options: groups.flatMap(\.options),
+            allowsMultiple: allowsMultiple,
+            initialSelection: initialSelection
+        )
+        _selected = State(initialValue: seeded.selected)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
