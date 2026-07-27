@@ -17,6 +17,94 @@ enum NameIconKind: String, Codable {
     case all
 }
 
+/// Just the icon, no text. Split out of `NameWithIcon` so a row that stacks a
+/// title over a subtitle can place the icon beside BOTH — putting the whole
+/// `NameWithIcon` in the title slot indents the title by the icon width and
+/// leaves the subtitle hanging at the left edge.
+struct NameIcon: View {
+    let name: String
+    let kind: NameIconKind
+    var artworkURL: URL? = nil
+
+    /// Icon URL resolved by-name as a fallback (see `.task` below). On the
+    /// parent device there are no captured FamilyControls tokens, so
+    /// `Label(token)` can't render the kid's app icons; when the backend also
+    /// gave us no `artworkURL`, we look the icon up from iTunes by name.
+    @State private var resolvedArtworkURL: URL? = nil
+
+    var body: some View {
+        iconView
+            .task(id: name) {
+                // Only the app icon needs this, and only when we have neither a
+                // backend artwork URL nor a local token to render (i.e. the parent
+                // device). The kid device hits the `Label(token)` path instead.
+                guard kind == .app,
+                      artworkURL == nil,
+                      resolvedArtworkURL == nil,
+                      LocalAliasStore.shared.applicationToken(forLookupKey: name) == nil
+                else { return }
+                resolvedArtworkURL = await AppArtworkResolver.shared.artwork(
+                    forName: NameWithIcon.displayName(name)
+                )
+            }
+    }
+
+    /// Map a backend restriction `kind` string ("app" / "category" / "list" /
+    /// "group" / "all") to the icon kind. Unknown values draw the app glyph —
+    /// a generic square is a better wrong answer than a category grid.
+    static func kind(fromWire wire: String) -> NameIconKind {
+        switch wire.lowercased() {
+        case "category": return .category
+        case "list", "group": return .savedList
+        case "all": return .all
+        default: return .app
+        }
+    }
+
+    @ViewBuilder
+    private var iconView: some View {
+        switch kind {
+        case .app:
+            if let artworkURL = artworkURL ?? resolvedArtworkURL {
+                AsyncImage(url: artworkURL) { phase in
+                    switch phase {
+                    case .success(let image):
+                        image
+                            .resizable()
+                            .scaledToFill()
+                            .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                    default:
+                        Image(systemName: "app.fill")
+                            .foregroundStyle(Color.evOutline)
+                    }
+                }
+            } else if let token = LocalAliasStore.shared.applicationToken(forLookupKey: name) {
+                Label(token).labelStyle(.iconOnly)
+            } else {
+                Image(systemName: "app.fill")
+                    .foregroundStyle(Color.evOutline)
+            }
+        case .category:
+            if let token = LocalAliasStore.shared.categoryToken(forName: name) {
+                Label(token).labelStyle(.iconOnly)
+            } else {
+                // Parent device has no captured category token, so Apple's
+                // colored category glyph isn't renderable — pick a meaningful
+                // SF Symbol by category name (Games → gamecontroller) instead of
+                // a generic grid (and never an app artwork).
+                Image(systemName: NameWithIcon.categorySymbol(for: name))
+                    .foregroundStyle(Color.evOutline)
+            }
+        case .savedList:
+            Image(systemName: "list.bullet.rectangle.fill")
+                .foregroundStyle(Color.evOutline)
+        case .all:
+            Image(systemName: "iphone")
+                .foregroundStyle(Color.evOutline)
+        }
+    }
+}
+
 struct NameWithIcon: View {
     let name: String
     let kind: NameIconKind
@@ -28,32 +116,13 @@ struct NameWithIcon: View {
     /// this alone". Off by default everywhere else.
     var strikethrough: Bool = false
 
-    /// Icon URL resolved by-name as a fallback (see `.task` below). On the
-    /// parent device there are no captured FamilyControls tokens, so
-    /// `Label(token)` can't render the kid's app icons; when the backend also
-    /// gave us no `artworkURL`, we look the icon up from iTunes by name.
-    @State private var resolvedArtworkURL: URL? = nil
-
     var body: some View {
         HStack(spacing: 8) {
-            iconView
+            NameIcon(name: name, kind: kind, artworkURL: artworkURL)
                 .frame(width: 24, height: 24)
             Text(NameWithIcon.displayName(name))
                 .font(titleFont)
                 .strikethrough(strikethrough, color: nil)
-        }
-        .task(id: name) {
-            // Only the app icon needs this, and only when we have neither a
-            // backend artwork URL nor a local token to render (i.e. the parent
-            // device). The kid device hits the `Label(token)` path instead.
-            guard kind == .app,
-                  artworkURL == nil,
-                  resolvedArtworkURL == nil,
-                  LocalAliasStore.shared.applicationToken(forLookupKey: name) == nil
-            else { return }
-            resolvedArtworkURL = await AppArtworkResolver.shared.artwork(
-                forName: NameWithIcon.displayName(name)
-            )
         }
     }
 
@@ -116,48 +185,6 @@ struct NameWithIcon: View {
         "discord": "Discord",
     ]
 
-    @ViewBuilder
-    private var iconView: some View {
-        switch kind {
-        case .app:
-            if let artworkURL = artworkURL ?? resolvedArtworkURL {
-                AsyncImage(url: artworkURL) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image
-                            .resizable()
-                            .scaledToFill()
-                            .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
-                    default:
-                        Image(systemName: "app.fill")
-                            .foregroundStyle(Color.evOutline)
-                    }
-                }
-            } else if let token = LocalAliasStore.shared.applicationToken(forLookupKey: name) {
-                Label(token).labelStyle(.iconOnly)
-            } else {
-                Image(systemName: "app.fill")
-                    .foregroundStyle(Color.evOutline)
-            }
-        case .category:
-            if let token = LocalAliasStore.shared.categoryToken(forName: name) {
-                Label(token).labelStyle(.iconOnly)
-            } else {
-                // Parent device has no captured category token, so Apple's
-                // colored category glyph isn't renderable — pick a meaningful
-                // SF Symbol by category name (Games → gamecontroller) instead of
-                // a generic grid (and never an app artwork).
-                Image(systemName: NameWithIcon.categorySymbol(for: name))
-                    .foregroundStyle(Color.evOutline)
-            }
-        case .savedList:
-            Image(systemName: "list.bullet.rectangle.fill")
-                .foregroundStyle(Color.evOutline)
-        case .all:
-            Image(systemName: "iphone")
-                .foregroundStyle(Color.evOutline)
-        }
-    }
 }
 
 /// Resolves an app's icon URL by display name via the public iTunes Search API,

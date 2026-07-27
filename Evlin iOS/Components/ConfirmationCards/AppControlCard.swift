@@ -350,6 +350,12 @@ struct AppControlCard: View {
                 }
                 .frame(width: 28, height: 28)
 
+                // Beside the title AND subtitle, not inside the title — see
+                // `NameIcon`. A parent scanning "what is locked right now"
+                // recognises the artwork before they read the name.
+                NameIcon(name: row.title, kind: NameIcon.kind(fromWire: row.kind))
+                    .frame(width: 26, height: 26)
+
                 VStack(alignment: .leading, spacing: 3) {
                     Text(row.title)
                         .font(.custom("Inter", size: 14).weight(.bold))
