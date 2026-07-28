@@ -727,6 +727,42 @@ final class MeteringV2ActivationTests: XCTestCase {
         )
     }
 
+    func testDuplicatePhysicalIdentityRejectionsConvergeToOneRecoveryRegistration() async throws {
+        let fixture = try makeReplacementFixture()
+        defer { fixture.cleanup() }
+        try fixture.addRejectedPhysicalIdentityRegistrations(count: 2)
+        fixture.transport.errors = [.noResponse]
+
+        try await makeDriver(fixture).recover(ownerChildDeviceID: owner)
+
+        let matching = try fixture.store.read().registrationWork.values
+            .filter {
+                $0.ownerChildDeviceID == owner
+                    && $0.epochID == fixture.candidateEpochID
+                    && $0.routeID == fixture.candidateRouteID
+            }
+        XCTAssertEqual(
+            matching.filter {
+                $0.retry.terminal == .pending
+                    && $0.request.reason == .identityRecovery
+            }.count,
+            1
+        )
+        XCTAssertEqual(
+            matching.filter {
+                $0.retry.terminal == .superseded
+                    && $0.retry.lastErrorCode
+                        == "duplicate_physical_identity_recovery_superseded"
+            }.count,
+            1
+        )
+        XCTAssertEqual(matching.count, 2)
+        XCTAssertEqual(
+            try XCTUnwrap(fixture.store.read().v2RouteHandoff).explicitRecovery,
+            .identityRecovery
+        )
+    }
+
     func testWaitingCandidateSampleDoesNotBlockItsRegistration() async throws {
         let fixture = try makeReplacementFixture()
         defer { fixture.cleanup() }
@@ -1428,6 +1464,33 @@ private final class ActivationFixture {
             var work = registration(route: route, epoch: epoch, terminal: .superseded)
             work.retry.lastErrorCode = "replacement_registration_deferred"
             state.registrationWork[work.workID] = work
+        }
+    }
+
+    func addRejectedPhysicalIdentityRegistrations(count: Int) throws {
+        try store.transaction(expectedOwner: owner) { state in
+            guard let route = state.routes[candidateRouteID],
+                  let epoch = state.epochs[candidateEpochID]
+            else { return }
+            for index in 0..<count {
+                let workID = UUID()
+                state.registrationWork[workID] = EpochRegistrationWork(
+                    workID: workID,
+                    ownerChildDeviceID: owner,
+                    epochID: epoch.epochID,
+                    routeID: route.routeID,
+                    request: registrationRequest(route: route, epoch: epoch),
+                    claim: nil,
+                    retry: MeteringRetryState(
+                        attemptCount: 1,
+                        nextAttemptAt: start,
+                        lastErrorCode:
+                            "physical_identity_recovery_required",
+                        terminal: .rejected
+                    ),
+                    createdAt: start.addingTimeInterval(TimeInterval(index))
+                )
+            }
         }
     }
 

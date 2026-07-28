@@ -569,19 +569,23 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
                   })
             else { return }
 
-            let rejectedKeys = state.registrationWork.compactMap {
-                key, work -> UUID? in
-                guard work.ownerChildDeviceID == owner,
-                      work.epochID == candidateEpoch.epochID,
-                      work.routeID == candidateRoute.routeID,
-                      work.claim == nil,
-                      work.retry.terminal == .rejected,
-                      work.retry.lastErrorCode
-                        == "physical_identity_recovery_required"
-                else { return nil }
-                return key
-            }
-            guard rejectedKeys.count == 1,
+            let rejected = state.registrationWork.values
+                .filter {
+                    isPhysicalIdentityRecoveryRejection(
+                        $0,
+                        owner: owner,
+                        epoch: candidateEpoch,
+                        route: candidateRoute
+                    )
+                }
+                .sorted {
+                    if $0.createdAt != $1.createdAt {
+                        return $0.createdAt < $1.createdAt
+                    }
+                    return $0.workID.uuidString.lowercased()
+                        < $1.workID.uuidString.lowercased()
+                }
+            guard let selected = rejected.first,
                   !state.registrationWork.values.contains(where: {
                       $0.ownerChildDeviceID == owner
                           && $0.epochID == candidateEpoch.epochID
@@ -590,34 +594,30 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
                               $0.retry.terminal == .pending
                                   || $0.retry.terminal == .succeeded
                           )
-                  }),
-                  let rejected = state.registrationWork[rejectedKeys[0]]
+                  })
             else { return }
 
-            let request = rejected.request
-            state.registrationWork[rejectedKeys[0]] = EpochRegistrationWork(
-                workID: rejected.workID,
-                ownerChildDeviceID: rejected.ownerChildDeviceID,
-                epochID: rejected.epochID,
-                routeID: rejected.routeID,
-                request: EpochRegistrationRequestDTO(
-                    protocolVersion: request.protocolVersion,
-                    epochID: request.epochID,
-                    deviceID: request.deviceID,
-                    usageDate: request.usageDate,
-                    timezone: request.timezone,
-                    policyRevision: request.policyRevision,
-                    measurementSelectionDigest:
-                        request.measurementSelectionDigest,
-                    enforcementSetID: request.enforcementSetID,
-                    startedAt: request.startedAt,
-                    baseAcceptedMinutes: request.baseAcceptedMinutes,
+            state.registrationWork[selected.workID] = EpochRegistrationWork(
+                workID: selected.workID,
+                ownerChildDeviceID: selected.ownerChildDeviceID,
+                epochID: selected.epochID,
+                routeID: selected.routeID,
+                request: registrationRequest(
+                    epoch: candidateEpoch,
                     reason: .identityRecovery
                 ),
                 claim: nil,
                 retry: pendingRetry(),
-                createdAt: rejected.createdAt
+                createdAt: selected.createdAt
             )
+            for duplicate in rejected.dropFirst() {
+                var terminal = duplicate
+                terminal.claim = nil
+                terminal.retry.terminal = .superseded
+                terminal.retry.lastErrorCode =
+                    "duplicate_physical_identity_recovery_superseded"
+                state.registrationWork[terminal.workID] = terminal
+            }
             handoff.explicitRecovery = .identityRecovery
             state.v2RouteHandoff = handoff
         }
@@ -1404,10 +1404,20 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
             // registration. That terminal audit row must not suppress the
             // one registration which becomes legal only after this barrier.
             let hasUsableRegistration = state.registrationWork.values.contains {
-                $0.ownerChildDeviceID == owner
-                    && $0.epochID == epoch.epochID
-                    && $0.routeID == candidate.routeID
-                    && ($0.retry.terminal == .pending || $0.retry.terminal == .succeeded)
+                (
+                    $0.ownerChildDeviceID == owner
+                        && $0.epochID == epoch.epochID
+                        && $0.routeID == candidate.routeID
+                        && (
+                            $0.retry.terminal == .pending
+                                || $0.retry.terminal == .succeeded
+                        )
+                ) || isPhysicalIdentityRecoveryRejection(
+                    $0,
+                    owner: owner,
+                    epoch: epoch,
+                    route: candidate
+                )
             }
             if !hasUsableRegistration {
                 let reason: EpochRegistrationReasonDTO
@@ -1983,6 +1993,33 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
             retry: pendingRetry(),
             createdAt: clock.now
         )
+    }
+
+    private func isPhysicalIdentityRecoveryRejection(
+        _ work: EpochRegistrationWork,
+        owner: UUID,
+        epoch: DeviceDailyEpoch,
+        route: MeteringCallbackRoute
+    ) -> Bool {
+        let request = work.request
+        return work.ownerChildDeviceID == owner
+            && work.epochID == epoch.epochID
+            && work.routeID == route.routeID
+            && work.claim == nil
+            && work.retry.terminal == .rejected
+            && work.retry.lastErrorCode
+                == "physical_identity_recovery_required"
+            && request.protocolVersion == 2
+            && request.epochID == epoch.epochID
+            && request.deviceID == owner
+            && request.usageDate == epoch.usageDate
+            && request.timezone == epoch.canonicalTimezone
+            && request.policyRevision == epoch.policyRevision
+            && request.measurementSelectionDigest
+                == epoch.measurementSelectionDigest
+            && request.enforcementSetID == epoch.enforcementSetID
+            && request.startedAt == epoch.startedAt
+            && request.baseAcceptedMinutes == epoch.baseAcceptedMinutes
     }
 
     private func registrationRequest(
