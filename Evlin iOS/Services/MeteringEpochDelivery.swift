@@ -472,8 +472,11 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
             guard response.meteringProtocolVersion == 2 else {
                 return .terminal(code: "protocol_mismatch")
             }
-            guard response.epochStatus == .active else {
-                return .terminal(code: response.epochStatus == nil ? "missing_epoch_status" : "epoch_not_active")
+            guard let epochStatus = response.epochStatus else {
+                return .terminal(code: "missing_epoch_status")
+            }
+            guard epochStatus != .retired else {
+                return .terminal(code: "epoch_retired")
             }
             return .registered(response)
         }
@@ -499,6 +502,9 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
             }
             guard response.meteringProtocolVersion == 2 else {
                 return .terminal(code: "protocol_mismatch")
+            }
+            if response.status == .paused, response.epochStatus == .paused {
+                return .terminal(code: "epoch_paused")
             }
             let firstActivationStatusAllowed = response.status == .activated
                 && (response.epochStatus == .active || response.epochStatus == .exhausted)

@@ -2163,9 +2163,25 @@ final class MeteringEpochDeliveryTests: XCTestCase {
         )
     }
 
-    func testRegistration2xxRequiresV2ProtocolAndActiveEpoch() throws {
+    func testRegistration2xxRequiresV2ProtocolAndKnownEpochLifecycle() throws {
         let snapshot = makeSnapshot(counted: true, warning: nil)
-        let responses = [
+        let paused = EpochRegistrationResponseDTO(
+            status: .alreadyRegistered,
+            epochID: epochID,
+            meteringProtocolVersion: 2,
+            snapshot: snapshot,
+            epochStatus: .paused
+        )
+        XCTAssertEqual(
+            MeteringEpochDelivery.registrationDisposition(
+                data: try encoded(paused),
+                statusCode: 200
+            ),
+            .registered(paused),
+            "a paused epoch is still the exact v2 identity the backend registered"
+        )
+
+        for response in [
             EpochRegistrationResponseDTO(
                 status: .registered,
                 epochID: epochID,
@@ -2174,27 +2190,17 @@ final class MeteringEpochDeliveryTests: XCTestCase {
                 epochStatus: .active
             ),
             EpochRegistrationResponseDTO(
-                status: .alreadyRegistered,
-                epochID: epochID,
-                meteringProtocolVersion: 2,
-                snapshot: snapshot,
-                epochStatus: .paused
-            ),
-            EpochRegistrationResponseDTO(
                 status: .registered,
                 epochID: epochID,
                 meteringProtocolVersion: 2,
                 snapshot: snapshot,
                 epochStatus: nil
             )
-        ]
-
-        for response in responses {
-            let disposition = MeteringEpochDelivery.registrationDisposition(
+        ] {
+            guard case .terminal = MeteringEpochDelivery.registrationDisposition(
                 data: try encoded(response),
                 statusCode: 200
-            )
-            guard case .terminal = disposition else {
+            ) else {
                 return XCTFail("unsafe registration response was treated as success: \(response)")
             }
         }
@@ -2238,6 +2244,24 @@ final class MeteringEpochDeliveryTests: XCTestCase {
                 return XCTFail("paused activation response was acknowledged")
             }
         }
+    }
+
+    func testPausedActivationPreservesV2IdentityAndReportsPausedLifecycle() throws {
+        let response = EpochActivationResponseDTO(
+            status: .paused,
+            epochID: epochID,
+            epochStatus: .paused,
+            meteringProtocolVersion: 2,
+            snapshot: makeSnapshot(counted: false, warning: nil)
+        )
+
+        XCTAssertEqual(
+            MeteringEpochDelivery.activationDisposition(
+                data: try encoded(response),
+                statusCode: 200
+            ),
+            .terminal(code: "epoch_paused")
+        )
     }
 
     func testFirstActivationAcknowledgesExhaustedEpoch() throws {

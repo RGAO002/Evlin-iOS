@@ -798,6 +798,41 @@ final class EarnedMeteringCallbackTests: XCTestCase {
                       "expired parked entry must be pruned")
     }
 
+    func testActivatingRouteFoldsBurstIntoOneMonotonicDeferredHighWater() throws {
+        let fixture = try CallbackFixture.active()
+        defer { fixture.cleanup() }
+        let thresholds = stride(from: 5, through: 180, by: 5).map { $0 }
+        try fixture.mutate { state in
+            state.routes[fixture.routeID]?.lifecycle = .planned
+            state.routes[fixture.routeID]?.plannedEvents = thresholds.map {
+                MeteringEventPlan(
+                    eventName: MeteringRouteNamespace.eventName(
+                        routeID: fixture.routeID,
+                        thresholdMinutes: $0
+                    ),
+                    thresholdMinutes: $0
+                )
+            }
+            state.activeRouteID = nil
+            state.activeEpochID = nil
+            state.activeGenerationID = nil
+        }
+
+        for threshold in thresholds {
+            XCTAssertEqual(
+                try fixture.callbackHandler().handle(
+                    fixture.callback(threshold: threshold),
+                    expectedOwnerChildDeviceID: fixture.owner
+                ),
+                .discarded(reason: "deferred_pending_activation")
+            )
+        }
+
+        let parked = try XCTUnwrap(fixture.store.read().deferredCallbacks.values.first)
+        XCTAssertEqual(try fixture.store.read().deferredCallbacks.count, 1)
+        XCTAssertEqual(parked.thresholdMinutes, 180)
+    }
+
     func testPriorDayTombstoneIsResolvedAndHasZeroEffects() throws {
         let fixture = try CallbackFixture.active(usageDate: "2026-07-17")
         defer { fixture.cleanup() }
@@ -864,6 +899,21 @@ final class EarnedMeteringCallbackTests: XCTestCase {
         )
         XCTAssertEqual(outcome, .discarded(reason: "unregistered_route_not_candidate"))
         XCTAssertEqual(try Data(contentsOf: handoffFixture.storeURL), before)
+    }
+
+    func testPreparingHandoffKeepsExactPriorAuthorityCountable() throws {
+        let fixture = try CallbackFixture.dualV2(phase: .preparing)
+        defer { fixture.cleanup() }
+
+        let outcome = try fixture.callbackHandler().handle(
+            fixture.callback(threshold: 5),
+            expectedOwnerChildDeviceID: fixture.owner
+        )
+
+        guard case .queued = outcome else {
+            return XCTFail("make-before-break requires the exact prior route to remain authoritative")
+        }
+        XCTAssertEqual(try fixture.store.read().sampleWork.count, 1)
     }
 
     func testReopenedPausedOldRouteIsByteIdenticalAndQueuesNothing() throws {
@@ -1083,11 +1133,10 @@ final class EarnedMeteringCallbackTests: XCTestCase {
         }
     }
 
-    func testResumeBoundaryRejectsUnregisteredPreparingAndClosedRoutesByteIdentically() throws {
+    func testResumeBoundaryRejectsPreparingAndClosedPriorRoutesByteIdentically() throws {
         let cases: [(String, V2RouteHandoffPhase, Bool)] = [
             ("preparing-prior", .preparing, false),
-            ("closed-prior", .cutoverReady, false),
-            ("unregistered-candidate", .dualV2, true)
+            ("closed-prior", .cutoverReady, false)
         ]
         for (label, phase, useCandidate) in cases {
             let fixture = try CallbackFixture.dualV2(phase: phase)
@@ -1362,6 +1411,152 @@ final class EarnedMeteringCallbackTests: XCTestCase {
         )
 
         guard case .queued = candidateOutcome else { return XCTFail("candidate must remain countable") }
+    }
+
+    func testCutoverReadyAcceptsPriorCallbackObservedBeforeInputClosure() throws {
+        let fixture = try CallbackFixture.dualV2(phase: .cutoverReady)
+        defer { fixture.cleanup() }
+        try fixture.mutate { state in
+            state.v2RouteHandoff?.priorRouteInputClosedAt =
+                fixture.start.addingTimeInterval(600)
+        }
+
+        let outcome = try fixture.callbackHandler().handle(
+            fixture.callback(
+                threshold: 5,
+                observedAt: fixture.start.addingTimeInterval(300)
+            ),
+            expectedOwnerChildDeviceID: fixture.owner
+        )
+
+        guard case .queued = outcome else {
+            return XCTFail("delivery time cannot invalidate usage observed before the durable barrier")
+        }
+        let state = try fixture.store.read()
+        XCTAssertEqual(state.v2RouteHandoff?.phase, .cutoverReady)
+        XCTAssertEqual(state.sampleWork.values.first?.routeID, fixture.candidateRouteID)
+        XCTAssertEqual(
+            state.sampleWork.values.first?.authorization,
+            .waitingForRegistration
+        )
+    }
+
+    func testExactDualV2CandidateCallbackOverridesStaleCoverageSnapshot() throws {
+        let fixture = try CallbackFixture.dualV2()
+        defer { fixture.cleanup() }
+        try fixture.mutate { state in
+            state.coverage = MonitorCoverageState(
+                ownerChildDeviceID: fixture.owner,
+                requiredFromUsageDate: "2026-07-18",
+                requiredThroughUsageDate: "2026-07-18",
+                readyThroughUsageDate: nil,
+                status: .coverageExhausted,
+                refreshedAt: fixture.start,
+                errorCode: "stale_test_snapshot"
+            )
+        }
+
+        let outcome = try fixture.callbackHandler().handle(
+            fixture.candidateCallback(threshold: 5),
+            expectedOwnerChildDeviceID: fixture.owner
+        )
+
+        guard case .queued = outcome else {
+            return XCTFail("the daemon callback itself proves this exact candidate is physically armed")
+        }
+    }
+
+    func testResumeBoundaryBeforeRegistrationPersistsHighWaterExactlyOnce() throws {
+        let fixture = try CallbackFixture.dualV2()
+        defer { fixture.cleanup() }
+        try fixture.mutate { state in
+            state.epochs[fixture.candidateEpochID]?.resumeBoundaryPending = true
+        }
+
+        let first = try fixture.callbackHandler().handle(
+            fixture.candidateCallback(threshold: 5),
+            expectedOwnerChildDeviceID: fixture.owner
+        )
+        let second = try fixture.callbackHandler().handle(
+            fixture.candidateCallback(threshold: 5),
+            expectedOwnerChildDeviceID: fixture.owner
+        )
+
+        XCTAssertEqual(first, .discarded(reason: "resume_boundary"))
+        XCTAssertNotEqual(second, .discarded(reason: "resume_boundary_unregistered"))
+        let epoch = try fixture.store.read().epochs[fixture.candidateEpochID]
+        XCTAssertEqual(epoch?.lastRawThresholdMinutes, 5)
+        XCTAssertEqual(epoch?.excludedWhilePausedMinutes, 5)
+        XCTAssertEqual(epoch?.resumeBoundaryPending, false)
+    }
+
+    func testDualV2ConsumedCandidateIsReplacedWithoutDroppingPriorAuthority() throws {
+        let fixture = try CallbackFixture.dualV2()
+        defer { fixture.cleanup() }
+        let originalHandoffID = try XCTUnwrap(
+            fixture.store.read().v2RouteHandoff?.handoffID
+        )
+        try fixture.mutate { state in
+            state.installWork[fixture.candidateInstallID]?.retry.lastErrorCode =
+                "physical_events_consumed_too_early"
+        }
+
+        XCTAssertTrue(
+            try fixture.store.repairLadderBaseInvariantIfNeeded(
+                owner: fixture.owner,
+                now: fixture.start.addingTimeInterval(60)
+            )
+        )
+
+        let state = try fixture.store.read()
+        let handoff = try XCTUnwrap(state.v2RouteHandoff)
+        XCTAssertEqual(state.activeRouteID, fixture.routeID)
+        XCTAssertEqual(handoff.fromRouteID, fixture.routeID)
+        XCTAssertNotEqual(handoff.toRouteID, fixture.candidateRouteID)
+        XCTAssertNotEqual(handoff.handoffID, originalHandoffID)
+        XCTAssertEqual(handoff.phase, .preparing)
+        XCTAssertEqual(state.routes[fixture.candidateRouteID]?.lifecycle, .tombstoned)
+        XCTAssertEqual(
+            state.installWork.values.first(where: {
+                $0.routeID == handoff.toRouteID
+            })?.phase,
+            .pendingStart
+        )
+    }
+
+    func testConsumedCandidateReplacementIsStableAcrossRecoveryRestart() throws {
+        let fixture = try CallbackFixture.dualV2()
+        defer { fixture.cleanup() }
+        try fixture.mutate { state in
+            state.installWork[fixture.candidateInstallID]?.retry.lastErrorCode =
+                "physical_events_consumed_too_early"
+        }
+
+        XCTAssertTrue(
+            try fixture.store.repairLadderBaseInvariantIfNeeded(
+                owner: fixture.owner,
+                now: fixture.start.addingTimeInterval(60)
+            )
+        )
+        let replaced = try fixture.store.read()
+        let replacement = try XCTUnwrap(replaced.v2RouteHandoff)
+
+        XCTAssertFalse(
+            try fixture.store.repairLadderBaseInvariantIfNeeded(
+                owner: fixture.owner,
+                now: fixture.start.addingTimeInterval(120)
+            )
+        )
+        let replayed = try fixture.store.read()
+        XCTAssertEqual(replayed.v2RouteHandoff, replacement)
+        XCTAssertEqual(
+            replayed.routes.values.filter {
+                $0.lifecycle == .planned
+                    && $0.routeID != fixture.candidateRouteID
+                    && $0.routeID != fixture.routeID
+            }.map(\.routeID),
+            [replacement.toRouteID]
+        )
     }
 
     func testPriorCallbackLosingRealRootLockBarrierIsDiscardedWithoutWork() throws {
