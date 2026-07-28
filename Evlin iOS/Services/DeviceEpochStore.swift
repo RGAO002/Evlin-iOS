@@ -5828,7 +5828,7 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         _ handoff: V2RouteHandoff,
         in state: DeviceEpochStoreState
     ) -> Bool {
-        guard handoff.phase == .preparing,
+        guard handoff.phase != .committed,
               state.activeGenerationID == handoff.fromGenerationID,
               state.activeEpochID == handoff.fromEpochID,
               state.activeRouteID == handoff.fromRouteID,
@@ -5843,13 +5843,19 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
               state.tombstones[handoff.toRouteID] != nil
         else { return false }
         let installs = state.installWork.values.filter { $0.routeID == handoff.toRouteID }
-        guard installs.count == 1,
-              installs[0].phase == .stopped,
-              installs[0].retry.terminal == .superseded,
-              installs[0].retry.lastErrorCode == "route_superseded"
-        else { return false }
+        guard installs.count == 1 else { return false }
+        let install = installs[0]
+        let wasNeverInstalled = install.phase == .stopped
+            && install.retry.terminal == .superseded
+            && install.retry.lastErrorCode == "route_superseded"
+            && state.tombstones[handoff.toRouteID]?.stopAcknowledgedAt != nil
+        let stopIsDurablyPending = install.phase == .pendingStop
+            && state.tombstones[handoff.toRouteID]?.stopAcknowledgedAt == nil
+        guard wasNeverInstalled || stopIsDurablyPending else { return false }
         return !state.registrationWork.values.contains {
-            $0.routeID == handoff.toRouteID && $0.retry.terminal == .succeeded
+            $0.routeID == handoff.toRouteID && $0.retry.terminal == .pending
+        } && !state.activationWork.values.contains {
+            $0.routeID == handoff.toRouteID && $0.retry.terminal == .pending
         } && !state.activationWork.values.contains {
             $0.routeID == handoff.toRouteID && $0.retry.terminal == .succeeded
         }

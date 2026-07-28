@@ -849,7 +849,7 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
               priorEpoch.usageDate < runtime.usageDate,
               let handoff = state.v2RouteHandoff,
               handoff.ownerChildDeviceID == owner,
-              handoff.phase == .preparing,
+              handoff.phase != .committed,
               handoff.fromRouteID == priorRouteID,
               handoff.fromEpochID == priorEpochID,
               var targetRoute = state.routes[handoff.toRouteID],
@@ -857,18 +857,13 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
               targetRoute.ownerChildDeviceID == owner,
               targetRoute.epochID == targetEpoch.epochID,
               targetRoute.usageDate == runtime.usageDate,
-              targetRoute.lifecycle == .planned,
+              targetRoute.lifecycle == .planned
+                  || targetRoute.lifecycle == .active,
               targetEpoch.status == .active,
               targetEpoch.retiredAt == nil,
               !targetEpoch.resumeBoundaryPending,
               let installKey = uniqueInstallKey(for: targetRoute.routeID, in: state),
               let install = state.installWork[installKey],
-              install.phase == .pendingStart,
-              install.retry.terminal == .superseded,
-              install.retry.lastErrorCode == "route_superseded",
-              !state.registrationWork.values.contains(where: {
-                  $0.routeID == targetRoute.routeID && $0.retry.terminal == .succeeded
-              }),
               !state.activationWork.values.contains(where: {
                   $0.routeID == targetRoute.routeID && $0.retry.terminal == .succeeded
               }),
@@ -884,6 +879,9 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
         state.epochs[targetEpoch.epochID] = targetEpoch
         targetRoute.lifecycle = .tombstoned
         state.routes[targetRoute.routeID] = targetRoute
+        let wasNeverInstalled = install.phase == .pendingStart
+            && install.retry.terminal == .superseded
+            && install.retry.lastErrorCode == "route_superseded"
         state.tombstones[targetRoute.routeID] = MeteringRouteTombstone(
             routeID: targetRoute.routeID,
             activityName: targetRoute.activityName,
@@ -893,11 +891,29 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
             epochID: targetEpoch.epochID,
             generationID: targetRoute.generationID,
             canonicalDayEnd: dayEnd,
-            stopAcknowledgedAt: clock.now,
+            stopAcknowledgedAt: wasNeverInstalled ? clock.now : nil,
             referencedWorkIDs: [],
             retainedUntil: nil
         )
-        state.installWork[installKey]?.phase = .stopped
+        state.installWork[installKey]?.claim = nil
+        state.installWork[installKey]?.phase =
+            wasNeverInstalled ? .stopped : .pendingStop
+        for (key, var work) in state.registrationWork
+        where work.routeID == targetRoute.routeID
+            && work.retry.terminal == .pending {
+            work.claim = nil
+            work.retry.terminal = .superseded
+            work.retry.lastErrorCode = "cross_day_resume_superseded"
+            state.registrationWork[key] = work
+        }
+        for (key, var work) in state.activationWork
+        where work.routeID == targetRoute.routeID
+            && work.retry.terminal == .pending {
+            work.claim = nil
+            work.retry.terminal = .superseded
+            work.retry.lastErrorCode = "cross_day_resume_superseded"
+            state.activationWork[key] = work
+        }
         state.v2RouteHandoff = nil
     }
 

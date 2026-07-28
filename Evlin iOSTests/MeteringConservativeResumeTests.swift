@@ -388,6 +388,110 @@ final class MeteringConservativeResumeTests: XCTestCase {
         })
     }
 
+    func testPausedPriorDayReplacesUncommittedActiveCandidateBeforeResume() throws {
+        for phase in [V2RouteHandoffPhase.dualV2, .cutoverReady] {
+            let fixture = try ResumeFixture(owner: owner, start: start)
+            defer { fixture.cleanup() }
+            let pausedAt = start.addingTimeInterval(3_600)
+            let nextDay = start.addingTimeInterval(86_400)
+            let currentRuntime = EarnedTimeRuntime(
+                usageDate: "2026-07-18",
+                timezone: "America/New_York",
+                policyRevision: "current-day",
+                dailyPoolMinutes: 180,
+                deviceCapMinutes: 120,
+                remainingMinutes: 120,
+                estimatedMinutes: 0
+            )
+            try makeDriver(fixture, clock: ResumeClock(now: pausedAt))
+                .reconcileUsageGate(
+                    ownerChildDeviceID: owner,
+                    allowed: false,
+                    runtime: resumeRuntime()
+                )
+            let generationID = try fixture.seedDesiredGeneration(
+                usageDate: currentRuntime.usageDate,
+                policyRevision: currentRuntime.policyRevision,
+                poolMinutes: currentRuntime.dailyPoolMinutes,
+                capMinutes: currentRuntime.deviceCapMinutes,
+                now: nextDay
+            )
+            let staleRoute = try XCTUnwrap(
+                try fixture.store.read().routes.values.first {
+                    $0.generationID == generationID
+                        && $0.usageDate == currentRuntime.usageDate
+                        && $0.lifecycle == .planned
+                }
+            )
+            try fixture.store.transaction(expectedOwner: owner) { state in
+                state.routes[staleRoute.routeID]?.lifecycle = .active
+                let installKey = try XCTUnwrap(
+                    state.installWork.first {
+                        $0.value.routeID == staleRoute.routeID
+                    }?.key
+                )
+                state.installWork[installKey]?.phase = .dualActive
+                state.installWork[installKey]?.retry.terminal = .succeeded
+                for (key, var work) in state.registrationWork
+                where work.routeID == staleRoute.routeID {
+                    work.retry.terminal = .succeeded
+                    state.registrationWork[key] = work
+                }
+                state.v2RouteHandoff = V2RouteHandoff(
+                    handoffID: UUID(),
+                    ownerChildDeviceID: owner,
+                    fromGenerationID: try XCTUnwrap(state.activeGenerationID),
+                    fromEpochID: fixture.oldEpochID,
+                    fromRouteID: fixture.oldRouteID,
+                    toGenerationID: generationID,
+                    toEpochID: staleRoute.epochID,
+                    toRouteID: staleRoute.routeID,
+                    phase: phase,
+                    priorRouteInputClosedAt:
+                        phase == .cutoverReady ? nextDay : nil,
+                    registrationAcknowledgedAt:
+                        phase == .cutoverReady ? nextDay : nil,
+                    activationAcknowledgedAt: nil,
+                    priorStopAcknowledgedAt: nil,
+                    createdAt: nextDay
+                )
+            }
+
+            try makeDriver(
+                fixture,
+                clock: ResumeClock(now: nextDay.addingTimeInterval(1))
+            ).reconcileUsageGate(
+                ownerChildDeviceID: owner,
+                allowed: true,
+                runtime: currentRuntime
+            )
+
+            let state = try fixture.store.read()
+            XCTAssertNil(state.v2RouteHandoff, "phase \(phase)")
+            XCTAssertEqual(
+                state.routes[staleRoute.routeID]?.lifecycle,
+                .tombstoned,
+                "phase \(phase)"
+            )
+            XCTAssertEqual(
+                state.epochs[staleRoute.epochID]?.retireReason,
+                .activationSuperseded,
+                "phase \(phase)"
+            )
+            XCTAssertNotNil(
+                state.routes.values.first {
+                    $0.routeID != staleRoute.routeID
+                        && $0.generationID == generationID
+                        && $0.usageDate == currentRuntime.usageDate
+                        && $0.lifecycle == .planned
+                        && state.epochs[$0.epochID]?.resumeBoundaryPending
+                            == true
+                },
+                "phase \(phase)"
+            )
+        }
+    }
+
     func testRegistrationObservesClosedGateAndPreservesPriorRouteForFreshResume() async throws {
         let fixture = try ResumeFixture(owner: owner, start: start)
         defer { fixture.cleanup() }
