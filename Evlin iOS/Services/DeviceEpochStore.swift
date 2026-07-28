@@ -3928,13 +3928,20 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
             )
             }
         }
+        var consumedCandidateWasAbandoned = false
         if try transaction(expectedOwner: owner, { state in
-            state.replaceConsumedHandoffCandidateIfNeeded(
+            let recovered = state.replaceConsumedHandoffCandidateIfNeeded(
                 owner: owner,
                 now: now
             )
+            if recovered {
+                consumedCandidateWasAbandoned = state.v2RouteHandoff == nil
+            }
+            return recovered
         }) {
-            verdict = "replacement_consumed_handoff_candidate"
+            verdict = consumedCandidateWasAbandoned
+                ? "consumed_candidate_abandoned"
+                : "replacement_consumed_handoff_candidate"
             return true
         }
 

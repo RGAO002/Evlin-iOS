@@ -1562,6 +1562,9 @@ final class EarnedMeteringCallbackTests: XCTestCase {
     func testSecondConsumedCandidateAbandonsHandoffWithoutMintingThirdIdentity() throws {
         let fixture = try CallbackFixture.dualV2()
         defer { fixture.cleanup() }
+        var recordedEvents: [ScreenTimeEvent] = []
+        MeteringFlightRecorder.testSink = { recordedEvents.append($0) }
+        defer { MeteringFlightRecorder.testSink = nil }
         try fixture.mutate { state in
             state.installWork[fixture.candidateInstallID]?.retry.lastErrorCode =
                 "physical_events_consumed_too_early"
@@ -1619,6 +1622,10 @@ final class EarnedMeteringCallbackTests: XCTestCase {
         XCTAssertEqual(
             abandoned.installWork[replacementInstallID]?.phase,
             .pendingStop
+        )
+        XCTAssertEqual(
+            recordedEvents.last(where: { $0.kind == .meteringRepair })?.reason,
+            "consumed_candidate_abandoned"
         )
     }
 
