@@ -239,19 +239,8 @@ final class MeteringIdentityCleanupTests: XCTestCase {
 
         try await driver.recover(ownerChildDeviceID: newOwner)
 
-        let recovered = try XCTUnwrap(store.read().identityCleanupWork)
-        XCTAssertEqual(recovered.retry.terminal, .succeeded)
-        XCTAssertTrue(recovered.ownerMirrorTransitionAcknowledged)
-        XCTAssertEqual(
-            recovered.terminalizedWorkIDs,
-            Set(recovered.oldRegistrationWorkIDs
-                + recovered.oldActivationWorkIDs
-                + recovered.oldSampleWorkIDs
-                + recovered.oldInstallWorkIDs)
-        )
-        XCTAssertEqual(recovered.purgedFallbackKeys, Set(recovered.oldFallbackKeys))
-        XCTAssertEqual(recovered.releasedShieldOperationIDs, Set(recovered.oldShieldOperationIDs))
-        XCTAssertEqual(recovered.stopAcknowledgedActivityNames, Set(activityNames))
+        XCTAssertNil(try store.read().identityCleanupWork)
+        XCTAssertEqual(try store.read().ownerChildDeviceID, newOwner)
         XCTAssertEqual(purges.count, 1)
         XCTAssertEqual(purges.first?.0, oldOwner)
         XCTAssertEqual(purges.first?.1, ["old-retry"])
@@ -259,7 +248,6 @@ final class MeteringIdentityCleanupTests: XCTestCase {
         XCTAssertEqual(releases.map(\.1), [oldOwner])
         XCTAssertEqual(Set(center.stoppedNames), Set(activityNames))
 
-        try await driver.recover(ownerChildDeviceID: newOwner)
         XCTAssertEqual(try store.read().ownerChildDeviceID, newOwner)
         XCTAssertNil(try store.read().identityCleanupWork)
         XCTAssertEqual(purges.count, 1)

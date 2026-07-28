@@ -89,22 +89,31 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
     }
 
     private func performRecovery(ownerChildDeviceID owner: UUID) async throws {
-        if try recoverIdentityCleanupIfPresent() { return }
-        guard store.isCurrentOwner(owner) else { return }
-        _ = try store.reconcileEpochStartsFromSuccessfulRegistrations(owner: owner)
-        try cancelBackwardPreparingHandoffIfNeeded(owner: owner)
-        try yieldSupersededCanonicalRolloverIfNeeded(owner: owner)
-        try markElapsedActivePriorAbsentIfNeeded(owner: owner)
-        try prepareCanonicalRolloverIfNeeded(owner: owner)
-        try detachCommittedHandoffForPreparedRolloverIfNeeded(owner: owner)
+        // Identity cleanup replaces the persisted root with an empty root for
+        // the new owner. Continue the same pass after that handoff instead of
+        // returning and waiting for an unrelated future wake-up to arm the
+        // first route. The cleanup method can require two passes itself:
+        // one to mark the envelope terminal and one to finalize the root.
+        var effectiveOwner = owner
+        while try recoverIdentityCleanupIfPresent() {
+            guard let currentOwner = try store.read().ownerChildDeviceID else { return }
+            effectiveOwner = currentOwner
+        }
+        guard store.isCurrentOwner(effectiveOwner) else { return }
+        _ = try store.reconcileEpochStartsFromSuccessfulRegistrations(owner: effectiveOwner)
+        try cancelBackwardPreparingHandoffIfNeeded(owner: effectiveOwner)
+        try yieldSupersededCanonicalRolloverIfNeeded(owner: effectiveOwner)
+        try markElapsedActivePriorAbsentIfNeeded(owner: effectiveOwner)
+        try prepareCanonicalRolloverIfNeeded(owner: effectiveOwner)
+        try detachCommittedHandoffForPreparedRolloverIfNeeded(owner: effectiveOwner)
         // Detached committed predecessors are cleanup debt, not rollover
         // authority. Retry their named stops even when the rollover network
         // leg below remains pending or fails and returns early.
-        try stopAbandonedCandidates(owner: owner)
+        try stopAbandonedCandidates(owner: effectiveOwner)
         do {
-            if try await recoverCanonicalRolloverIfPresent(owner: owner) {
+            if try await recoverCanonicalRolloverIfPresent(owner: effectiveOwner) {
                 if try store.read().rolloverEffectsWork?.activationAcknowledged == true {
-                    try reconcileCoverage(owner: owner)
+                    try reconcileCoverage(owner: effectiveOwner)
                 }
                 return
             }
@@ -123,56 +132,56 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
             throw error
         }
 
-        try collectCompletedHandoff(owner: owner)
-        try recoverPersistedInitialAuthoritativeBaseConflict(owner: owner)
-        try recoverLegacyInitialCorrectionReason(owner: owner)
+        try collectCompletedHandoff(owner: effectiveOwner)
+        try recoverPersistedInitialAuthoritativeBaseConflict(owner: effectiveOwner)
+        try recoverLegacyInitialCorrectionReason(owner: effectiveOwner)
         _ = try store.recoverLegacyRetiredPriorAuthoritativeCorrection(
-            owner: owner,
+            owner: effectiveOwner,
             now: clock.now
         )
         _ = try store.recoverLegacySameKeyCorrectionReasonMismatch(
-            owner: owner,
+            owner: effectiveOwner,
             now: clock.now
         )
         _ = try store.prepareCurrentDayInstallStartMigrationIfNeeded(
-            owner: owner,
+            owner: effectiveOwner,
             now: clock.now
         )
         // BUG 1 self-heal, before anything arms: a device already carrying a
         // base that outgrew its ladder must be re-cut here, otherwise the
         // installer below faithfully re-arms the over-running rungs.
-        _ = try store.repairLadderBaseInvariantIfNeeded(owner: owner, now: clock.now)
-        try prepareReplacementIfNeeded(owner: owner)
-        await delivery.drain(owner: owner)
-        _ = try installer.reconcile(ownerChildDeviceID: owner)
-        _ = try store.finalizeCurrentDayInstallStartMigrationIfNeeded(owner: owner)
-        try promoteVerifiedCandidate(owner: owner)
-        await delivery.drain(owner: owner)
-        try recoverTerminalInitialActivation(owner: owner)
-        try advanceReplacementBarrier(owner: owner)
-        await delivery.drain(owner: owner)
-        try recoverPhysicalIdentityRequired(owner: owner)
-        await delivery.drain(owner: owner)
-        try advanceReplacementBarrier(owner: owner)
-        await delivery.drain(owner: owner)
-        try promoteAcknowledgedActivation(owner: owner)
+        _ = try store.repairLadderBaseInvariantIfNeeded(owner: effectiveOwner, now: clock.now)
+        try prepareReplacementIfNeeded(owner: effectiveOwner)
+        await delivery.drain(owner: effectiveOwner)
+        _ = try installer.reconcile(ownerChildDeviceID: effectiveOwner)
+        _ = try store.finalizeCurrentDayInstallStartMigrationIfNeeded(owner: effectiveOwner)
+        try promoteVerifiedCandidate(owner: effectiveOwner)
+        await delivery.drain(owner: effectiveOwner)
+        try recoverTerminalInitialActivation(owner: effectiveOwner)
+        try advanceReplacementBarrier(owner: effectiveOwner)
+        await delivery.drain(owner: effectiveOwner)
+        try recoverPhysicalIdentityRequired(owner: effectiveOwner)
+        await delivery.drain(owner: effectiveOwner)
+        try advanceReplacementBarrier(owner: effectiveOwner)
+        await delivery.drain(owner: effectiveOwner)
+        try promoteAcknowledgedActivation(owner: effectiveOwner)
         // Routes that just reached .active may hold callbacks Apple delivered
         // within a second of arming, before activation could finish. Credit them
         // now and flush the resulting samples (FIX-A birth race).
-        if !(try store.replayDeferredCallbacks(owner: owner, now: clock.now)).isEmpty {
-            await delivery.drain(owner: owner)
+        if !(try store.replayDeferredCallbacks(owner: effectiveOwner, now: clock.now)).isEmpty {
+            await delivery.drain(owner: effectiveOwner)
         }
-        try abandonTerminalConservativeCandidate(owner: owner)
-        try abandonTerminalSupersededCandidate(owner: owner)
-        try prepareReplacementIfNeeded(owner: owner)
-        try stopRetiredLane(owner: owner)
+        try abandonTerminalConservativeCandidate(owner: effectiveOwner)
+        try abandonTerminalSupersededCandidate(owner: effectiveOwner)
+        try prepareReplacementIfNeeded(owner: effectiveOwner)
+        try stopRetiredLane(owner: effectiveOwner)
         // A candidate may have been tombstoned by the recovery steps above.
         // Keep this end-of-pass sweep in addition to the pre-rollover sweep:
         // the former handles newly-created debt, the latter prevents existing
         // cleanup debt from being starved by a failing rollover network leg.
-        try stopAbandonedCandidates(owner: owner)
-        try stopAuthoritativeBaseRejectedCandidates(owner: owner)
-        try reconcileCoverage(owner: owner)
+        try stopAbandonedCandidates(owner: effectiveOwner)
+        try stopAuthoritativeBaseRejectedCandidates(owner: effectiveOwner)
+        try reconcileCoverage(owner: effectiveOwner)
     }
 
     private func cancelBackwardPreparingHandoffIfNeeded(owner: UUID) throws {
