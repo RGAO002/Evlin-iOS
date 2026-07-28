@@ -504,7 +504,7 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
                 return .terminal(code: "protocol_mismatch")
             }
             if response.status == .paused, response.epochStatus == .paused {
-                return .terminal(code: "epoch_paused")
+                return .retry(code: "epoch_paused")
             }
             let firstActivationStatusAllowed = response.status == .activated
                 && (response.epochStatus == .active || response.epochStatus == .exhausted)
@@ -915,14 +915,21 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
             }
             guard hasNetworkRegistrationAuthorization(work, owner: owner, state: state),
                   let route = state.routes[work.routeID],
-                  let epoch = state.epochs[work.epochID],
+                  var epoch = state.epochs[work.epochID],
                   work.request.usageDate == route.usageDate,
                   work.request.usageDate == epoch.usageDate,
-                  epoch.status == .active,
+                  epoch.status == .active || epoch.status == .paused,
                   epoch.authoritativeBaseConflict == nil,
                   response.epochID == work.epochID,
+                  let responseStatus = response.epochStatus,
+                  let acknowledgedStatus = DeviceDailyEpochStatus(
+                      rawValue: responseStatus.rawValue
+                  ),
+                  acknowledgedStatus != .retired,
                   snapshotMatches(response.snapshot, owner: owner, usageDate: route.usageDate)
             else { return }
+            epoch.status = acknowledgedStatus
+            state.epochs[work.epochID] = epoch
             work.retry = completedRetry(from: work.retry, code: nil, terminal: .succeeded)
             work.claim = nil
             state.registrationWork[key] = work
@@ -933,7 +940,16 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
                     && sampleWork.epochID == work.epochID
                     && sampleWork.routeID == route.routeID
                     && sampleWork.authorization == .waitingForRegistration {
-                sampleWork.authorization = .v2Deliverable
+                if acknowledgedStatus == .paused {
+                    sampleWork.retry = completedRetry(
+                        from: sampleWork.retry,
+                        code: "accounting_paused",
+                        terminal: .rejected
+                    )
+                    sampleWork.claim = nil
+                } else {
+                    sampleWork.authorization = .v2Deliverable
+                }
                 state.sampleWork[sampleKey] = sampleWork
             }
             let matchingInstallKeys = state.installWork.compactMap { installKey, installWork in
@@ -961,11 +977,13 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
             ratchet.registeredV2At = clock.now
             ratchet.localSelection = selection
             state.ratchets[owner] = ratchet
-            enqueueExactReplacementActivationAfterRegistration(
-                registration: work,
-                owner: owner,
-                state: &state
-            )
+            if acknowledgedStatus != .paused {
+                enqueueExactReplacementActivationAfterRegistration(
+                    registration: work,
+                    owner: owner,
+                    state: &state
+                )
+            }
         }
     }
 

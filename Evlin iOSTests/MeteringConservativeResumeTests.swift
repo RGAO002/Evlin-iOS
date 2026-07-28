@@ -492,6 +492,114 @@ final class MeteringConservativeResumeTests: XCTestCase {
         }
     }
 
+    func testPausedPriorDayPreservesCutoverCandidateWhenActivationResponseMayBeLost() throws {
+        let fixture = try ResumeFixture(owner: owner, start: start)
+        defer { fixture.cleanup() }
+        let pausedAt = start.addingTimeInterval(3_600)
+        let nextDay = start.addingTimeInterval(86_400)
+        let currentRuntime = EarnedTimeRuntime(
+            usageDate: "2026-07-18",
+            timezone: "America/New_York",
+            policyRevision: "current-day",
+            dailyPoolMinutes: 180,
+            deviceCapMinutes: 120,
+            remainingMinutes: 120,
+            estimatedMinutes: 0
+        )
+        try makeDriver(fixture, clock: ResumeClock(now: pausedAt))
+            .reconcileUsageGate(
+                ownerChildDeviceID: owner,
+                allowed: false,
+                runtime: resumeRuntime()
+            )
+        let generationID = try fixture.seedDesiredGeneration(
+            usageDate: currentRuntime.usageDate,
+            policyRevision: currentRuntime.policyRevision,
+            poolMinutes: currentRuntime.dailyPoolMinutes,
+            capMinutes: currentRuntime.deviceCapMinutes,
+            now: nextDay
+        )
+        let candidate = try XCTUnwrap(
+            try fixture.store.read().routes.values.first {
+                $0.generationID == generationID
+                    && $0.usageDate == currentRuntime.usageDate
+                    && $0.lifecycle == .planned
+            }
+        )
+        try fixture.store.transaction(expectedOwner: owner) { state in
+            state.routes[candidate.routeID]?.lifecycle = .active
+            let installKey = try XCTUnwrap(
+                state.installWork.first {
+                    $0.value.routeID == candidate.routeID
+                }?.key
+            )
+            state.installWork[installKey]?.phase = .dualActive
+            state.installWork[installKey]?.retry.terminal = .succeeded
+            for (key, var work) in state.registrationWork
+            where work.routeID == candidate.routeID {
+                work.retry.terminal = .succeeded
+                state.registrationWork[key] = work
+            }
+            let activationID = UUID()
+            state.activationWork[activationID] = EpochActivationWork(
+                workID: activationID,
+                ownerChildDeviceID: owner,
+                epochID: candidate.epochID,
+                routeID: candidate.routeID,
+                request: EpochActivationRequestDTO(
+                    protocolVersion: 2,
+                    deviceID: owner,
+                    routeID: candidate.routeID,
+                    verifiedAt: nextDay
+                ),
+                claim: nil,
+                retry: MeteringRetryState(
+                    attemptCount: 1,
+                    nextAttemptAt: nextDay.addingTimeInterval(5),
+                    lastErrorCode: "network_connection_lost",
+                    terminal: .pending
+                ),
+                createdAt: nextDay
+            )
+            state.v2RouteHandoff = V2RouteHandoff(
+                handoffID: UUID(),
+                ownerChildDeviceID: owner,
+                fromGenerationID: try XCTUnwrap(state.activeGenerationID),
+                fromEpochID: fixture.oldEpochID,
+                fromRouteID: fixture.oldRouteID,
+                toGenerationID: generationID,
+                toEpochID: candidate.epochID,
+                toRouteID: candidate.routeID,
+                phase: .cutoverReady,
+                priorRouteInputClosedAt: nextDay,
+                registrationAcknowledgedAt: nextDay,
+                activationAcknowledgedAt: nil,
+                priorStopAcknowledgedAt: nil,
+                createdAt: nextDay
+            )
+        }
+
+        try makeDriver(
+            fixture,
+            clock: ResumeClock(now: nextDay.addingTimeInterval(1))
+        ).reconcileUsageGate(
+            ownerChildDeviceID: owner,
+            allowed: true,
+            runtime: currentRuntime
+        )
+
+        let state = try fixture.store.read()
+        XCTAssertEqual(state.v2RouteHandoff?.toRouteID, candidate.routeID)
+        XCTAssertEqual(state.routes[candidate.routeID]?.lifecycle, .active)
+        XCTAssertNil(state.epochs[candidate.epochID]?.retiredAt)
+        XCTAssertEqual(
+            state.activationWork.values.first {
+                $0.routeID == candidate.routeID
+            }?.retry.terminal,
+            .pending
+        )
+    }
+
     func testRegistrationObservesClosedGateAndPreservesPriorRouteForFreshResume() async throws {
         let fixture = try ResumeFixture(owner: owner, start: start)
         defer { fixture.cleanup() }
@@ -507,19 +615,49 @@ final class MeteringConservativeResumeTests: XCTestCase {
         XCTAssertEqual(state.activeRouteID, fixture.oldRouteID)
         XCTAssertEqual(state.routes[fixture.oldRouteID]?.lifecycle, .active)
         XCTAssertEqual(state.epochs[fixture.oldEpochID]?.status, .paused)
-        XCTAssertEqual(state.routes[candidate.routeID]?.lifecycle, .tombstoned)
-        XCTAssertEqual(state.epochs[candidate.epochID]?.retireReason, .gateResumeConservative)
-        XCTAssertNil(state.v2RouteHandoff)
+        XCTAssertEqual(state.routes[candidate.routeID]?.lifecycle, .active)
+        XCTAssertEqual(state.epochs[candidate.epochID]?.status, .paused)
+        XCTAssertNil(state.epochs[candidate.epochID]?.retiredAt)
+        XCTAssertEqual(state.v2RouteHandoff?.toRouteID, candidate.routeID)
+        XCTAssertEqual(
+            state.registrationWork.values.filter {
+                $0.routeID == candidate.routeID
+            }.count,
+            1
+        )
+        XCTAssertEqual(
+            state.registrationWork.values.first {
+                $0.routeID == candidate.routeID
+            }?.retry.terminal,
+            .succeeded
+        )
+        XCTAssertFalse(
+            state.activationWork.values.contains {
+                $0.routeID == candidate.routeID
+            }
+        )
 
         try makeDriver(fixture, clock: ResumeClock(now: clock.now.addingTimeInterval(10)))
             .reconcileUsageGate(ownerChildDeviceID: owner, allowed: true, runtime: runtime)
+        fixture.transport.results = [activationResult(epochID: candidate.epochID)]
+        try await makeDriver(
+            fixture,
+            clock: ResumeClock(now: clock.now.addingTimeInterval(11))
+        ).recover(ownerChildDeviceID: owner)
+
         state = try fixture.store.read()
-        let fresh = try XCTUnwrap(state.routes.values.first {
-            $0.routeID != fixture.oldRouteID
-                && $0.routeID != candidate.routeID
-                && state.epochs[$0.epochID]?.resumeBoundaryPending == true
-        })
-        XCTAssertNotEqual(fresh.epochID, candidate.epochID)
+        XCTAssertEqual(state.activeRouteID, candidate.routeID)
+        XCTAssertEqual(state.activeEpochID, candidate.epochID)
+        XCTAssertEqual(state.routes[candidate.routeID]?.lifecycle, .active)
+        XCTAssertEqual(state.epochs[candidate.epochID]?.status, .active)
+        XCTAssertEqual(
+            state.routes.values.filter {
+                $0.ownerChildDeviceID == owner
+                    && $0.usageDate == runtime.usageDate
+                    && $0.routeID != fixture.oldRouteID
+            }.map(\.routeID),
+            [candidate.routeID]
+        )
     }
 
     func testActivationObservesClosedGateAndPreservesPriorRouteForFreshResume() async throws {
@@ -530,19 +668,53 @@ final class MeteringConservativeResumeTests: XCTestCase {
         let candidate = try prepareCandidate(fixture, runtime: runtime, clock: clock)
         fixture.transport.results = [
             registrationResult(epochID: candidate.epochID),
-            (Data("{\"code\":\"epoch_paused\"}".utf8), httpResponse(statusCode: 409))
+            activationResult(
+                epochID: candidate.epochID,
+                status: .paused,
+                epochStatus: .paused
+            )
         ]
 
         try await makeDriver(fixture, clock: ResumeClock(now: clock.now.addingTimeInterval(5)))
             .recover(ownerChildDeviceID: owner)
 
-        let state = try fixture.store.read()
+        var state = try fixture.store.read()
         XCTAssertEqual(state.activeRouteID, fixture.oldRouteID)
         XCTAssertEqual(state.routes[fixture.oldRouteID]?.lifecycle, .active)
         XCTAssertEqual(state.epochs[fixture.oldEpochID]?.status, .paused)
-        XCTAssertEqual(state.routes[candidate.routeID]?.lifecycle, .tombstoned)
-        XCTAssertEqual(state.epochs[candidate.epochID]?.retireReason, .gateResumeConservative)
-        XCTAssertNil(state.v2RouteHandoff)
+        XCTAssertEqual(state.routes[candidate.routeID]?.lifecycle, .active)
+        XCTAssertNil(state.epochs[candidate.epochID]?.retiredAt)
+        XCTAssertEqual(state.v2RouteHandoff?.toRouteID, candidate.routeID)
+        XCTAssertEqual(
+            state.activationWork.values.first {
+                $0.routeID == candidate.routeID
+            }?.retry.terminal,
+            .pending
+        )
+
+        try makeDriver(fixture, clock: ResumeClock(now: clock.now.addingTimeInterval(10)))
+            .reconcileUsageGate(ownerChildDeviceID: owner, allowed: true, runtime: runtime)
+        fixture.transport.results = [activationResult(epochID: candidate.epochID)]
+        try await makeDriver(
+            fixture,
+            clock: ResumeClock(now: clock.now.addingTimeInterval(20))
+        ).recover(ownerChildDeviceID: owner)
+
+        state = try fixture.store.read()
+        XCTAssertEqual(state.activeRouteID, candidate.routeID)
+        XCTAssertEqual(state.activeEpochID, candidate.epochID)
+        XCTAssertEqual(
+            state.registrationWork.values.filter {
+                $0.routeID == candidate.routeID
+            }.count,
+            1
+        )
+        XCTAssertEqual(
+            state.activationWork.values.filter {
+                $0.routeID == candidate.routeID
+            }.count,
+            1
+        )
     }
 
     func testLostRegistrationResponseRetriesSameConservativeCandidate() async throws {
@@ -676,6 +848,7 @@ final class MeteringConservativeResumeTests: XCTestCase {
     private func activationResult(
         epochID: UUID,
         status: EpochActivationStatusDTO = .activated,
+        epochStatus: EpochStatusDTO = .active,
         usageDate: String = "2026-07-17",
         estimatedMinutes: Int = 17,
         capMinutes: Int = 60
@@ -683,7 +856,7 @@ final class MeteringConservativeResumeTests: XCTestCase {
         let response = EpochActivationResponseDTO(
             status: status,
             epochID: epochID,
-            epochStatus: .active,
+            epochStatus: epochStatus,
             meteringProtocolVersion: 2,
             snapshot: snapshot(
                 usageDate: usageDate,

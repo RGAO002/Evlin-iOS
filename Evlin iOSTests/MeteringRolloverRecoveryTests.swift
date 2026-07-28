@@ -101,6 +101,161 @@ final class MeteringRolloverRecoveryTests: XCTestCase {
         XCTAssertEqual(work.toUsageDate, "2026-07-19")
     }
 
+    func testCommittedReplacementWithPendingPriorStopDoesNotBlockNextDayRollover() async throws {
+        let fixture = try seedActiveAndReservedRoutes()
+        let initial = try store.read()
+        let oldRoute = try XCTUnwrap(initial.routes[fixture.oldRouteID])
+        let activeRoute = try XCTUnwrap(initial.routes[fixture.newRouteID])
+        let tomorrowRoute = try XCTUnwrap(initial.routes.values.first {
+            $0.generationID == activeRoute.generationID
+                && $0.usageDate == "2026-07-19"
+        })
+        let oldInstallID = try XCTUnwrap(
+            initial.installWork.first {
+                $0.value.routeID == oldRoute.routeID
+            }?.key
+        )
+        let activeInstallID = try XCTUnwrap(
+            initial.installWork.first {
+                $0.value.routeID == activeRoute.routeID
+            }?.key
+        )
+        let handoffID = UUID()
+        try store.transaction(expectedOwner: owner) { state in
+            state.routes[activeRoute.routeID]?.lifecycle = .active
+            state.installWork[activeInstallID]?.authorization = .registered
+            state.installWork[activeInstallID]?.phase = .dualActive
+            state.installWork[activeInstallID]?.retry.terminal = .succeeded
+            for (key, var work) in state.registrationWork
+            where work.routeID == activeRoute.routeID {
+                work.retry.terminal = .succeeded
+                state.registrationWork[key] = work
+            }
+            let activationID = UUID()
+            state.activationWork[activationID] = EpochActivationWork(
+                workID: activationID,
+                ownerChildDeviceID: owner,
+                epochID: activeRoute.epochID,
+                routeID: activeRoute.routeID,
+                request: EpochActivationRequestDTO(
+                    protocolVersion: 2,
+                    deviceID: owner,
+                    routeID: activeRoute.routeID,
+                    verifiedAt: start.addingTimeInterval(86_405)
+                ),
+                claim: nil,
+                retry: MeteringRetryState(
+                    attemptCount: 1,
+                    nextAttemptAt: start,
+                    lastErrorCode: nil,
+                    terminal: .succeeded
+                ),
+                createdAt: start.addingTimeInterval(86_405)
+            )
+            state.v2RouteHandoff = V2RouteHandoff(
+                handoffID: handoffID,
+                ownerChildDeviceID: owner,
+                fromGenerationID: oldRoute.generationID,
+                fromEpochID: oldRoute.epochID,
+                fromRouteID: oldRoute.routeID,
+                toGenerationID: activeRoute.generationID,
+                toEpochID: activeRoute.epochID,
+                toRouteID: activeRoute.routeID,
+                phase: .cutoverReady,
+                priorRouteInputClosedAt: start.addingTimeInterval(86_400),
+                registrationAcknowledgedAt: start.addingTimeInterval(86_405),
+                activationAcknowledgedAt: nil,
+                priorStopAcknowledgedAt: nil,
+                createdAt: start.addingTimeInterval(86_400)
+            )
+        }
+        try store.transaction(expectedOwner: owner) { state in
+            state.activeEpochID = activeRoute.epochID
+            state.activeRouteID = activeRoute.routeID
+            state.routes[oldRoute.routeID]?.lifecycle = .tombstoned
+            state.routes[activeRoute.routeID]?.lifecycle = .active
+            state.epochs[oldRoute.epochID]?.status = .retired
+            state.epochs[oldRoute.epochID]?.retiredAt = start.addingTimeInterval(86_410)
+            state.epochs[oldRoute.epochID]?.retireReason = .policyChange
+            state.epochs[activeRoute.epochID]?.status = .active
+            state.epochs[activeRoute.epochID]?.registeredAt = start.addingTimeInterval(86_405)
+            state.installWork[oldInstallID]?.phase = .pendingStop
+            state.installWork[activeInstallID]?.authorization = .registered
+            state.installWork[activeInstallID]?.phase = .active
+            state.installWork[activeInstallID]?.retry.terminal = .succeeded
+            state.tombstones[oldRoute.routeID] = MeteringRouteTombstone(
+                routeID: oldRoute.routeID,
+                activityName: oldRoute.activityName,
+                eventNames: oldRoute.plannedEvents.map(\.eventName),
+                ownerChildDeviceID: owner,
+                usageDate: oldRoute.usageDate,
+                epochID: oldRoute.epochID,
+                generationID: oldRoute.generationID,
+                canonicalDayEnd: start.addingTimeInterval(86_400),
+                stopAcknowledgedAt: nil,
+                referencedWorkIDs: [],
+                retainedUntil: nil
+            )
+            var handoff = try XCTUnwrap(state.v2RouteHandoff)
+            handoff.phase = .committed
+            handoff.activationAcknowledgedAt = start.addingTimeInterval(86_405)
+            state.v2RouteHandoff = handoff
+        }
+
+        let center = RolloverCenter()
+        center.preserveActivitiesWhenStopped = true
+        center.seed(DeviceActivityName(oldRoute.activityName))
+        center.seed(DeviceActivityName(activeRoute.activityName))
+        center.seed(DeviceActivityName(tomorrowRoute.activityName))
+        let transport = RolloverTransport(results: [])
+
+        try await makeDriver(
+            center: center,
+            transport: transport,
+            clock: RolloverClock(now: start.addingTimeInterval(2 * 86_400 + 30))
+        ).recover(ownerChildDeviceID: owner)
+        XCTAssertFalse(transport.requests.isEmpty)
+        XCTAssertEqual(try store.read().rolloverEffectsWork?.retry.terminal, .pending)
+        XCTAssertTrue(
+            center.stopCalls.contains([DeviceActivityName(oldRoute.activityName)]),
+            "network failure must not starve detached predecessor cleanup"
+        )
+
+        center.stopCalls.removeAll()
+        transport.results = [
+            registrationResult(
+                epochID: tomorrowRoute.epochID,
+                usageDate: tomorrowRoute.usageDate
+            ),
+            activationResult(
+                epochID: tomorrowRoute.epochID,
+                usageDate: tomorrowRoute.usageDate
+            )
+        ]
+        try await makeDriver(
+            center: center,
+            transport: transport,
+            clock: RolloverClock(now: start.addingTimeInterval(2 * 86_400 + 35))
+        ).recover(ownerChildDeviceID: owner)
+
+        let state = try store.read()
+        XCTAssertEqual(
+            state.activeRouteID,
+            tomorrowRoute.routeID,
+            "handoff=\(String(describing: state.v2RouteHandoff)) "
+                + "rollover=\(String(describing: state.rolloverEffectsWork)) "
+                + "requests=\(transport.requests.map(\.url?.path))"
+        )
+        XCTAssertEqual(state.routes[tomorrowRoute.routeID]?.lifecycle, .active)
+        XCTAssertNotEqual(state.v2RouteHandoff?.handoffID, handoffID)
+        XCTAssertEqual(state.installWork[oldInstallID]?.phase, .pendingStop)
+        XCTAssertNil(state.tombstones[oldRoute.routeID]?.stopAcknowledgedAt)
+        XCTAssertTrue(
+            center.stopCalls.contains([DeviceActivityName(oldRoute.activityName)]),
+            "old committed predecessor cleanup must run independently of rollover"
+        )
+    }
+
     func testRolloverRejectsSkippingAReservedCanonicalDayByteIdentically() throws {
         _ = try seedActiveAndReservedRoutes()
         let before = try Data(contentsOf: storeURL)
@@ -566,12 +721,15 @@ final class MeteringRolloverRecoveryTests: XCTestCase {
         return (oldEpochID, oldRouteID, newEpochID, newRouteID)
     }
 
-    private func registrationResult(epochID: UUID) -> (Data, URLResponse) {
+    private func registrationResult(
+        epochID: UUID,
+        usageDate: String = "2026-07-18"
+    ) -> (Data, URLResponse) {
         let response = EpochRegistrationResponseDTO(
             status: .registered,
             epochID: epochID,
             meteringProtocolVersion: 2,
-            snapshot: snapshot(),
+            snapshot: snapshot(usageDate: usageDate),
             epochStatus: .active
         )
         return (try! JSONEncoder().encode(response), httpResponse(status: 200))
@@ -623,21 +781,24 @@ final class MeteringRolloverRecoveryTests: XCTestCase {
         )
     }
 
-    private func activationResult(epochID: UUID) -> (Data, URLResponse) {
+    private func activationResult(
+        epochID: UUID,
+        usageDate: String = "2026-07-18"
+    ) -> (Data, URLResponse) {
         let response = EpochActivationResponseDTO(
             status: .activated,
             epochID: epochID,
             epochStatus: .active,
             meteringProtocolVersion: 2,
-            snapshot: snapshot()
+            snapshot: snapshot(usageDate: usageDate)
         )
         return (try! JSONEncoder().encode(response), httpResponse(status: 200))
     }
 
-    private func snapshot() -> DeviceDaySnapshotDTO {
+    private func snapshot(usageDate: String = "2026-07-18") -> DeviceDaySnapshotDTO {
         DeviceDaySnapshotDTO(
             childDeviceID: owner,
-            usageDate: "2026-07-18",
+            usageDate: usageDate,
             estimatedMinutes: 0,
             capMinutes: 60,
             childDayState: "available",
@@ -707,6 +868,7 @@ private nonisolated final class RolloverCenter: MeteringDeviceActivityCenter, @u
     var schedules: [DeviceActivityName: DeviceActivitySchedule] = [:]
     var eventMaps: [DeviceActivityName: [DeviceActivityEvent.Name: DeviceActivityEvent]] = [:]
     var stopCalls: [[DeviceActivityName]] = []
+    var preserveActivitiesWhenStopped = false
     var activities: [DeviceActivityName] { Array(records) }
     func schedule(for activity: DeviceActivityName) -> DeviceActivitySchedule? {
         schedules[activity]
@@ -725,6 +887,7 @@ private nonisolated final class RolloverCenter: MeteringDeviceActivityCenter, @u
     }
     func stopMonitoring(_ activities: [DeviceActivityName]) {
         stopCalls.append(activities)
+        guard !preserveActivitiesWhenStopped else { return }
         activities.forEach {
             records.remove($0)
             schedules.removeValue(forKey: $0)

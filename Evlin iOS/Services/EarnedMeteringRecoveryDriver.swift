@@ -96,6 +96,11 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
         try yieldSupersededCanonicalRolloverIfNeeded(owner: owner)
         try markElapsedActivePriorAbsentIfNeeded(owner: owner)
         try prepareCanonicalRolloverIfNeeded(owner: owner)
+        try detachCommittedHandoffForPreparedRolloverIfNeeded(owner: owner)
+        // Detached committed predecessors are cleanup debt, not rollover
+        // authority. Retry their named stops even when the rollover network
+        // leg below remains pending or fails and returns early.
+        try stopAbandonedCandidates(owner: owner)
         do {
             if try await recoverCanonicalRolloverIfPresent(owner: owner) {
                 if try store.read().rolloverEffectsWork?.activationAcknowledged == true {
@@ -161,6 +166,10 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
         try abandonTerminalSupersededCandidate(owner: owner)
         try prepareReplacementIfNeeded(owner: owner)
         try stopRetiredLane(owner: owner)
+        // A candidate may have been tombstoned by the recovery steps above.
+        // Keep this end-of-pass sweep in addition to the pre-rollover sweep:
+        // the former handles newly-created debt, the latter prevents existing
+        // cleanup debt from being starved by a failing rollover network leg.
         try stopAbandonedCandidates(owner: owner)
         try stopAuthoritativeBaseRejectedCandidates(owner: owner)
         try reconcileCoverage(owner: owner)
@@ -404,6 +413,36 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
             toUsageDate: nextUsageDate,
             now: clock.now
         )
+    }
+
+    /// A committed candidate is already the accounting authority. Failure to
+    /// read back the retired predecessor's stop must remain cleanup debt, not a
+    /// barrier that prevents that authority from rolling into a new day.
+    private func detachCommittedHandoffForPreparedRolloverIfNeeded(
+        owner: UUID
+    ) throws {
+        try store.transaction(expectedOwner: owner) { state in
+            guard let handoff = state.v2RouteHandoff,
+                  handoff.ownerChildDeviceID == owner,
+                  handoff.phase == .committed,
+                  handoff.priorStopAcknowledgedAt == nil,
+                  let rollover = state.rolloverEffectsWork,
+                  rollover.ownerChildDeviceID == owner,
+                  rollover.retry.terminal == .pending,
+                  rollover.oldEpochID == handoff.toEpochID,
+                  rollover.oldRouteID == handoff.toRouteID,
+                  state.activeGenerationID == handoff.toGenerationID,
+                  state.activeEpochID == handoff.toEpochID,
+                  state.activeRouteID == handoff.toRouteID,
+                  let priorInstallKey = uniqueInstallKey(
+                      for: handoff.fromRouteID,
+                      in: state
+                  ),
+                  state.installWork[priorInstallKey]?.phase == .pendingStop,
+                  state.tombstones[handoff.fromRouteID]?.stopAcknowledgedAt == nil
+            else { return }
+            state.v2RouteHandoff = nil
+        }
     }
 
     private func markElapsedActivePriorAbsentIfNeeded(owner: UUID) throws {
@@ -679,6 +718,39 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
                 runtime: runtime
             )
 
+            if var handoff = state.v2RouteHandoff,
+               handoff.ownerChildDeviceID == owner,
+               handoff.phase == .cutoverReady,
+               handoff.fromRouteID == priorRouteID,
+               handoff.fromEpochID == priorEpochID,
+               let candidateRoute = state.routes[handoff.toRouteID],
+               var candidateEpoch = state.epochs[handoff.toEpochID],
+               candidateRoute.ownerChildDeviceID == owner,
+               candidateRoute.epochID == candidateEpoch.epochID,
+               candidateRoute.usageDate == runtime.usageDate,
+               candidateEpoch.status == .paused,
+               candidateEpoch.retiredAt == nil,
+               candidateEpoch.canonicalTimezone == runtime.timezone,
+               candidateEpoch.policyRevision == runtime.policyRevision,
+               state.registrationWork.values.contains(where: {
+                   $0.ownerChildDeviceID == owner
+                       && $0.epochID == candidateEpoch.epochID
+                       && $0.routeID == candidateRoute.routeID
+                       && $0.retry.terminal == .succeeded
+               }),
+               !state.activationWork.values.contains(where: {
+                   $0.ownerChildDeviceID == owner
+                       && $0.epochID == candidateEpoch.epochID
+                       && $0.routeID == candidateRoute.routeID
+               }) {
+                candidateEpoch.status = .active
+                state.epochs[candidateEpoch.epochID] = candidateEpoch
+                handoff.registrationAcknowledgedAt =
+                    handoff.registrationAcknowledgedAt ?? clock.now
+                state.v2RouteHandoff = handoff
+                return
+            }
+
             guard priorEpoch.status == .paused,
                   state.v2RouteHandoff == nil,
                   runtime.dailyPoolMinutes > 0,
@@ -865,7 +937,11 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
               let installKey = uniqueInstallKey(for: targetRoute.routeID, in: state),
               let install = state.installWork[installKey],
               !state.activationWork.values.contains(where: {
-                  $0.routeID == targetRoute.routeID && $0.retry.terminal == .succeeded
+                  $0.routeID == targetRoute.routeID
+                      && (
+                          $0.retry.terminal == .pending
+                              || $0.retry.terminal == .succeeded
+                      )
               }),
               let dayEnd = state.canonicalDayEnd(
                   usageDate: targetRoute.usageDate,
@@ -1471,6 +1547,9 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
             guard let handoff = state.v2RouteHandoff,
                   handoff.phase == .cutoverReady,
                   let candidate = state.routes[handoff.toRouteID],
+                  let candidateEpoch = state.epochs[handoff.toEpochID],
+                  candidateEpoch.status == .active
+                      || candidateEpoch.status == .exhausted,
                   hasUniqueSuccessfulRegistration(candidate, owner: owner, in: state)
             else { return }
             enqueueActivationIfNeeded(route: candidate, owner: owner, state: &state)
@@ -1783,9 +1862,10 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
         let candidates = state.routes.values.compactMap { route -> (MeteringCallbackRoute, UUID)? in
             guard route.ownerChildDeviceID == owner,
                   route.routeID != state.activeRouteID,
+                  route.routeID != state.v2RouteHandoff?.fromRouteID,
                   route.lifecycle == .tombstoned,
-                  let retireReason = state.epochs[route.epochID]?.retireReason,
-                  retireReason == .gateResumeConservative || retireReason == .activationSuperseded,
+                  state.epochs[route.epochID]?.status == .retired,
+                  state.epochs[route.epochID]?.retireReason != nil,
                   state.tombstones[route.routeID]?.stopAcknowledgedAt == nil,
                   let installKey = uniqueInstallKey(for: route.routeID, in: state),
                   state.installWork[installKey]?.phase == .pendingStop
@@ -1799,8 +1879,10 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
             let acknowledgedAt = clock.now
             try store.transaction(expectedOwner: owner) { state in
                 guard state.routes[route.routeID]?.lifecycle == .tombstoned,
-                      let retireReason = state.epochs[route.epochID]?.retireReason,
-                      retireReason == .gateResumeConservative || retireReason == .activationSuperseded,
+                      route.routeID != state.activeRouteID,
+                      route.routeID != state.v2RouteHandoff?.fromRouteID,
+                      state.epochs[route.epochID]?.status == .retired,
+                      state.epochs[route.epochID]?.retireReason != nil,
                       state.tombstones[route.routeID]?.stopAcknowledgedAt == nil,
                       uniqueInstallKey(for: route.routeID, in: state) == installKey,
                       state.installWork[installKey]?.phase == .pendingStop

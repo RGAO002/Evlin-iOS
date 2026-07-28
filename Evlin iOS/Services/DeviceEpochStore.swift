@@ -5472,6 +5472,10 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         if let priorHandoff {
             guard let candidateHandoff else {
                 guard canCollectHandoff(priorHandoff, from: priorState)
+                        || canDetachCommittedHandoffForPreparedRollover(
+                            priorHandoff,
+                            in: candidate
+                        )
                         || canAbandonAuthoritativeBaseCorrection(priorHandoff, in: candidate)
                         || canAbandonConservativeResume(priorHandoff, in: candidate)
                         || canAbandonSupersededCandidate(priorHandoff, in: candidate)
@@ -5603,6 +5607,38 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
               tombstone.epochID == handoff.fromEpochID,
               tombstone.routeID == handoff.fromRouteID,
               tombstone.stopAcknowledgedAt == handoffStopAcknowledgedAt
+        else { return false }
+        return true
+    }
+
+    private func canDetachCommittedHandoffForPreparedRollover(
+        _ handoff: V2RouteHandoff,
+        in state: DeviceEpochStoreState
+    ) -> Bool {
+        guard handoff.phase == .committed,
+              handoff.priorStopAcknowledgedAt == nil,
+              state.activeGenerationID == handoff.toGenerationID,
+              state.activeEpochID == handoff.toEpochID,
+              state.activeRouteID == handoff.toRouteID,
+              let rollover = state.rolloverEffectsWork,
+              rollover.ownerChildDeviceID == handoff.ownerChildDeviceID,
+              rollover.retry.terminal == .pending,
+              rollover.oldEpochID == handoff.toEpochID,
+              rollover.oldRouteID == handoff.toRouteID,
+              let priorInstall = state.installWork.values.first(where: {
+                  $0.ownerChildDeviceID == handoff.ownerChildDeviceID
+                      && $0.routeID == handoff.fromRouteID
+              }),
+              state.installWork.values.filter({
+                  $0.ownerChildDeviceID == handoff.ownerChildDeviceID
+                      && $0.routeID == handoff.fromRouteID
+              }).count == 1,
+              priorInstall.phase == .pendingStop,
+              let tombstone = state.tombstones[handoff.fromRouteID],
+              tombstone.ownerChildDeviceID == handoff.ownerChildDeviceID,
+              tombstone.epochID == handoff.fromEpochID,
+              tombstone.generationID == handoff.fromGenerationID,
+              tombstone.stopAcknowledgedAt == nil
         else { return false }
         return true
     }
