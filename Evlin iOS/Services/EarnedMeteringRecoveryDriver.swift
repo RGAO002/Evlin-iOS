@@ -19,6 +19,8 @@ private enum EarnedMeteringRecoveryError: Error {
 // internally locked, so the whole driver is safe off the main actor; recover()
 // forces the work onto a detached background task.
 nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
+    private static let maxIdentityCleanupPasses = 4
+
     private let store: DeviceEpochStore
     private let delivery: MeteringEpochDelivery
     private let installer: DatedRouteInstaller
@@ -95,10 +97,33 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
         // first route. The cleanup method can require two passes itself:
         // one to mark the envelope terminal and one to finalize the root.
         var effectiveOwner = owner
-        while try recoverIdentityCleanupIfPresent() {
+        var cleanupPasses = 0
+        while cleanupPasses < Self.maxIdentityCleanupPasses {
+            guard try recoverIdentityCleanupIfPresent() else { break }
+            cleanupPasses += 1
             guard let currentOwner = try store.read().ownerChildDeviceID else { return }
             effectiveOwner = currentOwner
         }
+        if cleanupPasses == Self.maxIdentityCleanupPasses,
+           (try store.read().identityCleanupWork) != nil {
+            MeteringFlightRecorder.emit(
+                kind: .meteringDay,
+                site: "recovery.identity_cleanup",
+                verdict: "pass_limit",
+                detail: MeteringFlightRecorder.detail([
+                    ("passes", String(Self.maxIdentityCleanupPasses)),
+                ])
+            )
+            return
+        }
+        // A pending cleanup owns the old persisted root until every external
+        // effect is acknowledged. Do not compare that root with the already
+        // switched mirror or turn a retryable daemon delay into ownerMismatch.
+        if (try store.read().identityCleanupWork) != nil {
+            return
+        }
+        // After cleanup, the persisted owner is authoritative by design; the
+        // caller's owner may be the stale identity that triggered recovery.
         guard store.isCurrentOwner(effectiveOwner) else { return }
         _ = try store.reconcileEpochStartsFromSuccessfulRegistrations(owner: effectiveOwner)
         try cancelBackwardPreparingHandoffIfNeeded(owner: effectiveOwner)
@@ -1282,8 +1307,7 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
         )
         let refreshed = try requiredIdentityCleanup(workID: cleanup.workID)
         if refreshed.retry.terminal == .succeeded {
-            _ = try store.finalizeIdentityCleanup(workID: refreshed.workID)
-            return true
+            return try store.finalizeIdentityCleanup(workID: refreshed.workID)
         }
 
         try store.identityCleanupTransaction(workID: cleanup.workID) { state, current in
@@ -1371,8 +1395,7 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
             }
         }
 
-        _ = try store.markIdentityCleanupSucceeded(workID: cleanup.workID)
-        return true
+        return try store.markIdentityCleanupSucceeded(workID: cleanup.workID)
     }
 
     private func requiredIdentityCleanup(workID: UUID) throws -> IdentityCleanupWork {

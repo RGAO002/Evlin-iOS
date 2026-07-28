@@ -248,10 +248,43 @@ final class MeteringIdentityCleanupTests: XCTestCase {
         XCTAssertEqual(releases.map(\.1), [oldOwner])
         XCTAssertEqual(Set(center.stoppedNames), Set(activityNames))
 
+        // Recovery is idempotent after the root handoff; a second wake must
+        // not repeat purge, shield release, or activity stop work.
+        try await driver.recover(ownerChildDeviceID: newOwner)
+
         XCTAssertEqual(try store.read().ownerChildDeviceID, newOwner)
         XCTAssertNil(try store.read().identityCleanupWork)
         XCTAssertEqual(purges.count, 1)
         XCTAssertEqual(releases.count, 1)
+    }
+
+    @MainActor
+    func testRecoveryReturnsWhenDaemonHasNotAcknowledgedCleanupStop() async throws {
+        let oldOwner = try XCTUnwrap(currentOwner)
+        let newOwner = UUID()
+        let now = Date(timeIntervalSince1970: 1_784_419_200)
+        try seedOwner(oldOwner, now: now)
+        let workID = try store.prepareIdentityCleanup(
+            oldOwner: oldOwner,
+            newOwner: newOwner,
+            oldFallbackKeys: [],
+            now: now
+        )
+        let activityNames = try XCTUnwrap(store.read().identityCleanupWork).oldActivityNames
+        let center = IdentityCleanupCenter(
+            activityNames: activityNames,
+            acknowledgesStops: false
+        )
+        currentOwner = newOwner
+        let driver = makeRecoveryDriver(center: center, now: now)
+
+        try await driver.recover(ownerChildDeviceID: newOwner)
+
+        let cleanup = try XCTUnwrap(store.read().identityCleanupWork)
+        XCTAssertEqual(cleanup.workID, workID)
+        XCTAssertEqual(cleanup.retry.terminal, .pending)
+        XCTAssertTrue(cleanup.stopAcknowledgedActivityNames.isEmpty)
+        XCTAssertEqual(center.stopCalls, 1)
     }
 
     private func acknowledgeEveryCapturedEffect(workID: UUID) throws {
@@ -332,8 +365,8 @@ final class MeteringIdentityCleanupTests: XCTestCase {
     private func makeRecoveryDriver(
         center: IdentityCleanupCenter,
         now: Date,
-        purgeRetryState: @escaping (UUID, [String]) -> Set<String>,
-        releaseShield: @escaping (UUID, UUID) throws -> Void
+        purgeRetryState: @escaping (UUID, [String]) -> Set<String> = { _, keys in Set(keys) },
+        releaseShield: @escaping (UUID, UUID) throws -> Void = { _, _ in }
     ) -> EarnedMeteringRecoveryDriver {
         let clock = IdentityCleanupClock(now: now)
         let delivery = MeteringEpochDelivery(
@@ -375,9 +408,12 @@ private struct IdentityCleanupTransport: MeteringHTTPTransport {
 private nonisolated final class IdentityCleanupCenter: MeteringDeviceActivityCenter, @unchecked Sendable {
     private(set) var active: Set<DeviceActivityName>
     private(set) var stoppedNames: [String] = []
+    private let acknowledgesStops: Bool
+    private(set) var stopCalls = 0
 
-    init(activityNames: [String]) {
+    init(activityNames: [String], acknowledgesStops: Bool = true) {
         active = Set(activityNames.map { DeviceActivityName($0) })
+        self.acknowledgesStops = acknowledgesStops
     }
 
     var activities: [DeviceActivityName] { Array(active) }
@@ -391,7 +427,9 @@ private nonisolated final class IdentityCleanupCenter: MeteringDeviceActivityCen
         active.insert(activity)
     }
     func stopMonitoring(_ activities: [DeviceActivityName]) {
+        stopCalls += 1
         stoppedNames.append(contentsOf: activities.map(\.rawValue))
+        guard acknowledgesStops else { return }
         activities.forEach { active.remove($0) }
     }
 }
