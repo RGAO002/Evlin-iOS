@@ -944,6 +944,9 @@ nonisolated struct V2RouteHandoff: Codable, Equatable, Sendable {
     /// delivered must recover through a fresh identity, not masquerade as a
     /// policy change or re-arm the consumed names in place.
     var explicitRecovery: MeteringExplicitRecovery? = nil
+    /// Physical event names are single-use. One replacement is allowed for a
+    /// handoff lineage; a second consumed candidate falls back to the prior.
+    var consumedCandidateReplacementCount: Int? = nil
 }
 
 nonisolated struct MeteringOwnerRatchet: Codable, Equatable, Sendable {
@@ -5476,6 +5479,10 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                             priorHandoff,
                             in: candidate
                         )
+                        || canAbandonConsumedPhysicalCandidate(
+                            priorHandoff,
+                            in: candidate
+                        )
                         || canAbandonAuthoritativeBaseCorrection(priorHandoff, in: candidate)
                         || canAbandonConservativeResume(priorHandoff, in: candidate)
                         || canAbandonSupersededCandidate(priorHandoff, in: candidate)
@@ -5657,6 +5664,8 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
               replacement.toGenerationID != prior.toGenerationID,
               replacement.toEpochID != prior.toEpochID,
               replacement.toRouteID != prior.toRouteID,
+              (replacement.consumedCandidateReplacementCount ?? 0)
+                == (prior.consumedCandidateReplacementCount ?? 0) + 1,
               state.activeGenerationID == prior.fromGenerationID,
               state.activeEpochID == prior.fromEpochID,
               state.activeRouteID == prior.fromRouteID,
@@ -5730,6 +5739,42 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         else { return false }
         return replacementRoute.plannedEvents.map(\.thresholdMinutes)
             == state.routes[prior.toRouteID]?.plannedEvents.map(\.thresholdMinutes)
+    }
+
+    private func canAbandonConsumedPhysicalCandidate(
+        _ handoff: V2RouteHandoff,
+        in state: DeviceEpochStoreState
+    ) -> Bool {
+        guard (handoff.consumedCandidateReplacementCount ?? 0) >= 1,
+              handoff.phase == .preparing
+                || handoff.phase == .dualV2
+                || handoff.phase == .cutoverReady,
+              state.activeGenerationID == handoff.fromGenerationID,
+              state.activeEpochID == handoff.fromEpochID,
+              state.activeRouteID == handoff.fromRouteID,
+              let rejectedEpoch = state.epochs[handoff.toEpochID],
+              rejectedEpoch.status == .retired,
+              rejectedEpoch.retireReason == .identityRecovery,
+              state.generations[handoff.toGenerationID]?.retiredAt != nil,
+              state.routes[handoff.toRouteID]?.lifecycle == .tombstoned,
+              state.tombstones[handoff.toRouteID]?.stopAcknowledgedAt == nil
+        else { return false }
+        let installs = state.installWork.values.filter {
+            $0.routeID == handoff.toRouteID
+        }
+        guard installs.count == 1,
+              installs[0].phase == .pendingStop,
+              installs[0].retry.terminal == .pending,
+              installs[0].retry.lastErrorCode
+                == "physical_events_consumed_too_early"
+        else { return false }
+        return !state.registrationWork.values.contains {
+            $0.routeID == handoff.toRouteID && $0.retry.terminal == .pending
+        } && !state.activationWork.values.contains {
+            $0.routeID == handoff.toRouteID && $0.retry.terminal == .pending
+        } && !state.sampleWork.values.contains {
+            $0.routeID == handoff.toRouteID && $0.retry.terminal == .pending
+        }
     }
 
     private func canAbandonAuthoritativeBaseCorrection(
@@ -6434,6 +6479,15 @@ extension DeviceEpochStoreState {
         )
         installWork[rejectedInstallKey] = rejectedInstall
 
+        // A physical replacement is intentionally single-use. If Apple also
+        // consumes the replacement at install time, preserve the functioning
+        // prior authority and retire the candidate instead of minting an
+        // unbounded chain of identities.
+        guard (current.consumedCandidateReplacementCount ?? 0) < 1 else {
+            v2RouteHandoff = nil
+            return true
+        }
+
         let replacementGeneration = MeteringPolicyGeneration(
             generationID: replacementGenerationID,
             protocolVersion: rejectedGeneration.protocolVersion,
@@ -6521,7 +6575,9 @@ extension DeviceEpochStoreState {
             activationAcknowledgedAt: nil,
             priorStopAcknowledgedAt: nil,
             createdAt: now,
-            explicitRecovery: current.explicitRecovery ?? .identityRecovery
+            explicitRecovery: current.explicitRecovery ?? .identityRecovery,
+            consumedCandidateReplacementCount:
+                (current.consumedCandidateReplacementCount ?? 0) + 1
         )
         return true
     }

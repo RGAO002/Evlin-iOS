@@ -1559,6 +1559,69 @@ final class EarnedMeteringCallbackTests: XCTestCase {
         )
     }
 
+    func testSecondConsumedCandidateAbandonsHandoffWithoutMintingThirdIdentity() throws {
+        let fixture = try CallbackFixture.dualV2()
+        defer { fixture.cleanup() }
+        try fixture.mutate { state in
+            state.installWork[fixture.candidateInstallID]?.retry.lastErrorCode =
+                "physical_events_consumed_too_early"
+        }
+
+        XCTAssertTrue(
+            try fixture.store.repairLadderBaseInvariantIfNeeded(
+                owner: fixture.owner,
+                now: fixture.start.addingTimeInterval(60)
+            )
+        )
+        let onceReplaced = try fixture.store.read()
+        let replacement = try XCTUnwrap(onceReplaced.v2RouteHandoff)
+        let replacementInstallID = try XCTUnwrap(
+            onceReplaced.installWork.first(where: {
+                $0.value.routeID == replacement.toRouteID
+            })?.key
+        )
+        let generationCount = onceReplaced.generations.count
+        let epochCount = onceReplaced.epochs.count
+        let routeCount = onceReplaced.routes.count
+        let reopenedStore = DeviceEpochStore(
+            fileURL: fixture.storeURL,
+            lock: CallbackFixtureLock(),
+            ownerProvider: { fixture.owner }
+        )
+        try reopenedStore.transaction(expectedOwner: fixture.owner) { state in
+            state.installWork[replacementInstallID]?.retry.lastErrorCode =
+                "physical_events_consumed_too_early"
+        }
+
+        XCTAssertTrue(
+            try reopenedStore.repairLadderBaseInvariantIfNeeded(
+                owner: fixture.owner,
+                now: fixture.start.addingTimeInterval(120)
+            )
+        )
+
+        let abandoned = try reopenedStore.read()
+        XCTAssertNil(abandoned.v2RouteHandoff)
+        XCTAssertEqual(abandoned.activeGenerationID, fixture.generationID)
+        XCTAssertEqual(abandoned.activeEpochID, fixture.epochID)
+        XCTAssertEqual(abandoned.activeRouteID, fixture.routeID)
+        XCTAssertEqual(abandoned.generations.count, generationCount)
+        XCTAssertEqual(abandoned.epochs.count, epochCount)
+        XCTAssertEqual(abandoned.routes.count, routeCount)
+        XCTAssertEqual(
+            abandoned.epochs[replacement.toEpochID]?.retireReason,
+            .identityRecovery
+        )
+        XCTAssertEqual(
+            abandoned.routes[replacement.toRouteID]?.lifecycle,
+            .tombstoned
+        )
+        XCTAssertEqual(
+            abandoned.installWork[replacementInstallID]?.phase,
+            .pendingStop
+        )
+    }
+
     func testPriorCallbackLosingRealRootLockBarrierIsDiscardedWithoutWork() throws {
         let lock = CallbackRaceLock()
         let fixture = try CallbackFixture.dualV2(lock: lock)
