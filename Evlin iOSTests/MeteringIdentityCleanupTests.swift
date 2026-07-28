@@ -133,6 +133,41 @@ final class MeteringIdentityCleanupTests: XCTestCase {
         XCTAssertEqual(cleanup.retry.terminal, .pending)
     }
 
+    func testLostOwnerMirrorAckIsRecoveredOnlyForExactTarget() throws {
+        let oldOwner = try XCTUnwrap(currentOwner)
+        let newOwner = UUID()
+        let thirdOwner = UUID()
+        let now = Date(timeIntervalSince1970: 1_784_419_200)
+        try seedOwner(oldOwner, now: now)
+        let workID = try store.prepareIdentityCleanup(
+            oldOwner: oldOwner,
+            newOwner: newOwner,
+            oldFallbackKeys: [],
+            now: now
+        )
+
+        currentOwner = thirdOwner
+        XCTAssertFalse(
+            try store.recoverIdentityCleanupMirrorAcknowledgement(workID: workID)
+        )
+        XCTAssertFalse(
+            try XCTUnwrap(store.read().identityCleanupWork)
+                .ownerMirrorTransitionAcknowledged
+        )
+
+        currentOwner = newOwner
+        XCTAssertTrue(
+            try store.recoverIdentityCleanupMirrorAcknowledgement(workID: workID)
+        )
+        XCTAssertTrue(
+            try XCTUnwrap(store.read().identityCleanupWork)
+                .ownerMirrorTransitionAcknowledged
+        )
+        XCTAssertFalse(
+            try store.recoverIdentityCleanupMirrorAcknowledgement(workID: workID)
+        )
+    }
+
     func testSucceededCleanupHandsOffToOneEmptyNewOwnerRoot() throws {
         let oldOwner = try XCTUnwrap(currentOwner)
         let newOwner = UUID()
@@ -188,7 +223,6 @@ final class MeteringIdentityCleanupTests: XCTestCase {
         var releases: [(UUID, UUID)] = []
         try store.identityCleanupTransaction(workID: workID) { _, cleanup in
             cleanup.clearedUsageDates = Set(cleanup.oldUsageDates)
-            cleanup.ownerMirrorTransitionAcknowledged = true
         }
         currentOwner = newOwner
         let driver = makeRecoveryDriver(
@@ -207,6 +241,7 @@ final class MeteringIdentityCleanupTests: XCTestCase {
 
         let recovered = try XCTUnwrap(store.read().identityCleanupWork)
         XCTAssertEqual(recovered.retry.terminal, .succeeded)
+        XCTAssertTrue(recovered.ownerMirrorTransitionAcknowledged)
         XCTAssertEqual(
             recovered.terminalizedWorkIDs,
             Set(recovered.oldRegistrationWorkIDs

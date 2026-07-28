@@ -4865,6 +4865,23 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         }
     }
 
+    /// Repairs the crash window between changing the mutable App Group owner
+    /// mirror and durably acknowledging that exact transition in cleanup work.
+    ///
+    /// The persisted cleanup envelope, not the recovery caller, names the only
+    /// owner allowed to acknowledge the transition. A third identity therefore
+    /// cannot complete or steal an in-flight cleanup.
+    @discardableResult
+    func recoverIdentityCleanupMirrorAcknowledgement(workID: UUID) throws -> Bool {
+        try identityCleanupTransaction(workID: workID) { _, cleanup in
+            guard !cleanup.ownerMirrorTransitionAcknowledged,
+                  ownerProvider() == cleanup.newOwnerChildDeviceID
+            else { return false }
+            cleanup.ownerMirrorTransitionAcknowledged = true
+            return true
+        }
+    }
+
     /// Hands authority to the already-mirrored new owner only after the
     /// succeeded cleanup envelope has survived a durable write. No old-owner
     /// object is retained in the new root; delayed callbacks are rejected by

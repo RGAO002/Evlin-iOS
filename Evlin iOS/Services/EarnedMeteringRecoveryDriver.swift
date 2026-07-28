@@ -1176,8 +1176,12 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
     private func recoverIdentityCleanupIfPresent() throws -> Bool {
         let initial = try store.read()
         guard let cleanup = initial.identityCleanupWork else { return false }
-        if cleanup.retry.terminal == .succeeded {
-            _ = try store.finalizeIdentityCleanup(workID: cleanup.workID)
+        _ = try store.recoverIdentityCleanupMirrorAcknowledgement(
+            workID: cleanup.workID
+        )
+        let refreshed = try requiredIdentityCleanup(workID: cleanup.workID)
+        if refreshed.retry.terminal == .succeeded {
+            _ = try store.finalizeIdentityCleanup(workID: refreshed.workID)
             return true
         }
 
