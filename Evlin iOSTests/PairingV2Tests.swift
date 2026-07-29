@@ -1,0 +1,251 @@
+import XCTest
+
+@testable import Evlin_iOS
+
+/// Pairing v2 client-side contract. Plan Task 1-2.
+final class PairingV2Tests: XCTestCase {
+
+    // MARK: - Scan payload
+
+    func test_scannedInvite_parsesV2TokenAndLegacyAndRejectsJunk() {
+        XCTAssertEqual(ScannedInvite.parse("evlin-invite:v2:abcDEF123_-"),
+                       .v2Token("abcDEF123_-"))
+        XCTAssertEqual(ScannedInvite.parse("483920"), .legacySixDigit("483920"))
+        XCTAssertEqual(ScannedInvite.parse("  483920\n"), .legacySixDigit("483920"))
+        XCTAssertNil(ScannedInvite.parse("evlin-invite:v2:"))
+        XCTAssertNil(ScannedInvite.parse("48392"))
+        XCTAssertNil(ScannedInvite.parse("hello world"))
+    }
+
+    // MARK: - Wire decoding
+
+    func test_resolveResponse_decodesSnakeCaseWithAndWithoutRestore() throws {
+        let withRestore = #"""
+        {"resolve_session":"rs1",
+         "invited":{"purpose":"add_device","child_display_name":"Son"},
+         "restore":{"child_display_name":"Son"}}
+        """#.data(using: .utf8)!
+        let decoded = try JSONDecoder().decode(PairingResolveResponse.self,
+                                               from: withRestore)
+        XCTAssertEqual(decoded.resolveSession, "rs1")
+        XCTAssertEqual(decoded.invited.purpose, .addDevice)
+        XCTAssertEqual(decoded.invited.childDisplayName, "Son")
+        XCTAssertEqual(decoded.restore?.childDisplayName, "Son")
+
+        let noRestore = #"""
+        {"resolve_session":"rs2",
+         "invited":{"purpose":"new_child","child_display_name":null}}
+        """#.data(using: .utf8)!
+        let plain = try JSONDecoder().decode(PairingResolveResponse.self,
+                                             from: noRestore)
+        XCTAssertEqual(plain.invited.purpose, .newChild)
+        XCTAssertNil(plain.invited.childDisplayName)
+        XCTAssertNil(plain.restore)
+    }
+
+    // MARK: - Durable adoption record
+
+    private func makeTempStore() throws -> (PendingAdoptionStore, URL) {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir,
+                                                withIntermediateDirectories: true)
+        return (PendingAdoptionStore(directoryURL: dir), dir)
+    }
+
+    func test_pendingAdoption_survivesReloadWithCanonicalBodyIntact() throws {
+        let (store, dir) = try makeTempStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        XCTAssertNil(store.load())
+
+        let record = PendingAdoptionRecord(
+            inviteID: UUID(),
+            resolveSession: "rs1",
+            choice: .invited,
+            oldUUID: nil,
+            profile: .init(displayName: "Kid", birthYear: 2015, gender: nil),
+            deviceSnapshot: ["install_id": "inst-1", "platform": "iOS"]
+        )
+        try store.save(record)
+
+        // A fresh instance stands in for a relaunch.
+        let reloaded = PendingAdoptionStore(directoryURL: dir).load()
+        XCTAssertEqual(reloaded, record)
+        // Without these two the replay cannot rebuild an identical request.
+        XCTAssertEqual(reloaded?.profile?.displayName, "Kid")
+        XCTAssertEqual(reloaded?.deviceSnapshot["install_id"], "inst-1")
+
+        store.clear()
+        XCTAssertNil(PendingAdoptionStore(directoryURL: dir).load())
+    }
+
+    func test_pendingAdoption_phaseAdvanceOverwritesInPlace() throws {
+        let (store, dir) = try makeTempStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        var record = PendingAdoptionRecord(
+            inviteID: UUID(), resolveSession: "rs1", choice: .restore,
+            oldUUID: UUID()
+        )
+        try store.save(record)
+        record.phase = .converging
+        try store.save(record)
+        XCTAssertEqual(store.load()?.phase, .converging)
+        XCTAssertEqual(store.load()?.operationID, record.operationID)
+    }
+
+    // MARK: - Client request shaping
+
+    func test_resolveBody_routesTypedCodesAndScannedTokensSeparately() {
+        let scanned = PairingV2Client.resolveBody(invite: .v2Token("abc"),
+                                                  device: ["platform": "iOS"])
+        XCTAssertEqual(scanned["token"] as? String, "abc")
+        XCTAssertNil(scanned["code"])
+
+        let typed = PairingV2Client.resolveBody(invite: .legacySixDigit("483920"),
+                                                device: [:])
+        XCTAssertEqual(typed["code"] as? String, "483920")
+        XCTAssertNil(typed["token"])
+    }
+
+    func test_commitBody_isDerivedOnlyFromTheStoredRecord() {
+        let record = PairingV2Client.makeCommitRecord(
+            inviteID: nil,
+            resolveSession: "rs9",
+            choice: .invited,
+            profile: .init(displayName: "Kid", birthYear: nil, gender: nil),
+            device: ["install_id": "i2"],
+            oldUUID: nil
+        )
+        let body = PairingV2Client.commitBody(from: record)
+        XCTAssertEqual(body["resolve_session"] as? String, "rs9")
+        XCTAssertEqual(body["choice"] as? String, "invited")
+        XCTAssertEqual((body["device"] as? [String: String])?["install_id"], "i2")
+        let profile = body["profile"] as? [String: Any]
+        XCTAssertEqual(profile?["display_name"] as? String, "Kid")
+        // Absent optionals stay absent rather than becoming null — the server
+        // digests this dictionary, so an extra key would break the replay match.
+        XCTAssertNil(profile?["birth_year"])
+
+        // Rebuilding from the same record must give the same body; that is what
+        // makes a post-relaunch replay match the original digest.
+        XCTAssertEqual(
+            NSDictionary(dictionary: body),
+            NSDictionary(dictionary: PairingV2Client.commitBody(from: record))
+        )
+    }
+
+    // MARK: - Kid-side branching
+
+    func test_kidFlow_restoreOfferBeatsTheInvitedBranch() {
+        let response = PairingResolveResponse(
+            resolveSession: "rs",
+            invited: .init(purpose: .newChild, childDisplayName: nil),
+            restore: .init(childDisplayName: "Kid")
+        )
+        // Even on a new-child invite, a device with prior identity here must be
+        // offered restore — otherwise it silently mints a duplicate child.
+        XCTAssertEqual(KidJoinFlowModel.stage(for: response),
+                       .offerRestore(childName: "Kid"))
+    }
+
+    func test_kidFlow_addDeviceConfirmsAndNewChildCollectsAProfile() {
+        let addDevice = PairingResolveResponse(
+            resolveSession: "rs",
+            invited: .init(purpose: .addDevice, childDisplayName: "Kid"),
+            restore: nil
+        )
+        XCTAssertEqual(KidJoinFlowModel.stage(for: addDevice),
+                       .confirmAddDevice(childName: "Kid"))
+
+        let newChild = PairingResolveResponse(
+            resolveSession: "rs",
+            invited: .init(purpose: .newChild, childDisplayName: nil),
+            restore: nil
+        )
+        XCTAssertEqual(KidJoinFlowModel.stage(for: newChild),
+                       .collectNewChildProfile)
+    }
+
+    // MARK: - install_id migration
+
+    func test_installIDMigration_keychainWinsWhenItAlreadyHasAValue() {
+        let existing = UUID().uuidString
+        let kept = InstallIDKeychainMigration.migrate(
+            legacyValue: UUID().uuidString,
+            keychainRead: { existing },
+            keychainWrite: { _ in
+                XCTFail("must not overwrite the established identity")
+                return false
+            },
+            deleteLegacy: {},
+            stashLegacy: { _ in }
+        )
+        XCTAssertEqual(kept, existing)
+    }
+
+    func test_installIDMigration_movesAValidLegacyValueAndDropsTheSource() {
+        var stored: String?
+        var legacyDeleted = false
+        let legacy = UUID().uuidString
+
+        let migrated = InstallIDKeychainMigration.migrate(
+            legacyValue: legacy,
+            keychainRead: { stored },
+            keychainWrite: { stored = $0; return true },
+            deleteLegacy: { legacyDeleted = true },
+            stashLegacy: { _ in XCTFail("success path must not stash") }
+        )
+
+        XCTAssertEqual(migrated, legacy)
+        XCTAssertEqual(stored, legacy)
+        XCTAssertTrue(legacyDeleted)
+    }
+
+    func test_installIDMigration_mintsAFreshIDWhenTheLegacyValueIsMalformed() {
+        var stored: String?
+        let migrated = InstallIDKeychainMigration.migrate(
+            legacyValue: "not-a-uuid",
+            keychainRead: { stored },
+            keychainWrite: { stored = $0; return true },
+            deleteLegacy: {},
+            stashLegacy: { _ in }
+        )
+        XCTAssertNotNil(UUID(uuidString: migrated))
+        XCTAssertNotEqual(migrated, "not-a-uuid")
+        XCTAssertEqual(stored, migrated)
+    }
+
+    func test_installIDMigration_keepsTheSourceWhenTheKeychainWriteFails() {
+        var stashed: String?
+        let survivor = UUID().uuidString
+
+        let result = InstallIDKeychainMigration.migrate(
+            legacyValue: survivor,
+            keychainRead: { nil },
+            keychainWrite: { _ in false },
+            deleteLegacy: {
+                XCTFail("a failed write must never drop the only copy")
+            },
+            stashLegacy: { stashed = $0 }
+        )
+
+        XCTAssertEqual(result, survivor)
+        // Next launch retries with the same value instead of minting a new one.
+        XCTAssertEqual(stashed, survivor)
+    }
+
+    func test_commitResult_decodesCredentialAlongsideIdentity() throws {
+        let deviceID = UUID()
+        let json = """
+        {"family_id":"\(UUID())","child_device_id":"\(deviceID)",
+         "child_profile_id":"\(UUID())","mode":"invited",
+         "device_credential":{"scheme":"x-child-id-v1",
+                              "child_device_id":"\(deviceID)"}}
+        """.data(using: .utf8)!
+        let result = try JSONDecoder().decode(PairingCommitResult.self, from: json)
+        XCTAssertEqual(result.mode, "invited")
+        XCTAssertEqual(result.deviceCredential.scheme, "x-child-id-v1")
+        XCTAssertEqual(result.deviceCredential.childDeviceID, result.childDeviceID)
+    }
+}
