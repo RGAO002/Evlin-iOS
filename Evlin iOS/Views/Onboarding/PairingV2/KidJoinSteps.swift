@@ -65,7 +65,9 @@ struct KidJoinScanStep: View {
 
 struct KidRestoreOfferStep: View {
     let childName: String
-    let onChoice: (AdoptionChoice) -> Void
+    let canSetUpSomeoneNew: Bool
+    let onRestore: () -> Void
+    let onSetUpSomeoneNew: () -> Void
 
     var body: some View {
         VStack(spacing: 20) {
@@ -75,10 +77,17 @@ struct KidRestoreOfferStep: View {
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
 
-            Button("Continue as \(childName)") { onChoice(.restore) }
+            Button("Continue as \(childName)") { onRestore() }
                 .buttonStyle(.borderedProminent)
-            Button("Set up as someone new") { onChoice(.invited) }
-                .buttonStyle(.bordered)
+            if canSetUpSomeoneNew {
+                Button("Set up as someone new") { onSetUpSomeoneNew() }
+                    .buttonStyle(.bordered)
+            } else {
+                Text("This code adds a device for \(childName). Ask the parent to create a new child code for someone else.")
+                    .font(.footnote)
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.secondary)
+            }
         }
         .padding()
     }

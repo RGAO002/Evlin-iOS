@@ -137,7 +137,7 @@ final class PairingV2Tests: XCTestCase {
 
     // MARK: - Kid-side branching
 
-    func test_kidFlow_restoreOfferBeatsTheInvitedBranch() {
+    func test_kidFlow_restoreOfferBeatsTheInvitedBranch_butKeepsNewChildChoice() {
         let response = PairingResolveResponse(
             resolveSession: "rs",
             invited: .init(purpose: .newChild, childDisplayName: nil),
@@ -146,7 +146,18 @@ final class PairingV2Tests: XCTestCase {
         // Even on a new-child invite, a device with prior identity here must be
         // offered restore — otherwise it silently mints a duplicate child.
         XCTAssertEqual(KidJoinFlowModel.stage(for: response),
-                       .offerRestore(childName: "Kid"))
+                       .offerRestore(childName: "Kid", canSetUpSomeoneNew: true))
+    }
+
+    func test_kidFlow_addDeviceRestoreCannotBecomeANewChild() {
+        let response = PairingResolveResponse(
+            resolveSession: "rs",
+            invited: .init(purpose: .addDevice, childDisplayName: "Kid"),
+            restore: .init(childDisplayName: "Kid")
+        )
+
+        XCTAssertEqual(KidJoinFlowModel.stage(for: response),
+                       .offerRestore(childName: "Kid", canSetUpSomeoneNew: false))
     }
 
     func test_kidFlow_addDeviceConfirmsAndNewChildCollectsAProfile() {

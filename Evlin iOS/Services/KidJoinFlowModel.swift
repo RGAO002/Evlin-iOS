@@ -6,7 +6,7 @@ nonisolated enum KidJoinStage: Equatable, Sendable {
     case scanning
     case resolving
     /// This hardware already has an identity in the inviting family.
-    case offerRestore(childName: String)
+    case offerRestore(childName: String, canSetUpSomeoneNew: Bool)
     /// Joining an existing child as an additional device.
     case confirmAddDevice(childName: String)
     /// Only a genuinely new child asks for a name and birth year.
@@ -52,7 +52,10 @@ final class KidJoinFlowModel: ObservableObject {
         for response: PairingResolveResponse
     ) -> KidJoinStage {
         if let restore = response.restore {
-            return .offerRestore(childName: restore.childDisplayName)
+            return .offerRestore(
+                childName: restore.childDisplayName,
+                canSetUpSomeoneNew: response.invited.purpose == .newChild
+            )
         }
         switch response.invited.purpose {
         case .addDevice:
@@ -95,5 +98,13 @@ final class KidJoinFlowModel: ObservableObject {
             // finished at next launch — this is a UI-level failure only.
             stage = .failed(message: "Couldn't finish setting up. Reopen Evlin to retry.")
         }
+    }
+
+    /// An add-device invite is intentionally bound to one existing child. It
+    /// cannot silently become a new-child invite just because this hardware
+    /// had a prior identity. Only a new-child invite may collect a new profile.
+    func setUpSomeoneNew() {
+        guard resolved?.invited.purpose == .newChild else { return }
+        stage = .collectNewChildProfile
     }
 }

@@ -51,10 +51,13 @@ struct KidJoinFlowView: View {
             case .resolving:
                 ProgressView("Checking that code…")
 
-            case .offerRestore(let childName):
-                KidRestoreOfferStep(childName: childName) { choice in
-                    Task { await model.choose(choice) }
-                }
+            case .offerRestore(let childName, let canSetUpSomeoneNew):
+                KidRestoreOfferStep(
+                    childName: childName,
+                    canSetUpSomeoneNew: canSetUpSomeoneNew,
+                    onRestore: { Task { await model.choose(.restore) } },
+                    onSetUpSomeoneNew: { model.setUpSomeoneNew() }
+                )
 
             case .confirmAddDevice(let childName):
                 KidAddDeviceConfirmStep(childName: childName) {
