@@ -58,6 +58,12 @@ enum OnboardingStep: Equatable {
     case parentSetParentPIN      // Final: claim the kid-device Parent Controls PIN (critical)
 
     // v2 Kid flow (new cases)
+    /// Pairing v2: the kid device scans the PARENT's code, and the backend
+    /// decides whether this hardware is restoring an identity it already had,
+    /// joining an existing child as another device, or is genuinely new. Only
+    /// the last of those asks for a name, which is why this replaces
+    /// `childProfile` + `childShowCode` rather than sitting beside them.
+    case childJoinV2
     case childProfile            // mockup 3 (kid): "Set up your profile"
     case childShowCode           // mockup 5/6 (kid): "Show this to your parent"
     case childConnected          // mockup 7 (kid): "You're linked to your parent"
@@ -385,7 +391,9 @@ struct OnboardingCoordinator: View {
                                 step = .parentSignIn
                             case .child:
                                 appMode = "child"
-                                step = .childProfile
+                                // Pairing v2: scan first, ask for a name only if
+                                // the backend says this is a genuinely new child.
+                                step = .childJoinV2
                             }
                             return
                         }
@@ -814,6 +822,31 @@ struct OnboardingCoordinator: View {
             // → childAllowNotifications → childDeletionProtection (reused)
             // → childLockableHub → childReady (reused).
 
+            case .childJoinV2:
+                KidJoinFlowView(
+                    client: PairingV2Client.production() ?? PairingV2Client(
+                        baseURL: URL(string: APIClient.currentBaseURL)!
+                    ),
+                    store: PendingAdoptionStore.shared()
+                        ?? PendingAdoptionStore(
+                            directoryURL: FileManager.default.temporaryDirectory
+                        ),
+                    deviceSnapshot: kidJoinDeviceSnapshot(),
+                    // Non-nil when this hardware already carries a child
+                    // identity; the backend uses it to offer a restore, and the
+                    // adoption executor uses it to decide whether the old
+                    // identity has to be torn down first.
+                    currentOwnerUUID: UUID(
+                        uuidString: UserDefaults.standard
+                            .string(forKey: DeviceIdentity.childKey) ?? ""
+                    ),
+                    onJoined: { result in
+                        adoptKidJoinResult(result)
+                        step = .childConnected
+                    },
+                    onBack: { step = .modeSelect }
+                )
+
             case .childProfile:
                 ChildProfileStep(
                     // Capture the kid's profile LOCALLY; the family doesn't exist
@@ -1079,6 +1112,45 @@ struct OnboardingCoordinator: View {
         } catch {
             return "Network error. Check your connection and tap Retry."
         }
+    }
+
+    // MARK: - Pairing v2 (kid side)
+
+    /// What the backend matches this hardware against. The keychain UUID is the
+    /// primary key for "we have seen this device"; install_id is the fallback
+    /// for a reinstall that lost it. Both are scoped to the inviting family
+    /// server-side, so a device that belonged to another family gets a fresh
+    /// identity rather than being handed the old one.
+    private func kidJoinDeviceSnapshot() -> [String: String] {
+        var snapshot: [String: String] = [
+            "install_id": APIClient.clientInstallID,
+            "platform": "iOS",
+            "os_version": UIDevice.current.systemVersion,
+            "device_name": UIDevice.current.name,
+        ]
+        if let existing = UserDefaults.standard.string(forKey: DeviceIdentity.childKey) {
+            snapshot["keychain_device_uuid"] = existing
+        }
+        return snapshot
+    }
+
+    /// Persist the identity the join produced, writing the same UserDefaults
+    /// keys `createKidFamily` does so every existing reader keeps working.
+    ///
+    /// The heavy lifting — tearing down a previous identity's monitors before
+    /// this one is armed — belongs to the adoption executor and runs off the
+    /// durable record, not here.
+    private func adoptKidJoinResult(_ result: PairingCommitResult) {
+        familyID = result.familyID
+        childDeviceID = result.childDeviceID
+        UserDefaults.standard.set(result.familyID.uuidString, forKey: "evlin.familyID")
+        UserDefaults.standard.set(result.childDeviceID.uuidString,
+                                  forKey: DeviceIdentity.childKey)
+        UserDefaults.standard.set(result.childProfileID.uuidString,
+                                  forKey: "evlin.childProfileID")
+        // Mirror into the Keychain immediately: a reinstall before the next
+        // background capture would otherwise lose the identity just adopted.
+        DeviceIdentity.shared.capture()
     }
 
     /// Plan 5 — the co-parent join path. POSTs the entered invite code to
