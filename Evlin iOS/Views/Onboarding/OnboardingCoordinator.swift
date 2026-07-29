@@ -1034,10 +1034,16 @@ struct OnboardingCoordinator: View {
     /// server-side, so a device that belonged to another family gets a fresh
     /// identity rather than being handed the old one.
     private func kidJoinDeviceSnapshot() -> [String: String] {
+        // Same source the legacy register/pair seams use, so a device joining
+        // through v2 lands in the parent's list looking like every other one —
+        // omitting the model left a row showing nothing but "26.5.2".
+        let info = DeviceInfoProvider.current()
         var snapshot: [String: String] = [
             "install_id": APIClient.clientInstallID,
-            "platform": "iOS",
-            "os_version": UIDevice.current.systemVersion,
+            "platform": info.platform,
+            "os_version": info.os_version,
+            "device_model": info.device_model,
+            "device_model_id": info.device_model_id,
             "device_name": UIDevice.current.name,
         ]
         if let existing = UserDefaults.standard.string(forKey: DeviceIdentity.childKey) {
