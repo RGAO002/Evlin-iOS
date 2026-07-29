@@ -48,6 +48,10 @@ enum OnboardingStep: Equatable {
     case parentNewOrJoin         // mockup 5: "New family — or join an existing one"
     case parentCoParentJoin      // Plan 5: co-parent "waiting for owner approval" poll
     case parentBackInInstantly   // Plan 8: returning-parent / approved-co-parent recovery
+    /// Pairing v2, parent side: the parent SHOWS a code and the kid device
+    /// scans it. Replaces `parentPairScan`, whose direction only worked because
+    /// the kid minted the family first — the thing v2 exists to stop.
+    case parentInviteV2
     case parentPairScan          // mockup 6: "Scan the kid's code" (QR + 6-digit fallback)
     case parentConnected         // mockup 7: "Connected" (parent side)
     case parentWaitingForKid     // polls /family/pairing-status kid_onboarding_phase
@@ -133,6 +137,10 @@ struct OnboardingCoordinator: View {
     // handler, mirroring legacy PairingCodeStep).
     @State private var kidName: String = ""
     @State private var pairedChildDeviceID: UUID? = nil
+    /// Pairing v2 parent side. Held here rather than inside the step so the
+    /// invite (and its polling) survives a SwiftUI re-render — re-minting on
+    /// every redraw would invalidate the code the kid is currently looking at.
+    @StateObject private var parentInviteModel = ParentInviteModel()
 
     // MARK: - Onboarding v2 threaded state (KID create + profile)
     //
@@ -299,7 +307,7 @@ struct OnboardingCoordinator: View {
                 Button("▶︎ v2 KID flow (tap-through)") {
                     useV2Flow = true
                     appMode = "child"
-                    step = .childProfile
+                    step = .childJoinV2
                 }
                 Button("Use LEGACY v1 flow") {
                     useV2Flow = false
@@ -653,11 +661,19 @@ struct OnboardingCoordinator: View {
             case .parentNewOrJoin:
                 ParentNewOrJoinStep(
                     apiClient: apiClient,
-                    // "Start a new family" → pair (the kid creates the family;
-                    // the parent pairs). "Join existing" (Plan 5) consumes the
+                    // "Start a new family" → pairing v2: the family is created
+                    // on THIS account and the parent shows a code for the kid
+                    // device to scan. "Join existing" (Plan 5) consumes the
                     // co-parent invite HERE and routes to the waiting-for-owner
                     // approval poll — it does NOT pair a kid.
-                    onStartNew: { step = .parentPairScan },
+                    onStartNew: {
+                        // Configure before the step exists: it mints on
+                        // appear, so injecting from the step's own onAppear
+                        // would race its .task.
+                        parentInviteModel.api = .live(client: apiClient)
+                        parentInviteModel.onJoined = { step = .parentConnected }
+                        step = .parentInviteV2
+                    },
                     onJoinCode: { code in await joinCoParentFamily(code) },
                     onBack: { step = .parentProfile }
                 )
@@ -681,6 +697,16 @@ struct OnboardingCoordinator: View {
                     recover: { await recoverExistingFamily() },
                     onDone: { finishParentOnboarding() },
                     onBack: { step = .parentNewOrJoin }
+                )
+
+            case .parentInviteV2:
+                ParentInviteStep(
+                    model: parentInviteModel,
+                    // First device for a brand-new family, so there is no child
+                    // to target yet; the kid device supplies the name.
+                    purpose: .newChild,
+                    targetChildProfileID: nil,
+                    targetChildName: nil
                 )
 
             case .parentPairScan:
@@ -713,7 +739,7 @@ struct OnboardingCoordinator: View {
                             step = .parentWaitingForKid
                         }
                     },
-                    onBack: { step = .parentPairScan }
+                    onBack: { step = .parentInviteV2 }
                 )
 
             case .parentWaitingForKid:

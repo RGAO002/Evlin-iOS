@@ -27,14 +27,19 @@ final class ParentInviteModel: ObservableObject {
 
     @Published private(set) var stage: ParentInviteStage = .idle
 
-    private let api: ParentInviteAPI
+    /// Settable so the host can inject the environment's `APIClient` after
+    /// construction: a `@StateObject` initializer cannot reach an
+    /// `@EnvironmentObject`, and building a second APIClient just to satisfy
+    /// the initializer would re-run its base-URL side effects.
+    var api: ParentInviteAPI
     private let pollInterval: Duration
     private var pollTask: Task<Void, Never>?
 
     /// Called once the kid device has joined, so the host flow can advance.
     var onJoined: (() -> Void)?
 
-    init(api: ParentInviteAPI, pollInterval: Duration = .seconds(2)) {
+    init(api: ParentInviteAPI = .unconfigured,
+         pollInterval: Duration = .seconds(2)) {
         self.api = api
         self.pollInterval = pollInterval
     }
@@ -103,6 +108,15 @@ final class ParentInviteModel: ObservableObject {
 // MARK: - Production API
 
 extension ParentInviteAPI {
+
+    /// Placeholder until the host injects the real client. Every call fails
+    /// loudly rather than silently succeeding, so a missing injection shows up
+    /// as "couldn't create a code" instead of a screen that never advances.
+    static let unconfigured = ParentInviteAPI(
+        ensureFamily: { throw PairingV2ClientError(statusCode: -1) },
+        createInvite: { _, _ in throw PairingV2ClientError(statusCode: -1) },
+        fetchStatus: { _ in throw PairingV2ClientError(statusCode: -1) }
+    )
 
     /// Live implementation over `APIClient`'s authed request path.
     static func live(client: APIClient) -> ParentInviteAPI {
