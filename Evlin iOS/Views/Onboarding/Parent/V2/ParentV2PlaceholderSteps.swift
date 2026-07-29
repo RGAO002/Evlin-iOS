@@ -1456,7 +1456,7 @@ private struct OnboardingV2EditableField: View {
 
 /// The big monospaced 6-digit pairing-code entry (number pad). Mirrors the
 /// legacy PairingCodeStep field but themed for the v2 surface.
-private struct OnboardingV2CodeField: View {
+struct OnboardingV2CodeField: View {
     @Binding var code: String
 
     var body: some View {

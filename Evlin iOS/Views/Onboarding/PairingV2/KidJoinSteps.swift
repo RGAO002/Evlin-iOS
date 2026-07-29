@@ -11,41 +11,53 @@ import SwiftUI
 
 struct KidJoinScanStep: View {
     let onScanned: (ScannedInvite) -> Void
+    var onBack: (() -> Void)? = nil
 
     @State private var typedCode = ""
 
     var body: some View {
-        VStack(spacing: 24) {
-            Text("Scan your parent's code")
-                .font(.title2.bold())
-
-            // The shared scanner already handles the permission states and
-            // points at the typed-code field when the camera is unavailable,
-            // so there is no separate fallback branch to maintain here.
-            OnboardingV2QRScanner(onScan: { raw in
-                guard let invite = ScannedInvite.parse(raw) else { return }
-                onScanned(invite)
-            })
-
-            VStack(spacing: 8) {
-                Text("Or type the code")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                TextField("000000", text: $typedCode)
-                    .keyboardType(.numberPad)
-                    .multilineTextAlignment(.center)
-                    .font(.title3.monospacedDigit())
-                    .textFieldStyle(.roundedBorder)
-                    .onChange(of: typedCode) { _, value in
-                        // Six digits is the whole code, so submit on completion
-                        // rather than making the kid find a button.
-                        guard let invite = ScannedInvite.parse(value) else { return }
-                        onScanned(invite)
+        // Same container, scanner and code field the parent's scan screen used
+        // — only the direction and the copy change.
+        OnboardingV2ScreenContainer(
+            embeddedRole: .child,
+            phase: "2 · Pair",
+            stepIndex: 4,
+            stepTotal: childTotal,
+            title: "Scan your parent's code",
+            subtitle: "Point your camera at the QR on your parent's phone — or type the 6-digit code it shows.",
+            content: {
+                VStack(spacing: Spacing.lg) {
+                    HStack {
+                        Spacer(minLength: 0)
+                        // The shared scanner handles the permission states and
+                        // already points at the typed-code field when the
+                        // camera is unavailable.
+                        OnboardingV2QRScanner(onScan: { raw in
+                            guard let invite = ScannedInvite.parse(raw) else { return }
+                            onScanned(invite)
+                        })
+                        Spacer(minLength: 0)
                     }
+                    .frame(maxWidth: .infinity)
+
+                    OnboardingV2CodeField(code: $typedCode)
+                        .onChange(of: typedCode) { _, newValue in
+                            let digits = newValue.filter(\.isNumber)
+                            if digits != newValue { typedCode = digits }
+                            if digits.count > 6 { typedCode = String(digits.prefix(6)) }
+                            // Six digits is the whole code, so submit on
+                            // completion rather than hunting for a button.
+                            guard let invite = ScannedInvite.parse(typedCode) else { return }
+                            onScanned(invite)
+                        }
+                }
+            },
+            footer: {
+                if let onBack {
+                    OnboardingV2SecondaryButton("Back") { onBack() }
+                }
             }
-            .frame(maxWidth: 220)
-        }
-        .padding()
+        )
     }
 }
 

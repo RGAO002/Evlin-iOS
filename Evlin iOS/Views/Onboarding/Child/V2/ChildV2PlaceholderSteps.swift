@@ -30,7 +30,7 @@ import FamilyControls
 // 6-digit pairing code "4 8 2 9 1 0", and a deterministic faux QR box. None of
 // this is wired to the network in these onboarding-scaffold screens.
 
-private let childTotal = 11
+let childTotal = 11
 private let kidGreen = OnboardingV2Theme.Palette.secondary
 
 // MARK: - Shared local helpers (kid screens only)
