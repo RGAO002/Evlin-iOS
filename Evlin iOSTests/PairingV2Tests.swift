@@ -167,6 +167,46 @@ final class PairingV2Tests: XCTestCase {
                        .collectNewChildProfile)
     }
 
+    // MARK: - Parent invite
+
+    func test_inviteCreated_decodesWithISO8601Expiry() throws {
+        let json = """
+        {"invite_id":"\(UUID())","code_display":"483920",
+         "qr_payload":"evlin-invite:v2:tok","expires_at":"2026-07-29T01:00:00Z"}
+        """.data(using: .utf8)!
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let invite = try decoder.decode(PairingInviteCreated.self, from: json)
+        XCTAssertEqual(invite.codeDisplay, "483920")
+        // Rendered verbatim into the QR, so the prefix has to survive decoding.
+        XCTAssertEqual(invite.qrPayload, "evlin-invite:v2:tok")
+    }
+
+    func test_parentInviteStage_mapsPendingJoinedAndExpired() {
+        let invite = PairingInviteCreated(
+            inviteID: UUID(), codeDisplay: "483920",
+            qrPayload: "evlin-invite:v2:tok", expiresAt: Date()
+        )
+        let pending = PairingInviteStatus(status: "pending", childDisplayName: nil,
+                                          deviceLabel: nil, resolution: nil)
+        XCTAssertEqual(ParentInviteModel.stage(for: pending, showing: invite),
+                       .showing(invite))
+
+        let joined = PairingInviteStatus(status: "joined", childDisplayName: "Kid",
+                                         deviceLabel: "Kid's iPad",
+                                         resolution: "restore")
+        XCTAssertEqual(
+            ParentInviteModel.stage(for: joined, showing: invite),
+            .joined(childName: "Kid", deviceLabel: "Kid's iPad",
+                    resolution: "restore")
+        )
+
+        let expired = PairingInviteStatus(status: "expired", childDisplayName: nil,
+                                          deviceLabel: nil, resolution: nil)
+        XCTAssertEqual(ParentInviteModel.stage(for: expired, showing: invite),
+                       .expired)
+    }
+
     // MARK: - install_id migration
 
     func test_installIDMigration_keychainWinsWhenItAlreadyHasAValue() {

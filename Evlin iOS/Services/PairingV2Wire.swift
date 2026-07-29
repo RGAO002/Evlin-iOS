@@ -101,6 +101,40 @@ nonisolated struct PairingCommitResult: Codable, Equatable, Sendable {
     }
 }
 
+// MARK: - Parent side
+
+nonisolated struct PairingInviteCreated: Codable, Equatable, Sendable {
+    let inviteID: UUID
+    /// Six digits, for when the camera is unusable.
+    let codeDisplay: String
+    /// Carries the scheme prefix; render verbatim into the QR image.
+    let qrPayload: String
+    let expiresAt: Date
+
+    enum CodingKeys: String, CodingKey {
+        case inviteID = "invite_id"
+        case codeDisplay = "code_display"
+        case qrPayload = "qr_payload"
+        case expiresAt = "expires_at"
+    }
+}
+
+nonisolated struct PairingInviteStatus: Codable, Equatable, Sendable {
+    /// "pending" | "joined" | "expired"
+    let status: String
+    let childDisplayName: String?
+    let deviceLabel: String?
+    /// Which branch the kid device took: "restore" or "invited".
+    let resolution: String?
+
+    enum CodingKeys: String, CodingKey {
+        case status
+        case childDisplayName = "child_display_name"
+        case deviceLabel = "device_label"
+        case resolution
+    }
+}
+
 /// What the scanner (or the typed-code field) produced.
 ///
 /// The backend mints QR payloads with a fixed scheme prefix precisely so this
