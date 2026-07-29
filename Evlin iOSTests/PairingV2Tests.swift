@@ -169,17 +169,29 @@ final class PairingV2Tests: XCTestCase {
 
     // MARK: - Parent invite
 
-    func test_inviteCreated_decodesWithISO8601Expiry() throws {
-        let json = """
+    func test_inviteCreated_decodesTheMicrosecondsTheBackendActuallySends() throws {
+        // Pydantic emits `...815296+00:00`. Stock .iso8601 throws on that, and
+        // the throw surfaced as "Couldn't create a code" even though the server
+        // had minted one — the shared decoder has to accept both shapes.
+        let withMicroseconds = """
         {"invite_id":"\(UUID())","code_display":"483920",
-         "qr_payload":"evlin-invite:v2:tok","expires_at":"2026-07-29T01:00:00Z"}
+         "qr_payload":"evlin-invite:v2:tok",
+         "expires_at":"2026-07-29T05:12:55.815296+00:00"}
         """.data(using: .utf8)!
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        let invite = try decoder.decode(PairingInviteCreated.self, from: json)
+        let invite = try JSONDecoder.pairingV2.decode(PairingInviteCreated.self,
+                                                      from: withMicroseconds)
         XCTAssertEqual(invite.codeDisplay, "483920")
         // Rendered verbatim into the QR, so the prefix has to survive decoding.
         XCTAssertEqual(invite.qrPayload, "evlin-invite:v2:tok")
+
+        let withoutFraction = """
+        {"invite_id":"\(UUID())","code_display":"111111",
+         "qr_payload":"evlin-invite:v2:t2","expires_at":"2026-07-29T01:00:00Z"}
+        """.data(using: .utf8)!
+        XCTAssertNoThrow(
+            try JSONDecoder.pairingV2.decode(PairingInviteCreated.self,
+                                             from: withoutFraction)
+        )
     }
 
     func test_parentInviteStage_mapsPendingJoinedAndExpired() {

@@ -24,6 +24,10 @@ struct ParentInviteStep: View {
     let purpose: PairingInvitePurpose
     let targetChildProfileID: UUID?
     let targetChildName: String?
+    /// Onboarding shows this as one step of a sequence; Settings and Profile
+    /// present it on its own, where a progress dot row would be claiming the
+    /// parent is partway through a setup they already finished.
+    var showsOnboardingProgress: Bool = true
 
     private var title: String {
         purpose == .addDevice ? "Add a device" : "Show this to the kid's phone"
@@ -49,8 +53,8 @@ struct ParentInviteStep: View {
             stepTotal: parentTotal,
             title: title,
             subtitle: subtitle,
-            dotsCount: parentTotal,
-            dotsCurrent: 5,
+            dotsCount: showsOnboardingProgress ? parentTotal : nil,
+            dotsCurrent: showsOnboardingProgress ? 5 : nil,
             content: {
                 switch model.stage {
                 case .idle, .minting:
@@ -143,7 +147,10 @@ struct ParentInviteStep: View {
     }
 
     private func retry(message: String) -> some View {
+        // Centred rather than pinned to the top: with no QR to anchor the
+        // layout, top-aligned text left the screen looking broken.
         VStack(spacing: 6) {
+            Spacer(minLength: 0)
             Text(message)
                 .font(OnboardingV2Theme.Typography.bodyXS)
                 .foregroundStyle(OnboardingV2Theme.Palette.error)
@@ -151,6 +158,7 @@ struct ParentInviteStep: View {
             Button("Get a new code") { Task { await mint() } }
                 .font(OnboardingV2Theme.Typography.navButton)
                 .foregroundStyle(OnboardingV2Theme.Palette.primary)
+            Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity)
     }

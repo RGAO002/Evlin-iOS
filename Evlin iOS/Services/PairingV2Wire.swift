@@ -8,6 +8,43 @@ import Foundation
 /// The legacy pairing flow (kid mints the code, parent scans it) is untouched;
 /// nothing in this file is referenced by it.
 
+extension JSONDecoder.DateDecodingStrategy {
+
+    /// Pydantic v2 serializes datetimes with microseconds
+    /// (`2026-07-29T05:12:55.815296+00:00`), and Swift's stock `.iso8601` is
+    /// strict enough to reject fractional seconds outright — the decode throws
+    /// and the caller sees a generic failure with no hint that the server was
+    /// fine all along. Try the fractional variant, then plain.
+    ///
+    /// `JSONDecoder.bigKid` carries its own copy of this from an earlier
+    /// encounter with the same trap; it also applies key conversion, which
+    /// would fight the explicit snake_case CodingKeys used here.
+    static let evlinBackendISO8601 = JSONDecoder.DateDecodingStrategy.custom { decoder in
+        let container = try decoder.singleValueContainer()
+        let raw = try container.decode(String.self)
+        let withFraction = ISO8601DateFormatter()
+        withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = withFraction.date(from: raw) { return date }
+        let plain = ISO8601DateFormatter()
+        plain.formatOptions = [.withInternetDateTime]
+        if let date = plain.date(from: raw) { return date }
+        throw DecodingError.dataCorruptedError(
+            in: container,
+            debugDescription: "Expected ISO 8601 date, got \(raw)"
+        )
+    }
+}
+
+extension JSONDecoder {
+    /// Decoder for every `/family/v2` response. The DTOs declare their own
+    /// snake_case keys, so no key strategy is applied.
+    static let pairingV2: JSONDecoder = {
+        let d = JSONDecoder()
+        d.dateDecodingStrategy = .evlinBackendISO8601
+        return d
+    }()
+}
+
 nonisolated enum PairingInvitePurpose: String, Codable, Sendable {
     case newChild = "new_child"
     case addDevice = "add_device"

@@ -2201,7 +2201,9 @@ private struct AddDevicePairingFlow: View {
                         model: model,
                         purpose: targetChildProfileID == nil ? .newChild : .addDevice,
                         targetChildProfileID: targetChildProfileID,
-                        targetChildName: kidName
+                        targetChildName: kidName,
+                        // Reached from Profile, not onboarding.
+                        showsOnboardingProgress: false
                     )
                     .onAppear { model.onJoined = { paired = true } }
                 }

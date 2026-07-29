@@ -59,7 +59,7 @@ nonisolated final class PairingV2Client: @unchecked Sendable {
         let data = try await post("family/v2/join/resolve",
                                   body: Self.resolveBody(invite: invite,
                                                          device: device))
-        return try JSONDecoder().decode(PairingResolveResponse.self, from: data)
+        return try JSONDecoder.pairingV2.decode(PairingResolveResponse.self, from: data)
     }
 
     // MARK: - Commit
@@ -121,7 +121,7 @@ nonisolated final class PairingV2Client: @unchecked Sendable {
 
         let data = try await post("family/v2/join/commit",
                                   body: Self.commitBody(from: pending))
-        let result = try JSONDecoder().decode(PairingCommitResult.self, from: data)
+        let result = try JSONDecoder.pairingV2.decode(PairingCommitResult.self, from: data)
         pending.result = result
         try store.save(pending)
         return result

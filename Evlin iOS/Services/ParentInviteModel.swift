@@ -124,12 +124,6 @@ extension ParentInviteAPI {
 
     /// Live implementation over `APIClient`'s authed request path.
     static func live(client: APIClient) -> ParentInviteAPI {
-        func decoder() -> JSONDecoder {
-            let d = JSONDecoder()
-            d.dateDecodingStrategy = .iso8601
-            return d
-        }
-
         return ParentInviteAPI(
             ensureFamily: {
                 let request = client.authedRequest(path: "/family/v2", method: "POST")
@@ -148,7 +142,7 @@ extension ParentInviteAPI {
                 guard (200...299).contains(http.statusCode) else {
                     throw PairingV2ClientError(statusCode: http.statusCode)
                 }
-                return try decoder().decode(PairingInviteCreated.self, from: data)
+                return try JSONDecoder.pairingV2.decode(PairingInviteCreated.self, from: data)
             },
             fetchStatus: { inviteID in
                 let request = client.authedRequest(
@@ -158,7 +152,7 @@ extension ParentInviteAPI {
                 guard (200...299).contains(http.statusCode) else {
                     throw PairingV2ClientError(statusCode: http.statusCode)
                 }
-                return try decoder().decode(PairingInviteStatus.self, from: data)
+                return try JSONDecoder.pairingV2.decode(PairingInviteStatus.self, from: data)
             }
         )
     }
