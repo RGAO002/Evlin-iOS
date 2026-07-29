@@ -194,6 +194,36 @@ final class PairingV2Tests: XCTestCase {
         )
     }
 
+    @MainActor
+    func test_mintDoesNotReplaceACodeTheParentIsStillShowing() async {
+        nonisolated(unsafe) var mints = 0
+        let model = ParentInviteModel(api: ParentInviteAPI(
+            ensureFamily: {},
+            createInvite: { _, _ in
+                mints += 1
+                return PairingInviteCreated(
+                    inviteID: UUID(), codeDisplay: "483920",
+                    qrPayload: "evlin-invite:v2:tok",
+                    expiresAt: Date().addingTimeInterval(600)
+                )
+            },
+            fetchStatus: { _ in
+                PairingInviteStatus(status: "pending", childDisplayName: nil,
+                                    deviceLabel: nil, resolution: nil)
+            }
+        ))
+
+        // .task re-runs whenever SwiftUI rebuilds the step, and publishing the
+        // stage is itself a reason to rebuild — unguarded this minted eight
+        // invites in four seconds, each invalidating the visible code.
+        await model.mint(purpose: .newChild, target: nil)
+        await model.mint(purpose: .newChild, target: nil)
+        await model.mint(purpose: .newChild, target: nil)
+
+        XCTAssertEqual(mints, 1)
+        model.stopPolling()
+    }
+
     func test_parentInviteStage_mapsPendingJoinedAndExpired() {
         let invite = PairingInviteCreated(
             inviteID: UUID(), codeDisplay: "483920",

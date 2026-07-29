@@ -67,7 +67,25 @@ final class ParentInviteModel: ObservableObject {
         }
     }
 
+    /// Is there already a code on screen that the kid device could still use?
+    ///
+    /// Minting is triggered from `.task`, which re-runs whenever SwiftUI
+    /// rebuilds the step — and publishing `stage` is itself a reason to rebuild.
+    /// Unguarded, that fed back on itself: eight invites in four seconds, each
+    /// one invalidating the code the user was looking at.
+    private var hasLiveInvite: Bool {
+        switch stage {
+        case .minting:
+            return true
+        case .showing(let invite):
+            return invite.expiresAt > Date()
+        default:
+            return false
+        }
+    }
+
     func mint(purpose: PairingInvitePurpose, target: UUID?) async {
+        guard !hasLiveInvite else { return }
         stage = .minting
         do {
             // Idempotent: a family born on the parent's account is the anchor
