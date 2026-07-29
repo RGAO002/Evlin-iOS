@@ -8,6 +8,10 @@ import SwiftUI
 struct KidJoinFlowView: View {
 
     @StateObject private var model: KidJoinFlowModel
+    /// Single-device demo: the tester just saw the code on the parent screen of
+    /// this same phone, so feed it in rather than making them retype it. The
+    /// resolve/commit path taken afterwards is identical to a real device's.
+    let autoInvite: ScannedInvite?
     let onJoined: (PairingCommitResult) -> Void
     let onBack: () -> Void
 
@@ -16,9 +20,11 @@ struct KidJoinFlowView: View {
         store: PendingAdoptionStore,
         deviceSnapshot: [String: String],
         currentOwnerUUID: UUID?,
+        autoInvite: ScannedInvite? = nil,
         onJoined: @escaping (PairingCommitResult) -> Void,
         onBack: @escaping () -> Void
     ) {
+        self.autoInvite = autoInvite
         _model = StateObject(wrappedValue: KidJoinFlowModel(
             client: client,
             store: store,
@@ -36,6 +42,11 @@ struct KidJoinFlowView: View {
                 KidJoinScanStep(onScanned: { invite in
                     Task { await model.present(invite) }
                 })
+                .task {
+                    if let autoInvite {
+                        await model.present(autoInvite)
+                    }
+                }
 
             case .resolving:
                 ProgressView("Checking that code…")

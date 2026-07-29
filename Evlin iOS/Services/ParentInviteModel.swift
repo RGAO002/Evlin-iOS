@@ -37,6 +37,9 @@ final class ParentInviteModel: ObservableObject {
 
     /// Called once the kid device has joined, so the host flow can advance.
     var onJoined: (() -> Void)?
+    /// Fired as soon as a code exists. Single-device demo uses it to hand the
+    /// code to the kid half of the same phone; the two-device flow ignores it.
+    var onCodeReady: ((PairingInviteCreated) -> Void)?
 
     init(api: ParentInviteAPI = .unconfigured,
          pollInterval: Duration = .seconds(2)) {
@@ -73,6 +76,7 @@ final class ParentInviteModel: ObservableObject {
             try await api.ensureFamily()
             let invite = try await api.createInvite(purpose, target)
             stage = .showing(invite)
+            onCodeReady?(invite)
             startPolling(invite: invite)
         } catch {
             stage = .failed(message: "Couldn't create a code. Check your connection and try again.")

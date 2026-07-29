@@ -49,10 +49,9 @@ enum OnboardingStep: Equatable {
     case parentCoParentJoin      // Plan 5: co-parent "waiting for owner approval" poll
     case parentBackInInstantly   // Plan 8: returning-parent / approved-co-parent recovery
     /// Pairing v2, parent side: the parent SHOWS a code and the kid device
-    /// scans it. Replaces `parentPairScan`, whose direction only worked because
+    /// scans it. Replaced `parentPairScan`, whose direction only worked because
     /// the kid minted the family first — the thing v2 exists to stop.
     case parentInviteV2
-    case parentPairScan          // mockup 6: "Scan the kid's code" (QR + 6-digit fallback)
     case parentConnected         // mockup 7: "Connected" (parent side)
     case parentWaitingForKid     // polls /family/pairing-status kid_onboarding_phase
     case parentSetPasscode       // mockup 14: "Lock the Screen Time settings"
@@ -66,10 +65,8 @@ enum OnboardingStep: Equatable {
     /// decides whether this hardware is restoring an identity it already had,
     /// joining an existing child as another device, or is genuinely new. Only
     /// the last of those asks for a name, which is why this replaces
-    /// `childProfile` + `childShowCode` rather than sitting beside them.
+    /// `childProfile` + `childShowCode`, both now gone.
     case childJoinV2
-    case childProfile            // mockup 3 (kid): "Set up your profile"
-    case childShowCode           // mockup 5/6 (kid): "Show this to your parent"
     case childConnected          // mockup 7 (kid): "You're linked to your parent"
     case childConsentDisclosure  // mockup 8: "What Evlin can see"
     case childAllowNotifications // mockup 10: "Allow notifications"
@@ -141,6 +138,9 @@ struct OnboardingCoordinator: View {
     /// invite (and its polling) survives a SwiftUI re-render — re-minting on
     /// every redraw would invalidate the code the kid is currently looking at.
     @StateObject private var parentInviteModel = ParentInviteModel()
+    /// Single-device demo only: the code the parent half minted, fed to the kid
+    /// half so the tester doesn't retype what is already on screen.
+    @State private var singleDeviceInviteCode: String? = nil
 
     // MARK: - Onboarding v2 threaded state (KID create + profile)
     //
@@ -213,15 +213,9 @@ struct OnboardingCoordinator: View {
         SingleDeviceSession.shared.enable()
         useV2Flow = true
         kidName = ""
-        appMode = "child"
-        SingleDeviceSession.shared.stage = .kidCreate
-        step = .childProfile
-    }
-
-    /// Kid finished creating the family + code → switch THIS device to the parent side, sign in
-    /// the per-run demo account (fresh each run so /family/pair never 409s), then collect the
-    /// parent profile. (Async sign-in runs while the code screen is still up; brief.)
-    private func singleDeviceEnterParentPhase() {
+        // Pairing v2 inverts the order: the family is born on the parent
+        // account, so the parent half runs FIRST and mints the code the kid
+        // half of this same phone will consume.
         SingleDeviceSession.shared.stage = .parentPair
         Task { @MainActor in
             await auth?.signInDemoAccount()
@@ -230,24 +224,19 @@ struct OnboardingCoordinator: View {
         }
     }
 
-    /// Single device: we already KNOW the kid's pairing code, so pair programmatically and skip
-    /// the scan screen entirely (avoids the flaky auto-submit + the dead camera). On failure the
-    /// real error shows in the debug pill so we can tell 409 / expired / network apart.
-    private func singleDevicePairAndContinue() {
-        SingleDeviceSession.shared.stage = .parentPair
-        sdDiag = "pairing…"
-        Task { @MainActor in
-            let err = await pairWithKidCode(childPairingCode)
-            if let err {
-                sdDiag = "pairErr:\(err)"
-            } else {
-                sdDiag = ""
-                SingleDeviceSession.shared.stage = .kidPermit
-                step = .parentConnected
-            }
-        }
+    /// Single device: the parent half just minted a code, so hand it to the kid
+    /// half instead of asking the tester to retype what is on screen. The join
+    /// itself goes through the same resolve/commit path a real kid device uses.
+    private func singleDeviceJoinAsKid(code: String) {
+        SingleDeviceSession.shared.stage = .kidPermit
+        singleDeviceInviteCode = code
+        appMode = "child"
+        step = .childJoinV2
     }
 
+    /// Kid finished creating the family + code → switch THIS device to the parent side, sign in
+    /// the per-run demo account (fresh each run so /family/pair never 409s), then collect the
+    /// parent profile. (Async sign-in runs while the code screen is still up; brief.)
     var body: some View {
         ZStack(alignment: .topTrailing) {
             stepBody
@@ -270,13 +259,14 @@ struct OnboardingCoordinator: View {
                 .onReceive(NotificationCenter.default.publisher(
                     for: .evlinSingleDeviceJumpToParent,
                 )) { _ in
-                    // Single Device Mode drives the kid→parent switch itself (childShowCode
-                    // boundary); ignore this legacy jump so the two mechanisms don't race.
+                    // Single Device Mode drives its own parent→kid handoff now
+                    // (the parent half mints the code); ignore this legacy jump
+                    // so the two mechanisms don't race.
                     guard !SingleDeviceSession.shared.isEnabled else { return }
                     appMode = "parent"
-                    // v2 retargets the single-device jump to the parent pair
-                    // step (spec §7.4); v1 lands on the code-entry step.
-                    step = useV2Flow ? .parentPairScan : .parentPairingCode
+                    // v2 sends the parent to the invite screen (they SHOW a
+                    // code); v1 lands on the code-entry step.
+                    step = useV2Flow ? .parentInviteV2 : .parentPairingCode
                 }
                 #endif
                 // Single-device role tag: a small centered pill in a thin top inset. Inset (not
@@ -653,7 +643,17 @@ struct OnboardingCoordinator: View {
                             try? await apiClient.postAgreementAck(
                                 version: BetaAgreementContent.wireVersion)
                         }
-                        singleDevice ? singleDevicePairAndContinue() : (step = .parentNewOrJoin)
+                        // Single device skips "new or join": there is only ever
+                        // one family, and the next thing needed is the code.
+                        if singleDevice {
+                            parentInviteModel.api = .live(client: apiClient)
+                            parentInviteModel.onCodeReady = { invite in
+                                singleDeviceJoinAsKid(code: invite.codeDisplay)
+                            }
+                            step = .parentInviteV2
+                        } else {
+                            step = .parentNewOrJoin
+                        }
                     },
                     onBack: { step = .parentProfile }
                 )
@@ -707,20 +707,6 @@ struct OnboardingCoordinator: View {
                     purpose: .newChild,
                     targetChildProfileID: nil,
                     targetChildName: nil
-                )
-
-            case .parentPairScan:
-                // P2: no "Enter 6-digit code instead" routing — it sent the
-                // parent to the legacy unauthed PairingCodeStep (always 401s
-                // for a v2 authed account, with no Back). The pair-scan step's
-                // own typed-code field IS the 6-digit path.
-                ParentPairScanStep(
-                    // Scan is a placeholder; the typed-code path is the real
-                    // one. Both submit POST /family/pair via onPaired(code:).
-                    onPaired: { code in await pairWithKidCode(code) },
-                    pairedSucceeded: pairedChildDeviceID != nil,
-                    onAdvance: { step = .parentConnected },
-                    onBack: { step = .parentNewOrJoin }
                 )
 
             case .parentConnected:
@@ -866,56 +852,21 @@ struct OnboardingCoordinator: View {
                         uuidString: UserDefaults.standard
                             .string(forKey: DeviceIdentity.childKey) ?? ""
                     ),
+                    autoInvite: singleDeviceInviteCode.map { .legacySixDigit($0) },
                     onJoined: { result in
                         adoptKidJoinResult(result)
+                        singleDeviceInviteCode = nil
                         step = .childConnected
                     },
-                    onBack: { step = .modeSelect }
-                )
-
-            case .childProfile:
-                ChildProfileStep(
-                    // Capture the kid's profile LOCALLY; the family doesn't exist
-                    // yet (created on the next screen). Threaded forward + persisted.
-                    name: $childProfileName,
-                    birthYear: $childBirthYear,
-                    gender: $childGender,
-                    pickedAvatar: $childAvatar,
-                    onContinue: {
-                        // Always persist the just-entered name locally so the kid's
-                        // home greeting reflects the latest name immediately — even
-                        // if the later /family/create short-circuits or the backend
-                        // still serves a seed placeholder. Fixes a re-onboard showing
-                        // the OLD name from a stale `evlin.childProfileName`.
-                        let trimmed = childProfileName.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if !trimmed.isEmpty {
-                            childName = trimmed
-                            UserDefaults.standard.set(trimmed, forKey: "evlin.childProfileName")
-                        }
-                        step = .childShowCode
-                    },
-                    onBack: { step = .modeSelect }
-                )
-
-            case .childShowCode:
-                ChildShowCodeStep(
-                    // On appear: POST /family/create → real 6-digit code +
-                    // child_device_id, threaded into state. Returns nil on
-                    // success or an error string for inline display.
-                    createFamily: { await createKidFamily() },
-                    pairingCode: childPairingCode,
-                    // Normal two-device flow: a parent scanned the code → advance.
-                    onConnected: { step = .childConnected },
-                    onBack: { step = .childProfile },
-                    // Single device: no parent phone to scan — the kid taps "continue" and THIS
-                    // device becomes the parent to consume the code.
-                    onSingleDeviceContinue: singleDevice ? { singleDeviceEnterParentPhase() } : nil
+                    // Single device has no mode screen to fall back to — the
+                    // parent half of this phone owns the family already.
+                    onBack: { step = singleDevice ? .parentInviteV2 : .modeSelect }
                 )
 
             case .childConnected:
                 ChildConnectedStep(
                     onContinue: { step = .childConsentDisclosure },
-                    onBack: { step = .childShowCode }
+                    onBack: { step = .childJoinV2 }
                 )
 
             case .childConsentDisclosure:
@@ -987,7 +938,7 @@ struct OnboardingCoordinator: View {
                 .padding(.horizontal, Spacing.xl)
             Spacer()
             Button {
-                step = useV2Flow ? .childShowCode : .childEnterPairingCode
+                step = useV2Flow ? .childJoinV2 : .childEnterPairingCode
             } label: {
                 Text("Go back")
                     .font(.evLabelLarge)
