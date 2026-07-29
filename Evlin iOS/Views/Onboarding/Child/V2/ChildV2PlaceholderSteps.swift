@@ -246,7 +246,7 @@ private struct ChildOnboardingV2BackLink: View {
 /// A deterministic faux-QR box (finder squares + pseudo-random data modules) so
 /// the kid screens show a believable code without a real encoder. Mirrors the
 /// mockup's `qr()` SVG: 21×21 modules in `--primary` on white, 8px radius.
-private struct OnboardingV2FauxQR: View {
+struct OnboardingV2FauxQR: View {
     var size: CGFloat = 150
     private let n = 21
 

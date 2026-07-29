@@ -1,9 +1,19 @@
 import SwiftUI
 
+/// Matches the private copies the other parent v2 step files each keep. Swift
+/// won't let one be internal while the rest stay private (the beta-agreement
+/// file is off-limits), so this follows the existing convention rather than
+/// half-changing it.
+private let parentTotal = 12
+
 /// The parent shows this; the kid device scans it.
 ///
-/// Standalone like the kid-side steps — it reports completion through
-/// `model.onJoined` and imports no coordinator.
+/// Deliberately the mirror image of the old kid-side "Show this to your parent"
+/// screen — same container, same QR card, same "OR TYPE THIS CODE" card — since
+/// v2 only reverses who holds the code, not what the screen is.
+///
+/// Standalone like the kid-side steps: completion is reported through
+/// `model.onJoined` and no coordinator is imported.
 struct ParentInviteStep: View {
 
     @ObservedObject var model: ParentInviteModel
@@ -15,60 +25,99 @@ struct ParentInviteStep: View {
     let targetChildProfileID: UUID?
     let targetChildName: String?
 
-    var body: some View {
-        VStack(spacing: 24) {
-            header
+    private var title: String {
+        purpose == .addDevice ? "Add a device" : "Show this to the kid's phone"
+    }
 
-            switch model.stage {
-            case .idle, .minting:
-                ProgressView("Creating a code…")
-
-            case .showing(let invite):
-                OnboardingV2QRImage(string: invite.qrPayload)
-
-                VStack(spacing: 6) {
-                    Text("Or type this code")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                    Text(invite.codeDisplay)
-                        .font(.title.monospacedDigit().weight(.semibold))
-                        .tracking(4)
-                }
-
-                Text("Waiting for the device to join…")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-
-            case .joined(let childName, let deviceLabel, let resolution):
-                joined(childName: childName, deviceLabel: deviceLabel,
-                       resolution: resolution)
-
-            case .expired:
-                retry(message: "That code expired.")
-
-            case .failed(let message):
-                retry(message: message)
-            }
+    private var subtitle: String {
+        if purpose == .addDevice, let name = targetChildName, !name.isEmpty {
+            return "Scan this from \(name)'s new phone."
         }
-        .padding()
+        return "Open Evlin on the kid's phone and scan this."
+    }
+
+    /// "4 8 2 9 1 0" — space-separated for the big code readout.
+    private func spaced(_ code: String) -> String {
+        code.map(String.init).joined(separator: " ")
+    }
+
+    var body: some View {
+        OnboardingV2ScreenContainer(
+            role: .parent,
+            phase: "2 · Pair",
+            stepIndex: 6,
+            stepTotal: parentTotal,
+            title: title,
+            subtitle: subtitle,
+            dotsCount: parentTotal,
+            dotsCurrent: 5,
+            content: {
+                switch model.stage {
+                case .idle, .minting:
+                    codeCards(invite: nil)
+
+                case .showing(let invite):
+                    VStack(spacing: 12) {
+                        codeCards(invite: invite)
+                        Text("Waiting for the device to join…")
+                            .font(OnboardingV2Theme.Typography.bodyXS)
+                            .foregroundStyle(OnboardingV2Theme.Palette.onSurfaceVariant)
+                            .frame(maxWidth: .infinity)
+                    }
+
+                case .joined(let childName, let deviceLabel, let resolution):
+                    joined(childName: childName, deviceLabel: deviceLabel,
+                           resolution: resolution)
+
+                case .expired:
+                    retry(message: "That code expired.")
+
+                case .failed(let message):
+                    retry(message: message)
+                }
+            },
+            footer: { EmptyView() }
+        )
         .task { await mint() }
         .onDisappear { model.stopPolling() }
     }
 
-    private var header: some View {
-        VStack(spacing: 8) {
-            Text(purpose == .addDevice ? "Add a device" : "Set up a device")
-                .font(.title2.bold())
-            if let name = targetChildName, purpose == .addDevice {
-                Text("This will become another one of \(name)'s devices.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-            } else {
-                Text("Open Evlin on the kid's device and scan this.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
+    /// The QR + typed-code pair. `nil` renders the same shimmer the kid screen
+    /// used while its code was minting, so the layout doesn't jump.
+    @ViewBuilder
+    private func codeCards(invite: PairingInviteCreated?) -> some View {
+        VStack(spacing: 12) {
+            OnboardingV2Card {
+                HStack {
+                    Spacer(minLength: 0)
+                    if let invite {
+                        OnboardingV2QRImage(string: invite.qrPayload)
+                    } else {
+                        OnboardingV2FauxQR()
+                    }
+                    Spacer(minLength: 0)
+                }
+            }
+
+            OnboardingV2Card {
+                VStack(spacing: 4) {
+                    Text("OR TYPE THIS CODE")
+                        .font(OnboardingV2Theme.Typography.bodyXS)
+                        .tracking(1)
+                        .foregroundStyle(OnboardingV2Theme.Palette.onSurfaceVariant)
+                        .frame(maxWidth: .infinity)
+                    if let invite {
+                        Text(spaced(invite.codeDisplay))
+                            .font(.system(size: 24, weight: .bold))
+                            .tracking(5)
+                            .foregroundStyle(OnboardingV2Theme.Palette.primary)
+                            .frame(maxWidth: .infinity)
+                    } else {
+                        ProgressView().controlSize(.small)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 2)
+                    }
+                }
             }
         }
     }
@@ -77,30 +126,33 @@ struct ParentInviteStep: View {
                         resolution: String?) -> some View {
         VStack(spacing: 10) {
             Image(systemName: "checkmark.circle.fill")
-                .font(.largeTitle)
-                .foregroundStyle(.green)
+                .font(.system(size: 44, weight: .semibold))
+                .foregroundStyle(OnboardingV2Theme.Palette.secondary)
             Text(resolution == "restore" ? "Device restored" : "Device connected")
-                .font(.headline)
+                .font(OnboardingV2Theme.Typography.navButton)
+                .foregroundStyle(OnboardingV2Theme.Palette.primary)
             if let childName {
                 Text(deviceLabel.map { "\($0) is now set up for \(childName)." }
                      ?? "Set up for \(childName).")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                    .font(OnboardingV2Theme.Typography.bodyXS)
+                    .foregroundStyle(OnboardingV2Theme.Palette.onSurfaceVariant)
                     .multilineTextAlignment(.center)
             }
         }
+        .frame(maxWidth: .infinity)
     }
 
     private func retry(message: String) -> some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 6) {
             Text(message)
-                .foregroundStyle(.secondary)
+                .font(OnboardingV2Theme.Typography.bodyXS)
+                .foregroundStyle(OnboardingV2Theme.Palette.error)
                 .multilineTextAlignment(.center)
-            Button("Get a new code") {
-                Task { await mint() }
-            }
-            .buttonStyle(.borderedProminent)
+            Button("Get a new code") { Task { await mint() } }
+                .font(OnboardingV2Theme.Typography.navButton)
+                .foregroundStyle(OnboardingV2Theme.Palette.primary)
         }
+        .frame(maxWidth: .infinity)
     }
 
     private func mint() async {

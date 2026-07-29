@@ -619,9 +619,11 @@ struct ProfileView: View {
         .fullScreenCover(isPresented: $showAddDevicePairing) {
             AddDevicePairingFlow(
                 kidName: addedDeviceKidName.isEmpty ? displayChild.name : addedDeviceKidName,
-                onPair: { code in await pairAdditionalDevice(code) },
+                targetChildProfileID: UUID(uuidString: displayChild.id),
+                apiClient: apiClient,
                 onDone: {
                     showAddDevicePairing = false
+                    Task { await familyStore.refresh() }
                 },
                 onCancel: {
                     showAddDevicePairing = false
@@ -773,39 +775,6 @@ struct ProfileView: View {
                 if Task.isCancelled { return }
                 await refreshEarnedSummary()
             }
-        }
-    }
-
-    @MainActor
-    private func pairAdditionalDevice(_ code: String) async -> String? {
-        let trimmed = code.filter(\.isNumber)
-        guard trimmed.count == 6 else { return "Enter the 6-digit code." }
-        do {
-            let r = try await apiClient.pairFamily(
-                code: trimmed,
-                deviceLabel: UIDevice.current.name,
-                targetChildProfileID: child.id
-            )
-            UserDefaults.standard.set(r.family_id.uuidString, forKey: "evlin.familyID")
-            UserDefaults.standard.set(r.parent_device_id.uuidString, forKey: "evlin.parentDeviceID")
-            UserDefaults.standard.set(r.child_device_id.uuidString, forKey: "evlin.childDeviceID")
-            await familyStore.refresh()
-            if let matched = familyStore.children
-                .first(where: { child in
-                    child.devices.contains { UUID(uuidString: $0.device_id) == r.child_device_id }
-                }) {
-                addedDeviceKidName = matched.display_name
-            }
-            return nil
-        } catch let APIError.serverError(status) {
-            switch status {
-            case 404: return "That code wasn't found. Double-check the 6 digits."
-            case 400: return "That code has expired or was already used. Ask your kid for a fresh one."
-            case 409: return "This account is already in a different family."
-            default:  return "Couldn't pair (error \(status)). Try again."
-            }
-        } catch {
-            return "Network error. Check your connection and try again."
         }
     }
 
@@ -2192,13 +2161,35 @@ private struct ProfileComingSoonSheet: View {
     }
 }
 
+/// Pairing v2: the parent SHOWS a code and the new device scans it. The invite
+/// carries the target child, so that device is told whose it is becoming and is
+/// never asked for a name this family already has.
 private struct AddDevicePairingFlow: View {
     let kidName: String
-    let onPair: (String) async -> String?
+    let targetChildProfileID: UUID?
     let onDone: () -> Void
     let onCancel: () -> Void
 
+    @StateObject private var model: ParentInviteModel
     @State private var paired = false
+
+    init(
+        kidName: String,
+        targetChildProfileID: UUID?,
+        apiClient: APIClient,
+        onDone: @escaping () -> Void,
+        onCancel: @escaping () -> Void
+    ) {
+        self.kidName = kidName
+        self.targetChildProfileID = targetChildProfileID
+        self.onDone = onDone
+        self.onCancel = onCancel
+        // Built here rather than injected on appear: the step mints as soon as
+        // it appears and would otherwise race its own configuration.
+        _model = StateObject(wrappedValue: ParentInviteModel(
+            api: .live(client: apiClient)
+        ))
+    }
 
     var body: some View {
         NavigationStack {
@@ -2206,12 +2197,13 @@ private struct AddDevicePairingFlow: View {
                 if paired {
                     AddDeviceSuccessStep(kidName: kidName, onDone: onDone)
                 } else {
-                    ParentPairScanStep(
-                        onPaired: onPair,
-                        pairedSucceeded: false,
-                        onAdvance: { paired = true },
-                        onBack: onCancel
+                    ParentInviteStep(
+                        model: model,
+                        purpose: targetChildProfileID == nil ? .newChild : .addDevice,
+                        targetChildProfileID: targetChildProfileID,
+                        targetChildName: kidName
                     )
+                    .onAppear { model.onJoined = { paired = true } }
                 }
             }
             .toolbar {
