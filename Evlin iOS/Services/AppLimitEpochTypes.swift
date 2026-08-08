@@ -252,6 +252,12 @@ nonisolated struct AppLimitVersionSlot: Codable, Equatable, Sendable {
     var appliedReceipt: AppLimitApplyReceipt?
     var armProvenance: AppLimitArmProvenance? = nil
     var authoritativeUsedTodayMinutes: Int? = nil
+    /// When the backend reported `authoritativeUsedTodayMinutes`. A used-today
+    /// figure is only meaningful for the usage day it was measured on, and the
+    /// slot is rebuilt from scratch on every rule change (see
+    /// `AppLimitCommandCoordinator.ingest`), so the arm provenance cannot be
+    /// used to date it — it is gone by then.
+    var authoritativeUsedTodayAt: Date? = nil
 
     init(
         ruleID: UUID,
@@ -263,7 +269,8 @@ nonisolated struct AppLimitVersionSlot: Codable, Equatable, Sendable {
         pendingOwnerWork: AppLimitOwnerWork?,
         appliedReceipt: AppLimitApplyReceipt?,
         armProvenance: AppLimitArmProvenance? = nil,
-        authoritativeUsedTodayMinutes: Int? = nil
+        authoritativeUsedTodayMinutes: Int? = nil,
+        authoritativeUsedTodayAt: Date? = nil
     ) {
         self.ruleID = ruleID
         self.latestOrderingToken = latestOrderingToken
@@ -275,6 +282,7 @@ nonisolated struct AppLimitVersionSlot: Codable, Equatable, Sendable {
         self.appliedReceipt = appliedReceipt
         self.armProvenance = armProvenance
         self.authoritativeUsedTodayMinutes = authoritativeUsedTodayMinutes
+        self.authoritativeUsedTodayAt = authoritativeUsedTodayAt
     }
 }
 
@@ -373,7 +381,10 @@ nonisolated extension AppLimitVersionSlot {
             ) : nil,
             pendingOwnerWork: ownerWork,
             appliedReceipt: nil,
-            authoritativeUsedTodayMinutes: command.authoritativeUsedTodayMinutes
+            authoritativeUsedTodayMinutes: command.authoritativeUsedTodayMinutes,
+            authoritativeUsedTodayAt: command.authoritativeUsedTodayMinutes == nil
+                ? nil
+                : command.receivedAt
         )
     }
 

@@ -107,12 +107,14 @@ nonisolated final class AppLimitProvenanceStore: @unchecked Sendable {
             // backend's authoritative used-today so the ladder is cut over the
             // remaining budget; without this the child receives a whole second
             // allowance (08-08: 15m -> 20m yielded 35 minutes of screen time).
-            // Gated on the prior arm's usage date — a fresh day also mints a new
-            // arm, and yesterday's used-today must not carry into it. The store
-            // has no date stamp of its own on `authoritativeUsedTodayMinutes`.
+            // Gated on the day the backend measured it: a fresh day also mints a
+            // new arm, and yesterday's used-today must not carry into it. The
+            // gate CANNOT key off the arm provenance — a rule change rebuilds the
+            // slot wholesale (`AppLimitCommandCoordinator.ingest`) and drops the
+            // provenance, which is exactly the case this seeding exists for.
             let carriedBase: Int
-            if let prior = slot.armProvenance,
-               prior.usageDate == usageDate,
+            if let measuredAt = slot.authoritativeUsedTodayAt,
+               Self.usageDate(measuredAt, timezone: timezone) == usageDate,
                let usedToday = slot.authoritativeUsedTodayMinutes {
                 carriedBase = min(max(0, usedToday), canonicalRule.budgetMinutes)
             } else {
