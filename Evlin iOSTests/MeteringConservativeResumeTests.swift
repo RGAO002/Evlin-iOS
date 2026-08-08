@@ -599,15 +599,25 @@ final class MeteringConservativeResumeTests: XCTestCase {
             )
         }
 
+        // A storm is repeated mint->kill->mint cycles, so each corpse must
+        // carry its OWN mint instant. One batch retired at a single instant is
+        // an ordinary policy change, not a storm: a parent lowering the device
+        // limit produced eight same-second tombstones and parked the repair
+        // forever (2026-08-08 00:05, real device).
+        for i in 0..<4 { addCorpse(bornSecondsAgo: 300 - Double(i) * 20) }
+        XCTAssertFalse(
+            EarnedMeteringRecoveryDriver.isLadderRepairStorming(state: state, now: now),
+            "four fresh mint cycles must not trip the breaker"
+        )
         for _ in 0..<4 { addCorpse(bornSecondsAgo: 300) }
         XCTAssertFalse(
             EarnedMeteringRecoveryDriver.isLadderRepairStorming(state: state, now: now),
-            "four fresh corpses must not trip the breaker"
+            "one batch retired at a single instant is a policy change, not a storm"
         )
-        addCorpse(bornSecondsAgo: 300)
+        addCorpse(bornSecondsAgo: 200)
         XCTAssertTrue(
             EarnedMeteringRecoveryDriver.isLadderRepairStorming(state: state, now: now),
-            "five fresh corpses must trip the breaker"
+            "five fresh mint cycles must trip the breaker"
         )
 
         var staleState = try fixture.store.read()
